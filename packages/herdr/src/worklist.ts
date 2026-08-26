@@ -3504,6 +3504,14 @@ export function dispatchChordCommand(
   if (command.startsWith('!!wl reviewed')) {
     return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
+  // ── Data-modifying wl commands (close/delete/update/search) ──
+  // These mutate the work-item data set or change the list contents, so
+  // they are routed here (not the generic callback path) so the caller's
+  // isWlModifyingCommand check sees 'dispatched' and triggers an immediate
+  // list refresh after the command completes (WL-0MTA217DZ003H5K8).
+  if (/^!!\s*wl\s+(close|delete|update|search)\b/i.test(command)) {
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+  }
   if (command.includes('&& wl audit-set')) {
     return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }

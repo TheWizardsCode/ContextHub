@@ -1120,6 +1120,53 @@ describe('dispatchChordCommand', () => {
     expect(result).toBe(false);
   });
 
+  it('routes !!wl close commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('!!wl close <id>', state, onCommand);
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith('!!wl close TEST-123', undefined);
+  });
+
+  it('routes !!wl delete commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('!!wl delete <id>', state, onCommand);
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith('!!wl delete TEST-123', undefined);
+  });
+
+  it('routes !!wl update commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('!!wl update <id> --status open --stage plan_complete', state, onCommand);
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith('!!wl update TEST-123 --status open --stage plan_complete', undefined);
+  });
+
+  it('routes !!wl search commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const result = dispatchChordCommand('!!wl search <search_term>', state, onCommand);
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith('!!wl search <search_term>', undefined);
+  });
+
+  it('does not route bare/other !!wl commands through onCommand', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    // Read-only wl commands are NOT data-modifying — they keep the generic
+    // callback path and never trigger the modifying-command refresh.
+    expect(dispatchChordCommand('!!wl list open', state, onCommand)).toBe(false);
+    expect(dispatchChordCommand('!!wl next', state, onCommand)).toBe(false);
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
   it('routes /skill:ship release through onCommand with no <id> substitution (WL-0MSGG5N5Z0074TLY)', () => {
     const state = new WorkItemListState([makeItem('WL-TEST-1')], TERM_80x24);
     state.selectedIndex = 0;
@@ -1503,7 +1550,11 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     expect(executeResolvedCommand('/intake <id>', state, onCommand, true)).toBe('dispatched');
     expect(executeResolvedCommand('/plan <id>', state, onCommand, true)).toBe('dispatched');
-    expect(executeResolvedCommand('!!wl update <id> --priority high', state, onCommand, true)).toBe('callback');
+    // Data-modifying wl commands route via dispatchChordCommand so the
+    // caller's isWlModifyingCommand check triggers an immediate list
+    // refresh after dispatch (WL-0MTA217DZ003H5K8); still never blocked
+    // during a freeze
+    expect(executeResolvedCommand('!!wl update <id> --priority high', state, onCommand, true)).toBe('dispatched');
     expect(onCommand).toHaveBeenCalledTimes(3);
   });
 });
