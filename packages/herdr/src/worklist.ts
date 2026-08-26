@@ -4197,6 +4197,16 @@ export async function runWorklistTui(
     return priorityMatch !== null && PRIORITY_MAP[priorityMatch[1]] !== undefined;
   };
 
+  // True when a command modifies the work-item data set (close, delete,
+  // update, reviewed, search), warranting an immediate list refresh so the
+  // selection list reflects the change without waiting for the auto-refresh
+  // cycle (WL-0MTA217DZ003H5K8).
+  const isWlModifyingCommand = (cmd: string): boolean => {
+    // Commands like "!!wl close <id>", "!!wl delete <id>", "!!wl update <id> ..."
+    if (/^!!\s*wl\s+(close|delete|update|reviewed|search)\b/i.test(cmd)) return true;
+    return false;
+  };
+
   // Run `wl sync` and surface the outcome as a toast so sync status is
   // visible (success and graceful failure). Targets the resolved worklog
   // directory so sync operates on the tab project.
@@ -4617,7 +4627,11 @@ export async function runWorklistTui(
             // so the filtered view shows every root item in the stage matching
             // the stage's status rule, not just the already-loaded subset
             // (WL-0MSDT8X1V003206G).
-            if (result === 'dispatched' && isWlViewCommand(command)) {
+            // Modifying-command dispatch (close, delete, update, reviewed,
+            // search): refetch so the selection list reflects the change
+            // immediately instead of waiting for the auto-refresh cycle
+            // (WL-0MTA217DZ003H5K8).
+            if (result === 'dispatched' && (isWlViewCommand(command) || isWlModifyingCommand(command))) {
               await doRefresh(true);
             }
           } catch (e) {
@@ -4763,7 +4777,11 @@ export async function runWorklistTui(
           // so the filtered view shows every root item in the stage matching
           // the stage's status rule, not just the already-loaded subset
           // (WL-0MSDT8X1V003206G).
-          if (result === 'dispatched' && isWlViewCommand(singleCmd)) {
+          // Modifying-command dispatch (close, delete, update, reviewed,
+          // search): refetch so the selection list reflects the change
+          // immediately instead of waiting for the auto-refresh cycle
+          // (WL-0MTA217DZ003H5K8).
+          if (result === 'dispatched' && (isWlViewCommand(singleCmd) || isWlModifyingCommand(singleCmd))) {
             await doRefresh(true);
           }
           render();
