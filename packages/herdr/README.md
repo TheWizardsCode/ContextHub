@@ -551,8 +551,20 @@ proxy idle state:
 - **Cheap on idle (fail-closed)** — once the operator has been inactive for
   `modeSwitchIdleThresholdMs` **and** the proxy reports idle (via backend
   `GET {proxyUrl}/llama/local/status`; no local query, no model switch, no
-  active lease), the worker POSTs `mode=cheap`. Any ambiguity — an
-  unparseable status payload, a non-2xx admin response, or a fetch failure —
+  active lease), the worker POSTs `mode=cheap`.
+  **Per-slot operator gate (parent WL-0MT9F67Y3008S0PR, decision 1.a)**: when
+  the proxy serves per-slot identity (`slots[]` valid per `parseLlamaStatus`),
+  the idle gate requires only **≥ 1 free slot** (`evaluateIdle(status,
+  DOWNTIME_PANE_MIN_FREE_SLOTS)` — the spare-capacity semantics shared with
+  the downtime dispatcher), so the other busy slots — downtime panes holding
+  the dispatcher's query/lease — no longer block the switch: a downtime pane
+  is exactly the work the operator wants running while the proxy runs cheap.
+  Accepted tradeoff: a fast-mode downtime request in flight during the mode
+  restart is killed and retried by its client. Without per-slot data the
+  all-slots-free fail-closed fallback is unchanged (server up, no query,
+  no model switch, no lease, ALL slots free). Any ambiguity — an
+  unparseable status payload (including malformed/ambiguous per-slot
+  identity), a non-2xx admin response, or a fetch failure —
   is treated as busy (fail-closed) so the proxy is never switched cheap
   while real work might be in flight. The single-flight task means a hung
   tick can never wedge the task; the proxy URL reuses `downtimeProxyUrl`.
