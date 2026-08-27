@@ -1301,7 +1301,7 @@ async function main(): Promise<void> {
             // Fire-and-forget: polling must never block the TUI loop. A
             // missing file (split failed) is a no-op — no entry recorded.
             void capturePaneIdFromFile(itemId, paneIdFile, (wid, pid) =>
-              agentTracker.recordAgentForWorkItem(wid, pid),
+              agentTracker.recordAgentForWorkItem(wid, pid, command),
             );
           }
         } else if (route === 'pane') {

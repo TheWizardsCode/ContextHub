@@ -507,6 +507,13 @@ export class WorkItemListState {
   /** Navigation stack for hierarchical browsing (push/pop parent contexts). */
   navigationStack: NavigationStack = new NavigationStack();
 
+  // ── Hover tooltip state (WL-0MT9XRZDK006GMUH) ──────────────────────
+  /** Display-row index of the currently hovered row (null = no hover). */
+  hoveredRowIndex: number | null = null;
+
+  /** True when the user pressed Esc to dismiss the tooltip (blocks auto-show until mouse leaves/re-enters). */
+  tooltipDismissed: boolean = false;
+
   /** Terminal size for layout calculations. */
   termSize: TermSize;
 
@@ -1070,6 +1077,12 @@ export class WorkItemListState {
     if (this.scrollOffset > maxOffset) {
       this.scrollOffset = maxOffset;
     }
+    // Hover tooltip (WL-0MT9XRZDK006GMUH): a scroll/selection adjustment
+    // means the rows under the pointer changed (keyboard navigation,
+    // refresh) — clear the hovered row so a stale tooltip never renders.
+    // The next mouse motion re-establishes it. The Esc dismissal flag is
+    // intentionally preserved (it only clears on hover-none / re-entry).
+    this.hoveredRowIndex = null;
   }
 
   /** Returns the currently visible slice of items. */
@@ -1228,6 +1241,102 @@ export function formatTimestamp(iso: string): string {
     `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${pad(d.getFullYear() % 100)} ` +
     `${pad(d.getHours())}:${pad(d.getMinutes())}`
   );
+}
+
+// ── Hover tooltip rendering (WL-0MT9XRZDK006GMUH) ───────────────────
+
+/**
+ * Format a work-item hover tooltip line for an agent-pane row.
+ *
+ * Renders the 8 metadata fields: ID, Title, Command, Priority, Type,
+ * Risk, Effort, and Start Time.
+ *
+ * @param item - The work item being hovered.
+ * @param command - The command recorded for this pane (optional).
+ * @param recordedAt - The ISO timestamp when the pane was recorded.
+ * @param cols - Terminal width for truncation.
+ * @param noIcons - Whether to skip icon rendering.
+ * @returns Formatted tooltip lines.
+ */
+export function formatTooltipLines(
+  item: WorkItem,
+  command: string | undefined,
+  recordedAt: string | undefined,
+  cols: number,
+  noIcons = false,
+): string[] {
+  const parts: string[] = [];
+
+  // ID + Title line.
+  const titleStr = item.title ? `${item.title}` : '';
+  parts.push(`${ANSI.bold}${item.id}${ANSI.reset} ${titleStr}`);
+
+  // Command.
+  if (command) {
+    parts.push(`${ANSI.dim}Command:${ANSI.reset} ${ANSI.fg(220)}${command}${ANSI.reset}`);
+  }
+
+  // Priority + Type (compact row).
+  const priorityStr = item.priority ? `${priorityIcon(item.priority, { noIcons })} ${item.priority}` : '';
+  const typeStr = item.issueType ? `${item.issueType === 'epic' && !noIcons ? epicIcon() : ''}${item.issueType}` : '';
+  const typeLabel = typeStr ? `${ANSI.dim}Type:${ANSI.reset} ${typeStr}` : '';
+  const priorityLabel = priorityStr ? `${ANSI.dim}Priority:${ANSI.reset} ${priorityStr}` : '';
+  if (priorityLabel && typeLabel) {
+    parts.push(`${priorityLabel}${ANSI.dim}  ${typeLabel}${ANSI.reset}`);
+  } else if (priorityLabel) {
+    parts.push(priorityLabel);
+  } else if (typeLabel) {
+    parts.push(typeLabel);
+  }
+
+  // Risk + Effort (compact row).
+  const riskStr = item.risk ? `${riskIcon(item.risk, { noIcons })} ${item.risk}` : '';
+  const effortStr = item.effort ? `${effortIcon(item.effort, { noIcons })} ${item.effort}` : '';
+  const riskLabel = riskStr ? `${ANSI.dim}Risk:${ANSI.reset} ${riskStr}` : '';
+  const effortLabel = effortStr ? `${ANSI.dim}Effort:${ANSI.reset} ${effortStr}` : '';
+  if (riskLabel && effortLabel) {
+    parts.push(`${riskLabel}${ANSI.dim}  ${effortLabel}${ANSI.reset}`);
+  } else if (riskLabel) {
+    parts.push(riskLabel);
+  } else if (effortLabel) {
+    parts.push(effortLabel);
+  }
+
+  // Start Time.
+  if (recordedAt) {
+    parts.push(`${ANSI.dim}Started:${ANSI.reset} ${formatTimestamp(recordedAt)}`);
+  }
+
+  // Truncate each line to fit.
+  return parts.map((line) => truncateLine(line, cols));
+}
+
+/**
+ * Format the complete hover tooltip overlay as footer lines.
+ *
+ * The tooltip replaces the normal footer hints while a pane-associated row
+ * is hovered and not dismissed. Each line is wrapped in a dark-grey box
+ * so the overlay reads as a distinct panel.
+ *
+ * @param cols - Terminal width.
+ * @param lines - Tooltip content lines from {@link formatTooltipLines}.
+ * @returns Formatted footer lines for the tooltip; empty when no content.
+ */
+export function formatTooltipOverlay(cols: number, lines: string[]): string[] {
+  if (lines.length === 0) return [];
+  let maxWidth = 0;
+  for (const line of lines) {
+    const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+    if (visibleLen > maxWidth) maxWidth = visibleLen;
+  }
+  const boxWidth = Math.min(Math.max(maxWidth + 2, 20), cols - 2);
+  return lines.map((line) => {
+    const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const padding = Math.max(0, boxWidth - visibleLen);
+    const bg = ANSI.bg(238);
+    const fg = ANSI.fg(252);
+    return `${ANSI.reset}${bg}${fg} ${line}${' '.repeat(padding)} ${ANSI.reset}`;
+  });
 }
 
 /**
@@ -2164,7 +2273,7 @@ export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
   | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last'
   | 'meta-up' | 'meta-down'
   | 'chord-start' | 'chord-complete' | 'chord-cancel'
-  | 'toggle-expand' | null;
+  | 'toggle-expand' | 'dismiss-tooltip' | null;
 
 export interface ChordState {
   /** Keys pressed so far in the current chord sequence */
@@ -2350,6 +2459,15 @@ export function handleKeypress(
   }
 
   // List mode
+  // Esc dismissal of a hover tooltip (WL-0MT9XRZDK006GMUH AC2): when the
+  // tooltip is currently showing, Esc only dismisses it — the navigation
+  // stack is never popped and the list selection is untouched. The tooltip
+  // reappears on the next mouse re-entry over a pane-associated row.
+  if (key === '\x1b' && state.hoveredRowIndex !== null && !state.tooltipDismissed) {
+    state.hoveredRowIndex = null;
+    state.tooltipDismissed = true;
+    return 'dismiss-tooltip';
+  }
   const action = keyToAction(key);
   switch (action) {
     case 'up':
@@ -2515,6 +2633,8 @@ export type MouseAction =
   | { type: 'scroll-detail-up' } // detail: wheel up (k-equivalent)
   | { type: 'scroll-detail-down' } // detail: wheel down (j-equivalent)
   | { type: 'filter-stage'; index: number } // filter: tap a stage option
+  | { type: 'hover-row'; index: number } // list: motion over an item row (tooltip)
+  | { type: 'hover-none' } // list: motion over chrome rows (pointer left the rows)
   | null; // inert: chrome rows, motion, releases, unknown buttons
 
 /**
@@ -2683,8 +2803,19 @@ export function mapMouseToAction(
 ): MouseAction {
   // Release events are consumed but inert — presses drive selection (AC6).
   if (ev.release) return null;
-  // Drag-motion guard: motion events never navigate (AC6).
-  if ((ev.button & 32) !== 0) return null;
+  // Motion events (button & 32): never navigate, but trigger hover tooltip
+  // in list mode (WL-0MT9XRZDK006GMUH). They remain inert in detail/filter.
+  if ((ev.button & 32) !== 0) {
+    if (state.mode === 'list') {
+      const index = mapListRowToIndex(state, ev.y, termSize);
+      // Motion over a visible list row → hover-row (tooltip candidate).
+      // Motion over chrome/blank rows (header, fold indicators, footer,
+      // panel) → hover-none: the pointer has left the rows area, allowing
+      // a dismissed tooltip to re-show on the next re-entry (AC2).
+      return index !== null ? { type: 'hover-row', index } : { type: 'hover-none' };
+    }
+    return null; // detail/filter: motion is inert
+  }
   // Wheel buttons 64/65 (AC4).
   if (ev.button === 64) {
     if (state.mode === 'list') return { type: 'wheel-up' };
@@ -2827,6 +2958,19 @@ export function handleMouseInput(
         state.applyFilter(STAGES[action.index]);
       }
       break;
+    case 'hover-row':
+      // Update hovered row. The dismissed flag is intentionally NOT cleared
+      // here (WL-0MT9XRZDK006GMUH AC2): after Esc, the tooltip stays hidden
+      // while the pointer keeps moving within the rows area; only a
+      // hover-none (pointer left the rows) clears the dismissal.
+      state.hoveredRowIndex = action.index;
+      break;
+    case 'hover-none':
+      // Pointer left the rows area — clear hover state and the dismissed
+      // flag so a subsequent re-entry over a pane-row re-shows the tooltip.
+      state.hoveredRowIndex = null;
+      state.tooltipDismissed = false;
+      break;
   }
   return true; // consumed a mouse event
 }
@@ -2915,6 +3059,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   detailRenderedIndex?: number,
   showHelpText?: boolean,
   codeFreezeAmbiguous?: boolean,
+  hoverTooltip?: string[],
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -2945,6 +3090,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     detailRenderedIndex?: number,
     showHelpText?: boolean,
     codeFreezeAmbiguous?: boolean,
+    hoverTooltip?: string[],
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -3124,22 +3270,32 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // hints, consistent with the pi browse widget's showHelpText handling
     // (WL-0MSGJDSMJ004128E). Note: gating only affects rendering — chord key
     // handling/accumulation in chordState continues regardless.
+    //
+    // Hover tooltip (WL-0MT9XRZDK006GMUH): when tooltip lines are supplied
+    // they REPLACE the footer hints — the overlay lives in the footer area,
+    // directly above the metadata panel.
     const helpEnabled = showHelpText ?? true;
-    const isChordActive = chordState && chordState.pendingKeys.length > 0;
-    if (isChordActive && helpEnabled) {
-      const pendingStr = chordState!.pendingKeys.join(' ');
-      const hintStr = chordState!.hints
-        ? `  ${ANSI.dim}${chordState!.hints}${ANSI.reset}`
-        : '';
-      const footerLine = ` ${ANSI.reverse} chord: ${pendingStr} _ ${ANSI.reset}${hintStr}`;
-      output.push(footerLine);
+    if (hoverTooltip && hoverTooltip.length > 0) {
+      for (const line of formatTooltipOverlay(cols, hoverTooltip)) {
+        output.push(line);
+      }
     } else {
-      const navHint = (navStackDepth && navStackDepth > 0)
-        ? ` ${ANSI.dim}[esc] back${navStackDepth > 1 ? ` (${navStackDepth} levels)` : ''}${ANSI.reset}`
-        : '';
-      const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
-      const footerLine = navHint + chordHelpSuffix || ' ';
-      output.push(footerLine);
+      const isChordActive = chordState && chordState.pendingKeys.length > 0;
+      if (isChordActive && helpEnabled) {
+        const pendingStr = chordState!.pendingKeys.join(' ');
+        const hintStr = chordState!.hints
+          ? `  ${ANSI.dim}${chordState!.hints}${ANSI.reset}`
+          : '';
+        const footerLine = ` ${ANSI.reverse} chord: ${pendingStr} _ ${ANSI.reset}${hintStr}`;
+        output.push(footerLine);
+      } else {
+        const navHint = (navStackDepth && navStackDepth > 0)
+          ? ` ${ANSI.dim}[esc] back${navStackDepth > 1 ? ` (${navStackDepth} levels)` : ''}${ANSI.reset}`
+          : '';
+        const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
+        const footerLine = navHint + chordHelpSuffix || ' ';
+        output.push(footerLine);
+      }
     }
 
     // ── Metadata panel ────────────────────────────────────────────
@@ -5009,6 +5165,32 @@ export async function runWorklistTui(
       }
     }
 
+    // ── Hover tooltip (WL-0MT9XRZDK006GMUH) ────────────────────────
+    // Build the tooltip lines for the currently hovered row when it is a
+    // work item with an associated agent-pane and the tooltip has not been
+    // dismissed by Esc. Fail-open: any lookup error yields no tooltip.
+    let hoverTooltipLines: string[] | undefined;
+    if (state.mode === 'list' && !state.tooltipDismissed && state.hoveredRowIndex !== null) {
+      try {
+        const rows = state.getDisplayRows();
+        const row = rows[state.hoveredRowIndex];
+        if (row !== undefined && !isHeadingRow(row)) {
+          const entry = agentTracker?.getEntry(row.id) ?? undefined;
+          if (entry) {
+            hoverTooltipLines = formatTooltipLines(
+              row,
+              entry.command,
+              entry.recordedAt,
+              termSize.cols,
+              !opts.showIcons,
+            );
+          }
+        }
+      } catch {
+        // Fail-open: never let a tooltip lookup break rendering.
+      }
+    }
+
     const output = renderer(
       displayItems,
       state.selectedIndex,
@@ -5041,6 +5223,8 @@ export async function runWorklistTui(
       // distinct from the active-freeze banner; both can render (defensive)
       // but the tri-state read guarantees at most one is true.
       codeFreezeAmbiguous,
+      // Hover tooltip lines for the footer overlay (WL-0MT9XRZDK006GMUH).
+      hoverTooltipLines,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

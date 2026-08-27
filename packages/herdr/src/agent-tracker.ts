@@ -2,11 +2,11 @@
  * packages/herdr/src/agent-tracker.ts — Work-item ↔ agent-pane association
  * tracker (WL-0MSBQUJQX005RAT9)
  *
- * Records which work-item each worklist-spawned pi agent pane is working on,
- * persists the mapping to a gitignored JSON state file
- * (`.worklog/agent-panes.json`), and resolves each pane's current agent
- * state (`idle` / `working` / `blocked` / `done`) via the herdr CLI so the
- * worklist can render an agent-status icon per row.
+ * Records which work-item each worklist-spawned pi agent pane is working on
+ * (along with the dispatched command), persists the mapping to a gitignored
+ * JSON state file (`.worklog/agent-panes.json`), and resolves each pane's
+ * current agent state (`idle` / `working` / `blocked` / `done`) via the
+ * herdr CLI so the worklist can render an agent-status icon per row.
  *
  * Design notes:
  *  - Only worklist-spawned agent commands are tracked (the association is
@@ -46,6 +46,8 @@ export interface AgentPaneEntry {
   paneId: string;
   /** ISO timestamp of when the association was recorded. */
   recordedAt: string;
+  /** The command dispatched to this pane (e.g. "/skill:implement WL-123"). */
+  command?: string;
 }
 
 /** A parsed `herdr agent list` record. */
@@ -164,9 +166,13 @@ export class AgentTracker {
   /**
    * Record (or overwrite) the association for a work item and persist it.
    * Persistence failures are swallowed (fail-open).
+   *
+   * @param workItemId - The work item ID.
+   * @param paneId - The agent pane ID.
+   * @param command - Optional command dispatched to this pane (e.g. "/skill:implement WL-123").
    */
-  async recordAgentForWorkItem(workItemId: string, paneId: string): Promise<void> {
-    this.entries.set(workItemId, { workItemId, paneId, recordedAt: new Date().toISOString() });
+  async recordAgentForWorkItem(workItemId: string, paneId: string, command?: string): Promise<void> {
+    this.entries.set(workItemId, { workItemId, paneId, recordedAt: new Date().toISOString(), command });
     this.persist();
   }
 
@@ -180,6 +186,22 @@ export class AgentTracker {
   /** Return the pane ID recorded for a work item, or undefined. */
   getPaneId(workItemId: string): string | undefined {
     return this.entries.get(workItemId)?.paneId;
+  }
+
+  /**
+   * Return the command recorded for a work item, or undefined when none
+   * was recorded (e.g. pre-command entries loaded from disk).
+   */
+  getCommand(workItemId: string): string | undefined {
+    return this.entries.get(workItemId)?.command;
+  }
+
+  /**
+   * Return the full entry recorded for a work item (pane ID, recordedAt,
+   * command), or undefined when the item is not associated with a pane.
+   */
+  getEntry(workItemId: string): AgentPaneEntry | undefined {
+    return this.entries.get(workItemId);
   }
 
   /**
@@ -356,6 +378,7 @@ export class AgentTracker {
             workItemId,
             paneId,
             recordedAt: typeof entry.recordedAt === 'string' ? entry.recordedAt : new Date().toISOString(),
+            command: typeof entry.command === 'string' ? entry.command : undefined,
           });
         }
       }
