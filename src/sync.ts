@@ -110,6 +110,46 @@ export interface SyncResult {
 export interface MergeOptions {
   defaultValueFields?: Array<keyof WorkItem>;
   sameTimestampStrategy?: 'lexicographic' | 'local' | 'remote';
+  /** When true, allow remote defaults to overwrite local non-defaults (accept regressions). Default: false. */
+  acceptRegressions?: boolean;
+}
+
+/**
+ * Regression-guard definition of "default" for merge-participating fields.
+ * These are the values that constitute a regression when they appear on the
+ * remote side while the local side has a meaningful non-default value.
+ *
+ * This is DISTINCT from `isDefaultValue` which only treats ''/undefined/[] as
+ * defaults.  The regression guard uses a broader definition so that
+ * `status: open`, `stage: idea`, `priority: medium` are recognised as defaults
+ * that signal data loss when they overwrite local non-default values.
+ */
+export function isRegressionDefault(value: unknown, field: string): boolean {
+  if (value === undefined || value === '') {
+    return true;
+  }
+  const str = String(value);
+  switch (field) {
+    case 'status':
+      // 'open' is the default; everything else is a real value.
+      return str === 'open';
+    case 'stage':
+      // 'idea' is the default; everything else is a real value.
+      return str === 'idea';
+    case 'priority':
+      // 'medium' is the default.
+      return str === 'medium';
+    default:
+      return false;
+  }
+}
+
+/**
+ * Check whether a remote value is a "regression default" while the local
+ * value is a meaningful non-default — the core regression-detection predicate.
+ */
+export function isValueRegression(localValue: unknown, remoteValue: unknown, field: string): boolean {
+  return !isRegressionDefault(localValue, field) && isRegressionDefault(remoteValue, field);
 }
 
 
@@ -606,6 +646,32 @@ function mergeSameTimestampItems(
         continue;
       }
     }
+
+    // ── Regression guard (WL-0MSOYWZTH003JFVD) ──────────────────────
+    // Detect when a merge-participating field regresses from a local
+    // non-default value to a remote default (e.g. status: completed → open,
+    // stage: done → idea, priority: high → medium, assignee: alice → '').
+    // The guard refuses the import and reports the conflict unless
+    // acceptRegressions is true.
+    const mergeParticipatingFields = ['status', 'stage', 'priority', 'assignee'];
+    if (mergeParticipatingFields.includes(field as string) && isValueRegression(localValue, remoteValue, field)) {
+      const acceptRegressions = options?.acceptRegressions ?? false;
+      if (!acceptRegressions) {
+        // Refuse: keep local value, report regression conflict
+        mergedFields.push(`${field} (regression refused, local kept)`);
+        fieldDetails.push({
+          field,
+          localValue,
+          remoteValue,
+          chosenValue: localValue,
+          chosenSource: 'local',
+          reason: `regression detected: local ${String(localValue)} → remote ${String(remoteValue)} is a regression default; local value kept`
+        });
+        continue;
+      }
+      // With acceptRegressions=true, fall through to normal resolution.
+    }
+
     if (localIsDefault && !remoteIsDefault) {
       (merged as any)[field] = remoteValue;
       mergedFields.push(`${field} (from remote)`);
@@ -841,6 +907,26 @@ function mergeDifferentTimestampItems(
           // Fall through to normal resolution when local is newer
         }
       }
+
+      // ── Regression guard (WL-0MSOYWZTH003JFVD) ─────────────────────
+      const mergeParticipatingFieldsDiff = ['status', 'stage', 'priority', 'assignee'];
+      if (mergeParticipatingFieldsDiff.includes(field as string) && isValueRegression(localValue, remoteValue, field)) {
+        const acceptRegressionsDiff = options?.acceptRegressions ?? false;
+        if (!acceptRegressionsDiff) {
+          mergedFields.push(`${field} (regression refused, local kept)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: localValue,
+            chosenSource: 'local',
+            reason: `regression detected: local ${String(localValue)} → remote ${String(remoteValue)} is a regression default; local value kept`
+          });
+          continue;
+        }
+        // With acceptRegressions=true, fall through to normal resolution.
+      }
+
       if (localIsDefault && !remoteIsDefault) {
         (merged as any)[field] = remoteValue;
         mergedFields.push(`${field} (from remote)`);

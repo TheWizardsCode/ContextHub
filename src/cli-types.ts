@@ -156,6 +156,8 @@ export interface SyncOptions {
   ifIdle?: boolean;
   /** Override the author-identity gate for foreign-email commits (never bypasses the empty-email gate) */
   allowForeignAuthor?: boolean;
+  /** Accept regressions: allow remote defaults to overwrite local non-default values */
+  acceptRegressions?: boolean;
 }
 
 export interface SyncDebugOptions {

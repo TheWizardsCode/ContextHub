@@ -52,6 +52,7 @@ export async function performSync(
     isJsonMode?: boolean;
     isVerbose?: boolean;
     allowForeignAuthor?: boolean;
+    acceptRegressions?: boolean;
   }
 ): Promise<SyncResult> {
   const isJsonMode = options.isJsonMode ?? false;
@@ -222,7 +223,8 @@ export async function performSync(
   if (!isJsonMode && !isSilent) {
     console.log('\nMerging work items...');
   }
-  const itemMergeResult = mergeWorkItems(localItems, remoteItems);
+  const mergeOptions = options.acceptRegressions ? { acceptRegressions: true } : undefined;
+  const itemMergeResult = mergeWorkItems(localItems, remoteItems, mergeOptions);
   
   if (!isJsonMode && !isSilent) {
     console.log('Merging comments...');
@@ -584,6 +586,7 @@ export default function register(ctx: PluginContext): void {
     .option('--no-push', 'Skip pushing changes back to git')
     .option('--dry-run', 'Show what would be synced without making changes')
     .option('--allow-foreign-author', 'Allow merging commits authored by a different identity than the store user.email (never bypasses the empty-author-email gate) — overrides syncAllowForeignAuthor config')
+    .option('--accept-regressions', 'Accept regressions: allow remote defaults to overwrite local non-default values (regression guard bypass)')
     .option('--if-idle', 'Skip (exit 0) if another sync is already in progress — lock-aware guard for auto-sync spawners; prevents process pile-up under lock contention')
     .option('--no-re-sort', 'Skip automatic re-sort after sync')
     .option('--re-sort-sync', 'Force a synchronous re-sort after sync', false)
@@ -597,6 +600,8 @@ export default function register(ctx: PluginContext): void {
       const gitBranch = options.gitBranch || defaults.gitBranch;
       // Author-identity gate override: CLI flag wins over config (default false).
       const allowForeignAuthor = options.allowForeignAuthor ?? defaults.allowForeignAuthor;
+      // Regression guard override: CLI flag wins over default (default false).
+      const acceptRegressions = options.acceptRegressions ?? false;
       
       // Re-sort control options (apply once after batch completes)
       const reSortNo = Boolean((options as any).noReSort) || false;
@@ -618,7 +623,8 @@ export default function register(ctx: PluginContext): void {
               silent: false,
               isJsonMode,
               isVerbose,
-              allowForeignAuthor
+              allowForeignAuthor,
+              acceptRegressions
             }),
           options.ifIdle ? { skipIfLocked: true } : undefined
         );
