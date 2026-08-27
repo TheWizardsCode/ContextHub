@@ -661,6 +661,30 @@ describe('dispatch active-audit single-flight (parent WL-0MT3PHW4I002SNOV)', () 
     expect(deps.recordDispatch).not.toHaveBeenCalled();
   });
 
+  it('logs the audit-in-flight skip reason to stderr for observability (AC4/AC5)', async () => {
+    // The skip must be observable: the worker writes the skip reason to
+    // stderr (established observability pattern, cf. scheduler.test.ts
+    // 'logs an abandonment to stderr'), so operators can trace why the
+    // audit tier did not dispatch instead of seeing a silent fall-through.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const deps = makeDeps({
+        getActiveAudit: vi.fn().mockResolvedValue(activeAudit),
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.kind).toBe('implement');
+      expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Downtime audit tier skipped: audit-in-flight'),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
   it('a failed active-audit check with an empty remaining backlog is a wl-error strike, never no-candidate', async () => {
     // Partial information must not pause the worker: when the check failed
     // and every fallback tier answered empty, the backlog is NOT provably
