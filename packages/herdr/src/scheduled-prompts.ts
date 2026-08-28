@@ -7,8 +7,9 @@
  * `wl init` from `templates/scheduled-prompts.json`, create-if-absent).
  *
  * Each entry carries:
- *  - a stable `id` (used for the pane name `Downtime <id>` and the rolling
- *    log marker itemId),
+ *  - a stable `id` (used for the pane name `Downtime <id>` — set it to the
+ *    command itself, e.g. `/skill:refactor`, so the pane name clearly
+ *    identifies the scheduled command — and the rolling log marker itemId),
  *  - the `prompt` text (any text the pi agent pane can run, e.g.
  *    `/skill:refactor`),
  *  - a best-effort `intervalDays` frequency (whole days; a delayed dispatch
@@ -36,7 +37,9 @@ export const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** One scheduled-prompt entry from the config file. */
 export interface ScheduledPrompt {
-  /** Stable entry id (pane name `Downtime <id>`, rolling-log marker itemId). */
+  /** Stable entry id (pane name `Downtime <id>`, rolling-log marker itemId).
+   * Best practice: use the command itself (e.g. `/skill:refactor`) so the
+   * pane name clearly identifies the scheduled command. */
   id: string;
   /** Prompt text run by the pi agent pane (any text, e.g. `/skill:refactor`). */
   prompt: string;

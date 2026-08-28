@@ -43,7 +43,7 @@ function makeTempDir(): string {
 }
 
 const refactorPrompt: ScheduledPrompt = {
-  id: 'refactor',
+  id: '/skill:refactor',
   prompt: '/skill:refactor',
   intervalDays: 3,
   lastTriggeredAt: null,
@@ -164,7 +164,7 @@ describe('getDueScheduledPrompt', () => {
   });
 
   it('skips non-due entries before the first due one', () => {
-    expect(getDueScheduledPrompt([notDue, due], now)?.id).toBe('refactor');
+    expect(getDueScheduledPrompt([notDue, due], now)?.id).toBe('/skill:refactor');
   });
 });
 
@@ -229,7 +229,7 @@ describe('loadScheduledPrompts', () => {
     const result = loadScheduledPrompts(cwd, collectLog);
     expect(result.absent).toBe(false);
     expect(result.malformed).toBe(false);
-    expect(result.entries.map((e) => e.id)).toEqual(['refactor', 'weekly']);
+    expect(result.entries.map((e) => e.id)).toEqual(['/skill:refactor', 'weekly']);
     expect(logs.join('\n')).toContain('invalid entry');
   });
 
@@ -299,11 +299,11 @@ describe('updateScheduledPromptLastTriggered', () => {
   it('persists lastTriggeredAt and preserves the other entries', async () => {
     const weekly = { ...refactorPrompt, id: 'weekly', intervalDays: 7 };
     await saveScheduledPrompts(cwd, { entries: [weekly, refactorPrompt] });
-    const ok = await updateScheduledPromptLastTriggered(cwd, 'refactor', at);
+    const ok = await updateScheduledPromptLastTriggered(cwd, '/skill:refactor', at);
     expect(ok).toBe(true);
 
     const parsed = JSON.parse(readFileSync(scheduledPromptsPath(cwd), 'utf8')) as { entries: ScheduledPrompt[] };
-    expect(parsed.entries.find((e) => e.id === 'refactor')?.lastTriggeredAt).toBe(at);
+    expect(parsed.entries.find((e) => e.id === '/skill:refactor')?.lastTriggeredAt).toBe(at);
     expect(parsed.entries.find((e) => e.id === 'weekly')?.lastTriggeredAt).toBeNull();
   });
 
@@ -314,7 +314,7 @@ describe('updateScheduledPromptLastTriggered', () => {
       JSON.stringify({ version: 2, entries: [refactorPrompt] }),
       'utf8',
     );
-    await updateScheduledPromptLastTriggered(cwd, 'refactor', at);
+    await updateScheduledPromptLastTriggered(cwd, '/skill:refactor', at);
     const parsed = JSON.parse(readFileSync(scheduledPromptsPath(cwd), 'utf8')) as Record<string, unknown>;
     expect(parsed.version).toBe(2);
   });
@@ -325,10 +325,10 @@ describe('updateScheduledPromptLastTriggered', () => {
   });
 
   it('returns false when the config is absent or malformed (fail-closed, never throws)', async () => {
-    expect(await updateScheduledPromptLastTriggered(cwd, 'refactor', at)).toBe(false);
+    expect(await updateScheduledPromptLastTriggered(cwd, '/skill:refactor', at)).toBe(false);
     mkdirSync(join(cwd, '.worklog'), { recursive: true });
     writeFileSync(scheduledPromptsPath(cwd), '{broken', 'utf8');
-    expect(await updateScheduledPromptLastTriggered(cwd, 'refactor', at)).toBe(false);
+    expect(await updateScheduledPromptLastTriggered(cwd, '/skill:refactor', at)).toBe(false);
   });
 
   it('returns false when the target entry is not an object (fail-closed)', async () => {

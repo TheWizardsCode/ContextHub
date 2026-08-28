@@ -1224,7 +1224,7 @@ describe('dispatch code-freeze gate', () => {
 
 describe('dispatch scheduled-prompts tier', () => {
   const duePrompt: ScheduledPrompt = {
-    id: 'refactor',
+    id: '/skill:refactor',
     prompt: '/skill:refactor',
     intervalDays: 3,
     lastTriggeredAt: null,
@@ -1261,7 +1261,7 @@ describe('dispatch scheduled-prompts tier', () => {
     expect(deps.spawnAgentPane).toHaveBeenCalledWith('/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
-      paneName: 'Downtime refactor',
+      paneName: 'Downtime /skill:refactor',
     });
     // No pre-dispatch claim — there is no work item (AC4).
     expect(deps.claimItem).not.toHaveBeenCalled();
@@ -1282,12 +1282,12 @@ describe('dispatch scheduled-prompts tier', () => {
     // rolling log marker is written with kind scheduled + noItemComment.
     expect(deps.recordScheduledPromptTrigger).toHaveBeenCalledWith(
       '/repo',
-      'refactor',
+      '/skill:refactor',
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     );
     expect(deps.recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
-        itemId: 'refactor',
+        itemId: '/skill:refactor',
         kind: 'scheduled',
         cwd: '/repo',
         noItemComment: true,
@@ -1403,7 +1403,7 @@ describe('dispatch scheduled-prompts tier', () => {
     expect(outcome.error).toBe('ENOENT');
     expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
       expect.objectContaining({
-        itemId: 'refactor',
+        itemId: '/skill:refactor',
         kind: 'scheduled',
         error: 'ENOENT',
         noItemComment: true,
@@ -1427,11 +1427,11 @@ describe('dispatch scheduled-prompts tier', () => {
     const args = buildDowntimePaneArgs('plan', '/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
-      paneName: 'Downtime refactor',
+      paneName: 'Downtime /skill:refactor',
     });
     expect(args).toEqual([
       '--pane-name',
-      'Downtime refactor',
+      'Downtime /skill:refactor',
       '--no-focus',
       '--cwd',
       '/repo',
@@ -3393,7 +3393,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const { worker, deps } = makeEmptyBacklogWorker({
       deps: {
         getDueScheduledPrompt: vi.fn().mockResolvedValue({
-          id: 'refactor',
+          id: '/skill:refactor',
           prompt: '/skill:refactor',
           intervalDays: 3,
           lastTriggeredAt: null,
@@ -3410,7 +3410,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     expect(result.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       '/skill:refactor',
-      expect.objectContaining({ paneName: 'Downtime refactor' }),
+      expect.objectContaining({ paneName: 'Downtime /skill:refactor' }),
     );
     expect(worker.paused).toBe(false); // a dispatch — not the empty-backlog pause
     expect(worker.errorStrikes).toBe(0);
@@ -5332,7 +5332,7 @@ describe('dispatch critical-first tier', () => {
   it('scheduled-prompts tier still runs FIRST (ahead of the critical tier)', async () => {
     const deps = makeDeps({
       getDueScheduledPrompt: vi.fn().mockResolvedValue({
-        id: 'refactor',
+        id: '/skill:refactor',
         prompt: '/skill:refactor',
         intervalDays: 3,
         lastTriggeredAt: null,

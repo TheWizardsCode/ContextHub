@@ -275,7 +275,7 @@ describe('dispatchFromCoordination', () => {
   // marker as the audit/implement tiers (AC5).
 
   it('dispatches a due scheduled prompt FIRST in the coordination path', async () => {
-    const duePrompt: ScheduledPrompt = { id: 'refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
+    const duePrompt: ScheduledPrompt = { id: '/skill:refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
     const deps = makeCoordinationDeps({
       getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
       // The coordination tiers must never be reached — the prompt dispatches
@@ -294,7 +294,7 @@ describe('dispatchFromCoordination', () => {
     expect(deps.spawnAgentPane).toHaveBeenCalledWith('/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
-      paneName: 'Downtime refactor',
+      paneName: 'Downtime /skill:refactor',
     });
     // No pre-dispatch claim and NO coordination-tier work (AC3/AC4/AC6).
     expect(deps.claimItem).not.toHaveBeenCalled();
@@ -302,7 +302,7 @@ describe('dispatchFromCoordination', () => {
   });
 
   it('persists lastTriggeredAt and writes the scheduled log marker before the spawn (AC4)', async () => {
-    const duePrompt: ScheduledPrompt = { id: 'refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
+    const duePrompt: ScheduledPrompt = { id: '/skill:refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
     const deps = makeCoordinationDeps({
       getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
     });
@@ -315,11 +315,11 @@ describe('dispatchFromCoordination', () => {
     // rolling log marker is written with kind scheduled + noItemComment.
     expect(deps.recordScheduledPromptTrigger).toHaveBeenCalledWith(
       '/repo',
-      'refactor',
+      '/skill:refactor',
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     );
     expect(deps.recordDispatch).toHaveBeenCalledWith(
-      expect.objectContaining({ itemId: 'refactor', kind: 'scheduled', cwd: '/repo', noItemComment: true }),
+      expect.objectContaining({ itemId: '/skill:refactor', kind: 'scheduled', cwd: '/repo', noItemComment: true }),
     );
     // Marker + persist before spawn: the dispatch is recorded before the
     // pane opens (fail-closed: an unrecorded dispatch never runs).
@@ -331,7 +331,7 @@ describe('dispatchFromCoordination', () => {
   });
 
   it('aborts the coordination-path spawn when the marker write fails (fail-closed, AC4)', async () => {
-    const duePrompt: ScheduledPrompt = { id: 'refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
+    const duePrompt: ScheduledPrompt = { id: '/skill:refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
     const deps = makeCoordinationDeps({
       getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
       recordScheduledPromptTrigger: vi.fn().mockResolvedValue(false),
@@ -348,7 +348,7 @@ describe('dispatchFromCoordination', () => {
   });
 
   it('gates the coordination-path scheduled tier by the code-freeze marker (frozen → tiers still run)', async () => {
-    const duePrompt: ScheduledPrompt = { id: 'refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
+    const duePrompt: ScheduledPrompt = { id: '/skill:refactor', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: null };
     const deps = makeCoordinationDeps({
       readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
       getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),

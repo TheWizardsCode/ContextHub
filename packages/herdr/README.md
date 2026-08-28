@@ -616,7 +616,8 @@ so refactoring runs automatically at most every three days during idle time
 without manual triggering. Each entry has:
 
 - `id` — stable entry id (pane name `Downtime <id>` and rolling-log marker
-  `itemId`),
+  `itemId`); set it to the command itself (e.g. `/skill:refactor`) so the
+  pane name clearly identifies the scheduled command,
 - `prompt` — any text the pi agent pane can run (e.g. `/skill:refactor`),
 - `intervalDays` — best-effort frequency in whole days,
 - `lastTriggeredAt` — ISO-8601 UTC datetime of the last dispatch
