@@ -16,6 +16,21 @@ import { DEFAULT_RECOVERY_CONFIG, type RecoveryConfig } from './error-patterns.j
 /** Default continuation prompt text sent to the LLM after /compact. */
 export const DEFAULT_CONTINUATION_PROMPT = 'Please continue from where you left off.';
 
+/**
+ * Maximum gate → compact → retry cycles before falling back to explicit
+ * guidance. Prevents an infinite loop when compaction does not reduce
+ * context enough to clear the proxy's hard cap (WL-0MTBOXEGR009KDP6).
+ */
+export const MAX_COMPACTION_GATE_RETRIES = 2;
+
+/**
+ * Explicit guidance shown when a gated session cannot be compacted further
+ * (compact itself fails, or the retry limit is reached). Never silently
+ * drops the request (AC4).
+ */
+export const COMPACTION_GATE_FALLBACK_MESSAGE =
+  'Context cannot be compacted further — please start a new session to continue.';
+
 // ── Detection ─────────────────────────────────────────────────────────
 
 /**
@@ -43,6 +58,32 @@ export function hasContextLengthStop(message: AgentMessage | unknown): boolean {
   }
 
   return false;
+}
+
+/**
+ * Check if an assistant message signals the proxy's compaction gate.
+ *
+ * The llm-proxy cheap-mode hard local-routing cap returns an informative
+ * 4xx (wire contract: HTTP 413 + `X-Compaction-Gate: true` header per
+ * WL-0MTBOXEGR009KDP6, finalized with LP-0MTBOX45O005LD1S). The gate is a
+ * proxy-level signal and is **distinct** from the model-level
+ * `stopReason === "length"` context-length event (AC1) — a gate-hit session
+ * compacts and retries; a context-length turn continues normally.
+ *
+ * Matches when:
+ * - The message is an assistant error message whose text contains the
+ *   compaction-gate patterns (gate keyword, HTTP 413, payload-too-large,
+ *   context-over-cap text).
+ *
+ * @param message - The assistant message to check
+ * @returns true if the message is a compaction-gate response
+ */
+export function isCompactionGateResponse(message: AgentMessage | unknown): boolean {
+  if (!message || typeof message !== 'object') return false;
+  const m = message as Record<string, unknown>;
+  if (m.role !== 'assistant') return false;
+  if (typeof m.errorMessage !== 'string' || m.errorMessage.length === 0) return false;
+  return DEFAULT_RECOVERY_CONFIG.compactionGate.patterns.some((p) => p.test(m.errorMessage!));
 }
 
 // ── Compaction auto-continue (session_compact) ─────────────────────────
@@ -116,6 +157,46 @@ export function shouldTriggerCompactionContinue(guards: {
   if (guards.userAborted) return false;
   if (guards.continueInProgress) return false;
   if (guards.continuationInFlight) return false;
+  return true;
+}
+
+/**
+ * Guard checks for starting a compaction-gate recovery.
+ *
+ * Mirrors `shouldTriggerCompactionContinue` (user abort, retry-loop mutex,
+ * continuation-in-flight) plus the gate-specific retry-limit guard:
+ * once `continuationCount` exceeds `maxRetries` consecutive gate→compact→
+ * retry cycles, the session clearly cannot be shrunk below the proxy cap,
+ * so the caller must fall back to explicit guidance instead of looping
+ * forever (WL-0MTBOXEGR009KDP6).
+ *
+ * The compaction gate is a proxy-level 4xx signal and is deliberately
+ * distinct from the model-level CONTEXT_LENGTH path — it never conflates
+ * with `stopReason === "length"` handling (AC1).
+ *
+ * @param guards - Current recovery-module state
+ * @param maxRetries - Gate retry cap; defaults to MAX_COMPACTION_GATE_RETRIES
+ * @returns true when a gate-driven compaction may start
+ */
+export function shouldTriggerCompactionGateRecovery(
+  guards: {
+    /** User pressed ESC — never auto-compact. */
+    userAborted: boolean;
+    /** The invisible-continue retry loop is already running (mutex). */
+    continueInProgress: boolean;
+    /** A continuation (context-length or gate) is already in flight. */
+    continuationInFlight: boolean;
+    /** Consecutive gate→compact→retry cycles already performed. */
+    continuationCount: number;
+  },
+  maxRetries: number = MAX_COMPACTION_GATE_RETRIES,
+): boolean {
+  if (guards.userAborted) return false;
+  if (guards.continueInProgress) return false;
+  if (guards.continuationInFlight) return false;
+  // Retry-limit guard — at/over the cap, fall back to explicit guidance
+  // (never loop detect → compact → retry forever).
+  if (guards.continuationCount >= maxRetries) return false;
   return true;
 }
 
@@ -255,9 +336,31 @@ export async function executeCompactAndContinue(
   options: {
     executeCompact: () => Promise<{ success: boolean; error?: string }>;
     continuationPrompt?: string;
+    /**
+     * Maximum compact-and-continue cycles allowed (WL-0MTBOXEGR009KDP6).
+     * Once the continuation count reaches this limit, compaction is
+     * skipped and a failure is returned so the caller can fall back to
+     * explicit guidance — prevents an infinite detect → compact → retry
+     * loop when compaction cannot shrink context below the proxy cap.
+     */
+    maxRetries?: number;
   },
 ): Promise<CompactContinueResult> {
   const continuationPrompt = options.continuationPrompt ?? DEFAULT_CONTINUATION_PROMPT;
+
+  // Retry-limit guard (checked BEFORE starting a new cycle): when the
+  // existing count already equals/exceeds the cap, skip compaction so the
+  // count never climbs past the limit and no infinite detect → compact →
+  // retry loop can form (WL-0MTBOXEGR009KDP6). The caller falls back to
+  // explicit guidance on this failure.
+  const maxRetries = options.maxRetries;
+  if (maxRetries !== undefined && state.getCount() >= maxRetries) {
+    return {
+      success: false,
+      continuationCount: state.getCount(),
+      error: `Compaction gate retry limit reached (${maxRetries}); compacting again would not clear the proxy cap — please start a new session to continue.`,
+    };
+  }
 
   // Notify start
   state.startContinuation();

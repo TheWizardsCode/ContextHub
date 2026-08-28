@@ -5,7 +5,7 @@
  * per-category detection with configurable regex patterns that can be
  * overridden via settings.
  *
- * Eight error categories are defined:
+ * Nine error categories are defined:
  * - Rate limits (429)        → NOT retried (informative error)
  * - Server errors (5xx)      → retried with configurable backoff
  * - Auth errors (401/403)    → NOT retried (checkpoint + terminal)
@@ -14,6 +14,7 @@
  * - Timeout                  → retried with configurable backoff
  * - Terminated               → NOT retried (checkpoint + terminal)
  * - Parse errors (JSON)      → single-shot continue (no backoff)
+ * - Compaction gate (4xx)    → /compact + auto-continue (cheap-mode cap)
  */
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -29,6 +30,7 @@ export enum ErrorCategory {
   TIMEOUT = 'timeout',
   TERMINATED = 'terminated',
   PARSE_ERROR = 'parseError',
+  COMPACTION_GATE = 'compactionGate',
   UNKNOWN = 'unknown',
 }
 
@@ -65,6 +67,7 @@ export interface RecoveryConfig {
   timeout: RecoveryCategoryConfig;
   terminated: RecoveryCategoryConfig;
   parseError: RecoveryCategoryConfig;
+  compactionGate: RecoveryCategoryConfig;
 }
 
 // ── Type guard ─────────────────────────────────────────────────────────
@@ -157,6 +160,15 @@ const DEFAULT_TERMINATED_PATTERNS: RegExp[] = [
   /no\s*such\s*model/i,
 ];
 
+const DEFAULT_COMPACTION_GATE_PATTERNS: RegExp[] = [
+  /compaction\s*gate/i, // wire-contract signal keyword (X-Compaction-Gate)
+  /x-compaction-gate/i, // wire-contract header name echoed in the body
+  /\b413\b/i, // wire-contract status code (Payload Too Large)
+  /payload\s*too\s*large/i, // 413 reason phrase
+  /request\s*too\s*large/i, // common 413 phrasing
+  /cheap.*mode.*(cap|limit)/i, // cheap-mode proxy hard-cap signal
+];
+
 const DEFAULT_PARSE_ERROR_PATTERNS: RegExp[] = [
   // V8 / Node.js JSON.parse messages
   /expected\s+['\"]|['\"]\s+after\s+property\s+value/i,
@@ -235,6 +247,13 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
     maxDelayMs: 0,
     continuationPrompt: 'continue',
   },
+  compactionGate: {
+    enabled: true,
+    patterns: DEFAULT_COMPACTION_GATE_PATTERNS,
+    baseDelayMs: 1000,
+    maxDelayMs: 10000,
+    continuationPrompt: 'Please continue from where you left off.',
+  },
 };
 
 // ── Match helper ──────────────────────────────────────────────────────
@@ -302,6 +321,11 @@ export function isParseError(message: unknown): boolean {
   return matchesAny(message.errorMessage, DEFAULT_PARSE_ERROR_PATTERNS);
 }
 
+export function isCompactionGate(message: unknown): boolean {
+  if (!isAssistantMessage(message)) return false;
+  return matchesAny(message.errorMessage, DEFAULT_COMPACTION_GATE_PATTERNS);
+}
+
 // ── Unified classifier ────────────────────────────────────────────────
 
 /**
@@ -319,7 +343,12 @@ export function classifyError(message: unknown): ErrorCategory {
   if (!message || typeof message !== 'object') return ErrorCategory.UNKNOWN;
 
   try {
-    // Check for context-length first (special stopReason check)
+    // Compaction gate is a proxy-level 4xx signal, distinct from the
+    // model-level context-length signal (stopReason "length"). Gate
+    // keywords must win over generic context-length patterns so the two
+    // never conflate (WL-0MTBOXEGR009KDP6).
+    if (isCompactionGate(message)) return ErrorCategory.COMPACTION_GATE;
+    // Check for context-length second (special stopReason check)
     if (isContextLengthExceeded(message)) return ErrorCategory.CONTEXT_LENGTH;
     if (isRateLimit(message)) return ErrorCategory.RATE_LIMIT;
     if (isAuthError(message)) return ErrorCategory.AUTH_ERROR;
@@ -351,6 +380,7 @@ export function getDefaultPatterns(category: ErrorCategory): RegExp[] {
     case ErrorCategory.TIMEOUT: return DEFAULT_TIMEOUT_PATTERNS;
     case ErrorCategory.TERMINATED: return DEFAULT_TERMINATED_PATTERNS;
     case ErrorCategory.PARSE_ERROR: return DEFAULT_PARSE_ERROR_PATTERNS;
+    case ErrorCategory.COMPACTION_GATE: return DEFAULT_COMPACTION_GATE_PATTERNS;
     default: return [];
   }
 }
