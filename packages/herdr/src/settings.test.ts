@@ -202,3 +202,58 @@ describe('mode-switch proxy URL reuse', () => {
     expect(loadSettings(path).downtimeProxyUrl).toBe('http://192.168.0.199:8000');
   });
 });
+
+// ---------------------------------------------------------------------------
+// maxSyncStalenessMs (WL-0MTBWK01P000QO90)
+// ---------------------------------------------------------------------------
+
+describe('maxSyncStalenessMs', () => {
+  it('defaults to 60000 (60 seconds)', () => {
+    expect(defaultSettings.maxSyncStalenessMs).toBe(60_000);
+  });
+
+  it('loads a persisted value', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, maxSyncStalenessMs: 120_000 });
+    expect(loadSettings(path).maxSyncStalenessMs).toBe(120_000);
+  });
+
+  it('clamps values below the 1000ms floor up to 1000', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, maxSyncStalenessMs: 500 });
+    expect(loadSettings(path).maxSyncStalenessMs).toBe(1_000);
+
+    saveSettings(path, { ...defaultSettings, maxSyncStalenessMs: 0 });
+    expect(loadSettings(path).maxSyncStalenessMs).toBe(1_000);
+
+    saveSettings(path, { ...defaultSettings, maxSyncStalenessMs: -5000 });
+    expect(loadSettings(path).maxSyncStalenessMs).toBe(1_000);
+  });
+
+  it('clamps values above the maximum to 300000 (5 minutes)', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, maxSyncStalenessMs: 600_000 });
+    expect(loadSettings(path).maxSyncStalenessMs).toBe(300_000);
+  });
+
+  it('falls back to the default (60000) when the persisted value is not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, maxSyncStalenessMs: 'fast' }), 'utf-8');
+    expect(loadSettings(path).maxSyncStalenessMs).toBe(60_000);
+  });
+
+  it('falls back to the default when the persisted value is NaN or Infinity', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, maxSyncStalenessMs: NaN }), 'utf-8');
+    expect(loadSettings(path).maxSyncStalenessMs).toBe(60_000);
+
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, maxSyncStalenessMs: Infinity }), 'utf-8');
+    expect(loadSettings(path).maxSyncStalenessMs).toBe(60_000);
+  });
+
+  it('rounds fractional values', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, maxSyncStalenessMs: 1234.7 });
+    expect(loadSettings(path).maxSyncStalenessMs).toBe(1235);
+  });
+});
