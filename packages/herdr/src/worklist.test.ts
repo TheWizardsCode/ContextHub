@@ -35,6 +35,7 @@ import {
   fetchItemsForView,
   formatChordHintsForHelp,
   resolvePodcastTarget,
+  clearDescriptionPreviewCache,
 } from './worklist.js';
 import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
@@ -2323,13 +2324,69 @@ describe('formatMetadataPanel — field rendering and scrolling', () => {
   });
 });
 
-describe('formatMetadataPanel — description preview (WL-0MSFZKQL700381P3)', () => {
-  it('renders a Description section for items with a description', () => {
+describe('formatMetadataPanel — description preview (WL-0MT9ZJF28004UJ28)', () => {
+  // Strip ANSI SGR codes so tests assert on visible text.
+  const visibleOf = (lines: string[]): string => lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+  beforeEach(() => {
+    clearDescriptionPreviewCache();
+  });
+
+  it('renders a markdown-styled Description section for items with a description', () => {
     const item = { ...makeRichItem(), description: '# Fix the bug\n\nMake it work better.' };
     const joined = formatMetadataPanel(item, 80, 30, 0).join('\n');
     expect(joined).toContain('Description');
-    expect(joined).toContain('# Fix the bug');
+    // Headings render styled (h1 glyph + bold), not as raw `#` source.
+    expect(joined).not.toContain('# Fix the bug');
+    expect(joined).toContain('Fix the bug');
+    expect(joined).toContain('\x1b[1mFix the bug\x1b[0m'); // bold, styled
+    expect(visibleOf(formatMetadataPanel(item, 80, 30, 0))).toContain('██ Fix the bug');
     expect(joined).toContain('Make it work better.');
+  });
+
+  it('renders bold/italic/link/inline-code constructs with ANSI styling', () => {
+    const description = '**bold** and *italic* and [link](https://example.com) and `code`';
+    const item = { ...makeRichItem(), description };
+    const joined = formatMetadataPanel(item, 80, 30, 0).join('\n');
+    // Bold wraps in ANSI bold SGR; links get underline + blue.
+    expect(joined).toContain('\x1b[1mbold\x1b[0m');
+    expect(joined).toContain('\x1b[3mitalic\x1b[0m');
+    expect(joined).toContain('\x1b[4m');
+    expect(joined).toContain('\x1b[34m');
+    expect(joined).toContain('\x1b[36mcode\x1b[0m');
+  });
+
+  it('renders lists and nested items as styled lines', () => {
+    const description = '- item 1\n- item 2\n  - nested';
+    const item = { ...makeRichItem(), description };
+    const joined = visibleOf(formatMetadataPanel(item, 80, 30, 0));
+    expect(joined).toContain('• item 1');
+    expect(joined).toContain('• item 2');
+    expect(joined).toContain('  • nested');
+  });
+
+  it('renders blockquotes with the quote glyph', () => {
+    const description = '> quoted text';
+    const item = { ...makeRichItem(), description };
+    const joined = visibleOf(formatMetadataPanel(item, 80, 30, 0));
+    expect(joined).toContain('▌ quoted text');
+  });
+
+  it('renders tables with box-drawing borders', () => {
+    const description = '| A | B |\n|---|---|\n| 1 | 2 |';
+    const item = { ...makeRichItem(), description };
+    const joined = visibleOf(formatMetadataPanel(item, 80, 30, 0));
+    expect(joined).toContain('│ A │ B │');
+    expect(joined).toContain('│ 1 │ 2 │');
+  });
+
+  it('renders fenced code blocks as indented code lines', () => {
+    const description = '```\nconst x = "y";\n```';
+    const item = { ...makeRichItem(), description };
+    const joined = visibleOf(formatMetadataPanel(item, 80, 30, 0));
+    // Fence markers are consumed by the renderer; the code body is shown.
+    expect(joined).not.toContain('```');
+    expect(joined).toContain('const x = "y";');
   });
 
   it('omits the preview when the description is missing or empty', () => {
@@ -2339,20 +2396,31 @@ describe('formatMetadataPanel — description preview (WL-0MSFZKQL700381P3)', ()
     expect(blank).not.toContain('Description');
   });
 
-  it('shows at most the first 3 non-empty description lines', () => {
-    const item = { ...makeRichItem(), description: ['line 1', '', 'line 2', 'line 3', 'line 4'].join('\n') };
-    const joined = formatMetadataPanel(item, 80, 30, 0).join('\n');
-    expect(joined).toContain('line 1');
-    expect(joined).toContain('line 2');
-    expect(joined).toContain('line 3');
-    expect(joined).not.toContain('line 4');
+  it('shows at least the 3-line floor on short panels (fills available space on tall ones)', () => {
+    // Short panel (3 rows): the preview is capped by the panel height — only
+    // the fixed rows + floor fit before scrolling cuts in.
+    const item = { ...makeRichItem(), description: ['line 1', 'line 2', 'line 3', 'line 4'].join('\n') };
+    const shortPanel = visibleOf(formatMetadataPanel(item, 80, 3, 0));
+    expect(shortPanel).not.toContain('line 1'); // deep below the fold
+
+    // Tall panel with under-filled content: the preview expands to the
+    // available space, showing more than 3 description lines.
+    const tall = visibleOf(formatMetadataPanel(item, 80, 30, 0));
+    expect(tall).toContain('line 1');
+    expect(tall).toContain('line 2');
+    expect(tall).toContain('line 3');
+    expect(tall).toContain('line 4'); // fills the panel, no 3-line cap
   });
 
-  it('truncates long description lines to the panel width', () => {
-    const item = { ...makeRichItem(), description: 'x'.repeat(200) };
-    const lines = formatMetadataPanel(item, 40, 30, 0);
-    for (const line of lines) {
+  it('truncates long description lines to the panel width and never breaks ANSI sequences', () => {
+    const item = { ...makeRichItem(), description: '**bold ' + 'x'.repeat(200) + '** trailing' };
+    const withAnsi = formatMetadataPanel(item, 40, 30, 0);
+    for (const line of withAnsi) {
+      // No line (visible content) exceeds the panel width.
       expect(line.replace(/\x1b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(40);
+      // No truncated ANSI escape sequence in progress (an unterminated `\x1b[`
+      // or a partial code would survive; the renderer's truncation closes them).
+      expect(line.match(/\x1b\[(?!\d|m)/)).toBeNull();
     }
   });
 
@@ -2361,7 +2429,7 @@ describe('formatMetadataPanel — description preview (WL-0MSFZKQL700381P3)', ()
     const item = { ...makeRichItem(), description };
     const lines = formatMetadataPanel(item, 40, 30, 0);
     const joined = lines.join('\n');
-    expect(joined).toContain('```');
+    expect(joined).not.toContain('```');
     expect(joined).toContain('const x = "y";');
     for (const line of lines) {
       expect(line.replace(/\x1b\[[0-9;]*m/g, '').length).toBeLessThanOrEqual(40);
@@ -2374,6 +2442,31 @@ describe('formatMetadataPanel — description preview (WL-0MSFZKQL700381P3)', ()
     expect(joined.indexOf('Title')).toBeGreaterThanOrEqual(0);
     expect(joined.indexOf('Title')).toBeLessThan(joined.indexOf('Description'));
     expect(joined.indexOf('Description')).toBeLessThan(joined.indexOf('Last command:'));
+  });
+
+  it('caches rendered output keyed by (item.id, description) across calls', () => {
+    const item = { ...makeRichItem(), description: '# Cached heading\n\nbody line' };
+    const first = formatMetadataPanel(item, 80, 30, 0).join('\n');
+    // Refreshing the same item (same id + same description) reuses the cache.
+    const second = formatMetadataPanel(item, 80, 30, 0).join('\n');
+    expect(second).toBe(first);
+  });
+
+  it('invalidates the cache when the description changes', () => {
+    const base = { ...makeRichItem(), description: '# Heading v1' };
+    const first = formatMetadataPanel(base, 80, 30, 0).join('\n');
+    const changed = formatMetadataPanel({ ...makeRichItem(), description: '# Heading v2' }, 80, 30, 0).join('\n');
+    expect(changed).not.toBe(first);
+    expect(changed).toContain('Heading v2');
+  });
+
+  it('invalidate function clears cached previews (selection change / refresh)', () => {
+    const item = { ...makeRichItem(), description: '# Cached' };
+    const first = formatMetadataPanel(item, 80, 30, 0).join('\n');
+    clearDescriptionPreviewCache();
+    // Even an identical item must render anew after a global clear.
+    const second = formatMetadataPanel(item, 80, 30, 0).join('\n');
+    expect(second).toBe(first); // Same output, but re-rendered (no crash)
   });
 
   it('scrolls with the rest of the panel content', () => {

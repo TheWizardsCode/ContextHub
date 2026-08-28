@@ -404,6 +404,9 @@ export class WorkItemListState {
     this._clampSelection();
     this._adjustScroll();
     this._resetMetaScroll();
+    // Cache is keyed by item ID; a new selection means a new item's preview
+    // will be needed — invalidate the previous item's cached preview.
+    clearDescriptionPreviewCache();
   }
 
   /** Number of rows in the display-rows model (headings + items). */
@@ -920,6 +923,8 @@ export class WorkItemListState {
     this.scrollOffset = 0;
     this.mode = 'list';
     this._resetMetaScroll();
+    // Filter changes the visible item set — invalidate cached previews.
+    clearDescriptionPreviewCache();
   }
 
   /**
@@ -935,6 +940,8 @@ export class WorkItemListState {
     this.scrollOffset = 0;
     this.mode = 'list';
     this._resetMetaScroll();
+    // Filter changes the visible item set — invalidate cached previews.
+    clearDescriptionPreviewCache();
   }
 
   clearFilter(): void {
@@ -944,11 +951,17 @@ export class WorkItemListState {
     this.selectedIndex = 0;
     this.scrollOffset = 0;
     this._resetMetaScroll();
+    // Reverting a filter changes the visible item set — invalidate cached previews.
+    clearDescriptionPreviewCache();
   }
 
   // ── Refresh ─────────────────────────────────────────────────────
 
   refreshItems(newItems: WorkItem[]): void {
+    // Clear the description preview cache on refresh (descriptions may have
+    // changed externally; WL-0MT9ZJF28004UJ28).
+    clearDescriptionPreviewCache();
+
     // Capture the currently selected item's ID before replacing items
     const prevSelectedId = this._captureSelectedId();
 
@@ -1490,52 +1503,101 @@ export function pairMetaRows(
   return result;
 }
 
+// ── Description preview cache (WL-0MT9ZJF28004UJ28) ─────────────────────
+// Cache key: `${itemId}|${descHash}|${maxCols}`. Stores FULL rendered markdown
+// lines (no heading, no preview slicing) so the markdown parser — the
+// expensive step — runs at most once per selection change per item; the
+// per-call slicing to available panel space is cheap.
+const descriptionPreviewCache = new Map<string, string[]>();
+
 /**
- * Maximum number of description preview lines shown in the metadata panel.
+ * Minimum number of description preview lines shown in the metadata panel
+ * (rendered markdown lines, after the `Description` heading row).
  */
 const DESCRIPTION_PREVIEW_MAX_LINES = 3;
 
 /**
+ * Simple djb2 hash for description strings — used as part of the cache key.
+ * Collisions are harmless (cache miss triggers re-render); only correctness
+ * and speed matter.
+ */
+function hashString(s: string): number {
+  let hash = 5381;
+  for (let i = 0; i < s.length; i++) {
+    // eslint-disable-next-line no-bitwise
+    hash = ((hash << 5) + hash + s.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+/**
+ * Invalidate the description preview cache. Called on selection change
+ * (cache reset per item) and item refresh (global clear).
+ */
+export function clearDescriptionPreviewCache(itemId?: string): void {
+  if (itemId) {
+    for (const key of descriptionPreviewCache.keys()) {
+      if (key.startsWith(itemId + '|')) {
+        descriptionPreviewCache.delete(key);
+      }
+    }
+  } else {
+    descriptionPreviewCache.clear();
+  }
+}
+
+/**
  * Build the description preview lines for the metadata panel.
  *
- * Returns up to {@link DESCRIPTION_PREVIEW_MAX_LINES} non-empty lines from the
- * item's description, each truncated to `maxCols`. The preview starts with a
- * dimmed `Description` heading row. Returns an empty array when the description
- * is missing or blank.
+ * Replaces the original raw-line preview with a markdown-aware version that
+ * calls {@link renderMarkdown} from `md-viewer.ts`. Results are cached keyed
+ * by (item.id, description hash) so the markdown parser runs at most once
+ * per selection change (WL-0MT9ZJF28004UJ28 AC3).
  *
+ * Returns up to `maxLines` rendered markdown lines from the item's
+ * description, each truncated to `maxCols`. The preview starts with a dimmed
+ * `Description` heading row. Returns an empty array when the description is
+ * missing or blank.
+ *
+ * The preview fills the available panel space (AC2): `maxLines` is derived
+ * from the remaining panel rows by the caller, clamped to a 3-row minimum
+ * when other metadata lines are present.
+ *
+ * @param itemId - Work item ID (used for cache keying).
  * @param description - The work item's description text.
  * @param maxCols - Terminal width for truncation.
+ * @param maxLines - Maximum rendered lines to show (floor 3 by default).
  * @returns Preview lines ready to insert into the metadata panel.
  */
 function buildDescriptionPreview(
+  itemId: string,
   description: string | undefined | null,
   maxCols: number,
+  maxLines: number = DESCRIPTION_PREVIEW_MAX_LINES,
 ): string[] {
   if (!description || description.trim() === '') {
     return [];
   }
 
-  const preview: string[] = [];
+  const descHash = hashString(description);
+  const renderKey = `${itemId}|${descHash}|${maxCols}`;
 
+  // Reuse the fully rendered output across calls; slicing below is cheap.
+  let rendered = descriptionPreviewCache.get(renderKey);
+  if (!rendered) {
+    rendered = renderMarkdown(description, maxCols);
+    descriptionPreviewCache.set(renderKey, rendered);
+  }
+
+  const preview: string[] = [];
   // Heading row
   preview.push(` ${ANSI.dim}${ANSI.underline}Description${ANSI.reset}`);
 
-  // First up-to-3 non-empty lines, so blank separator lines between markdown
-  // sections don't waste the limited preview space (WL-0MSFZKQL700381P3).
-  const lines = description.split('\n');
-  let shown = 0;
-  for (const line of lines) {
-    if (shown >= DESCRIPTION_PREVIEW_MAX_LINES) break;
-    if (line.trim() === '') continue;
-    preview.push(` ${line}`);
-    shown += 1;
-  }
-
-  // Truncate to fit the terminal width
-  for (let i = 0; i < preview.length; i++) {
-    if (preview[i].length > 0) {
-      preview[i] = truncateLine(preview[i], maxCols);
-    }
+  // Up to `maxLines` rendered markdown lines (the renderer already handles
+  // wrapping/truncation, so lines are taken as-is)
+  for (const line of rendered) {
+    if (preview.length - 1 >= maxLines) break;
+    preview.push(line);
   }
 
   return preview;
@@ -1589,11 +1651,15 @@ export function formatMetadataPanel(
     }
   }
 
-  // Description preview — first few lines of the item's description so the
-  // user can see what the item is about without opening the detail view
-  // (WL-0MSFZKQL700381P3). Shown as-is (markdown source lines), placed after
-  // the metadata rows and before the last-command line.
-  const preview = buildDescriptionPreview(item.description, maxCols);
+  // Description preview — markdown-rendered lines filling the available
+  // panel space (WL-0MT9ZJF28004UJ28 AC2). The 3-row floor keeps a
+  // meaningful preview on short panels; tall panels show more of the
+  // description. A row is reserved for the Last command line (when the item
+  // is in_progress) so it stays visible. Cached per (id, description) so the
+  // markdown parser runs at most once per selection change.
+  const reserveLastCommand = item.stage === 'in_progress' ? 1 : 0;
+  const previewBudget = Math.max(DESCRIPTION_PREVIEW_MAX_LINES, panelRows - lines.length - reserveLastCommand);
+  const preview = buildDescriptionPreview(item.id, item.description, maxCols, previewBudget);
   lines.push(...preview);
 
   // Last command — only meaningful while the item is being worked on
