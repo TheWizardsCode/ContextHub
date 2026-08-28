@@ -78,6 +78,13 @@ export interface PluginSettings {
   /** Poll interval for the mode-switch worker (ms). Defaults to the same
    * cadence as the downtime poller; clamped to a sensible range. */
   modeSwitchPollIntervalMs: number;
+  /**
+   * Maximum acceptable staleness (ms) for the last successful `wl sync` before
+   * forcing a sync even when the DB hasn't changed locally. Bounded by the
+   * auto-sync interval so remote changes are pulled at least once per interval.
+   * Default 60000 (60 s), clamped to [1000, 300000] (1 s – 5 min).
+   */
+  maxSyncStalenessMs: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -100,12 +107,18 @@ export const defaultSettings: PluginSettings = {
   modeSwitchEnabled: false,
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
+  maxSyncStalenessMs: 60_000,
 };
 
 /** Minimum allowed browseItemCount. */
 export const MIN_BROWSE_ITEM_COUNT = 1;
 /** Maximum allowed browseItemCount. */
 export const MAX_BROWSE_ITEM_COUNT = 50;
+
+/** Minimum allowed maxSyncStalenessMs (1 s). */
+export const MIN_MAX_SYNC_STALENESS_MS = 1_000;
+/** Maximum allowed maxSyncStalenessMs (5 min). */
+export const MAX_MAX_SYNC_STALENESS_MS = 300_000;
 
 /**
  * Clamp a browseItemCount value to the supported [1, 50] range.
@@ -114,6 +127,14 @@ export const MAX_BROWSE_ITEM_COUNT = 50;
 export function clampBrowseItemCount(value: number): number {
   if (!Number.isFinite(value)) return defaultSettings.browseItemCount;
   return Math.min(Math.max(Math.round(value), MIN_BROWSE_ITEM_COUNT), MAX_BROWSE_ITEM_COUNT);
+}
+
+/**
+ * Clamp maxSyncStalenessMs to the supported [1000, 300000] range.
+ */
+export function clampMaxSyncStalenessMs(value: number): number {
+  if (!Number.isFinite(value)) return defaultSettings.maxSyncStalenessMs;
+  return Math.min(Math.max(Math.round(value), MIN_MAX_SYNC_STALENESS_MS), MAX_MAX_SYNC_STALENESS_MS);
 }
 
 // ── Default config path ───────────────────────────────────────────────
@@ -195,6 +216,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       modeSwitchPollIntervalMs: typeof parsed.modeSwitchPollIntervalMs === 'number'
         ? clampModeSwitchPollIntervalMs(parsed.modeSwitchPollIntervalMs)
         : defaultSettings.modeSwitchPollIntervalMs,
+      maxSyncStalenessMs: typeof parsed.maxSyncStalenessMs === 'number'
+        ? clampMaxSyncStalenessMs(parsed.maxSyncStalenessMs)
+        : defaultSettings.maxSyncStalenessMs,
     };
   } catch {
     return { ...defaultSettings };
