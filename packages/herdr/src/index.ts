@@ -1208,6 +1208,7 @@ async function main(): Promise<void> {
       modeSwitchWorker,
       modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
       modeSwitchEnabled: runSettings.modeSwitchEnabled,
+      maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
       onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
