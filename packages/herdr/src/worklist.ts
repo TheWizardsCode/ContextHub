@@ -15,6 +15,7 @@ import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
+import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
 import { AgentTracker, mergeAgentStatesCached } from './agent-tracker.js';
 import { readCodeFreezeState, readCodeFreezeStatus } from './code-freeze.js';
@@ -3461,7 +3462,7 @@ function logCommandForItem(command: string, itemId?: string): void {
 function resolveAndRouteCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
   model?: string,
   openPane?: boolean,
   onRefresh?: () => Promise<void>,
@@ -3485,17 +3486,36 @@ function resolveAndRouteCommand(
   logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
+    // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): build it from the
+    // selected/claimed work item IF resolvedCommand is an agent or shell
+    // command that will open a pane; else undefined keeps current arity.
+    const selected = state.getSelectedItem();
+    const paneTitle =
+      selected && (isAgentCommand(resolvedCommand) || resolvedCommand.startsWith('!'))
+        ? selected.title
+        : undefined;
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
     // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
     // background (no-pane) dispatches (openPane === false) so they can
     // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
-    // pane-opening paths keep their existing arity.
+    // pane-opening paths keep their existing arity. Pane titles are
+    // appended only when the command opens a pane and a title exists.
     if (openPane === undefined) {
-      onCommand(resolvedCommand, model);
+      if (paneTitle !== undefined) {
+        onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
+      } else {
+        onCommand(resolvedCommand, model);
+      }
     } else if (onRefresh) {
-      onCommand(resolvedCommand, model, openPane, onRefresh);
+      if (paneTitle !== undefined) {
+        onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
+      } else {
+        onCommand(resolvedCommand, model, openPane, onRefresh);
+      }
+    } else if (paneTitle !== undefined) {
+      onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
     } else {
       onCommand(resolvedCommand, model, openPane);
     }
@@ -3652,7 +3672,7 @@ export function fetchItemsForView(
 export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
   model?: string,
   onDowntimeToggle?: () => void,
   openPane?: boolean,
@@ -3918,7 +3938,7 @@ export async function resolvePodcastTarget(
 export function executeResolvedCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
   codeFreezeActive = false,
   model?: string,
   onDowntimeToggle?: () => void,
@@ -3959,6 +3979,16 @@ export function executeResolvedCommand(
   logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
+    // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): thread the selected
+    // item's title forward so the caller can build a pane name without an
+    // extra wl spawn. Only pane-opening routes (agent + shell commands)
+    // need it; plain commands derive nothing from the title and keep the
+    // 2-arg call (byte-compatible).
+    const selected = state.getSelectedItem();
+    const paneTitle =
+      selected && (isAgentCommand(resolvedCommand) || resolvedCommand.startsWith('!'))
+        ? selected.title
+        : undefined;
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
@@ -3967,9 +3997,19 @@ export function executeResolvedCommand(
     // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
     // pane-opening paths keep their existing arity.
     if (openPane === undefined) {
-      onCommand(resolvedCommand, model);
+      if (paneTitle !== undefined) {
+        onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
+      } else {
+        onCommand(resolvedCommand, model);
+      }
     } else if (onRefresh) {
-      onCommand(resolvedCommand, model, openPane, onRefresh);
+      if (paneTitle !== undefined) {
+        onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
+      } else {
+        onCommand(resolvedCommand, model, openPane, onRefresh);
+      }
+    } else if (paneTitle !== undefined) {
+      onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
     } else {
       onCommand(resolvedCommand, model, openPane);
     }
@@ -3994,7 +4034,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void> },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,

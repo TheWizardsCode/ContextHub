@@ -324,7 +324,7 @@ describe('dispatch selection', () => {
     expect(outcome.candidate?.id).toBe('WL-ABC');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-ABC'),
-      { model: 'plan', cwd: '/repo' },
+      { model: 'plan', cwd: '/repo', itemId: 'WL-ABC', itemTitle: 'Some task' },
     );
   });
 
@@ -477,7 +477,7 @@ describe('dispatch audit tier', () => {
     expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit WL-AUD'),
-      { model: 'plan', cwd: '/repo' },
+      { model: 'plan', cwd: '/repo', itemId: 'WL-AUD', itemTitle: 'Audit me' },
     );
   });
 
@@ -979,7 +979,7 @@ describe('dispatch implement tier', () => {
     expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP', { status: 'open', stage: 'plan_complete' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-IMP'),
-      { model: 'plan', cwd: '/repo' },
+      { model: 'plan', cwd: '/repo', itemId: 'WL-IMP', itemTitle: 'Implement me' },
     );
   });
 
@@ -5276,7 +5276,7 @@ describe('dispatch critical-first tier', () => {
     expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-I', { status: 'open', stage: 'idea' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-CRIT-I'),
-      { model: 'plan', cwd: '/repo' },
+      { model: 'plan', cwd: '/repo', itemId: 'WL-CRIT-I', itemTitle: 'Critical idea WL-CRIT-I' },
     );
   });
 

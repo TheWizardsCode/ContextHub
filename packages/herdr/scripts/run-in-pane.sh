@@ -10,20 +10,22 @@
 #     with Enter or herdr `close_pane` (default `prefix+x`)
 #
 # Usage:
-#   run-in-pane.sh [--cwd <path>] [--no-focus] <command>
+#   run-in-pane.sh [--cwd <path>] [--no-focus] [--pane-name <name>] <command>
 #
 # The command is executed via `bash -c`, so compound commands (`&&`),
 # single-quoted arguments (e.g. `--summary 'Approved by manual review'`),
 # and shell constructs all work.
 #
 # Options (parsed only at the head of argv):
-#   --cwd <path>     Working directory for the new pane
-#                    (default: $HERDR_RESOLVED_CWD, then $PWD)
-#   --no-focus       Skip the final pane zoom so the current pane (e.g. the
-#                    worklist selection list) keeps focus while the command
-#                    pane opens in the background (WL-0MSHIA53D009DJOT).
-#                    Without the flag the new pane is focused as before
-#                    (backward compatible).
+#   --cwd <path>       Working directory for the new pane
+#                      (default: $HERDR_RESOLVED_CWD, then $PWD)
+#   --no-focus         Skip the final pane zoom so the current pane (e.g. the
+#                      worklist selection list) keeps focus while the command
+#                      pane opens in the background (WL-0MSHIA53D009DJOT).
+#                      Without the flag the new pane is focused as before
+#                      (backward compatible).
+#   --pane-name <name> Pane title (overrides RUN_IN_PANE_NAME and the
+#                      default "Command Output"; WL-0MSJ4E8UA005KG9Y)
 #
 # Everything after the options — including commands whose first token
 # starts with `--` — is treated as the command to run.
@@ -91,9 +93,10 @@ fi
 
 # ── Main mode: split, run, rename ────────────────────────────────────────
 pane_name="${RUN_IN_PANE_NAME:-Command Output}"
-# The command is everything after the leading options. Only --cwd and
-# --no-focus are parsed as options at the head of argv; everything else
-# (including commands whose first token begins with --) is the command.
+# The command is everything after the leading options. Only --cwd,
+# --no-focus and --pane-name are parsed as options at the head of argv;
+# everything else (including commands whose first token begins with --) is
+# the command.
 target_cwd=""
 no_focus=false
 while [ $# -gt 0 ]; do
@@ -105,6 +108,10 @@ while [ $# -gt 0 ]; do
     --no-focus)
       no_focus=true
       shift
+      ;;
+    --pane-name)
+      pane_name="$2"
+      shift 2
       ;;
     *)
       break

@@ -103,6 +103,7 @@ import {
   DEFAULT_LEASE_TTL_SECONDS,
 } from './leader-election.js';
 import { appendCoordinationLogEntry } from './downtime-log.js';
+import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 export type { CoordinationEntry } from './coordination.js';
@@ -966,10 +967,12 @@ export interface DowntimeWorkerDeps {
    * window (no unhandled-exception crash, WL-0MSLWJ3I70031Z8U absorbed).
    * `paneName` overrides the default `Downtime <kind>` pane name — the
    * scheduled-prompts tier passes `Downtime <entryId>` (WL-0MSS1Q5ER007QDKX).
+   * `itemTitle`/`itemId` thread the candidate's context so the pane is named
+   * `Downtime triggered <kind> <title> - <id>` (WL-0MSJ4E8UA005KG9Y).
    */
   spawnAgentPane(
     prompt: string,
-    opts: { model: string; cwd: string; paneName?: string },
+    opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
   ): Promise<DowntimeSpawnResult>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
@@ -1177,7 +1180,18 @@ async function dispatchClaimedTier(
     return { dispatched: false, reason: 'marker-write-failed' };
   }
 
-  const spawn = await deps.spawnAgentPane(buildDowntimePrompt(kind, candidate), opts);
+  const spawn = await deps.spawnAgentPane(
+    buildDowntimePrompt(kind, candidate),
+    {
+      model: opts.model,
+      cwd: opts.cwd,
+      // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): thread the candidate's
+      // title/id so buildDowntimePaneArgs can name the pane
+      // `Downtime triggered <kind> <title> - <id>`.
+      itemTitle: candidate.title,
+      itemId: candidate.id,
+    },
+  );
   if (!spawn.ok) {
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2): the audit log distinguishes
     // "attempted" (failed spawn) from "opened" (success marker) — append
@@ -2045,15 +2059,24 @@ export async function dispatchDowntimeWork(
  * passes `Downtime <entryId>`, WL-0MSS1Q5ER007QDKX), `--no-focus` (visible but
  * never steals focus), `--cwd <wlRoot>`, `--model <downtimeModel>`, then the
  * prompt.
+ *
+ * When `opts.itemTitle`/`opts.itemId` are present (dispatch tiers,
+ * WL-0MSJ4E8UA005KG9Y), the pane is named in the full format
+ * `Downtime triggered <kind> <title> - <id>` so downtime panes follow the
+ * same descriptive convention as manually-triggered panes. Titles are
+ * bounded by {@link MAX_PANE_TITLE_LENGTH}.
  */
 export function buildDowntimePaneArgs(
   kind: DowntimeSkillKind,
   prompt: string,
-  opts: { model: string; cwd: string; paneName?: string },
+  opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
 ): string[] {
+  const paneName =
+    opts.paneName ??
+    buildDowntimePaneTitle(kind, opts.itemTitle, opts.itemId);
   return [
     '--pane-name',
-    opts.paneName ?? `Downtime ${kind}`,
+    paneName,
     '--no-focus',
     '--cwd',
     opts.cwd,

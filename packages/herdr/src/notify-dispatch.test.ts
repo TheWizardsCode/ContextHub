@@ -269,7 +269,7 @@ describe('model propagation through TUI dispatch (WL-0MSD48ZFC0043AO3)', () => {
     await tick();
     await tick();
 
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement WL-001', 'code');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement WL-001', 'code', undefined, undefined, 'Item');
 
     dataHandler?.(Buffer.from('q'));
     await p;
@@ -292,7 +292,7 @@ describe('model propagation through TUI dispatch (WL-0MSD48ZFC0043AO3)', () => {
     await tick();
     await tick();
 
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit WL-001', 'plan');
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit WL-001', 'plan', undefined, undefined, 'Item');
 
     dataHandler?.(Buffer.from('q'));
     await p;

@@ -92,6 +92,25 @@ describe('buildSendToPiArgs', () => {
       '/plan <id>',
     ]);
   });
+
+  it('forwards a descriptive pane name via --pane-name (WL-0MSJ4E8UA005KG9Y)', () => {
+    expect(
+      buildSendToPiArgs('/skill:implement WL-1', '/project', 'code', undefined, 'Manually triggered implement Fix the bug - WL-1'),
+    ).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      '--pane-name',
+      'Manually triggered implement Fix the bug - WL-1',
+      '--model',
+      'code',
+      '/skill:implement WL-1',
+    ]);
+  });
+
+  it('omits --pane-name when none is provided', () => {
+    expect(buildSendToPiArgs('/skill:audit WL-2', '/project')).not.toContain('--pane-name');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -123,6 +142,21 @@ describe('buildRunInPaneArgs', () => {
     const args = buildRunInPaneArgs("echo 'quoted arg' --flag", '/project');
     expect(args.slice(0, 3)).toEqual(['--no-focus', '--cwd', '/project']);
     expect(args[3]).toBe("echo 'quoted arg' --flag");
+  });
+
+  it('forwards --pane-name to replace the default "Command Output" (WL-0MSJ4E8UA005KG9Y)', () => {
+    expect(buildRunInPaneArgs('wl update WL-1 --priority high', '/project', 'Shell: wl update WL-1 (Fix the bug) WL-1')).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      '--pane-name',
+      'Shell: wl update WL-1 (Fix the bug) WL-1',
+      'wl update WL-1 --priority high',
+    ]);
+  });
+
+  it('omits --pane-name when none is provided', () => {
+    expect(buildRunInPaneArgs('ls -la', '/project')).not.toContain('--pane-name');
   });
 });
 

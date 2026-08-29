@@ -914,7 +914,7 @@ describe('executeResolvedCommand', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('propagates error from onCommand callback', () => {
@@ -1063,7 +1063,7 @@ describe('dispatchChordCommand', () => {
     const onCommand = vi.fn();
     const result = dispatchChordCommand('/skill:audit <id>', state, onCommand);
     expect(result).toBe(true);
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('routes !!wl reviewed producer-review commands through onCommand', () => {
@@ -1079,6 +1079,9 @@ describe('dispatchChordCommand', () => {
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl reviewed TEST-123 && wl comment add TEST-123 --body '<producer_comment>'",
       undefined,
+      undefined,
+      undefined,
+      'Item TEST-123',
     );
   });
 
@@ -1095,6 +1098,9 @@ describe('dispatchChordCommand', () => {
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
       undefined,
+      undefined,
+      undefined,
+      'Item TEST-123',
     );
   });
 
@@ -1111,6 +1117,9 @@ describe('dispatchChordCommand', () => {
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl reviewed TEST-123 false && wl update TEST-123 --status open --stage plan_complete --priority medium && wl audit-set TEST-123 --ready-to-close no --summary 'Rejected by manual review. <reason>'",
       undefined,
+      undefined,
+      undefined,
+      'Item TEST-123',
     );
   });
 
@@ -1127,7 +1136,7 @@ describe('dispatchChordCommand', () => {
     const onCommand = vi.fn();
     const result = dispatchChordCommand('!!wl close <id>', state, onCommand);
     expect(result).toBe(true);
-    expect(onCommand).toHaveBeenCalledWith('!!wl close TEST-123', undefined);
+    expect(onCommand).toHaveBeenCalledWith('!!wl close TEST-123', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('routes !!wl delete commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
@@ -1136,7 +1145,7 @@ describe('dispatchChordCommand', () => {
     const onCommand = vi.fn();
     const result = dispatchChordCommand('!!wl delete <id>', state, onCommand);
     expect(result).toBe(true);
-    expect(onCommand).toHaveBeenCalledWith('!!wl delete TEST-123', undefined);
+    expect(onCommand).toHaveBeenCalledWith('!!wl delete TEST-123', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('routes !!wl update commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
@@ -1145,7 +1154,7 @@ describe('dispatchChordCommand', () => {
     const onCommand = vi.fn();
     const result = dispatchChordCommand('!!wl update <id> --status open --stage plan_complete', state, onCommand);
     expect(result).toBe(true);
-    expect(onCommand).toHaveBeenCalledWith('!!wl update TEST-123 --status open --stage plan_complete', undefined);
+    expect(onCommand).toHaveBeenCalledWith('!!wl update TEST-123 --status open --stage plan_complete', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('routes !!wl search commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
@@ -1154,7 +1163,7 @@ describe('dispatchChordCommand', () => {
     const onCommand = vi.fn();
     const result = dispatchChordCommand('!!wl search <search_term>', state, onCommand);
     expect(result).toBe(true);
-    expect(onCommand).toHaveBeenCalledWith('!!wl search <search_term>', undefined);
+    expect(onCommand).toHaveBeenCalledWith('!!wl search <search_term>', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('does not route bare/other !!wl commands through onCommand', () => {
@@ -1176,7 +1185,7 @@ describe('dispatchChordCommand', () => {
     expect(result).toBe(true);
     // The release command is a global dev→main release — the command is
     // routed verbatim, never rewritten with the selected item's id.
-    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined, undefined, undefined, 'Item WL-TEST-1');
     expect(onCommand).toHaveBeenCalledTimes(1);
   });
 
@@ -1194,7 +1203,7 @@ describe('dispatchChordCommand', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:ship release', state, onCommand);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined, undefined, undefined, 'Item WL-TEST-1');
   });
 
   it('does not block /skill:ship release during a Code Freeze (ship skill gates itself)', () => {
@@ -1203,7 +1212,7 @@ describe('dispatchChordCommand', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:ship release', state, onCommand, true);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:ship release', undefined, undefined, undefined, 'Item WL-TEST-1');
   });
 });
 
@@ -1245,6 +1254,8 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
       "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
       undefined,
       false,
+      undefined,
+      'Item TEST-123',
     );
   });
 
@@ -1253,7 +1264,7 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     dispatchChordCommand('/skill:audit <id>', state, onCommand);
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('executeResolvedCommand passes openPane=false through to onCommand', () => {
@@ -1287,7 +1298,7 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
       false,
     );
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', 'plan', false);
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', 'plan', false, undefined, 'Item TEST-123');
   });
 
   it('executeResolvedCommand without openPane keeps the 2-arg onCommand call', () => {
@@ -1337,7 +1348,7 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
       onRefresh,
     );
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', 'plan', false, onRefresh);
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', 'plan', false, onRefresh, 'Item TEST-123');
   });
 });
 
@@ -1527,7 +1538,7 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('routes /skill:implement normally when freeze is explicitly false', () => {
@@ -1535,7 +1546,7 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand, false);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement TEST-123', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('does not block non-implement commands during a freeze', () => {
@@ -1543,7 +1554,7 @@ describe('executeResolvedCommand — code freeze blocking', () => {
     const onCommand = vi.fn();
     const auditResult = executeResolvedCommand('/skill:audit <id>', state, onCommand, true);
     expect(auditResult).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined, undefined, undefined, 'Item TEST-123');
   });
 
   it('does not block wl / intake / plan commands during a freeze', () => {
@@ -2741,7 +2752,7 @@ describe('command recording in dispatch paths', () => {
     const onCommand = vi.fn();
     const result = executeResolvedCommand('/skill:implement <id>', state, onCommand);
     expect(result).toBe('dispatched');
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement WL-TEST-1', undefined);
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement WL-TEST-1', undefined, undefined, undefined, 'Item WL-TEST-1');
     const last = getLastCommand('WL-TEST-1');
     expect(last).not.toBeNull();
     expect(last!.command).toBe('/skill:implement WL-TEST-1');

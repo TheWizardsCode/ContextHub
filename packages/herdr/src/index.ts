@@ -36,6 +36,13 @@ import {
   buildWlArgs,
 } from './fetcher.js';
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
+import {
+  isAgentCommand,
+  buildManuallyTriggeredPaneTitle,
+  buildShellPaneTitle,
+  stripSkillName,
+  stripAgentPromptPrefix,
+} from './pane-title.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -166,12 +173,7 @@ export function stripCommandPrefix(command: string): string {
  * @returns The prompt text with the `/prompt:` prefix removed; unchanged
  *          commands (no `/prompt:` prefix) are returned as-is.
  */
-export function stripAgentPromptPrefix(command: string): string {
-  if (command.startsWith('/prompt:')) {
-    return command.substring('/prompt:'.length);
-  }
-  return command;
-}
+export { stripAgentPromptPrefix };
 
 /**
  * Build the argument vector for spawning `send-to-pi.sh` for an agent
@@ -189,6 +191,10 @@ export function stripAgentPromptPrefix(command: string): string {
  * writes the new pane ID immediately after the split succeeds — the plugin
  * reads it back to record the work-item ↔ pane association.
  *
+ * When `paneName` is provided, it is forwarded via `--pane-name` so the new
+ * pane gets a descriptive title (WL-0MSJ4E8UA005KG9Y). Without the flag the
+ * script falls back to its default "Pi Agent".
+ *
  * Every selection-list agent dispatch passes `--no-focus` (WL-0MSHIA53D009DJOT)
  * so shared/send-to-pi.sh skips its final zoom and the selection list keeps
  * focus while the pi agent pane opens in the background. The shared script's
@@ -199,9 +205,13 @@ export function buildSendToPiArgs(
   targetCwd: string,
   model?: string,
   paneIdFile?: string,
+  paneName?: string,
 ): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
   const args = ['--no-focus', '--cwd', targetCwd];
+  if (paneName) {
+    args.push('--pane-name', paneName);
+  }
   if (model) {
     args.push('--model', model);
   }
@@ -218,11 +228,19 @@ export function buildSendToPiArgs(
  * route). Mirrors `buildSendToPiArgs`: `--no-focus` (WL-0MSHIA53D009DJOT) is
  * always passed so opening the command-output pane does not steal focus from
  * the selection list, followed by `--cwd <targetCwd>` so the pane starts in
- * the resolved project root. `run-in-pane.sh` parses both options at the
- * head of argv; everything else is the command itself.
+ * the resolved project root. `run-in-pane.sh` parses all three options at
+ * the head of argv; everything else is the command itself.
+ *
+ * When `paneName` is provided, `--pane-name <paneName>` replaces the
+ * script's default "Command Output" (WL-0MSJ4E8UA005KG9Y).
  */
-export function buildRunInPaneArgs(command: string, targetCwd: string): string[] {
-  return ['--no-focus', '--cwd', targetCwd, command];
+export function buildRunInPaneArgs(command: string, targetCwd: string, paneName?: string): string[] {
+  const args = ['--no-focus', '--cwd', targetCwd];
+  if (paneName) {
+    args.push('--pane-name', paneName);
+  }
+  args.push(command);
+  return args;
 }
 
 /**
@@ -451,19 +469,6 @@ export async function capturePaneIdFromFile(
   }
   // Timed out — the split may have failed or the file never appeared.
   return undefined;
-}
-
-/**
- * Check if a command is an agent command that should be sent to a pi pane.
- * Agent commands are those starting with /skill:, /intake, /plan, or /prompt:.
- */
-function isAgentCommand(command: string): boolean {
-  return (
-    command.startsWith('/skill:') ||
-    command.startsWith('/intake') ||
-    command.startsWith('/plan') ||
-    command.startsWith('/prompt:')
-  );
 }
 
 /**
@@ -917,7 +922,7 @@ export function createDowntimeDeps(
     },
     async spawnAgentPane(
       prompt: string,
-      opts: { model: string; cwd: string; paneName?: string },
+      opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
@@ -1209,7 +1214,7 @@ async function main(): Promise<void> {
       modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
       modeSwitchEnabled: runSettings.modeSwitchEnabled,
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
-      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => {
+      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -1283,13 +1288,18 @@ async function main(): Promise<void> {
           const paneIdFile = itemId
             ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}.json`)
             : undefined;
+          // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): build the pane
+          // name from the action descriptor + skill + selected item's
+          // title/id, then pass it via --pane-name so the pi pane is
+          // identifiable among other panes.
+          const paneName = buildManuallyTriggeredPaneTitle(command, paneTitle, itemId);
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           // The `model` from the shortcut entry (if any) is forwarded as
           // `--model <pattern>` so the pi CLI opens with the right model.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            buildSendToPiArgs(command, targetCwd, model, paneIdFile),
+            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName),
             {
               detached: true,
               stdio: 'ignore',
@@ -1328,9 +1338,14 @@ async function main(): Promise<void> {
             );
             return;
           }
+          // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): replace the
+          // generic "Command Output" with something identifying the command
+          // and its work item.
+          const shellItemId = extractWorkItemId(clean);
+          const shellPaneName = buildShellPaneTitle(clean, paneTitle, shellItemId);
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(clean, targetCwd),
+            buildRunInPaneArgs(clean, targetCwd, shellPaneName),
             {
               detached: true,
               stdio: 'ignore',
@@ -1363,7 +1378,7 @@ async function main(): Promise<void> {
           }
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(command, targetCwd),
+            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, extractWorkItemId(command))),
             {
               detached: true,
               stdio: 'ignore',
