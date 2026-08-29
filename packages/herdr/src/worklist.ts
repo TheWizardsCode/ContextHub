@@ -34,9 +34,14 @@ import {
   stageColor,
   type IconOptions,
 } from '@worklog/shared/icons';
-import { runSync, heartbeatTtlForInterval } from './auto-sync.js';
+import {
+  runSync,
+  heartbeatTtlForInterval,
+  isSyncHeartbeatFresh,
+} from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
+import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
 import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
@@ -5338,6 +5343,16 @@ export async function runWorklistTui(
   // pause-when-hidden gating, and shutdown cleanup live in one place.
   const scheduler = new TaskScheduler(DEFAULT_SCHEDULER_TICK_MS);
 
+  // DB-change tracker: detects whether the worklog DB has changed since the
+  // last cycle. Used to gate auto-refresh/sync ticks so idle panes spawn
+  // zero wl processes (WL-0MSJ1OLTL009N4IQ). Created only when we can
+  // resolve the worklog dir (set via fetcher.setWorklogDir()); otherwise
+  // the gate is effectively disabled (fail-open: all ticks run).
+  const worklogDir = getWorklogDir();
+  const tracker = worklogDir
+    ? new DbChangeTracker(resolveCacheDir(), worklogDir)
+    : null;
+
   const stopResumePoll = (): void => {
     scheduler.setDisabled('resume-poll', true);
   };
@@ -5374,6 +5389,10 @@ export async function runWorklistTui(
         }
         stopResumePoll();
         panePaused = false;
+        // DB-change gate: skip when DB unchanged since last cycle
+        if (tracker && !tracker.dbChanged()) {
+          return; // DB unchanged — zero wl spawns for this tick
+        }
         doRefresh(false);
       },
     });
@@ -5404,6 +5423,16 @@ export async function runWorklistTui(
         }
         stopResumePoll();
         panePaused = false;
+        // DB-change gate: skip when DB unchanged AND last sync fresh within cap.
+        // Subject to existing heartbeat / single-flight / --if-idle guards in doSync.
+        if (tracker && opts.maxSyncStalenessMs > 0) {
+          const dbChanged = tracker.dbChanged();
+          const syncDir = worklogDir ?? join(process.cwd(), '.worklog');
+          const heartbeatFresh = isSyncHeartbeatFresh(syncDir, opts.maxSyncStalenessMs);
+          if (!dbChanged && heartbeatFresh) {
+            return; // DB unchanged, last sync recent — skip
+          }
+        }
         doSync(true, heartbeatTtlMs); // ifIdle + heartbeat: skip when another sync is in-flight / fresh
         doRefresh(false);
       },
@@ -5425,6 +5454,12 @@ export async function runWorklistTui(
       if (await paneGate.visible()) {
         // Hidden → visible transition: refresh immediately (with the
         // "refreshed" notification) and let the normal cadence resume.
+        // DB-change gate: skip when DB unchanged (same as refresh tick).
+        if (tracker && !tracker.dbChanged()) {
+          stopResumePoll();
+          panePaused = false;
+          return; // DB unchanged — no need to refresh on visibility change
+        }
         stopResumePoll();
         panePaused = false;
         doRefresh(true);
