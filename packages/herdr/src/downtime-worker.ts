@@ -228,17 +228,20 @@ export interface LlamaStatus {
   /**
    * GLOBAL query activity: any request in flight (local AND remote).
    *
-   * Prefer `local_active_query` when present — remote provider streams keep
-   * this true while the local model is idle with free slots, so treating it
-   * as the busy signal would block downtime dispatch (RCA
-   * WL-0MSK9TUCA00206M7).
+   * This field is no longer used for idle/busy detection — the worker
+   * exclusively uses `local_active_query`. Remote provider streams keep this
+   * true while the local model is idle with free slots, so it cannot be used
+   * as the busy signal (RCA WL-0MSK9TUCA00206M7). Present in the payload for
+   * backwards compatibility with older proxy versions.
    */
   active_query: boolean;
   /**
    * LOCAL-only query activity (served by proxies exposing the
-   * `local_active_queries` counter, LP-0MSL2ZLLS009RVKR). Optional: ABSENT on
-   * pre-fix proxies. When present, `isIdleStatus` prefers it over the global
-   * `active_query`; `local_active_query=true` implies `active_query=true`.
+   * `local_active_queries` counter, LP-0MSL2ZLLS009RVKR). This is the
+   * SOLE busy signal for idle detection: `local_active_query=true` means
+   * busy (dispatch inhibited), `local_active_query=false` means idle.
+   * ABSENT on pre-fix proxies — absence is treated as busy (fail-closed)
+   * to prevent silent degraded dispatch on unverifiable signals.
    */
   local_active_query?: boolean;
   model_switch_in_progress: boolean;
@@ -275,21 +278,21 @@ export interface LlamaSlot {
 
 /**
  * The FULL global idle checks used by `isIdleStatus` and the count-based
- * (non-per-slot) path of `evaluateIdle`: llama-server up, no active
- * query (local signal preferred), no model switch, no local lease. The
+ * (non-per-slot) path of `evaluateIdle`: llama-server up, no active local
+ * query (the sole busy signal), no model switch, no local lease. The
  * per-slot branch uses the relaxed `perSlotGlobalIdleChecks` instead
  * (spare-capacity dispatch, parent WL-0MT32F90V008UAD2).
+ *
+ * `local_active_query` is the SOLE busy signal for the query gate:
+ * `true` → busy, `false` → not busy from queries. ABSENT on pre-fix proxies
+ * → busy (fail-closed), preventing dispatch when the busy signal is
+ * unverifiable.
  */
 function globalIdleChecks(status: LlamaStatus): boolean {
   if (!status.llama_server_running) return false;
-  // Prefer the local-only signal when the proxy exposes it (LP-0MSL2ZLLS009RVKR):
-  // remote streams keep the GLOBAL active_query true while the local model is
-  // idle with free slots, so they must not block downtime dispatch. Fall back
-  // to the global active_query for pre-fix proxies that do not serve
-  // local_active_query (backward compatible).
-  const queryActive =
-    status.local_active_query !== undefined ? status.local_active_query : status.active_query;
-  if (queryActive) return false;
+  // `local_active_query` is the sole busy signal (LP-0MSL2ZLLS009RVKR):
+  // true → busy, false → not busy, absent (pre-fix proxy) → busy (fail-closed).
+  if (status.local_active_query !== false) return false;
   if (status.model_switch_in_progress) return false;
   if (status.local_lease_active) return false;
   return true;
@@ -515,9 +518,9 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
   if (typeof o.active_query !== 'boolean') return null;
   if (typeof o.model_switch_in_progress !== 'boolean') return null;
 
-  // Optional local-only signal (LP-0MSL2ZLLS009RVKR): absent on pre-fix
-  // proxies, in which case isIdleStatus falls back to the global
-  // active_query. A malformed (non-boolean) value is ambiguous → busy.
+  // Local-only signal (LP-0MSL2ZLLS009RVKR): absent on pre-fix proxies.
+  // In isIdleStatus, absence → busy (fail-closed, no silent degraded
+  // dispatch). A malformed (non-boolean) value is ambiguous → busy.
   let localActiveQuery: boolean | undefined;
   if (o.local_active_query !== undefined) {
     if (typeof o.local_active_query !== 'boolean') return null;

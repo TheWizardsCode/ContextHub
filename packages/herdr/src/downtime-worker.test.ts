@@ -194,6 +194,7 @@ describe('idle detection (isIdleStatus)', () => {
   const idle: LlamaStatus = {
     llama_server_running: true,
     active_query: false,
+    local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: 4,
@@ -208,8 +209,22 @@ describe('idle detection (isIdleStatus)', () => {
     expect(isIdleStatus({ ...idle, llama_server_running: false }, 0)).toBe(false);
   });
 
-  it('is busy while a query is active', () => {
-    expect(isIdleStatus({ ...idle, active_query: true }, 0)).toBe(false);
+  it('is busy when local_active_query=true (a local query is in flight)', () => {
+    expect(isIdleStatus({ ...idle, local_active_query: true }, 0)).toBe(false);
+  });
+
+  it('is busy when local_active_query is absent (fail-closed on pre-fix proxy)', () => {
+    // A payload without local_active_query (pre-fix proxy) fails closed:
+    // the worker must never dispatch on an unverifiable busy signal.
+    const partial: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 4,
+      total_slots: 4,
+    };
+    expect(isIdleStatus(partial, 0)).toBe(false);
   });
 
   it('is idle during remote-only traffic when local_active_query=false (global active_query true)', () => {
@@ -217,10 +232,6 @@ describe('idle detection (isIdleStatus)', () => {
     // local model is idle with free slots; the proxy's local_active_query is
     // the local-only signal (LP-0MSL2ZLLS009RVKR) and must not block dispatch.
     expect(isIdleStatus({ ...idle, active_query: true, local_active_query: false }, 0)).toBe(true);
-  });
-
-  it('is busy when local_active_query=true (a local query is in flight)', () => {
-    expect(isIdleStatus({ ...idle, local_active_query: true }, 0)).toBe(false);
   });
 
   it('is busy while a model switch is in progress', () => {
@@ -2545,6 +2556,7 @@ describe('runtime idle evaluation (evaluateIdle)', () => {
   const idle: LlamaStatus = {
     llama_server_running: true,
     active_query: false,
+    local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: 4,
@@ -3204,7 +3216,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
   });
 
   it('treats a busy status as busy and never dispatches', async () => {
-    const { worker, deps } = makeWorker({ status: { ...idleAllSlotsFree, active_query: true } });
+    const { worker, deps } = makeWorker({ status: { ...idleAllSlotsFree, local_active_query: true } });
     const result = await worker.tick();
     expect(result.idle).toBe(false);
     expect(worker.idleSince).toBeNull();
@@ -3280,7 +3292,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     await worker.tick();
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
 
-    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...idleAllSlotsFree, active_query: true }));
+    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...idleAllSlotsFree, local_active_query: true }));
     vi.setSystemTime(start + cfg.thresholdMs + DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
     const busy = await worker.tick();
     expect(busy.idle).toBe(false);
@@ -3856,6 +3868,7 @@ describe('parseLlamaStatus per-slot slots array', () => {
     const livePayload = {
       llama_server_running: true,
       active_query: false,
+      local_active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
       total_slots: 4,
@@ -3979,6 +3992,7 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
   const perSlot = (slots: LlamaSlot[], available: number, total: number): LlamaStatus => ({
     llama_server_running: true,
     active_query: false,
+    local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: available,
@@ -4116,11 +4130,11 @@ describe('spare-capacity dispatch: DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2 (AC1
   });
 });
 
-describe('spare-capacity dispatch: pre-fix proxy degradation unchanged (AC4)', () => {
-  it('pre-fix proxy (no per-slot data): a configured N (0<N<total) degrades to all-slots-free', () => {
-    // Without per-slot identity, N=2 with 4 slots should still require ALL
-    // slots free (fail-closed degradation, parent AC4).
-    const status: LlamaStatus = {
+describe('spare-capacity dispatch: pre-fix proxy (no local_active_query) fails closed', () => {
+  it('pre-fix proxy (no local_active_query): absent signal → busy regardless of slot state', () => {
+    // A pre-fix proxy does not serve local_active_query. The worker
+    // fails closed (busy) on an absent signal — no silent degraded dispatch.
+    const noLocalQuery: LlamaStatus = {
       llama_server_running: true,
       active_query: false,
       model_switch_in_progress: false,
@@ -4128,11 +4142,10 @@ describe('spare-capacity dispatch: pre-fix proxy degradation unchanged (AC4)', (
       available_slots: 2,
       total_slots: 4,
     };
-    // No slots array — all-slots-free path: 2 free < 4 required → busy.
-    expect(evaluateIdle(status, 2)).toBe(false); // 2 < 4 → busy (all-slots-free)
-    // Even when N equals total (4), 2 < 4 available → still busy.
-    expect(evaluateIdle(status, 4)).toBe(false); // 2 < 4 → busy
-    // Now with all slots free: 4 === 4 → idle.
+    // Absent local_active_query → busy (fail-closed), not slot count.
+    expect(evaluateIdle(noLocalQuery, 2)).toBe(false); // absent → busy
+    expect(evaluateIdle(noLocalQuery, 4)).toBe(false); // absent → busy
+    // Even with all slots free, absent local_active_query → busy.
     const allFree: LlamaStatus = {
       llama_server_running: true,
       active_query: false,
@@ -4141,10 +4154,10 @@ describe('spare-capacity dispatch: pre-fix proxy degradation unchanged (AC4)', (
       available_slots: 4,
       total_slots: 4,
     };
-    expect(evaluateIdle(allFree, 2)).toBe(true); // 4 >= 4 (all-slots-free) → idle
+    expect(evaluateIdle(allFree, 2)).toBe(false); // absent → busy (fail-closed)
   });
 
-  it('pre-fix proxy with N=0 (default): all-slots-free behavior unchanged', () => {
+  it('pre-fix proxy with N=0 (default): absent local_active_query → busy', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
       active_query: false,
@@ -4153,8 +4166,8 @@ describe('spare-capacity dispatch: pre-fix proxy degradation unchanged (AC4)', (
       available_slots: 2,
       total_slots: 4,
     };
-    // N=0 requires all slots free regardless of per-slot mode.
-    expect(evaluateIdle(status, 0)).toBe(false); // 2 < 4 → busy
+    // Absent local_active_query → busy (fail-closed), regardless of slot count.
+    expect(evaluateIdle(status, 0)).toBe(false); // absent → busy
   });
 });
 
@@ -4396,6 +4409,7 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     const livePayload = {
       llama_server_running: true,
       active_query: false,
+      local_active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
       total_slots: 4,

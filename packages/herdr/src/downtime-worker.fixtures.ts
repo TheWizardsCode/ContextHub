@@ -16,6 +16,7 @@ import type { LlamaStatus } from './downtime-worker.js';
 export const idleAllSlotsFree: LlamaStatus = {
   llama_server_running: true,
   active_query: false,
+  local_active_query: false,
   model_switch_in_progress: false,
   local_lease_active: false,
   available_slots: 4,
@@ -23,7 +24,7 @@ export const idleAllSlotsFree: LlamaStatus = {
   current_model: 'qwen3-8b',
 };
 
-export const busyActiveQuery: LlamaStatus = { ...idleAllSlotsFree, active_query: true };
+export const busyActiveQuery: LlamaStatus = { ...idleAllSlotsFree, local_active_query: true };
 export const busyModelSwitch: LlamaStatus = { ...idleAllSlotsFree, model_switch_in_progress: true };
 export const busyLocalLease: LlamaStatus = { ...idleAllSlotsFree, local_lease_active: true };
 export const busyServerNotRunning: LlamaStatus = { ...idleAllSlotsFree, llama_server_running: false };
@@ -126,10 +127,10 @@ export const statusFixtures: LlamaStatusFixture[] = [
     note: 'server up, no query/switch/lease, all 4/4 slots free',
   },
   {
-    name: 'busy: active query',
+    name: 'busy: local active query',
     status: busyActiveQuery,
     expectedIdle: false,
-    note: 'active_query true',
+    note: 'local_active_query true',
   },
   {
     name: 'busy: model switch in progress',

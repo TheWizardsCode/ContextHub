@@ -72,6 +72,7 @@ function idlePayload(): Record<string, unknown> {
   return {
     llama_server_running: true,
     active_query: false,
+    local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: 4,
