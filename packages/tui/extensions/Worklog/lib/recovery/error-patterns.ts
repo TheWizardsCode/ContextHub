@@ -95,6 +95,8 @@ const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
   /retry\s*delay/i,
   /bad\s*gateway/i,
   /server\s*encountered/i,
+  /all providers exhausted/i,
+  /no provider available/i,
 ];
 
 const DEFAULT_AUTH_ERROR_PATTERNS: RegExp[] = [

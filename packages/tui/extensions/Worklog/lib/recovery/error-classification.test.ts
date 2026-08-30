@@ -65,6 +65,18 @@ describe('isRateLimit', () => {
 // ── Server Error (5xx) ────────────────────────────────────────────────
 
 describe('isServerError', () => {
+  it('detects "all providers exhausted" error', () => {
+    expect(isServerError(makeErrorMsg('All providers exhausted'))).toBe(true);
+    expect(isServerError(makeErrorMsg('all providers exhausted'))).toBe(true);
+    expect(isServerError(makeErrorMsg('ALL PROVIDERS EXHAUSTED'))).toBe(true);
+  });
+
+  it('detects "no provider available" error', () => {
+    expect(isServerError(makeErrorMsg('No provider available'))).toBe(true);
+    expect(isServerError(makeErrorMsg('no provider available'))).toBe(true);
+    expect(isServerError(makeErrorMsg('NO PROVIDER AVAILABLE'))).toBe(true);
+  });
+
   it('detects 5xx status codes', () => {
     expect(isServerError(makeErrorMsg('HTTP 500: Internal Server Error'))).toBe(true);
     expect(isServerError(makeErrorMsg('503 Service Unavailable'))).toBe(true);
@@ -283,6 +295,11 @@ describe('classifyError', () => {
   it('classifies server errors', () => {
     expect(classifyError(makeErrorMsg('500 Internal Server Error'))).toBe(ErrorCategory.SERVER_ERROR);
     expect(classifyError(makeErrorMsg('503 Service Unavailable'))).toBe(ErrorCategory.SERVER_ERROR);
+  });
+
+  it('classifies "all providers exhausted" as SERVER_ERROR (auto-retry)', () => {
+    expect(classifyError(makeErrorMsg('All providers exhausted'))).toBe(ErrorCategory.SERVER_ERROR);
+    expect(classifyError(makeErrorMsg('No provider available'))).toBe(ErrorCategory.SERVER_ERROR);
   });
 
   it('classifies auth errors', () => {
