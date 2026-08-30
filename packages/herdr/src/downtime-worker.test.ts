@@ -168,6 +168,9 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
     // existing dispatch tests exercise the unchanged audit/implement tiers.
     readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+    // Interim freshness re-check (WL-0MT8KSTOE00871E7): no fresh audit by
+    // default, so existing dispatch tests exercise the unchanged path.
+    hasFreshAudit: vi.fn().mockResolvedValue(false),
     ...overrides,
   };
 }
@@ -565,6 +568,159 @@ describe('dispatch audit tier', () => {
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── Interim freshness re-check (WL-0MT8KSTOE00871E7) ─────────────────
+
+describe('audit tier interim freshness re-check (WL-0MT8KSTOE00871E7)', () => {
+  const auditCandidate: DowntimeCandidate = {
+    id: 'WL-AUD',
+    title: 'Audit me',
+    stage: 'audit',
+  };
+
+  it('downgrades to a no-op when a fresh audit was recorded in the interim (no comment, no marker, no spawn)', async () => {
+    // AC1: select a stale/un-audited candidate, then a valid audit lands
+    // between selection and dispatch — the re-check sees it and the
+    // dispatch becomes a no-op; behaviour falls through to the next tier
+    // without triggering the no-candidate cooldown.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      // A fresh audit exists in the interim — dispatch must be skipped.
+      hasFreshAudit: vi.fn().mockResolvedValue(true),
+      // A plan candidate exists below — the audit tier skip falls through to it.
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-PLN', title: 'Plan me', stage: 'intake_complete' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Falls through to the next tier (plan), NOT the no-candidate cooldown.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('WL-PLN');
+    // No AUDIT dispatch side-effects: the audit candidate is never claimed,
+    // no audit comment/marker, no audit spawn.
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLN', { status: 'open', stage: 'intake_complete' });
+    expect(deps.recordDispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ itemId: 'WL-AUD', kind: 'audit' }),
+    );
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-PLN'),
+      expect.any(Object),
+    );
+    // The re-check was performed exactly once on the candidate.
+    expect(deps.hasFreshAudit).toHaveBeenCalledWith('WL-AUD', '/repo');
+  });
+
+  it('skips dispatch entirely and leaves the cooldown untouched when a fresh audit lands and no next-tier candidate exists', async () => {
+    // AC1 (no-candidate cooldown guard): a fresh-audit skip with an empty
+    // remaining backlog is NOT the no-candidate outcome — the worker keeps
+    // polling (the item is already audited; there is simply nothing to do).
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      hasFreshAudit: vi.fn().mockResolvedValue(true),
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: null }) // intake_complete empty
+        .mockResolvedValueOnce({ ok: true, candidate: null }), // idea empty
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    // Fresh-audit skip is treated as "already audited" — no cooldown, no strike.
+    expect(outcome.reason).toBe('fresh-audit-skip');
+    expect(outcome.reason).not.toBe('no-candidate');
+    expect(outcome.reason).not.toBe('wl-error');
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('records no spawn-failure trace when a fresh audit was recorded during the interim (AC2)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      // Selection re-check: no fresh audit → dispatch proceeds. Spawn-failure
+      // re-check: a fresh audit appeared in the interim → no failure trace.
+      hasFreshAudit: vi
+        .fn()
+        .mockResolvedValueOnce(false) // selection: not fresh → dispatch proceeds
+        .mockResolvedValueOnce(true), // spawn failure: fresh audit → skip trace
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'ENOENT', exitCode: 1 }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Spawn failed, but a valid audit exists — the push is moot, no failure trace.
+    expect(recordDispatchFailureCalled(deps)).toBe(false);
+    expect(deps.recordDispatch).toHaveBeenCalledTimes(1); // marker written (unchanged)
+    expect(outcome.dispatched).toBe(false);
+  });
+
+  it('still appends a spawn-failure trace when no fresh audit was recorded during the interim (unchanged path)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      hasFreshAudit: vi.fn().mockResolvedValue(false),
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'ENOENT', exitCode: 1 }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // No fresh audit — the failure trace is recorded exactly as before (AC3).
+    expect((deps.recordDispatchFailure as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+    expect(outcome.dispatched).toBe(false);
+  });
+
+  it('a genuinely unaudited item still dispatches exactly as today (comment + marker + spawn)', async () => {
+    // AC3: no fresh audit in the interim — the audit dispatch proceeds
+    // unchanged (comment + marker + spawn).
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      hasFreshAudit: vi.fn().mockResolvedValue(false),
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' });
+    expect(deps.recordDispatch).toHaveBeenCalledTimes(1); // marker/comment written
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit WL-AUD'),
+      { model: 'plan', cwd: '/repo', itemId: 'WL-AUD', itemTitle: 'Audit me' },
+    );
+  });
+
+  it('a hasFreshAudit failure (wl error) is fail-open — the dispatch proceeds as today (conservative default)', async () => {
+    // The re-check must never block dispatch on an unanswerable check: a
+    // wl/CLI failure in hasFreshAudit fails open (proceed) — never a strike,
+    // never a no-candidate, never a silent skip.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      // Fail-open: the re-check throws but the dispatching continues.
+      hasFreshAudit: vi.fn().mockRejectedValue(new Error('wl failed')),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalled();
+  });
+});
+
+function recordDispatchFailureCalled(deps: DowntimeWorkerDeps): boolean {
+  const fn = deps.recordDispatchFailure as ReturnType<typeof vi.fn>;
+  return fn.mock.calls.length > 0;
+}
 
 // ── Single-active-audit enforcement (WL-0MT3PHW4I002SNOV) ─────────────
 

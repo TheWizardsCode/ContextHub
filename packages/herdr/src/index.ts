@@ -26,6 +26,7 @@ import { dirname, resolve, join } from 'path';
 import { tmpdir } from 'node:os';
 import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync } from 'node:fs';
 import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
+import { isAuditFresh } from '@worklog/shared/icons';
 import {
   checkWlAvailable,
   fetchNextItems,
@@ -585,6 +586,38 @@ export function createDowntimeDeps(
     }
     return registry;
   };
+  // Leader-coordination item fetch (parent WL-0MST3OJ8S0001ROL AC4):
+  // resolve ONE item by id. `wl show` does not serve the audit timestamp, so
+  // for completed/in_review items the audit tier's list query (which DOES
+  // enrich auditedAt) is run against the worklog root to attach the
+  // freshness signal — otherwise an item with a valid audit could be
+  // re-audited on classification alone. Fail-closed: {ok:false} on any wl
+  // failure or unparseable output.
+  const fetchAuditItemById = async (itemId: string, cwd: string): Promise<DowntimeItemResult> => {
+    try {
+      const { stdout } = await getExecFileAsync()(
+        'wl',
+        buildWlArgs(['show', itemId, '--json']),
+        { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+      );
+      const info = parseShowItemOutput(stdout);
+      if (info === null) return { ok: false };
+      if (info.status === 'completed' && info.stage === 'in_review') {
+        const { stdout: listOut } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const audits = parseAuditCandidatesOutput(listOut);
+        if (audits === null) return { ok: false };
+        const found = audits.find((a) => a.id === itemId);
+        info.auditedAt = found?.auditedAt ?? null;
+      }
+      return { ok: true, info };
+    } catch {
+      return { ok: false };
+    }
+  };
   return {
     async getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult> {
       try {
@@ -854,31 +887,19 @@ export function createDowntimeDeps(
     // any wl failure or unparseable output — the coordinator treats it as
     // a strike (never a silent skip).
     async fetchItem(itemId: string, cwd: string): Promise<DowntimeItemResult> {
+      return fetchAuditItemById(itemId, cwd);
+    },
+    // Interim freshness re-check (WL-0MT8KSTOE00871E7): fetch the item and
+    // check isAuditFresh to detect whether a valid audit was recorded in the
+    // interim between candidate selection and dispatch.
+    async hasFreshAudit(itemId: string, cwd: string): Promise<boolean> {
       try {
-        const { stdout } = await getExecFileAsync()(
-          'wl',
-          buildWlArgs(['show', itemId, '--json']),
-          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
-        const info = parseShowItemOutput(stdout);
-        if (info === null) return { ok: false };
-        if (info.status === 'completed' && info.stage === 'in_review') {
-          // Enrich auditedAt via the audit-tier list query (the only CLI
-          // shape that carries it). A wl failure here fails closed — the
-          // item cannot be classified confidently.
-          const { stdout: listOut } = await getExecFileAsync()(
-            'wl',
-            buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
-            { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-          );
-          const audits = parseAuditCandidatesOutput(listOut);
-          if (audits === null) return { ok: false };
-          const found = audits.find((a) => a.id === itemId);
-          info.auditedAt = found?.auditedAt ?? null;
-        }
-        return { ok: true, info };
+        const result = await fetchAuditItemById(itemId, cwd);
+        if (!result.ok || !result.info) return false;
+        return isAuditFresh(result.info.auditedAt, result.info.updatedAt);
       } catch {
-        return { ok: false };
+        // Fail-closed: on any error, treat as "not fresh" (dispatch proceeds).
+        return false;
       }
     },
     // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): read the project-local

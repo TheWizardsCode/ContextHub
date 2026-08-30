@@ -950,6 +950,19 @@ export interface DowntimeWorkerDeps {
    */
   fetchItem?(itemId: string, cwd: string): Promise<DowntimeItemResult>;
   /**
+   * Re-check whether a work item already has a fresh audit (WL-0MT8KSTOE00871E7).
+   * Called in the audit-tier dispatch path BETWEEN candidate selection and
+   * dispatch to detect whether a valid audit was recorded in the interim
+   * (e.g. by a human or another process). Resolves true when the item has
+   * a fresh audit (auditedAt within 60s of updatedAt), false otherwise.
+   * Fail-closed: `{ok:false}` on a wl/CLI failure → treated as "not fresh"
+   * (the dispatch proceeds — conservative default, never blocks dispatch).
+   *
+   * Convenience wrapper: fetches the item and applies `isAuditFresh`.
+   * A single dep on the worker boundary, testable without wl.
+   */
+  hasFreshAudit(itemId: string, cwd: string): Promise<boolean>;
+  /**
    * Read the current code-freeze marker status (tri-state: 'frozen' /
    * 'not-frozen' / 'ambiguous'). `cwd` is the worklog root; the marker
    * lives at `<cwd>/.worklog/code-freeze.json`. Read fresh on EVERY
@@ -1097,7 +1110,12 @@ export interface DowntimeDispatchOutcome {
    * already running — a non-stale kind=audit dispatch marker maps to an
    * `in_progress` item — so the audit tier was skipped; a skip that leaves
    * an empty remaining backlog reports this reason, NEVER 'no-candidate',
-   * so the no-candidate cooldown is not entered while the audit runs).
+   * so the no-candidate cooldown is not entered while the audit runs) |
+   * 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a valid audit was recorded
+   * during the interim between candidate selection and dispatch, so the
+   * audit tier was skipped — an empty remaining backlog reports this
+   * reason, NEVER 'no-candidate', so the cooldown is not entered while
+   * the item is already audited).
    */
   reason?: string;
   /**
@@ -1203,6 +1221,31 @@ async function dispatchClaimedTier(
     },
   );
   if (!spawn.ok) {
+    // Spawn-failure freshness re-check (WL-0MT8KSTOE00871E7): between
+    // selection and spawn, a valid audit may have been recorded. If so, the
+    // pane is moot — do NOT record a failure trace or comment. The failure
+    // was against a stale/unaudited state that no longer exists.
+    if (kind === 'audit') {
+      try {
+        const fresh = await deps.hasFreshAudit(candidate.id, opts.cwd);
+        if (fresh) {
+          process.stderr.write(
+            `[worklog-plugin] Downtime spawn-failed skip: fresh audit recorded during interim (item ${candidate.id})\n`,
+          );
+          // Skip the failure trace — the pane was dispatched against a stale
+          // candidate; do NOT log as a failure.
+          return {
+            dispatched: false,
+            reason: 'spawn-failed',
+            error: spawn.error,
+            exitCode: spawn.exitCode,
+          };
+        }
+      } catch {
+        // Fail-open on the freshness check: if we can't verify, log the
+        // failure trace as normal (conservative default).
+      }
+    }
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2): the audit log distinguishes
     // "attempted" (failed spawn) from "opened" (success marker) — append
     // an outcome:'spawn-failed' entry with the error/exit trace. Fail-
@@ -1852,6 +1895,11 @@ export async function dispatchDowntimeWork(
     // not pause the worker).
     let auditInFlight = false;
     let auditCheckFailed = false;
+    // Freshness-skip flag (WL-0MT8KSTOE00871E7): when the interim freshness
+    // re-check finds a fresh audit, the audit tier skip is reported as
+    // 'fresh-audit-skip' (never 'no-candidate', so the cooldown is not
+    // entered while the item is already audited).
+    let freshnessSkip = false;
 
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
@@ -1931,7 +1979,34 @@ export async function dispatchDowntimeWork(
             const audit = await deps.getNextAuditCandidate(opts.cwd);
             if (audit.ok) {
               if (audit.candidate !== null) {
-                return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+                // Interim freshness re-check (WL-0MT8KSTOE00871E7): between
+                // candidate selection and dispatch, a valid audit may have
+                // been recorded (e.g. by a human or another process). Re-check
+                // freshness to avoid dispatching a redundant audit pane and
+                // writing a misleading dispatch comment. If a fresh audit now
+                // exists, skip the dispatch entirely — no comment, no marker,
+                // no spawn — and fall through to the next tier. Treat as
+                // "already audited", not "no-candidate"/cooldown and not a
+                // strike. Fail-open: a wl/CLI failure in the freshness check
+                // is treated as "not fresh" (dispatch proceeds) — never a
+                // silent skip.
+                try {
+                  const fresh = await deps.hasFreshAudit(audit.candidate.id, opts.cwd);
+                  if (fresh) {
+                    freshnessSkip = true;
+                    process.stderr.write(
+                      `[worklog-plugin] Downtime audit tier skip: fresh audit recorded during interim (item ${audit.candidate.id})\n`,
+                    );
+                    // Fall through to the next tier (implement/plan/intake).
+                  } else {
+                    return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+                  }
+                } catch {
+                  // Fail-open: the freshness check could not complete (e.g.
+                  // wl/CLI error) — proceed with the dispatch (conservative
+                  // default). The item is treated as "not fresh" for this tick.
+                  return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+                }
               }
             } else {
               return { dispatched: false, reason: 'wl-error' };
@@ -2050,11 +2125,13 @@ export async function dispatchDowntimeWork(
       // lifts (WL-0MSQ0RPQP00636JY).
       return frozen
         ? { dispatched: false, reason: 'code-freeze' }
-        : auditInFlight
-          ? { dispatched: false, reason: 'audit-in-flight' }
-          : auditCheckFailed
-            ? { dispatched: false, reason: 'wl-error' }
-            : { dispatched: false, reason: 'no-candidate' };
+        : freshnessSkip
+          ? { dispatched: false, reason: 'fresh-audit-skip' }
+          : auditInFlight
+            ? { dispatched: false, reason: 'audit-in-flight' }
+            : auditCheckFailed
+              ? { dispatched: false, reason: 'wl-error' }
+              : { dispatched: false, reason: 'no-candidate' };
     }
     // Tier 3 errored (with or without a tier-2 error): fail closed to busy.
     // The worker counts this as one CLI-error strike; the backlog is not
