@@ -36,7 +36,17 @@ package-level overview lives in
   leader (`packages/herdr/src/leader-election.ts`).
 - The leader holds a **5-minute lease**
   (`DEFAULT_LEASE_TTL_SECONDS = 300`) written to
-  `.worklog/downtime-leader-lease.json`, refreshed on every proxy-poll cycle.
+  `.worklog/downtime-leader-lease.json`, refreshed on every proxy-poll cycle
+  **and during the no-candidate cooldown pause** — an owned-but-EXPIRED
+  lease is still renewed (`refreshLease()` is ownership-based, not
+  validity-based: a lease with `leaderId === instanceId` is rewritten with a
+  fresh `acquiredAt` regardless of remaining TTL).
+- Leadership is **re-derived every tick** (a single cheap lease-file read):
+  a lease that expires mid-pause (tick loop stalled in the cooldown) routes
+  the worker out of zombie dispatch — it never polls or dispatches with
+  stale cached leadership, and if another instance won the lease during the
+  pause the re-derived worker yields silently (no fight, no double
+  dispatch).
 - If the lease expires (leader crashed or idle), a non-leader detects the
   staleness, clears the stale lock/lease, and runs a new election (with
   exponential backoff).
@@ -110,8 +120,16 @@ the worklog still holds dispatchable work. Therefore:
 - **Check-in is never suppressed:** the cooldown gate runs AFTER the
   leader-election/check-in block, so the 30-min coordination check-in
   (the only re-offer mechanism) still lands during a pause and the leader
-  lease keeps refreshing. A successful re-offer
+  lease keeps refreshing (self-healing `refreshLease()` renews an
+  owned-but-expired lease — the zombie can never lose its renewal path).
+  A successful re-offer
   (`checkIn.updated && offered !== null`) cancels the pause immediately.
+- **Cooldown-exit renewal + re-derivation:** the first tick after the pause
+  expires re-runs the leader block (self-heal refresh + per-tick leadership
+  re-derivation) BEFORE reaching the cooldown gate, so every dispatch
+  decision on the resume path uses lease-fresh leadership — even when the
+  tick loop stalled mid-pause, the resume tick can never double-dispatch a
+  foreign instance's coordination entry (zombie regression).
 - **Bound achieved:** dispatch occurs at least once per `min(noCandidateCooldownMs,
   2 × checkInIntervalMs)` (60 min) whenever the worklog holds dispatchable
   work — never once per full cooldown.
