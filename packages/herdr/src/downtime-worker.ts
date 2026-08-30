@@ -63,7 +63,17 @@
  *    idle period is required after the pause. Transient `wl` errors and the
  *    in-flight dispatch guard never trigger the cooldown; three consecutive
  *    CLI-error outcomes do (three-strike rule), after logging the
- *    persistent error via `deps.recordError`.
+ *    persistent error via `deps.recordError`. In coordination mode
+ *    (WL-0MTEZ4XZJ006Y9U7) an empty coordination file is an OFFER LIST,
+ *    not the backlog: the leader removes each entry after dispatching, so
+ *    an empty file is a transient gap — the tick probes the worklog
+ *    (`computeMostImportantItem`) before pausing and only a genuinely
+ *    empty backlog pauses (a probe CLI error is itself a three-strike
+ *    event, never a silent pause). The cooldown gate runs AFTER the
+ *    leader-election/check-in block so the 30-min check-in (the only
+ *    re-offer mechanism) still lands during a pause, and a successful
+ *    re-offer (`checkIn.updated && offered !== null`) cancels the pause
+ *    immediately.
  *  - `buildDowntimePrompt` / `BLOCKED_QUESTIONS_INSTRUCTION` — dispatched
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
