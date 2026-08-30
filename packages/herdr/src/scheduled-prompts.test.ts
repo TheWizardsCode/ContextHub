@@ -187,12 +187,14 @@ describe('loadScheduledPrompts', () => {
     tempDirs.length = 0;
   });
 
-  it('treats an absent config as an empty set (fail-closed) and logs a notice', () => {
+  it('treats an absent config as an empty set (fail-closed) with NO log output', () => {
+    // Absence is the expected/provisioned state — the loader is silent here
+    // (WL-0MTF5UAJ4000LLZ9); only malformed/unreadable configs log.
     const result = loadScheduledPrompts(cwd, collectLog);
     expect(result.entries).toEqual([]);
     expect(result.absent).toBe(true);
     expect(result.malformed).toBe(false);
-    expect(logs.join('\n')).toContain('absent');
+    expect(logs).toEqual([]);
   });
 
   it('treats malformed JSON as an empty set (fail-closed) and logs an error', () => {

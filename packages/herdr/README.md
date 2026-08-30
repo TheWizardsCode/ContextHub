@@ -634,10 +634,11 @@ pane named `Downtime <id>` via the same send-to-pi.sh path as the tiers
 prompt text. Multiple due entries dispatch one per idle slot in config order
 (the single-flight guard prevents overlap).
 
-Fail-closed at every boundary: an **absent** config is an empty set (logged
-notice — `wl init` is the provisioning path, no defaults are synthesized),
-and a **malformed** config (unreadable, corrupt JSON, no `entries` list) is an
-empty set (logged error) — in both cases no scheduled dispatch occurs and the
+Fail-closed at every boundary: an **absent** config is an empty set (silent —
+absence is the expected state; `wl init` is the provisioning path, no defaults
+are synthesized), and a **malformed** config (unreadable, corrupt JSON, no
+`entries` list) is an empty set (logged error) — in both cases no scheduled
+dispatch occurs and the
 existing tiers are unaffected. Invalid entries (missing/empty id or prompt,
 missing/non-finite/≤ 0 `intervalDays`, unparseable `lastTriggeredAt`) are
 skipped with a logged warning — never a crash.

@@ -17,10 +17,10 @@
  *  - `lastTriggeredAt` (ISO-8601 UTC datetime; `null` = never run).
  *
  * Fail-closed philosophy (mirrors settings.ts + the downtime worker): an
- * absent config is an EMPTY set (logged notice — `wl init` is the
- * provisioning path); a malformed config is an EMPTY set (logged error);
- * an invalid entry is skipped (logged warning). None of these ever throw
- * or crash the worker.
+ * absent config is an EMPTY set (silent — absence is the expected state;
+ * `wl init` is the provisioning path); a malformed config is an EMPTY set
+ * (logged error); an invalid entry is skipped (logged warning). None of these
+ * ever throw or crash the worker.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -57,7 +57,7 @@ export interface ScheduledPromptsConfig {
 /** Result of loading the config (entries are ALWAYS the valid subset). */
 export interface ScheduledPromptsLoadResult {
   entries: ScheduledPrompt[];
-  /** true when the config file was absent (fail-closed empty set, notice logged). */
+  /** true when the config file was absent (fail-closed empty set, silent). */
   absent: boolean;
   /** true when the file existed but could not be parsed (fail-closed empty set, error logged). */
   malformed: boolean;
@@ -151,8 +151,9 @@ export function getDueScheduledPrompt(
 /**
  * Load the scheduled-prompts config for a worklog root, fail-closed:
  *
- *  - absent file ⇒ `{ entries: [], absent: true }` with a logged notice
- *    (`wl init` is the provisioning path — no synthesis of defaults here),
+ *  - absent file ⇒ `{ entries: [], absent: true }` (silent — absence is the
+ *    expected state; `wl init` is the provisioning path, no synthesis of
+ *    defaults here),
  *  - unreadable/corrupt JSON/wrong shape ⇒ `{ entries: [], malformed: true }`
  *    with a logged error,
  *  - valid file ⇒ the VALID entries (invalid ones are skipped with a logged
@@ -167,10 +168,9 @@ export function loadScheduledPrompts(
   const file = scheduledPromptsPath(cwd);
 
   if (!existsSync(file)) {
-    log(
-      `scheduled-prompts: config file absent at ${file} — treating the ` +
-        `scheduled-prompt set as empty (fail-closed; run \`wl init\` to provision).`,
-    );
+    // Silent fail-closed: absence is the expected/provisioned state for most
+    // projects (WL-0MTF5UAJ4000LLZ9) — every poll cycle would otherwise spam
+    // stderr. All error paths below (unreadable/corrupt/wrong-shape) still log.
     return { entries: [], absent: true, malformed: false };
   }
 
