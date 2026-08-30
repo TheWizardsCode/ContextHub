@@ -121,6 +121,14 @@ import {
 } from './downtime-disable-marker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import {
+  LEASE_FILE,
+  LEADER_LOCK_FILE,
+  isLeaseValid,
+} from './leader-election.js';
+import {
+  writeCoordinationFile,
+} from './coordination.js';
+import {
   statusFixtures,
   ambiguousMissingFieldsRaw,
   idleAllSlotsFree,
@@ -3532,12 +3540,66 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     return { worker, deps, cfg, fetcher };
   }
 
+  // ── Coordination-dir worker fixture (F2 — cooldown lease maintenance) ──
+
+  /** Tmp dirs created by makeCoordinationWorker — cleaned up in afterEach. */
+  const coordinationTmpDirs: string[] = [];
+
+  function makeCoordinationWorker(overrides: {
+    instanceId?: string;
+    leaseTtlSeconds?: number;
+    cooldownMs?: number;
+    deps?: Partial<DowntimeWorkerDeps>;
+    /** Pre-seed another instance's valid lease BEFORE the worker is created. */
+    seedLease?: { instanceId: string; atMs: number };
+  } = {}) {
+    const coordDir = mkdtempSync(join(tmpdir(), 'cd-wl-0MTF4A4V3-'));
+    coordinationTmpDirs.push(coordDir);
+    const instanceId = overrides.instanceId ?? 'inst-a';
+    const leaseTtlSeconds = overrides.leaseTtlSeconds ?? 300;
+    if (overrides.seedLease) {
+      writeLease(coordDir, overrides.seedLease.instanceId, leaseTtlSeconds, overrides.seedLease.atMs);
+    }
+    const cfg = {
+      enabled: true,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: overrides.cooldownMs ?? 3_600_000,
+    };
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      // fetchItem is REQUIRED for coordination dispatch (dispatchFromCoordination).
+      // Default: returns dispatchable info for any item id.
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: { id: 'WL-FAKE', title: 'Fake', status: 'open', stage: 'intake_complete' },
+      }),
+      ...overrides.deps,
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      coordinationDir: coordDir,
+      instanceId,
+      leaseTtlSeconds,
+      config: () => ({ ...cfg }),
+    });
+    return { worker, deps, cfg, fetcher, coordDir, instanceId, leaseTtlSeconds };
+  }
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    for (const dir of coordinationTmpDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('enters the cooldown only after a genuine no-candidate outcome', async () => {
@@ -3736,6 +3798,198 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const resumed = await worker.tick();
     expect(resumed.polled).toBe(true);
     expect(worker.paused).toBe(false);
+  });
+
+  // ── Cooldown lease maintenance (parent F2 — holes A & B regression) ──
+
+  /** Read the current lease file from the coordination directory. */
+  function readLease(coordDir: string) {
+    const raw = readFileSync(join(coordDir, LEASE_FILE), 'utf-8');
+    return JSON.parse(raw) as { leaderId: string; acquiredAt: string; ttlSeconds: number };
+  }
+
+  /** Write a lease file directly (simulates another instance winning election). */
+  function writeLease(coordDir: string, instanceId: string, ttlSeconds: number, nowMs: number) {
+    const lease = {
+      leaderId: instanceId,
+      acquiredAt: new Date(nowMs).toISOString(),
+      ttlSeconds,
+    };
+    writeFileSync(join(coordDir, LEASE_FILE), JSON.stringify(lease));
+    // Also write the lock file so hasLease() returns true.
+    writeFileSync(join(coordDir, LEADER_LOCK_FILE), instanceId);
+  }
+
+  it('keeps refreshing the lease during the no-candidate cooldown pause (AC1)', async () => {
+    // While a leader is paused in the no-candidate cooldown, the lease file
+    // mtime/content keeps advancing (refresh continues during the pause).
+    // Sibling fix (e842208580) already runs the leader block BEFORE the
+    // cooldown gate, so lease refreshes each tick during the pause.
+    const { worker, coordDir } = makeCoordinationWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+
+    // Tick 1: election → A wins lease, refreshLease
+    await worker.tick();
+    expect(worker.isLeader).toBe(true);
+    expect(worker.paused).toBe(false);
+
+    const leaseAfterElection = readLease(coordDir);
+    expect(leaseAfterElection.leaderId).toBe('inst-a');
+
+    // Tick 2: threshold met → dispatch attempt → no-candidate → cooldown
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick();
+    expect(worker.paused).toBe(true);
+    expect(worker.isLeader).toBe(true);
+
+    // Tick 3 during cooldown: lease should refresh (leader block runs first)
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 60_000);
+    await worker.tick();
+
+    const leaseDuringPause = readLease(coordDir);
+    expect(leaseDuringPause.leaderId).toBe('inst-a');
+    // Content-based pin (fake timers control Date.now — robust vs fs mtime
+    // granularity): the lease acquiredAt must have ADVANCED during the pause.
+    expect(new Date(leaseDuringPause.acquiredAt).getTime()).toBeGreaterThan(
+      new Date(leaseAfterElection.acquiredAt).getTime(),
+    );
+    // Belt: the pause itself is still in effect (no premature resume).
+    expect(worker.paused).toBe(true);
+  });
+
+  it('renews the lease on cooldown exit BEFORE dispatch (even if expired mid-pause) (AC2)', async () => {
+    // On cooldown exit, the lease is renewed BEFORE any dispatch decision
+    // (belt: even if tick loop stalled mid-pause, the lease expired).
+    const { worker, coordDir } = makeCoordinationWorker({
+      leaseTtlSeconds: 300, // 5 min TTL
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+
+    // Tick 1: election → A wins lease
+    await worker.tick();
+    expect(worker.isLeader).toBe(true);
+
+    // Tick 2: threshold met → dispatch attempt → no-candidate → cooldown
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick();
+    expect(worker.paused).toBe(true);
+    expect(worker.isLeader).toBe(true);
+
+    // Stalled tick loop: advance time PAST lease TTL (300s) but still within
+    // the cooldown (3.6M ms) — simulate a frozen tick loop mid-pause.
+    // Lease TTL = 300s; we advance 400s into the cooldown → lease expired.
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 400_000);
+    // Do NOT tick — simulate the loop being frozen.
+
+    // Now advance to cooldown expiry.
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000 + 1_000);
+
+    // The resume tick: leader block runs (cached leaderState=true)
+    // but refreshLease no-ops on our expired lease (Hole A — isLeader returns
+    // false because lease expired).
+    // Cooldown gate clears. Then poll/dispatch.
+    await worker.tick();
+
+    // AC2 assertion: lease must be VALID after the exit tick (renewed BEFORE
+    // any dispatch decision). On current code the lease is still expired
+    // (refreshLease no-oped), so this FAILS — proving Hole A.
+    const leaseAfterExit = readLease(coordDir);
+    const leaseValid = isLeaseValid(leaseAfterExit);
+    expect(leaseValid).toBe(true);
+    expect(leaseAfterExit.leaderId).toBe('inst-a');
+    // Belt: the lease was RENEWED at exit — its acquiredAt must postdate the
+    // stalled period (current code keeps the stale acquiredAt → FAILS).
+    expect(new Date(leaseAfterExit.acquiredAt).getTime()).toBeGreaterThan(
+      start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 400_000,
+    );
+  });
+
+  it('re-derives leadership every tick: expired lease routes to election, no zombie dispatch (AC3)', async () => {
+    // leaderState is re-derived every tick: an expired lease while
+    // leaderState === true routes into the election/takeover path instead of
+    // zombie dispatch.
+    const { worker, deps, coordDir } = makeCoordinationWorker({
+      leaseTtlSeconds: 300,
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+
+    // Tick 1: election → A wins lease
+    await worker.tick();
+    expect(worker.isLeader).toBe(true);
+
+    // Tick 2: threshold met → dispatch attempt → no-candidate → cooldown
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick();
+    expect(worker.paused).toBe(true);
+    expect(worker.isLeader).toBe(true);
+
+    // Mid-pause, B wins the election with a FRESH lease and a FRESH
+    // coordination entry (a live instance refreshes its entry on its own
+    // check-in cadence — write it at resume time so pruneStaleEntries does
+    // NOT delete it before A's dispatch tick; the entry must be present for
+    // the zombie dispatch to be observable).
+    const resumeTime = start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000 + 1_000;
+    vi.setSystemTime(resumeTime);
+    writeLease(coordDir, 'inst-b', 300, resumeTime);
+
+    const entryB = {
+      instanceId: 'inst-b',
+      workItemId: 'WL-B1',
+      directory: '/repo-b',
+      assignedAt: new Date(resumeTime).toISOString(),
+      lastUpdated: new Date(resumeTime).toISOString(),
+    };
+    writeCoordinationFile(coordDir, { version: 1, entries: [entryB] });
+
+    // Resume tick at cooldown expiry: leader block runs (cached
+    // leaderState=true) → refreshLease no-ops (B holds the lease → isLeader
+    // false) → leaderState STAYS true (Hole B). Cooldown gate clears → a
+    // FRESH idle run starts (tracker was reset on cooldown entry), so no
+    // dispatch happens on THIS tick — the zombie dispatch is decided on the
+    // NEXT tick after the idle threshold.
+    await worker.tick();
+
+    // Second tick: idle threshold met → dispatch decision. On current code
+    // (leaderState cached true) A reads B's entry and spawns A PANE — the
+    // zombie. After F5 (per-tick re-derivation) leaderState=false → the
+    // non-leader short-circuit returns BEFORE poll/dispatch.
+    vi.setSystemTime(resumeTime + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick();
+
+    // AC3 assertion: A must NOT dispatch B's item (B is the live leader).
+    // On current code (cached leaderState=true): spawnAgentPane IS called →
+    // FAIL (RED). After F5: leaderState re-derived false → GREEN.
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    // Also assert A is no longer leader (re-derived state).
+    expect(worker.isLeader).toBe(false);
+  });
+
+  it('stays silent when a valid foreign lease is held by another instance (AC4)', async () => {
+    // Non-leader with a valid lease held by another live instance stays
+    // silent (existing AC3 behavior preserved — regression guard). B's lease
+    // is pre-seeded BEFORE worker creation, so leaderState=false at startup
+    // (fixture passes coordination opts TOP-LEVEL as required).
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    const { worker, deps, fetcher } = makeCoordinationWorker({
+      seedLease: { instanceId: 'inst-b', atMs: start },
+    });
+
+    // Tick: leaderState at creation = isLeader() → false (lease owned by B).
+    // Leader block: leaderState false → hasLease=true, detectStaleLeader=false
+    // (B's lease is valid) → no election. Then: if (!leaderState) return.
+    const result = await worker.tick();
+
+    expect(result.polled).toBe(false);
+    expect(result.dispatched).toBe(false);
+    expect(result.idle).toBe(false);
+    expect(worker.isLeader).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled(); // no poll
   });
 });
 
