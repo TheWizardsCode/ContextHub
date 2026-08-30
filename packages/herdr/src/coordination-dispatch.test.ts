@@ -583,3 +583,168 @@ describe('downtime worker leader/non-leader orchestration (coordination mode)', 
     expect(b.deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });
+
+// ── No-candidate cooldown semantics in coordination mode ───────────────
+// (WL-0MTEZ4XZJ006Y9U7): the empty coordination FILE must not be mistaken
+// for an empty BACKLOG. After a successful dispatch the leader removes the
+// entry, leaving the file transiently empty while the worklog still has
+// dispatchable candidates — pausing on that wastes ~60 of every 62 minutes
+// (the 1-hour no-candidate cooldown). The fix: (AC1) probe the worklog
+// before entering the cooldown, pausing only on a genuinely empty backlog;
+// (AC2) run the 30-min check-in BEFORE the cooldown gate and cancel the
+// pause when a fresh re-offer lands.
+
+describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () => {
+  it('does not pause when the coordination file is empty but the worklog still has candidates (AC1/AC3)', async () => {
+    // Scenario from the live bug: ≥2 dispatchable candidates, N free slots,
+    // single-entry coordination file. After the leader dispatches the entry
+    // the file is EMPTY, so the next dispatch attempt returns no-candidate —
+    // but the worklog still has a candidate (B), so the worker must NOT
+    // enter the 60-min cooldown; the 30-min check-in re-offers B and
+    // dispatch resumes well within min(noCandidateCooldownMs,
+    // 2 × checkInIntervalMs) — not once per noCandidateCooldownMs.
+    vi.useFakeTimers();
+    const T0 = 10_000_000;
+    vi.setSystemTime(T0);
+    try {
+      // Single-entry coordination file: this instance offers its item A.
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-a', 'WL-A', '/repo')] });
+      const deps = makeCoordinationDeps({
+        // The instance's most-important item: A first (first check-in), then
+        // B (mirrors the dispatched-marker exclusion after A is consumed).
+        getNextCriticalCandidate: vi.fn()
+          .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-A', title: 'A', stage: 'intake_complete', status: 'open' } })
+          .mockResolvedValue({ ok: true, candidate: { id: 'WL-B', title: 'B', stage: 'intake_complete', status: 'open' } }),
+        // The leader classifies each offered entry by re-fetching its item.
+        fetchItem: vi.fn().mockImplementation(async (id: string) => ({
+          ok: true,
+          info: itemInfo({ id, status: 'open', stage: 'intake_complete', title: id }),
+        })),
+      });
+      const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a', depsOverrides: deps });
+
+      // Tick 1: election + first check-in (offers A) + poll (idle run starts).
+      await worker.tick();
+      expect(worker.isLeader).toBe(true);
+      expect(getEntry(testDir, 'inst-a')?.workItemId).toBe('WL-A');
+
+      // Idle threshold met → the leader dispatches A and removes the entry,
+      // leaving the coordination file EMPTY.
+      vi.setSystemTime(T0 + 60_001);
+      const first = await worker.tick();
+      expect(first.dispatched).toBe(true);
+      const firstDispatchAt = worker.lastDispatchAt ?? 0;
+      expect(getEntry(testDir, 'inst-a')).toBe(null);
+
+      // A fresh full idle period elapses, then the empty-file dispatch
+      // attempt returns no-candidate. The worker probes the worklog (B is
+      // dispatchable) and must NOT enter the 60-min cooldown.
+      vi.setSystemTime(T0 + 120_001);
+      await worker.tick(); // fresh idle run starts
+      vi.setSystemTime(T0 + 180_001);
+      const attempt = await worker.tick(); // empty-file dispatch attempt
+      expect(attempt.dispatched).toBe(false);
+      expect(worker.paused).toBe(false); // BUG (pre-fix): 60-min cooldown entered
+      // Repeated empty-file attempts stay unpaused while work exists.
+      vi.setSystemTime(T0 + 240_001);
+      await worker.tick();
+      expect(worker.paused).toBe(false);
+
+      // The 30-min check-in re-offers B and the next idle evaluation
+      // dispatches it — well inside min(noCandidateCooldownMs=60min,
+      // 2 × checkInIntervalMs=60min), NOT once per the 60-min cooldown.
+      vi.setSystemTime(T0 + 30 * 60_000);
+      const second = await worker.tick(); // check-in due → re-offer B → dispatch
+      expect(second.dispatched).toBe(true);
+      expect(getEntry(testDir, 'inst-a')).toBe(null);
+      const gap = (worker.lastDispatchAt ?? 0) - firstDispatchAt;
+      expect(gap).toBeLessThan(2 * 30 * 60_000);
+      expect(gap).toBeLessThan(3_600_000); // min(noCandidateCooldownMs, 2×checkIn)
+      expect(gap).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('runs the check-in during a genuine-empty pause and cancels the pause on a re-offer (AC2)', async () => {
+    vi.useFakeTimers();
+    const T0 = 20_000_000;
+    vi.setSystemTime(T0);
+    try {
+      // Genuinely empty worklog first: the worker enters the cooldown.
+      const deps = makeCoordinationDeps({
+        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-NEW', status: 'open', stage: 'intake_complete' }) }),
+      });
+      const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a', depsOverrides: deps });
+
+      await worker.tick(); // election + check-in (nothing to offer) + first poll
+      vi.setSystemTime(T0 + 60_001);
+      const attempt = await worker.tick(); // idle threshold met → no-candidate → probe empty → cooldown
+      expect(attempt.dispatched).toBe(false);
+      expect(worker.paused).toBe(true); // genuine-empty pause IS entered
+      expect(getEntry(testDir, 'inst-a')).toBe(null); // nothing offered
+
+      // The pause is a full stop: a mid-pause tick performs no proxy polling.
+      vi.setSystemTime(T0 + 5 * 60_000);
+      const midPause = await worker.tick();
+      expect(midPause.polled).toBe(false);
+      expect(midPause.dispatched).toBe(false);
+      expect(worker.paused).toBe(true);
+
+      // Work appears while the worker is paused. The next 30-min check-in
+      // must STILL RUN (not suppressed by the pause — the check-in/cooldown
+      // ordering) and its re-offer cancels the pause.
+      (deps.getNextCriticalCandidate as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-NEW', title: 'New', stage: 'intake_complete', status: 'open' },
+      });
+      vi.setSystemTime(T0 + 30 * 60_000);
+      const resumed = await worker.tick();
+      expect(getEntry(testDir, 'inst-a')?.workItemId).toBe('WL-NEW'); // check-in landed during the pause
+      expect(worker.paused).toBe(false); // BUG (pre-fix): check-in suppressed → still paused
+      expect(resumed.polled).toBe(true); // polling resumed immediately
+
+      // The re-offered item dispatches promptly (fresh full idle period).
+      vi.setSystemTime(T0 + 30 * 60_000 + 60_001);
+      const dispatched = await worker.tick();
+      expect(dispatched.dispatched).toBe(true);
+      expect(worker.paused).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed to the three-strike rule when the pre-cooldown probe errors — never a silent pause (AC1)', async () => {
+    vi.useFakeTimers();
+    const T0 = 30_000_000;
+    vi.setSystemTime(T0);
+    try {
+      // The worklog lookups fail (CLI errors): the probe cannot prove the
+      // backlog is empty, so the worker must NOT pause — it records a strike
+      // (fail closed to the existing three-strike rule).
+      const deps = makeCoordinationDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: false }),
+        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: false }),
+        getNextItem: vi.fn().mockResolvedValue({ ok: false }),
+      });
+      const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a', depsOverrides: deps });
+
+      await worker.tick(); // election + check-in (lookups fail → entry kept) + poll
+      vi.setSystemTime(T0 + 60_001);
+      await worker.tick(); // threshold met → empty-file no-candidate → probe fails → strike 1
+      expect(worker.paused).toBe(false); // never a silent pause
+      expect(worker.errorStrikes).toBe(1);
+
+      vi.setSystemTime(T0 + 120_001);
+      await worker.tick(); // strike 2 (idle run stays warm)
+      vi.setSystemTime(T0 + 180_001);
+      await worker.tick(); // strike 3 → three-strike pause
+      expect(worker.paused).toBe(true);
+      expect(deps.recordError).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

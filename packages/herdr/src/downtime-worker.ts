@@ -1644,7 +1644,10 @@ export async function dispatchFromCoordination(
 
   // No tier had a dispatchable entry (or a freeze skip with an empty
   // plan/intake list). The caller decides cooldown vs. resume via the
-  // same reason semantics as the legacy dispatcher.
+  // same reason semantics as the legacy dispatcher — in the worker tick,
+  // a coordination-mode no-candidate is probed against the worklog
+  // (WL-0MTEZ4XZJ006Y9U7): an empty OFFER FILE is never mistaken for an
+  // empty BACKLOG.
   return frozen
     ? { dispatched: false, reason: 'code-freeze' }
     : { dispatched: false, reason: 'no-candidate' };
@@ -2364,7 +2367,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   let lastDispatchAt: number | null = null;
   // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
   // worker is fully paused (no poll, no idle tracking, no dispatch) after a
-  // genuine empty backlog OR three consecutive CLI errors. null = not paused.
+  // genuine empty backlog OR three consecutive CLI errors. Cancelled early
+  // when a coordination check-in re-offers a fresh item
+  // (WL-0MTEZ4XZJ006Y9U7). null = not paused.
   let cooldownUntil: number | null = null;
   // Three-strike rule: consecutive CLI-error dispatch outcomes. A successful
   // dispatch, a genuine no-candidate outcome, or an expired cooldown resets it.
@@ -2411,6 +2416,31 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // tick observe ONE consistent state — an election win mid-tick applies
   // next tick). Legacy mode (no coordinationDir) is always the leader.
   let leaderState = leaderManager ? leaderManager.isLeader() : true;
+
+  // Three-strike pause (WL-0MSI7DQL10016QYX; shared by the CLI-error path
+  // and the coordination probe-failure path, WL-0MTEZ4XZJ006Y9U7): N
+  // consecutive failures pause the worker entirely and log the persistent
+  // error so it is auditable. A single transient failure does NOT pause —
+  // it retries on the next idle period. Fail-closed: error logging must
+  // never crash the worker.
+  const pauseAfterPersistentErrors = async (message: string): Promise<void> => {
+    errorStrikes += 1;
+    if (errorStrikes >= DOWNTIME_ERROR_STRIKE_LIMIT) {
+      try {
+        await opts.deps.recordError({
+          cwd: opts.config().cwd,
+          at: new Date().toISOString(),
+          message,
+        });
+      } catch {
+        // fail-closed: error logging must never crash the worker
+      }
+      cooldownUntil = Date.now() + opts.config().noCandidateCooldownMs;
+      errorStrikes = 0;
+      tracker.record(false);
+      perSlotTracker.record([]);
+    }
+  };
 
   return {
     get idleSince(): number | null {
@@ -2477,18 +2507,6 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // while toggled off the worker performs no proxy polling, no idle
       // tracking, and no dispatch — exactly the settings-disabled path.
       if (!(override ?? cfg.enabled)) return { polled: false, dispatched: false, idle: false };
-      // Cooldown gate: while paused the worker performs NO proxy polling, NO
-      // idle tracking, and NO dispatch. The pause is a full stop (user
-      // confirmed "pause completely"); once it expires the idle tracker is
-      // empty, so a fresh full idle period is required before the next
-      // dispatch (no stale idle credit from before the pause).
-      if (cooldownUntil !== null) {
-        if (Date.now() < cooldownUntil) {
-          return { polled: false, dispatched: false, idle: false };
-        }
-        cooldownUntil = null; // pause expired — resume normal polling
-        errorStrikes = 0; // fresh strike counter after the pause
-      }
 
       // ── Leader election + coordination check-in (parent
       // WL-0MST3OJ8S0001ROL AC1/AC2/AC3) ───────────────────────────────────
@@ -2545,11 +2563,21 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         if (lastCheckInAt === null || tickNow - lastCheckInAt >= checkInIntervalMs) {
           lastCheckInAt = tickNow;
           try {
-            await runCoordinationCheckIn(opts.deps, {
+            const checkIn = await runCoordinationCheckIn(opts.deps, {
               cwd: cfg.cwd,
               coordinationDir: opts.coordinationDir!,
               instanceId,
             }, tickNow);
+            // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
+            // backlog is dispatchable again — cancel any no-candidate pause
+            // so the leader resumes polling/dispatch this very tick. The
+            // check-in block runs BEFORE the cooldown gate below, so the
+            // pause can never suppress the only mechanism that re-offers
+            // work once the coordination file empties.
+            if (checkIn.updated && checkIn.offered !== null) {
+              cooldownUntil = null;
+              errorStrikes = 0; // the re-offer's lookups succeeded — CLI healthy
+            }
           } catch {
             // Fail-safe: a throwing check-in (stub or regression) must never
             // crash the worker — retried at the next cadence.
@@ -2564,6 +2592,22 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         }
       }
 
+      // Cooldown gate (WL-0MTEZ4XZJ006Y9U7 AC2 — ordering): the check-in
+      // block above runs FIRST, so a no-candidate pause never suppresses the
+      // 30-min re-offer (the only mechanism that re-offers work once the
+      // coordination file empties); a fresh re-offer cancels the pause
+      // directly. While paused the worker performs NO proxy polling, NO
+      // idle tracking, and NO dispatch. The pause is a full stop (user
+      // confirmed "pause completely"); once it expires the idle tracker is
+      // empty, so a fresh full idle period is required before the next
+      // dispatch (no stale idle credit from before the pause).
+      if (cooldownUntil !== null) {
+        if (Date.now() < cooldownUntil) {
+          return { polled: false, dispatched: false, idle: false };
+        }
+        cooldownUntil = null; // pause expired — resume normal polling
+        errorStrikes = 0; // fresh strike counter after the pause
+      }
       if (opts.poller.isPolling()) return { polled: false, dispatched: false, idle: tracker.idleSince !== null };
 
 
@@ -2681,38 +2725,56 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           tracker.record(false);
           perSlotTracker.record([]);
         } else if (outcome.reason === 'no-candidate') {
-          // Genuine empty backlog (both stages answered with no candidate):
-          // pause entirely so the worker stops burning cycles (proxy polling
-          // + wl next spawns) for the configured cooldown. Reset the idle
-          // tracker so a fresh full idle period is required after the pause.
-          errorStrikes = 0; // the CLI answered — it is healthy
-          cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
-          tracker.record(false);
-          perSlotTracker.record([]);
+          // WL-0MTEZ4XZJ006Y9U7 (AC1): in coordination mode the shared file
+          // is an OFFER LIST, not the backlog — after a dispatch the leader
+          // removes the entry, so an empty file is a TRANSIENT gap while the
+          // worklog still has dispatchable work (the pre-fix code paused on
+          // it for the full cooldown, stalling ~60 of every 62 minutes).
+          // Probe the worklog before pausing; only a GENUINELY empty backlog
+          // pauses (legacy non-coordination semantics unchanged):
+          //  - probe finds a candidate → no pause, no strike: the 30-min
+          //    check-in re-offers it and dispatch resumes;
+          //  - probe fails (wl/CLI errors) → fail-closed strike (a broken
+          //    lookup must never look like an empty backlog — the
+          //    three-strike rule decides when to pause);
+          //  - probe finds nothing → genuine empty backlog → pause entirely
+          //    and reset the idle tracker (fresh full idle period required
+          //    after the pause).
+          if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now());
+            if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
+              errorStrikes = 0; // the CLI answered — it is healthy
+              cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
+              tracker.record(false);
+              perSlotTracker.record([]);
+            } else if (!probe.ok) {
+              await pauseAfterPersistentErrors(
+                `Downtime worker: worklog probe failed while the shared ` +
+                `coordination file held no dispatchable entry — ` +
+                `${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive errors, pausing ` +
+                `dispatch for ${cfg.noCandidateCooldownMs}ms.`,
+              );
+            }
+            // probe.ok with a candidate: no pause — the empty file is a
+            // transient gap; the check-in re-offers the candidate.
+          } else {
+            // Legacy mode — original semantics: no-candidate means a genuine
+            // empty backlog; pause entirely for the cooldown.
+            errorStrikes = 0; // the CLI answered — it is healthy
+            cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
+            tracker.record(false);
+            perSlotTracker.record([]);
+          }
         } else if (outcome.reason === 'wl-error') {
           // Three-strike rule on CLI errors: a dispatch attempt ending in a
           // wl failure is one strike. Three consecutive strikes pause the
           // worker entirely (no dispatch) AFTER logging the persistent error
           // so the failure is auditable. A single transient error does NOT
           // pause — it retries on the next idle period.
-          errorStrikes += 1;
-          if (errorStrikes >= DOWNTIME_ERROR_STRIKE_LIMIT) {
-            try {
-              await opts.deps.recordError({
-                cwd: cfg.cwd,
-                at: new Date().toISOString(),
-                message:
-                  `Downtime worker: ${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive ` +
-                  `wl CLI errors — pausing dispatch for ${cfg.noCandidateCooldownMs}ms.`,
-              });
-            } catch {
-              // fail-closed: error logging must never crash the worker
-            }
-            cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
-            errorStrikes = 0;
-            tracker.record(false);
-            perSlotTracker.record([]);
-          }
+          await pauseAfterPersistentErrors(
+            `Downtime worker: ${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive ` +
+            `wl CLI errors — pausing dispatch for ${cfg.noCandidateCooldownMs}ms.`,
+          );
         }
         // Any other non-dispatch outcome (dispatch-in-flight, code-freeze
         // skip) is neutral: no strike, no cooldown — the next idle period
