@@ -143,6 +143,96 @@ describe('refreshLease', () => {
     expect(existsSync(leasePath)).toBe(false);
     manager.close();
   });
+
+  // ── F4 self-heal (parent WL-0MTEZ5EK5002RXXD, child F3 red→green) ──
+  // Hole A in the zombie-leader scenario: isLeader() requires > MIN_VALID_LEASE_TTL_MS
+  // remaining, so an OWNED-but-EXPIRED lease makes refreshLease() no-op — the
+  // lease is never renewed and the worker stays leader-cached with a dead lease.
+  // F4 must treat OWNED leases as refreshable regardless of validity; F3 pins it.
+
+  it('self-heals: renews an owned-but-EXPIRED lease instead of no-oping (F4 AC1)', () => {
+    const manager = makeManager({ instanceId: 'test-instance-1', leaseTtlSeconds: 300 });
+    const leasePath = join(testDir, LEASE_FILE);
+    // Owned lease but expired (> 300s TTL ago). isLeader() → false on current
+    // code, so the `if (!this.isLeader()) return` guard no-ops → RED.
+    const staleAcquiredAt = new Date(Date.now() - 400_000).toISOString();
+    writeFileSync(
+      leasePath,
+      JSON.stringify({ leaderId: 'test-instance-1', acquiredAt: staleAcquiredAt, ttlSeconds: 300 }),
+      'utf-8',
+    );
+
+    manager.refreshLease();
+
+    const lease = JSON.parse(readFileSync(leasePath, 'utf-8')) as {
+      leaderId: string;
+      acquiredAt: string;
+      ttlSeconds: number;
+    };
+    expect(lease.leaderId).toBe('test-instance-1');
+    // RED on current code: refreshLease() no-oped → acquiredAt is still stale.
+    expect(new Date(lease.acquiredAt).getTime()).toBeGreaterThan(new Date(staleAcquiredAt).getTime());
+    // Belt: the self-healed lease is valid again (full TTL from now).
+    expect(isLeaseValid(lease)).toBe(true);
+    manager.close();
+  });
+
+  it('never renews a valid lease owned by another instance (F4 AC2)', () => {
+    const manager = makeManager({ instanceId: 'test-instance-1' });
+    const leasePath = join(testDir, LEASE_FILE);
+    const foreign = {
+      leaderId: 'other-instance',
+      acquiredAt: new Date(Date.now() - 60_000).toISOString(), // valid (TTL 300s)
+      ttlSeconds: 300,
+    };
+    writeFileSync(leasePath, JSON.stringify(foreign), 'utf-8');
+
+    manager.refreshLease();
+
+    const lease = JSON.parse(readFileSync(leasePath, 'utf-8')) as {
+      leaderId: string;
+      acquiredAt: string;
+    };
+    expect(lease.leaderId).toBe('other-instance');
+    expect(lease.acquiredAt).toBe(foreign.acquiredAt); // unchanged — never renews foreign
+    manager.close();
+  });
+
+  it('does not steal leadership from an EXPIRED foreign lease (F4 AC2b)', () => {
+    // Strongest anti-steal pin: even when the foreign lease has expired, the
+    // takeover must go through the election path (detectStaleLeader), never
+    // through refreshLease for a lease we do not own.
+    const manager = makeManager({ instanceId: 'test-instance-1' });
+    const leasePath = join(testDir, LEASE_FILE);
+    const staleForeign = {
+      leaderId: 'other-instance',
+      acquiredAt: new Date(Date.now() - 400_000).toISOString(), // expired
+      ttlSeconds: 300,
+    };
+    writeFileSync(leasePath, JSON.stringify(staleForeign), 'utf-8');
+
+    manager.refreshLease();
+
+    const lease = JSON.parse(readFileSync(leasePath, 'utf-8')) as {
+      leaderId: string;
+      acquiredAt: string;
+    };
+    expect(lease.leaderId).toBe('other-instance');
+    expect(lease.acquiredAt).toBe(staleForeign.acquiredAt); // unchanged
+    manager.close();
+  });
+
+  it('fails safe: no-ops on an unreadable (corrupt) lease file (F4 AC3)', () => {
+    const manager = makeManager({ instanceId: 'test-instance-1' });
+    const leasePath = join(testDir, LEASE_FILE);
+    writeFileSync(leasePath, '{not-valid-json', 'utf-8');
+
+    expect(() => manager.refreshLease()).not.toThrow();
+    // Treated as missing — the corrupt file must NOT be overwritten (would
+    // otherwise clobber a legitimately written lease mid-write).
+    expect(readFileSync(leasePath, 'utf-8')).toBe('{not-valid-json');
+    manager.close();
+  });
 });
 
 describe('detectStaleLeader', () => {
