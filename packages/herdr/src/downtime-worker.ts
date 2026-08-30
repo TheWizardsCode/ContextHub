@@ -2602,21 +2602,35 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // direct tier chain below (pre-refactor behavior).
       const tickNow = Date.now();
       if (leaderManager !== null) {
-        // Every tick resolves leadership (a single cheap lease-file read):
-        //  - While leader: refresh the 5-minute lease (each proxy-poll cycle
-        //    extends it — AC2).
-        //  - While non-leader: NO proxy polling and NO dispatch (AC4); only
-        //    detect a stale/expired lease (leader crashed or idle) and run a
-        //    new election — takeover lands within the lease TTL, well inside
-        //    the 5-minute user-story bound.
-        //  - Fail-safe (constraint): a missing/unreadable lease file is
-        //    treated as "not leader" — the instance continues operating
-        //    without dispatching.
+        // ── F5 (WL-0MTF4ABQN0043F4V): self-heal + re-derive EVERY tick ──
+        // The pre-fix code derived `leaderState` ONCE at creation and only
+        // updated it inside the takeover branch — a lease that expired
+        // mid-pause (worker's tick loop stalled in the no-candidate
+        // cooldown) left the worker dispatching with a cached leaderState
+        // as a zombie. Two changes fix this:
+        //
+        //  AC2 — self-heal FIRST. refreshLease() now renews only an OWNED
+        //  lease regardless of validity (F4 ownership check), so an
+        //  owned-but-EXPIRED lease is renewed here instead of silently
+        //  no-oped. This must run before the isLeader() re-derivation
+        //  below: detectStaleLeader() returns false for our OWN lease, so
+        //  without it an expired owned lease would fall through BOTH the
+        //  leader branch (isLeader() false) AND the takeover branch
+        //  (hasLease true, detectStaleLeader false) — the self-heal would
+        //  be starved. Foreign/missing leases are untouched (refreshLease
+        //  no-ops on those — F4 fail-safe).
+        leaderManager.refreshLease();
+        //  AC1 — re-derive leadership every tick (one cheap lease-file
+        //  read): a lease that expired mid-pause routes this worker OUT of
+        //  zombie dispatch; if ANOTHER instance won the lease during the
+        //  pause, this re-derived state yields — never fights the new
+        //  leader (AC4).
+        leaderState = leaderManager.isLeader();
         if (leaderState) {
-          // Refresh the lease first (each poll cycle extends the TTL). A
-          // failed refresh (rename/IO) is fail-safe: the existing lease
-          // stands until it expires, then a new election runs.
-          leaderManager.refreshLease();
+          // Leader: self-heal already ran above (fresh acquiredAt this
+          // tick — each proxy-poll cycle extends the 5-minute lease,
+          // AC2). A failed refresh (rename/IO) is fail-safe: the existing
+          // lease stands until it expires, then a new election runs.
         } else if (!leaderManager.hasLease() || leaderManager.detectStaleLeader()) {
           // No leader exists yet (fresh election) OR the elected leader's
           // lease expired (crash / idle) — try to take over NOW. Stale
@@ -2692,6 +2706,15 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         if (Date.now() < cooldownUntil) {
           return { polled: false, dispatched: false, idle: false };
         }
+        // ── F5 cooldown-exit hook (AC3) ──
+        // Pause expired — resume normal polling. Nothing further is needed
+        // here for leadership: the leader block at the top of THIS tick
+        // already ran the self-heal refreshLease + per-tick re-derivation
+        // BEFORE reaching this gate, so any dispatch decision on this
+        // resume tick (or later ones) uses a lease-fresh leaderState — even
+        // when the tick loop stalled mid-pause, the first tick after expiry
+        // re-derives before poll/dispatch. Belt-and-braces guarantee that
+        // the cooldown-exit path can never dispatch on stale leadership.
         cooldownUntil = null; // pause expired — resume normal polling
         errorStrikes = 0; // fresh strike counter after the pause
       }
