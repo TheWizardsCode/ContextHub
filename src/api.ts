@@ -8,6 +8,7 @@ import { CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, WorkItemStatus
 import { exportToJsonlAsync, importFromJsonl, getDefaultDataPath } from './jsonl.js';
 import { loadConfig } from './config.js';
 import { buildAuditEntry, hasAcceptanceCriteria } from './audit.js';
+import { getConfiguredUserEmail } from './sync.js';
 
 function parseNeedsProducerReview(value: unknown): boolean | undefined {
   if (value === undefined || value === null) return undefined;
@@ -182,10 +183,15 @@ export function createAPI(db: WorklogDatabase) {
   });
 
   // Delete a work item
-  app.delete('/items/:id', (req: Request, res: Response) => {
+  app.delete('/items/:id', async (req: Request, res: Response) => {
     db.setPrefix(defaultPrefix);
     const recursive = req.query.recursive !== 'false';
-    const deleted = db.delete(req.params.id, recursive);
+    // Attribution (WL-0MSKZ30SK007K9TO, F4): prefer explicit deletedBy
+    // query param, fall back to the repo git identity so REST deletes carry
+    // real intent and merge-propagate.
+    const deletedBy = (req.query.deletedBy as string) || (await getConfiguredUserEmail()) || '';
+    const deleteReason = (req.query.deleteReason as string) || 'deleted via API';
+    const deleted = db.delete(req.params.id, recursive, { deletedBy, deleteReason });
     if (!deleted) {
       res.status(404).json({ error: 'Work item not found' });
       return;
@@ -403,9 +409,11 @@ export function createAPI(db: WorklogDatabase) {
   });
 
   // Delete a work item with prefix
-  app.delete('/projects/:prefix/items/:id', setPrefixMiddleware, (req: Request, res: Response) => {
+  app.delete('/projects/:prefix/items/:id', setPrefixMiddleware, async (req: Request, res: Response) => {
     const recursive = req.query.recursive !== 'false';
-    const deleted = db.delete(req.params.id, recursive);
+    const deletedBy = (req.query.deletedBy as string) || (await getConfiguredUserEmail()) || '';
+    const deleteReason = (req.query.deleteReason as string) || 'deleted via API';
+    const deleted = db.delete(req.params.id, recursive, { deletedBy, deleteReason });
     if (!deleted) {
       res.status(404).json({ error: 'Work item not found' });
       return;

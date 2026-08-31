@@ -1346,8 +1346,13 @@ export class WorklogDatabase {
    *
    * @param id - The ID of the work item to delete
    * @param recursive - Whether to recursively delete descendants (default: true)
+   * @param opts - Optional attribution: deletedBy (identity) / deleteReason (why).
+   *   Deletes are ATTRIBUTED (WL-0MSKZ30SK007K9TO, F4): pass non-empty values so
+   *   the soft-delete carries real intent — unattributed deletes never
+   *   merge-propagate over a live remote item (delete-side protection in the
+   *   merge layer).
    */
-  delete(id: string, recursive: boolean = true): boolean {
+  delete(id: string, recursive: boolean = true, opts?: { deletedBy?: string; deleteReason?: string }): boolean {
     const item = this.store.getWorkItem(id);
     if (!item) {
       return false;
@@ -1364,18 +1369,21 @@ export class WorklogDatabase {
         return depthB - depthA;
       });
       for (const descendant of deepestFirst) {
-        this.deleteSingle(descendant.id);
+        this.deleteSingle(descendant.id, opts);
       }
     }
 
     // Now delete the item itself
-    return this.deleteSingle(id);
+    return this.deleteSingle(id, opts);
   }
 
   /**
    * Internal: Mark a single work item as deleted (no recursive child handling).
+   * Persists attribution (deletedBy/deleteReason) when provided — the merge
+   * layer's delete-side protection relies on it to distinguish real intent
+   * from bogus/stale deleted markers.
    */
-  private deleteSingle(id: string): boolean {
+  private deleteSingle(id: string, opts?: { deletedBy?: string; deleteReason?: string }): boolean {
     const item = this.store.getWorkItem(id);
     if (!item) {
       return false;
@@ -1389,6 +1397,8 @@ export class WorklogDatabase {
       // caused unexpected regressions in clients/tests that expect the
       // original stage to be retained.
       stage: item.stage,
+      deletedBy: opts?.deletedBy || item.deletedBy || '',
+      deleteReason: opts?.deleteReason || item.deleteReason || '',
       updatedAt: new Date().toISOString(),
     };
 
