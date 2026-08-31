@@ -372,6 +372,8 @@ export interface DisplayHeadingRow {
   count: number;
   /** Whether the group's items are hidden (in-memory, session-only). */
   collapsed: boolean;
+  /** Depth indentation level (0 = top-level, 1+ = inside expanded parents). */
+  depth?: number;
 }
 
 /**
@@ -704,6 +706,7 @@ export class WorkItemListState {
             groupLabel: item.groupLabel ?? `Group ${item.group}`,
             count: groupCounts.get(item.group) ?? 0,
             collapsed: isCollapsed,
+            depth,
           });
           lastGroup = item.group;
         }
@@ -3305,7 +3308,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       if (isHeadingRow(row)) {
         numHeadings++;
         const arrow = row.collapsed ? '▶' : '▼';
-        const line = ` ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
+        const indent = (row.depth ?? 0) > 0 ? '  '.repeat(row.depth!) : '';
+        const line = `${indent} ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
         output.push(isSelected ? `${ANSI.reverse}${line}${ANSI.reset}` : line);
         continue;
       }
