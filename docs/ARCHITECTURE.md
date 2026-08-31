@@ -390,6 +390,16 @@ simulates a 6-pane refresh and asserts ≥60% fewer work spawns.
   stderr (`[wl:cache]`). `ReadCache.stats()` exposes hit/miss counters for
   spawn-reduction instrumentation.
 
+## Selection ordering — audit-not-ready tier (WL-0MTH7G2O1004BHN5)
+
+`wl next` and `wl re-sort`/`reSort` apply a hard audit-not-ready tier second only to `critical`:
+
+- Any **fresh** non-critical audit with `readyToClose === false` and `auditedAt >= updatedAt` outranks **any** unaudited / `readyToClose === true` / stale (`auditedAt < updatedAt`) non-critical item regardless of base priority (high/medium/low) or age/effort/recency.
+- `critical` is a hard boundary that no audit-not-ready boost can overtake.
+- Missing/`true`/stale audits receive no boost; stale is defined as `auditedAt < updatedAt`.
+- The same tier is enforced in `packages/shared/src/database.ts` in `sortItemsByScore`/`computeScore` (batch audit `Map<id,AuditResult>` + tiered comparator) and in `selectBySortIndex` both when all `sortIndex` coincide (before effective-priority/age) and when they diverge (tier prefix before `sortIndex`), so `wl next --no-re-sort` and `wl next --json` preserve boosted order without requiring a prior `reSort`.
+- `src/commands/grouping.ts` Critical Group placement is unchanged by design.
+
 ## Future Considerations
 
 ### Potential Enhancements

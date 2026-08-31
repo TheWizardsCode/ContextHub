@@ -2267,6 +2267,29 @@ export class WorklogDatabase {
     });
   }
 
+  /**
+   * Compare two items by the audit-not-ready tier (WL-0MTH7G2O1004BHN5).
+   * Critical is strictly above the audited-not-ready non-critical tier;
+   * within the non-critical tier, a fresh `readyToClose===false` item
+   * outranks any unaudited/stale/ready-to-close item regardless of base
+   * priority. The tier only applies to workers that respect it (see callers).
+   * Returns -1/0/1 suitable as a comparator prefix before fallbacks.
+   */
+  private compareAuditNotReadyTier(
+    a: WorkItem,
+    b: WorkItem,
+    auditMap: Map<string, AuditResult>,
+    maxPriorityValue: number
+  ): number {
+    const aIsCritical = this.getPriorityValue(a.priority) === maxPriorityValue;
+    const bIsCritical = this.getPriorityValue(b.priority) === maxPriorityValue;
+    const aAuditFresh = !aIsCritical && this.isAuditNotReadyFresh(auditMap.get(a.id), a.updatedAt);
+    const bAuditFresh = !bIsCritical && this.isAuditNotReadyFresh(auditMap.get(b.id), b.updatedAt);
+    if (aIsCritical !== bIsCritical) return aIsCritical ? -1 : 1;
+    if (!aIsCritical && !bIsCritical && aAuditFresh !== bAuditFresh) return aAuditFresh ? -1 : 1;
+    return 0;
+  }
+
   private selectBySortIndex(
     items: WorkItem[],
     effectivePriorityCache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>,
@@ -2275,29 +2298,20 @@ export class WorklogDatabase {
     allItems?: WorkItem[]
   ): WorkItem | null {
     if (!items || items.length === 0) return null;
-    // When all sortIndex values are the same (including all-zero), fall back to
-    // audit-not-ready tier (fresh, readyToClose===false) before effective
-    // priority/age, then effective priority (descending) then createdAt
-    // (ascending / oldest first). Audit tier is second only to critical
-    // (WL-0MTH7G2O1004BHN5).
+    const cache = effectivePriorityCache ?? new Map();
+    const auditMap = this.buildAuditMapForItems(items);
+    const maxPriorityValue = 4;
+    // When all sortIndex values coincide (including all-zero), full fallback
+    // is effective priority/age. Otherwise the primary ordering is sortIndex —
+    // but the audit tier is applied as a prefix before any of those so that
+    // `wl next --no-re-sort` (which skips reSort) still reflects the boosted
+    // order rather than stale sortIndex (AC3, WL-0MTH7G2O1004BHN5).
     const firstSortIndex = items[0].sortIndex ?? 0;
     const allSame = items.every(item => (item.sortIndex ?? 0) === firstSortIndex);
     if (allSame) {
-      const cache = effectivePriorityCache ?? new Map();
-      const auditMap = this.buildAuditMapForItems(items);
-      const maxPriorityValue = 4;
       const sorted = items.slice().sort((a, b) => {
-        const aIsCritical = this.getPriorityValue(a.priority) === maxPriorityValue;
-        const bIsCritical = this.getPriorityValue(b.priority) === maxPriorityValue;
-        const aAuditFresh = !aIsCritical && this.isAuditNotReadyFresh(auditMap.get(a.id), a.updatedAt);
-        const bAuditFresh = !bIsCritical && this.isAuditNotReadyFresh(auditMap.get(b.id), b.updatedAt);
-        if (aIsCritical !== bIsCritical) {
-          return aIsCritical ? -1 : 1;
-        }
-        if (!aIsCritical && !bIsCritical && aAuditFresh !== bAuditFresh) {
-          return aAuditFresh ? -1 : 1;
-        }
-        // Critical items still respect effective priority ordering among themselves.
+        const tierDiff = this.compareAuditNotReadyTier(a, b, auditMap, maxPriorityValue);
+        if (tierDiff !== 0) return tierDiff;
         const aEffective = this.computeEffectivePriority(a, cache, edgeCache, allItems);
         const bEffective = this.computeEffectivePriority(b, cache, edgeCache, allItems);
         const priDiff = bEffective.value - aEffective.value;
@@ -2308,7 +2322,17 @@ export class WorklogDatabase {
       });
       return sorted[0] ?? null;
     }
-    return this.orderBySortIndex(items, sortOrderCache)[0] ?? null;
+    const sorted = items.slice().sort((a, b) => {
+      const tierDiff = this.compareAuditNotReadyTier(a, b, auditMap, maxPriorityValue);
+      if (tierDiff !== 0) return tierDiff;
+      const aIdx = a.sortIndex ?? 0;
+      const bIdx = b.sortIndex ?? 0;
+      if (aIdx !== bIdx) return aIdx - bIdx;
+      const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (createdDiff !== 0) return createdDiff;
+      return a.id.localeCompare(b.id);
+    });
+    return sorted[0] ?? null;
   }
 
   /**

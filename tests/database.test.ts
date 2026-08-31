@@ -3438,5 +3438,51 @@ describe('WorklogDatabase', () => {
       const result = db.findNextWorkItem();
       expect(result.workItem?.id).toBe(critical.id);
     });
+
+    it('wl next --no-re-sort with divergent sortIndex still reflects audit tier: low audited-not-ready outranks medium unaudited despite stale higher sortIndex', () => {
+      // Stale sortIndex scenario that previously defeated AC3: without the
+      // selectBySortIndex tier prefix, sortIndex order is respected verbatim
+      // and audit freshness is ignored. The fix must make audit tier win
+      // even when sortIndex diverges (WL-0MTH7G2O1004BHN5 / audit AC3).
+      const mediumUnaudited = db.create({ title: 'Medium unaudited', priority: 'medium', sortIndex: 100 });
+      const lowAudited = db.create({ title: 'Low audited not-ready stale sortIndex 5000', priority: 'low', sortIndex: 5000 });
+
+      db.saveAuditResult({
+        workItemId: lowAudited.id,
+        readyToClose: false,
+        auditedAt: new Date().toISOString(),
+        summary: null,
+        rawOutput: null,
+        author: null,
+      });
+
+      // No reSort — stale indices diverge. selectBySortIndex divergent path
+      // (audit tier prefix before sortIndex) must still pick the audited item.
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(lowAudited.id);
+      // Batch should also preserve boosted order without a reSort.
+      const batch = db.findNextWorkItems(2);
+      expect(batch[0].workItem?.id).toBe(lowAudited.id);
+      expect(batch[1].workItem?.id).toBe(mediumUnaudited.id);
+    });
+
+    it('wl next --no-re-sort with divergent sortIndex keeps critical ahead of audited non-critical', () => {
+      // Mirrors the stale-index case but ensures critical is still hard-top-tier
+      // when the divergent path is taken (critical boundary in divergent branch).
+      const lowAudited = db.create({ title: 'Low audited not-ready stale sortIndex 100', priority: 'low', sortIndex: 100 });
+      const critical = db.create({ title: 'Critical unaudited stale sortIndex 5000', priority: 'critical', sortIndex: 5000 });
+
+      db.saveAuditResult({
+        workItemId: lowAudited.id,
+        readyToClose: false,
+        auditedAt: new Date().toISOString(),
+        summary: null,
+        rawOutput: null,
+        author: null,
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(critical.id);
+    });
   });
 });
