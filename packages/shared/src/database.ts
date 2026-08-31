@@ -634,6 +634,31 @@ export class WorklogDatabase {
     console.error(message);
   }
 
+  /**
+   * Freshness rule (WL-0MTH7G2O1004BHN5): only audits with `auditedAt >= updatedAt`
+   * qualify for the audit-not-ready boost. Stale audits (edited after the last
+   * audit) are treated as no audit for ordering. Only `readyToClose === false`
+   * qualifies; `true` or absent audits receive no boost. Critical items are
+   * never boosted past by the audit tier (hard boundary).
+   */
+  private isAuditNotReadyFresh(audit: AuditResult | null | undefined, itemUpdatedAt: string | undefined): boolean {
+    if (!audit || audit.readyToClose) return false;
+    if (!itemUpdatedAt || !audit.auditedAt) return false;
+    return new Date(audit.auditedAt).getTime() >= new Date(itemUpdatedAt).getTime();
+  }
+
+  /**
+   * Build a batch audit map for a set of work item ids (EdgeCache-style, one
+   * batch query per scored set, no per-item N+1). Used by sortItemsByScore
+   * and the selectBySortIndex fallback.
+   */
+  private buildAuditMapForItems(items: WorkItem[]): Map<string, AuditResult> {
+    const all = this.store.getAllAuditResults();
+    const map = new Map<string, AuditResult>();
+    for (const a of all) map.set(a.workItemId, a);
+    return map;
+  }
+
   private sortItemsByScore(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore', edgeCache?: EdgeCache): WorkItem[] {
     const now = Date.now();
     const cache = edgeCache ?? this.buildEdgeCache(items);
@@ -655,9 +680,27 @@ export class WorklogDatabase {
       }
     }
 
+    // Audit-not-ready tier: batch audit map so the comparator is O(1) per
+    // item (no per-item N+1 queries). Mirrors the EdgeCache pattern.
+    const auditMap = this.buildAuditMapForItems(items);
+    const maxPriorityValue = 4; // critical
+
     return items.slice().sort((a, b) => {
-      const scoreA = this.computeScore(a, now, recencyPolicy, ancestorsOfInProgress, cache);
-      const scoreB = this.computeScore(b, now, recencyPolicy, ancestorsOfInProgress, cache);
+      const aIsCritical = this.getPriorityValue(a.priority) === maxPriorityValue;
+      const bIsCritical = this.getPriorityValue(b.priority) === maxPriorityValue;
+      const aAuditFresh = !aIsCritical && this.isAuditNotReadyFresh(auditMap.get(a.id), a.updatedAt);
+      const bAuditFresh = !bIsCritical && this.isAuditNotReadyFresh(auditMap.get(b.id), b.updatedAt);
+      // Hard tier boundary: critical items stay above any audited non-critical.
+      // Otherwise, any fresh audited-not-ready non-critical outranks any unaudited/non-fresh non-critical,
+      // regardless of base priority — enforced here as a tiered comparator before score.
+      if (aIsCritical !== bIsCritical) {
+        return aIsCritical ? -1 : 1;
+      }
+      if (!aIsCritical && !bIsCritical && aAuditFresh !== bAuditFresh) {
+        return aAuditFresh ? -1 : 1;
+      }
+      const scoreA = this.computeScore(a, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap);
+      const scoreB = this.computeScore(b, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap);
       if (scoreB !== scoreA) return scoreB - scoreA;
       const createdA = new Date(a.createdAt).getTime();
       const createdB = new Date(b.createdAt).getTime();
@@ -2079,7 +2122,8 @@ export class WorklogDatabase {
     now: number,
     recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
     ancestorsOfInProgress?: Set<string>,
-    edgeCache?: EdgeCache
+    edgeCache?: EdgeCache,
+    auditMap?: Map<string, AuditResult>
   ): number {
     // Weights are intentionally fixed and not configurable per request
     //
@@ -2099,6 +2143,18 @@ export class WorklogDatabase {
     };
 
     let score = 0;
+
+    // Audit-not-ready tier: second only to critical. Fresh `readyToClose ===
+    // false` audits boost any non-critical item so it outranks any unaudited
+    // non-critical regardless of base priority (tiered as numeric boost >
+    // max priority delta, with the comparator above as the hard authority).
+    // Critical items never receive this boost (hard boundary).
+    if (item.priority !== 'critical' && auditMap) {
+      const audit = auditMap.get(item.id);
+      if (this.isAuditNotReadyFresh(audit, item.updatedAt)) {
+        score += 3500; // > priority range (max 3*1000=3000 delta) but < critical gap
+      }
+    }
 
     // Priority base
     score += this.getPriorityValue(item.priority) * WEIGHTS.priority;
@@ -2220,13 +2276,28 @@ export class WorklogDatabase {
   ): WorkItem | null {
     if (!items || items.length === 0) return null;
     // When all sortIndex values are the same (including all-zero), fall back to
-    // effective priority (descending) then createdAt (ascending / oldest first).
-    // Effective priority accounts for priority inheritance from blocked dependents.
+    // audit-not-ready tier (fresh, readyToClose===false) before effective
+    // priority/age, then effective priority (descending) then createdAt
+    // (ascending / oldest first). Audit tier is second only to critical
+    // (WL-0MTH7G2O1004BHN5).
     const firstSortIndex = items[0].sortIndex ?? 0;
     const allSame = items.every(item => (item.sortIndex ?? 0) === firstSortIndex);
     if (allSame) {
       const cache = effectivePriorityCache ?? new Map();
+      const auditMap = this.buildAuditMapForItems(items);
+      const maxPriorityValue = 4;
       const sorted = items.slice().sort((a, b) => {
+        const aIsCritical = this.getPriorityValue(a.priority) === maxPriorityValue;
+        const bIsCritical = this.getPriorityValue(b.priority) === maxPriorityValue;
+        const aAuditFresh = !aIsCritical && this.isAuditNotReadyFresh(auditMap.get(a.id), a.updatedAt);
+        const bAuditFresh = !bIsCritical && this.isAuditNotReadyFresh(auditMap.get(b.id), b.updatedAt);
+        if (aIsCritical !== bIsCritical) {
+          return aIsCritical ? -1 : 1;
+        }
+        if (!aIsCritical && !bIsCritical && aAuditFresh !== bAuditFresh) {
+          return aAuditFresh ? -1 : 1;
+        }
+        // Critical items still respect effective priority ordering among themselves.
         const aEffective = this.computeEffectivePriority(a, cache, edgeCache, allItems);
         const bEffective = this.computeEffectivePriority(b, cache, edgeCache, allItems);
         const priDiff = bEffective.value - aEffective.value;

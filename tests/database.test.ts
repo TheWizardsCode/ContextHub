@@ -3283,4 +3283,160 @@ describe('WorklogDatabase', () => {
       expect(counts2.get(parent.id)).toBe(1);
     });
   });
+
+  describe('audit-not-ready boost (WL-0MTH7G2O1004BHN5)', () => {
+    it('reSort: low + fresh audited-not-ready outranks high unaudited', async () => {
+      const high = db.create({ title: 'High unaudited', priority: 'high', sortIndex: 100 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const low = db.create({ title: 'Low audited not-ready', priority: 'low', sortIndex: 200 });
+
+      db.saveAuditResult({
+        workItemId: low.id,
+        readyToClose: false,
+        auditedAt: new Date().toISOString(),
+        summary: null,
+        rawOutput: null,
+        author: null,
+      });
+
+      db.reSort();
+
+      const updatedHigh = db.get(high.id)!;
+      const updatedLow = db.get(low.id)!;
+      expect(updatedLow.sortIndex).toBeLessThan(updatedHigh.sortIndex);
+    });
+
+    it('reSort: low + fresh audited-not-ready outranks medium unaudited; within-tier tie-break is oldest-first then id', async () => {
+      const medium = db.create({ title: 'Medium unaudited', priority: 'medium', sortIndex: 100 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const low1 = db.create({ title: 'Low audited not-ready A', priority: 'low', sortIndex: 200 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const low2 = db.create({ title: 'Low audited not-ready B', priority: 'low', sortIndex: 300 });
+
+      const nowIso = new Date().toISOString();
+      for (const item of [low1, low2]) {
+        db.saveAuditResult({
+          workItemId: item.id,
+          readyToClose: false,
+          auditedAt: nowIso,
+          summary: null,
+          rawOutput: null,
+          author: null,
+        });
+      }
+
+      db.reSort();
+
+      expect(db.get(low1.id)!.sortIndex).toBeLessThan(db.get(medium.id)!.sortIndex);
+      expect(db.get(low1.id)!.sortIndex).toBeLessThan(db.get(low2.id)!.sortIndex);
+    });
+
+    it('reSort: critical unaudited outranks non-critical audited-not-ready', async () => {
+      const critical = db.create({ title: 'Critical unaudited', priority: 'critical', sortIndex: 500 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const lowAudited = db.create({ title: 'Low audited not-ready', priority: 'low', sortIndex: 100 });
+
+      db.saveAuditResult({
+        workItemId: lowAudited.id,
+        readyToClose: false,
+        auditedAt: new Date().toISOString(),
+        summary: null,
+        rawOutput: null,
+        author: null,
+      });
+
+      db.reSort();
+
+      expect(db.get(critical.id)!.sortIndex).toBeLessThan(db.get(lowAudited.id)!.sortIndex);
+    });
+
+    it('reSort: ready_to_close=true, missing audit, and stale audit receive no boost', async () => {
+      const base = db.create({ title: 'Medium base unaudited', priority: 'medium', sortIndex: 100 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const ready = db.create({ title: 'Low ready-to-close', priority: 'low', sortIndex: 200 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const missing = db.create({ title: 'Low missing audit', priority: 'low', sortIndex: 300 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const stale = db.create({ title: 'Low stale audited-not-ready', priority: 'low', sortIndex: 400 });
+
+      db.saveAuditResult({
+        workItemId: ready.id,
+        readyToClose: true,
+        auditedAt: new Date().toISOString(),
+        summary: null,
+        rawOutput: null,
+        author: null,
+      });
+      // missing stays with no audit row.
+      void base;
+      void missing;
+
+      const staleItem = db.get(stale.id)!;
+      // Make the audit stale: auditedAt distinctly < updatedAt (use 1 min in the past).
+      const staleAuditedAt = new Date(new Date(staleItem.updatedAt).getTime() - 60_000).toISOString();
+      db.saveAuditResult({
+        workItemId: stale.id,
+        readyToClose: false,
+        auditedAt: staleAuditedAt,
+        summary: null,
+        rawOutput: null,
+        author: null,
+      });
+      const after = db.get(stale.id)!;
+      expect(new Date(db.getAuditResult(stale.id)!.auditedAt).getTime()).toBeLessThan(
+        new Date(after.updatedAt).getTime(),
+      );
+
+      db.reSort();
+
+      expect(db.get(ready.id)!.sortIndex).toBeGreaterThan(db.get(base.id)!.sortIndex);
+      expect(db.get(missing.id)!.sortIndex).toBeGreaterThan(db.get(base.id)!.sortIndex);
+      expect(db.get(stale.id)!.sortIndex).toBeGreaterThan(db.get(base.id)!.sortIndex);
+    });
+
+    it('selectBySortIndex fallback (all sortIndex equal): audit-not-ready outranks unaudited before effective-priority/age', async () => {
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const lowAudited = db.create({ title: 'Low audited not-ready', priority: 'low', sortIndex: 0 });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const mediumUnaudited = db.create({ title: 'Medium unaudited', priority: 'medium', sortIndex: 0 });
+      // Ensure both items share sortIndex 0 so the all-equal fallback path is taken.
+      expect(db.get(lowAudited.id)!.sortIndex).toBe(0);
+      expect(db.get(mediumUnaudited.id)!.sortIndex).toBe(0);
+
+      db.saveAuditResult({
+        workItemId: lowAudited.id,
+        readyToClose: false,
+        auditedAt: new Date().toISOString(),
+        summary: null,
+        rawOutput: null,
+        author: null,
+      });
+
+      // Without reSort (which would diverge sortIndex), request findNextWorkItem with
+      // the equal-sortIndex tie-break — it should pick the audited item first.
+      const first = db.findNextWorkItem();
+      expect(first.workItem?.id).toBe(lowAudited.id);
+
+      const batch = db.findNextWorkItems(2);
+      expect(batch[0].workItem?.id).toBe(lowAudited.id);
+      expect(batch[1].workItem?.id).toBe(mediumUnaudited.id);
+    });
+
+    it('selectBySortIndex fallback with all sortIndex equal still lets critical outrank audited non-critical', () => {
+      const critical = db.create({ title: 'Critical unaudited', priority: 'critical', sortIndex: 0 });
+      const lowAudited = db.create({ title: 'Low audited not-ready', priority: 'low', sortIndex: 0 });
+
+      db.saveAuditResult({
+        workItemId: lowAudited.id,
+        readyToClose: false,
+        auditedAt: new Date().toISOString(),
+        summary: null,
+        rawOutput: null,
+        author: null,
+      });
+
+      const result = db.findNextWorkItem();
+      expect(result.workItem?.id).toBe(critical.id);
+    });
+  });
 });
