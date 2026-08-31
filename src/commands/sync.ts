@@ -411,13 +411,23 @@ export async function performSync(
   // records). Compare local item/comment counts against the remote tip to
   // detect divergence; when detected, force a full snapshot so the remote
   // converges to the local state (self-healing, AC2).
+  //
+  // The count mismatch is only treated as divergence when a delta push CANNOT
+  // repair it: if there are dirty records of the same type, the delta export
+  // conveys exactly those new/changed records and the remote converges on the
+  // push (local count legitimately exceeds remote before a delta push).
+  // Gating on the dirty count prevents the divergence force-full from
+  // breaking the normal delta path (sync-delta-push/fallback/convergence
+  // tests, WL-0MTH1HTTG0033JM9).
+  const dirty = db.countDirtyRecords();
   let divergenceDetected = false;
-  if (remoteContent !== null && localItems.length > remoteItems.length) {
-    // Remote has data but fewer items than local — divergence.
+  if (remoteContent !== null && localItems.length > remoteItems.length && dirty.items === 0) {
+    // Remote has data but fewer items than local, and no dirty item could
+    // carry the missing records — genuine divergence.
     divergenceDetected = true;
     logLine(`Divergence detected: local has ${localItems.length} items, remote has ${remoteItems.length} — forcing full snapshot`);
   }
-  if (remoteContent !== null && localComments.length > remoteComments.length) {
+  if (remoteContent !== null && localComments.length > remoteComments.length && dirty.comments === 0) {
     divergenceDetected = true;
     logLine(`Divergence detected: local has ${localComments.length} comments, remote has ${remoteComments.length} — forcing full snapshot`);
   }
@@ -439,7 +449,6 @@ export async function performSync(
   // dirty and no full snapshot is due (a 0-record delta is useless — the
   // remote tip would hold an effectively empty file). This preserves the
   // existing last-sync-time optimization.
-  const dirty = db.countDirtyRecords();
   const zeroChangeFastPath = syncMode === 'delta' && dirty.total === 0 && !divergenceDetected;
 
   let jsonlPath: string | null = null;
