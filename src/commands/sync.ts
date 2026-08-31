@@ -400,8 +400,39 @@ export async function performSync(
     (fullSnapshotEveryN > 0 &&
       deltaMeta.deltaSyncCount >= fullSnapshotEveryN) ||
     (deltaSizeThreshold > 0 && deltaMeta.deltaBytes >= deltaSizeThreshold);
-  const needsFullSnapshot =
+  let needsFullSnapshot =
     !hasBaseline || fullSnapshotDue || deltaDisabled || remoteContent === null;
+
+  // Divergence detection (WL-0MTGGGP2000642JS §4.1/AC1-AC2):
+  // When the local store holds more records than the remote tip, the watermark
+  // heuristic alone cannot detect this — records older than the watermark are
+  // assumed "already synced" even though the remote never received them
+  // (e.g. after a foreign-author full snapshot replaced the remote with fewer
+  // records). Compare local item/comment counts against the remote tip to
+  // detect divergence; when detected, force a full snapshot so the remote
+  // converges to the local state (self-healing, AC2).
+  let divergenceDetected = false;
+  if (remoteContent !== null && localItems.length > remoteItems.length) {
+    // Remote has data but fewer items than local — divergence.
+    divergenceDetected = true;
+    logLine(`Divergence detected: local has ${localItems.length} items, remote has ${remoteItems.length} — forcing full snapshot`);
+  }
+  if (remoteContent !== null && localComments.length > remoteComments.length) {
+    divergenceDetected = true;
+    logLine(`Divergence detected: local has ${localComments.length} comments, remote has ${remoteComments.length} — forcing full snapshot`);
+  }
+  if (divergenceDetected) {
+    needsFullSnapshot = true;
+    logLine('Divergence detected — upgrading to full snapshot export');
+    if (!isJsonMode && !isSilent) {
+      console.warn(
+        `\n⚠  Sync divergence detected: the local store holds ${localItems.length} work items / ${localComments.length} comments while the remote tip has ${remoteItems.length} / ${remoteComments.length}. ` +
+        `The remote is missing local records (watermark divergence, WL-0MTGGGP2000642JS). ` +
+        `Exporting a full snapshot so the remote converges to the local state.`
+      );
+    }
+  }
+
   const syncMode: 'full' | 'delta' = needsFullSnapshot ? 'full' : 'delta';
 
   // §5.4 zero-change fast path: skip export+push entirely when nothing is
@@ -409,7 +440,7 @@ export async function performSync(
   // remote tip would hold an effectively empty file). This preserves the
   // existing last-sync-time optimization.
   const dirty = db.countDirtyRecords();
-  const zeroChangeFastPath = syncMode === 'delta' && dirty.total === 0;
+  const zeroChangeFastPath = syncMode === 'delta' && dirty.total === 0 && !divergenceDetected;
 
   let jsonlPath: string | null = null;
   if (!zeroChangeFastPath) {
