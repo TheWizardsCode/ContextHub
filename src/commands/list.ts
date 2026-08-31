@@ -5,7 +5,8 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { ListOptions } from '../cli-types.js';
 import type { WorkItemQuery, WorkItemStatus, WorkItemPriority } from '../types.js';
-import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, resolveFormat, sortByPriorityAndDate } from './helpers.js';
+import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
+import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, humanFormatProjected, resolveFormat, sortByPriorityAndDate } from './helpers.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -25,6 +26,7 @@ export default function register(ctx: PluginContext): void {
     .option('-a, --assignee <assignee>', 'Filter by assignee')
     .option('--stage <stage>', 'Filter by stage')
     .option('--needs-producer-review [value]', 'Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)')
+    .option('-f, --fields <fields>', 'Comma-separated list of fields to include in output (id always included)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-icons', 'Disable icon rendering for clean text output')
     .action((search: string | undefined, options: ListOptions) => {
@@ -34,6 +36,19 @@ export default function register(ctx: PluginContext): void {
       }
       utils.requireInitialized();
       const db = utils.getDatabase(options?.prefix);
+
+      // Parse and validate --fields (comma-separated). Unknown field names are
+      // rejected loudly before any query runs, listing the valid vocabulary.
+      let requestedFields: string[] | undefined;
+      if (options.fields !== undefined && options.fields !== '') {
+        requestedFields = options.fields.split(',').map(f => f.trim()).filter(Boolean);
+        const unknown = requestedFields.filter(f => !VALID_FIELDS.includes(f as (typeof VALID_FIELDS)[number]));
+        if (unknown.length > 0) {
+          const fieldsError = `Unknown fields: ${unknown.join(', ')}. Valid fields: ${VALID_FIELDS.join(', ')}`;
+          output.error(fieldsError, { success: false, error: fieldsError, message: fieldsError });
+          process.exit(1);
+        }
+      }
       
       const query: WorkItemQuery = {};
       if (options.status) {
@@ -164,7 +179,15 @@ export default function register(ctx: PluginContext): void {
             childCount: childCounts.get(item.id) ?? 0,
           };
         });
-        output.json({ success: true, count: enrichedItems.length, workItems: enrichedItems });
+        // Apply --fields projection when requested (id always included).
+        // The projected items drop enrichment fields (auditResult, auditedAt,
+        // childCount) unless explicitly requested in the field list... they are
+        // never part of the shared VALID_FIELDS vocabulary, so they are omitted
+        // whenever a projection is active.
+        const jsonItems = requestedFields
+          ? enrichedItems.map(item => pickFields(item, requestedFields))
+          : enrichedItems;
+        output.json({ success: true, count: jsonItems.length, workItems: jsonItems });
       } else {
         if (items.length === 0) {
           console.log('No work items found');
@@ -174,6 +197,15 @@ export default function register(ctx: PluginContext): void {
         const displayItems = limited;
         console.log(`Found ${displayItems.length} work item(s):\n`);
         const format = resolveFormat(program);
+        if (requestedFields && format.toLowerCase() !== 'raw' && format.toLowerCase() !== 'concise') {
+          // Projected concise human display: render only the requested fields.
+          displayItems.forEach((item, index) => {
+            console.log(humanFormatProjected(pickFields(item, requestedFields)));
+            if (index < displayItems.length - 1) console.log('');
+          });
+          console.log('');
+          return;
+        }
         if (format.toLowerCase() === 'concise') {
           console.log('');
           // Use the shared renderer so `list` and `show` produce identical concise output.

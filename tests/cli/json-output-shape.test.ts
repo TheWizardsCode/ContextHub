@@ -192,16 +192,17 @@ describe('JSON output shape consistency', () => {
     expect(result.error).toBeDefined();
   });
 
-  // ── close --json uses {success, results} ──
+  // ── close --json uses {results, closed, failed} ──
 
-  it('close --json uses {success, results}', async () => {
+  it('close --json uses {results, closed, failed}', async () => {
     const { stdout: createStdout } = await execAsync(`tsx ${cliPath} --json create -t "Item to close"`);
     const created = JSON.parse(createStdout);
     const id = created.workItem.id;
 
     const { stdout } = await execAsync(`tsx ${cliPath} --json close ${id} -r "Test close"`);
     const result = JSON.parse(stdout);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBe(1);
+    expect(result.failed).toBe(0);
     expect(result.results).toBeDefined();
     expect(Array.isArray(result.results)).toBe(true);
     expect(result.results[0].id).toBe(id);

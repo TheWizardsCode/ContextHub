@@ -121,6 +121,14 @@ import {
 } from './downtime-disable-marker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import {
+  LEASE_FILE,
+  LEADER_LOCK_FILE,
+  isLeaseValid,
+} from './leader-election.js';
+import {
+  writeCoordinationFile,
+} from './coordination.js';
+import {
   statusFixtures,
   ambiguousMissingFieldsRaw,
   idleAllSlotsFree,
@@ -168,6 +176,9 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
     // existing dispatch tests exercise the unchanged audit/implement tiers.
     readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+    // Interim freshness re-check (WL-0MT8KSTOE00871E7): no fresh audit by
+    // default, so existing dispatch tests exercise the unchanged path.
+    hasFreshAudit: vi.fn().mockResolvedValue(false),
     ...overrides,
   };
 }
@@ -194,6 +205,7 @@ describe('idle detection (isIdleStatus)', () => {
   const idle: LlamaStatus = {
     llama_server_running: true,
     active_query: false,
+    local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: 4,
@@ -208,8 +220,22 @@ describe('idle detection (isIdleStatus)', () => {
     expect(isIdleStatus({ ...idle, llama_server_running: false }, 0)).toBe(false);
   });
 
-  it('is busy while a query is active', () => {
-    expect(isIdleStatus({ ...idle, active_query: true }, 0)).toBe(false);
+  it('is busy when local_active_query=true (a local query is in flight)', () => {
+    expect(isIdleStatus({ ...idle, local_active_query: true }, 0)).toBe(false);
+  });
+
+  it('is busy when local_active_query is absent (fail-closed on pre-fix proxy)', () => {
+    // A payload without local_active_query (pre-fix proxy) fails closed:
+    // the worker must never dispatch on an unverifiable busy signal.
+    const partial: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 4,
+      total_slots: 4,
+    };
+    expect(isIdleStatus(partial, 0)).toBe(false);
   });
 
   it('is idle during remote-only traffic when local_active_query=false (global active_query true)', () => {
@@ -217,10 +243,6 @@ describe('idle detection (isIdleStatus)', () => {
     // local model is idle with free slots; the proxy's local_active_query is
     // the local-only signal (LP-0MSL2ZLLS009RVKR) and must not block dispatch.
     expect(isIdleStatus({ ...idle, active_query: true, local_active_query: false }, 0)).toBe(true);
-  });
-
-  it('is busy when local_active_query=true (a local query is in flight)', () => {
-    expect(isIdleStatus({ ...idle, local_active_query: true }, 0)).toBe(false);
   });
 
   it('is busy while a model switch is in progress', () => {
@@ -313,7 +335,7 @@ describe('dispatch selection', () => {
     expect(outcome.candidate?.id).toBe('WL-ABC');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-ABC'),
-      { model: 'plan', cwd: '/repo' },
+      { model: 'plan', cwd: '/repo', itemId: 'WL-ABC', itemTitle: 'Some task' },
     );
   });
 
@@ -466,7 +488,7 @@ describe('dispatch audit tier', () => {
     expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit WL-AUD'),
-      { model: 'plan', cwd: '/repo' },
+      { model: 'plan', cwd: '/repo', itemId: 'WL-AUD', itemTitle: 'Audit me' },
     );
   });
 
@@ -554,6 +576,159 @@ describe('dispatch audit tier', () => {
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
   });
 });
+
+// ── Interim freshness re-check (WL-0MT8KSTOE00871E7) ─────────────────
+
+describe('audit tier interim freshness re-check (WL-0MT8KSTOE00871E7)', () => {
+  const auditCandidate: DowntimeCandidate = {
+    id: 'WL-AUD',
+    title: 'Audit me',
+    stage: 'audit',
+  };
+
+  it('downgrades to a no-op when a fresh audit was recorded in the interim (no comment, no marker, no spawn)', async () => {
+    // AC1: select a stale/un-audited candidate, then a valid audit lands
+    // between selection and dispatch — the re-check sees it and the
+    // dispatch becomes a no-op; behaviour falls through to the next tier
+    // without triggering the no-candidate cooldown.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      // A fresh audit exists in the interim — dispatch must be skipped.
+      hasFreshAudit: vi.fn().mockResolvedValue(true),
+      // A plan candidate exists below — the audit tier skip falls through to it.
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-PLN', title: 'Plan me', stage: 'intake_complete' } }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Falls through to the next tier (plan), NOT the no-candidate cooldown.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('WL-PLN');
+    // No AUDIT dispatch side-effects: the audit candidate is never claimed,
+    // no audit comment/marker, no audit spawn.
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLN', { status: 'open', stage: 'intake_complete' });
+    expect(deps.recordDispatch).not.toHaveBeenCalledWith(
+      expect.objectContaining({ itemId: 'WL-AUD', kind: 'audit' }),
+    );
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-PLN'),
+      expect.any(Object),
+    );
+    // The re-check was performed exactly once on the candidate.
+    expect(deps.hasFreshAudit).toHaveBeenCalledWith('WL-AUD', '/repo');
+  });
+
+  it('skips dispatch entirely and leaves the cooldown untouched when a fresh audit lands and no next-tier candidate exists', async () => {
+    // AC1 (no-candidate cooldown guard): a fresh-audit skip with an empty
+    // remaining backlog is NOT the no-candidate outcome — the worker keeps
+    // polling (the item is already audited; there is simply nothing to do).
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      hasFreshAudit: vi.fn().mockResolvedValue(true),
+      getNextItem: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, candidate: null }) // intake_complete empty
+        .mockResolvedValueOnce({ ok: true, candidate: null }), // idea empty
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    // Fresh-audit skip is treated as "already audited" — no cooldown, no strike.
+    expect(outcome.reason).toBe('fresh-audit-skip');
+    expect(outcome.reason).not.toBe('no-candidate');
+    expect(outcome.reason).not.toBe('wl-error');
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('records no spawn-failure trace when a fresh audit was recorded during the interim (AC2)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      // Selection re-check: no fresh audit → dispatch proceeds. Spawn-failure
+      // re-check: a fresh audit appeared in the interim → no failure trace.
+      hasFreshAudit: vi
+        .fn()
+        .mockResolvedValueOnce(false) // selection: not fresh → dispatch proceeds
+        .mockResolvedValueOnce(true), // spawn failure: fresh audit → skip trace
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'ENOENT', exitCode: 1 }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Spawn failed, but a valid audit exists — the push is moot, no failure trace.
+    expect(recordDispatchFailureCalled(deps)).toBe(false);
+    expect(deps.recordDispatch).toHaveBeenCalledTimes(1); // marker written (unchanged)
+    expect(outcome.dispatched).toBe(false);
+  });
+
+  it('still appends a spawn-failure trace when no fresh audit was recorded during the interim (unchanged path)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      hasFreshAudit: vi.fn().mockResolvedValue(false),
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'ENOENT', exitCode: 1 }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // No fresh audit — the failure trace is recorded exactly as before (AC3).
+    expect((deps.recordDispatchFailure as ReturnType<typeof vi.fn>).mock.calls.length).toBe(1);
+    expect(outcome.dispatched).toBe(false);
+  });
+
+  it('a genuinely unaudited item still dispatches exactly as today (comment + marker + spawn)', async () => {
+    // AC3: no fresh audit in the interim — the audit dispatch proceeds
+    // unchanged (comment + marker + spawn).
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      hasFreshAudit: vi.fn().mockResolvedValue(false),
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' });
+    expect(deps.recordDispatch).toHaveBeenCalledTimes(1); // marker/comment written
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit WL-AUD'),
+      { model: 'plan', cwd: '/repo', itemId: 'WL-AUD', itemTitle: 'Audit me' },
+    );
+  });
+
+  it('a hasFreshAudit failure (wl error) is fail-open — the dispatch proceeds as today (conservative default)', async () => {
+    // The re-check must never block dispatch on an unanswerable check: a
+    // wl/CLI failure in hasFreshAudit fails open (proceed) — never a strike,
+    // never a no-candidate, never a silent skip.
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      // Fail-open: the re-check throws but the dispatching continues.
+      hasFreshAudit: vi.fn().mockRejectedValue(new Error('wl failed')),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(deps.claimItem).toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalled();
+  });
+});
+
+function recordDispatchFailureCalled(deps: DowntimeWorkerDeps): boolean {
+  const fn = deps.recordDispatchFailure as ReturnType<typeof vi.fn>;
+  return fn.mock.calls.length > 0;
+}
 
 // ── Single-active-audit enforcement (WL-0MT3PHW4I002SNOV) ─────────────
 
@@ -659,6 +834,30 @@ describe('dispatch active-audit single-flight (parent WL-0MT3PHW4I002SNOV)', () 
     expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     expect(deps.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('logs the audit-in-flight skip reason to stderr for observability (AC4/AC5)', async () => {
+    // The skip must be observable: the worker writes the skip reason to
+    // stderr (established observability pattern, cf. scheduler.test.ts
+    // 'logs an abandonment to stderr'), so operators can trace why the
+    // audit tier did not dispatch instead of seeing a silent fall-through.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const deps = makeDeps({
+        getActiveAudit: vi.fn().mockResolvedValue(activeAudit),
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.kind).toBe('implement');
+      expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Downtime audit tier skipped: audit-in-flight'),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it('a failed active-audit check with an empty remaining backlog is a wl-error strike, never no-candidate', async () => {
@@ -944,7 +1143,7 @@ describe('dispatch implement tier', () => {
     expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP', { status: 'open', stage: 'plan_complete' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-IMP'),
-      { model: 'plan', cwd: '/repo' },
+      { model: 'plan', cwd: '/repo', itemId: 'WL-IMP', itemTitle: 'Implement me' },
     );
   });
 
@@ -1200,7 +1399,7 @@ describe('dispatch code-freeze gate', () => {
 
 describe('dispatch scheduled-prompts tier', () => {
   const duePrompt: ScheduledPrompt = {
-    id: 'refactor',
+    id: '/skill:refactor',
     prompt: '/skill:refactor',
     intervalDays: 3,
     lastTriggeredAt: null,
@@ -1237,7 +1436,7 @@ describe('dispatch scheduled-prompts tier', () => {
     expect(deps.spawnAgentPane).toHaveBeenCalledWith('/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
-      paneName: 'Downtime refactor',
+      paneName: 'Downtime /skill:refactor',
     });
     // No pre-dispatch claim — there is no work item (AC4).
     expect(deps.claimItem).not.toHaveBeenCalled();
@@ -1258,12 +1457,12 @@ describe('dispatch scheduled-prompts tier', () => {
     // rolling log marker is written with kind scheduled + noItemComment.
     expect(deps.recordScheduledPromptTrigger).toHaveBeenCalledWith(
       '/repo',
-      'refactor',
+      '/skill:refactor',
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     );
     expect(deps.recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
-        itemId: 'refactor',
+        itemId: '/skill:refactor',
         kind: 'scheduled',
         cwd: '/repo',
         noItemComment: true,
@@ -1379,7 +1578,7 @@ describe('dispatch scheduled-prompts tier', () => {
     expect(outcome.error).toBe('ENOENT');
     expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
       expect.objectContaining({
-        itemId: 'refactor',
+        itemId: '/skill:refactor',
         kind: 'scheduled',
         error: 'ENOENT',
         noItemComment: true,
@@ -1403,11 +1602,11 @@ describe('dispatch scheduled-prompts tier', () => {
     const args = buildDowntimePaneArgs('plan', '/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
-      paneName: 'Downtime refactor',
+      paneName: 'Downtime /skill:refactor',
     });
     expect(args).toEqual([
       '--pane-name',
-      'Downtime refactor',
+      'Downtime /skill:refactor',
       '--no-focus',
       '--cwd',
       '/repo',
@@ -2521,6 +2720,7 @@ describe('runtime idle evaluation (evaluateIdle)', () => {
   const idle: LlamaStatus = {
     llama_server_running: true,
     active_query: false,
+    local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: 4,
@@ -3180,7 +3380,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
   });
 
   it('treats a busy status as busy and never dispatches', async () => {
-    const { worker, deps } = makeWorker({ status: { ...idleAllSlotsFree, active_query: true } });
+    const { worker, deps } = makeWorker({ status: { ...idleAllSlotsFree, local_active_query: true } });
     const result = await worker.tick();
     expect(result.idle).toBe(false);
     expect(worker.idleSince).toBeNull();
@@ -3256,7 +3456,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     await worker.tick();
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
 
-    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...idleAllSlotsFree, active_query: true }));
+    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...idleAllSlotsFree, local_active_query: true }));
     vi.setSystemTime(start + cfg.thresholdMs + DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
     const busy = await worker.tick();
     expect(busy.idle).toBe(false);
@@ -3340,12 +3540,66 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     return { worker, deps, cfg, fetcher };
   }
 
+  // ── Coordination-dir worker fixture (F2 — cooldown lease maintenance) ──
+
+  /** Tmp dirs created by makeCoordinationWorker — cleaned up in afterEach. */
+  const coordinationTmpDirs: string[] = [];
+
+  function makeCoordinationWorker(overrides: {
+    instanceId?: string;
+    leaseTtlSeconds?: number;
+    cooldownMs?: number;
+    deps?: Partial<DowntimeWorkerDeps>;
+    /** Pre-seed another instance's valid lease BEFORE the worker is created. */
+    seedLease?: { instanceId: string; atMs: number };
+  } = {}) {
+    const coordDir = mkdtempSync(join(tmpdir(), 'cd-wl-0MTF4A4V3-'));
+    coordinationTmpDirs.push(coordDir);
+    const instanceId = overrides.instanceId ?? 'inst-a';
+    const leaseTtlSeconds = overrides.leaseTtlSeconds ?? 300;
+    if (overrides.seedLease) {
+      writeLease(coordDir, overrides.seedLease.instanceId, leaseTtlSeconds, overrides.seedLease.atMs);
+    }
+    const cfg = {
+      enabled: true,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: overrides.cooldownMs ?? 3_600_000,
+    };
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      // fetchItem is REQUIRED for coordination dispatch (dispatchFromCoordination).
+      // Default: returns dispatchable info for any item id.
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: { id: 'WL-FAKE', title: 'Fake', status: 'open', stage: 'intake_complete' },
+      }),
+      ...overrides.deps,
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      coordinationDir: coordDir,
+      instanceId,
+      leaseTtlSeconds,
+      config: () => ({ ...cfg }),
+    });
+    return { worker, deps, cfg, fetcher, coordDir, instanceId, leaseTtlSeconds };
+  }
+
   beforeEach(() => {
     vi.useFakeTimers();
   });
 
   afterEach(() => {
     vi.useRealTimers();
+    for (const dir of coordinationTmpDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('enters the cooldown only after a genuine no-candidate outcome', async () => {
@@ -3369,7 +3623,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const { worker, deps } = makeEmptyBacklogWorker({
       deps: {
         getDueScheduledPrompt: vi.fn().mockResolvedValue({
-          id: 'refactor',
+          id: '/skill:refactor',
           prompt: '/skill:refactor',
           intervalDays: 3,
           lastTriggeredAt: null,
@@ -3386,7 +3640,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     expect(result.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       '/skill:refactor',
-      expect.objectContaining({ paneName: 'Downtime refactor' }),
+      expect.objectContaining({ paneName: 'Downtime /skill:refactor' }),
     );
     expect(worker.paused).toBe(false); // a dispatch — not the empty-backlog pause
     expect(worker.errorStrikes).toBe(0);
@@ -3544,6 +3798,198 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const resumed = await worker.tick();
     expect(resumed.polled).toBe(true);
     expect(worker.paused).toBe(false);
+  });
+
+  // ── Cooldown lease maintenance (parent F2 — holes A & B regression) ──
+
+  /** Read the current lease file from the coordination directory. */
+  function readLease(coordDir: string) {
+    const raw = readFileSync(join(coordDir, LEASE_FILE), 'utf-8');
+    return JSON.parse(raw) as { leaderId: string; acquiredAt: string; ttlSeconds: number };
+  }
+
+  /** Write a lease file directly (simulates another instance winning election). */
+  function writeLease(coordDir: string, instanceId: string, ttlSeconds: number, nowMs: number) {
+    const lease = {
+      leaderId: instanceId,
+      acquiredAt: new Date(nowMs).toISOString(),
+      ttlSeconds,
+    };
+    writeFileSync(join(coordDir, LEASE_FILE), JSON.stringify(lease));
+    // Also write the lock file so hasLease() returns true.
+    writeFileSync(join(coordDir, LEADER_LOCK_FILE), instanceId);
+  }
+
+  it('keeps refreshing the lease during the no-candidate cooldown pause (AC1)', async () => {
+    // While a leader is paused in the no-candidate cooldown, the lease file
+    // mtime/content keeps advancing (refresh continues during the pause).
+    // Sibling fix (e842208580) already runs the leader block BEFORE the
+    // cooldown gate, so lease refreshes each tick during the pause.
+    const { worker, coordDir } = makeCoordinationWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+
+    // Tick 1: election → A wins lease, refreshLease
+    await worker.tick();
+    expect(worker.isLeader).toBe(true);
+    expect(worker.paused).toBe(false);
+
+    const leaseAfterElection = readLease(coordDir);
+    expect(leaseAfterElection.leaderId).toBe('inst-a');
+
+    // Tick 2: threshold met → dispatch attempt → no-candidate → cooldown
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick();
+    expect(worker.paused).toBe(true);
+    expect(worker.isLeader).toBe(true);
+
+    // Tick 3 during cooldown: lease should refresh (leader block runs first)
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 60_000);
+    await worker.tick();
+
+    const leaseDuringPause = readLease(coordDir);
+    expect(leaseDuringPause.leaderId).toBe('inst-a');
+    // Content-based pin (fake timers control Date.now — robust vs fs mtime
+    // granularity): the lease acquiredAt must have ADVANCED during the pause.
+    expect(new Date(leaseDuringPause.acquiredAt).getTime()).toBeGreaterThan(
+      new Date(leaseAfterElection.acquiredAt).getTime(),
+    );
+    // Belt: the pause itself is still in effect (no premature resume).
+    expect(worker.paused).toBe(true);
+  });
+
+  it('renews the lease on cooldown exit BEFORE dispatch (even if expired mid-pause) (AC2)', async () => {
+    // On cooldown exit, the lease is renewed BEFORE any dispatch decision
+    // (belt: even if tick loop stalled mid-pause, the lease expired).
+    const { worker, coordDir } = makeCoordinationWorker({
+      leaseTtlSeconds: 300, // 5 min TTL
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+
+    // Tick 1: election → A wins lease
+    await worker.tick();
+    expect(worker.isLeader).toBe(true);
+
+    // Tick 2: threshold met → dispatch attempt → no-candidate → cooldown
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick();
+    expect(worker.paused).toBe(true);
+    expect(worker.isLeader).toBe(true);
+
+    // Stalled tick loop: advance time PAST lease TTL (300s) but still within
+    // the cooldown (3.6M ms) — simulate a frozen tick loop mid-pause.
+    // Lease TTL = 300s; we advance 400s into the cooldown → lease expired.
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 400_000);
+    // Do NOT tick — simulate the loop being frozen.
+
+    // Now advance to cooldown expiry.
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000 + 1_000);
+
+    // The resume tick: leader block runs (cached leaderState=true)
+    // but refreshLease no-ops on our expired lease (Hole A — isLeader returns
+    // false because lease expired).
+    // Cooldown gate clears. Then poll/dispatch.
+    await worker.tick();
+
+    // AC2 assertion: lease must be VALID after the exit tick (renewed BEFORE
+    // any dispatch decision). On current code the lease is still expired
+    // (refreshLease no-oped), so this FAILS — proving Hole A.
+    const leaseAfterExit = readLease(coordDir);
+    const leaseValid = isLeaseValid(leaseAfterExit);
+    expect(leaseValid).toBe(true);
+    expect(leaseAfterExit.leaderId).toBe('inst-a');
+    // Belt: the lease was RENEWED at exit — its acquiredAt must postdate the
+    // stalled period (current code keeps the stale acquiredAt → FAILS).
+    expect(new Date(leaseAfterExit.acquiredAt).getTime()).toBeGreaterThan(
+      start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 400_000,
+    );
+  });
+
+  it('re-derives leadership every tick: expired lease routes to election, no zombie dispatch (AC3)', async () => {
+    // leaderState is re-derived every tick: an expired lease while
+    // leaderState === true routes into the election/takeover path instead of
+    // zombie dispatch.
+    const { worker, deps, coordDir } = makeCoordinationWorker({
+      leaseTtlSeconds: 300,
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+
+    // Tick 1: election → A wins lease
+    await worker.tick();
+    expect(worker.isLeader).toBe(true);
+
+    // Tick 2: threshold met → dispatch attempt → no-candidate → cooldown
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick();
+    expect(worker.paused).toBe(true);
+    expect(worker.isLeader).toBe(true);
+
+    // Mid-pause, B wins the election with a FRESH lease and a FRESH
+    // coordination entry (a live instance refreshes its entry on its own
+    // check-in cadence — write it at resume time so pruneStaleEntries does
+    // NOT delete it before A's dispatch tick; the entry must be present for
+    // the zombie dispatch to be observable).
+    const resumeTime = start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 3_600_000 + 1_000;
+    vi.setSystemTime(resumeTime);
+    writeLease(coordDir, 'inst-b', 300, resumeTime);
+
+    const entryB = {
+      instanceId: 'inst-b',
+      workItemId: 'WL-B1',
+      directory: '/repo-b',
+      assignedAt: new Date(resumeTime).toISOString(),
+      lastUpdated: new Date(resumeTime).toISOString(),
+    };
+    writeCoordinationFile(coordDir, { version: 1, entries: [entryB] });
+
+    // Resume tick at cooldown expiry: leader block runs (cached
+    // leaderState=true) → refreshLease no-ops (B holds the lease → isLeader
+    // false) → leaderState STAYS true (Hole B). Cooldown gate clears → a
+    // FRESH idle run starts (tracker was reset on cooldown entry), so no
+    // dispatch happens on THIS tick — the zombie dispatch is decided on the
+    // NEXT tick after the idle threshold.
+    await worker.tick();
+
+    // Second tick: idle threshold met → dispatch decision. On current code
+    // (leaderState cached true) A reads B's entry and spawns A PANE — the
+    // zombie. After F5 (per-tick re-derivation) leaderState=false → the
+    // non-leader short-circuit returns BEFORE poll/dispatch.
+    vi.setSystemTime(resumeTime + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick();
+
+    // AC3 assertion: A must NOT dispatch B's item (B is the live leader).
+    // On current code (cached leaderState=true): spawnAgentPane IS called →
+    // FAIL (RED). After F5: leaderState re-derived false → GREEN.
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    // Also assert A is no longer leader (re-derived state).
+    expect(worker.isLeader).toBe(false);
+  });
+
+  it('stays silent when a valid foreign lease is held by another instance (AC4)', async () => {
+    // Non-leader with a valid lease held by another live instance stays
+    // silent (existing AC3 behavior preserved — regression guard). B's lease
+    // is pre-seeded BEFORE worker creation, so leaderState=false at startup
+    // (fixture passes coordination opts TOP-LEVEL as required).
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    const { worker, deps, fetcher } = makeCoordinationWorker({
+      seedLease: { instanceId: 'inst-b', atMs: start },
+    });
+
+    // Tick: leaderState at creation = isLeader() → false (lease owned by B).
+    // Leader block: leaderState false → hasLease=true, detectStaleLeader=false
+    // (B's lease is valid) → no election. Then: if (!leaderState) return.
+    const result = await worker.tick();
+
+    expect(result.polled).toBe(false);
+    expect(result.dispatched).toBe(false);
+    expect(result.idle).toBe(false);
+    expect(worker.isLeader).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(fetcher).not.toHaveBeenCalled(); // no poll
   });
 });
 
@@ -3832,6 +4278,7 @@ describe('parseLlamaStatus per-slot slots array', () => {
     const livePayload = {
       llama_server_running: true,
       active_query: false,
+      local_active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
       total_slots: 4,
@@ -3955,6 +4402,7 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
   const perSlot = (slots: LlamaSlot[], available: number, total: number): LlamaStatus => ({
     llama_server_running: true,
     active_query: false,
+    local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: available,
@@ -4092,11 +4540,11 @@ describe('spare-capacity dispatch: DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2 (AC1
   });
 });
 
-describe('spare-capacity dispatch: pre-fix proxy degradation unchanged (AC4)', () => {
-  it('pre-fix proxy (no per-slot data): a configured N (0<N<total) degrades to all-slots-free', () => {
-    // Without per-slot identity, N=2 with 4 slots should still require ALL
-    // slots free (fail-closed degradation, parent AC4).
-    const status: LlamaStatus = {
+describe('spare-capacity dispatch: pre-fix proxy (no local_active_query) fails closed', () => {
+  it('pre-fix proxy (no local_active_query): absent signal → busy regardless of slot state', () => {
+    // A pre-fix proxy does not serve local_active_query. The worker
+    // fails closed (busy) on an absent signal — no silent degraded dispatch.
+    const noLocalQuery: LlamaStatus = {
       llama_server_running: true,
       active_query: false,
       model_switch_in_progress: false,
@@ -4104,11 +4552,10 @@ describe('spare-capacity dispatch: pre-fix proxy degradation unchanged (AC4)', (
       available_slots: 2,
       total_slots: 4,
     };
-    // No slots array — all-slots-free path: 2 free < 4 required → busy.
-    expect(evaluateIdle(status, 2)).toBe(false); // 2 < 4 → busy (all-slots-free)
-    // Even when N equals total (4), 2 < 4 available → still busy.
-    expect(evaluateIdle(status, 4)).toBe(false); // 2 < 4 → busy
-    // Now with all slots free: 4 === 4 → idle.
+    // Absent local_active_query → busy (fail-closed), not slot count.
+    expect(evaluateIdle(noLocalQuery, 2)).toBe(false); // absent → busy
+    expect(evaluateIdle(noLocalQuery, 4)).toBe(false); // absent → busy
+    // Even with all slots free, absent local_active_query → busy.
     const allFree: LlamaStatus = {
       llama_server_running: true,
       active_query: false,
@@ -4117,10 +4564,10 @@ describe('spare-capacity dispatch: pre-fix proxy degradation unchanged (AC4)', (
       available_slots: 4,
       total_slots: 4,
     };
-    expect(evaluateIdle(allFree, 2)).toBe(true); // 4 >= 4 (all-slots-free) → idle
+    expect(evaluateIdle(allFree, 2)).toBe(false); // absent → busy (fail-closed)
   });
 
-  it('pre-fix proxy with N=0 (default): all-slots-free behavior unchanged', () => {
+  it('pre-fix proxy with N=0 (default): absent local_active_query → busy', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
       active_query: false,
@@ -4129,8 +4576,8 @@ describe('spare-capacity dispatch: pre-fix proxy degradation unchanged (AC4)', (
       available_slots: 2,
       total_slots: 4,
     };
-    // N=0 requires all slots free regardless of per-slot mode.
-    expect(evaluateIdle(status, 0)).toBe(false); // 2 < 4 → busy
+    // Absent local_active_query → busy (fail-closed), regardless of slot count.
+    expect(evaluateIdle(status, 0)).toBe(false); // absent → busy
   });
 });
 
@@ -4372,6 +4819,7 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     const livePayload = {
       llama_server_running: true,
       active_query: false,
+      local_active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
       total_slots: 4,
@@ -5238,7 +5686,7 @@ describe('dispatch critical-first tier', () => {
     expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-I', { status: 'open', stage: 'idea' });
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-CRIT-I'),
-      { model: 'plan', cwd: '/repo' },
+      { model: 'plan', cwd: '/repo', itemId: 'WL-CRIT-I', itemTitle: 'Critical idea WL-CRIT-I' },
     );
   });
 
@@ -5308,7 +5756,7 @@ describe('dispatch critical-first tier', () => {
   it('scheduled-prompts tier still runs FIRST (ahead of the critical tier)', async () => {
     const deps = makeDeps({
       getDueScheduledPrompt: vi.fn().mockResolvedValue({
-        id: 'refactor',
+        id: '/skill:refactor',
         prompt: '/skill:refactor',
         intervalDays: 3,
         lastTriggeredAt: null,

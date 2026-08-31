@@ -231,7 +231,7 @@ describe('Ship It shortcut (S) — typed confirmation dialog (WL-0MSGG5N5Z0074TL
     await tick();
     await tick();
 
-    expect(onCommand).toHaveBeenCalledWith(SHIP_IT_COMMAND, 'plan'); // agent commands default to the plan model
+    expect(onCommand).toHaveBeenCalledWith(SHIP_IT_COMMAND, 'plan', undefined, undefined, 'Item WL-TEST-1'); // agent commands default to the plan model
     expect(onCommand).toHaveBeenCalledTimes(1);
     // The dialog closes after dispatch.
     expect(shipDialogShowing()).toBe(false);
@@ -253,7 +253,7 @@ describe('Ship It shortcut (S) — typed confirmation dialog (WL-0MSGG5N5Z0074TL
     await tick();
     await tick();
 
-    expect(onCommand).toHaveBeenCalledWith(SHIP_IT_COMMAND, 'plan'); // agent commands default to the plan model
+    expect(onCommand).toHaveBeenCalledWith(SHIP_IT_COMMAND, 'plan', undefined, undefined, 'Item WL-TEST-1'); // agent commands default to the plan model
     expect(onCommand).toHaveBeenCalledTimes(1);
 
     dataHandler?.(Buffer.from('q'));
@@ -353,7 +353,7 @@ describe('Ship It shortcut (S) — typed confirmation dialog (WL-0MSGG5N5Z0074TL
 
     // The release command is dispatched even while frozen — the ship skill
     // itself decides whether a release may proceed.
-    expect(onCommand).toHaveBeenCalledWith(SHIP_IT_COMMAND, 'plan'); // agent commands default to the plan model
+    expect(onCommand).toHaveBeenCalledWith(SHIP_IT_COMMAND, 'plan', undefined, undefined, 'Item WL-TEST-1'); // agent commands default to the plan model
 
     dataHandler?.(Buffer.from('q'));
     await p;

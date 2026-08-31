@@ -63,7 +63,8 @@ describe('close command + OpenBrain integration', () => {
       `tsx ${cliPath} --json close ${id} -r "done"`
     );
     const closed = JSON.parse(closeOut);
-    expect(closed.success).toBe(true);
+    expect(closed.closed).toBe(1);
+    expect(closed.failed).toBe(0);
   });
 
   it('closes a work item successfully when openBrainEnabled=true but ob is unavailable', async () => {
@@ -85,7 +86,8 @@ describe('close command + OpenBrain integration', () => {
         `tsx ${cliPath} --json close ${id} -r "done"`
       );
       const closed = JSON.parse(closeOut);
-      expect(closed.success).toBe(true);
+      expect(closed.closed).toBe(1);
+      expect(closed.failed).toBe(0);
     } finally {
       if (origEnv === undefined) {
         delete process.env.WL_OB_BIN;
@@ -119,7 +121,8 @@ describe('close command + OpenBrain integration', () => {
         `tsx ${cliPath} --json close ${id}`
       );
       const closed = JSON.parse(closeOut);
-      expect(closed.success).toBe(true);
+      expect(closed.closed).toBe(1);
+      expect(closed.failed).toBe(0);
 
       // Give the background process a moment to write the queue entry.
       await new Promise(r => setTimeout(r, 500));

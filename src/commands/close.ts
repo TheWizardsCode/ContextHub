@@ -331,9 +331,10 @@ export default function register(ctx: PluginContext): void {
       }
 
       if (isJsonMode) {
-        const overallSuccess = results.every(r => r.success);
+        const closed = results.filter(r => r.success).length;
+        const failed = results.filter(r => !r.success).length;
         // If only child errors exist, the close is still considered successful
-        output.json({ success: overallSuccess, results });
+        output.json({ results, closed, failed });
       } else {
         for (const r of results) {
           if (r.success) {

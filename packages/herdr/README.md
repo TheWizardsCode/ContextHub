@@ -12,12 +12,12 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`. Panes spawned from the selection list open **without stealing focus**: the list keeps the keyboard focus while the command-output pane opens in the background (see [Design decisions](#design-decisions)).
 - **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The form is a full-pane page (no border/centering) that wraps text at the pane width and grows downward as content is entered. See [Command input form](#command-input-form).
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back.
-- **Mouse and touch** — Click/tap a row to select; double-click to open detail; mouse wheel or touch-scroll to navigate (list mode) or scroll detail; tap stage options in the filter prompt. Requires SGR mouse reporting (enabled on raw-mode entry, disabled on exit). Terminals without it fall back to keyboard-only. **Alt+m toggles mouse tracking** on/off (WL-0MT0AP2LR000JFWN): while tracking is off, the terminal's native drag-select-to-copy works; press Alt+m again to resume mouse interaction. The current state is shown in the footer (`alt+m mouse on/off`).
+- **Mouse and touch** — Click/tap a row to select; double-click to open detail; mouse wheel or touch-scroll to navigate (list mode) or scroll detail; tap stage options in the filter prompt. Requires SGR mouse reporting (enabled on raw-mode entry, disabled on exit). Terminals without it fall back to keyboard-only. **Alt+m toggles mouse tracking** on/off (WL-0MT0AP2LR000JFWN): while tracking is off, the terminal's native drag-select-to-copy works; press Alt+m again to resume mouse interaction. The current state is shown in the footer (`alt+m mouse on/off`). **Hover tooltip** (WL-0MT9XRZDK006GMUH): hovering the mouse over a row that has an associated agent-pane shows a metadata tooltip in the footer area (ID, Title, Command, Priority, Type, Risk, Effort, Start Time); `Esc` dismisses it until the mouse leaves and re-enters the list.
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
 - **Mode-switch worker (activity-gated proxy mode switching)** — Automatically switches the llama-proxy between fast (cloud) and cheap (local) modes: agent-route commands fire an immediate fast switch (fail-open), while a full operator-idle window plus a proxy-idle check triggers the cheap switch (fail-closed). The proxy URL reuses `downtimeProxyUrl` and the plugin's switches are manual overrides that the proxy's own time schedule reclaims. See [Mode-switch worker](#mode-switch-worker-activity-gated-proxy-mode-switching-wl-0msn3fwv5008kqe9).
-- **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item (persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes). The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. See [Agent status icons](#agent-status-icons).
+- **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes. The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. Hovering a pane-associated row shows a tooltip with the work-item metadata (including the recorded command and pane start time). See [Agent status icons](#agent-status-icons).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Worklog tab** — The `open-podcast-editor-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Worklog`** so it is instantly recognisable in the tab row among other open tabs. See [Worklog tab](#worklog-tab).
@@ -162,6 +162,21 @@ Rows that have a worklist-spawned pi agent pane attached show the agent's live s
 The icon occupies a fixed-width slot, so the remaining icons and the item-ID column stay perfectly aligned whether or not a row has an agent. State is refreshed from the herdr CLI on each worklist refresh (with a short TTL); if the CLI is unavailable the list renders without icons rather than failing.
 
 **Event-driven updates (herdr ≥ 0.7.5, WL-0MSHB7DHO004RHBJ)** — when the herdr event subscription is active, a `pane_agent_status_changed` event updates the icon **immediately** (within one render cycle, no `herdr agent list` exec). `pane_agent_detected` re-reads the shared `.worklog/agent-panes.json` so agents spawned by any herdr instance in the same session (including late-spawned ones) are picked up; `pane_closed`/`pane_exited` prune associations so icons clear instantly. Rapid status changes are coalesced per render cycle (no render thrash). `herdr agent list` remains the one-time initial snapshot and the fail-open poll fallback when events are unavailable.
+
+**Hover tooltip (WL-0MT9XRZDK006GMUH)** — hovering the mouse over a row with an agent icon shows a tooltip in the footer area above the metadata panel, replacing the footer hints while visible:
+
+| Field | Source |
+|-------|--------|
+| ID | `workItem.id` |
+| Title | `workItem.title` |
+| Command | recorded command dispatched to the pane (e.g. `/skill:implement WL-123`; omitted when none was recorded) |
+| Priority | `workItem.priority` |
+| Type | `workItem.issueType` |
+| Risk | `workItem.risk` |
+| Effort | `workItem.effort` |
+| Start Time | `AgentPaneEntry.recordedAt` (ISO timestamp, rendered `DD/MM/YY HH:MM`) |
+
+Pressing `Esc` dismisses the tooltip until the mouse leaves and re-enters the list rows. Rows without an attached agent never show the tooltip.
 ### From the command line
 
 ```bash
@@ -189,12 +204,13 @@ The plugin respects the following environment variables:
 
 Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings include:
 
-- `autoRefresh` — Enable periodic auto-refresh of the work item list (default: `true`)
+- `autoRefresh` — Enable periodic auto-refresh of the work item list (default: `true`). Refresh ticks are **DB-change gated**: when the worklog DB has not changed since the last cycle, an auto-refresh tick spawns zero `wl` processes (no `wl next`, no `wl list`, no children fetches, no action-count fetch). The gate uses the wl CLI's monotonic per-worklog-dir state counter (`~/.cache/wl/state/<sha256>.json`) as a cheap cross-process signal; a read error fails **open** (the cycle runs). Manual `r` always runs (WL-0MSJ1OLTL009N4IQ).
 - `refreshIntervalMs` — Interval in ms between auto-refreshes (default: `30000`). Refresh cycles are single-flight: a tick that fires while the previous refresh is still awaiting its `wl` calls is skipped (no overlapping refresh cycles / wl spawn bursts from a pane), and the cadence resumes on the next tick (WL-0MSBVYBMD004007C). Each refresh is **atomic with respect to expanded state**: children of expanded parents are re-fetched in parallel with the top-level list and applied in one synchronous swap, so an expanded hierarchy never momentarily collapses mid-refresh (WL-0MSBVBNGH002RDP5).
 
   **Bounded wl spawns** — every `wl` spawn in the refresh/sync fetch path (`wl next`, `wl list`, `wl show`, `wl sync`, …) runs with a bounded `DEFAULT_WL_TIMEOUT_MS` (60s, matching the auto-sync spawn safety timeout) unless the caller supplies an override (e.g. the claim path's 3s `CLAIM_TIMEOUT_MS`). A hung `wl` child is killed after the bound, the refresh fails with a `Refresh failed` toast, the single-flight guard is cleared in `finally`, and the next tick retries — a hung spawn never wedges `refreshInFlight` permanently (WL-0MSJNJXX2001NMHS). The `checkWlAvailable` startup probe (`wl --version`) is bounded the same way so a hung probe cannot block TUI startup.
 - `autoSync` — Enable periodic background `wl sync` before auto-refreshes (default: `true`). Background syncs use a single-flight in-process guard and pass `wl sync --if-idle`, so overlapping syncs (from this pane or other panes/TUI instances) are skipped instead of piling up — preventing wl sync lock storms (WL-0MSAB7ZUC004SK7E).
 - `syncIntervalMs` — Interval in ms between background `wl sync` calls (default: `60000`, minimum: `60000`; set to `0` to disable auto-sync)
+- `maxSyncStalenessMs` — Maximum acceptable staleness (ms) of the last successful `wl sync` before a sync is forced even when the DB hasn't changed locally (default: `60000`, range `1000`–`300000`). Sync ticks are DB-change gated: when the DB is unchanged **and** the last sync (heartbeat marker) is fresher than this cap, the `wl sync` (and its follow-up refresh) is skipped — spawning zero `wl` processes. When the DB changed, or the last sync is older than the cap, the sync runs as before (still subject to the heartbeat / single-flight / `--if-idle` guards). Manual `S` always runs (WL-0MSJ1OLTL009N4IQ).
 - `browseItemCount` — Max number of non-mandatory items to show in the list (default: `20`, range `1`–`50`; critical and completed/in_review items are always shown regardless)
 - `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`). When `false`, **all** shortcut hint lines are hidden — including the chord-in-progress footer (`chord: <keys> _ <hints>`) — consistent with the pi browse widget (WL-0MSGJDSMJ004128E). Chord key *handling* still works while hints are hidden; only rendering is affected. Changes apply on the next render without a plugin restart
 - `showIcons` — Toggle icons in the list and metadata (default: `true`); changes apply on the next render without a plugin restart. When disabled, list rows use text fallbacks (`[OPEN]`, `[IDEA]`, …) and metadata values fall back to plain text (no emoji)
@@ -551,8 +567,20 @@ proxy idle state:
 - **Cheap on idle (fail-closed)** — once the operator has been inactive for
   `modeSwitchIdleThresholdMs` **and** the proxy reports idle (via backend
   `GET {proxyUrl}/llama/local/status`; no local query, no model switch, no
-  active lease), the worker POSTs `mode=cheap`. Any ambiguity — an
-  unparseable status payload, a non-2xx admin response, or a fetch failure —
+  active lease), the worker POSTs `mode=cheap`.
+  **Per-slot operator gate (parent WL-0MT9F67Y3008S0PR, decision 1.a)**: when
+  the proxy serves per-slot identity (`slots[]` valid per `parseLlamaStatus`),
+  the idle gate requires only **≥ 1 free slot** (`evaluateIdle(status,
+  DOWNTIME_PANE_MIN_FREE_SLOTS)` — the spare-capacity semantics shared with
+  the downtime dispatcher), so the other busy slots — downtime panes holding
+  the dispatcher's query/lease — no longer block the switch: a downtime pane
+  is exactly the work the operator wants running while the proxy runs cheap.
+  Accepted tradeoff: a fast-mode downtime request in flight during the mode
+  restart is killed and retried by its client. Without per-slot data the
+  all-slots-free fail-closed fallback is unchanged (server up, no query,
+  no model switch, no lease, ALL slots free). Any ambiguity — an
+  unparseable status payload (including malformed/ambiguous per-slot
+  identity), a non-2xx admin response, or a fetch failure —
   is treated as busy (fail-closed) so the proxy is never switched cheap
   while real work might be in flight. The single-flight task means a hung
   tick can never wedge the task; the proxy URL reuses `downtimeProxyUrl`.
@@ -589,7 +617,8 @@ so refactoring runs automatically at most every three days during idle time
 without manual triggering. Each entry has:
 
 - `id` — stable entry id (pane name `Downtime <id>` and rolling-log marker
-  `itemId`),
+  `itemId`); set it to the command itself (e.g. `/skill:refactor`) so the
+  pane name clearly identifies the scheduled command,
 - `prompt` — any text the pi agent pane can run (e.g. `/skill:refactor`),
 - `intervalDays` — best-effort frequency in whole days,
 - `lastTriggeredAt` — ISO-8601 UTC datetime of the last dispatch
@@ -605,10 +634,11 @@ pane named `Downtime <id>` via the same send-to-pi.sh path as the tiers
 prompt text. Multiple due entries dispatch one per idle slot in config order
 (the single-flight guard prevents overlap).
 
-Fail-closed at every boundary: an **absent** config is an empty set (logged
-notice — `wl init` is the provisioning path, no defaults are synthesized),
-and a **malformed** config (unreadable, corrupt JSON, no `entries` list) is an
-empty set (logged error) — in both cases no scheduled dispatch occurs and the
+Fail-closed at every boundary: an **absent** config is an empty set (silent —
+absence is the expected state; `wl init` is the provisioning path, no defaults
+are synthesized), and a **malformed** config (unreadable, corrupt JSON, no
+`entries` list) is an empty set (logged error) — in both cases no scheduled
+dispatch occurs and the
 existing tiers are unaffected. Invalid entries (missing/empty id or prompt,
 missing/non-finite/≤ 0 `intervalDays`, unparseable `lastTriggeredAt`) are
 skipped with a logged warning — never a crash.

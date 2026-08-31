@@ -489,16 +489,30 @@ describe('mapMouseToAction — wheel and touch scroll (AC4)', () => {
 
 // ── AC6: drag-motion guard + button semantics ──────────────────────────
 
+// Motion events (button & 32) map to hover actions in list mode
+// (WL-0MT9XRZDK006GMUH): they NEVER navigate/select — they drive the
+// hover tooltip instead (AC5: motion is consumed, never leaking to
+// keyboard handlers).
+
 describe('mapMouseToAction — drag-motion guard and button codes (AC6)', () => {
-  it('never jumps the selection on motion events (button & 32)', () => {
+  it('never navigates/jumps the selection on motion events — maps to hover instead', () => {
     const state = makeListState(30);
     // 35 = 3 | 32 (motion carrying release marker), 33 = 1 | 32, 32 alone.
-    expect(mapMouseToAction(state, press(32, 5, 5), TERM_80x24)).toBeNull();
-    expect(mapMouseToAction(state, press(33, 5, 5), TERM_80x24)).toBeNull();
-    expect(mapMouseToAction(state, press(35, 5, 5), TERM_80x24)).toBeNull();
+    // Row 5 → display-row index 3 — motion over a visible item row maps to
+    // a hover-row action (tooltip candidate), never a select/open action.
+    expect(mapMouseToAction(state, press(32, 5, 5), TERM_80x24)).toEqual({ type: 'hover-row', index: 3 });
+    expect(mapMouseToAction(state, press(33, 5, 5), TERM_80x24)).toEqual({ type: 'hover-row', index: 3 });
+    expect(mapMouseToAction(state, press(35, 5, 5), TERM_80x24)).toEqual({ type: 'hover-row', index: 3 });
   });
 
-  it('guards motion in detail and filter modes too', () => {
+  it('maps motion over chrome/blank rows to hover-none (pointer left the rows)', () => {
+    const state = makeListState(30);
+    // Header row 1 and metadata panel rows are NOT list rows → hover-none.
+    expect(mapMouseToAction(state, press(32, 5, 1), TERM_80x24)).toEqual({ type: 'hover-none' });
+    expect(mapMouseToAction(state, press(32, 5, 21), TERM_80x24)).toEqual({ type: 'hover-none' });
+  });
+
+  it('guards motion in detail and filter modes (motion stays inert)', () => {
     const d = makeListState(3);
     d.mode = 'detail';
     d.detailItem = makeItem('a');

@@ -55,7 +55,7 @@ The base set provisioned on a fresh init:
 {
   "entries": [
     {
-      "id": "refactor",
+      "id": "/skill:refactor",
       "prompt": "/skill:refactor",
       "intervalDays": 3,
       "lastTriggeredAt": null
@@ -66,8 +66,10 @@ The base set provisioned on a fresh init:
 
 Each entry carries:
 
-- `id` — stable entry id (used for the pane name `Downtime <id>` and the
-  rolling dispatch-log marker),
+- `id` — stable entry id (used for the pane name `Downtime <id>` — set it
+  to the command/skill itself, e.g. `/skill:refactor`, so the pane name
+  clearly identifies the scheduled command — and the rolling dispatch-log
+  marker),
 - `prompt` — any text the pi agent pane can run (e.g. `/skill:refactor`),
 - `intervalDays` — best-effort frequency in whole days (a delayed dispatch
   never fires more often than the frequency),

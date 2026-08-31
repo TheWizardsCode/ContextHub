@@ -64,6 +64,8 @@ export interface ListOptions {
   number?: string;
   /** Disable icon rendering for scripting/copy-paste */
   icons?: boolean;
+  /** Comma-separated list of fields to include in output (id always included) */
+  fields?: string;
 }
 
 export interface ShowOptions { children?: boolean; prefix?: string; noPager?: boolean; icons?: boolean; exact?: boolean }
@@ -154,6 +156,8 @@ export interface SyncOptions {
   ifIdle?: boolean;
   /** Override the author-identity gate for foreign-email commits (never bypasses the empty-email gate) */
   allowForeignAuthor?: boolean;
+  /** Accept regressions: allow remote defaults to overwrite local non-default values */
+  acceptRegressions?: boolean;
 }
 
 export interface SyncDebugOptions {
@@ -199,6 +203,8 @@ export interface SearchOptions {
   semantic?: boolean;
   semanticOnly?: boolean;
   prefix?: string;
+  /** Comma-separated list of fields to include in output (id always included) */
+  fields?: string;
 }
 
 export interface UnlockOptions { force?: boolean }

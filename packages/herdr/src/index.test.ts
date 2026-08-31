@@ -92,6 +92,25 @@ describe('buildSendToPiArgs', () => {
       '/plan <id>',
     ]);
   });
+
+  it('forwards a descriptive pane name via --pane-name (WL-0MSJ4E8UA005KG9Y)', () => {
+    expect(
+      buildSendToPiArgs('/skill:implement WL-1', '/project', 'code', undefined, 'Manually triggered implement Fix the bug - WL-1'),
+    ).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      '--pane-name',
+      'Manually triggered implement Fix the bug - WL-1',
+      '--model',
+      'code',
+      '/skill:implement WL-1',
+    ]);
+  });
+
+  it('omits --pane-name when none is provided', () => {
+    expect(buildSendToPiArgs('/skill:audit WL-2', '/project')).not.toContain('--pane-name');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -123,6 +142,21 @@ describe('buildRunInPaneArgs', () => {
     const args = buildRunInPaneArgs("echo 'quoted arg' --flag", '/project');
     expect(args.slice(0, 3)).toEqual(['--no-focus', '--cwd', '/project']);
     expect(args[3]).toBe("echo 'quoted arg' --flag");
+  });
+
+  it('forwards --pane-name to replace the default "Command Output" (WL-0MSJ4E8UA005KG9Y)', () => {
+    expect(buildRunInPaneArgs('wl update WL-1 --priority high', '/project', 'Shell: wl update WL-1 (Fix the bug) WL-1')).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      '--pane-name',
+      'Shell: wl update WL-1 (Fix the bug) WL-1',
+      'wl update WL-1 --priority high',
+    ]);
+  });
+
+  it('omits --pane-name when none is provided', () => {
+    expect(buildRunInPaneArgs('ls -la', '/project')).not.toContain('--pane-name');
   });
 });
 
@@ -1672,14 +1706,14 @@ describe('createDowntimeDeps', () => {
     await deps.spawnAgentPane('/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
-      paneName: 'Downtime refactor',
+      paneName: 'Downtime /skill:refactor',
     });
 
     expect(spawnFn).toHaveBeenCalledWith(
       '/path/to/send-to-pi.sh',
       [
         '--pane-name',
-        'Downtime refactor',
+        'Downtime /skill:refactor',
         '--no-focus',
         '--cwd',
         '/repo',
@@ -1828,7 +1862,7 @@ describe('createDowntimeDeps recordDispatch', () => {
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     await deps.recordDispatch({
-      itemId: 'refactor',
+      itemId: '/skill:refactor',
       kind: 'scheduled',
       dispatchedAt: '2026-01-01T00:00:00.000Z',
       cwd,
@@ -1844,7 +1878,7 @@ describe('createDowntimeDeps recordDispatch', () => {
       itemId?: string;
     };
     expect(entry.kind).toBe('scheduled');
-    expect(entry.itemId).toBe('refactor');
+    expect(entry.itemId).toBe('/skill:refactor');
   });
 });
 
@@ -1979,7 +2013,7 @@ describe('createDowntimeDeps getDueScheduledPrompt', () => {
   });
 
   const refactor: ScheduledPrompt = {
-    id: 'refactor',
+    id: '/skill:refactor',
     prompt: '/skill:refactor',
     intervalDays: 3,
     lastTriggeredAt: null,
@@ -2063,7 +2097,7 @@ describe('createDowntimeDeps recordScheduledPromptTrigger', () => {
   });
 
   const refactor: ScheduledPrompt = {
-    id: 'refactor',
+    id: '/skill:refactor',
     prompt: '/skill:refactor',
     intervalDays: 3,
     lastTriggeredAt: null,
@@ -2080,12 +2114,12 @@ describe('createDowntimeDeps recordScheduledPromptTrigger', () => {
     );
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    await expect(deps.recordScheduledPromptTrigger(cwd, 'refactor', at)).resolves.toBe(true);
+    await expect(deps.recordScheduledPromptTrigger(cwd, '/skill:refactor', at)).resolves.toBe(true);
 
     const parsed = JSON.parse(readFileSync(scheduledPromptsPath(cwd), 'utf8')) as {
       entries: ScheduledPrompt[];
     };
-    expect(parsed.entries.find((e) => e.id === 'refactor')?.lastTriggeredAt).toBe(at);
+    expect(parsed.entries.find((e) => e.id === '/skill:refactor')?.lastTriggeredAt).toBe(at);
     expect(parsed.entries.find((e) => e.id === 'weekly')?.lastTriggeredAt).toBeNull();
     // No tmp file left behind (atomic tmp+rename).
     expect(readdirSync(join(cwd, '.worklog'))).toEqual([SCHEDULED_PROMPTS_FILE]);
@@ -2094,11 +2128,11 @@ describe('createDowntimeDeps recordScheduledPromptTrigger', () => {
   it('resolves false when the config is absent or malformed (fail-closed, never throws)', async () => {
     const cwd = makeTempDir();
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    await expect(deps.recordScheduledPromptTrigger(cwd, 'refactor', at)).resolves.toBe(false);
+    await expect(deps.recordScheduledPromptTrigger(cwd, '/skill:refactor', at)).resolves.toBe(false);
 
     mkdirSync(join(cwd, '.worklog'), { recursive: true });
     writeFileSync(scheduledPromptsPath(cwd), '{broken', 'utf8');
-    await expect(deps.recordScheduledPromptTrigger(cwd, 'refactor', at)).resolves.toBe(false);
+    await expect(deps.recordScheduledPromptTrigger(cwd, '/skill:refactor', at)).resolves.toBe(false);
   });
 
   it('resolves false for an unknown entry id (fail-closed)', async () => {

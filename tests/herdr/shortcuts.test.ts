@@ -374,9 +374,10 @@ describe('executeResolvedCommand', () => {
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
-    const result = executeResolvedCommand('!!wl search test', state, callback);
+    // Genuinely unrecognized command families keep the generic callback path.
+    const result = executeResolvedCommand('echo hello', state, callback);
     expect(result).toBe('callback');
-    expect(commands).toEqual(['!!wl search test']);
+    expect(commands).toEqual(['echo hello']);
   });
 
   it('replaces <id> placeholder with selected item ID', () => {
@@ -388,8 +389,11 @@ describe('executeResolvedCommand', () => {
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
+    // Data-modifying commands route via dispatchChordCommand ('dispatched')
+    // so the caller's isWlModifyingCommand check refreshes the list
+    // immediately (WL-0MTA217DZ003H5K8).
     const result = executeResolvedCommand('!!wl update <id> --priority high', state, callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl update WL-002 --priority high']);
   });
 
@@ -424,7 +428,7 @@ describe('executeResolvedCommand', () => {
     const callback = (cmd: string) => { commands.push(cmd); };
 
     const result = executeResolvedCommand('!!wl search test', state, callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl search test']);
   });
 
@@ -444,41 +448,43 @@ describe('executeResolvedCommand', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
 
-    // Should not throw even with no callback
+    // Should not throw even with no callback; still dispatched so the
+    // caller's isWlModifyingCommand check refreshes the list
+    // (WL-0MTA217DZ003H5K8).
     const result = executeResolvedCommand('!!wl search test', state);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
   });
 
-  it('routes !!wl close <id> to callback with ID substitution', () => {
+  it('routes !!wl close <id> via dispatch with ID substitution', () => {
     const items = [makeWorkItem('WL-099')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
     const result = executeResolvedCommand('!!wl close <id>', state, callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl close WL-099']);
   });
 
-  it('routes !!wl delete <id> to callback with ID substitution', () => {
+  it('routes !!wl delete <id> via dispatch with ID substitution', () => {
     const items = [makeWorkItem('WL-077')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
     const result = executeResolvedCommand('!!wl delete <id>', state, callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl delete WL-077']);
   });
 
-  it('routes !!wl search [query] to callback', () => {
+  it('routes !!wl search [query] via dispatch', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
     const result = executeResolvedCommand('!!wl search my query', state, callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl search my query']);
   });
 
@@ -506,14 +512,14 @@ describe('executeResolvedCommand', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
     const result = executeResolvedCommand('!!wl close <id>', state);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
   });
 
   it('routes !!wl delete without callback (backward compatible)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
     const result = executeResolvedCommand('!!wl delete <id>', state);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
   });
 });
 
@@ -668,10 +674,10 @@ describe('dispatchChordCommand', () => {
 
   // ── !!wl text-insertion template commands ───────────────────────
 
-  it('returns false for !!wl update command (falls through to executeResolvedCommand)', () => {
+  it('routes !!wl update commands via dispatchChordCommand (WL-0MTA217DZ003H5K8)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
-    expect(dispatchChordCommand('!!wl update <id> --priority high', state)).toBe(false);
+    expect(dispatchChordCommand('!!wl update <id> --priority high', state)).toBe(true);
   });
 
   it('routes each priority chord template with id substitution', () => {
@@ -686,7 +692,9 @@ describe('dispatchChordCommand', () => {
       const commands: string[] = [];
       const callback = (cmd: string) => { commands.push(cmd); };
       const result = executeResolvedCommand(template, makeState(items), callback);
-      expect(result).toBe('callback');
+      // Data-modifying !!wl commands are dispatched so the caller refreshes
+      // the selection list immediately (WL-0MTA217DZ003H5K8).
+      expect(result).toBe('dispatched');
       expect(commands).toEqual([expected]);
     }
   });
@@ -696,7 +704,7 @@ describe('dispatchChordCommand', () => {
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
     const result = executeResolvedCommand('!!wl update <id> --status <status> --stage <stage> ', makeState(items), callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl update WL-001 --status <status> --stage <stage> ']);
   });
 
@@ -716,40 +724,43 @@ describe('dispatchChordCommand', () => {
     }
   });
 
-  it('returns false for !!wl close command (falls through to executeResolvedCommand)', () => {
+  it('routes !!wl close commands via dispatchChordCommand (WL-0MTA217DZ003H5K8)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
-    expect(dispatchChordCommand('!!wl close <id>', state)).toBe(false);
+    expect(dispatchChordCommand('!!wl close <id>', state)).toBe(true);
   });
 
-  it('returns false for !!wl delete command (falls through to executeResolvedCommand)', () => {
+  it('routes !!wl delete commands via dispatchChordCommand (WL-0MTA217DZ003H5K8)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
-    expect(dispatchChordCommand('!!wl delete <id>', state)).toBe(false);
+    expect(dispatchChordCommand('!!wl delete <id>', state)).toBe(true);
   });
 
-  it('returns false for !!wl search command (falls through to executeResolvedCommand)', () => {
+  it('routes !!wl search commands via dispatchChordCommand (WL-0MTA217DZ003H5K8)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
-    expect(dispatchChordCommand('!!wl search test', state)).toBe(false);
+    expect(dispatchChordCommand('!!wl search test', state)).toBe(true);
   });
 
-  it('returns false for !!wl update without callback (backward compatible)', () => {
+  it('routes !!wl update without callback (backward compatible)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
-    // When no callback provided, !!wl commands still fall through
-    expect(dispatchChordCommand('!!wl update <id> --priority low', state)).toBe(false);
+    // No callback provided — the command is still dispatched (via
+    // resolveAndRouteCommand) so the caller's isWlModifyingCommand check can
+    // refresh the list (WL-0MTA217DZ003H5K8).
+    expect(dispatchChordCommand('!!wl update <id> --priority low', state)).toBe(true);
   });
 
-  it('does not invoke onCommand for !!wl update in dispatchChordCommand (always falls through)', () => {
+  it('routes !!wl update to onCommand from dispatchChordCommand (WL-0MTA217DZ003H5K8)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
     dispatchChordCommand('!!wl update <id> --priority high', state, callback);
-    // dispatchChordCommand returns false for !!wl, so onCommand should NOT be called here
-    expect(commands).toEqual([]);
+    // dispatchChordCommand now routes data-modifying !!wl commands so the
+    // caller's isWlModifyingCommand check can refresh the list
+    expect(commands).toEqual(['!!wl update WL-001 --priority high']);
   });
 
   it('returns false for !!wl close with no items (does not attempt id substitution)', () => {
@@ -854,41 +865,41 @@ describe('executeResolvedCommand with routing', () => {
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
-    const result = executeResolvedCommand('!!wl search test', state, callback);
+    const result = executeResolvedCommand('echo hello', state, callback);
     expect(result).toBe('callback');
-    expect(commands).toEqual(['!!wl search test']);
+    expect(commands).toEqual(['echo hello']);
   });
 
-  it('still returns "callback" for !!wl update commands', () => {
+  it('returns "dispatched" for !!wl update commands (WL-0MTA217DZ003H5K8)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
     const result = executeResolvedCommand('!!wl update <id> --priority high', state, callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl update WL-001 --priority high']);
   });
 
-  it('routes !!wl close <id> to callback with ID substitution', () => {
+  it('routes !!wl close <id> via dispatch with ID substitution', () => {
     const items = [makeWorkItem('WL-099')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
     const result = executeResolvedCommand('!!wl close <id>', state, callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl close WL-099']);
   });
 
-  it('routes !!wl delete <id> to callback with ID substitution', () => {
+  it('routes !!wl delete <id> via dispatch with ID substitution', () => {
     const items = [makeWorkItem('WL-077')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
     const result = executeResolvedCommand('!!wl delete <id>', state, callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl delete WL-077']);
   });
 
@@ -912,23 +923,24 @@ describe('executeResolvedCommand with routing', () => {
     expect(commands).toEqual([]);
   });
 
-  it('routes !!wl update <id> --status done --stage in_review to callback with ID', () => {
+  it('routes !!wl update <id> --status done --stage in_review via dispatch with ID', () => {
     const items = [makeWorkItem('WL-042')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
     const result = executeResolvedCommand('!!wl update <id> --status completed --stage in_review', state, callback);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
     expect(commands).toEqual(['!!wl update WL-042 --status completed --stage in_review']);
   });
 
   it('routes !!wl close <id> without callback (backward compatible)', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
-    // Should not throw even without a callback
+    // Should not throw even without a callback; still dispatched so the
+    // caller's isWlModifyingCommand check refreshes the list
     const result = executeResolvedCommand('!!wl close <id>', state);
-    expect(result).toBe('callback');
+    expect(result).toBe('dispatched');
   });
 });
 

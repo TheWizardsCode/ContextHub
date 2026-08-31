@@ -536,10 +536,11 @@ The `--recency-policy` flag controls how recently updated items are weighted dur
 
 When multiple candidate items exist, `wl next` ranks them using the following criteria (highest weight first):
 
-1. **Priority** — higher-priority items always rank above lower-priority items.
-2. **Blocks high-priority work** — among equal-priority candidates, an item that is a prerequisite for a `high` or `critical` downstream item is preferred. This ensures that unblocking high-value work takes precedence over unrelated tasks at the same priority.
-3. **Blocked penalty** — items with active dependency blockers are excluded by default (see `--include-blocked`).
-4. **Tie-breakers** — sort_index, then age (older items first) break remaining ties.
+1. **Priority** — higher-priority items always rank above lower-priority items. **`critical` is a hard top tier that no other boost can overtake.**
+2. **Audit-not-ready tier (WL-0MTH7G2O1004BHN5)** — any non-critical item with a **fresh** audit (`readyToClose === false` and `auditedAt >= updatedAt`) that is not ready to close is ranked **ahead of every unaudited / ready-to-close / stale non-critical item**, regardless of base priority (high/medium/low) and regardless of age/effort/recency. The tier is second only to `critical`. Missing audit, `readyToClose === true`, or stale (`auditedAt < updatedAt`) audits receive no boost. The same tier governs `wl re-sort`/`reSort` and `wl next --no-re-sort` (via the `selectBySortIndex` stale-index prefix) and `wl next --json` ordering.
+3. **Blocks high-priority work** — among equal-tier candidates, an item that is a prerequisite for a `high` or `critical` downstream item is preferred. This ensures that unblocking high-value work takes precedence over unrelated tasks at the same priority.
+4. **Blocked penalty** — items with active dependency blockers are excluded by default (see `--include-blocked`).
+5. **Tie-breakers** — sort_index, then age (older items first) break remaining ties.
 
 Items with `status: 'blocked'` that have `critical` priority trigger a special escalation path: their direct blockers are surfaced immediately, bypassing the general ranking logic. Blocked `critical` items that are children of an open parent are still escalated — the parent item's blockers will be surfaced if the critical child is in its tree. Child blockers are never returned directly (see "Hierarchy-aware selection" above).
 

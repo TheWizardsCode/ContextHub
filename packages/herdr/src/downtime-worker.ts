@@ -63,7 +63,17 @@
  *    idle period is required after the pause. Transient `wl` errors and the
  *    in-flight dispatch guard never trigger the cooldown; three consecutive
  *    CLI-error outcomes do (three-strike rule), after logging the
- *    persistent error via `deps.recordError`.
+ *    persistent error via `deps.recordError`. In coordination mode
+ *    (WL-0MTEZ4XZJ006Y9U7) an empty coordination file is an OFFER LIST,
+ *    not the backlog: the leader removes each entry after dispatching, so
+ *    an empty file is a transient gap — the tick probes the worklog
+ *    (`computeMostImportantItem`) before pausing and only a genuinely
+ *    empty backlog pauses (a probe CLI error is itself a three-strike
+ *    event, never a silent pause). The cooldown gate runs AFTER the
+ *    leader-election/check-in block so the 30-min check-in (the only
+ *    re-offer mechanism) still lands during a pause, and a successful
+ *    re-offer (`checkIn.updated && offered !== null`) cancels the pause
+ *    immediately.
  *  - `buildDowntimePrompt` / `BLOCKED_QUESTIONS_INSTRUCTION` — dispatched
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
@@ -103,6 +113,7 @@ import {
   DEFAULT_LEASE_TTL_SECONDS,
 } from './leader-election.js';
 import { appendCoordinationLogEntry } from './downtime-log.js';
+import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 export type { CoordinationEntry } from './coordination.js';
@@ -228,17 +239,20 @@ export interface LlamaStatus {
   /**
    * GLOBAL query activity: any request in flight (local AND remote).
    *
-   * Prefer `local_active_query` when present — remote provider streams keep
-   * this true while the local model is idle with free slots, so treating it
-   * as the busy signal would block downtime dispatch (RCA
-   * WL-0MSK9TUCA00206M7).
+   * This field is no longer used for idle/busy detection — the worker
+   * exclusively uses `local_active_query`. Remote provider streams keep this
+   * true while the local model is idle with free slots, so it cannot be used
+   * as the busy signal (RCA WL-0MSK9TUCA00206M7). Present in the payload for
+   * backwards compatibility with older proxy versions.
    */
   active_query: boolean;
   /**
    * LOCAL-only query activity (served by proxies exposing the
-   * `local_active_queries` counter, LP-0MSL2ZLLS009RVKR). Optional: ABSENT on
-   * pre-fix proxies. When present, `isIdleStatus` prefers it over the global
-   * `active_query`; `local_active_query=true` implies `active_query=true`.
+   * `local_active_queries` counter, LP-0MSL2ZLLS009RVKR). This is the
+   * SOLE busy signal for idle detection: `local_active_query=true` means
+   * busy (dispatch inhibited), `local_active_query=false` means idle.
+   * ABSENT on pre-fix proxies — absence is treated as busy (fail-closed)
+   * to prevent silent degraded dispatch on unverifiable signals.
    */
   local_active_query?: boolean;
   model_switch_in_progress: boolean;
@@ -275,21 +289,21 @@ export interface LlamaSlot {
 
 /**
  * The FULL global idle checks used by `isIdleStatus` and the count-based
- * (non-per-slot) path of `evaluateIdle`: llama-server up, no active
- * query (local signal preferred), no model switch, no local lease. The
+ * (non-per-slot) path of `evaluateIdle`: llama-server up, no active local
+ * query (the sole busy signal), no model switch, no local lease. The
  * per-slot branch uses the relaxed `perSlotGlobalIdleChecks` instead
  * (spare-capacity dispatch, parent WL-0MT32F90V008UAD2).
+ *
+ * `local_active_query` is the SOLE busy signal for the query gate:
+ * `true` → busy, `false` → not busy from queries. ABSENT on pre-fix proxies
+ * → busy (fail-closed), preventing dispatch when the busy signal is
+ * unverifiable.
  */
 function globalIdleChecks(status: LlamaStatus): boolean {
   if (!status.llama_server_running) return false;
-  // Prefer the local-only signal when the proxy exposes it (LP-0MSL2ZLLS009RVKR):
-  // remote streams keep the GLOBAL active_query true while the local model is
-  // idle with free slots, so they must not block downtime dispatch. Fall back
-  // to the global active_query for pre-fix proxies that do not serve
-  // local_active_query (backward compatible).
-  const queryActive =
-    status.local_active_query !== undefined ? status.local_active_query : status.active_query;
-  if (queryActive) return false;
+  // `local_active_query` is the sole busy signal (LP-0MSL2ZLLS009RVKR):
+  // true → busy, false → not busy, absent (pre-fix proxy) → busy (fail-closed).
+  if (status.local_active_query !== false) return false;
   if (status.model_switch_in_progress) return false;
   if (status.local_lease_active) return false;
   return true;
@@ -515,9 +529,9 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
   if (typeof o.active_query !== 'boolean') return null;
   if (typeof o.model_switch_in_progress !== 'boolean') return null;
 
-  // Optional local-only signal (LP-0MSL2ZLLS009RVKR): absent on pre-fix
-  // proxies, in which case isIdleStatus falls back to the global
-  // active_query. A malformed (non-boolean) value is ambiguous → busy.
+  // Local-only signal (LP-0MSL2ZLLS009RVKR): absent on pre-fix proxies.
+  // In isIdleStatus, absence → busy (fail-closed, no silent degraded
+  // dispatch). A malformed (non-boolean) value is ambiguous → busy.
   let localActiveQuery: boolean | undefined;
   if (o.local_active_query !== undefined) {
     if (typeof o.local_active_query !== 'boolean') return null;
@@ -936,6 +950,19 @@ export interface DowntimeWorkerDeps {
    */
   fetchItem?(itemId: string, cwd: string): Promise<DowntimeItemResult>;
   /**
+   * Re-check whether a work item already has a fresh audit (WL-0MT8KSTOE00871E7).
+   * Called in the audit-tier dispatch path BETWEEN candidate selection and
+   * dispatch to detect whether a valid audit was recorded in the interim
+   * (e.g. by a human or another process). Resolves true when the item has
+   * a fresh audit (auditedAt within 60s of updatedAt), false otherwise.
+   * Fail-closed: `{ok:false}` on a wl/CLI failure → treated as "not fresh"
+   * (the dispatch proceeds — conservative default, never blocks dispatch).
+   *
+   * Convenience wrapper: fetches the item and applies `isAuditFresh`.
+   * A single dep on the worker boundary, testable without wl.
+   */
+  hasFreshAudit(itemId: string, cwd: string): Promise<boolean>;
+  /**
    * Read the current code-freeze marker status (tri-state: 'frozen' /
    * 'not-frozen' / 'ambiguous'). `cwd` is the worklog root; the marker
    * lives at `<cwd>/.worklog/code-freeze.json`. Read fresh on EVERY
@@ -963,10 +990,12 @@ export interface DowntimeWorkerDeps {
    * window (no unhandled-exception crash, WL-0MSLWJ3I70031Z8U absorbed).
    * `paneName` overrides the default `Downtime <kind>` pane name — the
    * scheduled-prompts tier passes `Downtime <entryId>` (WL-0MSS1Q5ER007QDKX).
+   * `itemTitle`/`itemId` thread the candidate's context so the pane is named
+   * `Downtime triggered <kind> <title> - <id>` (WL-0MSJ4E8UA005KG9Y).
    */
   spawnAgentPane(
     prompt: string,
-    opts: { model: string; cwd: string; paneName?: string },
+    opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
   ): Promise<DowntimeSpawnResult>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
@@ -1081,7 +1110,12 @@ export interface DowntimeDispatchOutcome {
    * already running — a non-stale kind=audit dispatch marker maps to an
    * `in_progress` item — so the audit tier was skipped; a skip that leaves
    * an empty remaining backlog reports this reason, NEVER 'no-candidate',
-   * so the no-candidate cooldown is not entered while the audit runs).
+   * so the no-candidate cooldown is not entered while the audit runs) |
+   * 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a valid audit was recorded
+   * during the interim between candidate selection and dispatch, so the
+   * audit tier was skipped — an empty remaining backlog reports this
+   * reason, NEVER 'no-candidate', so the cooldown is not entered while
+   * the item is already audited).
    */
   reason?: string;
   /**
@@ -1174,8 +1208,44 @@ async function dispatchClaimedTier(
     return { dispatched: false, reason: 'marker-write-failed' };
   }
 
-  const spawn = await deps.spawnAgentPane(buildDowntimePrompt(kind, candidate), opts);
+  const spawn = await deps.spawnAgentPane(
+    buildDowntimePrompt(kind, candidate),
+    {
+      model: opts.model,
+      cwd: opts.cwd,
+      // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): thread the candidate's
+      // title/id so buildDowntimePaneArgs can name the pane
+      // `Downtime triggered <kind> <title> - <id>`.
+      itemTitle: candidate.title,
+      itemId: candidate.id,
+    },
+  );
   if (!spawn.ok) {
+    // Spawn-failure freshness re-check (WL-0MT8KSTOE00871E7): between
+    // selection and spawn, a valid audit may have been recorded. If so, the
+    // pane is moot — do NOT record a failure trace or comment. The failure
+    // was against a stale/unaudited state that no longer exists.
+    if (kind === 'audit') {
+      try {
+        const fresh = await deps.hasFreshAudit(candidate.id, opts.cwd);
+        if (fresh) {
+          process.stderr.write(
+            `[worklog-plugin] Downtime spawn-failed skip: fresh audit recorded during interim (item ${candidate.id})\n`,
+          );
+          // Skip the failure trace — the pane was dispatched against a stale
+          // candidate; do NOT log as a failure.
+          return {
+            dispatched: false,
+            reason: 'spawn-failed',
+            error: spawn.error,
+            exitCode: spawn.exitCode,
+          };
+        }
+      } catch {
+        // Fail-open on the freshness check: if we can't verify, log the
+        // failure trace as normal (conservative default).
+      }
+    }
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2): the audit log distinguishes
     // "attempted" (failed spawn) from "opened" (success marker) — append
     // an outcome:'spawn-failed' entry with the error/exit trace. Fail-
@@ -1627,7 +1697,10 @@ export async function dispatchFromCoordination(
 
   // No tier had a dispatchable entry (or a freeze skip with an empty
   // plan/intake list). The caller decides cooldown vs. resume via the
-  // same reason semantics as the legacy dispatcher.
+  // same reason semantics as the legacy dispatcher — in the worker tick,
+  // a coordination-mode no-candidate is probed against the worklog
+  // (WL-0MTEZ4XZJ006Y9U7): an empty OFFER FILE is never mistaken for an
+  // empty BACKLOG.
   return frozen
     ? { dispatched: false, reason: 'code-freeze' }
     : { dispatched: false, reason: 'no-candidate' };
@@ -1822,6 +1895,11 @@ export async function dispatchDowntimeWork(
     // not pause the worker).
     let auditInFlight = false;
     let auditCheckFailed = false;
+    // Freshness-skip flag (WL-0MT8KSTOE00871E7): when the interim freshness
+    // re-check finds a fresh audit, the audit tier skip is reported as
+    // 'fresh-audit-skip' (never 'no-candidate', so the cooldown is not
+    // entered while the item is already audited).
+    let freshnessSkip = false;
 
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
@@ -1901,7 +1979,34 @@ export async function dispatchDowntimeWork(
             const audit = await deps.getNextAuditCandidate(opts.cwd);
             if (audit.ok) {
               if (audit.candidate !== null) {
-                return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+                // Interim freshness re-check (WL-0MT8KSTOE00871E7): between
+                // candidate selection and dispatch, a valid audit may have
+                // been recorded (e.g. by a human or another process). Re-check
+                // freshness to avoid dispatching a redundant audit pane and
+                // writing a misleading dispatch comment. If a fresh audit now
+                // exists, skip the dispatch entirely — no comment, no marker,
+                // no spawn — and fall through to the next tier. Treat as
+                // "already audited", not "no-candidate"/cooldown and not a
+                // strike. Fail-open: a wl/CLI failure in the freshness check
+                // is treated as "not fresh" (dispatch proceeds) — never a
+                // silent skip.
+                try {
+                  const fresh = await deps.hasFreshAudit(audit.candidate.id, opts.cwd);
+                  if (fresh) {
+                    freshnessSkip = true;
+                    process.stderr.write(
+                      `[worklog-plugin] Downtime audit tier skip: fresh audit recorded during interim (item ${audit.candidate.id})\n`,
+                    );
+                    // Fall through to the next tier (implement/plan/intake).
+                  } else {
+                    return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+                  }
+                } catch {
+                  // Fail-open: the freshness check could not complete (e.g.
+                  // wl/CLI error) — proceed with the dispatch (conservative
+                  // default). The item is treated as "not fresh" for this tick.
+                  return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+                }
               }
             } else {
               return { dispatched: false, reason: 'wl-error' };
@@ -2020,11 +2125,13 @@ export async function dispatchDowntimeWork(
       // lifts (WL-0MSQ0RPQP00636JY).
       return frozen
         ? { dispatched: false, reason: 'code-freeze' }
-        : auditInFlight
-          ? { dispatched: false, reason: 'audit-in-flight' }
-          : auditCheckFailed
-            ? { dispatched: false, reason: 'wl-error' }
-            : { dispatched: false, reason: 'no-candidate' };
+        : freshnessSkip
+          ? { dispatched: false, reason: 'fresh-audit-skip' }
+          : auditInFlight
+            ? { dispatched: false, reason: 'audit-in-flight' }
+            : auditCheckFailed
+              ? { dispatched: false, reason: 'wl-error' }
+              : { dispatched: false, reason: 'no-candidate' };
     }
     // Tier 3 errored (with or without a tier-2 error): fail closed to busy.
     // The worker counts this as one CLI-error strike; the backlog is not
@@ -2042,15 +2149,24 @@ export async function dispatchDowntimeWork(
  * passes `Downtime <entryId>`, WL-0MSS1Q5ER007QDKX), `--no-focus` (visible but
  * never steals focus), `--cwd <wlRoot>`, `--model <downtimeModel>`, then the
  * prompt.
+ *
+ * When `opts.itemTitle`/`opts.itemId` are present (dispatch tiers,
+ * WL-0MSJ4E8UA005KG9Y), the pane is named in the full format
+ * `Downtime triggered <kind> <title> - <id>` so downtime panes follow the
+ * same descriptive convention as manually-triggered panes. Titles are
+ * bounded by {@link MAX_PANE_TITLE_LENGTH}.
  */
 export function buildDowntimePaneArgs(
   kind: DowntimeSkillKind,
   prompt: string,
-  opts: { model: string; cwd: string; paneName?: string },
+  opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
 ): string[] {
+  const paneName =
+    opts.paneName ??
+    buildDowntimePaneTitle(kind, opts.itemTitle, opts.itemId);
   return [
     '--pane-name',
-    opts.paneName ?? `Downtime ${kind}`,
+    paneName,
     '--no-focus',
     '--cwd',
     opts.cwd,
@@ -2338,7 +2454,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   let lastDispatchAt: number | null = null;
   // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
   // worker is fully paused (no poll, no idle tracking, no dispatch) after a
-  // genuine empty backlog OR three consecutive CLI errors. null = not paused.
+  // genuine empty backlog OR three consecutive CLI errors. Cancelled early
+  // when a coordination check-in re-offers a fresh item
+  // (WL-0MTEZ4XZJ006Y9U7). null = not paused.
   let cooldownUntil: number | null = null;
   // Three-strike rule: consecutive CLI-error dispatch outcomes. A successful
   // dispatch, a genuine no-candidate outcome, or an expired cooldown resets it.
@@ -2385,6 +2503,31 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // tick observe ONE consistent state — an election win mid-tick applies
   // next tick). Legacy mode (no coordinationDir) is always the leader.
   let leaderState = leaderManager ? leaderManager.isLeader() : true;
+
+  // Three-strike pause (WL-0MSI7DQL10016QYX; shared by the CLI-error path
+  // and the coordination probe-failure path, WL-0MTEZ4XZJ006Y9U7): N
+  // consecutive failures pause the worker entirely and log the persistent
+  // error so it is auditable. A single transient failure does NOT pause —
+  // it retries on the next idle period. Fail-closed: error logging must
+  // never crash the worker.
+  const pauseAfterPersistentErrors = async (message: string): Promise<void> => {
+    errorStrikes += 1;
+    if (errorStrikes >= DOWNTIME_ERROR_STRIKE_LIMIT) {
+      try {
+        await opts.deps.recordError({
+          cwd: opts.config().cwd,
+          at: new Date().toISOString(),
+          message,
+        });
+      } catch {
+        // fail-closed: error logging must never crash the worker
+      }
+      cooldownUntil = Date.now() + opts.config().noCandidateCooldownMs;
+      errorStrikes = 0;
+      tracker.record(false);
+      perSlotTracker.record([]);
+    }
+  };
 
   return {
     get idleSince(): number | null {
@@ -2451,18 +2594,6 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // while toggled off the worker performs no proxy polling, no idle
       // tracking, and no dispatch — exactly the settings-disabled path.
       if (!(override ?? cfg.enabled)) return { polled: false, dispatched: false, idle: false };
-      // Cooldown gate: while paused the worker performs NO proxy polling, NO
-      // idle tracking, and NO dispatch. The pause is a full stop (user
-      // confirmed "pause completely"); once it expires the idle tracker is
-      // empty, so a fresh full idle period is required before the next
-      // dispatch (no stale idle credit from before the pause).
-      if (cooldownUntil !== null) {
-        if (Date.now() < cooldownUntil) {
-          return { polled: false, dispatched: false, idle: false };
-        }
-        cooldownUntil = null; // pause expired — resume normal polling
-        errorStrikes = 0; // fresh strike counter after the pause
-      }
 
       // ── Leader election + coordination check-in (parent
       // WL-0MST3OJ8S0001ROL AC1/AC2/AC3) ───────────────────────────────────
@@ -2471,21 +2602,35 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // direct tier chain below (pre-refactor behavior).
       const tickNow = Date.now();
       if (leaderManager !== null) {
-        // Every tick resolves leadership (a single cheap lease-file read):
-        //  - While leader: refresh the 5-minute lease (each proxy-poll cycle
-        //    extends it — AC2).
-        //  - While non-leader: NO proxy polling and NO dispatch (AC4); only
-        //    detect a stale/expired lease (leader crashed or idle) and run a
-        //    new election — takeover lands within the lease TTL, well inside
-        //    the 5-minute user-story bound.
-        //  - Fail-safe (constraint): a missing/unreadable lease file is
-        //    treated as "not leader" — the instance continues operating
-        //    without dispatching.
+        // ── F5 (WL-0MTF4ABQN0043F4V): self-heal + re-derive EVERY tick ──
+        // The pre-fix code derived `leaderState` ONCE at creation and only
+        // updated it inside the takeover branch — a lease that expired
+        // mid-pause (worker's tick loop stalled in the no-candidate
+        // cooldown) left the worker dispatching with a cached leaderState
+        // as a zombie. Two changes fix this:
+        //
+        //  AC2 — self-heal FIRST. refreshLease() now renews only an OWNED
+        //  lease regardless of validity (F4 ownership check), so an
+        //  owned-but-EXPIRED lease is renewed here instead of silently
+        //  no-oped. This must run before the isLeader() re-derivation
+        //  below: detectStaleLeader() returns false for our OWN lease, so
+        //  without it an expired owned lease would fall through BOTH the
+        //  leader branch (isLeader() false) AND the takeover branch
+        //  (hasLease true, detectStaleLeader false) — the self-heal would
+        //  be starved. Foreign/missing leases are untouched (refreshLease
+        //  no-ops on those — F4 fail-safe).
+        leaderManager.refreshLease();
+        //  AC1 — re-derive leadership every tick (one cheap lease-file
+        //  read): a lease that expired mid-pause routes this worker OUT of
+        //  zombie dispatch; if ANOTHER instance won the lease during the
+        //  pause, this re-derived state yields — never fights the new
+        //  leader (AC4).
+        leaderState = leaderManager.isLeader();
         if (leaderState) {
-          // Refresh the lease first (each poll cycle extends the TTL). A
-          // failed refresh (rename/IO) is fail-safe: the existing lease
-          // stands until it expires, then a new election runs.
-          leaderManager.refreshLease();
+          // Leader: self-heal already ran above (fresh acquiredAt this
+          // tick — each proxy-poll cycle extends the 5-minute lease,
+          // AC2). A failed refresh (rename/IO) is fail-safe: the existing
+          // lease stands until it expires, then a new election runs.
         } else if (!leaderManager.hasLease() || leaderManager.detectStaleLeader()) {
           // No leader exists yet (fresh election) OR the elected leader's
           // lease expired (crash / idle) — try to take over NOW. Stale
@@ -2519,11 +2664,21 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         if (lastCheckInAt === null || tickNow - lastCheckInAt >= checkInIntervalMs) {
           lastCheckInAt = tickNow;
           try {
-            await runCoordinationCheckIn(opts.deps, {
+            const checkIn = await runCoordinationCheckIn(opts.deps, {
               cwd: cfg.cwd,
               coordinationDir: opts.coordinationDir!,
               instanceId,
             }, tickNow);
+            // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
+            // backlog is dispatchable again — cancel any no-candidate pause
+            // so the leader resumes polling/dispatch this very tick. The
+            // check-in block runs BEFORE the cooldown gate below, so the
+            // pause can never suppress the only mechanism that re-offers
+            // work once the coordination file empties.
+            if (checkIn.updated && checkIn.offered !== null) {
+              cooldownUntil = null;
+              errorStrikes = 0; // the re-offer's lookups succeeded — CLI healthy
+            }
           } catch {
             // Fail-safe: a throwing check-in (stub or regression) must never
             // crash the worker — retried at the next cadence.
@@ -2538,6 +2693,31 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         }
       }
 
+      // Cooldown gate (WL-0MTEZ4XZJ006Y9U7 AC2 — ordering): the check-in
+      // block above runs FIRST, so a no-candidate pause never suppresses the
+      // 30-min re-offer (the only mechanism that re-offers work once the
+      // coordination file empties); a fresh re-offer cancels the pause
+      // directly. While paused the worker performs NO proxy polling, NO
+      // idle tracking, and NO dispatch. The pause is a full stop (user
+      // confirmed "pause completely"); once it expires the idle tracker is
+      // empty, so a fresh full idle period is required before the next
+      // dispatch (no stale idle credit from before the pause).
+      if (cooldownUntil !== null) {
+        if (Date.now() < cooldownUntil) {
+          return { polled: false, dispatched: false, idle: false };
+        }
+        // ── F5 cooldown-exit hook (AC3) ──
+        // Pause expired — resume normal polling. Nothing further is needed
+        // here for leadership: the leader block at the top of THIS tick
+        // already ran the self-heal refreshLease + per-tick re-derivation
+        // BEFORE reaching this gate, so any dispatch decision on this
+        // resume tick (or later ones) uses a lease-fresh leaderState — even
+        // when the tick loop stalled mid-pause, the first tick after expiry
+        // re-derives before poll/dispatch. Belt-and-braces guarantee that
+        // the cooldown-exit path can never dispatch on stale leadership.
+        cooldownUntil = null; // pause expired — resume normal polling
+        errorStrikes = 0; // fresh strike counter after the pause
+      }
       if (opts.poller.isPolling()) return { polled: false, dispatched: false, idle: tracker.idleSince !== null };
 
 
@@ -2655,38 +2835,56 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           tracker.record(false);
           perSlotTracker.record([]);
         } else if (outcome.reason === 'no-candidate') {
-          // Genuine empty backlog (both stages answered with no candidate):
-          // pause entirely so the worker stops burning cycles (proxy polling
-          // + wl next spawns) for the configured cooldown. Reset the idle
-          // tracker so a fresh full idle period is required after the pause.
-          errorStrikes = 0; // the CLI answered — it is healthy
-          cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
-          tracker.record(false);
-          perSlotTracker.record([]);
+          // WL-0MTEZ4XZJ006Y9U7 (AC1): in coordination mode the shared file
+          // is an OFFER LIST, not the backlog — after a dispatch the leader
+          // removes the entry, so an empty file is a TRANSIENT gap while the
+          // worklog still has dispatchable work (the pre-fix code paused on
+          // it for the full cooldown, stalling ~60 of every 62 minutes).
+          // Probe the worklog before pausing; only a GENUINELY empty backlog
+          // pauses (legacy non-coordination semantics unchanged):
+          //  - probe finds a candidate → no pause, no strike: the 30-min
+          //    check-in re-offers it and dispatch resumes;
+          //  - probe fails (wl/CLI errors) → fail-closed strike (a broken
+          //    lookup must never look like an empty backlog — the
+          //    three-strike rule decides when to pause);
+          //  - probe finds nothing → genuine empty backlog → pause entirely
+          //    and reset the idle tracker (fresh full idle period required
+          //    after the pause).
+          if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now());
+            if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
+              errorStrikes = 0; // the CLI answered — it is healthy
+              cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
+              tracker.record(false);
+              perSlotTracker.record([]);
+            } else if (!probe.ok) {
+              await pauseAfterPersistentErrors(
+                `Downtime worker: worklog probe failed while the shared ` +
+                `coordination file held no dispatchable entry — ` +
+                `${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive errors, pausing ` +
+                `dispatch for ${cfg.noCandidateCooldownMs}ms.`,
+              );
+            }
+            // probe.ok with a candidate: no pause — the empty file is a
+            // transient gap; the check-in re-offers the candidate.
+          } else {
+            // Legacy mode — original semantics: no-candidate means a genuine
+            // empty backlog; pause entirely for the cooldown.
+            errorStrikes = 0; // the CLI answered — it is healthy
+            cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
+            tracker.record(false);
+            perSlotTracker.record([]);
+          }
         } else if (outcome.reason === 'wl-error') {
           // Three-strike rule on CLI errors: a dispatch attempt ending in a
           // wl failure is one strike. Three consecutive strikes pause the
           // worker entirely (no dispatch) AFTER logging the persistent error
           // so the failure is auditable. A single transient error does NOT
           // pause — it retries on the next idle period.
-          errorStrikes += 1;
-          if (errorStrikes >= DOWNTIME_ERROR_STRIKE_LIMIT) {
-            try {
-              await opts.deps.recordError({
-                cwd: cfg.cwd,
-                at: new Date().toISOString(),
-                message:
-                  `Downtime worker: ${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive ` +
-                  `wl CLI errors — pausing dispatch for ${cfg.noCandidateCooldownMs}ms.`,
-              });
-            } catch {
-              // fail-closed: error logging must never crash the worker
-            }
-            cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
-            errorStrikes = 0;
-            tracker.record(false);
-            perSlotTracker.record([]);
-          }
+          await pauseAfterPersistentErrors(
+            `Downtime worker: ${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive ` +
+            `wl CLI errors — pausing dispatch for ${cfg.noCandidateCooldownMs}ms.`,
+          );
         }
         // Any other non-dispatch outcome (dispatch-in-flight, code-freeze
         // skip) is neutral: no strike, no cooldown — the next idle period

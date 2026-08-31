@@ -7,6 +7,7 @@
  * - turn_end → state management (reset on success, abort flag)
  * - session_start → state reset
  * - session_compact → auto-continue after mid-session compaction
+ * - agent_end COMPACTION_GATE → /compact + auto-retry (proxy hard cap 4xx)
  * - Built-in retry suppression (monkey-patching _prepareRetry)
  * - /retry command registration
  */
@@ -14,7 +15,15 @@
 import type { ExtensionAPI, ExtensionCommandContext, SessionCompactEvent } from '@earendil-works/pi-coding-agent';
 
 import { classifyError, DEFAULT_RECOVERY_CONFIG, ErrorCategory } from './error-patterns.js';
-import { executeParseErrorContinue } from './recovery.js';
+import {
+  executeParseErrorContinue,
+  executeCompactAndContinue,
+  shouldAutoContinueAfterCompaction,
+  shouldTriggerCompactionContinue,
+  shouldTriggerCompactionGateRecovery,
+  COMPACTION_GATE_FALLBACK_MESSAGE,
+  MAX_COMPACTION_GATE_RETRIES,
+} from './recovery.js';
 import {
   retryStates,
   continuationState,
@@ -24,10 +33,6 @@ import {
   type RetryCommandOptions,
 } from './retry-command.js';
 import { calculateDelay, formatDuration } from './retry-logic.js';
-import {
-  shouldAutoContinueAfterCompaction,
-  shouldTriggerCompactionContinue,
-} from './recovery.js';
 
 let _recoveryRegistered = false;
 
@@ -159,6 +164,15 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
           'info',
         );
         void triggerParseErrorContinue();
+        break;
+      }
+
+      case ErrorCategory.COMPACTION_GATE: {
+        // Compaction gate (proxy cheap-mode hard cap 4xx): runs /compact
+        // via the existing machinery, then auto-retries the original
+        // request invisibly. Distinct from CONTEXT_LENGTH (a model-level
+        // stopReason "length" signal) — enforced by the classifier.
+        void triggerCompactionGateRecovery(ctx);
         break;
       }
 
@@ -420,6 +434,59 @@ async function triggerCompactionContinue(): Promise<void> {
   }
   continuationState.endContinuation();
 
+  void triggerInvisibleContinue();
+}
+
+/**
+ * Compaction-gate recovery: the proxy's cheap-mode hard cap returned an
+ * informative 4xx because the context exceeded the cap. The client must
+ * compact and retry (AC2/AC3) — never silently drop, never queue-fallback
+ * to expensive remote, never burn a near-full-slot prefill.
+ *
+ * Flow: guard (abort/mutex/in-flight/retry-limit) → notify → /compact via
+ * the existing `executeCompactAndContinue()` machinery → on success fire
+ * the invisible-continue auto-retry; on failure show explicit guidance
+ * (AC4). Distinct from the CONTEXT_LENGTH path: this is a proxy-level 4xx,
+ * not a model-level stopReason "length".
+ */
+async function triggerCompactionGateRecovery(ctx: { compact(options?: { onComplete?: () => void; onError?: (error: Error) => void }): void }): Promise<void> {
+  if (!_agent) return;
+
+  if (!shouldTriggerCompactionGateRecovery({
+    userAborted: interruptibleState.userAborted,
+    continueInProgress: _continueInProgress,
+    continuationInFlight: continuationState.getIsContinuing(),
+    continuationCount: continuationState.getCount(),
+  })) return;
+
+  if (_notifyFn) {
+    _notifyFn(`Proxy context limit reached — compacting session (attempt ${continuationState.getCount() + 1}/${MAX_COMPACTION_GATE_RETRIES})...`, 'info');
+  }
+
+  const result = await executeCompactAndContinue(continuationState, {
+    // ctx.compact() is fire-and-forget; the callbacks resolve the promise.
+    executeCompact: () => new Promise((resolve) => {
+      ctx.compact({
+        onComplete: () => resolve({ success: true }),
+        onError: (err) => resolve({ success: false, error: err.message }),
+      });
+    }),
+    maxRetries: MAX_COMPACTION_GATE_RETRIES,
+  });
+
+  if (!result.success) {
+    // Explicit guidance — never silently drop the gated request (AC4).
+    const reason = result.error ?? COMPACTION_GATE_FALLBACK_MESSAGE;
+    if (_notifyFn) {
+      _notifyFn(reason, 'error');
+    }
+    return;
+  }
+
+  // Compaction succeeded — auto-retry the original request invisibly.
+  if (_notifyFn) {
+    _notifyFn('Compaction complete — retrying your request automatically...', 'info');
+  }
   void triggerInvisibleContinue();
 }
 

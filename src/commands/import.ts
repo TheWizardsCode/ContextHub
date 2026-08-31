@@ -12,7 +12,7 @@ export default function register(ctx: PluginContext): void {
   
   program
     .command('import')
-    .description('Import work items and comments from JSONL file')
+    .description('Import work items and comments from JSONL file. WARNING: This is a destructive operation that will REPLACE the entire database with only the items in the JSONL file. All existing items, comments, and dependency edges will be deleted. Use the --file option to specify the input path.')
     .option('-f, --file <filepath>', 'Input file path', dataPath)
     .option('--prefix <prefix>', 'Override the default prefix')
     .action((options: ImportOptions) => {

@@ -197,7 +197,7 @@ describe('valid-json-output', () => {
         `tsx ${cliPath} --json close ${closeId} -r "Closing for valid-json test"`,
       );
       const result = expectValidJson(stdout);
-      expect(result.success).toBe(true);
+      expect(result.closed).toBe(1);
       expect(result.results).toBeDefined();
       expect(Array.isArray(result.results)).toBe(true);
       expect(result.results[0].id).toBe(closeId);
@@ -553,7 +553,8 @@ describe('valid-json-output', () => {
       expect(['{', '[']).toContain(trimmed[0]);
       expect(['}', ']']).toContain(trimmed[trimmed.length - 1]);
       const parsed = JSON.parse(trimmed);
-      expect(parsed.success).toBe(false);
+      expect(parsed.closed).toBe(0);
+      expect(parsed.failed).toBeGreaterThan(0);
       // Error may be at top level (output.error) or in results[0].error (output.json)
       const hasError = parsed.error !== undefined ||
         (Array.isArray(parsed.results) && parsed.results[0]?.error !== undefined);

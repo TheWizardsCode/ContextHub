@@ -72,6 +72,7 @@ function idlePayload(): Record<string, unknown> {
   return {
     llama_server_running: true,
     active_query: false,
+    local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: 4,
@@ -104,12 +105,22 @@ function makeWorker(opts: {
   instanceId: string;
   cwd: string;
   deps: DowntimeWorkerDeps;
+  /** available_slots in the poll payload (default 4 = idle). 0 = busy llama: never dispatches. */
+  freeSlots?: number;
+  /** noCandidateCooldownMs (default 60 min). */
+  cooldownMs?: number;
+  /** checkInIntervalMs (default 30 min). */
+  checkInIntervalMs?: number;
 }): DowntimeWorker {
-  const fetcher = vi.fn(async () => ({
-    ok: true,
-    status: 200,
-    json: async () => idlePayload(),
-  }));
+  const fetcher = vi.fn(async () => {
+    const payload = idlePayload();
+    if (opts.freeSlots !== undefined) payload.available_slots = opts.freeSlots;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => payload,
+    };
+  });
   return createDowntimeWorker({
     coordinationDir: opts.coordinationDir,
     instanceId: opts.instanceId,
@@ -121,10 +132,10 @@ function makeWorker(opts: {
       requiredFreeSlots: 1,
       model: 'plan',
       cwd: opts.cwd,
-      noCandidateCooldownMs: 3_600_000,
+      noCandidateCooldownMs: opts.cooldownMs ?? 3_600_000,
     }),
     leaseTtlSeconds: 300,
-    checkInIntervalMs: 30 * 60 * 1000,
+    checkInIntervalMs: opts.checkInIntervalMs ?? 30 * 60 * 1000,
   });
 }
 
@@ -252,6 +263,122 @@ describe('integration: leader election → coordination → dispatch', () => {
       // never dispatched (its owner is gone; lastUpdated > lease TTL).
       expect(getEntry(sharedCoord, 'inst-dead')).toBe(null);
       expect(depsA.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('zombie-in-cooldown regression: an expired-lease leader never double-dispatches on resume (F1)', async () => {
+    // The zombie scenario: A elects itself leader, enters the no-candidate
+    // cooldown while its tick loop FREEZES mid-pause — its lease expires
+    // (TTL 300s < cooldown 600s). B, still ticking, detects the stale lease,
+    // wins a fresh election and re-offers its own item. When A resumes after
+    // the cooldown, its CACHED leaderState is still true → on the pre-fix
+    // code A zombie-dispatches B's coordination entry even though B is the
+    // live leader. F5 re-derives leadership every tick → A stays silent
+    // (non-leader short-circuit); F4 self-heals B's owned lease.
+    vi.useFakeTimers();
+    const t0 = 50_000_000;
+    vi.setSystemTime(t0);
+    try {
+      // A: normal idle leader (4 free slots).
+      const depsA = baseDeps({
+        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+        // A (pre-fix zombie) classifies B's entry by re-fetching it: WL-B1 is
+        // dispatchable (intake_complete → plan tier).
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-B1', 'intake_complete') }),
+      });
+      // B: live leader whose llama is BUSY (0 free slots) — it checks in and
+      // re-offers its item every 5 min but can never dispatch, so the ONLY
+      // way WL-B1 gets dispatched is A's zombie. B offers nothing until its
+      // SECOND check-in (after A is safely paused).
+      const depsB = baseDeps({
+        getNextCriticalCandidate: vi.fn()
+          .mockResolvedValueOnce({ ok: true, candidate: null })
+          .mockResolvedValue({
+            ok: true,
+            candidate: { id: 'WL-B1', title: 'B one', stage: 'intake_complete', status: 'open' },
+          }),
+      });
+      const workerA = makeWorker({
+        coordinationDir: sharedCoord,
+        instanceId: 'inst-a',
+        cwd: dirA,
+        deps: depsA,
+        cooldownMs: 600_000, // 10 min cooldown > 300s lease TTL → lease expires mid-pause
+      });
+      const workerB = makeWorker({
+        coordinationDir: sharedCoord,
+        instanceId: 'inst-b',
+        cwd: dirB,
+        deps: depsB,
+        freeSlots: 0, // busy llama: never dispatches
+        checkInIntervalMs: 300_000, // re-offers every 5 min (fresh lastUpdated < 300s prune window)
+      });
+
+      // Tick 1: A wins the election; both instances check in (B offers nothing).
+      await workerA.tick();
+      await workerB.tick();
+      expect(workerA.isLeader).toBe(true);
+      expect(workerB.isLeader).toBe(false);
+
+      // Tick 2: A's idle threshold met → dispatch attempt → empty offer list
+      // → worklog probe empty → genuine no-candidate → cooldown entered.
+      vi.setSystemTime(t0 + 60_000);
+      await workerA.tick();
+      expect(workerA.paused).toBe(true);
+
+      // A's tick loop is FROZEN: advance past A's lease TTL (expires at
+      // t0+360s, refreshed at t0+60s) WITHOUT ticking A. B ticks at t0+360s
+      // → detects the stale lease → wins a fresh election → check-in #2
+      // offers WL-B1 (fresh lastUpdated).
+      vi.setSystemTime(t0 + 360_000);
+      expect(workerB.isLeader).toBe(false);
+      await workerB.tick();
+      expect(workerB.isLeader).toBe(true);
+      expect(getEntry(sharedCoord, 'inst-b')?.workItemId).toBe('WL-B1');
+      const lease = JSON.parse(readFileSync(join(sharedCoord, LEASE_FILE), 'utf-8')) as {
+        leaderId: string;
+      };
+      expect(lease.leaderId).toBe('inst-b');
+
+      // B stays live through the rest of A's pause, refreshing its own lease
+      // (every 60s) so it never expires.
+      vi.setSystemTime(t0 + 420_000);
+      await workerB.tick();
+      vi.setSystemTime(t0 + 480_000);
+      await workerB.tick();
+      vi.setSystemTime(t0 + 540_000);
+      await workerB.tick();
+      vi.setSystemTime(t0 + 600_000);
+      await workerB.tick();
+      // B's 5-min check-in re-offers WL-B1 with a fresh lastUpdated so it
+      // survives the leader's 300s prune window at A's dispatch tick.
+      vi.setSystemTime(t0 + 660_000);
+      await workerB.tick();
+      expect(getEntry(sharedCoord, 'inst-b')?.workItemId).toBe('WL-B1');
+
+      // A's cooldown expired (t0+660s): resume tick. Cached leaderState=true
+      // → refreshLease no-ops (B holds the lease) → cooldown gate clears → a
+      // FRESH idle run starts (tracker was reset on cooldown entry → no
+      // dispatch on this tick).
+      vi.setSystemTime(t0 + 661_000);
+      await workerA.tick();
+      expect(workerA.paused).toBe(false);
+
+      // Second tick after resume: idle threshold met → dispatch decision.
+      // Pre-fix: A reads B's entry and spawns a pane for WL-B1 — the ZOMBIE.
+      vi.setSystemTime(t0 + 721_000);
+      await workerA.tick();
+
+      // AC: A must NOT dispatch B's entry on/after resume (B is the live
+      // leader). Pre-fix this fails — A spawned WL-B1; after F5 the
+      // non-leader short-circuit returns before poll/dispatch → GREEN.
+      expect(depsA.spawnAgentPane).not.toHaveBeenCalled();
+      // AC: exactly one instance (B) is leader. Pre-fix: A's cached
+      // leaderState stayed true → fails; after F5 re-derivation A is false.
+      expect(workerA.isLeader).toBe(false);
+      expect(workerB.isLeader).toBe(true);
     } finally {
       vi.useRealTimers();
     }

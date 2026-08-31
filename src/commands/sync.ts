@@ -52,6 +52,7 @@ export async function performSync(
     isJsonMode?: boolean;
     isVerbose?: boolean;
     allowForeignAuthor?: boolean;
+    acceptRegressions?: boolean;
   }
 ): Promise<SyncResult> {
   const isJsonMode = options.isJsonMode ?? false;
@@ -222,7 +223,8 @@ export async function performSync(
   if (!isJsonMode && !isSilent) {
     console.log('\nMerging work items...');
   }
-  const itemMergeResult = mergeWorkItems(localItems, remoteItems);
+  const mergeOptions = options.acceptRegressions ? { acceptRegressions: true } : undefined;
+  const itemMergeResult = mergeWorkItems(localItems, remoteItems, mergeOptions);
   
   if (!isJsonMode && !isSilent) {
     console.log('Merging comments...');
@@ -398,16 +400,56 @@ export async function performSync(
     (fullSnapshotEveryN > 0 &&
       deltaMeta.deltaSyncCount >= fullSnapshotEveryN) ||
     (deltaSizeThreshold > 0 && deltaMeta.deltaBytes >= deltaSizeThreshold);
-  const needsFullSnapshot =
+  let needsFullSnapshot =
     !hasBaseline || fullSnapshotDue || deltaDisabled || remoteContent === null;
+
+  // Divergence detection (WL-0MTGGGP2000642JS §4.1/AC1-AC2):
+  // When the local store holds more records than the remote tip, the watermark
+  // heuristic alone cannot detect this — records older than the watermark are
+  // assumed "already synced" even though the remote never received them
+  // (e.g. after a foreign-author full snapshot replaced the remote with fewer
+  // records). Compare local item/comment counts against the remote tip to
+  // detect divergence; when detected, force a full snapshot so the remote
+  // converges to the local state (self-healing, AC2).
+  //
+  // The count mismatch is only treated as divergence when a delta push CANNOT
+  // repair it: if there are dirty records of the same type, the delta export
+  // conveys exactly those new/changed records and the remote converges on the
+  // push (local count legitimately exceeds remote before a delta push).
+  // Gating on the dirty count prevents the divergence force-full from
+  // breaking the normal delta path (sync-delta-push/fallback/convergence
+  // tests, WL-0MTH1HTTG0033JM9).
+  const dirty = db.countDirtyRecords();
+  let divergenceDetected = false;
+  if (remoteContent !== null && localItems.length > remoteItems.length && dirty.items === 0) {
+    // Remote has data but fewer items than local, and no dirty item could
+    // carry the missing records — genuine divergence.
+    divergenceDetected = true;
+    logLine(`Divergence detected: local has ${localItems.length} items, remote has ${remoteItems.length} — forcing full snapshot`);
+  }
+  if (remoteContent !== null && localComments.length > remoteComments.length && dirty.comments === 0) {
+    divergenceDetected = true;
+    logLine(`Divergence detected: local has ${localComments.length} comments, remote has ${remoteComments.length} — forcing full snapshot`);
+  }
+  if (divergenceDetected) {
+    needsFullSnapshot = true;
+    logLine('Divergence detected — upgrading to full snapshot export');
+    if (!isJsonMode && !isSilent) {
+      console.warn(
+        `\n⚠  Sync divergence detected: the local store holds ${localItems.length} work items / ${localComments.length} comments while the remote tip has ${remoteItems.length} / ${remoteComments.length}. ` +
+        `The remote is missing local records (watermark divergence, WL-0MTGGGP2000642JS). ` +
+        `Exporting a full snapshot so the remote converges to the local state.`
+      );
+    }
+  }
+
   const syncMode: 'full' | 'delta' = needsFullSnapshot ? 'full' : 'delta';
 
   // §5.4 zero-change fast path: skip export+push entirely when nothing is
   // dirty and no full snapshot is due (a 0-record delta is useless — the
   // remote tip would hold an effectively empty file). This preserves the
   // existing last-sync-time optimization.
-  const dirty = db.countDirtyRecords();
-  const zeroChangeFastPath = syncMode === 'delta' && dirty.total === 0;
+  const zeroChangeFastPath = syncMode === 'delta' && dirty.total === 0 && !divergenceDetected;
 
   let jsonlPath: string | null = null;
   if (!zeroChangeFastPath) {
@@ -584,6 +626,7 @@ export default function register(ctx: PluginContext): void {
     .option('--no-push', 'Skip pushing changes back to git')
     .option('--dry-run', 'Show what would be synced without making changes')
     .option('--allow-foreign-author', 'Allow merging commits authored by a different identity than the store user.email (never bypasses the empty-author-email gate) — overrides syncAllowForeignAuthor config')
+    .option('--accept-regressions', 'Accept regressions: allow remote defaults to overwrite local non-default values (regression guard bypass)')
     .option('--if-idle', 'Skip (exit 0) if another sync is already in progress — lock-aware guard for auto-sync spawners; prevents process pile-up under lock contention')
     .option('--no-re-sort', 'Skip automatic re-sort after sync')
     .option('--re-sort-sync', 'Force a synchronous re-sort after sync', false)
@@ -597,6 +640,8 @@ export default function register(ctx: PluginContext): void {
       const gitBranch = options.gitBranch || defaults.gitBranch;
       // Author-identity gate override: CLI flag wins over config (default false).
       const allowForeignAuthor = options.allowForeignAuthor ?? defaults.allowForeignAuthor;
+      // Regression guard override: CLI flag wins over default (default false).
+      const acceptRegressions = options.acceptRegressions ?? false;
       
       // Re-sort control options (apply once after batch completes)
       const reSortNo = Boolean((options as any).noReSort) || false;
@@ -618,7 +663,8 @@ export default function register(ctx: PluginContext): void {
               silent: false,
               isJsonMode,
               isVerbose,
-              allowForeignAuthor
+              allowForeignAuthor,
+              acceptRegressions
             }),
           options.ifIdle ? { skipIfLocked: true } : undefined
         );

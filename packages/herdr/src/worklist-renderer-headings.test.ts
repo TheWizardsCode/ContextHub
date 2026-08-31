@@ -151,6 +151,91 @@ describe('line-count invariant with heading rows', () => {
   });
 });
 
+// ── Heading indentation ──────────────────────────────────────────────────
+
+describe('heading row indentation', () => {
+  const renderer = createListRenderer();
+
+  function stripAnsi(s: string): string {
+    return s.replace(/\x1b\[[0-9;]*m/g, '');
+  }
+
+  it('top-level heading (depth 0) renders without extra leading indentation', () => {
+    const rows: (DisplayHeadingRow | WorkItem)[] = [
+      makeHeading(1, 'Group 1', 2),
+      makeItem('A', 1),
+      makeItem('B', 1),
+    ];
+    const output = renderer(rows, 0, 0, TERM_80x24, null, 'list', null);
+    const headingLine = output.split('\n').find((l) => l.includes('── Group 1'));
+    expect(headingLine).toBeDefined();
+    // Format is ` ── Group 1 ...` — one base space, no extra indent at depth 0
+    const stripped = stripAnsi(headingLine!);
+    const match = stripped.match(/^(\s*)──/);
+    expect(match).not.toBeNull();
+    expect(match![1].length).toBe(1); // just the base space
+  });
+
+  it('heading inside expanded parent at depth 1 renders with 2-space indent', () => {
+    const heading = makeHeading(2, 'Group 2', 1);
+    heading.depth = 1;
+    const rows: (DisplayHeadingRow | WorkItem)[] = [
+      heading,
+      { id: 'C1', title: 'Child 1', status: 'open' },
+    ];
+    const output = renderer(rows, 0, 0, TERM_80x24, null, 'list', null);
+    const headingLine = output.split('\n').find((l) => l.includes('── Group 2'));
+    expect(headingLine).toBeDefined();
+    // At depth 1: 2 indent spaces + 1 base space = 3 spaces before ──
+    const stripped = stripAnsi(headingLine!);
+    const match = stripped.match(/^(\s*)──/);
+    expect(match).not.toBeNull();
+    expect(match![1].length).toBe(3);
+  });
+
+  it('heading at depth 2 renders with 4-space indent', () => {
+    const heading = makeHeading(3, 'Group 3', 1);
+    heading.depth = 2;
+    const rows: (DisplayHeadingRow | WorkItem)[] = [
+      heading,
+      { id: 'GC1', title: 'Grandchild 1', status: 'open' },
+    ];
+    const output = renderer(rows, 0, 0, TERM_80x24, null, 'list', null);
+    const headingLine = output.split('\n').find((l) => l.includes('── Group 3'));
+    expect(headingLine).toBeDefined();
+    // At depth 2: 4 indent spaces + 1 base space = 5 spaces before ──
+    const stripped = stripAnsi(headingLine!);
+    const match = stripped.match(/^(\s*)──/);
+    expect(match).not.toBeNull();
+    expect(match![1].length).toBe(5);
+  });
+
+  it('heading indentation matches item indentation at same depth', () => {
+    // A heading at depth 1 alongside an item at depth 1 should share the same depth indent
+    const heading = makeHeading(2, 'Group 2', 1);
+    heading.depth = 1;
+    const item: WorkItem = { id: 'C1', title: 'Child 1', status: 'open', depth: 1 };
+    const rows: (DisplayHeadingRow | WorkItem)[] = [heading, item];
+    const output = renderer(rows, 0, 0, TERM_80x24, null, 'list', null);
+    const lines = output.split('\n');
+    const headingLine = lines.find((l) => l.includes('── Group 2'));
+    const itemLine = lines.find((l) => l.includes('C1'));
+
+    expect(headingLine).toBeDefined();
+    expect(itemLine).toBeDefined();
+    const headingStripped = stripAnsi(headingLine!);
+    const itemStripped = stripAnsi(itemLine!);
+    // Both should have the same 2-space depth indent prefix
+    const headingIndent = headingStripped.match(/^(\s*)──/)![1].length;
+    // formatItemLine at depth 1: '  ' + '  ' + '  ' + id ... -> stripped starts with '      ' before id
+    // The depth indent is 2 spaces. Check heading depth indent equals item depth indent (2).
+    // headingIndent is 3 (2 indent + 1 base), item depth indent is 2.
+    // So heading extra beyond base (headingIndent - 1) should equal item depth indent (2).
+    expect(headingIndent - 1).toBe(2);
+    expect(itemStripped.startsWith('  ')).toBe(true);
+  });
+});
+
 // ── Click-row mapping with headings ──────────────────────────────────────
 
 describe('click-row mapping accounts for heading rows', () => {

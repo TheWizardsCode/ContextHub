@@ -389,7 +389,7 @@ describe('CLI Init Tests', () => {
       // (intervalDays 3, lastTriggeredAt null).
       expect(config.entries).toEqual([
         {
-          id: 'refactor',
+          id: '/skill:refactor',
           prompt: '/skill:refactor',
           intervalDays: 3,
           lastTriggeredAt: null,
@@ -412,7 +412,7 @@ describe('CLI Init Tests', () => {
       const edited = {
         entries: [
           {
-            id: 'refactor',
+            id: '/skill:refactor',
             prompt: '/skill:refactor',
             intervalDays: 3,
             lastTriggeredAt: '2026-08-17T12:00:00.000Z',
