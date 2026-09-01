@@ -7,7 +7,9 @@
  * Implements file-lock-based leader election with lease management:
  *
  *  - A file lock at `<machine-dir>/downtime-leader.lock` elects a single
- *    leader machine-wide (WL-0MTF0KLO10043YAN F3).
+ *    leader machine-wide (WL-0MTF0KLO10043YAN F3, F6 WL-0MTII4CWT00452HU
+ *    migration authoritative). Legacy per-worklog locks/leases are
+ *    retired — stale files are ignored, not read as fallback.
  *  - The leader holds a 5-minute lease (TTL), refreshed on each proxy-poll
  *    cycle. If the lease expires (leader crashed or idle), instances detect
  *    the expiry and run a new election.
@@ -159,6 +161,12 @@ function generateInstanceId(): string {
  * isolation so existing tests using mkdtempSync(tmpdir()) stay green
  * without setting HERDR_COORDINATION_DIR; production worklog roots share
  * the single machine dir (the F3 AC2 proof sets HERDR_COORDINATION_DIR).
+ * F6 WL-0MTII4CWT00452HU: machine dir is authoritative — stale per-worklog
+ * lock/lease files are orphaned (not read as fallback), so an instance
+ * with both old and new files joins exactly once (stable instanceId,
+ * single machine entry) and never double-dispatches. Unreadable/missing
+ * machine coordination or lease files degrade to no-dispatch this cycle
+ * (fail-safe, never crash, never drop another entry).
  */
 function resolveEffectiveLeaderDir(worklogDir: string): string | null {
   const envSet = typeof process.env.HERDR_COORDINATION_DIR === 'string'

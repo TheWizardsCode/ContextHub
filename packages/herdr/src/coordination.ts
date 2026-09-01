@@ -9,7 +9,10 @@
  * `<machine-dir>` is `~/.herdr/downtime/` (default) or
  * `HERDR_COORDINATION_DIR` (env override) — see `machine-coordination.ts`.
  * Legacy per-worklog `<worklog-root>/.worklog/downtime-coordination.json`
- * is retired (F6 migration). All instances read/write the SAME file
+ * is retired (F6 WL-0MTII4CWT00452HU migration): once the machine dir is
+ * authoritative, per-worklog files are neither written nor read — stale
+ * legacy files are orphaned and ignored (no double-join, no double-dispatch;
+ * single machine entry per stable instanceId). All instances read/write the SAME file
  * regardless of project; each entry carries `worklogRoot` (the worklog root
  * that owns the offered item) so the leader can dispatch across roots.
  *
@@ -98,15 +101,17 @@ function lockFilePath(worklogDir: string): string {
  * instances read/write the SAME file regardless of worklog root; each
  * entry carries `worklogRoot` so the leader can dispatch across roots.
  *
- * F2 compatibility: the public API still accepts a `worklogDir` param
- * (legacy per-worklog path). Tests pass isolated tmp dirs
- * (`mkdtempSync(tmpdir())`) and expect isolation there, while production
- * worklog roots (e.g. `~/projects/ContextHub`) must share the single
- * machine file. Until F6 retires the fallback, tmp-based `worklogDir`
- * values bypass the machine dir so existing tests stay green without
- * having to set `HERDR_COORDINATION_DIR` in every fixture; production
- * and the F2 AC1 proof test (which sets `HERDR_COORDINATION_DIR`) use
- * the machine file.
+ * F2 compatibility + F6 retirement: the public API still accepts a
+ * `worklogDir` param (legacy per-worklog path). Tests pass isolated tmp
+ * dirs (`mkdtempSync(tmpdir())`) and expect isolation there, while
+ * production worklog roots (e.g. `~/projects/ContextHub`) must share the
+ * single machine file. F6 retires the per-worklog fallback for
+ * non-tmp roots: only tmp-based `worklogDir` values bypass the machine
+ * dir (test isolation) so existing tests stay green without setting
+ * `HERDR_COORDINATION_DIR` in every fixture; every production/worklog
+ * root uses the machine file and stale legacy files are ignored (no
+ * double-write, no read fallback). The F2 AC1 proof sets
+ * `HERDR_COORDINATION_DIR` so sharing is still proven.
  */
 function resolveEffectiveDir(worklogDir: string): string | null {
   const envSet = typeof process.env.HERDR_COORDINATION_DIR === 'string'

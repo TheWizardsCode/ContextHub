@@ -18,9 +18,9 @@ package-level overview lives in
 ```
                 ┌─────────────────────────── single machine ───────────────────────────┐
                 │                                                                      │
-  herdr A ──▶   .worklog/downtime-leader.lock    (file lock, first-to-create wins)      │
-                .worklog/downtime-leader-lease.json  (5-min TTL, refreshed per poll)    │
-                .worklog/downtime-coordination.json   (one entry per instance)          │
+  herdr A ──▶   ~/.herdr/downtime/downtime-leader.lock    (single machine lock)        │
+                ~/.herdr/downtime/downtime-leader-lease.json  (5-min TTL, per poll)     │
+                ~/.herdr/downtime/downtime-coordination.json  (one entry per instance)  │
                 │                                                                      │
   herdr B ──▶   checks in every 30 min: offers its own worklog's most-important item    │
                 │                                                                      │
@@ -31,12 +31,15 @@ package-level overview lives in
 ### Leader election (file lock + lease)
 
 - The first instance to atomically create
-  `<worklog-root>/.worklog/downtime-leader.lock`
-  (`O_CREAT|O_EXCL` — the "flock-equivalent" single-machine v1) becomes the
-  leader (`packages/herdr/src/leader-election.ts`).
+  `~/.herdr/downtime/downtime-leader.lock` (or `HERDR_COORDINATION_DIR` override,
+  see `machine-coordination.ts`) (`O_CREAT|O_EXCL`) becomes the single
+  machine-wide leader (one election, one lease — `leader-election.ts`,
+  WL-0MTF0KLO10043YAN F3 + F6 migration authoritative). Per-worklog
+  `<worklog-root>/.worklog/downtime-leader.lock` is retired — stale files
+  are ignored (no double-election, stable instanceId → single machine entry).
 - The leader holds a **5-minute lease**
   (`DEFAULT_LEASE_TTL_SECONDS = 300`) written to
-  `.worklog/downtime-leader-lease.json`, refreshed on every proxy-poll cycle
+  `~/.herdr/downtime/downtime-leader-lease.json` (same machine dir), refreshed on every proxy-poll cycle
   **and during the no-candidate cooldown pause** — an owned-but-EXPIRED
   lease is still renewed (`refreshLease()` is ownership-based, not
   validity-based: a lease with `leaderId === instanceId` is rewritten with a
@@ -53,17 +56,24 @@ package-level overview lives in
 - **Fail-safe:** a missing/unreadable lock or lease file is treated as "no
   leader" — the instance never dispatches without a valid leased lock.
 
-### Shared coordination file
+### Shared coordination file (machine-wide)
 
-`<worklog-root>/.worklog/downtime-coordination.json` stores one entry per
-herdr instance:
+`~/.herdr/downtime/downtime-coordination.json` (or `HERDR_COORDINATION_DIR`,
+WL-0MTF0KLO10043YAN) stores one entry per herdr instance — `directory` + `worklogRoot`
+(the worklog root the item belongs to, so the single leader dispatches across roots):
 
 ```json
 {"version":1,"entries":[
-  {"instanceId":"<uuid>","workItemId":"<wl-id>","directory":"<worklog-root>",
+  {"instanceId":"<uuid>","workItemId":"<wl-id>","directory":"<worklog-root>","worklogRoot":"<worklog-root>",
    "assignedAt":"<iso>","lastUpdated":"<iso>"}
 ]}
 ```
+
+Legacy per-worklog `<worklog-root>/.worklog/downtime-coordination.json` is retired
+(F6 WL-0MTII4CWT00452HU): once the machine dir is authoritative, stale per-worklog
+files are orphaned and ignored — the same instanceId writes exactly one machine
+entry (no double-join) and the leader never double-dispatches from legacy data.
+Unreadable/missing machine files degrade to "no dispatch this cycle" (fail-safe).
 
 Lifecycle (`packages/herdr/src/coordination.ts`):
 
@@ -185,12 +195,34 @@ non-critical tiers); `{ok:false}` is a `wl`/parse failure — a CLI-error
 strike, never a silent fall-through (a broken critical lookup can never
 masquerade as "no critical work").
 
-### Multi-worklog support
+### Multi-worklog support (F4 cross-root + F5 single budget)
 
-Each coordination entry records its own worklog root (`directory`). The
-leader compares offers across directories using the standard tier priority
-system and spawns dispatch panes into each entry's directory. v1 scope is
-single-machine; a multi-machine (real flock/NFS) extension is future work.
+Each machine-wide entry records `worklogRoot` (preferred) + `directory` alias.
+The single leader orders offers by tier priority (audit → critical →
+implement → plan → intake) **across worklogRoots** and spawns each pane in
+the entry's `worklogRoot`. The slot budget is machine-wide: ONE leader poll →
+ONE `freeSlots` snapshot (per-slot or `available_slots`), forwarded to the sole
+dispatch call — no per-worklog duplication (F5 WL-0MTII48OV008P2QU;
+WL-0MT50LKAK001EF5Q single cap source). v1 scope is single-machine; a
+multi-machine (real flock/NFS) extension is future work.
+
+### Migration & legacy retirement (F6 WL-0MTII4CWT00452HU, parent AC5)
+
+The machine dir `~/.herdr/downtime/` (or `HERDR_COORDINATION_DIR`) is
+**authoritative** once provisioned. Legacy per-worklog
+`downtime-coordination.json` / `downtime-leader.lock` /
+`downtime-leader-lease.json` files are no longer written and are not read
+as fallback — they are orphaned and ignored. Guarantees:
+
+- No double-dispatch or double-join: stable `instanceId` writes exactly
+  one machine entry regardless of stale legacy file presence.
+- Fail-safe: unreadable/missing machine coordination or lease files
+  degrade to "no dispatch this cycle" — never crash, never drop another
+  entry.
+- Dispatch/coordination **logs** (`downtime-dispatches.log`,
+  `downtime-coordination.log`) remain per worklog root (retained location)
+  for per-project observability; they are not migrated — stale per-worklog
+  coordination files do not imply log migration.
 
 ## Timing defaults (canonical)
 
@@ -236,8 +268,10 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
   `downtime-coordination.log` for check-ins and the dispatches log for the
   last dispatch.
 - **Two leaders:** impossible with `O_CREAT|O_EXCL` on one machine; if it
-  appears, check for leftover stale lock files (delete
-  `downtime-leader.lock` + lease to force re-election).
+  appears, check for leftover stale lock files — delete the **machine-dir**
+  `~/.herdr/downtime/downtime-leader.lock` + lease to force re-election (per-
+  worklog `.worklog/` stale locks are orphaned and no longer consulted after
+  the F6 migration).
 - **Corrupt coordination file:** read failures are treated as "missing" —
   the instance degrades to the pre-refactor no-dispatch behavior, never
   crashes. The file is safe to delete; instances rebuild it at their next
@@ -250,6 +284,10 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 - Work item: **WL-0MST3OJ8S0001ROL** *Refactor Downtime Dispatcher: leader
   election with shared coordination file* (+ its children H3UF5/H9UT6/HA1B/
   HA7LP/HAE2/HAKDT)
+- Work item: **WL-0MTF0KLO10043YAN** *Single machine-wide downtime leader
+  across all worklogs* (+ F1 resolver / F2 shared file with worklogRoot / F3
+  machine-wide election / F4 cross-root dispatch / F5 global slot budget /
+  F6 migration & legacy retirement / F7 docs+green)
 - Work item: **WL-0MT3FM8VA005XBHE** *Downtime dispatcher: critical items
   always progress first regardless of stage* (critical-first tier + freeze
   split-by-skill + caps retention + dependency-frontier dispatch)
