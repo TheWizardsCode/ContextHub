@@ -221,26 +221,30 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 since the refactor, ONE elected leader handles all llama-proxy polling and
 dispatches; the other herdr instances coordinate instead of polling:
 
-- **Leader election** — the first instance to acquire a file lock at
-  `<worklog-root>/.worklog/downtime-leader.lock` wins (single-machine v1,
-  flock-equivalent `O_CREAT|O_EXCL`). The leader holds a **5-minute lease**
-  (`downtime-leader-lease.json`), refreshed on every proxy-poll cycle; if
-  the lease expires (leader crashed or idle) another instance detects it
-  and takes over within the TTL.
-- **Shared coordination file** — every instance (leader and non-leader
-  alike) checks in on startup and every **30 minutes**, offering its own
-  worklog's **most-important item** at
-  `<worklog-root>/.worklog/downtime-coordination.json`:
-  `{instanceId, workItemId, directory, assignedAt, lastUpdated}`.
-- **Leader dispatch** — only the leader polls the proxy; once the LLM has
-  been idle continuously for the threshold, it first checks the
-  **scheduled-prompts** config (a due prompt dispatches immediately,
-  WL-0MSS1Q5ER007QDKX — see *Scheduled prompts* below), and only when none
-  is due does it read the coordination
-  list, classify each offer (tier priority: **audit → implement → plan →
-  intake**), and dispatch the highest-priority available item when a slot
-  opens. The dispatched entry is **removed**, and its owning instance
-  re-offers its next most-important item at its next check-in.
+- **Leader election** — single machine-wide election at
+  `~/.herdr/downtime/downtime-leader.lock` (or `HERDR_COORDINATION_DIR`
+  override, WL-0MTF0KLO10043YAN — one lock + lease machine-wide,
+  `O_CREAT|O_EXCL`). The leader holds a **5-minute lease**
+  (`downtime-leader-lease.json` in the same machine dir), refreshed on
+  every proxy-poll cycle; if the lease expires another instance takes
+  over within the TTL. Per-worklog lock/lease files are retired (F6
+  migration — stale files orphaned, ignored).
+- **Shared coordination file** — machine-wide
+  `~/.herdr/downtime/downtime-coordination.json` (or
+  `HERDR_COORDINATION_DIR`): every instance checks in on startup and every
+  **30 minutes**, offering its most-important item as
+  `{instanceId, workItemId, worklogRoot/directory, assignedAt, lastUpdated}`
+  (`worklogRoot` lets the single leader dispatch across roots — F4).
+- **Leader dispatch** — only the leader polls the proxy; once idle for the
+  threshold, it first checks **scheduled-prompts** (a due prompt dispatches
+  immediately — WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*); otherwise it
+  reads the machine-wide offer list, orders by tier priority **audit →
+  critical → implement → plan → intake across worklogRoots** (F4),
+  gated by a single machine-wide slot budget (F5 — one snapshot, per-tier
+  minimums audit 2 / single-pane 1), and dispatches the highest-priority
+  available entry in its `worklogRoot`. The entry is **removed**; its owner
+  re-offers its next item at the next check-in. Stale entries are pruned at
+  the lease TTL.
 - **Non-leaders** — skip proxy polling and dispatch entirely; they only
   refresh their lease check (a cheap local file read) and their
   coordination entry.
@@ -252,7 +256,9 @@ dispatches; the other herdr instances coordinate instead of polling:
 Coordination operations (check-ins, elections/takeovers, stale-entry
 pruning) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
-coordination records.
+coordination records. Dispatch/coordination logs stay **per worklog root**
+(retained location, F6 WL-0MTII4CWT00452HU — per-project observability;
+not migrated to the machine dir).
 
 When the local LLM (llama-server behind the llama-proxy) is idle, the plugin
 can use that compute to advance the worklog backlog automatically: after the
