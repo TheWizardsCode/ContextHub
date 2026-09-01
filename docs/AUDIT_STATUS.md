@@ -169,12 +169,22 @@ Fields:
 - It avoids accidental status inference from arbitrary prose.
 - It makes validation errors precise and actionable.
 
+## Audit Freshness
+
+- `isAuditFresh(auditedAt, updatedAt)` (`packages/shared/src/icons.ts`, used by the herdr TUI) returns `auditedAt > updatedAt - 60s`.
+- Freshness is **atomic**: `saveAuditResult` — the path behind both `wl audit-set` and `wl update --audit-text` (see `packages/shared/src/persistent-store.ts`) — writes the `audit_results` row and sets `workitems.updatedAt = auditedAt` in the same transaction, so `isAuditFresh` is true immediately after an audit (WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51).
+- Flag-only flips of `needsProducerReview` do not bump `updatedAt` (WL-0MSN6ZCTN0027U2R); comments do bump `updatedAt`, but the 60 s grace keeps the audit fresh until real content changes advance `updatedAt` beyond the window.
+
+## Canonical Source of Truth
+
+The `audit_results` row is the **sole consumer** of the audit verdict. No flow parses audit-content comments: heartbeat, ship gate, TUI, and implement all read `auditResult`/`auditedAt` from the record. Audit verdicts duplicated into work-item comments are deprecated/legacy and must not be added by audit flows — they only harm freshness by bumping `updatedAt`.
+
 ## Operational Notes
 
 - Config: `auditWriteEnabled` controls whether audit writes are allowed.
 - Storage: audit data is stored in the `audit_results` table with foreign key constraints and CASCADE DELETE semantics.
 - Migration: Use `wl doctor upgrade --confirm` to apply schema migrations on existing databases.
-- Tests: Unit and integration tests cover valid first-line parsing, invalid first-line errors, redaction, whitespace handling, CRUD operations on the `audit_results` table, migration backfill, and legacy column removal.
+- Tests: Unit and integration tests cover valid first-line parsing, invalid first-line errors, redaction, whitespace handling, CRUD operations on the `audit_results` table, migration backfill, legacy column removal, and the atomic `updatedAt = auditedAt` freshness guarantee (`tests/database.test.ts` — audit-then-comment ordering and audit-text parity).
 
 ### Error Behavior
 

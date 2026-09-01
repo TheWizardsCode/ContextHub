@@ -265,6 +265,16 @@ export function needsProducerReviewIcon(
  * not move `updatedAt`, so a previously valid audit remains fresh — the TUI
  * continues showing the passed icon and the downtime dispatcher does not
  * re-dispatch a redundant audit. (WL-0MSN6ZCTN0027U2R)
+ *
+ * Atomic freshness (WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51): `saveAuditResult`
+ * (and therefore `wl audit-set` and `wl update --audit-text`) atomically sets
+ * `updatedAt = auditedAt` in the same transaction that writes the
+ * `audit_results` row, so `isAuditFresh(auditedAt, updatedAt)` is true
+ * immediately after an audit. Subsequent comments do bump `updatedAt`, but the
+ * 60 s grace window (`auditedAt > updatedAt - 60s`) keeps the audit fresh until
+ * real content changes advance `updatedAt` beyond that window. The audit record
+ * in `audit_results` is the canonical source of truth; audit-content comments
+ * are deprecated and not consumed by any flow (ship/heartbeat/TUI/implement).
  */
 export function isAuditFresh(
   auditedAt: string | null | undefined,
