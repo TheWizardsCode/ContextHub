@@ -193,3 +193,23 @@ describe('isAuditFresh — flag-only updates must not make a valid audit stale (
     expect(isAuditFresh(auditedAt, updatedAtAfterContentChange)).toBe(false);
   });
 });
+
+describe('isAuditFresh — atomic audit persistence (WL-0MT8KTE3E001Q1D9)', () => {
+  it('stays fresh when a comment bumps updatedAt within 60 s of the audit', () => {
+    const auditedAt = '2026-08-02T10:00:30.000Z';
+    const updatedAtAfterComment = '2026-08-02T10:00:40.000Z';
+    expect(isAuditFresh(auditedAt, updatedAtAfterComment)).toBe(true);
+  });
+
+  it('stays fresh when updatedAt equals auditedAt (immediately after audit)', () => {
+    const auditedAt = '2026-08-02T10:00:30.000Z';
+    const updatedAt = auditedAt;
+    expect(isAuditFresh(auditedAt, updatedAt)).toBe(true);
+  });
+
+  it('becomes stale when comment bumps updatedAt beyond 60 s', () => {
+    const auditedAt = '2026-08-02T10:00:30.000Z';
+    const updatedAtAfterComment = '2026-08-02T10:01:35.000Z';
+    expect(isAuditFresh(auditedAt, updatedAtAfterComment)).toBe(false);
+  });
+});

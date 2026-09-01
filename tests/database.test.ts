@@ -104,6 +104,24 @@ describe('WorklogDatabase', () => {
       expect(auditResult?.summary).toBe('Ready to close: Yes');
     });
 
+    it('should set updatedAt = auditedAt atomically on saveAuditResult (WL-0MT8KTE3E001Q1D9)', () => {
+      const item = db.create({
+        title: 'Audited item for freshness test',
+        description: 'Testing audit freshness clock',
+      });
+      const auditedAt = new Date().toISOString();
+      db.saveAuditResult({
+        workItemId: item.id,
+        readyToClose: true,
+        auditedAt: auditedAt,
+        author: 'tester',
+        summary: 'Ready to close: Yes',
+        rawOutput: null,
+      });
+      const updated = db.get(item.id);
+      expect(updated?.updatedAt).toBe(auditedAt);
+    });
+
     it('should create a work item with a parent', () => {
       const parent = db.create({ title: 'Parent task' });
       const child = db.create({
