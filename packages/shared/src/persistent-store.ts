@@ -1268,6 +1268,8 @@ export class SqlitePersistentStore {
       this.db.prepare(
         `UPDATE workitems SET updatedAt = ? WHERE id = ?`,
       ).run(audit.auditedAt, audit.workItemId);
+      this.invalidateWorkItemCaches();
+      this.cacheInvalidate(`workitem_${audit.workItemId}`);
     }
   }
 

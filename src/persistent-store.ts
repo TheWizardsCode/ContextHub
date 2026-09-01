@@ -937,6 +937,10 @@ export class SqlitePersistentStore {
     if (result.changes === 0) {
       throw new Error(`Audit result could not be persisted for work item ${audit.workItemId}`);
     }
+    const item = this.getWorkItem(audit.workItemId);
+    if (item) {
+      this.db.prepare(`UPDATE workitems SET updatedAt = ? WHERE id = ?`).run(audit.auditedAt, audit.workItemId);
+    }
   }
 
   /**
