@@ -227,7 +227,7 @@ export const DEFAULT_COORDINATION_CHECK_IN_MS = 30 * 60 * 1000;
  * FIRST dispatch stage (freeze-gated, before ANY coordination-tier work),
  * so a due prompt dispatches instead of reaching these tiers.
  */
-export const COORDINATION_TIER_ORDER = ['audit', 'implement', 'plan', 'intake'] as const;
+export const COORDINATION_TIER_ORDER = ['audit', 'critical', 'implement', 'plan', 'intake'] as const;
 
 export type CoordinationTierKind = (typeof COORDINATION_TIER_ORDER)[number];
 
@@ -1630,23 +1630,50 @@ export async function dispatchFromCoordination(
     }
   }
 
-  // Re-fetch + classify every entry once, grouped by tier.
-  const byTier = new Map<DowntimeSkillKind, Array<{ entry: CoordinationEntry; info: DowntimeItemInfo }>>();
+  // Re-fetch + classify every entry once, grouped by tier (F4 cross-root:
+  // audit → critical → implement → plan → intake across worklogRoots).
+  // Critical priority open items at any dispatchable stage outrank every
+  // non-critical tier — they are grouped under the dedicated 'critical'
+  // tier and dispatched with their stage-appropriate skill (Q2 caps retained).
+  const byTier = new Map<string, Array<{ entry: CoordinationEntry; info: DowntimeItemInfo; skill: DowntimeSkillKind }>>();
   let fetchAttempts = 0;
   let fetchFailures = 0;
   for (const entry of entries) {
     if (entry.instanceId.length === 0 || entry.workItemId.length === 0) continue;
     fetchAttempts += 1;
-    const result = await deps.fetchItem(entry.workItemId, entry.directory);
+    const worklogRoot = entry.worklogRoot ?? entry.directory;
+    const result = await deps.fetchItem(entry.workItemId, worklogRoot);
     if (!result.ok) {
       fetchFailures += 1;
       continue;
+    }
+    // Critical-first tier (WL-0MT3FM8VA005XBHE): an open critical item at
+    // a dispatchable stage (idea/intake_complete/plan_complete) outranks
+    // every non-critical tier; its dispatch skill is stage-appropriate.
+    const priority = typeof result.info.priority === 'string' ? result.info.priority.toLowerCase() : '';
+    if (priority === 'critical' && result.info.status === 'open') {
+      const critSkill = criticalSkillKind(result.info.stage ?? '');
+      if (critSkill !== null) {
+        // Q2 caps retained: above-caps critical plan_complete is not
+        // dispatchable even on the critical tier (same ordinals as
+        // selectCriticalCandidate).
+        if (result.info.stage === 'plan_complete') {
+          const risk = riskOrdinal(result.info.risk);
+          const effort = effortOrdinal(result.info.effort);
+          if (risk === null || risk > 2 || effort === null || effort > 3) continue;
+        }
+        if (frozen && critSkill === 'implement') continue;
+        const group = byTier.get('critical') ?? [];
+        group.push({ entry, info: result.info, skill: critSkill });
+        byTier.set('critical', group);
+        continue;
+      }
     }
     const kind = classifyItemForDispatch(result.info, now);
     if (kind === null) continue;
     if (frozen && (kind === 'audit' || kind === 'implement')) continue;
     const group = byTier.get(kind) ?? [];
-    group.push({ entry, info: result.info });
+    group.push({ entry, info: result.info, skill: kind });
     byTier.set(kind, group);
   }
 
@@ -1663,12 +1690,13 @@ export async function dispatchFromCoordination(
     // Phase 2 child (WL-0MSORQ1RG005DGUS) — skip the whole audit group
     // when too few slots are free (ineligible, never a strike).
     if (tier === 'audit' && !auditEligible) continue;
-    for (const { entry, info } of group) {
+    for (const { entry, info, skill } of group) {
+      const worklogRoot = entry.worklogRoot ?? entry.directory;
       const outcome = await dispatchClaimedTier(
         deps,
-        tier as DowntimeSkillKind,
+        skill,
         toCoordinationCandidate(info),
-        { model: opts.model, cwd: entry.directory },
+        { model: opts.model, cwd: worklogRoot },
       );
       if (outcome.dispatched) {
         // Dispatched — remove the entry so the owner re-queues its next
