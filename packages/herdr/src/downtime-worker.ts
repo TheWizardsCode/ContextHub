@@ -143,19 +143,25 @@ export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2;
 
 /**
  * Minimum free slots required for an AUDIT dispatch (parent
- * WL-0MT32F90V008UAD2 AC3): an audit pane needs a second slot for its
+ * WL-0MT32F90V008UAD2 AC3, machine-wide budget WL-0MTF0KLO10043YAN AC4 /
+ * WL-0MTII48OV008P2QU F5): an audit pane needs a second slot for its
  * Phase 2 child deep-analysis (`AUDIT_PHASE2_PARALLELISM=1` — the child
  * runs strictly after the parent, so parent + one child = 2 local slots,
  * WL-0MSORQ1RG005DGUS). Applied as an ADDITIONAL selection-time check on
  * the latest polled status; the idle-duration gate (configured N) is
- * unchanged. `AUDIT_PHASE2_PARALLELISM=1` → 2 slots minimum.
+ * unchanged. Single machine-wide budget (one leader poll, one snapshot) -
+ * see WL-0MT50LKAK001EF5Q bounded concurrent dispatches: the same cap
+ * source, no per-worklog duplication. `AUDIT_PHASE2_PARALLELISM=1` → 2
+ * slots minimum.
  */
 export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
 
 /**
  * Minimum free slots required for a single-pane dispatch (implement /
- * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3): each
- * pane consumes exactly one local slot, so ≥1 free slot suffices.
+ * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3, F5
+ * WL-0MTII48OV008P2QU single budget): each pane consumes exactly one local
+ * slot, so ≥1 free slot suffices. Machine-wide, not per-worklog — shares
+ * the single leader snapshot with WL-0MT50LKAK001EF5Q (one cap source).
  */
 export const DOWNTIME_PANE_MIN_FREE_SLOTS = 1;
 
@@ -2805,14 +2811,15 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (!ready) return { polled: true, dispatched: false, idle: true };
       if (dispatching) return { polled: true, dispatched: false, idle: true };
 
-      // ── Dispatch (parent WL-0MST3OJ8S0001ROL AC4) ──
-      // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
-      // latest polled free-slot count flows into dispatch selection — per-slot
-      // free count when per-slot identity is served (fail-closed counting:
-      // an entry without an explicit boolean `is_processing` is busy, never
-      // free), else `available_slots`. The coordination path uses it to gate
-      // the audit tier (needs ≥ 2 slots: parent + Phase 2 child); the legacy
-      // path passes it through to the direct tier chain unchanged.
+      // ── Dispatch (parent WL-0MST3OJ8S0001ROL AC4, F5 WL-0MTII48OV008P2QU AC4) ──
+      // Single machine-wide slot budget: ONE leader poll → ONE freeSlots
+      // snapshot (per-slot free count when `slots` served, else
+      // `available_slots`), forwarded to the sole dispatch call. No
+      // per-worklog duplication — total concurrently dispatched never exceeds
+      // the shared budget (WL-0MT50LKAK001EF5Q single cap source). Per-tier
+      // minimums (WL-0MT32F90V008UAD2 AC3): audit needs ≥2 (parent + Phase 2
+      // child), single-pane tiers need ≥1; idle-duration gate (configured N)
+      // is unchanged and shared.
       const freeSlots =
         Array.isArray(status.slots)
           ? status.slots.filter(
