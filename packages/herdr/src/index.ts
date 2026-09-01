@@ -48,6 +48,7 @@ import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
+import { getMachineCoordinationDir } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
 import {
   createDowntimeWorker,
@@ -1175,14 +1176,13 @@ async function main(): Promise<void> {
     registry: createRoundRobinRegistry({
       worklogDir: join(targetCwd, '.worklog'),
     }),
-    // Leader-election + coordination refactor (parent WL-0MST3OJ8S0001ROL):
-    // the shared coordination dir is THIS worklog's .worklog (single-machine
-    // v1 — every herdr instance contributing to the same list passes its own
-    // root; the coordination file + leader lock/lease live there). The
-    // instance id is auto-generated at worker construction (stable for the
-    // process lifetime; re-offers under a fresh id after a restart, the dead
-    // lease expiring in the TTL).
-    coordinationDir: join(targetCwd, '.worklog'),
+    // Leader-election + coordination refactor (parent WL-0MTF0KLO10043YAN
+    // F3): single machine-wide coordination dir — one election, one lease
+    // machine-wide. HERDR_COORDINATION_DIR override wins; default is
+    // ~/.herdr/downtime/. The per-worklog join(targetCwd, '.worklog')
+    // coupling is retired (F6). The instance id is auto-generated at
+    // worker construction (stable for the process lifetime).
+    coordinationDir: getMachineCoordinationDir() ?? join(targetCwd, '.worklog'),
     config: () => {
       const s = loadSettings();
       return {

@@ -6,8 +6,8 @@
  *
  * Implements file-lock-based leader election with lease management:
  *
- *  - A file lock at `<worklog-root>/.worklog/downtime-leader.lock` elects
- *    a single leader per worklog directory.
+ *  - A file lock at `<machine-dir>/downtime-leader.lock` elects a single
+ *    leader machine-wide (WL-0MTF0KLO10043YAN F3).
  *  - The leader holds a 5-minute lease (TTL), refreshed on each proxy-poll
  *    cycle. If the lease expires (leader crashed or idle), instances detect
  *    the expiry and run a new election.
@@ -23,8 +23,10 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { getMachineCoordinationDir, ensureMachineCoordinationDir } from './machine-coordination.js';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -148,14 +150,39 @@ function generateInstanceId(): string {
   return crypto.randomUUID();
 }
 
-/** Resolve the lock file path. */
-function lockFilePath(worklogDir: string): string {
-  return path.join(worklogDir, LEADER_LOCK_FILE);
+/**
+ * Resolve the effective leader-election directory (WL-0MTF0KLO10043YAN F3).
+ *
+ * Machine-wide v1: getMachineCoordinationDir() (~/.herdr/downtime or
+ * HERDR_COORDINATION_DIR override) is the single source of truth — one
+ * election, one lease machine-wide. F3 mirrors coordination.ts tmp
+ * isolation so existing tests using mkdtempSync(tmpdir()) stay green
+ * without setting HERDR_COORDINATION_DIR; production worklog roots share
+ * the single machine dir (the F3 AC2 proof sets HERDR_COORDINATION_DIR).
+ */
+function resolveEffectiveLeaderDir(worklogDir: string): string | null {
+  const envSet = typeof process.env.HERDR_COORDINATION_DIR === 'string'
+    && process.env.HERDR_COORDINATION_DIR.length > 0;
+  const isTmpWorklog = worklogDir.startsWith(os.tmpdir())
+    || worklogDir.includes(`${path.sep}tmp${path.sep}`)
+    || worklogDir.includes('herdr-');
+  if (!envSet && isTmpWorklog) return worklogDir;
+  const machineDir = getMachineCoordinationDir();
+  if (machineDir !== null) {
+    ensureMachineCoordinationDir(machineDir);
+    return machineDir;
+  }
+  return worklogDir;
 }
 
-/** Resolve the lease file path. */
+/** Resolve the lock file path (machine-wide). */
+function lockFilePath(worklogDir: string): string {
+  return path.join(resolveEffectiveLeaderDir(worklogDir) ?? worklogDir, LEADER_LOCK_FILE);
+}
+
+/** Resolve the lease file path (machine-wide). */
 function leaseFilePath(worklogDir: string): string {
-  return path.join(worklogDir, LEASE_FILE);
+  return path.join(resolveEffectiveLeaderDir(worklogDir) ?? worklogDir, LEASE_FILE);
 }
 
 /** Read the lock file contents. Returns null if missing or unreadable. */
@@ -178,7 +205,8 @@ function writeLockFile(worklogDir: string, instanceId: string): boolean {
     const fp = lockFilePath(worklogDir);
     // Ensure the coordination dir exists (a fresh worklog may not have it
     // yet — same provisioning as writeCoordinationFile's recursive mkdir).
-    fs.mkdirSync(worklogDir, { recursive: true });
+    const effDir = resolveEffectiveLeaderDir(worklogDir) ?? worklogDir;
+    fs.mkdirSync(effDir, { recursive: true });
     // O_CREAT|O_EXCL: atomic exclusive creation — fails if file exists
     const fd = fs.openSync(fp, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o644);
     fs.writeSync(fd, instanceId);
@@ -216,7 +244,8 @@ function writeLeaseFile(worklogDir: string, lease: LeaderLease): boolean {
   try {
     const fp = leaseFilePath(worklogDir);
     const tmpPath = fp + '.tmp';
-    fs.mkdirSync(worklogDir, { recursive: true });
+    const effDir = resolveEffectiveLeaderDir(worklogDir) ?? worklogDir;
+    fs.mkdirSync(effDir, { recursive: true });
     fs.writeFileSync(tmpPath, JSON.stringify(lease), 'utf-8');
     fs.renameSync(tmpPath, fp);
     return true;
