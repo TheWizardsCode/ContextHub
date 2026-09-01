@@ -110,6 +110,46 @@ export interface SyncResult {
 export interface MergeOptions {
   defaultValueFields?: Array<keyof WorkItem>;
   sameTimestampStrategy?: 'lexicographic' | 'local' | 'remote';
+  /** When true, allow remote defaults to overwrite local non-defaults (accept regressions). Default: false. */
+  acceptRegressions?: boolean;
+}
+
+/**
+ * Regression-guard definition of "default" for merge-participating fields.
+ * These are the values that constitute a regression when they appear on the
+ * remote side while the local side has a meaningful non-default value.
+ *
+ * This is DISTINCT from `isDefaultValue` which only treats ''/undefined/[] as
+ * defaults.  The regression guard uses a broader definition so that
+ * `status: open`, `stage: idea`, `priority: medium` are recognised as defaults
+ * that signal data loss when they overwrite local non-default values.
+ */
+export function isRegressionDefault(value: unknown, field: string): boolean {
+  if (value === undefined || value === '') {
+    return true;
+  }
+  const str = String(value);
+  switch (field) {
+    case 'status':
+      // 'open' is the default; everything else is a real value.
+      return str === 'open';
+    case 'stage':
+      // 'idea' is the default; everything else is a real value.
+      return str === 'idea';
+    case 'priority':
+      // 'medium' is the default.
+      return str === 'medium';
+    default:
+      return false;
+  }
+}
+
+/**
+ * Check whether a remote value is a "regression default" while the local
+ * value is a meaningful non-default — the core regression-detection predicate.
+ */
+export function isValueRegression(localValue: unknown, remoteValue: unknown, field: string): boolean {
+  return !isRegressionDefault(localValue, field) && isRegressionDefault(remoteValue, field);
 }
 
 
@@ -485,6 +525,17 @@ export function isTerminalStage(stage: string | undefined): boolean {
   return stage === 'done' || stage === 'in_review';
 }
 
+/**
+ * DELETE-SIDE PROTECTION (WL-0MSKZ30SK007K9TO): an attributed delete carries real
+ * intent — non-empty `deletedBy` (who) or `deleteReason` (why). Unattributed
+ * `status='deleted'` markers (empty both) are NOT real deletes and must never
+ * override a live remote/local item (mirrors the close-preservation model that
+ * protects `status='completed'`).
+ */
+function isAttributedDelete(item: WorkItem): boolean {
+  return Boolean(item.deletedBy) || Boolean(item.deleteReason);
+}
+
 function mergeSameTimestampItems(
   localItem: WorkItem,
   remoteItem: WorkItem,
@@ -534,7 +585,45 @@ function mergeSameTimestampItems(
     // resurrect a soft-deleted record (AC3 remote/local convergence).
     if (field === 'status') {
       if (localValue === 'deleted' || remoteValue === 'deleted') {
-        const chosenValue = localValue === 'deleted' ? localValue : remoteValue;
+        const localDeleted = localValue === 'deleted';
+        const remoteDeleted = remoteValue === 'deleted';
+        const localAttributed = isAttributedDelete(localItem);
+        const remoteAttributed = isAttributedDelete(remoteItem);
+
+        // DELETE-SIDE PROTECTION (WL-0MSKZ30SK007K9TO): an UNATTRIBUTED soft-delete
+        // (empty deletedBy/deleteReason) is not real intent — it must never override
+        // a live remote/local item. A delete only wins when it is attributed, or when
+        // BOTH sides are deleted (nothing live left to protect).
+        if (localDeleted && !remoteDeleted && !localAttributed) {
+          // Keep the live remote status; ignore the unattributed local delete.
+          (merged as any)[field] = remoteValue;
+          mergedFields.push(`${field} (unattributed local delete ignored, remote status kept)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: remoteValue,
+            chosenSource: 'remote',
+            reason: 'local soft delete is unattributed (no deletedBy/deleteReason); remote live status kept'
+          });
+          continue;
+        }
+        if (remoteDeleted && !localDeleted && !remoteAttributed) {
+          // Keep the local live status; ignore the unattributed remote delete.
+          (merged as any)[field] = localValue;
+          mergedFields.push(`${field} (unattributed remote delete ignored, local status kept)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: localValue,
+            chosenSource: 'local',
+            reason: 'remote soft delete is unattributed (no deletedBy/deleteReason); local live status kept'
+          });
+          continue;
+        }
+
+        const chosenValue = localDeleted ? localValue : remoteValue;
         (merged as any)[field] = chosenValue;
         mergedFields.push(`${field} (deleted preserved)`);
         fieldDetails.push({
@@ -543,7 +632,9 @@ function mergeSameTimestampItems(
           remoteValue,
           chosenValue,
           chosenSource: chosenValue === localValue ? 'local' : 'remote',
-          reason: 'soft delete is terminal and wins at equal timestamps'
+          reason: localDeleted && remoteDeleted
+            ? 'both sides soft-deleted — converged to deleted'
+            : 'attributed soft delete is terminal and wins at equal timestamps'
         });
         continue;
       }
@@ -606,6 +697,32 @@ function mergeSameTimestampItems(
         continue;
       }
     }
+
+    // ── Regression guard (WL-0MSOYWZTH003JFVD) ──────────────────────
+    // Detect when a merge-participating field regresses from a local
+    // non-default value to a remote default (e.g. status: completed → open,
+    // stage: done → idea, priority: high → medium, assignee: alice → '').
+    // The guard refuses the import and reports the conflict unless
+    // acceptRegressions is true.
+    const mergeParticipatingFields = ['status', 'stage', 'priority', 'assignee'];
+    if (mergeParticipatingFields.includes(field as string) && isValueRegression(localValue, remoteValue, field)) {
+      const acceptRegressions = options?.acceptRegressions ?? false;
+      if (!acceptRegressions) {
+        // Refuse: keep local value, report regression conflict
+        mergedFields.push(`${field} (regression refused, local kept)`);
+        fieldDetails.push({
+          field,
+          localValue,
+          remoteValue,
+          chosenValue: localValue,
+          chosenSource: 'local',
+          reason: `regression detected: local ${String(localValue)} → remote ${String(remoteValue)} is a regression default; local value kept`
+        });
+        continue;
+      }
+      // With acceptRegressions=true, fall through to normal resolution.
+    }
+
     if (localIsDefault && !remoteIsDefault) {
       (merged as any)[field] = remoteValue;
       mergedFields.push(`${field} (from remote)`);
@@ -663,12 +780,32 @@ function mergeSameTimestampItems(
     }
   }
 
-  // Bump updatedAt so next sync has an unambiguous winner.
-  merged.updatedAt = new Date().toISOString();
+  // Bump updatedAt ONLY when the merge changed a user-visible, non-sortIndex field
+  // (WL-0MSKZ30SK007K9TO). The previous unconditional bump made any divergent pair
+  // forever "newer" than the remote, so the local value kept winning and updatedAt
+  // advanced on EVERY repeated sync — a self-sustaining conflict loop with no real
+  // user edit behind it. Case-by-case:
+  //   1. sortIndex-only conflicts (concurrent wl re-sort): NEVER bump — pure ordering,
+  //      zero timestamp churn (producer Q2).
+  //   2. Merge resolved back to the local content (tie-break/regression guard kept
+  //      local): no user-visible change — no bump; the same divergent state re-merges
+  //      deterministically with no timestamp advance, so updatedAt stays quiescent.
+  //   3. Real content change: bump once so the next sync has an unambiguous winner; the
+  //      merged item then propagates (newer side wins by recency) and both sides
+  //      converge — no unbounded bumping.
+  const mergedEqualsLocal = fields.every((field) =>
+    stableValueKey((merged as any)[field]) === stableValueKey(localItem[field])
+  );
+  const nonSortIndexMerged = mergedFields.some((f) => !f.startsWith('sortIndex'));
+  if (nonSortIndexMerged && !mergedEqualsLocal) {
+    merged.updatedAt = new Date().toISOString();
+  }
   merged.createdAt = localItem.createdAt;
 
   const conflictMessages: string[] = [
-    `${remoteItem.id}: Same updatedAt but different content - ${sameTimestampLabel} and bumped updatedAt`
+    `${remoteItem.id}: Same updatedAt but different content - ${sameTimestampLabel}${
+      merged.updatedAt === localItem.updatedAt ? '' : ' and bumped updatedAt'
+    }`
   ];
   if (mergedFields.length > 0) {
     conflictMessages.push(`${remoteItem.id}: Merged fields [${mergedFields.join(', ')}]`);
@@ -743,31 +880,79 @@ function mergeDifferentTimestampItems(
       // completed/in_review item (the delete command preserves the stage) would
       // otherwise never converge to the remote. When the NEWER side is `deleted`, its
       // status always wins; the newer timestamp already reflects the deletion time.
+      //
+      // DELETE-SIDE PROTECTION (WL-0MSKZ30SK007K9TO): an UNATTRIBUTED delete (empty
+      // deletedBy/deleteReason) is not real intent and must never win by recency
+      // alone — it would silently soft-delete an item the other side still considers
+      // live. Unattributed deletes keep the live status; only ATTRIBUTED (or
+      // both-sides-deleted) deletes propagate.
       if (field === 'status') {
-        if (remoteValue === 'deleted' && isRemoteNewer) {
-          (merged as any)[field] = remoteValue;
-          mergedFields.push(`${field} (deleted from remote)`);
+        if (localValue === 'deleted' && remoteValue === 'deleted') {
+          // Both sides soft-deleted — nothing live to protect; converge to deleted.
+          (merged as any)[field] = 'deleted';
+          mergedFields.push(`${field} (deleted from both)`);
           fieldDetails.push({
             field,
             localValue,
             remoteValue,
-            chosenValue: remoteValue,
-            chosenSource: 'remote',
-            reason: 'remote records a soft delete (newer timestamp)'
+            chosenValue: 'deleted',
+            chosenSource: 'both',
+            reason: 'both sides soft-deleted — converged to deleted'
           });
           continue;
         }
+        if (remoteValue === 'deleted' && isRemoteNewer) {
+          if (isAttributedDelete(remoteItem)) {
+            (merged as any)[field] = remoteValue;
+            mergedFields.push(`${field} (deleted from remote)`);
+            fieldDetails.push({
+              field,
+              localValue,
+              remoteValue,
+              chosenValue: remoteValue,
+              chosenSource: 'remote',
+              reason: 'remote records an attributed soft delete (newer timestamp)'
+            });
+          } else {
+            // Keep the local live status; ignore the unattributed remote delete.
+            (merged as any)[field] = localValue;
+            mergedFields.push(`${field} (unattributed remote delete ignored, local status kept)`);
+            fieldDetails.push({
+              field,
+              localValue,
+              remoteValue,
+              chosenValue: localValue,
+              chosenSource: 'local',
+              reason: 'remote soft delete is unattributed (no deletedBy/deleteReason); local live status kept'
+            });
+          }
+          continue;
+        }
         if (localValue === 'deleted' && !isRemoteNewer) {
-          (merged as any)[field] = localValue;
-          mergedFields.push(`${field} (deleted from local)`);
-          fieldDetails.push({
-            field,
-            localValue,
-            remoteValue,
-            chosenValue: localValue,
-            chosenSource: 'local',
-            reason: 'local records a soft delete (newer timestamp)'
-          });
+          if (isAttributedDelete(localItem)) {
+            (merged as any)[field] = localValue;
+            mergedFields.push(`${field} (deleted from local)`);
+            fieldDetails.push({
+              field,
+              localValue,
+              remoteValue,
+              chosenValue: localValue,
+              chosenSource: 'local',
+              reason: 'local records an attributed soft delete (newer timestamp)'
+            });
+          } else {
+            // Keep the remote live status; ignore the unattributed local delete.
+            (merged as any)[field] = remoteValue;
+            mergedFields.push(`${field} (unattributed local delete ignored, remote status kept)`);
+            fieldDetails.push({
+              field,
+              localValue,
+              remoteValue,
+              chosenValue: remoteValue,
+              chosenSource: 'remote',
+              reason: 'local soft delete is unattributed (no deletedBy/deleteReason); remote live status kept'
+            });
+          }
           continue;
         }
         const localIsClose = localValue === 'completed' && (isTerminalStage(localItem.stage) || isTerminalStage(remoteItem.stage));
@@ -841,6 +1026,26 @@ function mergeDifferentTimestampItems(
           // Fall through to normal resolution when local is newer
         }
       }
+
+      // ── Regression guard (WL-0MSOYWZTH003JFVD) ─────────────────────
+      const mergeParticipatingFieldsDiff = ['status', 'stage', 'priority', 'assignee'];
+      if (mergeParticipatingFieldsDiff.includes(field as string) && isValueRegression(localValue, remoteValue, field)) {
+        const acceptRegressionsDiff = options?.acceptRegressions ?? false;
+        if (!acceptRegressionsDiff) {
+          mergedFields.push(`${field} (regression refused, local kept)`);
+          fieldDetails.push({
+            field,
+            localValue,
+            remoteValue,
+            chosenValue: localValue,
+            chosenSource: 'local',
+            reason: `regression detected: local ${String(localValue)} → remote ${String(remoteValue)} is a regression default; local value kept`
+          });
+          continue;
+        }
+        // With acceptRegressions=true, fall through to normal resolution.
+      }
+
       if (localIsDefault && !remoteIsDefault) {
         (merged as any)[field] = remoteValue;
         mergedFields.push(`${field} (from remote)`);

@@ -570,6 +570,20 @@ export function resolveFormat(program: Command, provided?: string): string {
   return loadConfig()?.humanDisplay || 'full';
 }
 
+// Human renderer for projected (field-selected) items. Renders each requested
+// field as `key: value` lines so `--fields` yields concise display while still
+// remaining human-readable.
+export function humanFormatProjected(projected: Record<string, unknown>): string {
+  const lines: string[] = [];
+  for (const [key, value] of Object.entries(projected)) {
+    const formatted = Array.isArray(value)
+      ? value.join(', ')
+      : String(value ?? '');
+    lines.push(`${key}: ${formatted}`);
+  }
+  return lines.join('\n');
+}
+
 // Human formatter for comments
 export function humanFormatComment(comment: Comment, format?: string): string {
   const fmt = (format || loadConfig()?.humanDisplay || 'full').toLowerCase();

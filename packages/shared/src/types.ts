@@ -291,7 +291,7 @@ export interface ConflictFieldDetail {
   localValue: any;
   remoteValue: any;
   chosenValue: any;
-  chosenSource: 'local' | 'remote' | 'merged';
+  chosenSource: 'local' | 'remote' | 'merged' | 'both';
   reason: string;
 }
 

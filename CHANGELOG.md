@@ -1,5 +1,7 @@
 # Changelog
 
+## v1.0.13 (2026-09-01)
+
 ## v1.0.12 (2026-08-25)
 ### Features
 - Herdr downtime dispatcher: scheduled prompts (best-effort frequency) config (WL-0MSS1Q5ER007QDKX)

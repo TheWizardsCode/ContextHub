@@ -31,6 +31,7 @@ export const retryStates: Record<string, RetryState> = {
   timeout: new RetryState(),
   terminated: new RetryState(),
   parseError: new RetryState(),
+  compactionGate: new RetryState(),
 };
 
 export const continuationState = new ContinuationState();
@@ -164,6 +165,14 @@ export async function executeRetryCommand(
 
     case ErrorCategory.CONTEXT_LENGTH:
       ctx.ui.notify('Manual continue after context-length...', 'info');
+      options.triggerCompactContinue();
+      break;
+
+    case ErrorCategory.COMPACTION_GATE:
+      ctx.ui.notify('Manual continue after compaction gate...', 'info');
+      // COMPACTION_GATE shares the compact-and-continue machinery
+      // (executeCompactAndContinue → triggerInvisibleContinue). A manual
+      // /retry after a gate is routed through the same trigger.
       options.triggerCompactContinue();
       break;
 

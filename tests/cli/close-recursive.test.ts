@@ -18,6 +18,7 @@ import {
   writeConfig,
   writeInitSemaphore,
 } from './cli-helpers.js';
+import { runInProcess } from './cli-inproc.js';
 
 /**
  * Run a CLI command via tsx and return parsed JSON output.
@@ -33,6 +34,17 @@ async function runJson(args: string): Promise<any> {
  */
 async function runRaw(args: string): Promise<{ stdout: string; stderr: string }> {
   return await execAsync(`tsx ${cliPath} ${args}`);
+}
+
+/**
+ * Run a CLI command and return parsed JSON output, even when the process
+ * exits non-zero (e.g. batch close with partial failures).
+ * Unlike runJson, this does NOT throw on non-zero exit codes.
+ */
+async function runJsonSilent(args: string): Promise<any> {
+  const command = `tsx ${cliPath} --json ${args}`;
+  const res = await runInProcess(command, 30000);
+  return JSON.parse(res.stdout ?? '');
 }
 
 describe('close command recursive close', () => {
@@ -80,7 +92,7 @@ describe('close command recursive close', () => {
     const id = created.workItem.id;
 
     const result = await runJson(`close ${id} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
 
     // Verify it's closed
     const shown = await runJson(`show ${id}`);
@@ -93,7 +105,7 @@ describe('close command recursive close', () => {
 
     // Close parent (not in_review stage)
     const result = await runJson(`close ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
 
     // Parent should be closed
     const parentShown = await runJson(`show ${parentId}`);
@@ -111,7 +123,7 @@ describe('close command recursive close', () => {
 
     // Close parent (in_review but no audit)
     const result = await runJson(`close ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
 
     // Parent should be closed
     const parentShown = await runJson(`show ${parentId}`);
@@ -132,7 +144,7 @@ describe('close command recursive close', () => {
 
     // Close parent
     const result = await runJson(`close ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
 
     // Parent should be closed
     const parentShown = await runJson(`show ${parentId}`);
@@ -153,7 +165,7 @@ describe('close command recursive close', () => {
 
     // Close parent - should recursively close children
     const result = await runJson(`close ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
 
     // Parent should be closed
     const parentShown = await runJson(`show ${parentId}`);
@@ -187,7 +199,7 @@ describe('close command recursive close', () => {
 
     // Close grandparent
     const result = await runJson(`close ${gpId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
 
     // All items should be closed
     expect((await runJson(`show ${gpId}`)).workItem.status).toBe('completed');
@@ -236,7 +248,7 @@ describe('close command recursive close', () => {
     await runJson(`update ${parentId} --audit-text "Ready to close: Yes\nAll criteria met"`);
 
     const result = await runJson(`close ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results).toHaveLength(1);
 
     const parentResult = result.results[0];
@@ -262,7 +274,7 @@ describe('close command recursive close', () => {
     await runJson(`update ${gpId} --audit-text "Ready to close: Yes\nAll criteria met"`);
 
     const result = await runJson(`close ${gpId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].childrenClosed).toBe(2); // parent + child = 2 descendants
   });
 
@@ -271,7 +283,7 @@ describe('close command recursive close', () => {
 
     // Close parent (NOT in_review -> non-recursive)
     const result = await runJson(`close ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].childrenClosed).toBeUndefined();
   });
 
@@ -345,7 +357,7 @@ describe('close command recursive close', () => {
     await runJson(`update ${parentId} --audit-text "Ready to close: Yes\nAll criteria met"`);
 
     const result = await runJson(`close ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results).toHaveLength(1);
 
     const parentResult = result.results[0];
@@ -378,7 +390,7 @@ describe('close command recursive close', () => {
 
     // Call close again on the done parent — should trigger recovery
     const result = await runJson(`close ${parentId} -r "closing children"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
 
     // Children should now be closed
     for (const childId of childIds) {
@@ -413,7 +425,7 @@ describe('close command recursive close', () => {
 
     // Call close again on the done parent — should trigger recovery
     const result = await runJson(`close ${parentId} -r "closing children"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
 
     // Children should now be closed
     for (const childId of childIds) {
@@ -433,7 +445,7 @@ describe('close command recursive close', () => {
     await runJson(`update ${parentId} --status completed --stage done`);
 
     const result = await runJson(`close ${parentId} -r "closing children"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results).toHaveLength(1);
 
     const parentResult = result.results[0];
@@ -472,7 +484,7 @@ describe('close command recursive close', () => {
 
     // Call close — should NOT trigger recovery (all children already done)
     const result = await runJson(`close ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].recovered).toBeUndefined();
 
     // Standard output: no recovery message
@@ -485,7 +497,7 @@ describe('close command recursive close', () => {
     const { parentId } = await createParentWithChildren(2, false);
 
     const result = await runJson(`close ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].recovered).toBeUndefined();
   });
 
@@ -506,7 +518,7 @@ describe('close command recursive close', () => {
 
     // Call close on grandparent — should trigger recovery
     const result = await runJson(`close ${gpId} -r "closing descendants"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].recovered).toBe(true);
     expect(result.results[0].childrenClosed).toBe(2); // parent + child
 
@@ -529,7 +541,7 @@ describe('close command recursive close', () => {
     // closeDescendants processes ALL descendants; childrenClosed includes
     // the already-closed child since closeSingle handles it gracefully.
     const result = await runJson(`close ${parentId} -r "closing open children"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].recovered).toBe(true);
     // All 3 descendants were processed (1 was already done, 2 were open)
     // closeDescendants counts descendants.length - errors.length = 3 - 0
@@ -607,7 +619,7 @@ describe('close command recursive close', () => {
 
     // Close parent with --force
     const result = await runJson(`close --force ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].childrenClosed).toBe(2);
 
     // Parent should be closed
@@ -626,7 +638,7 @@ describe('close command recursive close', () => {
 
     // Close parent with --force (parent is in_review but has no audit)
     const result = await runJson(`close --force ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].childrenClosed).toBe(2);
 
     // All should be closed
@@ -650,7 +662,7 @@ describe('close command recursive close', () => {
 
     // Close grandparent with --force (not in_review, no audit)
     const result = await runJson(`close --force ${gpId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].childrenClosed).toBe(2); // parent + child
 
     // All items should be closed
@@ -664,7 +676,7 @@ describe('close command recursive close', () => {
     const id = created.workItem.id;
 
     const result = await runJson(`close --force ${id} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results[0].childrenClosed).toBeUndefined();
 
     const shown = await runJson(`show ${id}`);
@@ -697,7 +709,7 @@ describe('close command recursive close', () => {
     const { parentId, childIds } = await createParentWithChildren(3, false);
 
     const result = await runJson(`close --force ${parentId} -r "done"`);
-    expect(result.success).toBe(true);
+    expect(result.closed).toBeGreaterThan(0);
     expect(result.results).toHaveLength(1);
     expect(result.results[0].id).toBe(parentId);
     expect(result.results[0].success).toBe(true);
@@ -777,11 +789,157 @@ describe('close command recursive close', () => {
 
     // Stdout should be valid JSON
     const parsed = JSON.parse(stdout);
-    expect(parsed.success).toBe(true);
+    expect(parsed.closed).toBeGreaterThan(0);
     expect(parsed.results[0].success).toBe(true);
 
     // Stderr should NOT contain the human-readable warning in JSON mode
     // (JSON consumers should receive clean output)
     expect(stderr).not.toContain(`Warning: ${parentId} has ${childIds.length} open children`);
+  });
+
+  // ── Batch close: multiple IDs in a single invocation (WL-0MTBB8I4E008FJCC) ──
+  //
+  // `wl close <id1> <id2> ... --force --reason <r>` closes all items in one
+  // subprocess. These tests verify: uniform --force/--reason application,
+  // per-item error isolation, and the aggregated `{ results, closed, failed }`
+  // JSON summary shape.
+
+  it('closes N items in one invocation with --force --reason, aggregated JSON summary', async () => {
+    const id1 = (await runJson(`create -t "Batch item 1"`)).workItem.id;
+    const id2 = (await runJson(`create -t "Batch item 2"`)).workItem.id;
+    const id3 = (await runJson(`create -t "Batch item 3"`)).workItem.id;
+
+    const result = await runJson(`close ${id1} ${id2} ${id3} --force --reason "Shipped in v1.2.3"`);
+
+    // JSON output shape (AC4): { results, closed, failed }
+    expect(result.closed).toBeGreaterThan(0);
+    expect(result.results).toHaveLength(3);
+    expect(result.closed).toBe(3);
+    expect(result.failed).toBe(0);
+
+    // Per-item success flags (AC1)
+    const byId = Object.fromEntries(result.results.map((r: any) => [r.id, r]));
+    for (const id of [id1, id2, id3]) {
+      expect(byId[id].success).toBe(true);
+      expect(byId[id].error).toBeUndefined();
+    }
+
+    // All items are actually closed (AC2: --force applied uniformly)
+    for (const id of [id1, id2, id3]) {
+      const shown = await runJson(`show ${id}`);
+      expect(shown.workItem.status).toBe('completed');
+      expect(shown.workItem.stage).toBe('done');
+    }
+  });
+
+  it('stores --reason as a comment on every item in the batch', async () => {
+    const id1 = (await runJson(`create -t "Reason item 1"`)).workItem.id;
+    const id2 = (await runJson(`create -t "Reason item 2"`)).workItem.id;
+
+    await runJson(`close ${id1} ${id2} --force --reason "Shipped in v1.2.3"`);
+
+    for (const id of [id1, id2]) {
+      const shown = await runJson(`show ${id}`);
+      const comments = shown.comments ?? [];
+      const texts = comments.map((c: any) => c.comment);
+      expect(texts.some((t: string) => t.includes('Shipped in v1.2.3'))).toBe(true);
+    }
+  });
+
+  it('isolates per-item errors: one missing ID does not block the others', async () => {
+    const id1 = (await runJson(`create -t "Batch good 1"`)).workItem.id;
+    const id2 = (await runJson(`create -t "Batch good 2"`)).workItem.id;
+    const missingId = 'TEST-NOTEXIST-999';
+
+    const result = await runJsonSilent(`close ${id1} ${missingId} ${id2} --force --reason "Shipped in v1.2.3"`);
+
+    // Error on one item must not abort the batch (AC3)
+    expect(result.closed).toBeGreaterThan(0);
+    expect(result.results).toHaveLength(3);
+    expect(result.closed).toBe(2);
+    expect(result.failed).toBe(1);
+
+    // The missing ID is reported with an error
+    const missingResult = result.results.find((r: any) => r.id === missingId);
+    expect(missingResult.success).toBe(false);
+    expect(missingResult.error).toBe('Work item not found');
+
+    // The valid IDs are still closed
+    for (const id of [id1, id2]) {
+      const shown = await runJson(`show ${id}`);
+      expect(shown.workItem.status).toBe('completed');
+    }
+  });
+
+  it('batches close of open children with --force: parent + sibling ids in one call', async () => {
+    const { parentId, childIds } = await createParentWithChildren(2, false);
+
+    // Close parent and its children in one batch invocation.
+    // The parent closes recursively (--force), the children as leaf items.
+    const result = await runJson(`close --force ${parentId} ${childIds[0]} ${childIds[1]} --reason "Shipped in v1.3.0"`);
+
+    expect(result.results).toHaveLength(3);
+    expect(result.closed).toBe(3);
+    expect(result.failed).toBe(0);
+
+    // Parent result reports its recursively closed children
+    const parentResult = result.results.find((r: any) => r.id === parentId);
+    expect(parentResult.success).toBe(true);
+    expect(parentResult.childrenClosed).toBe(2);
+
+    for (const id of [parentId, ...childIds]) {
+      const shown = await runJson(`show ${id}`);
+      expect(shown.workItem.status).toBe('completed');
+    }
+  });
+
+  it('batch close without --force closes leaf items individually', async () => {
+    const id1 = (await runJson(`create -t "No-force item 1"`)).workItem.id;
+    const id2 = (await runJson(`create -t "No-force item 2"`)).workItem.id;
+
+    // Leaf items: without --force the standard (non-recursive) path runs
+    const result = await runJson(`close ${id1} ${id2} --reason "shipped"`);
+    expect(result.results).toHaveLength(2);
+    expect(result.closed).toBe(2);
+    expect(result.failed).toBe(0);
+
+    for (const id of [id1, id2]) {
+      const shown = await runJson(`show ${id}`);
+      expect(shown.workItem.status).toBe('completed');
+      expect(shown.workItem.stage).toBe('done');
+    }
+  });
+
+  it('batch close reports a partially-failed batch via closed/failed counts (mixed success)', async () => {
+    // One item already closed, one open, one missing.
+    const idClosed = (await runJson(`create -t "Already closed"`)).workItem.id;
+    await runJson(`close ${idClosed} --reason "earlier"`);
+
+    const idOpen = (await runJson(`create -t "Still open"`)).workItem.id;
+    const missingId = 'TEST-NOTEXIST-888';
+
+    const result = await runJsonSilent(`close ${idClosed} ${idOpen} ${missingId} --force --reason "Shipped in v1.4.0"`);
+
+    // Re-closing an already-closed item: closeSingle re-executes the update
+    // and reports success; the open item closes; the missing one fails.
+    expect(result.results).toHaveLength(3);
+    expect(result.closed).toBe(2);
+    expect(result.failed).toBe(1);
+
+    const missingResult = result.results.find((r: any) => r.id === missingId);
+    expect(missingResult.success).toBe(false);
+    expect(missingResult.error).toBe('Work item not found');
+
+    expect((await runJson(`show ${idOpen}`)).workItem.status).toBe('completed');
+  });
+
+  it('human-readable output prints one line per batch item', async () => {
+    const id1 = (await runJson(`create -t "Human batch 1"`)).workItem.id;
+    const id2 = (await runJson(`create -t "Human batch 2"`)).workItem.id;
+
+    const { stdout, stderr } = await runRaw(`close ${id1} ${id2} --force --reason "shipped"`);
+    expect(stdout).toContain(`Closed ${id1}`);
+    expect(stdout).toContain(`Closed ${id2}`);
+    expect(stderr).toBe('');
   });
 });

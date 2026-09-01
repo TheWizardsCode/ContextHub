@@ -7,8 +7,9 @@
  * `wl init` from `templates/scheduled-prompts.json`, create-if-absent).
  *
  * Each entry carries:
- *  - a stable `id` (used for the pane name `Downtime <id>` and the rolling
- *    log marker itemId),
+ *  - a stable `id` (used for the pane name `Downtime <id>` — set it to the
+ *    command itself, e.g. `/skill:refactor`, so the pane name clearly
+ *    identifies the scheduled command — and the rolling log marker itemId),
  *  - the `prompt` text (any text the pi agent pane can run, e.g.
  *    `/skill:refactor`),
  *  - a best-effort `intervalDays` frequency (whole days; a delayed dispatch
@@ -16,10 +17,10 @@
  *  - `lastTriggeredAt` (ISO-8601 UTC datetime; `null` = never run).
  *
  * Fail-closed philosophy (mirrors settings.ts + the downtime worker): an
- * absent config is an EMPTY set (logged notice — `wl init` is the
- * provisioning path); a malformed config is an EMPTY set (logged error);
- * an invalid entry is skipped (logged warning). None of these ever throw
- * or crash the worker.
+ * absent config is an EMPTY set (silent — absence is the expected state;
+ * `wl init` is the provisioning path); a malformed config is an EMPTY set
+ * (logged error); an invalid entry is skipped (logged warning). None of these
+ * ever throw or crash the worker.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -36,7 +37,9 @@ export const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** One scheduled-prompt entry from the config file. */
 export interface ScheduledPrompt {
-  /** Stable entry id (pane name `Downtime <id>`, rolling-log marker itemId). */
+  /** Stable entry id (pane name `Downtime <id>`, rolling-log marker itemId).
+   * Best practice: use the command itself (e.g. `/skill:refactor`) so the
+   * pane name clearly identifies the scheduled command. */
   id: string;
   /** Prompt text run by the pi agent pane (any text, e.g. `/skill:refactor`). */
   prompt: string;
@@ -54,7 +57,7 @@ export interface ScheduledPromptsConfig {
 /** Result of loading the config (entries are ALWAYS the valid subset). */
 export interface ScheduledPromptsLoadResult {
   entries: ScheduledPrompt[];
-  /** true when the config file was absent (fail-closed empty set, notice logged). */
+  /** true when the config file was absent (fail-closed empty set, silent). */
   absent: boolean;
   /** true when the file existed but could not be parsed (fail-closed empty set, error logged). */
   malformed: boolean;
@@ -148,8 +151,9 @@ export function getDueScheduledPrompt(
 /**
  * Load the scheduled-prompts config for a worklog root, fail-closed:
  *
- *  - absent file ⇒ `{ entries: [], absent: true }` with a logged notice
- *    (`wl init` is the provisioning path — no synthesis of defaults here),
+ *  - absent file ⇒ `{ entries: [], absent: true }` (silent — absence is the
+ *    expected state; `wl init` is the provisioning path, no synthesis of
+ *    defaults here),
  *  - unreadable/corrupt JSON/wrong shape ⇒ `{ entries: [], malformed: true }`
  *    with a logged error,
  *  - valid file ⇒ the VALID entries (invalid ones are skipped with a logged
@@ -164,10 +168,9 @@ export function loadScheduledPrompts(
   const file = scheduledPromptsPath(cwd);
 
   if (!existsSync(file)) {
-    log(
-      `scheduled-prompts: config file absent at ${file} — treating the ` +
-        `scheduled-prompt set as empty (fail-closed; run \`wl init\` to provision).`,
-    );
+    // Silent fail-closed: absence is the expected/provisioned state for most
+    // projects (WL-0MTF5UAJ4000LLZ9) — every poll cycle would otherwise spam
+    // stderr. All error paths below (unreadable/corrupt/wrong-shape) still log.
     return { entries: [], absent: true, malformed: false };
   }
 

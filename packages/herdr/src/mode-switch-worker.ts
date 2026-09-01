@@ -12,11 +12,22 @@
  *    the pane opens regardless).
  *  - **Cheap switch on idle:** on each tick, when the operator has been idle
  *    (no agent-route commands) for ≥ `modeSwitchIdleThresholdMs` **AND** the
- *    proxy reports idle (reusing `evaluateIdle` from downtime-worker.ts with
- *    `requiredFreeSlots = 0` — llama-server running, no active local query,
- *    no model switch, no local lease, all required slots free), the worker
- *    POSTs `/admin/set-mode {"mode":"cheap"}`. A busy proxy (active local
- *    query) **delays** the switch — it never kills in-flight work.
+ *    proxy reports idle (reusing `evaluateIdle` from downtime-worker.ts), the
+ *    worker POSTs `/admin/set-mode {"mode":"cheap"}`.
+ *    **Per-slot operator gate (parent WL-0MT9F67Y3008S0PR, decision 1.a):**
+ *    when the proxy serves per-slot identity (`slots[]` valid per
+ *    `parseLlamaStatus`), the idle gate requires only ≥ 1 free slot
+ *    (`evaluateIdle(status, DOWNTIME_PANE_MIN_FREE_SLOTS)`) — the spare-capacity
+ *    semantics shared with the downtime dispatcher, whose autonomous
+ *    query/lease work holds the OTHER busy slots. A downtime pane is exactly
+ *    the work the operator wants to keep running while the proxy runs cheap,
+ *    so the busy slots must **not** delay the switch (Q4b decision;
+ *    accepted tradeoff: a fast-mode downtime request in flight during the
+ *    mode restart is killed and retried by its client). Without per-slot
+ *    data the all-slots-free fail-closed fallback is unchanged
+ *    (`evaluateIdle(status, 0)` — full global checks). In every case a busy
+ *    proxy (server down, model switch, or 0 free slots) **delays** the
+ *    switch — it never kills in-flight work.
  *  - **No redundant switching / no hammering:** the worker skips a switch when
  *    the persisted mode already matches the target (tracking last-known mode,
  *    refreshed via `GET /admin/mode` on each poll). At most one switch per
@@ -37,7 +48,12 @@
  * from downtime-worker.ts is reused.
  */
 
-import { evaluateIdle, type LlamaStatus } from './downtime-worker.js';
+import {
+  evaluateIdle,
+  parseLlamaStatus,
+  DOWNTIME_PANE_MIN_FREE_SLOTS,
+  type LlamaStatus,
+} from './downtime-worker.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -198,8 +214,13 @@ export const PROXY_STATUS_PATH = '/llama/local/status';
 /**
  * Fetch and parse the llama-proxy's `/llama/local/status` payload for idle
  * evaluation. Returns null on any failure mode (network error, timeout,
- * non-2xx, invalid JSON) — propagated as proxyStatus null ⇒ fail-closed
- * (treated as busy, no cheap switch).
+ * non-2xx, invalid JSON, ambiguous payload) — propagated as proxyStatus null
+ * ⇒ fail-closed (treated as busy, no cheap switch). Parsing routes through
+ * the shared `parseLlamaStatus` (downtime-worker.ts) so per-slot identity
+ * (`slots[]`) is validated identically to the downtime dispatcher: a
+ * malformed/ambiguous per-slot payload (non-array `slots`, non-boolean
+ * `is_processing`, missing/empty/duplicate/negative-clamped `slot_id`,
+ * non-finite counts) resolves null → busy (parent WL-0MT9F67Y3008S0PR).
  */
 export async function fetchProxyStatus(
   proxyUrl: string,
@@ -211,9 +232,13 @@ export async function fetchProxyStatus(
   try {
     const res = await fetcher(url, { signal: controller.signal });
     if (!res.ok) return null;
-    const raw = (await res.json()) as LlamaStatus;
-    if (typeof raw !== 'object' || raw === null) return null;
-    return raw as LlamaStatus;
+    let raw: unknown;
+    try {
+      raw = await res.json();
+    } catch {
+      return null; // invalid JSON → ambiguous
+    }
+    return parseLlamaStatus(raw);
   } catch {
     return null; // network errors / timeouts → unknown, never throw
   } finally {
@@ -336,12 +361,21 @@ export function createModeSwitchWorker(deps?: {
           ? opts.proxyStatus
           : await fetchProxyStatus(opts.proxyUrl, fetcher);
 
-      // Proxy idle gate: a busy proxy (active local query / lease / model
-      // switch / missing fields) DELAYS the switch — never kills in-flight
-      // work (operator decision Q4b). Reuses evaluateIdle with
-      // requiredFreeSlots = 0 (all slots free). proxyStatus null (endpoint
-      // failure, timeout, ambiguous) ⇒ busy (fail-closed).
-      if (proxyStatus === null || !evaluateIdle(proxyStatus, 0)) return;
+      // Proxy idle gate: a busy proxy DELAYS the switch — never kills
+      // in-flight work. Per-slot operator gate (parent WL-0MT9F67Y3008S0PR,
+      // decision 1.a): when the proxy serves per-slot identity (`slots[]`
+      // valid per parseLlamaStatus), the gate requires ≥ 1 free slot
+      // (spare-capacity, DOWNTIME_PANE_MIN_FREE_SLOTS — the relaxed per-slot
+      // global checks: llama-server up + no model switch only), so busy
+      // downtime-pane slots holding the dispatcher's query/lease no longer
+      // block the switch. Without per-slot data the all-slots-free
+      // fail-closed fallback is unchanged (requiredFreeSlots = 0, full
+      // global checks). proxyStatus null (endpoint failure, timeout,
+      // ambiguous/malformed) ⇒ busy (fail-closed).
+      const requiredFreeSlots = Array.isArray(proxyStatus?.slots)
+        ? DOWNTIME_PANE_MIN_FREE_SLOTS
+        : 0;
+      if (proxyStatus === null || !evaluateIdle(proxyStatus, requiredFreeSlots)) return;
 
       // Refresh last-known mode via GET /admin/mode before deciding (AC:
       // "track last-known mode; refresh via GET /admin/mode on poll").

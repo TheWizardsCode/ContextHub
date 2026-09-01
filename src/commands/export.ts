@@ -12,7 +12,7 @@ export default function register(ctx: PluginContext): void {
   
   program
     .command('export')
-    .description('Export work items and comments to JSONL file')
+    .description('Export work items and comments to JSONL file. WARNING: This exports the entire database — all items, comments, and dependency edges. Use the --file option to specify the output path.')
     .option('-f, --file <filepath>', 'Output file path', dataPath)
     .option('--prefix <prefix>', 'Override the default prefix')
     .action(async (options: ExportOptions) => {

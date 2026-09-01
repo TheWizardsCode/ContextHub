@@ -15,6 +15,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { DeleteOptions } from '../cli-types.js';
 import { performSync, getSyncDefaults } from './sync.js';
+import { getConfiguredUserEmail } from '../sync.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, dataPath, output, utils } = ctx;
@@ -44,8 +45,14 @@ export default function register(ctx: PluginContext): void {
       // Get descendants before deletion for reporting
       const children = recursive ? db.getDescendants(idLookup) : [];
       const childrenCount = children.length;
-      
-      const deleted = db.delete(idLookup, recursive);
+
+      // Attribution (WL-0MSKZ30SK007K9TO, F4): record who deleted the item and
+      // why, so the soft-delete carries real intent. The merge layer's
+      // delete-side protection only propagates ATTRIBUTED deletes over a live
+      // remote item — an unattributed delete would silently fail to propagate.
+      const deletedBy = await getConfiguredUserEmail();
+      const deleteReason = 'deleted via wl delete';
+      const deleted = db.delete(idLookup, recursive, { deletedBy, deleteReason });
       if (!deleted) {
         output.error(`Work item not found: ${normalizedId}`, { success: false, error: `Work item not found: ${normalizedId}` });
         process.exit(1);

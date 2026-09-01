@@ -1103,6 +1103,14 @@ export class SqlitePersistentStore {
     });
 
     importTransaction();
+
+    // Bounded WAL growth: importData() is the single largest write path
+    // (wl sync / doctor / init bulk imports). A PASSIVE checkpoint merges
+    // the WAL back into the main DB file right after the batch, so
+    // concurrent readers don't scan a large WAL and the WAL doesn't grow
+    // unboundedly across repeated imports (WL-0MSG8EG7P002MX2I /
+    // WL-0MT5J4Q290025O0L). PASSIVE never blocks readers or writers.
+    this.db.pragma('wal_checkpoint(PASSIVE)');
   }
 
   /**

@@ -386,7 +386,7 @@ describe('Code Freeze notice dialog — dismissal key handling (AC7)', () => {
     await tick();
     await tick();
 
-    expect(onCommand).toHaveBeenCalledWith('/skill:implement WL-TEST-1', 'code');
+    expect(onCommand).toHaveBeenCalledWith('/skill:implement WL-TEST-1', 'code', undefined, undefined, 'Item WL-TEST-1');
     expect(rawOutput()).not.toContain('CODE FREEZE');
 
     dataHandler?.(Buffer.from('q'));

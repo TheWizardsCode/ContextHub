@@ -13,10 +13,11 @@ import { DEFAULT_RECOVERY_CONFIG, type RecoveryConfig, type RecoveryCategoryConf
 // ── RecoveryConfig defaults ───────────────────────────────────────────
 
 describe('DEFAULT_RECOVERY_CONFIG', () => {
-  it('has all 8 error categories', () => {
+  it('has all 9 error categories', () => {
     const keys = Object.keys(DEFAULT_RECOVERY_CONFIG);
     expect(keys.sort()).toEqual([
       'authError',
+      'compactionGate',
       'contextLength',
       'parseError',
       'quotaExhausted',

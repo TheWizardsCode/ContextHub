@@ -287,6 +287,82 @@ describe('collapsedGroups survives list refresh', () => {
   });
 });
 
+// ── Heading depth inside expanded parents ────────────────────────────────
+
+describe('getDisplayRows() heading depth', () => {
+  it('top-level heading row carries depth 0', () => {
+    const items = makeGroupedList();
+    const state = new WorkItemListState(items, TERM_80x24);
+    const rows = state.getDisplayRows();
+
+    // All top-level headings should have depth 0
+    const headings = rows.filter(
+      (r): r is NonNullable<DisplayRow> & { kind: 'heading'; depth: number } =>
+        typeof r === 'object' && r !== null && 'kind' in r && (r as any).kind === 'heading' && 'depth' in r
+    );
+    for (const h of headings) {
+      expect(h.depth).toBe(0);
+    }
+  });
+
+  it('heading inserted inside expanded parent at depth 1 carries depth 1', () => {
+    // Parent P has children C1, C2 in Group 2; verify the group's heading inherits depth 1
+    const c1 = makeChild('C1');
+    c1.group = 2;
+    c1.groupLabel = 'Group 2';
+    const c2 = makeChild('C2');
+    c2.group = 2;
+    c2.groupLabel = 'Group 2';
+    const parent = makeItem('P', 1, 'Group 1', 'plan_complete', [c1, c2]);
+    parent.childCount = 2;
+
+    const state = new WorkItemListState([parent], TERM_80x24);
+    state.toggleExpand('P');
+    const rows = state.getDisplayRows();
+
+    // Expect: heading(1, depth=0), P, heading(2, depth=1), C1, C2
+    const headings = rows.filter(
+      (r): r is NonNullable<DisplayRow> & { kind: 'heading'; depth: number } =>
+        typeof r === 'object' && r !== null && 'kind' in r && (r as any).kind === 'heading' && 'depth' in r
+    );
+    expect(headings.length).toBe(2);
+    expect(headings[0].depth).toBe(0); // top-level Group 1
+    expect(headings[1].depth).toBe(1); // Group 2 heading inside expanded parent at depth 1
+  });
+
+  it('heading at depth 2 inside nested children carries depth 2', () => {
+    // grandchild GC1, GC2 in Group 3, child C1 has those children
+    const gc1 = makeChild('GC1');
+    gc1.group = 3;
+    gc1.groupLabel = 'Group 3';
+    const gc2 = makeChild('GC2');
+    gc2.group = 3;
+    gc2.groupLabel = 'Group 3';
+    const c1 = makeChild('C1');
+    c1.children = [gc1, gc2];
+    c1.childCount = 2;
+    c1.group = 2;
+    c1.groupLabel = 'Group 2';
+    const parent = makeItem('P', 1, 'Group 1', 'plan_complete', [c1]);
+    parent.childCount = 1;
+
+    const state = new WorkItemListState([parent], TERM_80x24);
+    state.toggleExpand('P');
+    state.toggleExpand('C1');
+    const rows = state.getDisplayRows();
+
+    const headings = rows.filter(
+      (r): r is NonNullable<DisplayRow> & { kind: 'heading'; depth: number } =>
+        typeof r === 'object' && r !== null && 'kind' in r && (r as any).kind === 'heading' && 'depth' in r
+    );
+    // heading(1, depth=0), P, heading(2, depth=1), C1, heading(3, depth=2), GC1, GC2
+    expect(headings.length).toBe(3);
+    expect(headings[0].depth).toBe(0);
+    expect(headings[1].depth).toBe(1);
+    expect(headings[2].depth).toBe(2);
+  });
+});
+
 // ── Interaction with expanded items ──────────────────────────────────────
 
 describe('getDisplayRows() with expanded items', () => {

@@ -15,6 +15,7 @@ import { dirname, join, resolve as resolvePath } from 'node:path';
 
 import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
+import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
 import { AgentTracker, mergeAgentStatesCached } from './agent-tracker.js';
 import { readCodeFreezeState, readCodeFreezeStatus } from './code-freeze.js';
@@ -34,9 +35,14 @@ import {
   stageColor,
   type IconOptions,
 } from '@worklog/shared/icons';
-import { runSync, heartbeatTtlForInterval } from './auto-sync.js';
+import {
+  runSync,
+  heartbeatTtlForInterval,
+  isSyncHeartbeatFresh,
+} from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
+import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
 import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
@@ -366,6 +372,8 @@ export interface DisplayHeadingRow {
   count: number;
   /** Whether the group's items are hidden (in-memory, session-only). */
   collapsed: boolean;
+  /** Depth indentation level (0 = top-level, 1+ = inside expanded parents). */
+  depth?: number;
 }
 
 /**
@@ -404,6 +412,9 @@ export class WorkItemListState {
     this._clampSelection();
     this._adjustScroll();
     this._resetMetaScroll();
+    // Cache is keyed by item ID; a new selection means a new item's preview
+    // will be needed — invalidate the previous item's cached preview.
+    clearDescriptionPreviewCache();
   }
 
   /** Number of rows in the display-rows model (headings + items). */
@@ -506,6 +517,13 @@ export class WorkItemListState {
 
   /** Navigation stack for hierarchical browsing (push/pop parent contexts). */
   navigationStack: NavigationStack = new NavigationStack();
+
+  // ── Hover tooltip state (WL-0MT9XRZDK006GMUH) ──────────────────────
+  /** Display-row index of the currently hovered row (null = no hover). */
+  hoveredRowIndex: number | null = null;
+
+  /** True when the user pressed Esc to dismiss the tooltip (blocks auto-show until mouse leaves/re-enters). */
+  tooltipDismissed: boolean = false;
 
   /** Terminal size for layout calculations. */
   termSize: TermSize;
@@ -688,6 +706,7 @@ export class WorkItemListState {
             groupLabel: item.groupLabel ?? `Group ${item.group}`,
             count: groupCounts.get(item.group) ?? 0,
             collapsed: isCollapsed,
+            depth,
           });
           lastGroup = item.group;
         }
@@ -913,6 +932,8 @@ export class WorkItemListState {
     this.scrollOffset = 0;
     this.mode = 'list';
     this._resetMetaScroll();
+    // Filter changes the visible item set — invalidate cached previews.
+    clearDescriptionPreviewCache();
   }
 
   /**
@@ -928,6 +949,8 @@ export class WorkItemListState {
     this.scrollOffset = 0;
     this.mode = 'list';
     this._resetMetaScroll();
+    // Filter changes the visible item set — invalidate cached previews.
+    clearDescriptionPreviewCache();
   }
 
   clearFilter(): void {
@@ -937,11 +960,17 @@ export class WorkItemListState {
     this.selectedIndex = 0;
     this.scrollOffset = 0;
     this._resetMetaScroll();
+    // Reverting a filter changes the visible item set — invalidate cached previews.
+    clearDescriptionPreviewCache();
   }
 
   // ── Refresh ─────────────────────────────────────────────────────
 
   refreshItems(newItems: WorkItem[]): void {
+    // Clear the description preview cache on refresh (descriptions may have
+    // changed externally; WL-0MT9ZJF28004UJ28).
+    clearDescriptionPreviewCache();
+
     // Capture the currently selected item's ID before replacing items
     const prevSelectedId = this._captureSelectedId();
 
@@ -1070,6 +1099,12 @@ export class WorkItemListState {
     if (this.scrollOffset > maxOffset) {
       this.scrollOffset = maxOffset;
     }
+    // Hover tooltip (WL-0MT9XRZDK006GMUH): a scroll/selection adjustment
+    // means the rows under the pointer changed (keyboard navigation,
+    // refresh) — clear the hovered row so a stale tooltip never renders.
+    // The next mouse motion re-establishes it. The Esc dismissal flag is
+    // intentionally preserved (it only clears on hover-none / re-entry).
+    this.hoveredRowIndex = null;
   }
 
   /** Returns the currently visible slice of items. */
@@ -1230,6 +1265,102 @@ export function formatTimestamp(iso: string): string {
   );
 }
 
+// ── Hover tooltip rendering (WL-0MT9XRZDK006GMUH) ───────────────────
+
+/**
+ * Format a work-item hover tooltip line for an agent-pane row.
+ *
+ * Renders the 8 metadata fields: ID, Title, Command, Priority, Type,
+ * Risk, Effort, and Start Time.
+ *
+ * @param item - The work item being hovered.
+ * @param command - The command recorded for this pane (optional).
+ * @param recordedAt - The ISO timestamp when the pane was recorded.
+ * @param cols - Terminal width for truncation.
+ * @param noIcons - Whether to skip icon rendering.
+ * @returns Formatted tooltip lines.
+ */
+export function formatTooltipLines(
+  item: WorkItem,
+  command: string | undefined,
+  recordedAt: string | undefined,
+  cols: number,
+  noIcons = false,
+): string[] {
+  const parts: string[] = [];
+
+  // ID + Title line.
+  const titleStr = item.title ? `${item.title}` : '';
+  parts.push(`${ANSI.bold}${item.id}${ANSI.reset} ${titleStr}`);
+
+  // Command.
+  if (command) {
+    parts.push(`${ANSI.dim}Command:${ANSI.reset} ${ANSI.fg(220)}${command}${ANSI.reset}`);
+  }
+
+  // Priority + Type (compact row).
+  const priorityStr = item.priority ? `${priorityIcon(item.priority, { noIcons })} ${item.priority}` : '';
+  const typeStr = item.issueType ? `${item.issueType === 'epic' && !noIcons ? epicIcon() : ''}${item.issueType}` : '';
+  const typeLabel = typeStr ? `${ANSI.dim}Type:${ANSI.reset} ${typeStr}` : '';
+  const priorityLabel = priorityStr ? `${ANSI.dim}Priority:${ANSI.reset} ${priorityStr}` : '';
+  if (priorityLabel && typeLabel) {
+    parts.push(`${priorityLabel}${ANSI.dim}  ${typeLabel}${ANSI.reset}`);
+  } else if (priorityLabel) {
+    parts.push(priorityLabel);
+  } else if (typeLabel) {
+    parts.push(typeLabel);
+  }
+
+  // Risk + Effort (compact row).
+  const riskStr = item.risk ? `${riskIcon(item.risk, { noIcons })} ${item.risk}` : '';
+  const effortStr = item.effort ? `${effortIcon(item.effort, { noIcons })} ${item.effort}` : '';
+  const riskLabel = riskStr ? `${ANSI.dim}Risk:${ANSI.reset} ${riskStr}` : '';
+  const effortLabel = effortStr ? `${ANSI.dim}Effort:${ANSI.reset} ${effortStr}` : '';
+  if (riskLabel && effortLabel) {
+    parts.push(`${riskLabel}${ANSI.dim}  ${effortLabel}${ANSI.reset}`);
+  } else if (riskLabel) {
+    parts.push(riskLabel);
+  } else if (effortLabel) {
+    parts.push(effortLabel);
+  }
+
+  // Start Time.
+  if (recordedAt) {
+    parts.push(`${ANSI.dim}Started:${ANSI.reset} ${formatTimestamp(recordedAt)}`);
+  }
+
+  // Truncate each line to fit.
+  return parts.map((line) => truncateLine(line, cols));
+}
+
+/**
+ * Format the complete hover tooltip overlay as footer lines.
+ *
+ * The tooltip replaces the normal footer hints while a pane-associated row
+ * is hovered and not dismissed. Each line is wrapped in a dark-grey box
+ * so the overlay reads as a distinct panel.
+ *
+ * @param cols - Terminal width.
+ * @param lines - Tooltip content lines from {@link formatTooltipLines}.
+ * @returns Formatted footer lines for the tooltip; empty when no content.
+ */
+export function formatTooltipOverlay(cols: number, lines: string[]): string[] {
+  if (lines.length === 0) return [];
+  let maxWidth = 0;
+  for (const line of lines) {
+    const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+    if (visibleLen > maxWidth) maxWidth = visibleLen;
+  }
+  const boxWidth = Math.min(Math.max(maxWidth + 2, 20), cols - 2);
+  return lines.map((line) => {
+    const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const padding = Math.max(0, boxWidth - visibleLen);
+    const bg = ANSI.bg(238);
+    const fg = ANSI.fg(252);
+    return `${ANSI.reset}${bg}${fg} ${line}${' '.repeat(padding)} ${ANSI.reset}`;
+  });
+}
+
 /**
  * Build the metadata table rows for a work item (label/value pairs).
  *
@@ -1318,52 +1449,164 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   return metaRows;
 }
 
+// ── Compound metadata rows (WL-0MSNIX4V60012266) ──────────────────────────
+// The four field pairs that should be rendered on a single compressed row.
+
+/** Metadata field-pair definitions for compressed rendering. */
+const META_ROW_PAIRS: Array<[string, string, string]> = [
+  ['Status+Stage', 'Status', 'Stage'],
+  ['Priority+Type', 'Priority', 'Type'],
+  ['Created+Updated', 'Created', 'Updated'],
+  ['Audit+AuditedAt', 'Audit', 'Audited At'],
+] as const;
+
 /**
- * Maximum number of description preview lines shown in the metadata panel.
+ * Post-process `buildMetaRows` output to pair four field combinations onto
+ * single rows, reducing the vertical space used in the metadata panel.
+ *
+ * Pairs: Status+Stage, Priority+Type, Created+Updated, Audit+AuditedAt.
+ * Each pair is joined with ` / ` as a separator when BOTH values are
+ * present. When only one half of a pair is present, the present half is
+ * kept as its own single row (with its original label) so no field
+ * information is ever lost (e.g. an item with an audit verdict but no
+ * audited-at timestamp still shows its `Audit` row).
+ *
+ * All other rows pass through unchanged. The original row order is
+ * preserved (pairs appear where their first component originally appeared).
+ *
+ * @param metaRows - Raw label/value pairs from {@link buildMetaRows}.
+ * @returns A new array with the four pairs compressed into single rows.
+ */
+export function pairMetaRows(
+  metaRows: Array<[string, string]>,
+): Array<[string, string]> {
+  const rows = new Map<string, string>(metaRows);
+  const consumed = new Set<string>();
+
+  const result: Array<[string, string]> = [];
+  for (const [label, value] of metaRows) {
+    // Second key of a pair already emitted inside a compound row — skip.
+    if (consumed.has(label)) continue;
+
+    // First key of a pair (buildMetaRows always emits the first key before
+    // the second, so the compound row lands in its natural position).
+    const pairDef = META_ROW_PAIRS.find(([, keyA]) => keyA === label);
+    if (pairDef) {
+      const [compoundLabel, keyA, keyB] = pairDef;
+      const valA = rows.get(keyA);
+      const valB = rows.get(keyB);
+      if (valA != null && valB != null) {
+        result.push([compoundLabel, `${valA} / ${valB}`]);
+        consumed.add(keyB);
+      } else {
+        // Incomplete pair — keep the present half as a single row.
+        result.push([label, value]);
+      }
+    } else {
+      // Regular row, or the lone second key of an incomplete pair —
+      // pass through unchanged.
+      result.push([label, value]);
+    }
+  }
+
+  return result;
+}
+
+// ── Description preview cache (WL-0MT9ZJF28004UJ28) ─────────────────────
+// Cache key: `${itemId}|${descHash}|${maxCols}`. Stores FULL rendered markdown
+// lines (no heading, no preview slicing) so the markdown parser — the
+// expensive step — runs at most once per selection change per item; the
+// per-call slicing to available panel space is cheap.
+const descriptionPreviewCache = new Map<string, string[]>();
+
+/**
+ * Minimum number of description preview lines shown in the metadata panel
+ * (rendered markdown lines, after the `Description` heading row).
  */
 const DESCRIPTION_PREVIEW_MAX_LINES = 3;
 
 /**
+ * Simple djb2 hash for description strings — used as part of the cache key.
+ * Collisions are harmless (cache miss triggers re-render); only correctness
+ * and speed matter.
+ */
+function hashString(s: string): number {
+  let hash = 5381;
+  for (let i = 0; i < s.length; i++) {
+    // eslint-disable-next-line no-bitwise
+    hash = ((hash << 5) + hash + s.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
+/**
+ * Invalidate the description preview cache. Called on selection change
+ * (cache reset per item) and item refresh (global clear).
+ */
+export function clearDescriptionPreviewCache(itemId?: string): void {
+  if (itemId) {
+    for (const key of descriptionPreviewCache.keys()) {
+      if (key.startsWith(itemId + '|')) {
+        descriptionPreviewCache.delete(key);
+      }
+    }
+  } else {
+    descriptionPreviewCache.clear();
+  }
+}
+
+/**
  * Build the description preview lines for the metadata panel.
  *
- * Returns up to {@link DESCRIPTION_PREVIEW_MAX_LINES} non-empty lines from the
- * item's description, each truncated to `maxCols`. The preview starts with a
- * dimmed `Description` heading row. Returns an empty array when the description
- * is missing or blank.
+ * Replaces the original raw-line preview with a markdown-aware version that
+ * calls {@link renderMarkdown} from `md-viewer.ts`. Results are cached keyed
+ * by (item.id, description hash) so the markdown parser runs at most once
+ * per selection change (WL-0MT9ZJF28004UJ28 AC3).
  *
+ * Returns up to `maxLines` rendered markdown lines from the item's
+ * description, each truncated to `maxCols`. The preview starts with a dimmed
+ * `Description` heading row. Returns an empty array when the description is
+ * missing or blank.
+ *
+ * The preview fills the available panel space (AC2): `maxLines` is derived
+ * from the remaining panel rows by the caller, clamped to a 3-row minimum
+ * when other metadata lines are present.
+ *
+ * @param itemId - Work item ID (used for cache keying).
  * @param description - The work item's description text.
  * @param maxCols - Terminal width for truncation.
+ * @param maxLines - Maximum rendered lines to show (floor 3 by default).
  * @returns Preview lines ready to insert into the metadata panel.
  */
 function buildDescriptionPreview(
+  itemId: string,
   description: string | undefined | null,
   maxCols: number,
+  maxLines: number = DESCRIPTION_PREVIEW_MAX_LINES,
 ): string[] {
   if (!description || description.trim() === '') {
     return [];
   }
 
-  const preview: string[] = [];
+  const descHash = hashString(description);
+  const renderKey = `${itemId}|${descHash}|${maxCols}`;
 
+  // Reuse the fully rendered output across calls; slicing below is cheap.
+  let rendered = descriptionPreviewCache.get(renderKey);
+  if (!rendered) {
+    rendered = renderMarkdown(description, maxCols);
+    descriptionPreviewCache.set(renderKey, rendered);
+  }
+
+  const preview: string[] = [];
   // Heading row
   preview.push(` ${ANSI.dim}${ANSI.underline}Description${ANSI.reset}`);
 
-  // First up-to-3 non-empty lines, so blank separator lines between markdown
-  // sections don't waste the limited preview space (WL-0MSFZKQL700381P3).
-  const lines = description.split('\n');
-  let shown = 0;
-  for (const line of lines) {
-    if (shown >= DESCRIPTION_PREVIEW_MAX_LINES) break;
-    if (line.trim() === '') continue;
-    preview.push(` ${line}`);
-    shown += 1;
-  }
-
-  // Truncate to fit the terminal width
-  for (let i = 0; i < preview.length; i++) {
-    if (preview[i].length > 0) {
-      preview[i] = truncateLine(preview[i], maxCols);
-    }
+  // Up to `maxLines` rendered markdown lines (the renderer already handles
+  // wrapping/truncation, so lines are taken as-is)
+  for (const line of rendered) {
+    if (preview.length - 1 >= maxLines) break;
+    preview.push(line);
   }
 
   return preview;
@@ -1407,8 +1650,9 @@ export function formatMetadataPanel(
   // Header separator identifying the selected item
   lines.push(` ${ANSI.dim}── ${item.id} ──${ANSI.reset}`);
 
-  // Metadata rows
-  const metaRows = buildMetaRows(item, noIcons);
+  // Metadata rows — pair Status+Stage, Priority+Type, Created+Updated,
+  // Audit+AuditedAt onto single rows for a more compact display (WL-0MSNIX4V60012266).
+  const metaRows = pairMetaRows(buildMetaRows(item, noIcons));
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
     for (const [label, value] of metaRows) {
@@ -1416,11 +1660,15 @@ export function formatMetadataPanel(
     }
   }
 
-  // Description preview — first few lines of the item's description so the
-  // user can see what the item is about without opening the detail view
-  // (WL-0MSFZKQL700381P3). Shown as-is (markdown source lines), placed after
-  // the metadata rows and before the last-command line.
-  const preview = buildDescriptionPreview(item.description, maxCols);
+  // Description preview — markdown-rendered lines filling the available
+  // panel space (WL-0MT9ZJF28004UJ28 AC2). The 3-row floor keeps a
+  // meaningful preview on short panels; tall panels show more of the
+  // description. A row is reserved for the Last command line (when the item
+  // is in_progress) so it stays visible. Cached per (id, description) so the
+  // markdown parser runs at most once per selection change.
+  const reserveLastCommand = item.stage === 'in_progress' ? 1 : 0;
+  const previewBudget = Math.max(DESCRIPTION_PREVIEW_MAX_LINES, panelRows - lines.length - reserveLastCommand);
+  const preview = buildDescriptionPreview(item.id, item.description, maxCols, previewBudget);
   lines.push(...preview);
 
   // Last command — only meaningful while the item is being worked on
@@ -1587,8 +1835,11 @@ export function formatDetailContent(
 
   // Metadata — rendered as a markdown table (shared row builder; ID and
   // Title are already shown in the header above, so they are filtered out
-  // here to avoid duplicating them).
-  const metaRows = buildMetaRows(item, noIcons).filter(([label]) => label !== 'ID' && label !== 'Title');
+  // here to avoid duplicating them). Apply compound row pairing for a
+  // more compact display (WL-0MSNIX4V60012266).
+  const metaRows = pairMetaRows(
+    buildMetaRows(item, noIcons).filter(([label]) => label !== 'ID' && label !== 'Title'),
+  );
 
   // Render the metadata as a markdown table
   if (metaRows.length > 0) {
@@ -2097,7 +2348,7 @@ export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
   | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last'
   | 'meta-up' | 'meta-down'
   | 'chord-start' | 'chord-complete' | 'chord-cancel'
-  | 'toggle-expand' | null;
+  | 'toggle-expand' | 'dismiss-tooltip' | null;
 
 export interface ChordState {
   /** Keys pressed so far in the current chord sequence */
@@ -2283,6 +2534,15 @@ export function handleKeypress(
   }
 
   // List mode
+  // Esc dismissal of a hover tooltip (WL-0MT9XRZDK006GMUH AC2): when the
+  // tooltip is currently showing, Esc only dismisses it — the navigation
+  // stack is never popped and the list selection is untouched. The tooltip
+  // reappears on the next mouse re-entry over a pane-associated row.
+  if (key === '\x1b' && state.hoveredRowIndex !== null && !state.tooltipDismissed) {
+    state.hoveredRowIndex = null;
+    state.tooltipDismissed = true;
+    return 'dismiss-tooltip';
+  }
   const action = keyToAction(key);
   switch (action) {
     case 'up':
@@ -2448,6 +2708,8 @@ export type MouseAction =
   | { type: 'scroll-detail-up' } // detail: wheel up (k-equivalent)
   | { type: 'scroll-detail-down' } // detail: wheel down (j-equivalent)
   | { type: 'filter-stage'; index: number } // filter: tap a stage option
+  | { type: 'hover-row'; index: number } // list: motion over an item row (tooltip)
+  | { type: 'hover-none' } // list: motion over chrome rows (pointer left the rows)
   | null; // inert: chrome rows, motion, releases, unknown buttons
 
 /**
@@ -2616,8 +2878,19 @@ export function mapMouseToAction(
 ): MouseAction {
   // Release events are consumed but inert — presses drive selection (AC6).
   if (ev.release) return null;
-  // Drag-motion guard: motion events never navigate (AC6).
-  if ((ev.button & 32) !== 0) return null;
+  // Motion events (button & 32): never navigate, but trigger hover tooltip
+  // in list mode (WL-0MT9XRZDK006GMUH). They remain inert in detail/filter.
+  if ((ev.button & 32) !== 0) {
+    if (state.mode === 'list') {
+      const index = mapListRowToIndex(state, ev.y, termSize);
+      // Motion over a visible list row → hover-row (tooltip candidate).
+      // Motion over chrome/blank rows (header, fold indicators, footer,
+      // panel) → hover-none: the pointer has left the rows area, allowing
+      // a dismissed tooltip to re-show on the next re-entry (AC2).
+      return index !== null ? { type: 'hover-row', index } : { type: 'hover-none' };
+    }
+    return null; // detail/filter: motion is inert
+  }
   // Wheel buttons 64/65 (AC4).
   if (ev.button === 64) {
     if (state.mode === 'list') return { type: 'wheel-up' };
@@ -2760,6 +3033,19 @@ export function handleMouseInput(
         state.applyFilter(STAGES[action.index]);
       }
       break;
+    case 'hover-row':
+      // Update hovered row. The dismissed flag is intentionally NOT cleared
+      // here (WL-0MT9XRZDK006GMUH AC2): after Esc, the tooltip stays hidden
+      // while the pointer keeps moving within the rows area; only a
+      // hover-none (pointer left the rows) clears the dismissal.
+      state.hoveredRowIndex = action.index;
+      break;
+    case 'hover-none':
+      // Pointer left the rows area — clear hover state and the dismissed
+      // flag so a subsequent re-entry over a pane-row re-shows the tooltip.
+      state.hoveredRowIndex = null;
+      state.tooltipDismissed = false;
+      break;
   }
   return true; // consumed a mouse event
 }
@@ -2848,6 +3134,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   detailRenderedIndex?: number,
   showHelpText?: boolean,
   codeFreezeAmbiguous?: boolean,
+  hoverTooltip?: string[],
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -2878,6 +3165,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     detailRenderedIndex?: number,
     showHelpText?: boolean,
     codeFreezeAmbiguous?: boolean,
+    hoverTooltip?: string[],
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -3020,7 +3308,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
       if (isHeadingRow(row)) {
         numHeadings++;
         const arrow = row.collapsed ? '▶' : '▼';
-        const line = ` ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
+        const indent = (row.depth ?? 0) > 0 ? '  '.repeat(row.depth!) : '';
+        const line = `${indent} ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
         output.push(isSelected ? `${ANSI.reverse}${line}${ANSI.reset}` : line);
         continue;
       }
@@ -3057,22 +3346,32 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // hints, consistent with the pi browse widget's showHelpText handling
     // (WL-0MSGJDSMJ004128E). Note: gating only affects rendering — chord key
     // handling/accumulation in chordState continues regardless.
+    //
+    // Hover tooltip (WL-0MT9XRZDK006GMUH): when tooltip lines are supplied
+    // they REPLACE the footer hints — the overlay lives in the footer area,
+    // directly above the metadata panel.
     const helpEnabled = showHelpText ?? true;
-    const isChordActive = chordState && chordState.pendingKeys.length > 0;
-    if (isChordActive && helpEnabled) {
-      const pendingStr = chordState!.pendingKeys.join(' ');
-      const hintStr = chordState!.hints
-        ? `  ${ANSI.dim}${chordState!.hints}${ANSI.reset}`
-        : '';
-      const footerLine = ` ${ANSI.reverse} chord: ${pendingStr} _ ${ANSI.reset}${hintStr}`;
-      output.push(footerLine);
+    if (hoverTooltip && hoverTooltip.length > 0) {
+      for (const line of formatTooltipOverlay(cols, hoverTooltip)) {
+        output.push(line);
+      }
     } else {
-      const navHint = (navStackDepth && navStackDepth > 0)
-        ? ` ${ANSI.dim}[esc] back${navStackDepth > 1 ? ` (${navStackDepth} levels)` : ''}${ANSI.reset}`
-        : '';
-      const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
-      const footerLine = navHint + chordHelpSuffix || ' ';
-      output.push(footerLine);
+      const isChordActive = chordState && chordState.pendingKeys.length > 0;
+      if (isChordActive && helpEnabled) {
+        const pendingStr = chordState!.pendingKeys.join(' ');
+        const hintStr = chordState!.hints
+          ? `  ${ANSI.dim}${chordState!.hints}${ANSI.reset}`
+          : '';
+        const footerLine = ` ${ANSI.reverse} chord: ${pendingStr} _ ${ANSI.reset}${hintStr}`;
+        output.push(footerLine);
+      } else {
+        const navHint = (navStackDepth && navStackDepth > 0)
+          ? ` ${ANSI.dim}[esc] back${navStackDepth > 1 ? ` (${navStackDepth} levels)` : ''}${ANSI.reset}`
+          : '';
+        const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
+        const footerLine = navHint + chordHelpSuffix || ' ';
+        output.push(footerLine);
+      }
     }
 
     // ── Metadata panel ────────────────────────────────────────────
@@ -3167,7 +3466,7 @@ function logCommandForItem(command: string, itemId?: string): void {
 function resolveAndRouteCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
   model?: string,
   openPane?: boolean,
   onRefresh?: () => Promise<void>,
@@ -3191,17 +3490,36 @@ function resolveAndRouteCommand(
   logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
+    // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): build it from the
+    // selected/claimed work item IF resolvedCommand is an agent or shell
+    // command that will open a pane; else undefined keeps current arity.
+    const selected = state.getSelectedItem();
+    const paneTitle =
+      selected && (isAgentCommand(resolvedCommand) || resolvedCommand.startsWith('!'))
+        ? selected.title
+        : undefined;
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
     // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
     // background (no-pane) dispatches (openPane === false) so they can
     // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
-    // pane-opening paths keep their existing arity.
+    // pane-opening paths keep their existing arity. Pane titles are
+    // appended only when the command opens a pane and a title exists.
     if (openPane === undefined) {
-      onCommand(resolvedCommand, model);
+      if (paneTitle !== undefined) {
+        onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
+      } else {
+        onCommand(resolvedCommand, model);
+      }
     } else if (onRefresh) {
-      onCommand(resolvedCommand, model, openPane, onRefresh);
+      if (paneTitle !== undefined) {
+        onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
+      } else {
+        onCommand(resolvedCommand, model, openPane, onRefresh);
+      }
+    } else if (paneTitle !== undefined) {
+      onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
     } else {
       onCommand(resolvedCommand, model, openPane);
     }
@@ -3358,7 +3676,7 @@ export function fetchItemsForView(
 export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
   model?: string,
   onDowntimeToggle?: () => void,
   openPane?: boolean,
@@ -3435,6 +3753,14 @@ export function dispatchChordCommand(
 
   // ── Producer review / audit compound commands ───────────
   if (command.startsWith('!!wl reviewed')) {
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+  }
+  // ── Data-modifying wl commands (close/delete/update/search) ──
+  // These mutate the work-item data set or change the list contents, so
+  // they are routed here (not the generic callback path) so the caller's
+  // isWlModifyingCommand check sees 'dispatched' and triggers an immediate
+  // list refresh after the command completes (WL-0MTA217DZ003H5K8).
+  if (/^!!\s*wl\s+(close|delete|update|search)\b/i.test(command)) {
     return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
   }
   if (command.includes('&& wl audit-set')) {
@@ -3616,7 +3942,7 @@ export async function resolvePodcastTarget(
 export function executeResolvedCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
   codeFreezeActive = false,
   model?: string,
   onDowntimeToggle?: () => void,
@@ -3657,6 +3983,16 @@ export function executeResolvedCommand(
   logCommandForItem(resolvedCommand, itemId);
 
   if (onCommand) {
+    // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): thread the selected
+    // item's title forward so the caller can build a pane name without an
+    // extra wl spawn. Only pane-opening routes (agent + shell commands)
+    // need it; plain commands derive nothing from the title and keep the
+    // 2-arg call (byte-compatible).
+    const selected = state.getSelectedItem();
+    const paneTitle =
+      selected && (isAgentCommand(resolvedCommand) || resolvedCommand.startsWith('!'))
+        ? selected.title
+        : undefined;
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
@@ -3665,9 +4001,19 @@ export function executeResolvedCommand(
     // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
     // pane-opening paths keep their existing arity.
     if (openPane === undefined) {
-      onCommand(resolvedCommand, model);
+      if (paneTitle !== undefined) {
+        onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
+      } else {
+        onCommand(resolvedCommand, model);
+      }
     } else if (onRefresh) {
-      onCommand(resolvedCommand, model, openPane, onRefresh);
+      if (paneTitle !== undefined) {
+        onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
+      } else {
+        onCommand(resolvedCommand, model, openPane, onRefresh);
+      }
+    } else if (paneTitle !== undefined) {
+      onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
     } else {
       onCommand(resolvedCommand, model, openPane);
     }
@@ -3692,7 +4038,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; onRefresh?: () => Promise<void> },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -3714,6 +4060,7 @@ export async function runWorklistTui(
     modeSwitchWorker: options?.modeSwitchWorker,
     modeSwitchPollIntervalMs: options?.modeSwitchPollIntervalMs ?? 10_000,
     modeSwitchEnabled: options?.modeSwitchEnabled ?? true,
+    maxSyncStalenessMs: options?.maxSyncStalenessMs ?? 60_000,
     onRefresh: options?.onRefresh,
   };
 
@@ -4128,6 +4475,16 @@ export async function runWorklistTui(
     if (stageMatch !== null && STAGE_MAP[stageMatch[1]] !== undefined) return true;
     const priorityMatch = cmd.match(/^\/wl\s+--priority\s+(\S+)$/);
     return priorityMatch !== null && PRIORITY_MAP[priorityMatch[1]] !== undefined;
+  };
+
+  // True when a command modifies the work-item data set (close, delete,
+  // update, reviewed, search), warranting an immediate list refresh so the
+  // selection list reflects the change without waiting for the auto-refresh
+  // cycle (WL-0MTA217DZ003H5K8).
+  const isWlModifyingCommand = (cmd: string): boolean => {
+    // Commands like "!!wl close <id>", "!!wl delete <id>", "!!wl update <id> ..."
+    if (/^!!\s*wl\s+(close|delete|update|reviewed|search)\b/i.test(cmd)) return true;
+    return false;
   };
 
   // Run `wl sync` and surface the outcome as a toast so sync status is
@@ -4550,7 +4907,11 @@ export async function runWorklistTui(
             // so the filtered view shows every root item in the stage matching
             // the stage's status rule, not just the already-loaded subset
             // (WL-0MSDT8X1V003206G).
-            if (result === 'dispatched' && isWlViewCommand(command)) {
+            // Modifying-command dispatch (close, delete, update, reviewed,
+            // search): refetch so the selection list reflects the change
+            // immediately instead of waiting for the auto-refresh cycle
+            // (WL-0MTA217DZ003H5K8).
+            if (result === 'dispatched' && (isWlViewCommand(command) || isWlModifyingCommand(command))) {
               await doRefresh(true);
             }
           } catch (e) {
@@ -4696,7 +5057,11 @@ export async function runWorklistTui(
           // so the filtered view shows every root item in the stage matching
           // the stage's status rule, not just the already-loaded subset
           // (WL-0MSDT8X1V003206G).
-          if (result === 'dispatched' && isWlViewCommand(singleCmd)) {
+          // Modifying-command dispatch (close, delete, update, reviewed,
+          // search): refetch so the selection list reflects the change
+          // immediately instead of waiting for the auto-refresh cycle
+          // (WL-0MTA217DZ003H5K8).
+          if (result === 'dispatched' && (isWlViewCommand(singleCmd) || isWlModifyingCommand(singleCmd))) {
             await doRefresh(true);
           }
           render();
@@ -4916,6 +5281,32 @@ export async function runWorklistTui(
       }
     }
 
+    // ── Hover tooltip (WL-0MT9XRZDK006GMUH) ────────────────────────
+    // Build the tooltip lines for the currently hovered row when it is a
+    // work item with an associated agent-pane and the tooltip has not been
+    // dismissed by Esc. Fail-open: any lookup error yields no tooltip.
+    let hoverTooltipLines: string[] | undefined;
+    if (state.mode === 'list' && !state.tooltipDismissed && state.hoveredRowIndex !== null) {
+      try {
+        const rows = state.getDisplayRows();
+        const row = rows[state.hoveredRowIndex];
+        if (row !== undefined && !isHeadingRow(row)) {
+          const entry = agentTracker?.getEntry(row.id) ?? undefined;
+          if (entry) {
+            hoverTooltipLines = formatTooltipLines(
+              row,
+              entry.command,
+              entry.recordedAt,
+              termSize.cols,
+              !opts.showIcons,
+            );
+          }
+        }
+      } catch {
+        // Fail-open: never let a tooltip lookup break rendering.
+      }
+    }
+
     const output = renderer(
       displayItems,
       state.selectedIndex,
@@ -4948,6 +5339,8 @@ export async function runWorklistTui(
       // distinct from the active-freeze banner; both can render (defensive)
       // but the tri-state read guarantees at most one is true.
       codeFreezeAmbiguous,
+      // Hover tooltip lines for the footer overlay (WL-0MT9XRZDK006GMUH).
+      hoverTooltipLines,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
@@ -4994,6 +5387,16 @@ export async function runWorklistTui(
   // pause-when-hidden gating, and shutdown cleanup live in one place.
   const scheduler = new TaskScheduler(DEFAULT_SCHEDULER_TICK_MS);
 
+  // DB-change tracker: detects whether the worklog DB has changed since the
+  // last cycle. Used to gate auto-refresh/sync ticks so idle panes spawn
+  // zero wl processes (WL-0MSJ1OLTL009N4IQ). Created only when we can
+  // resolve the worklog dir (set via fetcher.setWorklogDir()); otherwise
+  // the gate is effectively disabled (fail-open: all ticks run).
+  const worklogDir = getWorklogDir();
+  const tracker = worklogDir
+    ? new DbChangeTracker(resolveCacheDir(), worklogDir)
+    : null;
+
   const stopResumePoll = (): void => {
     scheduler.setDisabled('resume-poll', true);
   };
@@ -5030,6 +5433,10 @@ export async function runWorklistTui(
         }
         stopResumePoll();
         panePaused = false;
+        // DB-change gate: skip when DB unchanged since last cycle
+        if (tracker && !tracker.dbChanged()) {
+          return; // DB unchanged — zero wl spawns for this tick
+        }
         doRefresh(false);
       },
     });
@@ -5060,6 +5467,16 @@ export async function runWorklistTui(
         }
         stopResumePoll();
         panePaused = false;
+        // DB-change gate: skip when DB unchanged AND last sync fresh within cap.
+        // Subject to existing heartbeat / single-flight / --if-idle guards in doSync.
+        if (tracker && opts.maxSyncStalenessMs > 0) {
+          const dbChanged = tracker.dbChanged();
+          const syncDir = worklogDir ?? join(process.cwd(), '.worklog');
+          const heartbeatFresh = isSyncHeartbeatFresh(syncDir, opts.maxSyncStalenessMs);
+          if (!dbChanged && heartbeatFresh) {
+            return; // DB unchanged, last sync recent — skip
+          }
+        }
         doSync(true, heartbeatTtlMs); // ifIdle + heartbeat: skip when another sync is in-flight / fresh
         doRefresh(false);
       },
@@ -5081,6 +5498,12 @@ export async function runWorklistTui(
       if (await paneGate.visible()) {
         // Hidden → visible transition: refresh immediately (with the
         // "refreshed" notification) and let the normal cadence resume.
+        // DB-change gate: skip when DB unchanged (same as refresh tick).
+        if (tracker && !tracker.dbChanged()) {
+          stopResumePoll();
+          panePaused = false;
+          return; // DB unchanged — no need to refresh on visibility change
+        }
         stopResumePoll();
         panePaused = false;
         doRefresh(true);

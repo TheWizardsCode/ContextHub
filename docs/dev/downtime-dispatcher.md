@@ -36,7 +36,17 @@ package-level overview lives in
   leader (`packages/herdr/src/leader-election.ts`).
 - The leader holds a **5-minute lease**
   (`DEFAULT_LEASE_TTL_SECONDS = 300`) written to
-  `.worklog/downtime-leader-lease.json`, refreshed on every proxy-poll cycle.
+  `.worklog/downtime-leader-lease.json`, refreshed on every proxy-poll cycle
+  **and during the no-candidate cooldown pause** — an owned-but-EXPIRED
+  lease is still renewed (`refreshLease()` is ownership-based, not
+  validity-based: a lease with `leaderId === instanceId` is rewritten with a
+  fresh `acquiredAt` regardless of remaining TTL).
+- Leadership is **re-derived every tick** (a single cheap lease-file read):
+  a lease that expires mid-pause (tick loop stalled in the cooldown) routes
+  the worker out of zombie dispatch — it never polls or dispatches with
+  stale cached leadership, and if another instance won the lease during the
+  pause the re-derived worker yields silently (no fight, no double
+  dispatch).
 - If the lease expires (leader crashed or idle), a non-leader detects the
   staleness, clears the stale lock/lease, and runs a new election (with
   exponential backoff).
@@ -87,6 +97,42 @@ Lifecycle (`packages/herdr/src/coordination.ts`):
 5. **Non-leaders** skip proxy polling and dispatch entirely — they only
    refresh their lease check (a cheap local file read) and their
    coordination entry.
+
+### No-candidate cooldown & the empty offer file
+
+The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
+(no poll, no idle tracking, no dispatch) for `downtimeNoCandidateCooldownMs`
+(default 60 min) after a genuinely empty backlog, resetting the idle
+tracker so a fresh full idle period is required after the pause. In
+coordination mode (WL-0MTEZ4XZJ006Y9U7) the shared runtime file
+(`.worklog/downtime-coordination.json`) is an **offer list, not the
+backlog**: the leader removes each entry after dispatching (see step 4
+above), so an empty file right after a dispatch is a *transient gap* while
+the worklog still holds dispatchable work. Therefore:
+
+- **Probe before pause:** a coordination-mode `no-candidate` outcome probes
+  the worklog (`computeMostImportantItem`) before any cooldown. A
+  genuinely empty backlog pauses exactly as in legacy mode; a probe that
+  finds a candidate does NOT pause — the next check-in re-offers the work;
+  a probe CLI error is a three-strike event (fail-closed — a broken
+  lookup can never masquerade as an empty backlog, `deps.recordError` is
+  called before any pause).
+- **Check-in is never suppressed:** the cooldown gate runs AFTER the
+  leader-election/check-in block, so the 30-min coordination check-in
+  (the only re-offer mechanism) still lands during a pause and the leader
+  lease keeps refreshing (self-healing `refreshLease()` renews an
+  owned-but-expired lease — the zombie can never lose its renewal path).
+  A successful re-offer
+  (`checkIn.updated && offered !== null`) cancels the pause immediately.
+- **Cooldown-exit renewal + re-derivation:** the first tick after the pause
+  expires re-runs the leader block (self-heal refresh + per-tick leadership
+  re-derivation) BEFORE reaching the cooldown gate, so every dispatch
+  decision on the resume path uses lease-fresh leadership — even when the
+  tick loop stalled mid-pause, the resume tick can never double-dispatch a
+  foreign instance's coordination entry (zombie regression).
+- **Bound achieved:** dispatch occurs at least once per `min(noCandidateCooldownMs,
+  2 × checkInIntervalMs)` (60 min) whenever the worklog holds dispatchable
+  work — never once per full cooldown.
 
 ### Critical-first tier & freeze split-by-skill
 
@@ -160,6 +206,7 @@ status refresh unchanged at 30s.**
 | Proxy status refresh | 30 s (`refreshIntervalMs`) | `settings.ts` (unchanged, pre-refactor cadence) |
 | Leader lease TTL | 5 min (`DEFAULT_LEASE_TTL_SECONDS = 300`) | `leader-election.ts` |
 | Coordination check-in | 30 min (`DEFAULT_COORDINATION_CHECK_IN_MS`) | `downtime-worker.ts` |
+| No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin
 settings file (`~/.config/herdr/worklog-plugin.json`,

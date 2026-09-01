@@ -9,6 +9,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { SearchOptions } from '../cli-types.js';
 import type { FtsSearchResult } from '../persistent-store.js';
+import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
 import { formatTitleAndId } from './helpers.js';
 import { theme } from '../theme.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
@@ -37,6 +38,7 @@ export default function register(ctx: PluginContext): void {
     .option('--deleted', 'Include deleted items in results')
     .option('--needs-producer-review [value]', 'Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)')
     .option('--issue-type <type>', 'Filter by issue type')
+    .option('-f, --fields <fields>', 'Comma-separated list of fields to include in output (id always included)')
     .option('-l, --limit <n>', 'Maximum number of results (default: 20)')
     .option('--rebuild-index', 'Rebuild the FTS index from scratch before searching')
     .option('--semantic', 'Enable semantic search enhancement (hybrid lexical+semantic ranking)')
@@ -108,6 +110,20 @@ export default function register(ctx: PluginContext): void {
       const tags = options.tags
         ? options.tags.split(',').map((t: string) => t.trim())
         : undefined;
+
+      // Parse and validate --fields (comma-separated). Unknown field names
+      // are rejected loudly before the search runs, listing the valid
+      // vocabulary (shared with wl list).
+      let requestedFields: string[] | undefined;
+      if (options.fields !== undefined && options.fields !== '') {
+        requestedFields = options.fields.split(',').map(f => f.trim()).filter(Boolean);
+        const unknown = requestedFields.filter(f => !VALID_FIELDS.includes(f as (typeof VALID_FIELDS)[number]));
+        if (unknown.length > 0) {
+          const fieldsError = `Unknown fields: ${unknown.join(', ')}. Valid fields: ${VALID_FIELDS.join(', ')}`;
+          output.error(fieldsError, { success: false, error: fieldsError, message: fieldsError });
+          process.exit(1);
+        }
+      }
 
       let parentId = options.parent;
       if (parentId) {
@@ -225,11 +241,19 @@ export default function register(ctx: PluginContext): void {
       if (utils.isJsonMode()) {
         const jsonResults = results.map(r => {
           const item = db.get(r.itemId);
+          const base: Record<string, unknown> = requestedFields
+            ? pickFields(item as NonNullable<typeof item>, requestedFields)
+            : {
+                id: r.itemId,
+                title: item?.title || '',
+                status: item?.status || '',
+                priority: item?.priority || '',
+              };
+          // Search-specific fields are always included, even when --fields
+          // projects the work-item portion (the projection applies only to
+          // the work-item object fields, not to search ranking metadata).
           return {
-            id: r.itemId,
-            title: item?.title || '',
-            status: item?.status || '',
-            priority: item?.priority || '',
+            ...base,
             score: r.rank,
             snippet: r.snippet,
             matchedField: r.matchedColumn,

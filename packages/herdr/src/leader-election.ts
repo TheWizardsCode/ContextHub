@@ -298,14 +298,22 @@ export function createLeaderElectionManager(options: {
 
     refreshLease(): void {
       if (closed) return;
-      if (!this.isLeader()) return; // Only the leader refreshes
+      // Self-heal by OWNERSHIP, not validity: isLeader() requires
+      // > MIN_VALID_LEASE_TTL_MS remaining, so an OWNED-but-EXPIRED lease
+      // would make the old `if (!this.isLeader()) return` guard no-op
+      // forever — the zombie can never renew. Renew whenever the lease
+      // belongs to this instance, regardless of current validity (writes a
+      // fresh acquiredAt with the same TTL). Missing/unreadable or FOREIGN
+      // leases stay untouched: takeover of a foreign/expired lease is the
+      // election path's job, never refresh (takeover-race safe).
+      const lease = readLeaseFile(worklogDir);
+      if (!lease || lease.leaderId !== instanceId) return;
 
-      const lease: LeaderLease = {
+      writeLeaseFile(worklogDir, {
         leaderId: instanceId,
         acquiredAt: new Date().toISOString(),
         ttlSeconds: leaseTtlSeconds,
-      };
-      writeLeaseFile(worklogDir, lease);
+      });
     },
 
     detectStaleLeader(): boolean {

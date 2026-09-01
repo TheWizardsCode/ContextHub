@@ -634,6 +634,31 @@ export class WorklogDatabase {
     console.error(message);
   }
 
+  /**
+   * Freshness rule (WL-0MTH7G2O1004BHN5): only audits with `auditedAt >= updatedAt`
+   * qualify for the audit-not-ready boost. Stale audits (edited after the last
+   * audit) are treated as no audit for ordering. Only `readyToClose === false`
+   * qualifies; `true` or absent audits receive no boost. Critical items are
+   * never boosted past by the audit tier (hard boundary).
+   */
+  private isAuditNotReadyFresh(audit: AuditResult | null | undefined, itemUpdatedAt: string | undefined): boolean {
+    if (!audit || audit.readyToClose) return false;
+    if (!itemUpdatedAt || !audit.auditedAt) return false;
+    return new Date(audit.auditedAt).getTime() >= new Date(itemUpdatedAt).getTime();
+  }
+
+  /**
+   * Build a batch audit map for a set of work item ids (EdgeCache-style, one
+   * batch query per scored set, no per-item N+1). Used by sortItemsByScore
+   * and the selectBySortIndex fallback.
+   */
+  private buildAuditMapForItems(items: WorkItem[]): Map<string, AuditResult> {
+    const all = this.store.getAllAuditResults();
+    const map = new Map<string, AuditResult>();
+    for (const a of all) map.set(a.workItemId, a);
+    return map;
+  }
+
   private sortItemsByScore(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore', edgeCache?: EdgeCache): WorkItem[] {
     const now = Date.now();
     const cache = edgeCache ?? this.buildEdgeCache(items);
@@ -655,9 +680,27 @@ export class WorklogDatabase {
       }
     }
 
+    // Audit-not-ready tier: batch audit map so the comparator is O(1) per
+    // item (no per-item N+1 queries). Mirrors the EdgeCache pattern.
+    const auditMap = this.buildAuditMapForItems(items);
+    const maxPriorityValue = 4; // critical
+
     return items.slice().sort((a, b) => {
-      const scoreA = this.computeScore(a, now, recencyPolicy, ancestorsOfInProgress, cache);
-      const scoreB = this.computeScore(b, now, recencyPolicy, ancestorsOfInProgress, cache);
+      const aIsCritical = this.getPriorityValue(a.priority) === maxPriorityValue;
+      const bIsCritical = this.getPriorityValue(b.priority) === maxPriorityValue;
+      const aAuditFresh = !aIsCritical && this.isAuditNotReadyFresh(auditMap.get(a.id), a.updatedAt);
+      const bAuditFresh = !bIsCritical && this.isAuditNotReadyFresh(auditMap.get(b.id), b.updatedAt);
+      // Hard tier boundary: critical items stay above any audited non-critical.
+      // Otherwise, any fresh audited-not-ready non-critical outranks any unaudited/non-fresh non-critical,
+      // regardless of base priority — enforced here as a tiered comparator before score.
+      if (aIsCritical !== bIsCritical) {
+        return aIsCritical ? -1 : 1;
+      }
+      if (!aIsCritical && !bIsCritical && aAuditFresh !== bAuditFresh) {
+        return aAuditFresh ? -1 : 1;
+      }
+      const scoreA = this.computeScore(a, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap);
+      const scoreB = this.computeScore(b, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap);
       if (scoreB !== scoreA) return scoreB - scoreA;
       const createdA = new Date(a.createdAt).getTime();
       const createdB = new Date(b.createdAt).getTime();
@@ -1346,8 +1389,13 @@ export class WorklogDatabase {
    *
    * @param id - The ID of the work item to delete
    * @param recursive - Whether to recursively delete descendants (default: true)
+   * @param opts - Optional attribution: deletedBy (identity) / deleteReason (why).
+   *   Deletes are ATTRIBUTED (WL-0MSKZ30SK007K9TO, F4): pass non-empty values so
+   *   the soft-delete carries real intent — unattributed deletes never
+   *   merge-propagate over a live remote item (delete-side protection in the
+   *   merge layer).
    */
-  delete(id: string, recursive: boolean = true): boolean {
+  delete(id: string, recursive: boolean = true, opts?: { deletedBy?: string; deleteReason?: string }): boolean {
     const item = this.store.getWorkItem(id);
     if (!item) {
       return false;
@@ -1364,18 +1412,21 @@ export class WorklogDatabase {
         return depthB - depthA;
       });
       for (const descendant of deepestFirst) {
-        this.deleteSingle(descendant.id);
+        this.deleteSingle(descendant.id, opts);
       }
     }
 
     // Now delete the item itself
-    return this.deleteSingle(id);
+    return this.deleteSingle(id, opts);
   }
 
   /**
    * Internal: Mark a single work item as deleted (no recursive child handling).
+   * Persists attribution (deletedBy/deleteReason) when provided — the merge
+   * layer's delete-side protection relies on it to distinguish real intent
+   * from bogus/stale deleted markers.
    */
-  private deleteSingle(id: string): boolean {
+  private deleteSingle(id: string, opts?: { deletedBy?: string; deleteReason?: string }): boolean {
     const item = this.store.getWorkItem(id);
     if (!item) {
       return false;
@@ -1389,6 +1440,8 @@ export class WorklogDatabase {
       // caused unexpected regressions in clients/tests that expect the
       // original stage to be retained.
       stage: item.stage,
+      deletedBy: opts?.deletedBy || item.deletedBy || '',
+      deleteReason: opts?.deleteReason || item.deleteReason || '',
       updatedAt: new Date().toISOString(),
     };
 
@@ -2069,7 +2122,8 @@ export class WorklogDatabase {
     now: number,
     recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
     ancestorsOfInProgress?: Set<string>,
-    edgeCache?: EdgeCache
+    edgeCache?: EdgeCache,
+    auditMap?: Map<string, AuditResult>
   ): number {
     // Weights are intentionally fixed and not configurable per request
     //
@@ -2089,6 +2143,18 @@ export class WorklogDatabase {
     };
 
     let score = 0;
+
+    // Audit-not-ready tier: second only to critical. Fresh `readyToClose ===
+    // false` audits boost any non-critical item so it outranks any unaudited
+    // non-critical regardless of base priority (tiered as numeric boost >
+    // max priority delta, with the comparator above as the hard authority).
+    // Critical items never receive this boost (hard boundary).
+    if (item.priority !== 'critical' && auditMap) {
+      const audit = auditMap.get(item.id);
+      if (this.isAuditNotReadyFresh(audit, item.updatedAt)) {
+        score += 3500; // > priority range (max 3*1000=3000 delta) but < critical gap
+      }
+    }
 
     // Priority base
     score += this.getPriorityValue(item.priority) * WEIGHTS.priority;
@@ -2201,6 +2267,29 @@ export class WorklogDatabase {
     });
   }
 
+  /**
+   * Compare two items by the audit-not-ready tier (WL-0MTH7G2O1004BHN5).
+   * Critical is strictly above the audited-not-ready non-critical tier;
+   * within the non-critical tier, a fresh `readyToClose===false` item
+   * outranks any unaudited/stale/ready-to-close item regardless of base
+   * priority. The tier only applies to workers that respect it (see callers).
+   * Returns -1/0/1 suitable as a comparator prefix before fallbacks.
+   */
+  private compareAuditNotReadyTier(
+    a: WorkItem,
+    b: WorkItem,
+    auditMap: Map<string, AuditResult>,
+    maxPriorityValue: number
+  ): number {
+    const aIsCritical = this.getPriorityValue(a.priority) === maxPriorityValue;
+    const bIsCritical = this.getPriorityValue(b.priority) === maxPriorityValue;
+    const aAuditFresh = !aIsCritical && this.isAuditNotReadyFresh(auditMap.get(a.id), a.updatedAt);
+    const bAuditFresh = !bIsCritical && this.isAuditNotReadyFresh(auditMap.get(b.id), b.updatedAt);
+    if (aIsCritical !== bIsCritical) return aIsCritical ? -1 : 1;
+    if (!aIsCritical && !bIsCritical && aAuditFresh !== bAuditFresh) return aAuditFresh ? -1 : 1;
+    return 0;
+  }
+
   private selectBySortIndex(
     items: WorkItem[],
     effectivePriorityCache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>,
@@ -2209,14 +2298,20 @@ export class WorklogDatabase {
     allItems?: WorkItem[]
   ): WorkItem | null {
     if (!items || items.length === 0) return null;
-    // When all sortIndex values are the same (including all-zero), fall back to
-    // effective priority (descending) then createdAt (ascending / oldest first).
-    // Effective priority accounts for priority inheritance from blocked dependents.
+    const cache = effectivePriorityCache ?? new Map();
+    const auditMap = this.buildAuditMapForItems(items);
+    const maxPriorityValue = 4;
+    // When all sortIndex values coincide (including all-zero), full fallback
+    // is effective priority/age. Otherwise the primary ordering is sortIndex —
+    // but the audit tier is applied as a prefix before any of those so that
+    // `wl next --no-re-sort` (which skips reSort) still reflects the boosted
+    // order rather than stale sortIndex (AC3, WL-0MTH7G2O1004BHN5).
     const firstSortIndex = items[0].sortIndex ?? 0;
     const allSame = items.every(item => (item.sortIndex ?? 0) === firstSortIndex);
     if (allSame) {
-      const cache = effectivePriorityCache ?? new Map();
       const sorted = items.slice().sort((a, b) => {
+        const tierDiff = this.compareAuditNotReadyTier(a, b, auditMap, maxPriorityValue);
+        if (tierDiff !== 0) return tierDiff;
         const aEffective = this.computeEffectivePriority(a, cache, edgeCache, allItems);
         const bEffective = this.computeEffectivePriority(b, cache, edgeCache, allItems);
         const priDiff = bEffective.value - aEffective.value;
@@ -2227,7 +2322,17 @@ export class WorklogDatabase {
       });
       return sorted[0] ?? null;
     }
-    return this.orderBySortIndex(items, sortOrderCache)[0] ?? null;
+    const sorted = items.slice().sort((a, b) => {
+      const tierDiff = this.compareAuditNotReadyTier(a, b, auditMap, maxPriorityValue);
+      if (tierDiff !== 0) return tierDiff;
+      const aIdx = a.sortIndex ?? 0;
+      const bIdx = b.sortIndex ?? 0;
+      if (aIdx !== bIdx) return aIdx - bIdx;
+      const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+      if (createdDiff !== 0) return createdDiff;
+      return a.id.localeCompare(b.id);
+    });
+    return sorted[0] ?? null;
   }
 
   /**

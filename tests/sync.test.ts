@@ -907,8 +907,20 @@ describe('Sync Operations', () => {
       // the lexicographic tie-breaker. The close is preserved.
       expect(merged.status).toBe('completed');
       expect(merged.stage).toBe('done');
-      // The updatedAt should be bumped to break the tie for next sync
-      expect(merged.updatedAt).not.toBe(sameTimestamp);
+      // WL-0MSKZ30SK007K9TO (F2): a merge that resolves back to the local
+      // content (close preserved from local — no user-visible change) must NOT
+      // bump updatedAt. The old unconditional bump made the item forever
+      // "newer" than the remote, advancing updatedAt on every repeated sync of
+      // the same divergent pair (the sync-conflict loop). The deterministic
+      // same-timestamp merge is idempotent, and full-snapshot pushes propagate
+      // the merged close to the remote — so no bump is needed for convergence.
+      expect(merged.updatedAt).toBe(sameTimestamp);
+      // Repeated merges of the same divergent pair stay quiescent.
+      for (let i = 0; i < 5; i++) {
+        const again = mergeWorkItems([merged], [remoteInProgress]).merged[0];
+        expect(again.updatedAt).toBe(sameTimestamp);
+        expect(again.status).toBe('completed');
+      }
     });
 
     it('should preserve close when remote is newer with non-close field change', () => {
@@ -1335,6 +1347,10 @@ describe('Sync Operations', () => {
   // must win even over a local/remote CLOSE (completed + terminal stage), because the
   // delete command preserves the stage — without this precedence a deletion of a
   // completed/in_review item would never converge to the remote.
+  //
+  // WL-0MSKZ30SK007K9TO (F1/AC5): real deletes are now ATTRIBUTED — merge propagation
+  // of an intentional delete requires non-empty `deletedBy`/`deleteReason` (F3). These
+  // fixtures use attributed deletes so propagation semantics are preserved.
   describe('deletion propagation via delta merge (WL-0MT2KZH0I005XUWE)', () => {
     const dItem2 = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => ({
       id,
@@ -1358,16 +1374,25 @@ describe('Sync Operations', () => {
       ...overrides,
     });
 
+    // Attributed-delete fixture helper: a real delete always carries identity.
+    const deleted = (id: string, overrides: Partial<WorkItem> = {}): WorkItem =>
+      dItem2(id, {
+        status: 'deleted',
+        deletedBy: 'alice@example.com',
+        deleteReason: 'removed by user',
+        ...overrides,
+      });
+
     it('a newer remote delete beats a local close (same id, different timestamps)', () => {
       const local = [dItem2('WI-D1', { status: 'completed', stage: 'in_review', updatedAt: '2024-01-02T00:00:00.000Z' })];
-      const delta = [dItem2('WI-D1', { status: 'deleted', stage: 'in_review', updatedAt: '2024-01-03T00:00:00.000Z' })];
+      const delta = [deleted('WI-D1', { stage: 'in_review', updatedAt: '2024-01-03T00:00:00.000Z' })];
       const result = mergeWorkItems(local, delta);
       expect(result.merged).toHaveLength(1);
       expect(result.merged[0].status).toBe('deleted');
     });
 
     it('a newer local delete beats an older remote close (push-side propagation)', () => {
-      const local = [dItem2('WI-D1', { status: 'deleted', stage: 'in_review', updatedAt: '2024-01-03T00:00:00.000Z' })];
+      const local = [deleted('WI-D1', { stage: 'in_review', updatedAt: '2024-01-03T00:00:00.000Z' })];
       const delta = [dItem2('WI-D1', { status: 'completed', stage: 'in_review', updatedAt: '2024-01-02T00:00:00.000Z' })];
       const result = mergeWorkItems(local, delta);
       expect(result.merged).toHaveLength(1);
@@ -1376,7 +1401,7 @@ describe('Sync Operations', () => {
 
     it('a delete wins deterministically at equal timestamps (same-timestamp strategy)', () => {
       const local = [dItem2('WI-D1', { status: 'completed', stage: 'in_review', updatedAt: '2024-01-03T00:00:00.000Z' })];
-      const delta = [dItem2('WI-D1', { status: 'deleted', stage: 'in_review', updatedAt: '2024-01-03T00:00:00.000Z' })];
+      const delta = [deleted('WI-D1', { stage: 'in_review', updatedAt: '2024-01-03T00:00:00.000Z' })];
       const result = mergeWorkItems(local, delta);
       expect(result.merged).toHaveLength(1);
       expect(result.merged[0].status).toBe('deleted');
@@ -1384,7 +1409,7 @@ describe('Sync Operations', () => {
 
     it('a plain open → deleted delta record still merges to deleted', () => {
       const local = [dItem2('WI-D1', { status: 'open', updatedAt: '2024-01-02T00:00:00.000Z' })];
-      const delta = [dItem2('WI-D1', { status: 'deleted', updatedAt: '2024-01-03T00:00:00.000Z' })];
+      const delta = [deleted('WI-D1', { updatedAt: '2024-01-03T00:00:00.000Z' })];
       const result = mergeWorkItems(local, delta);
       expect(result.merged).toHaveLength(1);
       expect(result.merged[0].status).toBe('deleted');
@@ -1397,6 +1422,149 @@ describe('Sync Operations', () => {
       const result = mergeWorkItems(local, delta);
       expect(result.merged).toHaveLength(1);
       expect(result.merged[0].status).toBe('completed');
+    });
+  });
+
+  // ── WL-0MSKZ30SK007K9TO: merge convergence & delete protection (AC1–AC4) ──
+  // Two failure modes observed in the field:
+  //   1. `mergeSameTimestampItems` bumped `updatedAt` on EVERY merge of a divergent
+  //      pair, even when nothing user-visible changed — a self-sustaining conflict
+  //      loop that advanced the timestamp on each sync forever.
+  //   2. An UNATTRIBUTED soft-delete (`status:'deleted'` with empty deletedBy /
+  //      deleteReason) won by timestamp recency, silently soft-deleting an item the
+  //      remote still considered open.
+  // Expected: repeated merges of the same divergent state CONVERGE (no unbounded
+  // bumping); an unattributed delete never overrides a live remote item; a real
+  // (attributed) newer delete still propagates.
+  describe('merge convergence & delete protection (WL-0MSKZ30SK007K9TO)', () => {
+    const convItem = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => ({
+      id,
+      title: `Item ${id}`,
+      description: '',
+      status: 'open',
+      priority: 'medium',
+      sortIndex: 0,
+      parentId: null,
+      createdAt: '2024-01-01T00:00:00.000Z',
+      updatedAt: '2024-01-02T00:00:00.000Z',
+      tags: [],
+      assignee: '',
+      stage: 'idea',
+      issueType: '',
+      createdBy: '',
+      deletedBy: '',
+      deleteReason: '',
+      risk: '' as const,
+      effort: '' as const,
+      ...overrides,
+    });
+
+    // AC1: sortIndex-only, same-timestamp divergence must NEVVER bump updatedAt.
+    it('AC1: sortIndex-only same-timestamp conflict never bumps updatedAt and converges', () => {
+      const local = convItem('WI-C1', { sortIndex: 10 });
+      const remote = convItem('WI-C1', { sortIndex: 5 });
+      const originalUpdatedAt = local.updatedAt;
+
+      let merged = mergeWorkItems([local], [remote]).merged[0];
+      expect(merged.updatedAt).toBe(originalUpdatedAt); // pure ordering: zero timestamp churn
+      expect(merged.sortIndex).toBeGreaterThanOrEqual(5); // a deterministic side won
+
+      // Repeated syncs of the (now identical) state must stay quiescent.
+      for (let i = 0; i < 10; i++) {
+        merged = mergeWorkItems([merged], [merged]).merged[0];
+        expect(merged.updatedAt).toBe(originalUpdatedAt);
+      }
+    });
+
+    // AC2: a real user-visible change (e.g. priority) bumps at most ONCE, then converges.
+    it('AC2: metadata-field same-timestamp conflict bumps updatedAt at most once then stabilises', () => {
+      const local = convItem('WI-C2', { priority: 'high' });
+      const remote = convItem('WI-C2', { priority: 'low' });
+      const originalUpdatedAt = local.updatedAt;
+
+      const first = mergeWorkItems([local], [remote]).merged[0];
+      expect(first.updatedAt).not.toBe(originalUpdatedAt); // first merge resolves the divergence
+
+      // Once both sides hold the merged item, further syncs must not keep advancing.
+      let current = first;
+      const afterFirstBump = current.updatedAt;
+      for (let i = 0; i < 10; i++) {
+        current = mergeWorkItems([current], [current]).merged[0];
+        expect(current.updatedAt).toBe(afterFirstBump);
+        expect(current.priority).toBe(first.priority);
+      }
+    });
+
+    // AC3: an unattributed soft-delete must never override a live open remote item.
+    it('AC3: unattributed delete (same-timestamp) never overrides a live remote open item', () => {
+      const local = convItem('WI-C3', { status: 'deleted', deletedBy: '', deleteReason: '' });
+      const remote = convItem('WI-C3', { status: 'open' });
+      const result = mergeWorkItems([local], [remote]);
+      expect(result.merged).toHaveLength(1);
+      expect(result.merged[0].status).not.toBe('deleted');
+      expect(result.merged[0].status).toBe('open');
+    });
+
+    it('AC3: unattributed delete (local newer) never overrides a live remote open item', () => {
+      const local = convItem('WI-C4', {
+        status: 'deleted',
+        deletedBy: '',
+        deleteReason: '',
+        updatedAt: '2024-01-03T00:00:00.000Z',
+      });
+      const remote = convItem('WI-C4', { status: 'open', updatedAt: '2024-01-02T00:00:00.000Z' });
+      const result = mergeWorkItems([local], [remote]);
+      expect(result.merged).toHaveLength(1);
+      expect(result.merged[0].status).toBe('open');
+    });
+
+    it('AC3: unattributed remote delete (remote newer) never overrides a live local item', () => {
+      const local = convItem('WI-C8', { status: 'open', updatedAt: '2024-01-02T00:00:00.000Z' });
+      const remote = convItem('WI-C8', {
+        status: 'deleted',
+        deletedBy: '',
+        deleteReason: '',
+        updatedAt: '2024-01-03T00:00:00.000Z',
+      });
+      const result = mergeWorkItems([local], [remote]);
+      expect(result.merged).toHaveLength(1);
+      expect(result.merged[0].status).toBe('open');
+    });
+
+    // AC4: an attributed delete that is the newer change still propagates.
+    it('AC4: attributed newer delete still propagates over a live remote item', () => {
+      const local = convItem('WI-C5', {
+        status: 'deleted',
+        deletedBy: 'bob@example.com',
+        deleteReason: 'duplicate of WI-100',
+        updatedAt: '2024-01-03T00:00:00.000Z',
+      });
+      const remote = convItem('WI-C5', { status: 'open', updatedAt: '2024-01-02T00:00:00.000Z' });
+      const result = mergeWorkItems([local], [remote]);
+      expect(result.merged).toHaveLength(1);
+      expect(result.merged[0].status).toBe('deleted');
+      expect(result.merged[0].deletedBy).toBe('bob@example.com');
+    });
+
+    it('AC4: attributed delete wins deterministically at equal timestamps', () => {
+      const local = convItem('WI-C6', { status: 'open' });
+      const remote = convItem('WI-C6', {
+        status: 'deleted',
+        deletedBy: 'carol@example.com',
+        deleteReason: 'no longer needed',
+      });
+      const result = mergeWorkItems([local], [remote]);
+      expect(result.merged).toHaveLength(1);
+      expect(result.merged[0].status).toBe('deleted');
+    });
+
+    // Both sides deleted still converges to deleted (nothing live to protect).
+    it('both-sides-deleted converges to deleted even with no attribution', () => {
+      const local = convItem('WI-C7', { status: 'deleted', deletedBy: '', deleteReason: '' });
+      const remote = convItem('WI-C7', { status: 'deleted', deletedBy: '', deleteReason: '' });
+      const result = mergeWorkItems([local], [remote]);
+      expect(result.merged).toHaveLength(1);
+      expect(result.merged[0].status).toBe('deleted');
     });
   });
 

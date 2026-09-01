@@ -26,6 +26,7 @@ import { dirname, resolve, join } from 'path';
 import { tmpdir } from 'node:os';
 import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync } from 'node:fs';
 import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
+import { isAuditFresh } from '@worklog/shared/icons';
 import {
   checkWlAvailable,
   fetchNextItems,
@@ -36,6 +37,13 @@ import {
   buildWlArgs,
 } from './fetcher.js';
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
+import {
+  isAgentCommand,
+  buildManuallyTriggeredPaneTitle,
+  buildShellPaneTitle,
+  stripSkillName,
+  stripAgentPromptPrefix,
+} from './pane-title.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -166,12 +174,7 @@ export function stripCommandPrefix(command: string): string {
  * @returns The prompt text with the `/prompt:` prefix removed; unchanged
  *          commands (no `/prompt:` prefix) are returned as-is.
  */
-export function stripAgentPromptPrefix(command: string): string {
-  if (command.startsWith('/prompt:')) {
-    return command.substring('/prompt:'.length);
-  }
-  return command;
-}
+export { stripAgentPromptPrefix };
 
 /**
  * Build the argument vector for spawning `send-to-pi.sh` for an agent
@@ -189,6 +192,10 @@ export function stripAgentPromptPrefix(command: string): string {
  * writes the new pane ID immediately after the split succeeds — the plugin
  * reads it back to record the work-item ↔ pane association.
  *
+ * When `paneName` is provided, it is forwarded via `--pane-name` so the new
+ * pane gets a descriptive title (WL-0MSJ4E8UA005KG9Y). Without the flag the
+ * script falls back to its default "Pi Agent".
+ *
  * Every selection-list agent dispatch passes `--no-focus` (WL-0MSHIA53D009DJOT)
  * so shared/send-to-pi.sh skips its final zoom and the selection list keeps
  * focus while the pi agent pane opens in the background. The shared script's
@@ -199,9 +206,13 @@ export function buildSendToPiArgs(
   targetCwd: string,
   model?: string,
   paneIdFile?: string,
+  paneName?: string,
 ): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
   const args = ['--no-focus', '--cwd', targetCwd];
+  if (paneName) {
+    args.push('--pane-name', paneName);
+  }
   if (model) {
     args.push('--model', model);
   }
@@ -218,11 +229,19 @@ export function buildSendToPiArgs(
  * route). Mirrors `buildSendToPiArgs`: `--no-focus` (WL-0MSHIA53D009DJOT) is
  * always passed so opening the command-output pane does not steal focus from
  * the selection list, followed by `--cwd <targetCwd>` so the pane starts in
- * the resolved project root. `run-in-pane.sh` parses both options at the
- * head of argv; everything else is the command itself.
+ * the resolved project root. `run-in-pane.sh` parses all three options at
+ * the head of argv; everything else is the command itself.
+ *
+ * When `paneName` is provided, `--pane-name <paneName>` replaces the
+ * script's default "Command Output" (WL-0MSJ4E8UA005KG9Y).
  */
-export function buildRunInPaneArgs(command: string, targetCwd: string): string[] {
-  return ['--no-focus', '--cwd', targetCwd, command];
+export function buildRunInPaneArgs(command: string, targetCwd: string, paneName?: string): string[] {
+  const args = ['--no-focus', '--cwd', targetCwd];
+  if (paneName) {
+    args.push('--pane-name', paneName);
+  }
+  args.push(command);
+  return args;
 }
 
 /**
@@ -454,19 +473,6 @@ export async function capturePaneIdFromFile(
 }
 
 /**
- * Check if a command is an agent command that should be sent to a pi pane.
- * Agent commands are those starting with /skill:, /intake, /plan, or /prompt:.
- */
-function isAgentCommand(command: string): boolean {
-  return (
-    command.startsWith('/skill:') ||
-    command.startsWith('/intake') ||
-    command.startsWith('/plan') ||
-    command.startsWith('/prompt:')
-  );
-}
-
-/**
  * Work-item ID format: a prefix (e.g. `WL`, `SA`) followed by a hash,
  * e.g. `WL-0MS9NPHQU005Y3VE`.
  */
@@ -579,6 +585,38 @@ export function createDowntimeDeps(
       registries.set(worklogDir, registry);
     }
     return registry;
+  };
+  // Leader-coordination item fetch (parent WL-0MST3OJ8S0001ROL AC4):
+  // resolve ONE item by id. `wl show` does not serve the audit timestamp, so
+  // for completed/in_review items the audit tier's list query (which DOES
+  // enrich auditedAt) is run against the worklog root to attach the
+  // freshness signal — otherwise an item with a valid audit could be
+  // re-audited on classification alone. Fail-closed: {ok:false} on any wl
+  // failure or unparseable output.
+  const fetchAuditItemById = async (itemId: string, cwd: string): Promise<DowntimeItemResult> => {
+    try {
+      const { stdout } = await getExecFileAsync()(
+        'wl',
+        buildWlArgs(['show', itemId, '--json']),
+        { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+      );
+      const info = parseShowItemOutput(stdout);
+      if (info === null) return { ok: false };
+      if (info.status === 'completed' && info.stage === 'in_review') {
+        const { stdout: listOut } = await getExecFileAsync()(
+          'wl',
+          buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        const audits = parseAuditCandidatesOutput(listOut);
+        if (audits === null) return { ok: false };
+        const found = audits.find((a) => a.id === itemId);
+        info.auditedAt = found?.auditedAt ?? null;
+      }
+      return { ok: true, info };
+    } catch {
+      return { ok: false };
+    }
   };
   return {
     async getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult> {
@@ -849,31 +887,19 @@ export function createDowntimeDeps(
     // any wl failure or unparseable output — the coordinator treats it as
     // a strike (never a silent skip).
     async fetchItem(itemId: string, cwd: string): Promise<DowntimeItemResult> {
+      return fetchAuditItemById(itemId, cwd);
+    },
+    // Interim freshness re-check (WL-0MT8KSTOE00871E7): fetch the item and
+    // check isAuditFresh to detect whether a valid audit was recorded in the
+    // interim between candidate selection and dispatch.
+    async hasFreshAudit(itemId: string, cwd: string): Promise<boolean> {
       try {
-        const { stdout } = await getExecFileAsync()(
-          'wl',
-          buildWlArgs(['show', itemId, '--json']),
-          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
-        const info = parseShowItemOutput(stdout);
-        if (info === null) return { ok: false };
-        if (info.status === 'completed' && info.stage === 'in_review') {
-          // Enrich auditedAt via the audit-tier list query (the only CLI
-          // shape that carries it). A wl failure here fails closed — the
-          // item cannot be classified confidently.
-          const { stdout: listOut } = await getExecFileAsync()(
-            'wl',
-            buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
-            { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-          );
-          const audits = parseAuditCandidatesOutput(listOut);
-          if (audits === null) return { ok: false };
-          const found = audits.find((a) => a.id === itemId);
-          info.auditedAt = found?.auditedAt ?? null;
-        }
-        return { ok: true, info };
+        const result = await fetchAuditItemById(itemId, cwd);
+        if (!result.ok || !result.info) return false;
+        return isAuditFresh(result.info.auditedAt, result.info.updatedAt);
       } catch {
-        return { ok: false };
+        // Fail-closed: on any error, treat as "not fresh" (dispatch proceeds).
+        return false;
       }
     },
     // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): read the project-local
@@ -917,7 +943,7 @@ export function createDowntimeDeps(
     },
     async spawnAgentPane(
       prompt: string,
-      opts: { model: string; cwd: string; paneName?: string },
+      opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
@@ -1208,7 +1234,8 @@ async function main(): Promise<void> {
       modeSwitchWorker,
       modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
       modeSwitchEnabled: runSettings.modeSwitchEnabled,
-      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => {
+      maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
+      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -1282,13 +1309,18 @@ async function main(): Promise<void> {
           const paneIdFile = itemId
             ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}.json`)
             : undefined;
+          // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): build the pane
+          // name from the action descriptor + skill + selected item's
+          // title/id, then pass it via --pane-name so the pi pane is
+          // identifiable among other panes.
+          const paneName = buildManuallyTriggeredPaneTitle(command, paneTitle, itemId);
           // Spawn send-to-pi.sh asynchronously — detached and with stdio ignored
           // so the TUI loop is not blocked or affected by the script's output.
           // The `model` from the shortcut entry (if any) is forwarded as
           // `--model <pattern>` so the pi CLI opens with the right model.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            buildSendToPiArgs(command, targetCwd, model, paneIdFile),
+            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName),
             {
               detached: true,
               stdio: 'ignore',
@@ -1301,7 +1333,7 @@ async function main(): Promise<void> {
             // Fire-and-forget: polling must never block the TUI loop. A
             // missing file (split failed) is a no-op — no entry recorded.
             void capturePaneIdFromFile(itemId, paneIdFile, (wid, pid) =>
-              agentTracker.recordAgentForWorkItem(wid, pid),
+              agentTracker.recordAgentForWorkItem(wid, pid, command),
             );
           }
         } else if (route === 'pane') {
@@ -1327,9 +1359,14 @@ async function main(): Promise<void> {
             );
             return;
           }
+          // Descriptive pane title (WL-0MSJ4E8UA005KG9Y): replace the
+          // generic "Command Output" with something identifying the command
+          // and its work item.
+          const shellItemId = extractWorkItemId(clean);
+          const shellPaneName = buildShellPaneTitle(clean, paneTitle, shellItemId);
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(clean, targetCwd),
+            buildRunInPaneArgs(clean, targetCwd, shellPaneName),
             {
               detached: true,
               stdio: 'ignore',
@@ -1362,7 +1399,7 @@ async function main(): Promise<void> {
           }
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(command, targetCwd),
+            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, extractWorkItemId(command))),
             {
               detached: true,
               stdio: 'ignore',
