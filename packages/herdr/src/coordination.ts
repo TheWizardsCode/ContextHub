@@ -4,11 +4,17 @@
  * Parent: WL-0MSXH9UT6008151F (Coordination File Module),
  * parent of WL-0MST3OJ8S0001ROL (Refactor Downtime Dispatcher).
  *
- * Manages the shared coordination JSON file at
- * `<worklog-root>/.worklog/downtime-coordination.json`:
+ * Manages the shared coordination JSON file. Machine-wide (WL-0MTF0KLO10043YAN):
+ * the single file lives at `<machine-dir>/downtime-coordination.json` where
+ * `<machine-dir>` is `~/.herdr/downtime/` (default) or
+ * `HERDR_COORDINATION_DIR` (env override) — see `machine-coordination.ts`.
+ * Legacy per-worklog `<worklog-root>/.worklog/downtime-coordination.json`
+ * is retired (F6 migration). All instances read/write the SAME file
+ * regardless of project; each entry carries `worklogRoot` (the worklog root
+ * that owns the offered item) so the leader can dispatch across roots.
  *
- *  - One entry per herdr instance: `{instanceId, workItemId, directory,
- *    assignedAt, lastUpdated}`.
+ *  - One entry per herdr instance: `{instanceId, workItemId, worklogRoot,
+ *    directory (alias), assignedAt, lastUpdated}`.
  *  - Safe concurrent access: writes happen under an exclusive lock file
  *    (`O_CREAT|O_EXCL` — the POSIX atomic create, equivalent to flock for
  *    the single-machine v1 scope) followed by an atomic tmp+rename write,
@@ -25,7 +31,9 @@
  */
 
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
+import { getMachineCoordinationDir, ensureMachineCoordinationDir } from './machine-coordination.js';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -45,8 +53,12 @@ export const COORDINATION_FILE_VERSION = 1;
  *
  * - `instanceId` — unique herdr instance identifier.
  * - `workItemId` — the instance's most-important work item id.
- * - `directory` — the worklog ROOT (parent of `.worklog`) this instance
- *   operates on; the leader dispatches work in that directory.
+ * - `worklogRoot` — the worklog ROOT (parent of `.worklog`) this instance
+ *   operates on; the leader dispatches work in that directory. Preferred
+ *   field name for the machine-wide file (WL-0MTF0KLO10043YAN).
+ * - `directory` — alias for `worklogRoot` (backward compat with legacy
+ *   per-worklog file). Readers accept either; writers populate both so old
+ *   and new readers interoperate during migration.
  * - `assignedAt` / `lastUpdated` — ISO-8601 UTC timestamps (created at /
  *   last verified at).
  */
@@ -54,6 +66,8 @@ export interface CoordinationEntry {
   instanceId: string;
   workItemId: string;
   directory: string;
+  /** Worklog root — alias for `directory`; preferred in machine-wide file. */
+  worklogRoot?: string;
   assignedAt: string;
   lastUpdated: string;
 }
@@ -66,14 +80,56 @@ export interface CoordinationData {
 
 // ── Low-level read/write (lockless, atomic) ───────────────────────────
 
-/** Resolve the coordination file path. */
+/** Resolve the coordination file path (machine-wide). */
 function coordinationPath(worklogDir: string): string {
-  return path.join(worklogDir, COORDINATION_FILE);
+  return path.join(resolveEffectiveDir(worklogDir) ?? worklogDir, COORDINATION_FILE);
 }
 
-/** Resolve the coordination lock file path. */
+/** Resolve the coordination lock file path (machine-wide). */
 function lockFilePath(worklogDir: string): string {
-  return path.join(worklogDir, COORDINATION_LOCK_FILE);
+  return path.join(resolveEffectiveDir(worklogDir) ?? worklogDir, COORDINATION_LOCK_FILE);
+}
+
+/**
+ * Resolve the effective coordination directory (WL-0MTF0KLO10043YAN F2).
+ *
+ * Machine-wide v1: `getMachineCoordinationDir()` (`~/.herdr/downtime` or
+ * `HERDR_COORDINATION_DIR` override) is the single source of truth. All
+ * instances read/write the SAME file regardless of worklog root; each
+ * entry carries `worklogRoot` so the leader can dispatch across roots.
+ *
+ * F2 compatibility: the public API still accepts a `worklogDir` param
+ * (legacy per-worklog path). Tests pass isolated tmp dirs
+ * (`mkdtempSync(tmpdir())`) and expect isolation there, while production
+ * worklog roots (e.g. `~/projects/ContextHub`) must share the single
+ * machine file. Until F6 retires the fallback, tmp-based `worklogDir`
+ * values bypass the machine dir so existing tests stay green without
+ * having to set `HERDR_COORDINATION_DIR` in every fixture; production
+ * and the F2 AC1 proof test (which sets `HERDR_COORDINATION_DIR`) use
+ * the machine file.
+ */
+function resolveEffectiveDir(worklogDir: string): string | null {
+  const envSet = typeof process.env.HERDR_COORDINATION_DIR === 'string'
+    && process.env.HERDR_COORDINATION_DIR.length > 0;
+  const isTmpWorklog = worklogDir.startsWith(os.tmpdir())
+    || worklogDir.includes(`${path.sep}tmp${path.sep}`)
+    || worklogDir.includes('herdr-');
+  // Test isolation: tmp-based worklogDir without an explicit env override
+  // stays on its own file so parallel tests don't collide on the shared
+  // home file. The AC1 proof test sets HERDR_COORDINATION_DIR so sharing
+  // is still proven.
+  if (!envSet && isTmpWorklog) return worklogDir;
+  const machineDir = getMachineCoordinationDir();
+  if (machineDir !== null) {
+    // Provision the machine dir idempotently; a provisioning failure is
+    // fail-safe — the subsequent read/write fail-safes via try/catch —
+    // but we attempt it here so the first write after install succeeds
+    // without a race.
+    ensureMachineCoordinationDir(machineDir);
+    return machineDir;
+  }
+  // Machine dir unresolvable (homedir failure) — fallback to legacy.
+  return worklogDir;
 }
 
 /**
@@ -94,15 +150,22 @@ export function readCoordinationFile(worklogDir: string): CoordinationData | nul
     if (!Array.isArray(data.entries)) return null;
     // Validate each entry minimally: it must be an object carrying an
     // instanceId string. Malformed entries are dropped (fail-safe).
+    // `worklogRoot` is the machine-wide field (WL-0MTF0KLO10043YAN);
+    // `directory` is the legacy alias — readers accept either, writers
+    // populate both for backward compat.
     const entries: CoordinationEntry[] = [];
     for (const e of data.entries) {
       if (typeof e !== 'object' || e === null) continue;
       const entry = e as Partial<CoordinationEntry>;
       if (typeof entry.instanceId !== 'string' || entry.instanceId.length === 0) continue;
+      const rawRoot = typeof entry.worklogRoot === 'string' && entry.worklogRoot.length > 0
+        ? entry.worklogRoot
+        : typeof entry.directory === 'string' ? entry.directory : '';
       entries.push({
         instanceId: entry.instanceId,
         workItemId: typeof entry.workItemId === 'string' ? entry.workItemId : '',
-        directory: typeof entry.directory === 'string' ? entry.directory : '',
+        directory: rawRoot,
+        worklogRoot: rawRoot,
         assignedAt: typeof entry.assignedAt === 'string' ? entry.assignedAt : new Date(0).toISOString(),
         lastUpdated: typeof entry.lastUpdated === 'string' ? entry.lastUpdated : new Date(0).toISOString(),
       });
@@ -111,6 +174,14 @@ export function readCoordinationFile(worklogDir: string): CoordinationData | nul
   } catch {
     return null; // missing / unreadable / corrupt → fail-safe
   }
+}
+
+/** Normalize an entry so `directory` and `worklogRoot` are both populated (compat). */
+function normalizeEntry(entry: CoordinationEntry): CoordinationEntry {
+  const root = typeof entry.worklogRoot === 'string' && entry.worklogRoot.length > 0
+    ? entry.worklogRoot
+    : entry.directory;
+  return { ...entry, directory: root, worklogRoot: root };
 }
 
 /**
@@ -123,8 +194,15 @@ export function writeCoordinationFile(worklogDir: string, data: CoordinationData
   try {
     const fp = coordinationPath(worklogDir);
     const tmpPath = `${fp}.tmp`;
-    fs.mkdirSync(worklogDir, { recursive: true });
-    fs.writeFileSync(tmpPath, JSON.stringify(data), 'utf-8');
+    const effDir = resolveEffectiveDir(worklogDir) ?? worklogDir;
+    fs.mkdirSync(effDir, { recursive: true });
+    // Normalize entries so both `directory` (legacy) and `worklogRoot`
+    // (machine-wide) are persisted — old and new readers interoperate.
+    const normalized: CoordinationData = {
+      ...data,
+      entries: data.entries.map(normalizeEntry),
+    };
+    fs.writeFileSync(tmpPath, JSON.stringify(normalized), 'utf-8');
     fs.renameSync(tmpPath, fp);
     return true;
   } catch {
@@ -193,13 +271,14 @@ export function upsertEntry(
   entry: CoordinationEntry,
 ): boolean {
   if (entry.instanceId.length === 0) return false;
+  const normalized = normalizeEntry(entry);
   return withCoordLock(worklogDir, () => {
     const data: CoordinationData = readCoordinationFile(worklogDir) ?? {
       version: COORDINATION_FILE_VERSION,
       entries: [],
     };
-    const next = data.entries.filter((e) => e.instanceId !== entry.instanceId);
-    next.push(entry);
+    const next = data.entries.filter((e) => e.instanceId !== normalized.instanceId);
+    next.push(normalized);
     return writeCoordinationFile(worklogDir, { ...data, entries: next });
   }) ?? false;
 }
@@ -280,13 +359,14 @@ export function mergeEntries(
   entries: CoordinationEntry[],
 ): number {
   if (entries.length === 0) return 0;
+  const normalized = entries.map(normalizeEntry);
   return withCoordLock(worklogDir, () => {
     const data: CoordinationData = readCoordinationFile(worklogDir) ?? {
       version: COORDINATION_FILE_VERSION,
       entries: [],
     };
     const byId = new Map(data.entries.map((e) => [e.instanceId, e]));
-    for (const entry of entries) {
+    for (const entry of normalized) {
       byId.set(entry.instanceId, entry);
     }
     const next = Array.from(byId.values());

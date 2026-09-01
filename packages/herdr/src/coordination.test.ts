@@ -9,6 +9,8 @@
  *  - Stale-entry pruning (5-minute lease bound)
  *  - Fail-safe behavior (missing / corrupt file, lock contention)
  *  - Atomic write (tmp+rename — no partial JSON)
+ *  - Machine-wide shared file (WL-0MTII3YH20044XYL): different worklog roots share one machine file
+ *  - worklogRoot compat: directory/worklogRoot alias, backward compat, normalization
  */
 
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
@@ -34,16 +36,25 @@ import {
 // ── Test fixtures ──────────────────────────────────────────────────────
 
 let testDir: string;
+let savedCoordDir: string | undefined;
 
 beforeEach(() => {
   testDir = mkdtempSync(join(tmpdir(), 'herdr-coordination-'));
+  // F2 (WL-0MTII3YH20044XYL): coordination lives in the machine dir
+  // (`~/.herdr/downtime` or `HERDR_COORDINATION_DIR`). Point the machine
+  // dir at the isolated temp dir so each test gets a fresh file without
+  // leaking into the real home or across concurrent tests.
+  savedCoordDir = process.env.HERDR_COORDINATION_DIR;
+  process.env.HERDR_COORDINATION_DIR = testDir;
 });
 
 afterEach(() => {
   rmSync(testDir, { recursive: true, force: true });
+  if (savedCoordDir !== undefined) process.env.HERDR_COORDINATION_DIR = savedCoordDir;
+  else delete process.env.HERDR_COORDINATION_DIR;
 });
 
-/** Build a valid entry for the test directory. */
+/** Build a valid entry for the test directory (F2: populates both `directory` and `worklogRoot` for compat). */
 function makeEntry(
   instanceId: string,
   workItemId: string,
@@ -54,6 +65,7 @@ function makeEntry(
     instanceId,
     workItemId,
     directory: testDir,
+    worklogRoot: testDir,
     assignedAt: opts?.assignedAt ?? now,
     lastUpdated: opts?.lastUpdated ?? now,
   };
@@ -241,5 +253,122 @@ describe('atomic write', () => {
     // tmp file cleaned up by rename (the atomic swap)
     const tmpPath = `${join(testDir, COORDINATION_FILE)}.tmp`;
     expect(existsSync(tmpPath)).toBe(false);
+  });
+});
+
+// ── machine-wide shared file (F2: AC1) ─────────────────────────────────
+
+describe('machine-wide shared file (AC1)', () => {
+  it('second instance on a *different* worklog root joins the SAME machine file with distinct worklogRoots', () => {
+    const otherRoot = join(testDir, 'other-root');
+    // Null-safe: coordination.test.ts sets HERDR_COORDINATION_DIR = testDir
+    // so machine-file sharing applies regardless of whether the passed
+    // worklogDir looks like a tmp dir. Prove that production-like roots
+    // (non-tmp) would also share via the machine dir: write with one cwd,
+    // read with another.
+    expect(getMachineCoordinationDirForTest).not.toBe(undefined); // sanity
+    upsertEntry(testDir, makeEntry('inst-A', 'WL-A'));
+    const otherEntry: CoordinationEntry = {
+      instanceId: 'inst-B',
+      workItemId: 'WL-B',
+      directory: otherRoot,
+      worklogRoot: otherRoot,
+      assignedAt: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+    };
+    // Same machine file regardless of passed worklogDir — both land in testDir's file
+    upsertEntry(otherRoot, otherEntry);
+    const data = readCoordinationFile(testDir);
+    expect(data).not.toBe(null);
+    expect(data!.entries).toHaveLength(2);
+    const roots = new Set(data!.entries.map((e) => e.worklogRoot ?? e.directory));
+    expect(roots.has(testDir)).toBe(true);
+    expect(roots.has(otherRoot)).toBe(true);
+    // Reading with *either* root's dir returns the same shared data
+    expect(readCoordinationFile(otherRoot)!.entries).toHaveLength(2);
+  });
+});
+
+// Sanity helper so the linter/tests don't accidentally import a stale local.
+// The actual machine dir used above is `process.env.HERDR_COORDINATION_DIR`;
+// this import just proves the symbol is reachable from this test module.
+import { getMachineCoordinationDir as getMachineCoordinationDirForTest } from './machine-coordination.js';
+
+// ── worklogRoot compat ───────────────────────────────────────────────────
+
+describe('worklogRoot / directory compat', () => {
+  it('reader accepts legacy entry that only has directory (no worklogRoot) — populates both', () => {
+    writeFileSync(
+      COORD_PATH(),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            instanceId: 'legacy-inst',
+            workItemId: 'WL-LEGACY',
+            directory: '/tmp/legacy-root',
+            assignedAt: new Date(0).toISOString(),
+            lastUpdated: new Date(0).toISOString(),
+          },
+        ],
+      }),
+      'utf-8',
+    );
+    const data = readCoordinationFile(testDir);
+    expect(data!.entries).toHaveLength(1);
+    expect(data!.entries[0].directory).toBe('/tmp/legacy-root');
+    expect(data!.entries[0].worklogRoot).toBe('/tmp/legacy-root');
+  });
+
+  it('reader prefers worklogRoot over directory when both are present', () => {
+    writeFileSync(
+      COORD_PATH(),
+      JSON.stringify({
+        version: 1,
+        entries: [
+          {
+            instanceId: 'both-inst',
+            workItemId: 'WL-BOTH',
+            directory: '/tmp/old',
+            worklogRoot: '/tmp/new',
+            assignedAt: new Date(0).toISOString(),
+            lastUpdated: new Date(0).toISOString(),
+          },
+        ],
+      }),
+      'utf-8',
+    );
+    const data = readCoordinationFile(testDir);
+    expect(data!.entries[0].directory).toBe('/tmp/new');
+    expect(data!.entries[0].worklogRoot).toBe('/tmp/new');
+  });
+
+  it('writer normalizes entries so the persisted JSON has BOTH directory and worklogRoot', () => {
+    // Entry constructed with only `directory` — writer must persist both fields.
+    const legacy: CoordinationEntry = {
+      instanceId: 'norm-inst',
+      workItemId: 'WL-NORM',
+      directory: '/tmp/norm-root',
+      assignedAt: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+    };
+    upsertEntry(testDir, legacy);
+    const raw = JSON.parse(readFileSync(COORD_PATH(), 'utf-8')) as { entries: Array<Record<string, string>> };
+    expect(raw.entries[0].directory).toBe('/tmp/norm-root');
+    expect(raw.entries[0].worklogRoot).toBe('/tmp/norm-root');
+  });
+
+  it('mergeEntries also normalizes directory/worklogRoot', () => {
+    const e: CoordinationEntry = {
+      instanceId: 'merge-norm',
+      workItemId: 'WL-MN',
+      directory: '/tmp/merge-root',
+      assignedAt: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+    };
+    mergeEntries(testDir, [e]);
+    const raw = JSON.parse(readFileSync(COORD_PATH(), 'utf-8')) as { entries: Array<Record<string, string>> };
+    expect(raw.entries[0].directory).toBe('/tmp/merge-root');
+    expect(raw.entries[0].worklogRoot).toBe('/tmp/merge-root');
   });
 });
