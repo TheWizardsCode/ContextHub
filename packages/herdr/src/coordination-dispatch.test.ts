@@ -512,6 +512,54 @@ describe('dispatchFromCoordination', () => {
     const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
     expect(spawnCall).toContain('/skill:plan WL-CRIT-B');
   });
+
+  // WL-0MTJDSCSX007NNSE: fair-dispatch integration (alternating + critical + persistence)
+  it('alternates non-critical entries from different projects across dispatches (round-robin)', async () => {
+    const entryA = makeEntry('inst-a', 'WL-PLAN-A', '/roots/contexthub');
+    const entryB = makeEntry('inst-b', 'WL-PLAN-B', '/roots/sorraagents');
+    const planA = itemInfo({ id: 'WL-PLAN-A', status: 'open', stage: 'intake_complete', priority: 'high' });
+    const planB = itemInfo({ id: 'WL-PLAN-B', status: 'open', stage: 'intake_complete', priority: 'high' });
+    const deps1 = makeCoordinationDeps({ fetchItem: vi.fn().mockResolvedValueOnce({ ok: true, info: planA }).mockResolvedValueOnce({ ok: true, info: planB }) });
+    const out1 = await dispatchFromCoordination(deps1, [entryA, entryB], { model: 'plan', cwd: '/roots/contexthub', coordinationDir: testDir });
+    expect(out1.dispatched).toBe(true);
+    const firstCall = (deps1.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    const firstWasA = firstCall.includes('WL-PLAN-A');
+    // Cursor must be stamped for the dispatched root
+    const { loadRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    const cursorBefore = loadRoundRobinCursor(testDir);
+    expect(cursorBefore[firstWasA ? '/roots/contexthub' : '/roots/sorraagents']).toBeDefined();
+    // Second dispatch alternates
+    const deps2 = makeCoordinationDeps({ fetchItem: vi.fn().mockResolvedValueOnce({ ok: true, info: planA }).mockResolvedValueOnce({ ok: true, info: planB }) });
+    const out2 = await dispatchFromCoordination(deps2, [entryA, entryB], { model: 'plan', cwd: '/roots/contexthub', coordinationDir: testDir });
+    expect(out2.dispatched).toBe(true);
+    const secondCall = (deps2.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    // Must alternate: if first was A, second is B and vice-versa
+    expect(firstWasA).toBe(secondCall.includes('WL-PLAN-B'));
+  });
+
+  it('a newly-arrived critical from project B is dispatched even though round-robin would choose A', async () => {
+    const planA = itemInfo({ id: 'WL-PLAN-A', status: 'open', stage: 'intake_complete', priority: 'high' });
+    const critB = itemInfo({ id: 'WL-CRIT-B', status: 'open', stage: 'idea', priority: 'critical' });
+    const entryPlanA = makeEntry('inst-a', 'WL-PLAN-A', '/roots/contexthub');
+    const entryCritB = makeEntry('inst-b', 'WL-CRIT-B', '/roots/sorraagents');
+    const deps = makeCoordinationDeps({ fetchItem: vi.fn().mockResolvedValueOnce({ ok: true, info: planA }).mockResolvedValueOnce({ ok: true, info: critB }) });
+    const outcome = await dispatchFromCoordination(deps, [entryPlanA, entryCritB], { model: 'plan', cwd: '/roots/contexthub', coordinationDir: testDir });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('intake');
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('WL-CRIT-B');
+  });
+
+  it('cursor persists across a simulated leader restart (file survives re-read)', async () => {
+    const { loadRoundRobinCursor, saveRoundRobinCursor, ROUND_ROBIN_BY_ROOT_FILE_NAME } = await import('./downtime-round-robin-by-root.js');
+    const { join } = await import('node:path');
+    const { readFileSync } = await import('node:fs');
+    saveRoundRobinCursor(testDir, { '/roots/contexthub': '2026-09-02T00:00:00.000Z' });
+    const reloaded = loadRoundRobinCursor(testDir);
+    expect(reloaded['/roots/contexthub']).toBe('2026-09-02T00:00:00.000Z');
+    const raw = readFileSync(join(testDir, ROUND_ROBIN_BY_ROOT_FILE_NAME), 'utf-8');
+    expect(JSON.parse(raw)['/roots/contexthub']).toBe('2026-09-02T00:00:00.000Z');
+  });
 });
 
 // ── runCoordinationCheckIn ────────────────────────────────────────────
