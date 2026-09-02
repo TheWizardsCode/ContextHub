@@ -179,6 +179,45 @@ the non-critical plan/intake tiers.
 above-caps critical item is not a valid candidate and the tier falls
 through.
 
+### Fair scheduling: global cross-project round-robin (WL-0MTJ7IEI80055V2V)
+
+Within each tier, non-critical entries are dispatched in **global
+cross-project round-robin** order, not file order. This prevents any single
+project from monopolising the downtime worker when multiple projects
+have offers in the coordination list.
+
+**How it works:**
+
+- A persistent cursor file
+  (`downtime-round-robin-by-root.json`) tracks the last-dispatched
+  `worklogRoot` (project) for every project that has offered work.
+- On each dispatch cycle, the leader calls
+  `selectLeastRecentlyServed()` to pick the **least-recently-dispatched
+  project** among those with offers in the current tier.
+- **New/unknown roots sort first** — a project that has never been
+  dispatched is never penalised; it is served before any known root.
+- After selection, the cursor is advanced: the chosen root's timestamp is
+  updated to the current time and persisted atomically (tmp+rename).
+
+**Fail-open:** a missing, corrupt, or unreadable cursor degrades to
+file order (the pre-refactor behaviour) — the cursor never blocks
+dispatch. Lock contention during cursor reads/writes also degrades
+gracefully.
+
+**Cursor persistence across restarts:** the cursor is written to disk
+after every selection, so a leader restart picks up the most-recently
+served root from the persisted file. No cursor state is lost.
+
+**Critical override (global pre-tier):** the critical tier is evaluated
+**before** the round-robin tier order. A critical entry at ANY stage
+(intake/plan/implement) dispatches immediately regardless of round-robin
+ordering — critical items jump ahead of all non-critical work. The
+critical tier uses deterministic `sortIndex` ordering (not round-robin)
+so the lowest-sortIndex critical item is always dispatched first.
+
+**Tier priority (global):** audit → critical (pre-tier override) →
+implement → plan → intake. Within each non-critical tier, round-robin
+ordering applies.
 **Dependency-frontier dispatch (Q3):** when the selected critical item is
 dependency-blocked (`wl dep list <id>` outbound `depends-on` edges), the
 worker follows the blocking chain to the nearest OPEN blocker and dispatches
