@@ -4347,12 +4347,28 @@ export async function runWorklistTui(
   let refreshInFlight = false;
 
   /**
+   * Coalescing flag: set when a refresh is requested while one is already
+   * in-flight. The trailing refresh runs after the current cycle completes
+   * (WL-0MTIB7JAN004MQ8N). This ensures that an `onExit` refresh triggered
+   * by a background command's exit is never silently dropped when another
+   * refresh (e.g. from a prior immediate dispatch) is still running.
+   *
+   * At-most-one trailing refresh: multiple simultaneous refresh requests
+   * while in-flight coalesce into a single trailing run, not an unbounded
+   * queue (prevents refresh storms).
+   */
+  let refreshPending = false;
+
+  /**
    * Fetch and apply updated items, with optional notification.
    */
   const doRefresh = async (showNotification = false): Promise<void> => {
-    // Single-flight guard: skip the tick while the previous refresh cycle is
-    // still running, so overlapping wl spawn bursts cannot happen.
+    // Single-flight guard with trailing/coalescing: if a refresh is already
+    // in-flight, record the request as pending and return. The pending flag
+    // is checked in the `finally` block so a trailing refresh runs after the
+    // current cycle completes — without unbounded queuing (WL-0MTIB7JAN004MQ8N).
     if (refreshInFlight) {
+      refreshPending = true;
       return;
     }
     refreshInFlight = true;
@@ -4445,6 +4461,14 @@ export async function runWorklistTui(
       // Always clear the guard — a successful, failed, or aborted cycle must
       // never block the next refresh tick.
       refreshInFlight = false;
+      // Trailing/coalescing refresh (WL-0MTIB7JAN004MQ8N): if a refresh was
+      // requested while this cycle was in-flight, run it now. The flag is
+      // reset before the recursive call to prevent infinite loops — only one
+      // trailing run per in-flight cycle.
+      if (refreshPending) {
+        refreshPending = false;
+        void doRefresh(false);
+      }
     }
   };
 
@@ -4911,7 +4935,13 @@ export async function runWorklistTui(
             // search): refetch so the selection list reflects the change
             // immediately instead of waiting for the auto-refresh cycle
             // (WL-0MTA217DZ003H5K8).
-            if (result === 'dispatched' && (isWlViewCommand(command) || isWlModifyingCommand(command))) {
+            // Background dispatches (openPane === false) suppress the immediate
+            // refresh — the onExit handler (onRefresh) fires after the
+            // background command completes and provides the correct freshness
+            // point without racing ahead of the data-modifying command
+            // (WL-0MTIB7JAN004MQ8N).
+            if (result === 'dispatched' && openPane !== false
+                && (isWlViewCommand(command) || isWlModifyingCommand(command))) {
               await doRefresh(true);
             }
           } catch (e) {
@@ -5061,7 +5091,13 @@ export async function runWorklistTui(
           // search): refetch so the selection list reflects the change
           // immediately instead of waiting for the auto-refresh cycle
           // (WL-0MTA217DZ003H5K8).
-          if (result === 'dispatched' && (isWlViewCommand(singleCmd) || isWlModifyingCommand(singleCmd))) {
+          // Background dispatches (singleOpenPane === false) suppress the
+          // immediate refresh — the onExit handler (onRefresh) fires after
+          // the background command completes and provides the correct
+          // freshness point without racing ahead of the data-modifying
+          // command (WL-0MTIB7JAN004MQ8N).
+          if (result === 'dispatched' && singleOpenPane !== false
+              && (isWlViewCommand(singleCmd) || isWlModifyingCommand(singleCmd))) {
             await doRefresh(true);
           }
           render();

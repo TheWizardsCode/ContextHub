@@ -1157,6 +1157,46 @@ describe('dispatchChordCommand', () => {
     expect(onCommand).toHaveBeenCalledWith('!!wl update TEST-123 --status open --stage plan_complete', undefined, undefined, undefined, 'Item TEST-123');
   });
 
+  // WL-0MTIB7JAN004MQ8N — background dispatch (openPane=false) plumbing
+  it('dispatchChordCommand forwards openPane=false and onRefresh for a background-modifying command (WL-0MTIB7JAN004MQ8N)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const onRefresh = vi.fn();
+    const result = dispatchChordCommand('!!wl update <id> --priority critical', state, onCommand, undefined, undefined, false, onRefresh as any);
+    expect(result).toBe(true);
+    // openPane false is forwarded so the handler knows the command is
+    // background and the refresh timing is tied to onExit.
+    expect(onCommand).toHaveBeenCalledWith('!!wl update TEST-123 --priority critical', undefined, false, onRefresh, 'Item TEST-123');
+  });
+
+  it('dispatchChordCommand forwards openPane=false and onRefresh for update --priority low/medium/high (WL-0MTIB7JAN004MQ8N)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const cases: Array<[string, string]> = [
+      ['!!wl update <id> --priority low', '!!wl update TEST-123 --priority low'],
+      ['!!wl update <id> --priority medium', '!!wl update TEST-123 --priority medium'],
+      ['!!wl update <id> --priority high', '!!wl update TEST-123 --priority high'],
+    ];
+    for (const [cmd, expected] of cases) {
+      const onCommand = vi.fn();
+      const onRefresh = vi.fn();
+      const ok = dispatchChordCommand(cmd, state, onCommand, undefined, undefined, false, onRefresh as any);
+      expect(ok).toBe(true);
+      expect(onCommand).toHaveBeenCalledWith(expected, undefined, false, onRefresh, 'Item TEST-123');
+    }
+  });
+
+  it('dispatchChordCommand forwards onRefresh for !!wl reviewed with openPane=false (WL-0MTIB7JAN004MQ8N)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const onRefresh = vi.fn();
+    const result = dispatchChordCommand('!!wl reviewed <id> false', state, onCommand, undefined, undefined, false, onRefresh as any);
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith('!!wl reviewed TEST-123 false', undefined, false, onRefresh, 'Item TEST-123');
+  });
+
   it('routes !!wl search commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
     const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
     state.selectedIndex = 0;
@@ -1235,6 +1275,21 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
     const step2 = processChordInput(chordState, 'a', registry, 'list', 'in_review');
     expect(step2).toBe('chord-complete');
     expect(chordState.resolvedOpenPane).toBeUndefined();
+  });
+
+  // WL-0MTIB7JAN004MQ8N — u p * priority chords are open_pane:false
+  it('processChordInput stores resolvedOpenPane=false for u p * priority chords (WL-0MTIB7JAN004MQ8N)', () => {
+    const registry = loadShortcutConfig();
+    for (const suffix of ['l', 'm', 'h', 'c'] as const) {
+      const chordState = createChordState();
+      const step1 = processChordInput(chordState, 'u', registry, 'list', undefined);
+      const step2 = processChordInput(chordState, 'p', registry, 'list', undefined);
+      const step3 = processChordInput(chordState, suffix, registry, 'list', undefined);
+      expect(step3).toBe('chord-complete');
+      expect(chordState.resolvedCommand).toBeTruthy();
+      expect(chordState.resolvedCommand).toContain('wl update');
+      expect(chordState.resolvedOpenPane).toBe(false);
+    }
   });
 
   it('dispatchChordCommand passes openPane=false through to onCommand', () => {
