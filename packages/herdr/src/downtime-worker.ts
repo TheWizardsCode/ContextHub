@@ -1690,6 +1690,50 @@ export async function dispatchFromCoordination(
     return { dispatched: false, reason: 'wl-error' };
   }
 
+  // ── Global critical override (WL-0MTJDZY5E003D6CO) ────────────────
+  // Promote the critical-priority shortcut to a global pre-tier check:
+  // if any dispatchable critical entry exists, dispatch it IMMEDIATELY,
+  // before any tier loop. This ensures critical outranks everything
+  // (e.g., a critical `idea` dispatches before a non-critical `audit`),
+  // matching the intent "jump to the front of the queue".
+  //
+  // Within the critical subset, selection is deterministic by sortIndex
+  // (existing priority/sortIndex tie-break — one item per project, so
+  // round-robin is not needed inside critical).
+  //
+  // The freeze (audit/implement skipped while frozen) and caps
+  // (`risk <= Medium && effort <= Medium` for `plan_complete`, including
+  // critical) are retained — critical entries are already filtered during
+  // classification, so we only need to dispatch the first eligible entry.
+  //
+  // If dispatch fails (claim-failed, etc.), we fall through to the
+  // normal tier loop — the critical tier group is still available there.
+  const criticalGroup = byTier.get('critical');
+  if (criticalGroup && criticalGroup.length > 0) {
+    // Sort by sortIndex ascending (deterministic tie-break).
+    const sortedCritical = [...criticalGroup].sort(
+      (a, b) => (a.info.sortIndex ?? 0) - (b.info.sortIndex ?? 0),
+    );
+    const { entry, info, skill } = sortedCritical[0];
+    const worklogRoot = entry.worklogRoot ?? entry.directory;
+    const criticalOutcome = await dispatchClaimedTier(
+      deps,
+      skill,
+      toCoordinationCandidate(info),
+      { model: opts.model, cwd: worklogRoot },
+    );
+    if (criticalOutcome.dispatched) {
+      // Dispatched — remove the entry so the owner re-queues its next
+      // most-important item at the next check-in (AC3 re-queue).
+      removeEntry(opts.coordinationDir, entry.instanceId);
+      return criticalOutcome;
+    }
+    // Dispatch failed (claim-failed, spawn-failed, marker-write-failed,
+    // wl-error): fall through to the tier loop below.
+    // spawn-failed/marker-write-failed will consume the entry in the tier
+    // loop; claim-failed is neutral and we try the next entry there.
+  }
+
   for (const tier of COORDINATION_TIER_ORDER) {
     const group = byTier.get(tier) ?? [];
     // Audit-tier slot minimum: an audit pane needs a second slot for its

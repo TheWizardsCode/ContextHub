@@ -78,6 +78,7 @@ function itemInfo(overrides: Partial<DowntimeItemInfo> & { id: string }): Downti
     effort: overrides.effort,
     auditedAt: overrides.auditedAt,
     updatedAt: overrides.updatedAt,
+    sortIndex: overrides.sortIndex,
   };
 }
 
@@ -380,6 +381,136 @@ describe('dispatchFromCoordination', () => {
     expect(outcome.kind).toBe('implement');
     const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
     expect(spawnCall).toContain('/skill:implement WL-IMPL');
+  });
+
+  // Critical override pre-tier check (WL-0MTJDZY5E003D6CO):
+  // A critical entry dispatches BEFORE any non-critical tier, regardless
+  // of the tier order (e.g., critical idea outranks non-critical audit).
+  // The override is global, evaluated before the tier loop.
+
+  it('dispatches a critical entry before a non-critical audit entry (global override)', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn()
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-AUDIT', status: 'open', stage: 'idea', priority: 'high' }) })
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-CRIT', status: 'open', stage: 'idea', priority: 'critical' }) }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entries = [makeEntry('inst-audit', 'WL-AUDIT'), makeEntry('inst-crit', 'WL-CRIT')];
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('intake');
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('/skill:intake WL-CRIT');
+  });
+
+  it('dispatches a critical entry before a non-critical plan entry (critical idea > non-critical plan)', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn()
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S', priority: 'high' }) })
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-CRIT', status: 'open', stage: 'idea', priority: 'critical' }) }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entries = [makeEntry('inst-plan', 'WL-PLAN'), makeEntry('inst-crit', 'WL-CRIT')];
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('intake');
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('/skill:intake WL-CRIT');
+  });
+
+  it('dispatches a critical implement before a non-critical audit (critical plan_complete > audit)', async () => {
+    const deps = makeCoordinationDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+      fetchItem: vi.fn()
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-AUDIT', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString(), priority: 'high' }) })
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-CRIT', status: 'open', stage: 'plan_complete', risk: 'Medium', effort: 'S', priority: 'critical' }) }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entries = [makeEntry('inst-audit', 'WL-AUDIT'), makeEntry('inst-crit', 'WL-CRIT')];
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('/skill:implement WL-CRIT');
+  });
+
+  it('respects code-freeze: critical implement is skipped when frozen', async () => {
+    const deps = makeCoordinationDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      fetchItem: vi.fn()
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-CRIT', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S', priority: 'critical' }) })
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete', priority: 'high' }) }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entries = [makeEntry('inst-crit', 'WL-CRIT'), makeEntry('inst-plan', 'WL-PLAN')];
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('respects caps: above-caps critical plan_complete is skipped', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn()
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-CRIT', status: 'open', stage: 'plan_complete', risk: 'High', effort: 'L', priority: 'critical' }) })
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete', priority: 'high' }) }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entries = [makeEntry('inst-crit', 'WL-CRIT'), makeEntry('inst-plan', 'WL-PLAN')];
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('falls through to non-critical tiers when critical dispatch fails (claim-failed)', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn()
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-CRIT', status: 'open', stage: 'idea', priority: 'critical' }) })
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete', priority: 'high' }) }),
+      claimItem: vi.fn()
+        .mockResolvedValueOnce({ ok: false, reason: 'stale' })
+        .mockResolvedValueOnce({ ok: false, reason: 'stale' })
+        .mockResolvedValueOnce({ ok: true }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entries = [makeEntry('inst-crit', 'WL-CRIT'), makeEntry('inst-plan', 'WL-PLAN')];
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('removes the critical entry from the coordination file after dispatch', async () => {
+    const entry = makeEntry('inst-crit', 'WL-CRIT');
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-CRIT', status: 'open', stage: 'idea', priority: 'critical' }) }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [entry], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(getEntry(testDir, 'inst-crit')).toBe(null);
+  });
+
+  it('selects the lowest-sortIndex critical entry when multiple exist', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn()
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-CRIT-A', status: 'open', stage: 'idea', priority: 'critical', sortIndex: 200 }) })
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-CRIT-B', status: 'open', stage: 'intake_complete', priority: 'critical', sortIndex: 100 }) }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entries = [makeEntry('inst-a', 'WL-CRIT-A'), makeEntry('inst-b', 'WL-CRIT-B')];
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('/skill:plan WL-CRIT-B');
   });
 });
 
