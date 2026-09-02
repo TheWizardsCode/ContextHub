@@ -108,6 +108,10 @@ import {
   type CoordinationEntry,
 } from './coordination.js';
 import {
+  loadRoundRobinCursor,
+  advanceRoot,
+} from './downtime-round-robin-by-root.js';
+import {
   createLeaderElectionManager,
   cleanupStaleElection,
   DEFAULT_LEASE_TTL_SECONDS,
@@ -1553,8 +1557,19 @@ export async function computeMostImportantItem(
  * file so its owner re-queues its next item at the next check-in (AC3).
  *
  * Tier priority: audit → implement → plan → intake. Within a tier,
- * entries dispatch in file order (the instances' offers are equally
- * weighted; round-robin is superseded by the shared-list model).
+ * non-critical entries dispatch in global cross-project round-robin
+ * order (WL-0MTJ7IEI80055V2V): least-recently-dispatched `worklogRoot`
+ * first, new/unknown roots before known (never penalised), sourced
+ * from the persistent cursor alongside the coordination file
+ * (`downtime-round-robin-by-root.json`); fail-open on missing/corrupt
+ * cursor or lock contention — falls back to file order. The critical
+ * tier uses deterministic `sortIndex` ordering (not round-robin).
+ *
+ * Cursor advance (WL-0MTJE0FXC006WAOX): on every consumed entry
+ * (successful dispatch, or claimed-but-failed spawn/marker) the
+ * per-`worklogRoot` cursor advances so the next dispatch in ANY tier
+ * considers that project most-recently served. Concurrent leaders do
+ * not corrupt the cursor (fail-open on lock contention).
  *
  * Fail-closed at every boundary: a wl failure fetching an entry resolves
  * `wl-error` only when EVERY entry failed (a fully broken lookup — a
@@ -1726,20 +1741,30 @@ export async function dispatchFromCoordination(
       // Dispatched — remove the entry so the owner re-queues its next
       // most-important item at the next check-in (AC3 re-queue).
       removeEntry(opts.coordinationDir, entry.instanceId);
+      advanceRoundRobinCursor(opts.coordinationDir, worklogRoot, now);
       return criticalOutcome;
     }
-    // Dispatch failed (claim-failed, spawn-failed, marker-write-failed,
-    // wl-error): fall through to the tier loop below.
-    // spawn-failed/marker-write-failed will consume the entry in the tier
-    // loop; claim-failed is neutral and we try the next entry there.
+    if (criticalOutcome.reason === 'spawn-failed' || criticalOutcome.reason === 'marker-write-failed') {
+      // Claimed but never opened — still consumes the entry and advances the cursor (AC).
+      removeEntry(opts.coordinationDir, entry.instanceId);
+      advanceRoundRobinCursor(opts.coordinationDir, worklogRoot, now);
+      return criticalOutcome;
+    }
+    // Dispatch failed (claim-failed, wl-error): fall through to the
+    // tier loop below. spawn-failed/marker-write-failed already returned.
   }
 
   for (const tier of COORDINATION_TIER_ORDER) {
-    const group = byTier.get(tier) ?? [];
+    let group = byTier.get(tier) ?? [];
     // Audit-tier slot minimum: an audit pane needs a second slot for its
     // Phase 2 child (WL-0MSORQ1RG005DGUS) — skip the whole audit group
     // when too few slots are free (ineligible, never a strike).
     if (tier === 'audit' && !auditEligible) continue;
+    // Global per-`worklogRoot` round-robin (WL-0MTJE0FXC006WAOX): non-
+    // critical same-tier entries order by least-recently-served
+    // (`downtime-round-robin-by-root.json`); unknown roots first,
+    // oldest timestamp first; fail-open on missing/corrupt cursor.
+    group = sortEntriesByRoundRobin(group, opts.coordinationDir);
     for (const { entry, info, skill } of group) {
       const worklogRoot = entry.worklogRoot ?? entry.directory;
       const outcome = await dispatchClaimedTier(
@@ -1752,6 +1777,7 @@ export async function dispatchFromCoordination(
         // Dispatched — remove the entry so the owner re-queues its next
         // most-important item at the next check-in (AC3 re-queue).
         removeEntry(opts.coordinationDir, entry.instanceId);
+        advanceRoundRobinCursor(opts.coordinationDir, worklogRoot, now);
         return outcome;
       }
       if (outcome.reason === 'claim-failed') {
@@ -1766,8 +1792,10 @@ export async function dispatchFromCoordination(
       if (outcome.reason === 'spawn-failed' || outcome.reason === 'marker-write-failed') {
         // The item is claimed (+ marked) but the pane never appeared:
         // remove the entry so the owner re-queues; the standing marker and
-        // the in_progress claim prevent double-dispatch.
+        // the in_progress claim prevent double-dispatch. Still advances
+        // the round-robin cursor (consumed entry, AC).
         removeEntry(opts.coordinationDir, entry.instanceId);
+        advanceRoundRobinCursor(opts.coordinationDir, worklogRoot, now);
         return outcome;
       }
     }
@@ -3910,4 +3938,76 @@ export function clampDowntimeRequiredFreeSlots(value: number): number {
 export function clampDowntimeNoCandidateCooldownMs(value: number): number {
   if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS;
   return Math.max(Math.round(value), DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS);
+}
+
+// ── Round-robin helpers (WL-0MTJE0FXC006WAOX) ──────────────────────────
+
+/** Internal tier-group entry: a CoordinationEntry paired with its dispatch info. */
+type TierEntry = { entry: CoordinationEntry; info: DowntimeItemInfo; skill: DowntimeSkillKind };
+
+/**
+ * Sort a tier group by round-robin cursor order (WL-0MTJE0FXC006WAOX).
+ *
+ * Uses `loadRoundRobinCursor` (fail-open → `{}` → file order) to order
+ * entries: unknown/new roots first (never penalised), known roots oldest
+ * last-served first; stable sort preserves file order for timestamp ties.
+ *
+ * This is a pure sort — it does NOT advance the cursor. Advancement
+ * happens only when the dispatched entry is consumed (every `removeEntry`
+ * path).
+ */
+export function sortEntriesByRoundRobin(
+  group: TierEntry[],
+  coordinationDir: string,
+): TierEntry[] {
+  if (group.length <= 1) return group;
+
+  // Load cursor state (fail-open → {}). No lock needed for read-only sort.
+  const cursor = loadRoundRobinCursor(coordinationDir);
+
+  // Stable sort: unknown roots first, then oldest known first.
+  return [...group].sort((a, b) => {
+    const rootA = a.entry.worklogRoot ?? a.entry.directory;
+    const rootB = b.entry.worklogRoot ?? b.entry.directory;
+
+    const aKnown = rootA in cursor;
+    const bKnown = rootB in cursor;
+
+    // Unknown roots sort before known roots.
+    if (!aKnown && bKnown) return -1;
+    if (aKnown && !bKnown) return 1;
+
+    // Both known: oldest timestamp first (stable sort preserves file order for ties).
+    if (aKnown && bKnown) {
+      const tsA = new Date(cursor[rootA]).getTime();
+      const tsB = new Date(cursor[rootB]).getTime();
+      const diff = tsA - tsB;
+      if (diff !== 0) return diff;
+    }
+
+    // Both unknown or timestamp tie: stable sort (preserve original file order).
+    return 0;
+  });
+}
+
+/**
+ * Advance the round-robin cursor for a given root (WL-0MTJE0FXC006WAOX).
+ *
+ * Calls `advanceRoot` from the cursor module under the coordination lock.
+ * Fail-open: lock contention or I/O error silently tolerates the missed
+ * advance (the project will be selected sooner on the next cycle).
+ *
+ * This is called AFTER `removeEntry` on every consumed-entry path:
+ * - critical tier dispatched
+ * - critical tier spawn-failed / marker-write-failed
+ * - non-critical tier dispatched
+ * - non-critical tier spawn-failed / marker-write-failed
+ */
+export function advanceRoundRobinCursor(
+  coordinationDir: string,
+  root: string,
+  now: number,
+): void {
+  if (root.length === 0) return;
+  advanceRoot(coordinationDir, root, now);
 }
