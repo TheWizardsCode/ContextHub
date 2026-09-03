@@ -637,7 +637,7 @@ export function createDowntimeDeps(
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const candidates = parseNextCandidatesOutput(stdout, stage);
-        if (candidates === null) return { ok: false };
+        if (candidates === null) return { ok: false, error: `${stage} parse error` };
         // Plan/intake dispatched-marker exclusion with change-guard (RCA
         // WL-0MSRBFFLN005W3VT design point 3, RC-2): read the shared rolling
         // dispatch log for THIS worklog root and exclude any candidate the
@@ -655,10 +655,11 @@ export function createDowntimeDeps(
               : new Map<string, string>();
         const selected = selectNextCandidate(candidates, dispatched, registryFor(cwd));
         return { ok: true, candidate: selected };
-      } catch {
+      } catch (err) {
         // Transient wl failure → fail closed to busy: no dispatch, and the
         // worker must NOT treat it as an empty backlog (no cooldown).
-        return { ok: false };
+        // Capture error details for the three-strike pause log (WL-0MTL4PC0Y005GXTI).
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): fresh tri-state read of the
@@ -687,7 +688,7 @@ export function createDowntimeDeps(
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const candidates = parseAuditCandidatesOutput(stdout);
-        if (candidates === null) return { ok: false };
+        if (candidates === null) return { ok: false, error: `audit parse error` };
         // Dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY): read the shared
         // rolling dispatch log for THIS worklog root (the same <cwd> that
         // recordDispatch writes) and exclude any candidate the downtime
@@ -705,11 +706,12 @@ export function createDowntimeDeps(
         return selected === null
           ? { ok: true, candidate: null }
           : { ok: true, candidate: toDowntimeCandidate(selected) };
-      } catch {
+      } catch (err) {
         // Fail-closed: a wl failure yields a CLI-error outcome, never a
         // candidate and never a null that looks like an empty tier — the
         // caller counts it as a strike (WL-0MSLWJ2KP0002SV0).
-        return { ok: false };
+        // Capture error details for the three-strike pause log (WL-0MTL4PC0Y005GXTI).
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
     async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
@@ -748,7 +750,7 @@ export function createDowntimeDeps(
         const inProgress = parseInProgressOutput(stdout);
         if (inProgress === null) {
           // Unparseable query → the check cannot complete → fail-open.
-          return { ok: false };
+          return { ok: false } as const;
         }
         const active = [...auditCandidateIds].some((id) => inProgress.has(id));
         return { ok: true, active };
@@ -823,7 +825,7 @@ export function createDowntimeDeps(
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const candidates = parseCriticalCandidatesOutput(stdout);
-        if (candidates === null) return { ok: false };
+        if (candidates === null) return { ok: false, error: `critical parse error` };
         // Dispatched-marker change-guard (WL-0MSRBFFLN005W3VT design point
         // 3 semantics): read the shared rolling dispatch log for THIS
         // worklog root and exclude any critical item the downtime worker
@@ -871,11 +873,11 @@ export function createDowntimeDeps(
             stage: frontier.stage as DowntimeStage,
           },
         };
-      } catch {
+      } catch (err) {
         // Fail-closed: a wl failure yields a CLI-error outcome, never a
         // candidate and never a null that looks like an empty tier — the
-        // caller counts it as a strike.
-        return { ok: false };
+        // caller counts it as a strike. Capture error for pause log.
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
     // Leader-coordination item fetch (parent WL-0MST3OJ8S0001ROL AC4):

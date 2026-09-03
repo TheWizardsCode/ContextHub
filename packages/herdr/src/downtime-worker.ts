@@ -1117,6 +1117,10 @@ export interface DowntimeDispatchOutcome {
    * BEFORE spawn — includes the scheduled-prompt persist failure) |
    * 'spawn-failed' (handled spawn error or non-zero script exit; outcome is
    * not success) | 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
+   * in flight) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
+   * was recorded during interim). When `reason` is 'wl-error', `error`
+   * may carry the underlying wl/CLI error details (timeout, SQLITE_BUSY,
+   * parse failure, stderr) for the three-strike pause log.
    * already running — a non-stale kind=audit dispatch marker maps to an
    * `in_progress` item — so the audit tier was skipped; a skip that leaves
    * an empty remaining backlog reports this reason, NEVER 'no-candidate',
@@ -2115,7 +2119,7 @@ export async function dispatchDowntimeWork(
                 }
               }
             } else {
-              return { dispatched: false, reason: 'wl-error' };
+              return { dispatched: false, reason: 'wl-error', error: audit.error };
             }
           }
         } else {
@@ -2164,7 +2168,7 @@ export async function dispatchDowntimeWork(
           // the non-critical tiers.
         }
       } else {
-        return { dispatched: false, reason: 'wl-error' };
+        return { dispatched: false, reason: 'wl-error', error: critical.error };
       }
     }
 
@@ -2194,6 +2198,7 @@ export async function dispatchDowntimeWork(
     // worker this is always true (the idle-duration gate has already
     // required ≥ N ≥ 1 free), the gate is defensive for direct API callers.
     let tier2Error = false;
+    let tier2ErrorDetail: string | undefined;
     if (panesEligible) {
       const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
       if (intakeComplete.ok) {
@@ -2202,6 +2207,7 @@ export async function dispatchDowntimeWork(
         }
       } else {
         tier2Error = true;
+        tier2ErrorDetail = intakeComplete.error;
       }
     } else {
       // 0 free slots (defensive, unreachable via the worker): the panes
@@ -2221,7 +2227,7 @@ export async function dispatchDowntimeWork(
         // provably empty (the intake_complete state is unknown) → fail
         // closed to busy (a strike), never a no-candidate — partial
         // information must not pause the worker.
-        return { dispatched: false, reason: 'wl-error' };
+        return { dispatched: false, reason: 'wl-error', error: tier2ErrorDetail };
       }
       // Both tiers answered with no candidate → genuine empty backlog. The
       // freeze gate must NOT pause the worker on an empty plan/intake
@@ -2243,7 +2249,7 @@ export async function dispatchDowntimeWork(
     // The worker counts this as one CLI-error strike; the backlog is not
     // provably empty so this is never `no-candidate` (the three-strike rule
     // governs when consecutive errors pause the worker).
-    return { dispatched: false, reason: 'wl-error' };
+    return { dispatched: false, reason: 'wl-error', error: (idea as { error?: string }).error ?? tier2ErrorDetail };
   } finally {
     dispatchInFlight = false;
   }
@@ -2616,7 +2622,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // error so it is auditable. A single transient failure does NOT pause —
   // it retries on the next idle period. Fail-closed: error logging must
   // never crash the worker.
-  const pauseAfterPersistentErrors = async (message: string): Promise<void> => {
+  const pauseAfterPersistentErrors = async (message: string, error?: string): Promise<void> => {
     errorStrikes += 1;
     if (errorStrikes >= DOWNTIME_ERROR_STRIKE_LIMIT) {
       try {
@@ -2624,6 +2630,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           cwd: opts.config().cwd,
           at: new Date().toISOString(),
           message,
+          ...(error ? { error } : {}),
         });
       } catch {
         // fail-closed: error logging must never crash the worker
@@ -2987,10 +2994,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // wl failure is one strike. Three consecutive strikes pause the
           // worker entirely (no dispatch) AFTER logging the persistent error
           // so the failure is auditable. A single transient error does NOT
-          // pause — it retries on the next idle period.
+          // pause — it retries on the next idle period. Carry the
+          // underlying wl error (WL-0MTL4PC0Y005GXTI) so the pause entry is actionable.
           await pauseAfterPersistentErrors(
             `Downtime worker: ${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive ` +
             `wl CLI errors — pausing dispatch for ${cfg.noCandidateCooldownMs}ms.`,
+            outcome.error,
           );
         }
         // Any other non-dispatch outcome (dispatch-in-flight, code-freeze

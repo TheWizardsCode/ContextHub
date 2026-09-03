@@ -747,7 +747,7 @@ describe('createDowntimeDeps', () => {
   it('getNextItem fails closed ({ok:false}) when wl errors', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextItem('idea', '/repo')).toEqual({ ok: false });
+    expect(await deps.getNextItem('idea', '/repo')).toEqual({ ok: false, error: 'wl boom' });
   });
 
   it('getNextItem passes a bounded timeout so a hung wl fails closed', async () => {
@@ -788,7 +788,7 @@ describe('createDowntimeDeps', () => {
       await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS - 1);
       // Still pending just before the timeout — no premature resolution.
       await vi.advanceTimersByTimeAsync(1);
-      await expect(resultPromise).resolves.toEqual({ ok: false });
+      await expect(resultPromise).resolves.toEqual({ ok: false, error: 'ETIMEDOUT' });
 
       // The hung invocation received the bounded timeout option.
       expect(hungExec.mock.calls[0][2]).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
@@ -886,7 +886,7 @@ describe('createDowntimeDeps', () => {
   it('getNextAuditCandidate resolves ok:false when wl errors (a strike, never a null empty tier)', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false });
+    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false, error: 'wl boom' });
   });
 
   it('getNextAuditCandidate passes a bounded timeout so a hung wl fails closed', async () => {
@@ -921,7 +921,7 @@ describe('createDowntimeDeps', () => {
 
       const resultPromise = deps.getNextAuditCandidate('/repo');
       await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS);
-      await expect(resultPromise).resolves.toEqual({ ok: false });
+      await expect(resultPromise).resolves.toEqual({ ok: false, error: 'ETIMEDOUT' });
     } finally {
       vi.useRealTimers();
     }
@@ -932,7 +932,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false });
+    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false, error: 'audit parse error' });
   });
 
   it('getNextAuditCandidate excludes an item already dispatched for audit (marker in the log, no fresh audit)', async () => {
@@ -1387,7 +1387,7 @@ describe('createDowntimeDeps', () => {
   it('getNextCriticalCandidate fails closed ({ok:false}) on wl error (never a silent empty)', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false });
+    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false, error: 'wl boom' });
   });
 
   it('getNextCriticalCandidate fails closed ({ok:false}) on malformed wl output', async () => {
@@ -1395,7 +1395,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false });
+    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false, error: 'critical parse error' });
   });
 
   it('getNextCriticalCandidate passes a bounded timeout so a hung wl fails closed', async () => {
@@ -1527,7 +1527,7 @@ describe('createDowntimeDeps', () => {
 
     // A dependency look-up failure must NOT look like an empty tier — it
     // is a wl-error strike.
-    expect(result).toEqual({ ok: false });
+    expect(result).toEqual({ ok: false, error: 'wl dep boom' });
   });
 
   it('end-to-end: two consecutive idle windows dispatch a single unaudited candidate exactly once', async () => {
