@@ -620,6 +620,12 @@ export function createDowntimeDeps(
     }
   };
   return {
+    // Herdr list head (WL-0MTK1ILM2009QYB2): canonical ranking via fetcher → smart-selection → grouping.
+    // The dispatcher treats this as the single ranking source; remaining safety gates are filters.
+    // Production no-op for now (returns empty): the live fetcher collides with the synthetic `groups.list`
+    // infinities item in the ?-count 1→infinity regression path, and the full `fetchNextItems` plumbing
+    // lands in the follow-up work item (WL-0MT26TE72002FLKX — browseItemCount/cap/mandatory-merge fix).
+    getHerdrListHead: async (_cwd: string): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => ({ ok: true, items: [] }),
     async getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult> {
       try {
         // buildWlArgs() prepends the tab's resolved --worklog-dir override

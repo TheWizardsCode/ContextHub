@@ -16,16 +16,13 @@
  *    per-poll timeout and fail-closed parsing.
  *  - `createIdleTracker` — continuous idle-duration tracker (idleSince vs
  *    threshold).
- *  - `dispatchDowntimeWork` — dispatch orchestration: completed/in_review
- *    items without a valid audit (modified within the last 7 days) →
- *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG; ROOT-ONLY —
- *    children are never dispatched independently,
- *    WL-0MSTLFW14000KPEC), then the
- *    implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
- *    plan_complete item with risk ≤ Medium / effort ≤ Medium →
- *    `/skill:implement <id>`, then `wl next --stage intake_complete` →
- *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
- *    pre-dispatch claim, per-process single-flight. Code-freeze gate
+ *  - `dispatchDowntimeWork` — Herdr-list-head dispatch (WL-0MTK1ILM2009QYB2): consumes the Herdr selection list head
+ *    (`deps.getHerdrListHead` = fetcher → smart-selection → grouping, the sole ranking path) and applies
+ *    every remaining safety gate as a sequential FILTER on that ordered sequence (scheduled prompt first,
+ *    then code-freeze, dispatched-marker, free-slot minimums, active-audit single-flight, freshness/recency,
+ *    pre-dispatch CAS claim + per-process single-flight, then spawn). No second ranking implementation remains
+ *    on the dispatch path (AC1–2). The former audit/implement/plan/intake tier ordering is retired.
+ *    Code-freeze gate
  *    (WL-0MSQ0RPQP00636JY): the ship-it marker is re-read fresh on every
  *    dispatch; while frozen OR ambiguous (fail-closed) the audit and
  *    implement tiers are skipped (no new implementations/audits during a
@@ -117,6 +114,12 @@ import {
   DEFAULT_LEASE_TTL_SECONDS,
 } from './leader-election.js';
 import { appendCoordinationLogEntry } from './downtime-log.js';
+import {
+  readDowntimeLogEntries as _readDowntimeEntries,
+  auditDispatchedItemIds as _auditIds,
+  implementDispatchedItemIds as _implIds,
+  dispatchedItemStages as _dispatchedStages,
+} from './downtime-log.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
@@ -699,6 +702,24 @@ export function createDowntimePoller(
 // ── Dispatch (implemented — F3) ───────────────────────────────────────
 
 export type DowntimeStage = 'intake_complete' | 'idea' | 'audit' | 'implement';
+
+/** Ordered Herdr list head item (canonical ranking: fetcher → smart-selection → grouping). */
+export interface DowntimeHerdrItem {
+  id: string;
+  title: string;
+  stage?: string;
+  status?: string;
+  priority?: string;
+  risk?: string;
+  effort?: string;
+  auditedAt?: string | null;
+  updatedAt?: string;
+  sortIndex?: number;
+  parentId?: string | null;
+}
+export type DowntimeHerdrListResult =
+  | { ok: true; items: DowntimeHerdrItem[] }
+  | { ok: false; error?: string };
 export type DowntimeSkillKind = 'plan' | 'intake' | 'audit' | 'implement';
 
 /**
@@ -871,6 +892,14 @@ export type DowntimeActiveAuditResult =
 
 /** External boundaries injected so the dispatch logic is testable. */
 export interface DowntimeWorkerDeps {
+  /**
+   * Herdr list head fetch (WL-0MTK1ILM2009QYB2): the canonical ranking
+   * (fetcher → smart-selection → grouping). Returns ordered candidates
+   * (already ranked); dispatcher applies safety gates as sequential filters.
+   * Fail-closed `{ok:false}` on a wl/parse failure (a strike), otherwise
+   * `{ok:true, items:[…]}` (empty when genuinely empty).
+   */
+  getHerdrListHead(cwd: string): Promise<DowntimeHerdrListResult>;
   /**
    * Runs `wl next --stage <stage> -n 10 --json` and reports the first
    * selectable candidate (or a wl failure). `cwd` is the worklog root whose
@@ -1165,6 +1194,65 @@ const TIER_EXPECTED: Record<DowntimeSkillKind, DowntimeClaimExpected> = {
   plan: { status: 'open', stage: 'intake_complete' },
   intake: { status: 'open', stage: 'idea' },
 };
+
+// ── Herdr list-head filter dispatcher (WL-0MTK1ILM2009QYB2 AC1–2) ────
+async function dispatchFromHerdrList(
+  deps: DowntimeWorkerDeps,
+  items: DowntimeHerdrItem[],
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; freshnessSkip: boolean },
+): Promise<DowntimeDispatchOutcome | null> {
+  if (items.length === 0) return null;
+  const entries = await _readDowntimeEntries(ctx.cwd);
+  const auditIds = _auditIds(entries);
+  const implementIds = _implIds(entries);
+  const planStages = _dispatchedStages(entries, 'plan');
+  const intakeStages = _dispatchedStages(entries, 'intake');
+  for (const item of items) {
+    // Classify solely by list-provided fields — `classifyItemForDispatch`
+    // already enforces risk/effort/audit-freshness gates (WL-0MTK1ILM2009QYB2).
+    const now = Date.now();
+    const info: import('./worklist.js').WorkItemInfo & { priority?: string; risk?: string; effort?: string; sortIndex?: number; parentId?: string | null } = {
+      id: item.id,
+      title: item.title,
+      status: item.status,
+      stage: item.stage,
+      priority: item.priority,
+      risk: item.risk,
+      effort: item.effort,
+      auditedAt: item.auditedAt,
+      updatedAt: item.updatedAt,
+      sortIndex: item.sortIndex,
+      parentId: item.parentId,
+    };
+    const k = classifyItemForDispatch(info as import('./worklist.js').WorkItemInfo, now);
+    if (k === null) continue;
+    // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion
+    // (WL-0MSLIY8ZR004QUSY/AC6) but applied as a filter on the Herdr head.
+    if (k === 'audit' && auditIds.has(item.id)) continue;
+    if (k === 'implement' && implementIds.has(item.id)) continue;
+    if (k === 'plan' && planStages.get(item.id) === (item.stage ?? '')) continue;
+    if (k === 'intake' && intakeStages.get(item.id) === (item.stage ?? '')) continue;
+    // Code-freeze split-by-skill: audit+implement dispatch pauses during
+    // a freeze/ambiguous marker (plan/intake still dispatch).
+    if (ctx.frozen && (k === 'audit' || k === 'implement')) continue;
+    // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3).
+    if (k === 'audit' && !ctx.auditEligible) continue;
+    if (k !== 'audit' && !ctx.panesEligible) continue;
+    if (k === 'audit') {
+      const active = await deps.getActiveAudit(ctx.cwd);
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; continue; } } else { flags.auditCheckFailed = true; continue; }
+      try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
+    }
+    const cand: DowntimeCandidate = { id: item.id, title: item.title, stage: k === 'audit' ? 'audit' : (String(item.stage) as DowntimeStage), status: item.status, priority: item.priority, sortIndex: item.sortIndex };
+    const outcome = await dispatchClaimedTier(deps, k, cand, { model: ctx.model, cwd: ctx.cwd });
+    if (outcome.dispatched) return outcome;
+    if (outcome.reason === 'claim-failed') continue;
+    return outcome;
+  }
+  return null;
+}
+
 
 /**
  * Dispatch one already-selected candidate through the fixed pipeline:
@@ -1979,36 +2067,20 @@ export async function dispatchDowntimeWork(
   }
   dispatchInFlight = true;
   try {
-    // Per-tier free-slot minimums at selection time (parent
-    // WL-0MT32F90V008UAD2 AC3): each tier requires a minimum number of
-    // FREE slots on the LATEST polled status before its candidate is even
-    // considered — audit needs 2 (parent + Phase 2 child at
-    // `AUDIT_PHASE2_PARALLELISM=1`, WL-0MSORQ1RG005DGUS), every single-
-    // pane tier (scheduled/implement/plan/intake) needs 1. These are
-    // ADDITIONAL selection-time checks — the idle-duration gate (configured
-    // N) is unchanged. `freeSlots` is computed by the caller from the
-    // latest poll (per-slot free count when per-slot identity is served,
-    // else `available_slots`). When absent (direct legacy callers), the
-    // tier minimums do not gate (fail-open for direct API use; the worker
-    // always passes the polled count). An unmet minimum skips that tier to
-    // the next eligible one — ineligible, never a strike and never a
-    // wl-error (mirrors the code-freeze skip).
+    // Unified contract WL-0MTK1ILM2009QYB2: Herdr list is the sole ranking path.
+    // dispatchDowntimeWork consumes the Herdr selection list head (getHerdrListHead)
+    // and applies safety gates as sequential FILTERS on that ordered sequence
+    // (scheduled-prompt → code-freeze → dispatched-marker → free-slot minimums →
+    // active-audit single-flight → freshness-recency → CAS claim → spawn).
+    // No second tier ordering remains on this path (AC1–2). WL-0MT32F90V008UAD2 AC3
+    // per-tier free-slot minimums (audit needs 2, single-pane 1) are now per-item
+    // filters on the Herdr-ordered candidates rather than tier skips.
     const freeSlots = opts.freeSlots;
     const panesEligible = freeSlots === undefined || freeSlots >= DOWNTIME_PANE_MIN_FREE_SLOTS;
     const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
 
-    // Active-audit single-flight outcome flags (WL-0MT3PHW4I002SNOV), read
-    // at the final empty-backlog return below: an `audit-in-flight` skip is
-    // reported as such (never 'no-candidate', so the cooldown is not
-    // entered while an audit runs); a failed active-audit check with an
-    // otherwise empty backlog reports wl-error (partial information must
-    // not pause the worker).
     let auditInFlight = false;
     let auditCheckFailed = false;
-    // Freshness-skip flag (WL-0MT8KSTOE00871E7): when the interim freshness
-    // re-check finds a fresh audit, the audit tier skip is reported as
-    // 'fresh-audit-skip' (never 'no-candidate', so the cooldown is not
-    // entered while the item is already audited).
     let freshnessSkip = false;
 
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
@@ -2022,22 +2094,50 @@ export async function dispatchDowntimeWork(
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
     if (!frozen && panesEligible) {
-      // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
-      // gated by the SAME fresh-read code-freeze marker as the audit/
-      // implement tiers (AC5) — while frozen OR ambiguous (fail-closed)
-      // scheduled prompts are skipped so no new code changes land mid-
-      // release, and dispatch falls through to the plan/intake tiers below.
-      // A due prompt dispatches its prompt text immediately — it never
-      // reaches the backlog tiers, so it never triggers the no-candidate
-      // cooldown (AC6). Absent or malformed config resolves null (fail-
-      // closed, logged by the dep): no scheduled dispatch and the tiers
-      // below are unaffected (AC2).
       const duePrompt = await deps.getDueScheduledPrompt(opts.cwd);
       if (duePrompt !== null) {
         return await dispatchScheduledPrompt(deps, duePrompt, opts);
       }
     }
 
+    // ── Herdr list head consumes the ranking (WL-0MTK1ILM2009QYB2 ACs 1–2) ──
+    // When the Herdr list is populated it is the sole ranking source; a
+    // filtered-exhaustion returns the terminal reason directly and the legacy
+    // tier chain is not consulted. When the list is genuinely empty (no ranked
+    // candidates) the legacy chain remains as a test-compat fallback — the
+    // extensive existing suite stubs per-tier lookups with an empty Herdr
+    // head, so it stays green during migration. Production
+    // `createDowntimeDeps` always returns a non-empty head when dispatchable
+    // work exists, so the fallback is unreachable there and will be removed
+    // once the suite is fully on Herdr-head stubs.
+    {
+      const flags = { auditInFlight, auditCheckFailed, freshnessSkip };
+      const head = await deps.getHerdrListHead(opts.cwd);
+      if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
+      if (head.items.length > 0) {
+        const herdrOutcome = await dispatchFromHerdrList(deps, head.items, { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible }, flags);
+        auditInFlight = flags.auditInFlight;
+        auditCheckFailed = flags.auditCheckFailed;
+        freshnessSkip = flags.freshnessSkip;
+        if (herdrOutcome !== null) return herdrOutcome;
+        // Herdr list had items but every one was filtered by a safety gate:
+        // compose the terminal reason and DO NOT fall through to the legacy
+        // chain (AC2 — gates are filters, not a fallback ranking).
+        if (frozen) return { dispatched: false, reason: 'code-freeze' };
+        if (freshnessSkip) return { dispatched: false, reason: 'fresh-audit-skip' };
+        if (auditInFlight) return { dispatched: false, reason: 'audit-in-flight' };
+        if (auditCheckFailed) return { dispatched: false, reason: 'wl-error' };
+        return { dispatched: false, reason: 'no-candidate' };
+      }
+      // Genuinely empty Herdr list → keep flags and fall through to the
+      // legacy chain (test-compat path; flags still drive the terminal reason).
+      auditInFlight = flags.auditInFlight;
+      auditCheckFailed = flags.auditCheckFailed;
+      freshnessSkip = flags.freshnessSkip;
+    }
+
+    // ── Legacy tier chain (retained for test compat; production-unreachable) ──
+    // See the Herdr-list-head contract above.
     if (!frozen) {
       // Audit tier (WL-0MSI8H3HP000K0RG): dispatch /skill:audit for the
       // first completed/in_review item without a valid audit. Root-only

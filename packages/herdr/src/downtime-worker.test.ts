@@ -147,6 +147,9 @@ import {
 /** Shared deps mock for dispatch tests. */
 function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
   return {
+    // Herdr list head (WL-0MTK1ILM2009QYB2): empty by default so legacy tests that
+    // stub per-tier lookups keep passing (the head path is inert on empty).
+    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
     getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     // Audit tier answers a GENUINELY empty tier by default ({ok:true,
     // candidate:null}); a wl/parse failure is {ok:false} (WL-0MSLWJ2KP0002SV0).
