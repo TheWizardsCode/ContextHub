@@ -90,6 +90,7 @@ import {
   selectAuditCandidate,
   selectWithRotation,
   toDowntimeCandidate,
+  classifyItemForDispatch,
   skillKindFromPrompt,
   buildDowntimeDispatchComment,
   clampDowntimePollInterval,
@@ -111,8 +112,10 @@ import {
   type DowntimeStage,
   type AuditCandidate,
   type ImplementCandidate,
+  type CriticalCandidate,
   type ScheduledPrompt,
   type DowntimeActiveAuditResult,
+  type DowntimeItemInfo,
 } from './downtime-worker.js';
 import {
   DOWNTIME_DISABLE_MARKER_FILE,
@@ -143,6 +146,7 @@ import {
   jsonResponseFixture,
   type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
+
 
 /** Shared deps mock for dispatch tests. */
 function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
@@ -5958,5 +5962,231 @@ describe('dispatch critical-first tier', () => {
     expect(firstOutcome.kind).toBe('intake');
     expect(secondOutcome.dispatched).toBe(false);
     expect(secondOutcome.reason).toBe('dispatch-in-flight');
+  });
+});
+
+// ── needsProducerReview exclusion (WL-0MTIAL65N004T22F) ─────────────
+// AC1–AC4: every tier (audit / implement / plan / intake / critical-first
+// including frontier blockers and the coordination leader path) excludes
+// items with needsProducerReview === true; absent/false/undefined is
+// dispatchable; failed/unparseable parsing is fail-safe; clearing the flag
+// makes the item dispatchable again.
+
+describe('needsProducerReview exclusion', () => {
+  const auditDated = () => new Date(Date.now() - 1000).toISOString();
+  const auditCandidate = (overrides: Partial<AuditCandidate> = {}): AuditCandidate => ({
+    id: `AUD-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Audit candidate',
+    sortIndex: 1,
+    updatedAt: auditDated(),
+    ...overrides,
+  });
+  const implementCandidate = (overrides: Partial<ImplementCandidate> = {}): ImplementCandidate => ({
+    id: `IMP-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Implement candidate',
+    status: 'open',
+    risk: 'low',
+    effort: 'small',
+    sortIndex: 1,
+    ...overrides,
+  });
+  const nextCandidate = (overrides: Partial<DowntimeCandidate> = {}): DowntimeCandidate => ({
+    id: `NEXT-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Next candidate',
+    stage: 'intake_complete',
+    status: 'open',
+    sortIndex: 1,
+    ...overrides,
+  });
+  const critCandidate = (overrides: Partial<CriticalCandidate> = {}): CriticalCandidate => ({
+    id: `CR-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Critical candidate',
+    status: 'open',
+    stage: 'idea',
+    sortIndex: 1,
+    ...overrides,
+  });
+
+  describe('selectAuditCandidate', () => {
+    it('excludes needsProducerReview === true candidates', () => {
+      const blockedAudit = auditCandidate({ id: 'A1', needsProducerReview: true, sortIndex: 1 });
+      const allowedAudit = auditCandidate({ id: 'A2', sortIndex: 10 });
+      const sel = selectAuditCandidate([blockedAudit, allowedAudit]);
+      expect(sel?.id).toBe('A2');
+    });
+    it('absent/false/undefined needsProducerReview remain dispatchable', () => {
+      const falsy = auditCandidate({ id: 'A3', needsProducerReview: false, sortIndex: 1 });
+      const absent = auditCandidate({ id: 'A4', sortIndex: 2 });
+      expect(selectAuditCandidate([falsy])?.id).toBe('A3');
+      expect(selectAuditCandidate([absent])?.id).toBe('A4');
+    });
+    it('returns null when the tier contains only review-gated candidates', () => {
+      const b = auditCandidate({ id: 'A5', needsProducerReview: true, sortIndex: 1 });
+      expect(selectAuditCandidate([b])).toBeNull();
+    });
+    it('clearing needsProducerReview makes the item dispatchable again', () => {
+      const c = auditCandidate({ id: 'A6', needsProducerReview: true, sortIndex: 1 });
+      expect(selectAuditCandidate([c])).toBeNull();
+      // Clear the flag — same candidate object, flag removed → dispatchable.
+      c.needsProducerReview = false;
+      expect(selectAuditCandidate([c])?.id).toBe('A6');
+    });
+  });
+
+  describe('selectImplementCandidate', () => {
+    it('excludes needsProducerReview === true candidates', () => {
+      const blocked = implementCandidate({ id: 'I1', needsProducerReview: true, sortIndex: 1 });
+      const allowed = implementCandidate({ id: 'I2', sortIndex: 10 });
+      const sel = selectImplementCandidate([blocked, allowed] as ImplementCandidate[]);
+      expect(sel?.id).toBe('I2');
+    });
+    it('absent/false remain dispatchable', () => {
+      expect(selectImplementCandidate([implementCandidate({ id: 'I3', needsProducerReview: false, sortIndex: 1 })] as ImplementCandidate[])?.id).toBe('I3');
+      expect(selectImplementCandidate([implementCandidate({ id: 'I4', sortIndex: 1 })] as ImplementCandidate[])?.id).toBe('I4');
+    });
+    it('returns null when only review-gated candidates remain', () => {
+      expect(selectImplementCandidate([implementCandidate({ id: 'I5', needsProducerReview: true, sortIndex: 1 })] as ImplementCandidate[])).toBeNull();
+    });
+    it('clearing the flag makes the item dispatchable again', () => {
+      const c = implementCandidate({ id: 'I6', needsProducerReview: true, sortIndex: 1 });
+      expect(selectImplementCandidate([c] as ImplementCandidate[])).toBeNull();
+      c.needsProducerReview = false;
+      expect(selectImplementCandidate([c] as ImplementCandidate[])?.id).toBe('I6');
+    });
+  });
+
+  describe('selectNextCandidate', () => {
+    it('excludes needsProducerReview === true candidates', () => {
+      const blocked = nextCandidate({ id: 'N1', needsProducerReview: true, sortIndex: 1, stage: 'intake_complete' });
+      const allowed = nextCandidate({ id: 'N2', sortIndex: 10, stage: 'intake_complete' });
+      expect(selectNextCandidate([blocked, allowed])?.id).toBe('N2');
+    });
+    it('absent/false remain dispatchable', () => {
+      expect(selectNextCandidate([nextCandidate({ id: 'N3', needsProducerReview: false, sortIndex: 1 })])?.id).toBe('N3');
+      expect(selectNextCandidate([nextCandidate({ id: 'N4', sortIndex: 1 })])?.id).toBe('N4');
+    });
+    it('returns null when only review-gated candidates remain', () => {
+      expect(selectNextCandidate([nextCandidate({ id: 'N5', needsProducerReview: true, sortIndex: 1 })])).toBeNull();
+    });
+    it('clearing the flag makes the item dispatchable again', () => {
+      const c = nextCandidate({ id: 'N6', needsProducerReview: true, sortIndex: 1 });
+      expect(selectNextCandidate([c])).toBeNull();
+      c.needsProducerReview = false;
+      expect(selectNextCandidate([c])?.id).toBe('N6');
+    });
+  });
+
+  describe('selectCriticalCandidate', () => {
+    it('excludes needsProducerReview === true candidates', () => {
+      const blocked = critCandidate({ id: 'C1', needsProducerReview: true, sortIndex: 1 });
+      const allowed = critCandidate({ id: 'C2', sortIndex: 10 });
+      expect(selectCriticalCandidate([blocked, allowed] as never)?.id).toBe('C2');
+    });
+    it('absent/false remain dispatchable', () => {
+      expect(selectCriticalCandidate([critCandidate({ id: 'C3', needsProducerReview: false, sortIndex: 1 })] as never)?.id).toBe('C3');
+      expect(selectCriticalCandidate([critCandidate({ id: 'C4', sortIndex: 1 })] as never)?.id).toBe('C4');
+    });
+    it('returns null when only review-gated criticals remain', () => {
+      expect(selectCriticalCandidate([critCandidate({ id: 'C5', needsProducerReview: true })] as never)).toBeNull();
+    });
+  });
+
+  describe('resolveDependencyFrontier (AC2)', () => {
+    it('resolves to null when the only blocker is review-gated', async () => {
+      const crit: CriticalCandidate = critCandidate({ id: 'C6', stage: 'plan_complete', risk: 'low', effort: 'medium' });
+      const fetchBlockers = async (_id: string): Promise<CriticalCandidate[] | null> => [
+        { id: 'B1', title: 'Review-gated blocker', status: 'open', stage: 'idea', needsProducerReview: true },
+      ];
+      expect(await resolveDependencyFrontier(crit, fetchBlockers)).toBeNull();
+    });
+    it('skips a review-gated direct blocker and still reaches an open ancestor beneath a non-dispatchable wrapper', async () => {
+      const crit: CriticalCandidate = critCandidate({ id: 'C7', stage: 'plan_complete', risk: 'low', effort: 'medium' });
+      const fetchBlockers = async (id: string): Promise<CriticalCandidate[] | null> => {
+        if (id === 'C7') return [{ id: 'MID', title: 'Non-dispatchable wrapper', status: 'open', stage: 'in_review', needsProducerReview: true }];
+        if (id === 'MID') return [{ id: 'DEEP', title: 'Open deep blocker', status: 'open', stage: 'idea' }];
+        return [];
+      };
+      // Walk recurses through MID (non-dispatchable but has open descendant) → DEEP.
+      expect((await resolveDependencyFrontier(crit, fetchBlockers))?.id).toBe('DEEP');
+    });
+    it('review-gated plan_complete blockers are excluded (caps-covered + flag)', async () => {
+      const crit: CriticalCandidate = critCandidate({ id: 'C8', stage: 'plan_complete', risk: 'low', effort: 'medium' });
+      const fetchBlockers = async (_id: string): Promise<CriticalCandidate[] | null> => [
+        { id: 'B2', title: 'Gated plan_complete', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'small', needsProducerReview: true },
+      ];
+      expect(await resolveDependencyFrontier(crit, fetchBlockers)).toBeNull();
+    });
+  });
+
+  describe('classifyItemForDispatch', () => {
+    it('returns null immediately when needsProducerReview === true (AC1 — every tier)', () => {
+      for (const info of [
+        { id: 'X', status: 'completed', stage: 'in_review', updatedAt: new Date().toISOString(), needsProducerReview: true },
+        { id: 'X', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'medium', needsProducerReview: true },
+        { id: 'X', status: 'open', stage: 'intake_complete', needsProducerReview: true },
+        { id: 'X', status: 'open', stage: 'idea', needsProducerReview: true },
+      ] as DowntimeItemInfo[]) {
+        expect(classifyItemForDispatch(info)).toBeNull();
+      }
+    });
+    it('dispatches normally when needsProducerReview is false/undefined', () => {
+      expect(classifyItemForDispatch({ id: 'I', status: 'open', stage: 'idea', needsProducerReview: false } as DowntimeItemInfo)).toBe('intake');
+      expect(classifyItemForDispatch({ id: 'I', status: 'open', stage: 'idea' } as DowntimeItemInfo)).toBe('intake');
+    });
+  });
+
+  describe('parse* preserves needsProducerReview (AC4 fail-safe)', () => {
+    it('parseNextCandidatesOutput preserves true/undefined/absent per candidate', () => {
+      const out = JSON.stringify({
+        workItems: [
+          { workItem: { id: 'P1', title: 'A', status: 'open', priority: 'medium', needsProducerReview: 1 } },
+          { workItem: { id: 'P2', title: 'B', status: 'open', priority: 'medium', needsProducerReview: 0 } },
+          { workItem: { id: 'P3', title: 'C', status: 'open', priority: 'medium', needsProducerReview: true } },
+          { workItem: { id: 'P4', title: 'D', status: 'open', priority: 'medium' } },
+        ],
+      });
+      const c = parseNextCandidatesOutput(out, 'intake_complete')!;
+      expect(c.find((x) => x.id === 'P1')!.needsProducerReview).toBe(true);
+      expect(c.find((x) => x.id === 'P2')!.needsProducerReview).toBe(false);
+      expect(c.find((x) => x.id === 'P3')!.needsProducerReview).toBe(true);
+      expect(c.find((x) => x.id === 'P4')!.needsProducerReview).toBeUndefined();
+    });
+    it('parseImplementCandidatesOutput preserves needsProducerReview', () => {
+      const out = JSON.stringify({
+        workItems: [{ workItem: { id: 'IM', title: 'X', status: 'open', risk: 'low', effort: 'small', needsProducerReview: true } }],
+      });
+      expect(parseImplementCandidatesOutput(out)![0]!.needsProducerReview).toBe(true);
+    });
+    it('parseAuditCandidatesOutput preserves needsProducerReview', () => {
+      const out = JSON.stringify({
+        workItems: [{ id: 'AU', title: 'A', auditedAt: null, updatedAt: new Date().toISOString(), needsProducerReview: true }],
+      });
+      expect(parseAuditCandidatesOutput(out)![0]!.needsProducerReview).toBe(true);
+    });
+    it('parseCriticalCandidatesOutput preserves needsProducerReview', () => {
+      const out = JSON.stringify({
+        workItems: [{ id: 'CR', title: 'A', status: 'open', stage: 'idea', needsProducerReview: true }],
+      });
+      expect(parseCriticalCandidatesOutput(out)![0]!.needsProducerReview).toBe(true);
+    });
+    it('parseShowItemOutput preserves needsProducerReview', () => {
+      const out = JSON.stringify({ success: true, workItem: { id: 'SH', title: 'shown', status: 'open', stage: 'idea', needsProducerReview: true } });
+      expect(parseShownWorkItem(out)!.needsProducerReview).toBe(true);
+    });
+    it('dispatch falls through when every candidate in every tier needs review (no-candidate, not wl-error)', async () => {
+      // Every tier returns a flagged candidate (or empty) → no-candidate, never a strike.
+      const deps2 = makeDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: { id: 'A-B', title: 'A-B', stage: 'audit', needsProducerReview: true } }),
+        getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+        hasFreshAudit: vi.fn().mockResolvedValue(false),
+        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+        getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      });
+      // Audit tier candidate is review-gated → skipped → falls through to no-candidate.
+      const outcome = await dispatchDowntimeWork(deps2, { model: 'plan', cwd: '/repo' });
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+    });
   });
 });

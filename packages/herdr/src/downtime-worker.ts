@@ -37,7 +37,11 @@
  *    for `/skill:audit` (durable dispatched-marker exclusion,
  *    WL-0MSLIY8ZR004QUSY) unless a fresh audit exists since, closing the
  *    re-selection loop where a dispatched run reverts the item to
- *    completed/in_review without recording a fresh audit. A tier-2 CLI error does
+ *    completed/in_review without recording a fresh audit. Every tier
+ *    additionally excludes items with `needsProducerReview === true`
+ *    (parent WL-0MTIAL65N004T22F): items flagged for producer review are
+ *    never auto-dispatched, preventing the worker from consuming local
+ *    slots on items awaiting a human decision. A tier-2 CLI error does
  *    NOT short-circuit: the idea tier is still attempted so a tier-3
  *    candidate can still dispatch.
  *    `wl next` failures are reported as `{ok:false}` (fail closed to busy)
@@ -725,6 +729,13 @@ export interface DowntimeCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * the item must NOT be auto-dispatched by the downtime worker — a human
+   * producer must review it first. Absent/false/undefined → dispatchable.
+   * Filtered in every `select*` function (AC1).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -744,6 +755,11 @@ export interface ImplementCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * exclude from implement-tier selection (AC1).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -761,6 +777,11 @@ export interface AuditCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * exclude from audit-tier selection (AC1).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -802,6 +823,12 @@ export interface DowntimeItemInfo {
   updatedAt?: string;
   /** wl priority order preserved for deterministic ordering. */
   sortIndex?: number;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * exclude from classification (the item is not dispatchable) and the
+   * coordination leader path skips it (AC3).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -1419,6 +1446,9 @@ export function classifyItemForDispatch(
   info: DowntimeItemInfo,
   now: number = Date.now(),
 ): DowntimeSkillKind | null {
+  // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+  // Items flagged for producer review must NOT be auto-dispatched at any tier.
+  if (info.needsProducerReview === true) return null;
   const status = typeof info.status === 'string' ? info.status : '';
   const stage = typeof info.stage === 'string' ? info.stage : '';
   if (status === 'completed') {
@@ -1461,6 +1491,7 @@ export function toCoordinationCandidate(info: DowntimeItemInfo): DowntimeCandida
     status: info.status,
     priority: info.priority,
     sortIndex: info.sortIndex,
+    needsProducerReview: info.needsProducerReview,
   };
 }
 
@@ -1497,7 +1528,7 @@ export async function computeMostImportantItem(
   if (!frozen) {
     const audit = await deps.getNextAuditCandidate(cwd);
     if (audit.ok) {
-      if (audit.candidate !== null) {
+      if (audit.candidate !== null && audit.candidate.needsProducerReview !== true) {
         return { ok: true, kind: 'audit', candidate: audit.candidate };
       }
     } else {
@@ -1507,7 +1538,7 @@ export async function computeMostImportantItem(
 
   const critical = await deps.getNextCriticalCandidate(cwd);
   if (critical.ok) {
-    if (critical.candidate !== null) {
+    if (critical.candidate !== null && critical.candidate.needsProducerReview !== true) {
       const kind = criticalSkillKind(critical.candidate.stage);
       if (kind !== null && !(frozen && kind === 'implement')) {
         return { ok: true, kind, candidate: critical.candidate };
@@ -1519,14 +1550,14 @@ export async function computeMostImportantItem(
 
   if (!frozen) {
     const implement = await deps.getNextImplementCandidate(cwd);
-    if (implement !== null) {
+    if (implement !== null && implement.needsProducerReview !== true) {
       return { ok: true, kind: 'implement', candidate: implement };
     }
   }
 
   const intakeComplete = await deps.getNextItem('intake_complete', cwd);
   if (intakeComplete.ok) {
-    if (intakeComplete.candidate !== null) {
+    if (intakeComplete.candidate !== null && intakeComplete.candidate.needsProducerReview !== true) {
       return { ok: true, kind: 'plan', candidate: intakeComplete.candidate };
     }
   } else {
@@ -1535,7 +1566,7 @@ export async function computeMostImportantItem(
 
   const idea = await deps.getNextItem('idea', cwd);
   if (idea.ok) {
-    if (idea.candidate !== null) {
+    if (idea.candidate !== null && idea.candidate.needsProducerReview !== true) {
       return { ok: true, kind: 'intake', candidate: idea.candidate };
     }
   } else {
@@ -1672,6 +1703,8 @@ export async function dispatchFromCoordination(
       fetchFailures += 1;
       continue;
     }
+    // Exclude review-gated entries (parent WL-0MTIAL65N004T22F AC3).
+    if (result.info.needsProducerReview === true) continue;
     // Critical-first tier (WL-0MT3FM8VA005XBHE): an open critical item at
     // a dispatchable stage (idea/intake_complete/plan_complete) outranks
     // every non-critical tier; its dispatch skill is stage-appropriate.
@@ -2088,7 +2121,7 @@ export async function dispatchDowntimeWork(
             // No active audit: proceed with the candidate lookup unchanged.
             const audit = await deps.getNextAuditCandidate(opts.cwd);
             if (audit.ok) {
-              if (audit.candidate !== null) {
+              if (audit.candidate !== null && audit.candidate.needsProducerReview !== true) {
                 // Interim freshness re-check (WL-0MT8KSTOE00871E7): between
                 // candidate selection and dispatch, a valid audit may have
                 // been recorded (e.g. by a human or another process). Re-check
@@ -2158,7 +2191,7 @@ export async function dispatchDowntimeWork(
     if (panesEligible) {
       const critical = await deps.getNextCriticalCandidate(opts.cwd);
       if (critical.ok) {
-        if (critical.candidate !== null) {
+        if (critical.candidate !== null && critical.candidate.needsProducerReview !== true) {
           const kind = criticalSkillKind(critical.candidate.stage);
           if (kind !== null && !(frozen && kind === 'implement')) {
             return await dispatchClaimedTier(deps, kind, critical.candidate, opts);
@@ -2187,7 +2220,7 @@ export async function dispatchDowntimeWork(
       // ineligible (never a strike): the lookup is skipped entirely and
       // dispatch falls through to the plan tier's defensive no-candidate.
       const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
-      if (implementCandidate !== null) {
+      if (implementCandidate !== null && implementCandidate.needsProducerReview !== true) {
         return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
       }
     }
@@ -2202,7 +2235,7 @@ export async function dispatchDowntimeWork(
     if (panesEligible) {
       const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
       if (intakeComplete.ok) {
-        if (intakeComplete.candidate !== null) {
+        if (intakeComplete.candidate !== null && intakeComplete.candidate.needsProducerReview !== true) {
           return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, opts);
         }
       } else {
@@ -2219,7 +2252,7 @@ export async function dispatchDowntimeWork(
     // no candidate — including when tier 2 errored.
     const idea = await deps.getNextItem('idea', opts.cwd);
     if (idea.ok) {
-      if (idea.candidate !== null) {
+      if (idea.candidate !== null && idea.candidate.needsProducerReview !== true) {
         return await dispatchClaimedTier(deps, 'intake', idea.candidate, opts);
       }
       if (tier2Error) {
@@ -3120,6 +3153,8 @@ export function parseNextCandidatesOutput(
           ? nested.sortIndex
           : undefined,
       priority: typeof nested.priority === 'string' ? nested.priority : undefined,
+      needsProducerReview:
+        nested.needsProducerReview !== undefined ? Boolean(nested.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -3257,6 +3292,8 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       updatedAt: typeof o.updatedAt === 'string' ? o.updatedAt : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      needsProducerReview:
+        o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -3340,6 +3377,8 @@ export function selectAuditCandidate(
   const filtered = candidates
     .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt))
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
+    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => {
       if (!c.updatedAt) return true; // missing → include
       const updated = new Date(c.updatedAt).getTime();
@@ -3355,7 +3394,12 @@ export function selectAuditCandidate(
  * (stage `audit`) for the audit tier.
  */
 export function toDowntimeCandidate(candidate: AuditCandidate): DowntimeCandidate {
-  return { id: candidate.id, title: candidate.title, stage: 'audit' };
+  return {
+    id: candidate.id,
+    title: candidate.title,
+    stage: 'audit',
+    needsProducerReview: candidate.needsProducerReview,
+  };
 }
 
 // ── Implement-tier selection (WL-0MSMAYPQP001FLR6) ───────────────────
@@ -3462,6 +3506,8 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
       effort: typeof o.effort === 'string' ? o.effort : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      needsProducerReview:
+        o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -3495,6 +3541,8 @@ export function selectImplementCandidate(
       if (effort === null || effort > 3) return false; // effort ≤ Medium (1=XS, 2=S, 3=M)
       return true;
     })
+    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
   return selectWithRotation(filtered, registry);
@@ -3505,7 +3553,12 @@ export function selectImplementCandidate(
  * (stage `implement`) for the implement tier.
  */
 export function toImplementCandidate(candidate: ImplementCandidate): DowntimeCandidate {
-  return { id: candidate.id, title: candidate.title, stage: 'implement' };
+  return {
+    id: candidate.id,
+    title: candidate.title,
+    stage: 'implement',
+    needsProducerReview: candidate.needsProducerReview,
+  };
 }
 
 // ── Plan/intake selection (RCA WL-0MSRBFFLN005W3VT RC-2 + amplifier) ──
@@ -3532,6 +3585,8 @@ export function selectNextCandidate(
 ): DowntimeCandidate | null {
   const filtered = candidates
     .filter((c) => c.status === 'open')
+    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => {
       const dispatchedAt = dispatchedStages?.get(c.id);
       // Exclude while still at the dispatched-at stage; a missing recorded
@@ -3573,6 +3628,12 @@ export interface CriticalCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical) — round-robin grouping key. */
   priority?: string;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * exclude from critical-tier selection and from dependency-frontier
+   * resolution (AC1, AC2).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -3626,6 +3687,8 @@ export function parseCriticalCandidatesOutput(stdout: string): CriticalCandidate
       effort: typeof o.effort === 'string' ? o.effort : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      needsProducerReview:
+        o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -3666,6 +3729,8 @@ export function selectCriticalCandidate(
       if (effort === null || effort > 3) return false; // effort ≤ Medium
       return true;
     })
+    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => {
       const dispatchedAt = dispatchedStages?.get(c.id);
       // Change-guard: exclude while still at the dispatched-at stage; a
@@ -3753,6 +3818,8 @@ export function parseShownWorkItem(stdout: string): CriticalCandidate | null {
     effort: typeof raw.effort === 'string' ? raw.effort : undefined,
     sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
     priority: typeof raw.priority === 'string' ? raw.priority : undefined,
+    needsProducerReview:
+      raw.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
   };
 }
 
@@ -3796,6 +3863,8 @@ export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
           : undefined,
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : undefined,
     sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
+    needsProducerReview:
+      raw.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
   };
   return info;
 }
@@ -3857,6 +3926,8 @@ export async function resolveDependencyFrontier(
   const dispatchable = (c: CriticalCandidate): boolean =>
     c.status === 'open' &&
     criticalSkillKind(c.stage) !== null &&
+    // Exclude review-gated blockers (parent WL-0MTIAL65N004T22F AC2).
+    c.needsProducerReview !== true &&
     (c.stage !== 'plan_complete' ||
       ((riskOrdinal(c.risk) ?? 9) <= 2 && (effortOrdinal(c.effort) ?? 9) <= 3));
 
