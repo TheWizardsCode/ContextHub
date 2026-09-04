@@ -353,3 +353,140 @@ describe('isValidScheduledPrompt', () => {
     expect(isValidScheduledPrompt({ ...refactorPrompt, intervalDays: -1 })).toBe(false);
   });
 });
+// ── time field (WL-0MTMN7W63001FCQR) ───────────────────────────────────
+
+import { isValidTimeHHMM, isAtOrAfterScheduledTime } from './scheduled-prompts.js';
+
+describe('isValidTimeHHMM', () => {
+  it('accepts valid HH:MM values', () => {
+    expect(isValidTimeHHMM('00:00')).toBe(true);
+    expect(isValidTimeHHMM('06:05')).toBe(true);
+    expect(isValidTimeHHMM('23:59')).toBe(true);
+    expect(isValidTimeHHMM('09:09')).toBe(true);
+  });
+  it('rejects invalid HH:MM values', () => {
+    expect(isValidTimeHHMM('24:00')).toBe(false);
+    expect(isValidTimeHHMM('6:05')).toBe(false);  // no leading zero
+    expect(isValidTimeHHMM('06:5')).toBe(false);
+    expect(isValidTimeHHMM('06:05:00')).toBe(false);
+    expect(isValidTimeHHMM('')).toBe(false);
+    expect(isValidTimeHHMM('ab:cd')).toBe(false);
+    expect(isValidTimeHHMM(' 06:05')).toBe(false);
+  });
+});
+
+describe('parseScheduledPrompt with time', () => {
+  it('accepts a valid time field', () => {
+    const parsed = parseScheduledPrompt({ ...refactorPrompt, time: '06:05' });
+    expect(parsed).not.toBeNull();
+    expect(parsed!.time).toBe('06:05');
+  });
+  it('omits time when absent (backward-compatible)', () => {
+    const parsed = parseScheduledPrompt(refactorPrompt);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.time).toBeUndefined();
+  });
+  it('rejects an entry with an invalid time (fail-closed)', () => {
+    expect(parseScheduledPrompt({ ...refactorPrompt, time: '24:00' })).toBeNull();
+    expect(parseScheduledPrompt({ ...refactorPrompt, time: '6:05' })).toBeNull();
+    expect(parseScheduledPrompt({ ...refactorPrompt, time: '' })).toBeNull();
+    expect(parseScheduledPrompt({ ...refactorPrompt, time: 605 })).toBeNull();
+  });
+  it('loadScheduledPrompts skips entries with invalid time', async () => {
+    const cwd = makeTempDir();
+    const { mkdirSync: mk, writeFileSync: wf } = await import('node:fs');
+    const { scheduledPromptsPath: spp } = await import('./scheduled-prompts.js');
+    mk(join(cwd, '.worklog'), { recursive: true });
+    const logs: string[] = [];
+    wf(
+      spp(cwd),
+      JSON.stringify({ entries: [{ ...refactorPrompt, time: 'bad' }, refactorPrompt] }),
+      'utf8',
+    );
+    const result = loadScheduledPrompts(cwd, (m) => logs.push(m));
+    expect(result.entries.map((e) => e.id)).toEqual(['/skill:refactor']);
+    expect(logs.join('\n')).toContain('invalid entry');
+    const { rmSync: rm } = await import('node:fs');
+    try { rm(cwd, { recursive: true }); } catch {}
+  });
+});
+
+describe('isAtOrAfterScheduledTime', () => {
+  it('returns true when time is absent (backward-compatible)', () => {
+    const now = new Date(2026, 8, 4, 0, 0).getTime();
+    expect(isAtOrAfterScheduledTime(refactorPrompt, now)).toBe(true);
+  });
+  it('returns false before the scheduled time, true at and after', () => {
+    const e: ScheduledPrompt = { ...refactorPrompt, time: '06:05' };
+    expect(isAtOrAfterScheduledTime(e, new Date(2026, 8, 4, 6, 4, 59, 999).getTime())).toBe(false);
+    expect(isAtOrAfterScheduledTime(e, new Date(2026, 8, 4, 6, 5, 0).getTime())).toBe(true);
+    expect(isAtOrAfterScheduledTime(e, new Date(2026, 8, 4, 12, 0).getTime())).toBe(true);
+  });
+  it('returns false for an invalid time (fail-closed)', () => {
+    const e = { ...refactorPrompt, time: 'bad' } as ScheduledPrompt;
+    expect(isAtOrAfterScheduledTime(e, Date.now())).toBe(false);
+  });
+});
+
+describe('isDueScheduledPrompt with time (WL-0MTMN7W63001FCQR AC2/AC3)', () => {
+  const dailyAt0605: ScheduledPrompt = {
+    id: '/skill:standup', prompt: '/skill:standup', intervalDays: 1, lastTriggeredAt: null, time: '06:05',
+  };
+
+  it('null lastTriggeredAt: due only at/after time (not before)', () => {
+    expect(isDueScheduledPrompt(dailyAt0605, new Date(2026, 8, 4, 5, 59).getTime())).toBe(false);
+    expect(isDueScheduledPrompt(dailyAt0605, new Date(2026, 8, 4, 6, 5).getTime())).toBe(true);
+    expect(isDueScheduledPrompt(dailyAt0605, new Date(2026, 8, 4, 7, 0).getTime())).toBe(true);
+  });
+
+  it('not due again the same calendar day after dispatch', () => {
+    const dispatched: ScheduledPrompt = {
+      ...dailyAt0605, lastTriggeredAt: new Date(2026, 8, 4, 7, 0).toISOString(),
+    };
+    expect(isDueScheduledPrompt(dispatched, new Date(2026, 8, 4, 8, 0).getTime())).toBe(false);
+    expect(isDueScheduledPrompt(dispatched, new Date(2026, 8, 4, 23, 59).getTime())).toBe(false);
+  });
+
+  it('due the next calendar day at/after time even if dispatched late the prior day (no drift)', () => {
+    const dispatchedLate: ScheduledPrompt = {
+      ...dailyAt0605, lastTriggeredAt: new Date(2026, 8, 4, 8, 0).toISOString(),
+    };
+    // Same day before midnight: not due (interval gate: 0 days elapsed)
+    expect(isDueScheduledPrompt(dispatchedLate, new Date(2026, 8, 4, 23, 59).getTime())).toBe(false);
+    // Next day before time: not due (after-time gate)
+    expect(isDueScheduledPrompt(dispatchedLate, new Date(2026, 8, 5, 6, 0).getTime())).toBe(false);
+    // Next day at time: due even though only ~22h elapsed — calendar day gate, not 24h
+    expect(isDueScheduledPrompt(dispatchedLate, new Date(2026, 8, 5, 6, 5).getTime())).toBe(true);
+    expect(isDueScheduledPrompt(dispatchedLate, new Date(2026, 8, 5, 8, 0).getTime())).toBe(true);
+  });
+
+  it('intervalDays > 1 with time: every N calendar days after time', () => {
+    const every3: ScheduledPrompt = {
+      id: 'every3', prompt: '/skill:refactor', intervalDays: 3, lastTriggeredAt: new Date(2026, 8, 1, 8, 0).toISOString(), time: '06:05',
+    };
+    expect(isDueScheduledPrompt(every3, new Date(2026, 8, 3, 6, 5).getTime())).toBe(false); // 2 days
+    expect(isDueScheduledPrompt(every3, new Date(2026, 8, 4, 6, 4).getTime())).toBe(false); // 3 days but before time
+    expect(isDueScheduledPrompt(every3, new Date(2026, 8, 4, 6, 5).getTime())).toBe(true);  // 3 days + after time
+  });
+
+  it('without time: existing 24h interval semantics are unchanged (backward-compatible)', () => {
+    const noTime: ScheduledPrompt = { ...refactorPrompt, lastTriggeredAt: new Date(2026, 8, 1, 12, 0).toISOString() };
+    expect(isDueScheduledPrompt(noTime, new Date(2026, 8, 4, 12, 0).getTime() - 1)).toBe(false);
+    expect(isDueScheduledPrompt(noTime, new Date(2026, 8, 4, 12, 0).getTime())).toBe(true);
+  });
+
+  it('getDueScheduledPrompt respects time: skips not-yet-time entries, returns first due in order', () => {
+    const early: ScheduledPrompt = { ...dailyAt0605, id: 'early', lastTriggeredAt: null };
+    const laterReady: ScheduledPrompt = { ...refactorPrompt, id: 'later' }; // no time, interval due
+    // Before 06:05: early is not due, later is due → later wins
+    expect(getDueScheduledPrompt([early, laterReady], new Date(2026, 8, 4, 5, 0).getTime())?.id).toBe('later');
+    // At 07:00: both due → first in order wins
+    expect(getDueScheduledPrompt([early, laterReady], new Date(2026, 8, 4, 7, 0).getTime())?.id).toBe('early');
+  });
+
+  it('invalid time entry is never due', () => {
+    const bad = { ...refactorPrompt, time: 'bad' } as ScheduledPrompt;
+    expect(isDueScheduledPrompt(bad, Date.now())).toBe(false);
+    expect(isAtOrAfterScheduledTime(bad, Date.now())).toBe(false);
+  });
+});
