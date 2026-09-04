@@ -3227,6 +3227,17 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     if (downtimeStatus) {
       header += downtimeStatus;
     }
+    // ── Header truncation guard (WL-0MSNI6TQ5003JY1Z) ────────────
+    // In narrow panes the concatenated header can exceed `cols`,
+    // causing the terminal to wrap it onto a second physical row.
+    // That extra row shifts the entire output down and, when the
+    // rendered line count exceeds `rows - 1` (WL-0MSAAON63003N6LO),
+    // the first line scrolls off the top of the pane. Truncating
+    // the header to exactly `cols` visible characters guarantees it
+    // occupies one output row, preserving the `rows - 1` invariant
+    // and keeping the header visible at row 0. ANSI styling is
+    // preserved; trailing segments are dropped with an ellipsis.
+    header = truncateLine(header, cols);
     output.push(header);
 
     // Code Freeze banners — a prominent warning that implementation is

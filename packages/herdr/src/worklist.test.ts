@@ -4489,3 +4489,280 @@ describe('DB-change gate — manual actions', () => {
     expect(manualBypassesGate).toBe(true);
   });
 });
+
+// ── Header truncation guard (WL-0MSNI6TQ5003JY1Z) ─────────────────────
+// The list-mode header must be truncated to the terminal width so it
+// never wraps onto a second physical row. When it does wrap, the output
+// occupies more rows than the `rows - 1` invariant allows and the
+// header scrolls off the top of the pane.
+
+/** Strip ANSI codes for visible-length assertions. */
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () => {
+  const renderer = createListRenderer();
+  const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+
+  // AC1: Header visible length ≤ cols at narrow widths
+  it('truncates header so visible length ≤ cols at 40 cols with all status segments', () => {
+    const cols = 40;
+    const termSize = { rows: 24, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [Downtime Off]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+  });
+
+  it('truncates header so visible length ≤ cols at 60 cols with filter and auto-refresh', () => {
+    const cols = 60;
+    const termSize = { rows: 24, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'priority critical',
+      'list',
+      null,
+      100,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+  });
+
+  // AC2: Line-count invariant holds in narrow panes
+  it('maintains rows - 1 invariant at 40×24 with long header + banner', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [Downtime Off]',
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
+
+  it('maintains rows - 1 invariant at 40×24 with long header, banner, and paused pane', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      true, // panePaused
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [⏳ downtime idle 1:23]',
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
+
+  it('maintains rows - 1 invariant at 40×24 without banner', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
+
+  // AC2b: Wider panes still pass (no over-truncation)
+  it('wide pane 80×24 still passes — header fits or is sensibly truncated', () => {
+    const cols = 80;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [Downtime Off]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+    // At 80 cols the header may be truncated if the full header
+    // exceeds 80 chars, but the key prefix must remain.
+    expect(visible).toContain('item(s)');
+  });
+
+  it('wide pane 120×24 still passes — no over-truncation for minimal header', () => {
+    const cols = 120;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+    // At 120 cols the minimal header definitely fits without truncation.
+    expect(visible).toEqual(' Work Items — 3 item(s)');
+  });
+
+  it('wide pane 120×24 with full header — truncation is sensible', () => {
+    const cols = 120;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'priority critical',
+      'list',
+      null,
+      200,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      true,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [downtime busy]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+    // At 120 cols the header may be truncated at the very tail, but the
+    // core segments should all be present up to the truncation point.
+    expect(visible).toContain('[auto-refresh on]');
+    expect(visible).toContain('[paused — hidden]');
+    // The downtime segment may be cut at the truncation boundary.
+    expect(visible).toContain('[downtime');
+  });
+});
