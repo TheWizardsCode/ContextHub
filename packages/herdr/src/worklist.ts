@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchCompletedItemCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
@@ -44,6 +44,7 @@ import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
 import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
+import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './downtime-disable-marker.js';
 import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
@@ -3135,6 +3136,12 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   showHelpText?: boolean,
   codeFreezeAmbiguous?: boolean,
   hoverTooltip?: string[],
+  /** When true, sprint is complete: write disable marker, replace help text with banner. (parent WL-0MTHSHN5V008R5L0) */
+  sprintComplete?: boolean,
+  /** Number of completed+in_review items counted (used for the banner). (parent WL-0MTHSHN5V008R5L0) */
+  sprintCompletedCount?: number,
+  /** browseItemCount threshold for the sprint-complete banner. (parent WL-0MTHSHN5V008R5L0) */
+  browseItemCount?: number,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -3166,6 +3173,9 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     showHelpText?: boolean,
     codeFreezeAmbiguous?: boolean,
     hoverTooltip?: string[],
+    sprintComplete?: boolean,
+    sprintCompletedCount?: number,
+    browseItemCount?: number,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -3358,11 +3368,22 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // (WL-0MSGJDSMJ004128E). Note: gating only affects rendering — chord key
     // handling/accumulation in chordState continues regardless.
     //
-    // Hover tooltip (WL-0MT9XRZDK006GMUH): when tooltip lines are supplied
-    // they REPLACE the footer hints — the overlay lives in the footer area,
-    // directly above the metadata panel.
+    // ── Sprint Complete banner (parent WL-0MTHSHN5V008R5L0) ──────────
+    // Replaces the help text footer when the sprint is complete (completed
+    // + in_review count >= browseItemCount). Green background, white text:
+    // "Sprint Complete, hit S to ship". Only shown when help text is
+    // enabled (`showHelpText: true`); does NOT interfere with code-freeze
+    // banners (those render above the list).
+    const isSprintComplete = sprintComplete ?? false;
+    const completedCount = sprintCompletedCount ?? 0;
     const helpEnabled = showHelpText ?? true;
-    if (hoverTooltip && hoverTooltip.length > 0) {
+    if (isSprintComplete && helpEnabled) {
+      const countDisplay = browseItemCount !== undefined ? ` ${completedCount} of ${browseItemCount} items done` : '';
+      const bannerText = `Sprint Complete${countDisplay ? ` — ${countDisplay}` : ''}, hit S to ship`;
+      const bannerLine = `${ANSI.bg(40)}${ANSI.fg(255)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+    } else if (hoverTooltip && hoverTooltip.length > 0) {
+      // Hover tooltip — replace the footer hints
       for (const line of formatTooltipOverlay(cols, hoverTooltip)) {
         output.push(line);
       }
@@ -4049,7 +4070,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void> },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -4073,6 +4094,7 @@ export async function runWorklistTui(
     modeSwitchEnabled: options?.modeSwitchEnabled ?? true,
     maxSyncStalenessMs: options?.maxSyncStalenessMs ?? 60_000,
     onRefresh: options?.onRefresh,
+    cwd: options?.cwd,
   };
 
   let termSize = getTermSize();
@@ -4140,6 +4162,38 @@ export async function runWorklistTui(
 
   // Initial Code Freeze state read (fail-open: no marker => not frozen).
   refreshFreezeState();
+
+  // ── Sprint Complete state (parent WL-0MTHSHN5V008R5L0) ────────────
+  // When completed + in_review item count >= browseItemCount, the sprint
+  // is considered complete: auto-disable the downtime worker and show a
+  // green banner. The check runs on each refresh; auto-disable writes the
+  // existing `.herdr-downtime-disabled` marker (reuse, never new persistence).
+  let sprintComplete = false;
+  let sprintCompletedCount = 0;
+
+  /**
+   * Refresh the sprint-complete state by counting completed/in_review items.
+   * Fail-closed: a query failure leaves `sprintComplete` unchanged (conservative).
+   * When the sprint becomes complete, auto-disable dispatch by writing the
+   * existing marker; when it clears, remove the marker (re-enable dispatch).
+   */
+  const refreshSprintState = async (): Promise<void> => {
+    const count = await fetchCompletedItemCount();
+    if (count === undefined) return; // fail-closed: unknown count → no state change
+    sprintCompletedCount = count;
+    const wasComplete = sprintComplete;
+    // Re-read browseItemCount live so a settings change applies without a plugin restart.
+    const liveBrowseCount = loadSettings().browseItemCount ?? opts.browseItemCount;
+    sprintComplete = count >= liveBrowseCount;
+    // Auto-disable: sprint just completed → write marker, suppress help text
+    if (sprintComplete && !wasComplete) {
+      writeDisableMarker(opts.cwd ?? process.cwd());
+    }
+    // Re-enable: sprint just cleared → remove marker
+    if (!sprintComplete && wasComplete) {
+      removeDisableMarker(opts.cwd ?? process.cwd());
+    }
+  };
 
   // Pane-visibility gating (pause-when-hidden). When the pane's tab is not
   // focused, auto-refresh/auto-sync timer ticks are skipped so hidden panes
@@ -4443,6 +4497,9 @@ export async function runWorklistTui(
         // Re-read the Code Freeze marker so a freeze that started (or ended)
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
+        // Check sprint completeness: completed+in_review count vs browseItemCount.
+        // Fail-closed: query failure leaves state unchanged.
+        await refreshSprintState();
         // Merge agent-status state into the refreshed items (top-level +
         // expanded children) so the agent icons reflect the latest tracker
         // state (WL-0MSBQUJQX005RAT9). Fail-open: no herdr CLI → no icons.
@@ -5388,6 +5445,10 @@ export async function runWorklistTui(
       codeFreezeAmbiguous,
       // Hover tooltip lines for the footer overlay (WL-0MT9XRZDK006GMUH).
       hoverTooltipLines,
+      // Sprint-complete banner state (parent WL-0MTHSHN5V008R5L0).
+      sprintComplete,
+      sprintCompletedCount,
+      loadSettings().browseItemCount ?? opts.browseItemCount,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

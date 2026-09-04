@@ -97,6 +97,7 @@ import { spawn } from 'node:child_process';
 import { isAuditFresh } from '@worklog/shared/icons';
 import type { CodeFreezeStatus } from './code-freeze.js';
 import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './downtime-disable-marker.js';
+import { fetchCompletedItemCount } from './fetcher.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
 import {
@@ -2438,6 +2439,8 @@ export interface DowntimeWorkerConfig {
     cwd: string;
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
+    /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
+    browseItemCount?: number;
   };
   /**
    * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
@@ -2707,6 +2710,36 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // while toggled off the worker performs no proxy polling, no idle
       // tracking, and no dispatch — exactly the settings-disabled path.
       if (!(override ?? cfg.enabled)) return { polled: false, dispatched: false, idle: false };
+
+      // ── Sprint Complete auto-disable (parent WL-0MTHSHN5V008R5L0) ────
+      // Check sprint completeness: count completed + in_review items vs
+      // browseItemCount. When the count meets or exceeds the threshold,
+      // write the disable marker (same as `d` shortcut). When below,
+      // remove the marker (re-enable dispatch). Fail-closed: any query
+      // failure leaves the marker unchanged. Live marker check gates
+      // dispatch so the current process respects an auto-written marker
+      // without waiting for a restart.
+      try {
+        const completedCount = await fetchCompletedItemCount();
+        if (completedCount !== undefined) {
+          const threshold = cfg.browseItemCount ?? 20;
+          const isSprintComplete = completedCount >= threshold;
+          const markerExists = disableMarkerExists(cfg.cwd);
+          if (isSprintComplete && !markerExists) {
+            writeDisableMarker(cfg.cwd);
+          } else if (!isSprintComplete && markerExists) {
+            removeDisableMarker(cfg.cwd);
+          }
+        }
+      } catch {
+        // Fail-closed: sprint check failure must never crash the worker.
+      }
+      // Live marker gate: respect an auto-written (or manually toggled)
+      // `.herdr-downtime-disabled` marker immediately, not just at
+      // construction. Effective enabled = override ?? (marker ? false : cfg.enabled).
+      if (disableMarkerExists(cfg.cwd) && override === null) {
+        return { polled: false, dispatched: false, idle: false };
+      }
 
       // ── Leader election + coordination check-in (parent
       // WL-0MST3OJ8S0001ROL AC1/AC2/AC3) ───────────────────────────────────

@@ -615,6 +615,29 @@ export async function runWlSync(): Promise<{ success: boolean; error?: string }>
 }
 
 /**
+ * Count completed + in_review work items (root-only) for the sprint-complete
+ * check (parent WL-0MTHSHN5V008R5L0). Returns the count, or undefined on
+ * failure — callers treat undefined as "unknown" and must NOT auto-disable
+ * on a query failure (fail-closed, AC1).
+ *
+ * Uses `wl list --status completed --stage in_review --root-only --json`
+ * and counts the resulting items. A CLI error or unparseable output
+ * resolves to undefined (never throws).
+ */
+export async function fetchCompletedItemCount(): Promise<number | undefined> {
+  try {
+    const output = await runWl(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']);
+    const payload = extractJson(output);
+    const items = extractItems(payload);
+    return items.length;
+  } catch {
+    // Fail-closed: a query failure means we cannot determine completion status
+    // — the conservative default is to NOT auto-disable (AC1).
+    return undefined;
+  }
+}
+
+/**
  * Fetch child work items for a given parent ID (via `wl list --parent`).
  *
  * Child items are returned with the given hierarchy `depth` for display

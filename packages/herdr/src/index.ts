@@ -1194,6 +1194,7 @@ async function main(): Promise<void> {
         model: s.downtimeModel,
         cwd: targetCwd,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
+        browseItemCount: s.browseItemCount,
       };
     },
   });
@@ -1213,6 +1214,8 @@ async function main(): Promise<void> {
       refreshIntervalMs: runSettings.refreshIntervalMs,
       autoSync: runSettings.autoSync,
       syncIntervalMs: runSettings.syncIntervalMs,
+      browseItemCount: clampBrowseItemCount(runSettings.browseItemCount ?? defaultSettings.browseItemCount),
+      cwd: targetCwd,
       showHelpText: runSettings.showHelpText,
       showIcons: runSettings.showIcons,
       downtimeWorker,
