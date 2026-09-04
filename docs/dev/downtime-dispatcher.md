@@ -13,6 +13,20 @@ package-level overview lives in
 [`packages/herdr/README.md`](../../packages/herdr/README.md) *Downtime worker
 (local-LLM idle dispatch)*.
 
+## Ranking contract (WL-0MTK1ILM2009QYB2) — dispatcher == Herdr list head
+
+The downtime dispatcher does **not** maintain its own ranking. The Herdr selection list
+(`packages/herdr/src/fetcher.ts:fetchNextItems` → `smart-selection.ts:selectWorkItems` →
+`grouping.ts:regroupWorkItems`) is the **sole** ranking path (mandatory-always for critical +
+`completed`/`in_review`, `browseItemCount` windowing of "other" items, grouping logic,
+`reSort`/`computeScore` as used by the fetcher). The dispatcher (`dispatchDowntimeWork`) derives
+its candidate from the **Herdr list head** (first ordered item) and applies every remaining
+safety gate as a **sequential filter** on that ordered sequence (scheduled-prompt → code-freeze
+→ dispatched-marker → free-slot minimums → active-audit single-flight → freshness/recency →
+CAS claim → spawn). If no head item passes the filters, the dispatcher reports "no candidate"
+rather than falling back to a second ranking. No `wl next`/database scoring change is required;
+the observable contract is "dispatcher == Herdr list head".
+
 ## Architecture
 
 ```

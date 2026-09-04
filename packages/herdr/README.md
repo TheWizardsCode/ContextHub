@@ -263,7 +263,13 @@ not migrated to the machine dir).
 When the local LLM (llama-server behind the llama-proxy) is idle, the plugin
 can use that compute to advance the worklog backlog automatically: after the
 proxy reports idle continuously for the configured threshold, it opens a
-visible (non-focus-stealing) pi agent pane. Dispatch priority
+visible (non-focus-stealing) pi agent pane. **Ranking contract (WL-0MTK1ILM2009QYB2):
+“dispatcher == Herdr list head”** — the Herdr selection list
+(`fetchNextItems` → `selectWorkItems` → `regroupWorkItems`) is the sole ranking path;
+the dispatcher derives its candidate from the Herdr list head and applies safety gates as
+sequential filters (scheduled-prompt → code-freeze → dispatched-marker → free-slot
+minimums → active-audit single-flight → freshness/recency → CAS claim → spawn).
+Dispatch priority within that head sequence still honors the historical tier intent
 (WL-0MSS1Q5ER007QDKX, WL-0MSI8H3HP000K0RG, WL-0MSMAYPQP001FLR6,
 WL-0MT3FM8VA005XBHE):
 first a due **scheduled prompt** (see *Scheduled prompts* below) dispatches
