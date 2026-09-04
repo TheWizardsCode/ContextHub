@@ -238,20 +238,37 @@ describe('selectWorkItems — smart selection algorithm', () => {
       expect(result.map(i => i.id)).toEqual(['C1', 'R1']);
     });
 
-    it('hides child items from the selection list (WL-0MS964SIA0057ABR)', () => {
+    it('hides non-critical child items from the selection list (WL-0MS964SIA0057ABR)', () => {
       const items = [
         critical('C1'),
         inReview('R1'),
         other('O1'),
-        // Children must never appear at top level even if they match a
-        // mandatory criterion or are otherwise actionable.
-        makeItem('ChildCritical', { priority: 'critical', parentId: 'C1' }),
+        // Non-critical children are hidden from the top-level list.
         makeItem('ChildReview', { status: 'completed', stage: 'in_review', parentId: 'R1' }),
         makeItem('ChildOther', { parentId: 'O1' }),
       ];
       const result = selectWorkItems(items, 10);
       const ids = result.map(i => i.id);
       expect(ids).toEqual(['C1', 'R1', 'O1']);
+    });
+
+    it('shows child critical items at the top level (exception to WL-0MS964SIA0057ABR)', () => {
+      // Child critical items must always be visible so the team can see
+      // blocking items (e.g., untriaged test-failures) that the ship
+      // critical-items gate detects.
+      const items = [
+        critical('C1'),
+        inReview('R1'),
+        other('O1'),
+        // Child critical items appear at top level despite having parentId.
+        makeItem('ChildCritical', { priority: 'critical', parentId: 'C1' }),
+        // Non-critical children are still hidden.
+        makeItem('ChildReview', { status: 'completed', stage: 'in_review', parentId: 'R1' }),
+        makeItem('ChildOther', { parentId: 'O1' }),
+      ];
+      const result = selectWorkItems(items, 10);
+      const ids = result.map(i => i.id);
+      expect(ids).toEqual(['C1', 'ChildCritical', 'R1', 'O1']);
     });
   });
 });

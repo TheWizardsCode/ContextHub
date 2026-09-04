@@ -468,10 +468,21 @@ function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
  * mitigate refresh latency.
  */
 async function fetchMandatorySubsets(): Promise<WorkItem[]> {
-  // Root-only (WL-0MS964SIA0057ABR): child items are hidden from the
-  // top-level worklist — they are only visible under their parent via expand.
+  // Critical items: fetch ALL critical items across all statuses (open,
+  // in-progress, blocked, completed) regardless of root/child status. This
+  // ensures child critical items that block releases (e.g., untriaged
+  // test-failures) are always visible in the worklist — they are not filtered
+  // out by the rootOnly gate in selectWorkItems (WL-0MS964SIA0057ABR).
+  //
+  // We query all statuses because `wl list --priority critical` only returns
+  // `open` and `completed` items by default, missing `in-progress` critical
+  // items that the ship critical-items gate detects.
+  //
+  // Review items: root-only is appropriate because the in_review queue
+  // is about producer review of parent items; child items are handled by
+  // the parent's review lifecycle.
   const [criticalOutput, reviewOutput] = await Promise.all([
-    runWl(['list', '--priority', 'critical', '--root-only']),
+    runWl(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed']),
     runWl(['list', '--status', 'completed', '--stage', 'in_review', '--root-only']),
   ]);
   const criticalItems = extractItems(extractJson(criticalOutput));
