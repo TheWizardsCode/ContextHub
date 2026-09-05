@@ -1762,6 +1762,11 @@ export async function dispatchFromCoordination(
   // non-critical tier — they are grouped under the dedicated 'critical'
   // tier and dispatched with their stage-appropriate skill (Q2 caps retained).
   const byTier = new Map<string, Array<{ entry: CoordinationEntry; info: DowntimeItemInfo; skill: DowntimeSkillKind }>>();
+  // WL-0MTMPIQBE001J41P: entries persist until dispatch-time eligibility
+  // finds them non-dispatchable. Stale entries are removed eagerly
+  // (no pane, no cursor advance, cursor NOT advanced).
+  const staleEntries: CoordinationEntry[] = [];
+  const markStale = (e: CoordinationEntry) => { staleEntries.push(e); };
   let fetchAttempts = 0;
   let fetchFailures = 0;
   for (const entry of entries) {
@@ -1774,7 +1779,8 @@ export async function dispatchFromCoordination(
       continue;
     }
     // Exclude review-gated entries (parent WL-0MTIAL65N004T22F AC3).
-    if (result.info.needsProducerReview === true) continue;
+    // WL-0MTMPIQBE001J41P: a now-gated entry is stale — remove it.
+    if (result.info.needsProducerReview === true) { markStale(entry); continue; }
     // Critical-first tier (WL-0MT3FM8VA005XBHE): an open critical item at
     // a dispatchable stage (idea/intake_complete/plan_complete) outranks
     // every non-critical tier; its dispatch skill is stage-appropriate.
@@ -1788,9 +1794,9 @@ export async function dispatchFromCoordination(
         if (result.info.stage === 'plan_complete') {
           const risk = riskOrdinal(result.info.risk);
           const effort = effortOrdinal(result.info.effort);
-          if (risk === null || risk > 2 || effort === null || effort > 3) continue;
+          if (risk === null || risk > 2 || effort === null || effort > 3) { markStale(entry); continue; }
         }
-        if (frozen && critSkill === 'implement') continue;
+        if (frozen && critSkill === 'implement') { markStale(entry); continue; }
         const group = byTier.get('critical') ?? [];
         group.push({ entry, info: result.info, skill: critSkill });
         byTier.set('critical', group);
@@ -1798,11 +1804,17 @@ export async function dispatchFromCoordination(
       }
     }
     const kind = classifyItemForDispatch(result.info, now);
-    if (kind === null) continue;
-    if (frozen && (kind === 'audit' || kind === 'implement')) continue;
+    if (kind === null) { markStale(entry); continue; }
+    if (frozen && (kind === 'audit' || kind === 'implement')) { markStale(entry); continue; }
     const group = byTier.get(kind) ?? [];
     group.push({ entry, info: result.info, skill: kind });
     byTier.set(kind, group);
+  }
+
+  // Eagerly drop stale entries (non-dispatchable at dispatch time):
+  // no pane, no marker, no cursor advance — just remove and continue.
+  for (const e of staleEntries) {
+    removeEntry(opts.coordinationDir, e.instanceId);
   }
 
   // A wl lookup that failed for EVERY entry is a persistent CLI/parse

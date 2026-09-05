@@ -223,7 +223,9 @@ describe('integration: leader election → coordination → dispatch', () => {
       writeCoordinationFile(sharedCoord, { version: 1, entries: [entry] });
       const depsA = baseDeps({
         // Instance B's item is ALREADY claimed by another pane (in_progress).
-        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-B1', 'in_progress') }),
+        // WL-0MTMPIQBE001J41P: stale entries are dropped at dispatch time —
+        // the entry is removed without dispatching or advancing the cursor.
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: { ...itemInfo('WL-B1', 'idea'), status: 'in_progress' } }),
         spawnAgentPane: vi.fn(),
       });
       const workerA = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-a', cwd: dirA, deps: depsA });
@@ -232,10 +234,10 @@ describe('integration: leader election → coordination → dispatch', () => {
       vi.setSystemTime(30_000_000 + 60_001);
       const at = await workerA.tick();
       // An already-in-progress item is classified as not dispatchable —
-      // never re-dispatched (no pane, no marker).
+      // the stale entry is removed (WL-0MTMPIQBE001J41P) with no pane/marker.
       expect(at.dispatched).toBe(false);
       expect(depsA.spawnAgentPane).not.toHaveBeenCalled();
-      expect(getEntry(sharedCoord, 'inst-b')).not.toBe(null); // entry intact
+      expect(getEntry(sharedCoord, 'inst-b')).toBe(null); // stale entry removed
     } finally {
       vi.useRealTimers();
     }
