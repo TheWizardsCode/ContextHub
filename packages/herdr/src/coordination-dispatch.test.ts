@@ -80,6 +80,7 @@ function itemInfo(overrides: Partial<DowntimeItemInfo> & { id: string }): Downti
     auditedAt: overrides.auditedAt,
     updatedAt: overrides.updatedAt,
     sortIndex: overrides.sortIndex,
+    needsProducerReview: overrides.needsProducerReview,
   };
 }
 
@@ -562,6 +563,157 @@ describe('dispatchFromCoordination', () => {
     expect(JSON.parse(raw)['/roots/contexthub']).toBe('2026-09-02T00:00:00.000Z');
   });
 });
+
+
+// ── Eligibility re-check at dispatch time (WL-0MTMPIQBE001J41P / WL-0MTOC170J001QMIT) ─
+// Entries are never pruned by age; dispatch-time fetchItem+classify is the sole gate.
+// Stale entries are removed eagerly (no pane, no marker, cursor NOT advanced) and the
+// next eligible entry in tier order is dispatched.
+
+describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', () => {
+  it('removes a needsProducerReview entry without cursor advance and dispatches next eligible', async () => {
+    const stale = makeEntry('inst-stale', 'WL-STALE', '/roots/contexthub');
+    const ok = makeEntry('inst-ok', 'WL-OK', '/roots/sorraagents');
+    writeCoordinationFile(testDir, { version: 1, entries: [stale, ok] });
+    // Pre-seed cursor so we can assert NOT advanced for stale root
+    const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    saveRoundRobinCursor(testDir, { '/roots/contexthub': '2026-09-01T00:00:00.000Z', '/roots/sorraagents': '2026-09-01T00:00:00.000Z' });
+    const before = loadRoundRobinCursor(testDir);
+
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn(async (id: string) => {
+        if (id === 'WL-STALE') return { ok: true, info: itemInfo({ id: 'WL-STALE', status: 'open', stage: 'idea', needsProducerReview: true }) } as const;
+        return { ok: true, info: itemInfo({ id: 'WL-OK', status: 'open', stage: 'idea' }) } as const;
+      }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [stale, ok], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('WL-OK');
+    // Stale entry eagerly removed, no pane/marker for it
+    expect(getEntry(testDir, 'inst-stale')).toBe(null);
+    // Cursor advanced only for the dispatched root, NOT the stale root
+    const after = loadRoundRobinCursor(testDir);
+    expect(after['/roots/contexthub']).toBe(before['/roots/contexthub']); // not advanced
+    expect(after['/roots/sorraagents'] !== before['/roots/sorraagents']).toBe(true);
+    // Exactly one spawn, for the eligible entry
+    expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it('removes closed / completed-not-in_review entries and dispatches next eligible', async () => {
+    const closed = makeEntry('inst-closed', 'WL-CLOSED', '/roots/a');
+    const ok = makeEntry('inst-ok', 'WL-OK2', '/roots/b');
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn(async (id: string) => {
+        if (id === 'WL-CLOSED') return { ok: true, info: itemInfo({ id: 'WL-CLOSED', status: 'closed', stage: 'in_review' }) } as const;
+        return { ok: true, info: itemInfo({ id: 'WL-OK2', status: 'open', stage: 'intake_complete' }) } as const;
+      }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [closed, ok], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(getEntry(testDir, 'inst-closed')).toBe(null);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes an entry whose completed/in_review item now has a fresh audit', async () => {
+    const now = Date.now();
+    const freshAudit = makeEntry('inst-aud', 'WL-AUD', '/roots/a');
+    const ok = makeEntry('inst-ok', 'WL-OK3', '/roots/b');
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn(async (id: string) => {
+        if (id === 'WL-AUD') return {
+          ok: true,
+          info: itemInfo({
+            id: 'WL-AUD',
+            status: 'completed',
+            stage: 'in_review',
+            updatedAt: new Date(now - 10_000).toISOString(),
+            auditedAt: new Date(now - 5_000).toISOString(), // fresh (<60s after updatedAt)
+          }),
+        } as const;
+        return { ok: true, info: itemInfo({ id: 'WL-OK3', status: 'open', stage: 'idea' }) } as const;
+      }),
+    });
+    // Need actual file entries for removeEntry to act on
+    writeCoordinationFile(testDir, { version: 1, entries: [freshAudit, ok] });
+    const outcome = await dispatchFromCoordination(deps, [freshAudit, ok], { model: 'plan', cwd: '/repo', coordinationDir: testDir }, now);
+    expect(outcome.dispatched).toBe(true);
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('WL-OK3');
+    expect(getEntry(testDir, 'inst-aud')).toBe(null);
+  });
+
+  it('removes in_progress and done statuses without dispatching them', async () => {
+    const ip = makeEntry('inst-ip', 'WL-IP', '/roots/a');
+    const done = makeEntry('inst-done', 'WL-DONE', '/roots/b');
+    const ok = makeEntry('inst-ok', 'WL-OK4', '/roots/c');
+    writeCoordinationFile(testDir, { version: 1, entries: [ip, done, ok] });
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn(async (id: string) => {
+        if (id === 'WL-IP') return { ok: true, info: itemInfo({ id: 'WL-IP', status: 'in_progress', stage: 'in_progress' }) } as const;
+        if (id === 'WL-DONE') return { ok: true, info: itemInfo({ id: 'WL-DONE', status: 'completed', stage: 'completed' }) } as const;
+        return { ok: true, info: itemInfo({ id: 'WL-OK4', status: 'open', stage: 'idea' }) } as const;
+      }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [ip, done, ok], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    expect(outcome.dispatched).toBe(true);
+    expect(getEntry(testDir, 'inst-ip')).toBe(null);
+    expect(getEntry(testDir, 'inst-done')).toBe(null);
+    expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
+  });
+
+  it('removes above-caps plan_complete entries and dispatches next', async () => {
+    const caps = makeEntry('inst-caps', 'WL-CAPS', '/roots/a');
+    const ok = makeEntry('inst-ok', 'WL-OK5', '/roots/b');
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn(async (id: string) => {
+        if (id === 'WL-CAPS') return { ok: true, info: itemInfo({ id: 'WL-CAPS', status: 'open', stage: 'plan_complete', risk: 'High', effort: 'L' }) } as const;
+        return { ok: true, info: itemInfo({ id: 'WL-OK5', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }) } as const;
+      }),
+    });
+    writeCoordinationFile(testDir, { version: 1, entries: [caps, ok] });
+    const outcome = await dispatchFromCoordination(deps, [caps, ok], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(getEntry(testDir, 'inst-caps')).toBe(null);
+  });
+
+  it('does NOT prune by wall-clock age: old lastUpdated still dispatches (WL-0MTMPIQBE001J41P)', async () => {
+    const oldEntry: CoordinationEntry = { ...makeEntry('inst-old', 'WL-OLDAGE', '/roots/a'), lastUpdated: new Date(Date.now() - 400_000).toISOString() };
+    writeCoordinationFile(testDir, { version: 1, entries: [oldEntry] });
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-OLDAGE', status: 'open', stage: 'idea' }) }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [oldEntry], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    expect(outcome.dispatched).toBe(true);
+    expect(getEntry(testDir, 'inst-old')).toBe(null); // removed via dispatch path, not prune
+  });
+
+  it('when all entries are stale the result is no-candidate with all stale removed and cursor untouched', async () => {
+    const a = makeEntry('inst-a', 'WL-A', '/roots/a');
+    const b = makeEntry('inst-b', 'WL-B', '/roots/b');
+    writeCoordinationFile(testDir, { version: 1, entries: [a, b] });
+    const { loadRoundRobinCursor, saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    saveRoundRobinCursor(testDir, { '/roots/a': '2026-09-01T00:00:00.000Z', '/roots/b': '2026-09-01T00:00:00.000Z' });
+    const before = loadRoundRobinCursor(testDir);
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-X', status: 'in_progress', stage: 'in_progress' }) }),
+      spawnAgentPane: vi.fn(),
+    });
+    const outcome = await dispatchFromCoordination(deps, [a, b], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(getEntry(testDir, 'inst-a')).toBe(null);
+    expect(getEntry(testDir, 'inst-b')).toBe(null);
+    const after = loadRoundRobinCursor(testDir);
+    expect(after).toEqual(before); // cursor NOT advanced for stale-only cycle
+  });
+});
+
+
 
 // ── runCoordinationCheckIn ────────────────────────────────────────────
 
