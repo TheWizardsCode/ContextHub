@@ -232,9 +232,17 @@ export const DEFAULT_DOWNTIME_MODEL = 'plan';
 /**
  * Default coordination check-in interval: 30 minutes (parent AC3).
  * Every instance re-verifies/updates its entry in the shared coordination
- * file at this cadence — including the leader.
+ * file at this cadence. The leader checks in more often
+ * (WL-0MTOCBP1D009P4U3) — see DEFAULT_LEADER_CHECK_IN_MS.
  */
 export const DEFAULT_COORDINATION_CHECK_IN_MS = 30 * 60 * 1000;
+
+/**
+ * Leader coordination check-in interval (WL-0MTOCBP1D009P4U3): the leader
+ * re-offers every 4 minutes so offers stay fresh and the lease is renewed
+ * inside the 5-minute TTL with ~1 min grace. Non-leaders stay at 30 min.
+ */
+export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
 
 /**
  * Coordinator tier priority (parent AC4): the leader dispatches the
@@ -2604,6 +2612,12 @@ export interface DowntimeWorkerConfig {
    * leader or not.
    */
   checkInIntervalMs?: number;
+  /**
+   * Leader coordination check-in interval (WL-0MTOCBP1D009P4U3 — default
+   * 4 minutes): the leader re-offers at this cadence; followers stay at
+   * 30 min. The value must be < lease TTL (5 min) so renewal is inside.
+   */
+  leaderCheckInIntervalMs?: number;
 }
 
 export interface DowntimeWorkerTickResult {
@@ -2736,6 +2750,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     : null;
   const instanceId = leaderManager ? leaderManager.getInstanceId() : (opts.instanceId ?? 'legacy');
   const checkInIntervalMs = opts.checkInIntervalMs ?? DEFAULT_COORDINATION_CHECK_IN_MS;
+  const leaderCheckInMs = (opts as { leaderCheckInIntervalMs?: number }).leaderCheckInIntervalMs
+    ?? DEFAULT_LEADER_CHECK_IN_MS;
   // Timestamp of the last coordination check-in (30-min cadence, parent
   // AC3). null until the first tick so every instance checks in on startup
   // (first check-in on startup — parent Constraint).
@@ -2933,7 +2949,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // verify/update its entry in the shared coordination file. Runs for
         // leader AND non-leader alike — every instance contributes its most
         // important item; the single elected leader dispatches from the list.
-        if (lastCheckInAt === null || tickNow - lastCheckInAt >= checkInIntervalMs) {
+        // WL-0MTOCBP1D009P4U3: leader every 4 min (renews lease), followers every 30 min.
+        const effectiveCheckInMs = leaderState ? leaderCheckInMs : checkInIntervalMs;
+        if (lastCheckInAt === null || tickNow - lastCheckInAt >= effectiveCheckInMs) {
           lastCheckInAt = tickNow;
           try {
             const checkIn = await runCoordinationCheckIn(opts.deps, {
@@ -2947,9 +2965,20 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             // check-in block runs BEFORE the cooldown gate below, so the
             // pause can never suppress the only mechanism that re-offers
             // work once the coordination file empties.
-            if (checkIn.updated && checkIn.offered !== null) {
+            // WL-0MTEZ4XZJ006Y9U7 (AC2): any successful write (re-offer
+            // or emptied entry) proves CLI health — cancel any pause so
+            // polling resumes this tick. A non-update on a paused worker
+            // also cancels (the write proved CLI health; dispatch will
+            // resume next tick via the poll).
+            if (checkIn.updated || checkIn.offered !== null) {
               cooldownUntil = null;
-              errorStrikes = 0; // the re-offer's lookups succeeded — CLI healthy
+              errorStrikes = 0;
+            } else if (cooldownUntil !== null && checkIn.offered !== null) {
+              // File already holds the same entry (no write needed) but
+              // CLI healthy — also cancel so stale-file probes don't keep
+              // the pause alive while work still exists.
+              cooldownUntil = null;
+              errorStrikes = 0;
             }
           } catch {
             // Fail-safe: a throwing check-in (stub or regression) must never

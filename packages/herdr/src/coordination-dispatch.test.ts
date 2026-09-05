@@ -25,6 +25,7 @@ import {
   classifyItemForDispatch,
   dispatchFromCoordination,
   runCoordinationCheckIn,
+  computeMostImportantItem,
   coordinationTierRank,
   DOWNTIME_AUDIT_RECENCY_WINDOW_MS,
   type DowntimeWorker,
@@ -664,7 +665,8 @@ function makeCoordWorker(opts: {
       noCandidateCooldownMs: 3_600_000,
     }),
     leaseTtlSeconds: 300,
-    checkInIntervalMs: 30 * 60 * 1000,
+    checkInIntervalMs: 30 * 60 * 1000, // follower cadence (explicit)
+    leaderCheckInIntervalMs: 4 * 60 * 1000, // leader cadence (WL-0MTOCBP1D009P4U3)
   });
   return { worker, deps };
 }
@@ -779,9 +781,9 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
     // single-entry coordination file. After the leader dispatches the entry
     // the file is EMPTY, so the next dispatch attempt returns no-candidate —
     // but the worklog still has a candidate (B), so the worker must NOT
-    // enter the 60-min cooldown; the 30-min check-in re-offers B and
-    // dispatch resumes well within min(noCandidateCooldownMs,
-    // 2 × checkInIntervalMs) — not once per noCandidateCooldownMs.
+    // enter the 60-min cooldown; the leader's 4-min check-in re-offers B
+    // and dispatch resumes well within min(noCandidateCooldownMs,
+    // leaderCheckInMs). Non-leaders stay at 30 min (WL-0MTOCBP1D009P4U3).
     vi.useFakeTimers();
     const T0 = 10_000_000;
     vi.setSystemTime(T0);
@@ -824,21 +826,26 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
       const attempt = await worker.tick(); // empty-file dispatch attempt
       expect(attempt.dispatched).toBe(false);
       expect(worker.paused).toBe(false); // BUG (pre-fix): 60-min cooldown entered
-      // Repeated empty-file attempts stay unpaused while work exists.
-      vi.setSystemTime(T0 + 240_001);
-      await worker.tick();
-      expect(worker.paused).toBe(false);
 
-      // The 30-min check-in re-offers B and the next idle evaluation
-      // dispatches it — well inside min(noCandidateCooldownMs=60min,
-      // 2 × checkInIntervalMs=60min), NOT once per the 60-min cooldown.
-      vi.setSystemTime(T0 + 30 * 60_000);
-      const second = await worker.tick(); // check-in due → re-offer B → dispatch
-      expect(second.dispatched).toBe(true);
+      // The leader's 4-min check-in re-offers B and the next idle evaluation
+      // dispatches it — well inside noCandidateCooldownMs=60min.
+      // 4 min from T0 is 240k; we tick there (check-in due → re-offer B).
+      vi.setSystemTime(T0 + 4 * 60_000 + 1);
+      const second = await worker.tick(); // leader check-in due → re-offer B
+      // Dispatch may land on this same tick (idle already met) or next idle
+      // tick — either way the gap from first dispatch stays bounded by the
+      // 4-min cadence + idle threshold. Poll until dispatched (≤ 1 extra tick).
+      let gap = (worker.lastDispatchAt ?? 0) - firstDispatchAt;
+      if (!second.dispatched) {
+        vi.setSystemTime(T0 + 4 * 60_000 + 60_002);
+        const extra = await worker.tick();
+        expect(extra.dispatched).toBe(true);
+        gap = (worker.lastDispatchAt ?? 0) - firstDispatchAt;
+      } else {
+        expect(second.dispatched).toBe(true);
+      }
       expect(getEntry(testDir, 'inst-a')).toBe(null);
-      const gap = (worker.lastDispatchAt ?? 0) - firstDispatchAt;
-      expect(gap).toBeLessThan(2 * 30 * 60_000);
-      expect(gap).toBeLessThan(3_600_000); // min(noCandidateCooldownMs, 2×checkIn)
+      expect(gap).toBeLessThan(5 * 60_000 + 60_002);
       expect(gap).toBeGreaterThan(0);
     } finally {
       vi.useRealTimers();
@@ -865,28 +872,28 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
       expect(worker.paused).toBe(true); // genuine-empty pause IS entered
       expect(getEntry(testDir, 'inst-a')).toBe(null); // nothing offered
 
-      // The pause is a full stop: a mid-pause tick performs no proxy polling.
-      vi.setSystemTime(T0 + 5 * 60_000);
+      // The pause is a full stop: a tick before the 4-min boundary stays paused.
+      vi.setSystemTime(T0 + 3 * 60_000);
       const midPause = await worker.tick();
       expect(midPause.polled).toBe(false);
       expect(midPause.dispatched).toBe(false);
       expect(worker.paused).toBe(true);
 
-      // Work appears while the worker is paused. The next 30-min check-in
-      // must STILL RUN (not suppressed by the pause — the check-in/cooldown
-      // ordering) and its re-offer cancels the pause.
+      // Work appears while the worker is paused. The leader's 4-min check-in
+      // must STILL RUN (not suppressed by the pause) and its re-offer cancels
+      // the pause. Keep time monotonic forward (T0 → 60k → 3min → 4min → 4min+60k).
       (deps.getNextCriticalCandidate as ReturnType<typeof vi.fn>).mockResolvedValue({
         ok: true,
         candidate: { id: 'WL-NEW', title: 'New', stage: 'intake_complete', status: 'open' },
       });
-      vi.setSystemTime(T0 + 30 * 60_000);
+      vi.setSystemTime(T0 + 4 * 60_000 + 1000);
       const resumed = await worker.tick();
       expect(getEntry(testDir, 'inst-a')?.workItemId).toBe('WL-NEW'); // check-in landed during the pause
-      expect(worker.paused).toBe(false); // BUG (pre-fix): check-in suppressed → still paused
+      expect(worker.paused).toBe(false); // check-in cancels pause
       expect(resumed.polled).toBe(true); // polling resumed immediately
 
       // The re-offered item dispatches promptly (fresh full idle period).
-      vi.setSystemTime(T0 + 30 * 60_000 + 60_001);
+      vi.setSystemTime(T0 + 4 * 60_000 + 60_001 + 1000);
       const dispatched = await worker.tick();
       expect(dispatched.dispatched).toBe(true);
       expect(worker.paused).toBe(false);
