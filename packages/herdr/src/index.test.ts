@@ -1544,6 +1544,8 @@ describe('createDowntimeDeps', () => {
     const candidate = {
       id: 'WL-ONCE',
       title: 'dispatch me once',
+      status: 'completed',
+      stage: 'in_review',
       auditedAt: null,
       updatedAt: new Date(now - 60_000).toISOString(),
       sortIndex: 100,

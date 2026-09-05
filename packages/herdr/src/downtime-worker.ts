@@ -1255,6 +1255,16 @@ async function dispatchFromHerdrList(
     };
     const k = classifyItemForDispatch(info as import('./worklist.js').WorkItemInfo, now);
     if (k === null) continue;
+    // Active-audit single-flight check (WL-0MT3PHW4I002SNOV): runs BEFORE
+    // dispatched-marker exclusion to match legacy tier behavior. While an
+    // audit is in-flight the audit tier is skipped entirely, so we must
+    // check this before filtering dispatched items (a dispatched item may
+    // still be the active-audit item that should cause the skip).
+    if (k === 'audit') {
+      const active = await deps.getActiveAudit(ctx.cwd);
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; continue; } } else { flags.auditCheckFailed = true; continue; }
+      try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
+    }
     // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion
     // (WL-0MSLIY8ZR004QUSY/AC6) but applied as a filter on the Herdr head.
     if (k === 'audit' && auditIds.has(item.id)) continue;
@@ -1267,11 +1277,6 @@ async function dispatchFromHerdrList(
     // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3).
     if (k === 'audit' && !ctx.auditEligible) continue;
     if (k !== 'audit' && !ctx.panesEligible) continue;
-    if (k === 'audit') {
-      const active = await deps.getActiveAudit(ctx.cwd);
-      if (active.ok) { if (active.active) { flags.auditInFlight = true; continue; } } else { flags.auditCheckFailed = true; continue; }
-      try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
-    }
     const cand: DowntimeCandidate = { id: item.id, title: item.title, stage: k === 'audit' ? 'audit' : (String(item.stage) as DowntimeStage), status: item.status, priority: item.priority, sortIndex: item.sortIndex };
     const outcome = await dispatchClaimedTier(deps, k, cand, { model: ctx.model, cwd: ctx.cwd });
     if (outcome.dispatched) return outcome;
