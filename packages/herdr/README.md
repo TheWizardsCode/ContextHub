@@ -405,7 +405,13 @@ the item to completed/in_review without recording a fresh audit. The
 exclusion composes with the freshness rule: a *fresh* audit since the
 dispatch still governs (fresh → not a candidate). A missing or unreadable
 log is treated as empty (fail-safe), so audit dispatch keeps working on a
-fresh worklog.
+fresh worklog. Every dispatch tier — audit, critical, implement, plan,
+and intake — additionally excludes items with `needsProducerReview === true`
+(WL-0MTIAL65N004T22F): items flagged for producer review are never
+auto-dispatched (the `r` shortcut / `wl update --needs-producer-review true`),
+so the worker never consumes local slots on items awaiting a human decision.
+Absent/false/undefined → dispatchable (`=== true` only). Clearing the flag
+makes the item dispatchable again on the next idle poll.
 
 > **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV):** exactly one
 > audit is dispatched at a time during downtime dispatch — strictly

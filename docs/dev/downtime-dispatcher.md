@@ -22,10 +22,11 @@ The downtime dispatcher does **not** maintain its own ranking. The Herdr selecti
 `reSort`/`computeScore` as used by the fetcher). The dispatcher (`dispatchDowntimeWork`) derives
 its candidate from the **Herdr list head** (first ordered item) and applies every remaining
 safety gate as a **sequential filter** on that ordered sequence (scheduled-prompt → code-freeze
-→ dispatched-marker → free-slot minimums → active-audit single-flight → freshness/recency →
-CAS claim → spawn). If no head item passes the filters, the dispatcher reports "no candidate"
-rather than falling back to a second ranking. No `wl next`/database scoring change is required;
-the observable contract is "dispatcher == Herdr list head".
+→ producer-review gate (WL-0MTIAL65N004T22F) → dispatched-marker → free-slot minimums →
+active-audit single-flight → freshness/recency → CAS claim → spawn). If no head item passes
+the filters, the dispatcher reports "no candidate" rather than falling back to a second ranking.
+No `wl next`/database scoring change is required; the observable contract is
+"dispatcher == Herdr list head".
 
 ## Architecture
 
@@ -157,6 +158,17 @@ the worklog still holds dispatchable work. Therefore:
 - **Bound achieved:** dispatch occurs at least once per `min(noCandidateCooldownMs,
   2 × checkInIntervalMs)` (60 min) whenever the worklog holds dispatchable
   work — never once per full cooldown.
+
+### Producer-review gate (WL-0MTIAL65N004T22F)
+
+Every dispatch tier — audit, critical (including its dependency-frontier walk), implement,
+plan, and intake — excludes items with `needsProducerReview === true`. Classification
+(`classifyItemForDispatch`) and every `select*` helper check strict `=== true` only, so
+absent/false/undefined remain dispatchable. Parsers preserve the flag via `Boolean(...)`
+coercion; a missing or unparseable field never crashes the dispatcher. The coordination
+leader path equally skips review-gated entries (retaining them for later re-offer after the
+flag is cleared). The filter report is "no candidate" (not a `wl-error` strike) and the
+no-candidate cooldown is not triggered while review-gated work exists.
 
 ### Critical-first tier & freeze split-by-skill
 
