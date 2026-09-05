@@ -106,7 +106,6 @@ import {
   getEntry,
   upsertEntry,
   removeEntry,
-  pruneStaleEntries,
   type CoordinationEntry,
 } from './coordination.js';
 import {
@@ -1720,32 +1719,9 @@ export async function dispatchFromCoordination(
   const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
-  // Stale-entry pruning (parent AC3 risk mitigation): the leader prunes
-  // entries whose owner has not refreshed within the lease TTL (crashed or
-  // idle instances) at the START of every dispatch cycle, so dead offers
-  // never starve the queue and their owners re-queue on their next
-  // check-in. Fail-safe: pruneStaleEntries never throws (lock contention or
-  // IO → 0 removed).
-  const pruned = pruneStaleEntries(
-    opts.coordinationDir,
-    (opts.leaseTtlMs ?? DEFAULT_LEASE_TTL_SECONDS * 1000),
-    now,
-  );
-  if (pruned > 0) {
-    // Audit trail (WL-0MSXHAE290067VAL).
-    void appendCoordinationLogEntry(opts.cwd, {
-      kind: 'coordination',
-      operation: 'prune',
-      prunedCount: pruned,
-      at: new Date(now).toISOString(),
-    });
-    // The coordination FILE is the source of truth: the passed snapshot is
-    // stale after a prune — re-read it so a pruned (crashed-instance)
-    // entry can never classify or dispatch this cycle. Fail-safe: a failed
-    // re-read falls back to the snapshot (already pruned entries are then
-    // skipped by classify → non-dispatchable).
-    entries = readCoordinationFile(opts.coordinationDir)?.entries ?? entries;
-  }
+  // No wall-clock prune (WL-0MTMPIQBE001J41P) — entries persist until
+  // dispatch-time eligibility check (fetchItem+classify) finds them
+  // non-dispatchable. Stale offers are dropped at dispatch, never by age.
 
   // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
   // audit tier needs ≥ 2 slots (parent + Phase 2 child at

@@ -23,9 +23,9 @@
  *    the single-machine v1 scope) followed by an atomic tmp+rename write,
  *    so two instances updating simultaneously never corrupt the file and a
  *    crash never leaves a half-written JSON.
- *  - The leader prunes stale entries (lastUpdated older than the 5-minute
- *    lease) on each dispatch cycle so crashed instances' items do not
- *    starve the queue.
+ *  - Entries do NOT expire by wall-clock age (WL-0MTMPIQBE001J41P): the
+ *    leader validates eligibility at dispatch time via fetchItem+classify,
+ *    so an offer persists until dispatched or dropped as non-dispatchable.
  *
  * Fail-safe by contract (parent constraint): a missing or unreadable
  * coordination file, or a failed lock acquisition, degrades to the
@@ -328,29 +328,18 @@ export function getEntry(
 }
 
 /**
- * Prune entries whose `lastUpdated` is older than `maxAgeMs` (the leader
- * runs this on each dispatch cycle — the 5-minute lease bound). Crashed or
- * idle instances' stale items stop blocking the queue; their owners
- * re-add on their next check-in. Returns the number of entries removed.
- * Fail-safe: lock contention or I/O failure → 0 removed, never throws.
+ * @deprecated Time-based expiry removed (WL-0MTMPIQBE001J41P) — entries do
+ * NOT expire by wall-clock age. The dispatcher validates eligibility at
+ * dispatch time (fetchItem+classify), so an offer persists until
+ * dispatched or found non-dispatchable. Kept as a no-op for compat;
+ * always returns 0 and never mutates the file.
  */
 export function pruneStaleEntries(
-  worklogDir: string,
-  maxAgeMs: number,
-  nowMs: number = Date.now(),
+  _worklogDir: string,
+  _maxAgeMs: number,
+  _nowMs: number = Date.now(),
 ): number {
-  return withCoordLock(worklogDir, () => {
-    const data = readCoordinationFile(worklogDir);
-    if (data === null) return 0;
-    const before = data.entries.length;
-    const next = data.entries.filter((e) => {
-      const updated = new Date(e.lastUpdated).getTime();
-      return Number.isFinite(updated) && nowMs - updated < maxAgeMs;
-    });
-    if (next.length === before) return 0;
-    if (!writeCoordinationFile(worklogDir, { ...data, entries: next })) return 0;
-    return before - next.length;
-  }) ?? 0;
+  return 0;
 }
 
 /**

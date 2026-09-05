@@ -241,7 +241,7 @@ describe('integration: leader election → coordination → dispatch', () => {
     }
   });
 
-  it('stale coordination entries are pruned by the leader dispatch cycle', async () => {
+  it('stale entries are NOT pruned by age — they persist until dispatch-time eligibility (WL-0MTMPIQBE001J41P)', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(40_000_000);
     try {
@@ -252,17 +252,15 @@ describe('integration: leader election → coordination → dispatch', () => {
       const depsA = baseDeps({
         getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
         fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-DEAD', 'idea') }),
-        spawnAgentPane: vi.fn(),
       });
       const workerA = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-a', cwd: dirA, deps: depsA });
       await workerA.tick(); // elect A
       await workerA.tick(); // idle
       vi.setSystemTime(40_000_000 + 60_001);
-      await workerA.tick(); // dispatch cycle — prunes the stale entry
-      // The stale (crashed-instance) entry was pruned during the cycle and
-      // never dispatched (its owner is gone; lastUpdated > lease TTL).
-      expect(getEntry(sharedCoord, 'inst-dead')).toBe(null);
-      expect(depsA.spawnAgentPane).not.toHaveBeenCalled();
+      await workerA.tick(); // dispatch cycle — entry persists (no wall-clock prune), dispatched via fetchItem classify
+      // The old entry (lastUpdated > 5 min) is NOT pruned — it is dispatched via eligibility check.
+      expect(getEntry(sharedCoord, 'inst-dead')).toBe(null); // removed after successful dispatch
+      expect(depsA.spawnAgentPane).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

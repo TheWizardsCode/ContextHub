@@ -169,18 +169,19 @@ describe('upsertEntry / getEntry / removeEntry', () => {
   });
 });
 
-// ── pruning ────────────────────────────────────────────────────────────
+// ── pruning (retired: WL-0MTMPIQBE001J41P) ──────────────────────────
+// Entries do NOT expire by age — pruneStaleEntries is a no-op (compat).
 
-describe('pruneStaleEntries', () => {
-  it('removes only entries older than the lease bound', () => {
+describe('pruneStaleEntries (no-op, WL-0MTMPIQBE001J41P)', () => {
+  it('does not remove entries older than the former lease bound', () => {
     const now = 1_000_000;
-    const old = new Date(now - 400_000).toISOString(); // > 5 min stale
-    const fresh = new Date(now - 60_000).toISOString(); // < 5 min
+    const old = new Date(now - 400_000).toISOString(); // > 5 min, formerly stale
+    const fresh = new Date(now - 60_000).toISOString();
     upsertEntry(testDir, makeEntry('stale', 'WL-STALE', { lastUpdated: old }));
     upsertEntry(testDir, makeEntry('fresh', 'WL-FRESH', { lastUpdated: fresh }));
     const removed = pruneStaleEntries(testDir, 300_000, now);
-    expect(removed).toBe(1);
-    expect(getEntry(testDir, 'stale')).toBe(null);
+    expect(removed).toBe(0);
+    expect(getEntry(testDir, 'stale')).not.toBe(null);
     expect(getEntry(testDir, 'fresh')).not.toBe(null);
   });
 
