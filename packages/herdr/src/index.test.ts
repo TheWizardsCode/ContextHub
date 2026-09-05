@@ -1630,7 +1630,7 @@ describe('createDowntimeDeps', () => {
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'idea' });
 
-    expect(result).toEqual({ ok: false, reason: 'stale' });
+    expect(result).toEqual({ ok: false, reason: 'stale', error: '{"success":false,"error":"stale","message":"Conditional update skipped"}' });
   });
 
   it('claimItem resolves error (a strike) when wl fails for any other reason', async () => {
@@ -1639,7 +1639,7 @@ describe('createDowntimeDeps', () => {
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'idea' });
 
-    expect(result).toEqual({ ok: false, reason: 'error' });
+    expect(result).toEqual({ ok: false, reason: 'error', error: 'wl boom' });
   });
 
   it('spawnAgentPane spawns send-to-pi.sh with the derived pane name and args', async () => {

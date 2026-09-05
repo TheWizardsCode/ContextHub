@@ -602,7 +602,7 @@ export function createDowntimeDeps(
         { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
       );
       const info = parseShowItemOutput(stdout);
-      if (info === null) return { ok: false };
+      if (info === null) return { ok: false, error: 'show parse error' };
       if (info.status === 'completed' && info.stage === 'in_review') {
         const { stdout: listOut } = await getExecFileAsync()(
           'wl',
@@ -610,13 +610,13 @@ export function createDowntimeDeps(
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         );
         const audits = parseAuditCandidatesOutput(listOut);
-        if (audits === null) return { ok: false };
+        if (audits === null) return { ok: false, error: 'audit list parse error' };
         const found = audits.find((a) => a.id === itemId);
         info.auditedAt = found?.auditedAt ?? null;
       }
       return { ok: true, info };
-    } catch {
-      return { ok: false };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   };
   return {
@@ -763,15 +763,15 @@ export function createDowntimeDeps(
         const inProgress = parseInProgressOutput(stdout);
         if (inProgress === null) {
           // Unparseable query → the check cannot complete → fail-open.
-          return { ok: false } as const;
+          return { ok: false, error: 'in_progress parse error' } as const;
         }
         const active = [...auditCandidateIds].some((id) => inProgress.has(id));
         return { ok: true, active };
-      } catch {
+      } catch (err) {
         // Fail-open: a wl failure yields {ok:false} — the dispatcher skips
         // the audit tier and falls through to the next tier; dispatch is
         // never blocked by an unanswerable check (fail-safe).
-        return { ok: false };
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
     async getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null> {
@@ -954,8 +954,8 @@ export function createDowntimeDeps(
           `${result.stale ? ' (another pane won the claim race — dispatch aborted)' : ''}\n`,
       );
       return result.stale
-        ? { ok: false, reason: 'stale' }
-        : { ok: false, reason: 'error' };
+        ? { ok: false, reason: 'stale', error: result.error }
+        : { ok: false, reason: 'error', error: result.error ?? 'claim failed' };
     },
     async spawnAgentPane(
       prompt: string,

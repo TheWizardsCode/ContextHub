@@ -825,7 +825,7 @@ export interface AuditCandidate {
  */
 export type DowntimeNextResult =
   | { ok: true; candidate: DowntimeCandidate | null }
-  | { ok: false };
+  | { ok: false; error?: string };
 
 /**
  * Enriched single-item view fetched by the leader for a coordination entry
@@ -867,7 +867,7 @@ export interface DowntimeItemInfo {
  */
 export type DowntimeItemResult =
   | { ok: true; info: DowntimeItemInfo }
-  | { ok: false };
+  | { ok: false; error?: string };
 
 /**
  * Outcome of the check-in most-important-item computation. `{ok:true,
@@ -880,7 +880,7 @@ export type DowntimeItemResult =
 export type MostImportantItemResult =
   | { ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate }
   | { ok: true; noCandidate: true }
-  | { ok: false };
+  | { ok: false; error?: string };
 
 
 /**
@@ -904,7 +904,7 @@ export interface DowntimeClaimExpected {
  */
 export type DowntimeClaimResult =
   | { ok: true }
-  | { ok: false; reason: 'stale' | 'error' };
+  | { ok: false; reason: 'stale' | 'error'; error?: string };
 
 /**
  * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV).
@@ -923,7 +923,7 @@ export type DowntimeClaimResult =
  */
 export type DowntimeActiveAuditResult =
   | { ok: true; active: boolean }
-  | { ok: false };
+  | { ok: false; error?: string };
 
 /** External boundaries injected so the dispatch logic is testable. */
 export interface DowntimeWorkerDeps {
@@ -1168,6 +1168,8 @@ export interface DowntimeErrorEvent {
   /** ISO-8601 UTC timestamp of the error. */
   at: string;
   message: string;
+  /** Underlying wl/CLI error (timeout, SQLITE_BUSY, parse failure, stderr) — WL-0MTL4PC0Y005GXTI. */
+  error?: string;
 }
 
 export interface DowntimeDispatchOutcome {
@@ -1235,7 +1237,7 @@ async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
   ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; freshnessSkip: boolean },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -1269,7 +1271,7 @@ async function dispatchFromHerdrList(
     // still be the active-audit item that should cause the skip).
     if (k === 'audit') {
       const active = await deps.getActiveAudit(ctx.cwd);
-      if (active.ok) { if (active.active) { flags.auditInFlight = true; continue; } } else { flags.auditCheckFailed = true; continue; }
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
       try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
     }
     // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion
@@ -1326,7 +1328,7 @@ async function dispatchClaimedTier(
   if (!claim.ok) {
     return claim.reason === 'stale'
       ? { dispatched: false, reason: 'claim-failed' }
-      : { dispatched: false, reason: 'wl-error' };
+      : { dispatched: false, reason: 'wl-error', error: claim.error ?? 'claim failed' };
   }
 
   let marked = false;
@@ -1621,10 +1623,11 @@ export async function computeMostImportantItem(
   cwd: string,
   now: number = Date.now(),
 ): Promise<MostImportantItemResult> {
-  if (typeof deps.getNextAuditCandidate !== 'function') return { ok: false };
+  if (typeof deps.getNextAuditCandidate !== 'function') return { ok: false, error: 'getNextAuditCandidate unavailable' };
   const freezeStatus = deps.readCodeFreezeStatus(cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
   let sawError = false;
+  let firstError: string | undefined;
 
   if (!frozen) {
     const audit = await deps.getNextAuditCandidate(cwd);
@@ -1634,6 +1637,7 @@ export async function computeMostImportantItem(
       }
     } else {
       sawError = true;
+      firstError ??= audit.error ?? 'audit lookup failed';
     }
   }
 
@@ -1647,6 +1651,7 @@ export async function computeMostImportantItem(
     }
   } else {
     sawError = true;
+    firstError ??= critical.error ?? 'critical lookup failed';
   }
 
   if (!frozen) {
@@ -1663,6 +1668,7 @@ export async function computeMostImportantItem(
     }
   } else {
     sawError = true;
+    firstError ??= intakeComplete.error ?? 'intake_complete lookup failed';
   }
 
   const idea = await deps.getNextItem('idea', cwd);
@@ -1672,13 +1678,14 @@ export async function computeMostImportantItem(
     }
   } else {
     sawError = true;
+    firstError ??= idea.error ?? 'idea lookup failed';
   }
 
   // Genuinely empty backlog (both prep tiers answered) → no candidate. A
   // CLI error with no candidate → {ok:false} (the check-in keeps the
   // existing entry, fail-open — a transient wl error must never drop a
   // valid offer).
-  return sawError ? { ok: false } : { ok: true, noCandidate: true };
+  return sawError ? { ok: false, error: firstError } : { ok: true, noCandidate: true };
 }
 
 /**
@@ -1722,7 +1729,7 @@ export async function dispatchFromCoordination(
   // never classify an entry — fail closed to a strike (a misconfigured
   // deployment must be visible, not silently idle).
   if (typeof deps.fetchItem !== 'function') {
-    return { dispatched: false, reason: 'wl-error' };
+    return { dispatched: false, reason: 'wl-error', error: 'fetchItem unavailable' };
   }
   const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
@@ -1777,6 +1784,7 @@ export async function dispatchFromCoordination(
   const markStale = (e: CoordinationEntry) => { staleEntries.push(e); };
   let fetchAttempts = 0;
   let fetchFailures = 0;
+  let lastFetchError: string | undefined;
   for (const entry of entries) {
     if (entry.instanceId.length === 0 || entry.workItemId.length === 0) continue;
     fetchAttempts += 1;
@@ -1784,6 +1792,7 @@ export async function dispatchFromCoordination(
     const result = await deps.fetchItem(entry.workItemId, worklogRoot);
     if (!result.ok) {
       fetchFailures += 1;
+      lastFetchError = (result as { error?: string }).error ?? 'fetchItem failed';
       continue;
     }
     // Exclude review-gated entries (parent WL-0MTIAL65N004T22F AC3).
@@ -1829,7 +1838,7 @@ export async function dispatchFromCoordination(
   // failure — a strike (never a silent no-candidate). Per-instance
   // failures are tolerated (fail-open).
   if (fetchAttempts > 0 && fetchFailures === fetchAttempts) {
-    return { dispatched: false, reason: 'wl-error' };
+    return { dispatched: false, reason: 'wl-error', error: lastFetchError ?? 'all fetchItem lookups failed' };
   }
 
   // ── Global critical override (WL-0MTJDZY5E003D6CO) ────────────────
@@ -2146,13 +2155,14 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, freshnessSkip };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip };
       const head = await deps.getHerdrListHead(opts.cwd);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible }, flags);
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
+        const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         if (herdrOutcome !== null) return herdrOutcome;
         // Herdr list had items but every one was filtered by a safety gate:
@@ -2161,7 +2171,7 @@ export async function dispatchDowntimeWork(
         if (frozen) return { dispatched: false, reason: 'code-freeze' };
         if (freshnessSkip) return { dispatched: false, reason: 'fresh-audit-skip' };
         if (auditInFlight) return { dispatched: false, reason: 'audit-in-flight' };
-        if (auditCheckFailed) return { dispatched: false, reason: 'wl-error' };
+        if (auditCheckFailed) return { dispatched: false, reason: 'wl-error', error: auditCheckError };
         return { dispatched: false, reason: 'no-candidate' };
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
@@ -2377,7 +2387,7 @@ export async function dispatchDowntimeWork(
           : auditInFlight
             ? { dispatched: false, reason: 'audit-in-flight' }
             : auditCheckFailed
-              ? { dispatched: false, reason: 'wl-error' }
+              ? { dispatched: false, reason: 'wl-error', error: tier2ErrorDetail }
               : { dispatched: false, reason: 'no-candidate' };
     }
     // Tier 3 errored (with or without a tier-2 error): fail closed to busy.
