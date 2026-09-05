@@ -231,20 +231,17 @@ dispatches; the other herdr instances coordinate instead of polling:
   migration — stale files orphaned, ignored).
 - **Shared coordination file** — machine-wide
   `~/.herdr/downtime/downtime-coordination.json` (or
-  `HERDR_COORDINATION_DIR`): every instance checks in on startup and every
-  **30 minutes**, offering its most-important item as
+  `HERDR_COORDINATION_DIR`): entries **do not expire by age**; every instance checks in on startup — **leaders every ~4 minutes** (`DEFAULT_LEADER_CHECK_IN_MS`, renewing the 5-min lease inside its TTL) and **followers every 30 minutes** (`DEFAULT_COORDINATION_CHECK_IN_MS`) — offering its most-important item as
   `{instanceId, workItemId, worklogRoot/directory, assignedAt, lastUpdated}`
-  (`worklogRoot` lets the single leader dispatch across roots — F4).
+  (`worklogRoot` lets the single leader dispatch across roots — F4). Re-offer also refreshes leadership every tick from the lease file.
 - **Leader dispatch** — only the leader polls the proxy; once idle for the
   threshold, it first checks **scheduled-prompts** (a due prompt dispatches
   immediately — WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*); otherwise it
-  reads the machine-wide offer list, orders by tier priority **audit →
-  critical → implement → plan → intake across worklogRoots** (F4),
-  gated by a single machine-wide slot budget (F5 — one snapshot, per-tier
+  reads the machine-wide offer list, validates each entry **at dispatch time** (`fetchItem` → `classifyItemForDispatch`/`isAuditFresh`/stage+status as the sole gate; no wall-clock prune — WL-0MTMPIQBE001J41P), orders the remaining eligible entries by tier priority **audit →
+  critical → implement → plan → intake across worklogRoots** (F4) with **global cross-project round-robin within each non-critical tier** (`sortEntriesByRoundRobin` / `downtime-round-robin-by-root.json` — unknown roots first, oldest timestamp first; `advanceRoundRobinCursor` only on successful dispatch), gated by a single machine-wide slot budget (F5 — one snapshot, per-tier
   minimums audit 2 / single-pane 1), and dispatches the highest-priority
-  available entry in its `worklogRoot`. The entry is **removed**; its owner
-  re-offers its next item at the next check-in. Stale entries are pruned at
-  the lease TTL.
+  available entry in its `worklogRoot`. A **stale** entry (closed/`in_progress`/`done`, audit-now-fresh, `needsProducerReview === true`, above-caps, or otherwise not currently dispatchable) is **removed eagerly without cursor advance, without pane or dispatched marker**, and the tier loop continues to the next entry. The dispatched entry is **removed** (cursor advanced for its `worklogRoot`); its owner
+  re-offers its next item at the next check-in. There is **no TTL-based pruning**.
 - **Non-leaders** — skip proxy polling and dispatch entirely; they only
   refresh their lease check (a cheap local file read) and their
   coordination entry.
@@ -253,8 +250,7 @@ dispatches; the other herdr instances coordinate instead of polling:
   dispatch from it); the existing dispatched-marker exclusion and CAS
   claim guards are preserved unchanged.
 
-Coordination operations (check-ins, elections/takeovers, stale-entry
-pruning) are recorded in `.worklog/downtime-coordination.log` — a separate
+Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
 coordination records. Dispatch/coordination logs stay **per worklog root**
 (retained location, F6 WL-0MTII4CWT00452HU — per-project observability;
