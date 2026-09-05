@@ -36,7 +36,9 @@ import {
   formatChordHintsForHelp,
   resolvePodcastTarget,
   clearDescriptionPreviewCache,
+  isHeadingRow,
 } from './worklist.js';
+import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { createDowntimeWorker, createDowntimePoller } from './downtime-worker.js';
@@ -4764,5 +4766,143 @@ describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () =>
     expect(visible).toContain('[paused — hidden]');
     // The downtime segment may be cut at the truncation boundary.
     expect(visible).toContain('[downtime');
+  });
+});
+
+// ── Header item count excludes heading rows (WL-0MT26TE72002FLKX) ──────
+// AC1: Header item count is WorkItem rows only, not displayRows length.
+// AC2: "top N of M" badge uses the same item-based N.
+// AC3: Group heading counts remain unchanged.
+
+describe('createListRenderer — header count excludes heading rows (WL-0MT26TE72002FLKX)', () => {
+  const renderer = createListRenderer();
+
+  /**
+   * Build a DisplayRow array with heading rows interleaved, matching
+   * the reported scenario: 21 items across 3 groups + 3 heading rows = 24 rows.
+   */
+  function makeFixtureRows(): DisplayRow[] {
+    const items: WorkItem[] = [];
+    for (let i = 1; i <= 21; i++) {
+      items.push(makeItem(`item-${i}`));
+    }
+    const rows: DisplayRow[] = [];
+    // Group 1: 19 items + heading
+    for (let i = 0; i < 19; i++) {
+      rows.push({ kind: 'heading', group: 1, groupLabel: 'In Review', count: 19, collapsed: false });
+      break;
+    }
+    for (let i = 0; i < 19; i++) {
+      rows.push(items[i]);
+    }
+    // Group 2: 1 item + heading
+    rows.push({ kind: 'heading', group: 2, groupLabel: 'Critical Group 1', count: 1, collapsed: false });
+    rows.push(items[19]);
+    // Group 3: 1 item + heading
+    rows.push({ kind: 'heading', group: 3, groupLabel: 'Critical Group 2', count: 1, collapsed: false });
+    rows.push(items[20]);
+    return rows;
+  }
+
+  it('header shows item count (not row count) with 21 items + 3 headings = 24 displayRows', () => {
+    const displayRows = makeFixtureRows();
+    // Verify the fixture: 24 total rows (21 items + 3 headings)
+    expect(displayRows.length).toBe(24);
+    const itemRows = displayRows.filter(r => !isHeadingRow(r));
+    expect(itemRows.length).toBe(21);
+
+    const termSize = { rows: 24, cols: 120 };
+    const output = renderer(
+      displayRows,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      100,
+      null,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    // AC1: "21 item(s)" not "24 item(s)"
+    expect(visible).toContain('21 item(s)');
+    expect(visible).not.toContain('24 item(s)');
+    // AC2: "(top 21 of 100)" uses item-based N
+    expect(visible).toContain('(top 21 of 100)');
+  });
+
+  it('no badge when totalCount <= item count', () => {
+    const displayRows: DisplayRow[] = [
+      { kind: 'heading', group: 1, groupLabel: 'Group 1', count: 2, collapsed: false },
+      makeItem('A'),
+      makeItem('B'),
+    ];
+    const termSize = { rows: 24, cols: 120 };
+    const output = renderer(
+      displayRows,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      2,  // totalCount == item count → no badge
+      null,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('2 item(s)');
+    expect(visible).not.toContain('(top');
+  });
+
+  it('no badge when totalCount is undefined', () => {
+    const displayRows: DisplayRow[] = [
+      { kind: 'heading', group: 1, groupLabel: 'Group 1', count: 1, collapsed: false },
+      makeItem('A'),
+    ];
+    const termSize = { rows: 24, cols: 120 };
+    const output = renderer(
+      displayRows,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,  // no totalCount → no badge
+      null,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('1 item(s)');
+    expect(visible).not.toContain('(top');
   });
 });

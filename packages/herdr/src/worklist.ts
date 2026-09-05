@@ -3219,10 +3219,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
 
     // ── Render list mode ──────────────────────────────────────────
 
-    // Header with total count and auto-refresh indicator. `displayRows`
-    // includes heading rows, so the item count shown is the row count — the
-    // same metric the header has always shown for the flattened list.
-    const totalItems = displayRows.length;
+    // Header with total count and auto-refresh indicator. `totalItems` is
+    // the count of WorkItem rows only (heading rows are excluded so the
+    // header reconciles with per-group heading counts).
+    const totalItems = displayRows.filter((row) => !isHeadingRow(row)).length;
     const filterLabel = activeFilter ? ` (filtered: ${activeFilter})` : '';
     let header = ` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`;
     if (totalCount !== undefined && totalCount > totalItems) {
