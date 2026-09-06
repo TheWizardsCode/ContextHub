@@ -120,6 +120,7 @@ import {
 import {
   loadRoundRobinCursor,
   advanceRoot,
+  selectLeastRecentlyServed,
 } from './downtime-round-robin-by-root.js';
 import {
   createLeaderElectionManager,
@@ -1839,12 +1840,29 @@ export async function dispatchFromCoordination(
 
   // Entries are OFFERS — one per instance, each naming that instance's
   // own worklog Herdr list head at its last check-in (computeMostImportantItem).
-  // The leader dispatches in FILE ORDER with no re-ranking (the tier
-  // grouping / critical override / round-robin ordering are retired by
-  // WL-0MTK1ILM2009QYB2 AC1–2 — a second ranking is never re-derived
-  // here). WL-0MTMPIQBE001J41P: entries persist until dispatch-time
-  // eligibility finds them non-dispatchable; a stale offer is removed
-  // eagerly (no pane, no marker) and dispatch continues to the next offer.
+  // The leader dispatches in ROUND-ROBIN across worklogRoots: the
+  // least-recently-served project root is selected first (cursor advances
+  // atomically via selectLeastRecentlyServed). WL-0MTMPIQBE001J41P: entries
+  // persist until dispatch-time eligibility finds them non-dispatchable; a
+  // stale offer is removed eagerly (no pane, no marker) and dispatch
+  // continues to the next offer.
+  // Round-robin cross-project dispatch: select the least-recently-served
+  // project root before dispatch iteration (wire in the cursor infrastructure
+  // that was implemented but never connected — WL-0MTQ2FGSK004CBRK).
+  const entryRoots = entries
+    .filter(e => e.instanceId.length > 0 && e.workItemId.length > 0)
+    .map(e => e.worklogRoot ?? e.directory);
+  const selectedRoot = selectLeastRecentlyServed(opts.coordinationDir, entryRoots, now);
+  if (selectedRoot !== null) {
+    const idx = entries.findIndex(
+      e => (e.worklogRoot ?? e.directory) === selectedRoot,
+    );
+    if (idx > 0) {
+      const [selected] = entries.splice(idx, 1);
+      entries.unshift(selected);
+    }
+  }
+
   let fetchAttempts = 0;
   let fetchFailures = 0;
   let lastFetchError: string | undefined;

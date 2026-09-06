@@ -596,8 +596,10 @@ describe('dispatchFromCoordination', () => {
 
 // ── Eligibility re-check at dispatch time (WL-0MTMPIQBE001J41P / WL-0MTOC170J001QMIT) ─
 // Entries are never pruned by age; dispatch-time fetchItem+classify is the sole gate.
-// Stale entries are removed eagerly (no pane, no marker, cursor NOT advanced) and the
-// next eligible entry in file order is dispatched.
+// Stale entries are removed eagerly (no pane, no marker). The round-robin cursor
+// IS advanced for the selected root at selection time (WL-0MTQ2FGSK004CBRK — the
+// cursor advances atomically via selectLeastRecentlyServed even if the entry is
+// later skipped or removed).
 
 describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', () => {
   it('removes a needsProducerReview entry without cursor advance and dispatches next eligible', async () => {
@@ -622,10 +624,11 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
     expect(spawnCall).toContain('WL-OK');
     // Stale entry eagerly removed, no pane/marker for it
     expect(getEntry(testDir, 'inst-stale')).toBe(null);
-    // The round-robin cursor is retired (WL-0MTK1ILM2009QYB2) — dispatch
-    // does NOT advance it for ANY root (offers are consumed in file order).
+    // The round-robin cursor IS advanced for the selected root at selection
+    // time, even though the entry is later removed (WL-0MTQ2FGSK004CBRK).
     const after = loadRoundRobinCursor(testDir);
-    expect(after).toEqual(before);
+    expect(after['/roots/contexthub']).not.toBe(before['/roots/contexthub']); // selected root advanced
+    expect(after['/roots/sorraagents']).toBe(before['/roots/sorraagents']); // unselected root untouched
     // Exactly one spawn, for the eligible entry
     expect((deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls).toHaveLength(1);
   });
@@ -738,7 +741,10 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
     expect(getEntry(testDir, 'inst-a')).toBe(null);
     expect(getEntry(testDir, 'inst-b')).toBe(null);
     const after = loadRoundRobinCursor(testDir);
-    expect(after).toEqual(before); // cursor NOT advanced for stale-only cycle
+    // Cursor IS advanced for the selected root even when all entries are stale
+    // (WL-0MTQ2FGSK004CBRK — selection advances atomically, removal doesn't undo).
+    expect(after['/roots/a']).not.toBe(before['/roots/a']); // selected root advanced
+    expect(after['/roots/b']).toBe(before['/roots/b']);     // unselected root untouched
   });
 });
 

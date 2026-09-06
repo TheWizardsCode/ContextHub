@@ -1,10 +1,12 @@
 /**
  * F4 cross-root offer-list dispatch proof (WL-0MTII45EP002DWK6 +
- * WL-0MTK1ILM2009QYB2): the leader dispatches OFFERS in FILE ORDER across
- * worklogRoots (each offer is its root's Herdr list head at the owner's
- * check-in — the cross-root tier priority / critical override ordering is
- * retired: no second ranking on the dispatch path) and spawns the pane in
- * the entry's worklogRoot.
+ * WL-0MTK1ILM2009QYB2): the leader dispatches OFFERS in ROUND-ROBIN order
+ * across worklogRoots (least-recently-served root selected first; cursor
+ * advances atomically via selectLeastRecentlyServed — WL-0MTQ2FGSK004CBRK).
+ * Each offer is its root's Herdr list head at the owner's check-in. The
+ * cross-root tier priority / critical override ordering is retired: no
+ * second ranking on the dispatch path. Spawns the pane in the entry's
+ * worklogRoot.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -49,7 +51,29 @@ function deps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
 }
 
 describe('F4 cross-root offer-list dispatch', () => {
-  it('dispatches the FIRST offer in file order and spawns in its worklogRoot (no cross-root tier re-ranking)', withShared(async () => {
+  it('round-robin cursor rotates: when rootA is cursor-older, rootA is dispatched first', withShared(async () => {
+    const rootA = '/repo/a'; const rootB = '/repo/b';
+    const { saveRoundRobinCursor } = await import('./downtime-round-robin-by-root.js');
+    // rootA has older cursor — it should be dispatched first
+    saveRoundRobinCursor(shared, {
+      [rootA]: '2026-01-01T00:00:00.000Z',
+      [rootB]: '2026-12-31T23:59:59.999Z',
+    });
+    const entries = [entry('inst-b', 'WL-B', rootB), entry('inst-a', 'WL-A', rootA)];
+    const d = deps({
+      fetchItem: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'WL-A') return { ok: true, info: info({ id, status: 'open', stage: 'idea' }) };
+        return { ok: true, info: info({ id, status: 'open', stage: 'idea' }) };
+      }),
+    });
+    const out = await dispatchFromCoordination(d, entries, { model: 'plan', cwd: '/repo', coordinationDir: shared });
+    expect(out.dispatched).toBe(true);
+    const spawn = (d.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0] as [string, { cwd: string }];
+    expect(spawn[1].cwd).toBe(rootA);
+    expect(String(spawn[0])).toContain('WL-A');
+  }));
+
+  it('dispatches the least-recently-served root first (round-robin cursor; unknown roots sorted alphabetically)', withShared(async () => {
     const rootA = '/repo/a'; const rootB = '/repo/b';
     const entries = [entry('inst-a', 'WL-IMPL', rootA), entry('inst-b', 'WL-AUD', rootB)];
     const d = deps({
@@ -66,7 +90,7 @@ describe('F4 cross-root offer-list dispatch', () => {
     expect(String(spawn[0])).toContain('WL-IMPL');
   }));
 
-  it('a later critical offer in another root does not jump an earlier eligible offer (file order)', withShared(async () => {
+  it('a later critical offer in another root does not jump an earlier eligible offer (round-robin cursor, unknown roots alphabetical)', withShared(async () => {
     const rootA = '/repo/a'; const rootC = '/repo/c';
     const entries = [entry('inst-a', 'WL-IMPL', rootA), entry('inst-c', 'WL-CRIT', rootC)];
     const d = deps({
