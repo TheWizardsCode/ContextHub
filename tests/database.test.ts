@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorklogDatabase } from '../src/database.js';
+import { isAuditFresh } from '@worklog/shared/icons';
 import { createTempDir, cleanupTempDir, createTempJsonlPath, createTempDbPath } from './test-utils.js';
 
 describe('WorklogDatabase', () => {
@@ -123,10 +124,10 @@ describe('WorklogDatabase', () => {
     });
 
     it('audit-then-comment ordering: audit stays fresh after a comment (WL-0MTHRY9NP004R9MC)', () => {
-      // Simulate the audit-then-comment race: audit sets updatedAt=auditedAt,
-      // a comment shortly after bumps updatedAt but the 60 s window keeps it fresh.
+      // Use wall-clock times so touchWorkItemUpdatedAt (Date.now()) stays
+      // within the 60 s freshness window.
       const item = db.create({ title: 'Ordering test', description: 'audit then comment' });
-      const auditedAt = '2026-08-02T10:00:30.000Z';
+      const auditedAt = new Date().toISOString();
       db.saveAuditResult({
         workItemId: item.id,
         readyToClose: true,
@@ -135,17 +136,32 @@ describe('WorklogDatabase', () => {
         summary: 'Ready to close: Yes',
         rawOutput: null,
       });
-      // Comment added 10 s after audit
-      const updatedAt = '2026-08-02T10:00:40.000Z';
       db.createComment({ workItemId: item.id, author: 'tester', comment: 'Follow-up note' });
-      // Override updatedAt to the comment time for deterministic assertion
       const itemAfterComment = db.get(item.id)!;
-      // The update path clobber: simulate the ordering with known timestamps
-      // updatedAt is after auditedAt but within 60 s => fresh
-      const auditTime = new Date(auditedAt).getTime();
-      const updateTime = new Date(updatedAt).getTime();
-      expect(auditTime > updateTime - 60000).toBe(true); // isAuditFresh semantics
-      expect(itemAfterComment).toBeDefined();
+      const auditResult = db.getAuditResult(item.id)!;
+      // Post-audit comment bumps updatedAt; the 60 s grace window keeps the
+      // audit fresh (WL-0MT8KTE3E001Q1D9 / WL-0MTHRSZJK008ATDB).
+      expect(isAuditFresh(auditResult.auditedAt, itemAfterComment.updatedAt)).toBe(true);
+    });
+
+    it('comment after audit keeps audit fresh via isAuditFresh (WL-0MTHRSZJK008ATDB)', () => {
+      const item = db.create({ title: 'Freshness regression: comment after audit', description: 'regression' });
+      const auditedAt = new Date().toISOString();
+      db.saveAuditResult({
+        workItemId: item.id,
+        readyToClose: true,
+        auditedAt,
+        author: 'tester',
+        summary: 'Ready to close: Yes',
+        rawOutput: null,
+      });
+      db.createComment({ workItemId: item.id, author: 'tester', comment: 'Just a comment after the audit' });
+      const afterComment = db.get(item.id)!;
+      const auditResult = db.getAuditResult(item.id)!;
+      expect(auditResult.auditedAt).toBe(auditedAt);
+      // Comment bumps updatedAt but within the 60 s window the audit is still
+      // fresh and the TUI keeps the passed icon (not stale).
+      expect(isAuditFresh(auditResult.auditedAt, afterComment.updatedAt)).toBe(true);
     });
 
     it('should create a work item with a parent', () => {
