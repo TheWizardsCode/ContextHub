@@ -19,7 +19,8 @@ The downtime dispatcher does **not** maintain its own ranking. The Herdr selecti
 (`packages/herdr/src/fetcher.ts:fetchNextItems` → `smart-selection.ts:selectWorkItems` →
 `grouping.ts:regroupWorkItems`) is the **sole** ranking path (mandatory-always for critical +
 `completed`/`in_review`, `browseItemCount` windowing of "other" items, grouping logic,
-`reSort`/`computeScore` as used by the fetcher). The dispatcher (`dispatchDowntimeWork`) derives
+`reSort`/`computeScore` as used by the fetcher). The dispatcher (`dispatchDowntimeWork`,
+and the coordination leader path `dispatchFromCoordination`) derives
 its candidate from the **Herdr list head** (first ordered item) and applies every remaining
 safety gate as a **sequential filter** on that ordered sequence (scheduled-prompt → code-freeze
 → producer-review gate (WL-0MTIAL65N004T22F) → dispatched-marker → free-slot minimums →
@@ -27,6 +28,26 @@ active-audit single-flight → freshness/recency → CAS claim → spawn). If no
 the filters, the dispatcher reports "no candidate" rather than falling back to a second ranking.
 No `wl next`/database scoring change is required; the observable contract is
 "dispatcher == Herdr list head".
+
+**Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
+entry per instance — an **offer** of that instance's own Herdr list head (computed at the
+owner's check-in by `computeMostImportantItem`, which walks the same Herdr sequence with the
+same filters). The leader dispatches offers in **file order** and re-validates each offer at
+dispatch time (`fetchItem` + `classifyItemForDispatch` as sequential filters, no wall-clock
+prune). The cross-root **tier priority** (audit → critical → implement → plan → intake), the
+**global critical override** and the per-`worklogRoot` **round-robin cursor ordering** are
+**retired** from the leader dispatch path — they were a second ranking and are removed by
+WL-0MTK1ILM2009QYB2 AC1–2. Per-root "critical first" is preserved *by construction*: the
+Herdr list (smart-selection) orders critical items first, so a root's critical head is what
+its check-in offers. The retired cursor helpers (`sortEntriesByRoundRobin`,
+`advanceRoundRobinCursor`, `COORDINATION_TIER_ORDER`, `coordinationTierRank`) remain
+exported for the module tests only — nothing on the dispatch path calls them.
+
+**Agreement sampling (F2):** `npm run sample:downtime-agreement [<worklog-root>]`
+(`scripts/downtime-agreement-sample.ts`) proves the contract on a live worklog root: it
+computes the downtime pick from the production `fetchNextItems` sequence + dispatcher
+filters and asserts the pick is the Herdr head whenever the head is dispatchable (and
+reports explicitly when a filter moves the pick deeper in the SAME sequence).
 
 ## Architecture
 
@@ -105,7 +126,15 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    below).
 2. When a **scheduled prompt** is due, it dispatches immediately
    (WL-0MSS1Q5ER007QDKX).
-3. Otherwise the leader reads the coordination list, orders offers by **tier priority — audit → critical-first** (stage-appropriate intake/plan/implement, see *Critical-first tier & freeze split-by-skill* below) **→ non-critical implement → plan → intake across worklogRoots**, and within each non-critical tier by **global cross-project round-robin** (`sortEntriesByRoundRobin` / `downtime-round-robin-by-root`; unknown roots first, oldest timestamp first; `downtime-round-robin-by-root.json` cursor). Each entry is eligibility re-checked at dispatch time; stale entries are dropped without cursor advance (see Lifecycle §2). When a slot opens the highest-priority remaining eligible item dispatches.
+3. Otherwise the leader reads the coordination OFFER list and dispatches the
+   first offer in **file order** that passes the dispatch-time filters
+   (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` +
+   producer-review gate + code-freeze split-by-skill + free-slot minimums;
+   see *Ranking contract* above — the cross-root tier priority / critical
+   override / round-robin ordering are retired by WL-0MTK1ILM2009QYB2).
+   Each entry is eligibility re-checked at dispatch time; stale entries are
+   dropped (removed) without a pane or marker (see Lifecycle §2). When a slot
+   opens the first passing offer dispatches in the entry's `worklogRoot`.
 4. The dispatched entry is **removed** from the coordination file. The
    existing dispatched-marker exclusion and CAS claim mechanisms are
    preserved unchanged.
@@ -162,6 +191,16 @@ no-candidate cooldown is not triggered while review-gated work exists.
 
 ### Critical-first tier & freeze split-by-skill
 
+> **Scope note (WL-0MTK1ILM2009QYB2):** "critical first" now lives INSIDE the
+> Herdr ranking — smart-selection orders critical items at the head of every
+> root's Herdr list, so the dispatcher's first-classifyable list item IS the
+> critical item whenever the root has one (no separate critical lookup or
+> global pre-tier override remains on either dispatch path). The historical
+> leader-side critical lookup described below was retired with the
+> coordination tier ordering; the freeze split-by-skill rule below still
+> applies verbatim as a sequential filter (frozen → audit/implement offers
+> and candidates are skipped, plan/intake still dispatch).
+
 **Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
 implement/plan/intake tiers, the leader looks up the highest-priority open
 **critical** item at ANY stage via `wl list --priority critical --status open
@@ -196,6 +235,18 @@ above-caps critical item is not a valid candidate and the tier falls
 through.
 
 ### Fair scheduling: global cross-project round-robin (WL-0MTJ7IEI80055V2V)
+
+> **Retired for the coordination leader (WL-0MTK1ILM2009QYB2).** The cross-root
+> round-robin cursor ordering below was a *second ranking* on the dispatch path
+> and is removed: the coordination leader now dispatches offers in file order
+> (each offer is its root's Herdr list head). Cross-project interleaving is
+> achieved by offer removal + re-offer: a dispatched root's entry is removed and
+> its owner re-offers its next Herdr head at the next check-in, so the next
+> cycle serves the next offer in the file. The cursor module
+> (`downtime-round-robin-by-root.ts`) and `sortEntriesByRoundRobin` /
+> `advanceRoundRobinCursor` remain exported only for module tests — nothing on
+> the dispatch path calls them. The historical description below is retained
+> for the record.
 
 Within each tier, non-critical entries are dispatched in **global
 cross-project round-robin** order, not file order. This prevents any single
@@ -253,9 +304,9 @@ masquerade as "no critical work").
 ### Multi-worklog support (F4 cross-root + F5 single budget)
 
 Each machine-wide entry records `worklogRoot` (preferred) + `directory` alias.
-The single leader orders offers by tier priority (audit → critical →
-implement → plan → intake) **across worklogRoots** and spawns each pane in
-the entry's `worklogRoot`. The slot budget is machine-wide: ONE leader poll →
+The single leader dispatches offers in **file order** (each offer is its root's
+Herdr list head) **across worklogRoots** and spawns each pane in the entry's
+`worklogRoot`. The slot budget is machine-wide: ONE leader poll →
 ONE `freeSlots` snapshot (per-slot or `available_slots`), forwarded to the sole
 dispatch call — no per-worklog duplication (F5 WL-0MTII48OV008P2QU;
 WL-0MT50LKAK001EF5Q single cap source). v1 scope is single-machine; a

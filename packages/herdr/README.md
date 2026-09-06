@@ -237,11 +237,24 @@ dispatches; the other herdr instances coordinate instead of polling:
 - **Leader dispatch** — only the leader polls the proxy; once idle for the
   threshold, it first checks **scheduled-prompts** (a due prompt dispatches
   immediately — WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*); otherwise it
-  reads the machine-wide offer list, validates each entry **at dispatch time** (`fetchItem` → `classifyItemForDispatch`/`isAuditFresh`/stage+status as the sole gate; no wall-clock prune — WL-0MTMPIQBE001J41P), orders the remaining eligible entries by tier priority **audit →
-  critical → implement → plan → intake across worklogRoots** (F4) with **global cross-project round-robin within each non-critical tier** (`sortEntriesByRoundRobin` / `downtime-round-robin-by-root.json` — unknown roots first, oldest timestamp first; `advanceRoundRobinCursor` only on successful dispatch), gated by a single machine-wide slot budget (F5 — one snapshot, per-tier
-  minimums audit 2 / single-pane 1), and dispatches the highest-priority
-  available entry in its `worklogRoot`. A **stale** entry (closed/`in_progress`/`done`, audit-now-fresh, `needsProducerReview === true`, above-caps, or otherwise not currently dispatchable) is **removed eagerly without cursor advance, without pane or dispatched marker**, and the tier loop continues to the next entry. The dispatched entry is **removed** (cursor advanced for its `worklogRoot`); its owner
-  re-offers its next item at the next check-in. There is **no TTL-based pruning**.
+  reads the machine-wide offer list and dispatches offers in **file order**
+  — each offer is that instance's own **Herdr list head** (computed at its
+  check-in via `computeMostImportantItem`, WL-0MTK1ILM2009QYB2 ranking
+  contract). The leader re-validates each offer **at dispatch time**
+  (`fetchItem` → `classifyItemForDispatch`/stage+status as the sole gate;
+  no wall-clock prune — WL-0MTMPIQBE001J41P) and applies the sequential
+  safety filters (producer-review gate, code-freeze split-by-skill,
+  free-slot minimums). The cross-root **tier priority** and the **global
+  cross-project round-robin cursor** ordering are **retired**
+  (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); dispatch
+  is gated by a single machine-wide slot budget (F5 — one snapshot,
+  per-tier minimums audit 2 / single-pane 1). A **stale** offer
+  (closed/`in_progress`/`done`, audit-now-fresh, `needsProducerReview ===
+  true`, above-caps, or otherwise not currently dispatchable) is **removed
+  eagerly without pane or dispatched marker**, and dispatch continues to
+  the next offer. The dispatched entry is **removed**; its owner re-offers
+  its next Herdr head at the next check-in. There is **no TTL-based
+  pruning**.
 - **Non-leaders** — skip proxy polling and dispatch entirely; they only
   refresh their lease check (a cheap local file read) and their
   coordination entry.
@@ -263,20 +276,18 @@ visible (non-focus-stealing) pi agent pane. **Ranking contract (WL-0MTK1ILM2009Q
 “dispatcher == Herdr list head”** — the Herdr selection list
 (`fetchNextItems` → `selectWorkItems` → `regroupWorkItems`) is the sole ranking path;
 the dispatcher derives its candidate from the Herdr list head and applies safety gates as
-sequential filters (scheduled-prompt → code-freeze → dispatched-marker → free-slot
-minimums → active-audit single-flight → freshness/recency → CAS claim → spawn).
-Dispatch priority within that head sequence still honors the historical tier intent
-(WL-0MSS1Q5ER007QDKX, WL-0MSI8H3HP000K0RG, WL-0MSMAYPQP001FLR6,
-WL-0MT3FM8VA005XBHE):
-first a due **scheduled prompt** (see *Scheduled prompts* below) dispatches
-its prompt text; else a completed/in_review item **without a valid audit** →
-`/skill:audit <id>`; else the highest-priority open **critical** item at ANY
-stage (or its dependency-frontier blocker) → stage-appropriate
-`/skill:intake`/`/skill:plan`/`/skill:implement` (see *Critical-first tier*
-below, WL-0MT3FM8VA005XBHE); else the highest-priority open `plan_complete`
-item with risk `Low` and effort `Small`/`Extra Small` → `/skill:implement <id>`;
-else `/skill:plan` on the next `intake_complete` item; else falls back
-to `/skill:intake` on the next `idea` item (parent WL-0MSF49FMW009M06K).
+sequential filters (scheduled-prompt → code-freeze → producer-review gate → dispatched-marker
+→ free-slot minimums → active-audit single-flight → freshness/recency → CAS claim → spawn).
+The filters walk the Herdr sequence in LIST ORDER — a filtered head simply moves the pick
+to the first dispatchable item deeper in the same sequence (never a re-ranking). The same
+selection feeds the coordination check-in offer (`computeMostImportantItem`), so the
+leader's dispatch and each root's check-in agree on the ranking by construction
+(the leader dispatches offers in file order; the cross-root tier priority / round-robin
+cursor ordering are retired — see the *Leader dispatch* bullet above).
+Per-root "critical first" is preserved inside the ranking: smart-selection always places
+critical items at the Herdr head, so a critical item dispatches as soon as it is the
+first classifyable list item (WL-0MSI8H3HP000K0RG audit, WL-0MSMAYPQP001FLR6 implement,
+WL-0MT3FM8VA005XBHE critical).
 
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)

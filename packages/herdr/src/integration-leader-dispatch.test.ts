@@ -87,6 +87,9 @@ function baseDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     getNextImplementCandidate: vi.fn().mockResolvedValue(null),
     getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Herdr list head (WL-0MTK1ILM2009QYB2): the canonical ranking the
+    // coordination check-in / no-candidate probe consume. Default empty.
+    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
     claimItem: vi.fn().mockResolvedValue({ ok: true }),
     spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
     recordDispatch: vi.fn().mockResolvedValue(true),
@@ -149,13 +152,15 @@ describe('integration: leader election → coordination → dispatch', () => {
       // Instance A is the leader; instance B offers its item.
       // Sequence B's most-important item: first WL-B1, then (after its item
       // is dispatched) the NEXT item WL-B2 at the following check-in.
+      // Instance B offers items from its own Herdr list head: first WL-B1,
+      // then (after its item is dispatched) the NEXT head WL-B2 at the
+      // following check-in.
       const depsB = baseDeps({
-        getNextCriticalCandidate: vi.fn()
-          .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-B1', title: 'B one', stage: 'intake_complete', status: 'open' } })
-          .mockResolvedValue({ ok: true, candidate: { id: 'WL-B2', title: 'B two', stage: 'plan_complete', status: 'open' } }),
+        getHerdrListHead: vi.fn()
+          .mockResolvedValueOnce({ ok: true, items: [{ id: 'WL-B1', title: 'B one', status: 'open', stage: 'intake_complete' }] })
+          .mockResolvedValue({ ok: true, items: [{ id: 'WL-B2', title: 'B two', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }] }),
       });
       const depsA = baseDeps({
-        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
         // The leader classifies the coordination entries by re-fetching them.
         fetchItem: vi.fn().mockImplementation(async (id: string) => {
           if (id === 'WL-B1') return { ok: true, info: itemInfo('WL-B1', 'intake_complete') };
@@ -281,9 +286,10 @@ describe('integration: leader election → coordination → dispatch', () => {
     const t0 = 50_000_000;
     vi.setSystemTime(t0);
     try {
-      // A: normal idle leader (4 free slots).
+      // A: normal idle leader (4 free slots). Its own Herdr head is empty
+      // (nothing to offer — A enters the cooldown on the empty offer file).
       const depsA = baseDeps({
-        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
         // A (pre-fix zombie) classifies B's entry by re-fetching it: WL-B1 is
         // dispatchable (intake_complete → plan tier).
         fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-B1', 'intake_complete') }),
@@ -293,12 +299,9 @@ describe('integration: leader election → coordination → dispatch', () => {
       // way WL-B1 gets dispatched is A's zombie. B offers nothing until its
       // SECOND check-in (after A is safely paused).
       const depsB = baseDeps({
-        getNextCriticalCandidate: vi.fn()
-          .mockResolvedValueOnce({ ok: true, candidate: null })
-          .mockResolvedValue({
-            ok: true,
-            candidate: { id: 'WL-B1', title: 'B one', stage: 'intake_complete', status: 'open' },
-          }),
+        getHerdrListHead: vi.fn()
+          .mockResolvedValueOnce({ ok: true, items: [] })
+          .mockResolvedValue({ ok: true, items: [{ id: 'WL-B1', title: 'B one', status: 'open', stage: 'intake_complete' }] }),
       });
       const workerA = makeWorker({
         coordinationDir: sharedCoord,
