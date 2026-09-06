@@ -933,14 +933,18 @@ export class SqlitePersistentStore {
       audit.author ?? null,
     ];
     const normalized = normalizeSqliteBindings(values);
-    const result = stmt.run(...normalized);
-    if (result.changes === 0) {
-      throw new Error(`Audit result could not be persisted for work item ${audit.workItemId}`);
-    }
-    const item = this.getWorkItem(audit.workItemId);
-    if (item) {
-      this.db.prepare(`UPDATE workitems SET updatedAt = ? WHERE id = ?`).run(audit.auditedAt, audit.workItemId);
-    }
+    const updateWorkItemUpdatedAt = this.db.prepare(`UPDATE workitems SET updatedAt = ? WHERE id = ?`);
+    const saveTx = this.db.transaction(() => {
+      const result = stmt.run(...normalized);
+      if (result.changes === 0) {
+        throw new Error(`Audit result could not be persisted for work item ${audit.workItemId}`);
+      }
+      const item = this.getWorkItem(audit.workItemId);
+      if (item) {
+        updateWorkItemUpdatedAt.run(audit.auditedAt, audit.workItemId);
+      }
+    });
+    saveTx();
   }
 
   /**
