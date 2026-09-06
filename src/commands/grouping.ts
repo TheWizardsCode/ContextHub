@@ -275,14 +275,14 @@ export function inReviewBucket(item: {
   // Bucket 1: producer review pending
   if (item.needsProducerReview) return 1;
 
-  // Bucket 4: no audit yet (null or undefined auditResult)
-  if (item.auditResult === null || item.auditResult === undefined) return 4;
+  // Bucket 4: no audit yet (null/undefined auditResult or missing auditedAt)
+  // Per AC4 stale buckets require auditedAt present; absence is the no-audit bucket.
+  if (item.auditResult === null || item.auditResult === undefined || !item.auditedAt) return 4;
 
-  // Determine freshness via the shared predicate
-  const fresh =
-    item.auditedAt &&
-    item.updatedAt &&
-    isAuditFresh(item.auditedAt, item.updatedAt);
+  // Determine freshness via the shared predicate (isAuditFresh handles 60 s buffer)
+  const fresh = Boolean(
+    item.auditedAt && item.updatedAt && isAuditFresh(item.auditedAt, item.updatedAt),
+  );
 
   if (item.auditResult === false) {
     // Failed audit — fresh items are more urgent (need attention)

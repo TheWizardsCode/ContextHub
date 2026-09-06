@@ -228,7 +228,7 @@ function normalizeItem(raw: any): WorkItem {
     groupLabel: raw?.groupLabel ? String(raw.groupLabel) : undefined,
     needsProducerReview: raw?.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
     auditResult: raw?.auditResult !== undefined ? raw.auditResult : null,
-    auditedAt: raw?.auditedAt !== undefined ? String(raw.auditedAt) : undefined,
+    auditedAt: raw?.auditedAt == null ? (raw?.auditedAt as null | undefined) : String(raw.auditedAt),
   };
 }
 
