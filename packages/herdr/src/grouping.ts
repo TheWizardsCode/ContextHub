@@ -1,3 +1,5 @@
+import { isAuditFresh } from '@worklog/shared/icons';
+
 /**
  * packages/herdr/src/grouping.ts — Grouping for the Herdr worklist
  *
@@ -106,12 +108,20 @@ function isFilePath(candidate: string): boolean {
 /**
  * Input item for grouping — must have an `id`, `stage`, and a list of
  * `filePaths`.
+ *
+ * Optional audit fields are used for the 6-bucket sort when
+ * `stage === 'in_review'`.
  */
 export interface GroupableItem {
   id: string;
   stage?: string;
   filePaths: string[];
   priority?: string;
+  // Optional audit fields — used for in_review bucket sort
+  needsProducerReview?: boolean;
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  updatedAt?: string | null;
 }
 
 /**
@@ -327,12 +337,108 @@ const WITHIN_GROUP_PRIORITY_ORDER: Record<string, number> = {
 const DEFAULT_PRIORITY_ORDER = WITHIN_GROUP_PRIORITY_ORDER.medium;
 
 /**
+ * The 6-bucket predicate for in_review items.  Lower number = higher
+ * display priority (displayed first).
+ *
+ * | Bucket | Meaning                                        |
+ * |--------|------------------------------------------------ |
+ * | 1      | needsProducerReview                             |
+ * | 2      | failed audit, fresh                             |
+ * | 3      | failed audit, stale                             |
+ * | 4      | no audit                                        |
+ * | 5      | passed audit, stale                             |
+ * | 6      | passed audit, fresh                             |
+ *
+ * This mirrors the predicate in src/commands/grouping.ts (ACL2).
+ */
+export function inReviewBucket(item: {
+  stage?: string;
+  needsProducerReview?: boolean;
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  updatedAt?: string | null;
+}): number {
+  // Sentinel — only valid when stage === 'in_review'
+  if (item.stage !== 'in_review') return 0;
+
+  // Bucket 1: producer review pending
+  if (item.needsProducerReview) return 1;
+
+  // Bucket 4: no audit yet (null or undefined auditResult)
+  if (item.auditResult === null || item.auditResult === undefined) return 4;
+
+  // Determine freshness via the shared predicate
+  const fresh =
+    item.auditedAt &&
+    item.updatedAt &&
+    isAuditFresh(item.auditedAt, item.updatedAt);
+
+  if (item.auditResult === false) {
+    // Failed audit — fresh items are more urgent (need attention)
+    return fresh ? 2 : 3;
+  }
+  // Passed audit — fresh items are least urgent (already cleared)
+  return fresh ? 6 : 5;
+}
+
+/**
+ * Compare two in_review items using the 6-bucket predicate.
+ *
+ * Primary sort: bucket number (ascending — lower bucket = higher priority).
+ * Secondary: priority (high → medium → low).
+ * Tertiary: updatedAt (older items first).
+ * Quaternary: id (deterministic tie-break).
+ *
+ * Returns 0 when either item lacks stage === 'in_review', letting the
+ * caller fall back to the standard comparator.
+ */
+export function compareInReviewItems(a: GroupableItem & {
+  needsProducerReview?: boolean;
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  updatedAt?: string | null;
+}, b: typeof a): number {
+  if (a.stage !== 'in_review' || b.stage !== 'in_review') return 0;
+
+  const bucketDiff = inReviewBucket(a) - inReviewBucket(b);
+  if (bucketDiff !== 0) return bucketDiff;
+
+  // Within bucket: priority (high → medium → low)
+  const prioA = WITHIN_GROUP_PRIORITY_ORDER[a.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
+  const prioB = WITHIN_GROUP_PRIORITY_ORDER[b.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
+  if (prioA !== prioB) return prioA - prioB;
+
+  // Within bucket: updatedAt (older items first)
+  const tsA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
+  const tsB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
+  if (tsA !== tsB) return tsA - tsB;
+
+  // Deterministic tie-break
+  return a.id.localeCompare(b.id);
+}
+
+/**
  * Compare two items for within-group display order:
  * stage sub-sort (in_progress → plan_complete → intake_complete → remaining
  * stages), then priority (high → medium → low), then id as a deterministic
  * tie-break.
+ *
+ * When BOTH items have stage === 'in_review', the 6-bucket predicate
+ * (see `compareInReviewItems`) takes priority over the default stage
+ * sub-sort.  All in_review items map to the same stage-sub-order value
+ * (REMAINING_STAGE_ORDER) anyway, but the bucket predicate provides the
+ * deterministic ordering specified in WL-0MSLPM5ZB003TADT.
+ *
+ * If the bucket comparator returns 0 (items in the same bucket, same
+ * priority, same timestamp), falls through to stage/priority/id tie-break.
  */
 export function compareGroupableItems(a: GroupableItem, b: GroupableItem): number {
+  // Fast-path: if both are in_review, use bucket ordering
+  if (a.stage === 'in_review' && b.stage === 'in_review') {
+    const bucketCmp = compareInReviewItems(a, b);
+    if (bucketCmp !== 0) return bucketCmp;
+  }
+
   const stageA = WITHIN_GROUP_STAGE_ORDER[a.stage ?? ''] ?? REMAINING_STAGE_ORDER;
   const stageB = WITHIN_GROUP_STAGE_ORDER[b.stage ?? ''] ?? REMAINING_STAGE_ORDER;
   if (stageA !== stageB) return stageA - stageB;
@@ -353,7 +459,19 @@ export function compareGroupableItems(a: GroupableItem, b: GroupableItem): numbe
  * Does not filter or drop items — the always-show-mandatory guarantee of
  * selectWorkItems is preserved. Items are only reordered and stamped.
  */
-export function regroupWorkItems<T extends { id: string; stage?: string; priority?: string; description?: string; group?: number; groupLabel?: string }>(
+export function regroupWorkItems<T extends {
+  id: string;
+  stage?: string;
+  priority?: string;
+  description?: string;
+  group?: number;
+  groupLabel?: string;
+  // Optional audit fields — used for in_review bucket sort
+  needsProducerReview?: boolean;
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  updatedAt?: string | null;
+}>(
   items: T[],
   maxFilePathGroups: number = 3,
 ): T[] {
@@ -362,6 +480,10 @@ export function regroupWorkItems<T extends { id: string; stage?: string; priorit
     stage: item.stage,
     priority: item.priority,
     filePaths: extractFilePaths(item.description ?? ''),
+    needsProducerReview: item.needsProducerReview,
+    auditResult: item.auditResult,
+    auditedAt: item.auditedAt,
+    updatedAt: item.updatedAt,
   }));
   const groupMap = assignItemGroups(groupable, maxFilePathGroups);
 
@@ -370,8 +492,18 @@ export function regroupWorkItems<T extends { id: string; stage?: string; priorit
     const gb = groupMap.get(b.id)?.group ?? Number.MAX_SAFE_INTEGER;
     if (ga !== gb) return ga - gb;
     return compareGroupableItems(
-      { id: a.id, stage: a.stage, priority: a.priority, filePaths: [] },
-      { id: b.id, stage: b.stage, priority: b.priority, filePaths: [] },
+      { id: a.id, stage: a.stage, priority: a.priority, filePaths: [],
+        needsProducerReview: a.needsProducerReview,
+        auditResult: a.auditResult,
+        auditedAt: a.auditedAt,
+        updatedAt: a.updatedAt,
+      },
+      { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
+        needsProducerReview: b.needsProducerReview,
+        auditResult: b.auditResult,
+        auditedAt: b.auditedAt,
+        updatedAt: b.updatedAt,
+      },
     );
   });
 

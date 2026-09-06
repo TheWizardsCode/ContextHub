@@ -572,3 +572,109 @@ describe('compareGroupableItems — within-group ordering', () => {
     expect(sorted.map(i => i.id)).toEqual(['C-other', 'C-plan', 'C-intake']);
   });
 });
+
+// ── in_review 6-bucket sort (WL-0MSLPM5ZB003TADT) ──────────────────────
+
+import { inReviewBucket, compareInReviewItems } from '../src/commands/grouping.js';
+
+describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
+  // isAuditFresh(auditedAt, updatedAt) → auditedAt > updatedAt - 60s
+  // So auditedAt === updatedAt is fresh; auditedAt 10m before updatedAt is stale.
+  const updatedAt = '2026-01-10T10:00:00.000Z';
+  const freshAuditedAt = '2026-01-10T10:00:00.000Z'; // same instant → fresh
+  const staleAuditedAt = '2026-01-10T09:40:00.000Z'; // 20m earlier → stale
+
+  function inReviewItem(overrides: Record<string, unknown> = {}) {
+    return { id: 'WL-x', stage: 'in_review', filePaths: [], priority: 'medium', ...overrides };
+  }
+
+  it('inReviewBucket returns correct bucket for each category', () => {
+    expect(inReviewBucket({
+      stage: 'in_review', needsProducerReview: true,
+      auditResult: null, auditedAt: null, updatedAt,
+    })).toBe(1);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: false, auditedAt: freshAuditedAt, updatedAt,
+    })).toBe(2);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: false, auditedAt: staleAuditedAt, updatedAt,
+    })).toBe(3);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: null, auditedAt: null, updatedAt,
+    })).toBe(4);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: true, auditedAt: staleAuditedAt, updatedAt,
+    })).toBe(5);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: true, auditedAt: freshAuditedAt, updatedAt,
+    })).toBe(6);
+    // Non in_review stages return sentinel 0
+    expect(inReviewBucket({
+      stage: 'plan_complete', auditResult: false, auditedAt: freshAuditedAt, updatedAt,
+    })).toBe(0);
+  });
+
+  it('orders the six buckets: needsProducerReview → failed fresh → failed stale → no audit → passed stale → passed fresh', () => {
+    const items = [
+      inReviewItem({ id: 'WL-passed-fresh', auditResult: true, auditedAt: freshAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-passed-stale', auditResult: true, auditedAt: staleAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-no-audit', auditResult: null, auditedAt: null, updatedAt }),
+      inReviewItem({ id: 'WL-failed-stale', auditResult: false, auditedAt: staleAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-failed-fresh', auditResult: false, auditedAt: freshAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-needs-producer', needsProducerReview: true, auditResult: false, auditedAt: freshAuditedAt, updatedAt }),
+    ];
+    // Shuffle then sort
+    const shuffled = [items[0], items[3], items[1], items[5], items[2], items[4]];
+    const sorted = shuffled.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual([
+      'WL-needs-producer',
+      'WL-failed-fresh',
+      'WL-failed-stale',
+      'WL-no-audit',
+      'WL-passed-stale',
+      'WL-passed-fresh',
+    ]);
+  });
+
+  it('within the same bucket orders by priority high → medium → low', () => {
+    const items = [
+      inReviewItem({ id: 'WL-low', priority: 'low', auditResult: null }),
+      inReviewItem({ id: 'WL-high', priority: 'high', auditResult: null }),
+      inReviewItem({ id: 'WL-med', priority: 'medium', auditResult: null }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual(['WL-high', 'WL-med', 'WL-low']);
+  });
+
+  it('within same bucket and priority orders by updatedAt older first', () => {
+    const items = [
+      inReviewItem({ id: 'WL-newer', auditResult: null, updatedAt: '2026-01-10T12:00:00.000Z' }),
+      inReviewItem({ id: 'WL-older', auditResult: null, updatedAt: '2026-01-10T08:00:00.000Z' }),
+      inReviewItem({ id: 'WL-mid', auditResult: null, updatedAt: '2026-01-10T10:00:00.000Z' }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual(['WL-older', 'WL-mid', 'WL-newer']);
+  });
+
+  it('uses id as deterministic tie-break when bucket, priority, and timestamp are equal', () => {
+    const items = [
+      inReviewItem({ id: 'WL-b', auditResult: null, updatedAt }),
+      inReviewItem({ id: 'WL-a', auditResult: null, updatedAt }),
+      inReviewItem({ id: 'WL-c', auditResult: null, updatedAt }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual(['WL-a', 'WL-b', 'WL-c']);
+  });
+
+  it('does not apply bucket sort to non-in_review items', () => {
+    const a = { id: 'WL-a', stage: 'plan_complete', filePaths: [], priority: 'medium', needsProducerReview: true };
+    const b = { id: 'WL-b', stage: 'plan_complete', filePaths: [], priority: 'medium' };
+    expect(compareGroupableItems(a, b)).toBeLessThan(0); // WL-a < WL-b lexicographically
+  });
+
+  it('compareInReviewItems returns 0 for non-in_review items', () => {
+    const a = { id: 'WL-a', stage: 'plan_complete', filePaths: [], priority: 'medium', needsProducerReview: true } as any;
+    const b = { id: 'WL-b', stage: 'intake_complete', filePaths: [], priority: 'medium' } as any;
+    expect(compareInReviewItems(a, b)).toBe(0);
+  });
+});

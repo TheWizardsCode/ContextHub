@@ -1065,6 +1065,24 @@ refresh. Non-critical `in_progress` items join the file-path-partitioned
 ahead of them (actively-worked items first); "Other" remains only as a
 safety net for unknown/custom stages.
 
+**In Review** items are sorted within the group using a deterministic
+**6-bucket predicate** (WL-0MSLPM5ZB003TADT):
+
+| Bucket | Meaning                            |
+|--------|------------------------------------|
+| 1      | `needsProducerReview = true`       |
+| 2      | failed audit, fresh                |
+| 3      | failed audit, stale                |
+| 4      | no audit                           |
+| 5      | passed audit, stale                |
+| 6      | passed audit, fresh                |
+
+A "fresh" audit has `auditedAt > updatedAt - 60 s`; otherwise it is stale.
+Within the same bucket items are ordered by priority (high → medium → low),
+then by `updatedAt` (older first), then by `id` as a tie-break.  The same
+predicate is shared by the Herdr worklist, `wl next --groups`, and
+`wl list --stage in_review`.
+
 ## Markdown viewer
 
 When a work item's description carries a `Key Files:` path to a markdown

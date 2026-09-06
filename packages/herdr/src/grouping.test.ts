@@ -17,6 +17,8 @@ import {
   regroupWorkItems,
   compareGroupableItems,
   extractFilePaths,
+  inReviewBucket,
+  compareInReviewItems,
   type GroupableItem,
 } from './grouping.js';
 import type { WorkItem } from './fetcher.js';
@@ -222,3 +224,100 @@ describe('extractFilePaths (duplicated)', () => {
     expect(extractFilePaths('Just a description.')).toEqual([]);
   });
 });
+
+describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
+  // isAuditFresh(auditedAt, updatedAt) → auditedAt > updatedAt - 60s
+  // So auditedAt === updatedAt is fresh; auditedAt 10m before updatedAt is stale.
+  const updatedAt = '2026-01-10T10:00:00.000Z';
+  const freshAuditedAt = '2026-01-10T10:00:00.000Z'; // same instant → fresh
+  const staleAuditedAt = '2026-01-10T09:40:00.000Z'; // 20m earlier → stale
+
+  function inReviewItem(id: string, overrides: Partial<GroupableItem> = {}): GroupableItem {
+    return { id, stage: 'in_review', filePaths: [], priority: 'medium', ...overrides } as GroupableItem;
+  }
+
+  it('orders the six buckets: needsProducerReview → failed fresh → failed stale → no audit → passed stale → passed fresh', () => {
+    const items: GroupableItem[] = [
+      inReviewItem('WL-passed-fresh', { auditResult: true, auditedAt: freshAuditedAt, updatedAt }),
+      inReviewItem('WL-passed-stale', { auditResult: true, auditedAt: staleAuditedAt, updatedAt }),
+      inReviewItem('WL-no-audit', { auditResult: null, auditedAt: null, updatedAt }),
+      inReviewItem('WL-failed-stale', { auditResult: false, auditedAt: staleAuditedAt, updatedAt }),
+      inReviewItem('WL-failed-fresh', { auditResult: false, auditedAt: freshAuditedAt, updatedAt }),
+      inReviewItem('WL-needs-producer', { needsProducerReview: true, auditResult: false, auditedAt: freshAuditedAt, updatedAt }),
+    ];
+    // Shuffle then sort
+    const shuffled = [items[0], items[3], items[1], items[5], items[2], items[4]];
+    const sorted = shuffled.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => i.id)).toEqual([
+      'WL-needs-producer',
+      'WL-failed-fresh',
+      'WL-failed-stale',
+      'WL-no-audit',
+      'WL-passed-stale',
+      'WL-passed-fresh',
+    ]);
+  });
+
+  it('needsProducerReview wins regardless of audit state', () => {
+    const a = inReviewItem('WL-a', { needsProducerReview: true, auditResult: true, auditedAt: freshAuditedAt, updatedAt });
+    const b = inReviewItem('WL-b', { auditResult: false, auditedAt: freshAuditedAt, updatedAt });
+    expect(compareGroupableItems(a, b)).toBeLessThan(0);
+    expect(compareGroupableItems(b, a)).toBeGreaterThan(0);
+  });
+
+  it('within the same bucket orders by priority high → medium → low', () => {
+    const items: GroupableItem[] = [
+      inReviewItem('WL-low', { priority: 'low', auditResult: null }),
+      inReviewItem('WL-high', { priority: 'high', auditResult: null }),
+      inReviewItem('WL-med', { priority: 'medium', auditResult: null }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => i.id)).toEqual(['WL-high', 'WL-med', 'WL-low']);
+  });
+
+  it('within same bucket and priority orders by updatedAt older first', () => {
+    const items: GroupableItem[] = [
+      inReviewItem('WL-newer', { auditResult: null, updatedAt: '2026-01-10T12:00:00.000Z' }),
+      inReviewItem('WL-older', { auditResult: null, updatedAt: '2026-01-10T08:00:00.000Z' }),
+      inReviewItem('WL-mid', { auditResult: null, updatedAt: '2026-01-10T10:00:00.000Z' }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => i.id)).toEqual(['WL-older', 'WL-mid', 'WL-newer']);
+  });
+
+  it('uses id as deterministic tie-break when bucket, priority, and timestamp are equal', () => {
+    const items: GroupableItem[] = [
+      inReviewItem('WL-b', { auditResult: null, updatedAt }),
+      inReviewItem('WL-a', { auditResult: null, updatedAt }),
+      inReviewItem('WL-c', { auditResult: null, updatedAt }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => i.id)).toEqual(['WL-a', 'WL-b', 'WL-c']);
+  });
+
+  it('does not apply bucket sort to non-in_review items', () => {
+    const a: GroupableItem = { id: 'WL-a', stage: 'plan_complete', filePaths: [], priority: 'medium', needsProducerReview: true } as any;
+    const b: GroupableItem = { id: 'WL-b', stage: 'plan_complete', filePaths: [], priority: 'medium' } as any;
+    // Both are plan_complete, so needsProducerReview is irrelevant — ordering is by id
+    expect(compareGroupableItems(a, b)).toBeLessThan(0); // WL-a < WL-b lexicographically
+  });
+
+  it('regroupWorkItems respects bucket order within the In Review section', () => {
+    const merged: WorkItem[] = [
+      makeItem('WL-passed-fresh', { stage: 'in_review', priority: 'medium', auditResult: true, auditedAt: freshAuditedAt, updatedAt }),
+      makeItem('WL-no-audit', { stage: 'in_review', priority: 'medium', auditResult: null, auditedAt: null as any, updatedAt }),
+      makeItem('WL-failed-fresh', { stage: 'in_review', priority: 'medium', auditResult: false, auditedAt: freshAuditedAt, updatedAt }),
+      makeItem('WL-needs-producer', { stage: 'in_review', priority: 'medium', needsProducerReview: true, auditResult: null, updatedAt }),
+      makeItem('WL-other', { stage: 'custom', priority: 'medium' }),
+    ];
+    const regrouped = regroupWorkItems(merged, 3);
+    const inReviewOrder = regrouped.filter(i => i.stage === 'in_review').map(i => i.id);
+    expect(inReviewOrder).toEqual([
+      'WL-needs-producer',
+      'WL-failed-fresh',
+      'WL-no-audit',
+      'WL-passed-fresh',
+    ]);
+  });
+});
+

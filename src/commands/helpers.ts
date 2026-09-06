@@ -828,12 +828,20 @@ function isFilePath(candidate: string): boolean {
 
 /**
  * Input item for grouping — must have an `id`, `stage`, and a list of `filePaths`.
+ *
+ * Optional audit fields are used for the 6-bucket sort when
+ * `stage === 'in_review'` (WL-0MSLPM5ZB003TADT).
  */
 export interface GroupableItem {
   id: string;
   stage?: string;
   filePaths: string[];
   priority?: string;
+  // Optional audit fields — used for in_review bucket sort
+  needsProducerReview?: boolean;
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  updatedAt?: string | null;
 }
 
 /**
