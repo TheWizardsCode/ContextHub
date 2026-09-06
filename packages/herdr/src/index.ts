@@ -91,6 +91,7 @@ import {
   DOWNTIME_AUDIT_STALE_WINDOW_MS,
   parseInProgressOutput,
   type DowntimeActiveAuditResult,
+  withTransientRetry,
 } from './downtime-worker.js';
 import {
   createModeSwitchWorker,
@@ -538,20 +539,20 @@ export async function claimItemForAgentCommand(command: string): Promise<void> {
  * empty frontier (AC5: no silent fall-through).
  */
 async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<CriticalCandidate[]> {
-  const { stdout } = await getExecFileAsync()(
+  const { stdout } = await withTransientRetry(() => getExecFileAsync()(
     'wl',
     buildWlArgs(['dep', 'list', itemId, '--json']),
     { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-  );
+  ));
   const blockerRefs = parseDepListBlockersOutput(stdout);
   if (blockerRefs === null) throw new Error('wl dep list parse failure');
   const blockers: CriticalCandidate[] = [];
   for (const ref of blockerRefs) {
-    const { stdout: showOut } = await getExecFileAsync()(
+    const { stdout: showOut } = await withTransientRetry(() => getExecFileAsync()(
       'wl',
       buildWlArgs(['show', ref.id, '--json']),
       { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-    );
+    ));
     const full = parseShownWorkItem(showOut);
     if (full === null) throw new Error(`wl show parse failure for ${ref.id}`);
     blockers.push(full);
@@ -596,19 +597,19 @@ export function createDowntimeDeps(
   // failure or unparseable output.
   const fetchAuditItemById = async (itemId: string, cwd: string): Promise<DowntimeItemResult> => {
     try {
-      const { stdout } = await getExecFileAsync()(
+      const { stdout } = await withTransientRetry(() => getExecFileAsync()(
         'wl',
         buildWlArgs(['show', itemId, '--json']),
         { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-      );
+      ));
       const info = parseShowItemOutput(stdout);
       if (info === null) return { ok: false, error: 'show parse error' };
       if (info.status === 'completed' && info.stage === 'in_review') {
-        const { stdout: listOut } = await getExecFileAsync()(
+        const { stdout: listOut } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const audits = parseAuditCandidatesOutput(listOut);
         if (audits === null) return { ok: false, error: 'audit list parse error' };
         const found = audits.find((a) => a.id === itemId);
@@ -644,11 +645,11 @@ export function createDowntimeDeps(
         // timeout (WL-0MSJIPHD0001L1J9) kills a hung wl child so the lookup
         // fails closed to a strike instead of wedging the dispatch task
         // until the pane restarts.
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs(['next', '--stage', stage, '-n', '10', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const candidates = parseNextCandidatesOutput(stdout, stage);
         if (candidates === null) return { ok: false, error: `${stage} parse error` };
         // Plan/intake dispatched-marker exclusion with change-guard (RCA
@@ -695,11 +696,11 @@ export function createDowntimeDeps(
         // CLI-error strike — NOT a null that is indistinguishable from a
         // genuinely empty audit tier. The bounded timeout
         // (WL-0MSJIPHD0001L1J9) applies here too.
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const candidates = parseAuditCandidatesOutput(stdout);
         if (candidates === null) return { ok: false, error: `audit parse error` };
         // Dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY): read the shared
@@ -755,11 +756,11 @@ export function createDowntimeDeps(
         // (dispatched but not yet completed/reviewed — the audit pane
         // transitions the item when it finishes). The bounded timeout
         // (WL-0MSJIPHD0001L1J9) kills a hung wl child.
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs(['list', '--status', 'in_progress', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const inProgress = parseInProgressOutput(stdout);
         if (inProgress === null) {
           // Unparseable query → the check cannot complete → fail-open.
@@ -786,7 +787,7 @@ export function createDowntimeDeps(
         // (WL-0MSJIPHD0001L1J9) kills a hung wl child. Fail-closed: a wl
         // failure yields no candidate (no dispatch) and never short-circuits
         // the plan/intake fallback (AC6).
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs([
             'next',
@@ -801,7 +802,7 @@ export function createDowntimeDeps(
             '--json',
           ]),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const candidates = parseImplementCandidatesOutput(stdout);
         if (candidates === null) return null;
         // Dispatched-marker exclusion (AC6): read the shared rolling
@@ -832,11 +833,11 @@ export function createDowntimeDeps(
         // of the next one. The bounded timeout (WL-0MSJIPHD0001L1J9) kills
         // a hung wl child so the lookup fails closed to a strike instead
         // of wedging the dispatch task.
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs(['list', '--priority', 'critical', '--status', 'open', '-n', '10', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const candidates = parseCriticalCandidatesOutput(stdout);
         if (candidates === null) return { ok: false, error: `critical parse error` };
         // Dispatched-marker change-guard (WL-0MSRBFFLN005W3VT design point

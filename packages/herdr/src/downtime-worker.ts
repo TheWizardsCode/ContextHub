@@ -224,6 +224,51 @@ export const DOWNTIME_ERROR_STRIKE_LIMIT = 3;
 export const DOWNTIME_WL_TIMEOUT_MS = 10_000;
 
 /**
+ * Bounded transient-retry for `wl` CLI invocations (WL-0MTOTCETU004YYIU
+ * AC3): a single `SQLITE_BUSY` / `database is locked` / timeout is a
+ * transient contention that must not burn a strike. The caller retries
+ * with exponential backoff within the same dispatch tick so one transient
+ * does not cascade into the three-strike 60-min cooldown. Only the
+ * patterns below are retried — parse/author-gate errors fail fast.
+ */
+export function isTransientDowntimeError(message: string): boolean {
+  const m = message.toLowerCase();
+  if (m.includes('sqlite_busy') || m.includes('sqlite busy')) return true;
+  if (m.includes('database is locked') || m.includes('database table is locked')) return true;
+  // "database busy" variants — better-sqlite3 busy_timeout contention
+  if (m.includes('database') && m.includes('busy')) return true;
+  return false;
+}
+
+/**
+ * Execute `fn` with bounded retry on transient `wl` errors only.
+ * Retries `retries` times (default 2 → up to 3 total attempts) with
+ * exponential backoff `baseDelayMs * 2^attempt` (default 50ms → 50,100ms).
+ * Non-transient errors throw immediately. The total extra wall-clock
+ * added is < 200ms so the tick stays well inside DOWNTIME_RUN_TIMEOUT_MS.
+ */
+export async function withTransientRetry<T>(
+  fn: () => Promise<T>,
+  retries = 2,
+  baseDelayMs = 50,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const transient = isTransientDowntimeError(msg);
+      if (!transient || attempt === retries) throw err;
+      const delay = baseDelayMs * (1 << attempt);
+      await new Promise<void>((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr as Error;
+}
+
+/**
  * Scheduler-level watchdog bound for ONE downtime-worker tick run
  * (WL-0MSJIPHD0001L1J9): the maximum wall-clock time a scheduler run may
  * take before it is abandoned and the task's single-flight flag is reset so
