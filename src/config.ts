@@ -186,6 +186,13 @@ export function loadConfig(): WorklogConfig | null {
     };
   }
 
+  // Validate syncAllowedAuthors whitelist (AC1): [], string[], null, true allowed; other types rejected.
+  const syncAllowedAuthorsError = validateSyncAllowedAuthors(config);
+  if (syncAllowedAuthorsError) {
+    console.error(syncAllowedAuthorsError);
+    return null;
+  }
+
   const statusStageError = validateStatusStageConfig(config);
   if (statusStageError) {
     console.error(statusStageError);
@@ -193,6 +200,24 @@ export function loadConfig(): WorklogConfig | null {
   }
   
   return config;
+}
+
+function validateSyncAllowedAuthors(config: WorklogConfig): string | null {
+  const value = (config as any).syncAllowedAuthors;
+  if (value === undefined) return null;
+  if (value === null || value === true) return null;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry !== 'string' || entry.trim() === '') {
+        return 'Invalid config: syncAllowedAuthors must be a list of non-empty email strings, null, or true (got an entry that is not a non-empty string)';
+      }
+    }
+    return null;
+  }
+  if (value === false) {
+    return 'Invalid config: syncAllowedAuthors must be a list of email strings, null, or true (false is not valid; use [] for strict mode)';
+  }
+  return 'Invalid config: syncAllowedAuthors must be a list of email strings, null, or true';
 }
 
 /**

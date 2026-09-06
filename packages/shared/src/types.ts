@@ -201,8 +201,18 @@ export interface WorklogConfig {
    * Default false — the sync refuses foreign-author commits. The CLI flag
    * `--allow-foreign-author` takes precedence over this config value.
    * Never bypasses the empty-author-email gate.
+   * @deprecated Use `syncAllowedAuthors` instead; when `syncAllowedAuthors` is set it takes precedence.
    */
   syncAllowForeignAuthor?: boolean;
+  /**
+   * Whitelist of author emails allowed to merge during `wl sync` (WL-0MTGDW58X007UJDS).
+   * - `[]` (default) — only the local `user.email` is allowed (strictest, backward compatible).
+   * - `string[]` — `user.email` plus any email in this list (case-insensitive, trimmed).
+   * - `null` or `true` — allow any author (equivalent to `--allow-foreign-author`).
+   * Empty author emails are always refused regardless of this setting.
+   * When set, this takes precedence over `syncAllowForeignAuthor`.
+   */
+  syncAllowedAuthors?: string[] | null | boolean;
   githubRepo?: string;
   githubLabelPrefix?: string;
   githubImportCreateNew?: boolean;

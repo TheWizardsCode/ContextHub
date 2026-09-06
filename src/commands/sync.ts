@@ -23,11 +23,28 @@ import { invalidateCacheForWrite } from '../read-cache-cli.js';
 
 const execAsync = contextExec;
 
+export function getAllowedAuthors(config?: ReturnType<typeof loadConfig>): string[] | null | boolean | undefined {
+  if (config && (config as any).syncAllowedAuthors !== undefined) {
+    return (config as any).syncAllowedAuthors as string[] | null | boolean;
+  }
+  // Deprecated alias: syncAllowForeignAuthor:true -> allow-all, false -> strict []
+  if (config?.syncAllowForeignAuthor === true) return null;
+  return undefined;
+}
+
 export function getSyncDefaults(config?: ReturnType<typeof loadConfig>) {
+  const allowedAuthors = getAllowedAuthors(config);
+  // allowForeignAuthor effective value: CLI flag handled separately; config-derived value here
+  // is true only when legacy boolean allows all and no whitelist overrides it.
+  const allowForeignAuthor =
+    allowedAuthors === null || allowedAuthors === true
+      ? true
+      : config?.syncAllowForeignAuthor === true;
   return {
     gitRemote: config?.syncRemote || DEFAULT_GIT_REMOTE,
     gitBranch: config?.syncBranch || DEFAULT_GIT_BRANCH,
-    allowForeignAuthor: config?.syncAllowForeignAuthor === true,
+    allowForeignAuthor,
+    allowedAuthors,
   };
 }
 
@@ -52,6 +69,7 @@ export async function performSync(
     isJsonMode?: boolean;
     isVerbose?: boolean;
     allowForeignAuthor?: boolean;
+    allowedAuthors?: string[] | null | boolean;
     acceptRegressions?: boolean;
   }
 ): Promise<SyncResult> {
@@ -122,6 +140,7 @@ export async function performSync(
     await enforceAuthorIdentityGate(remoteContentResult.remoteTrackingRef, options.file, {
       expectedAuthorEmail,
       allowForeignAuthor: options.allowForeignAuthor,
+      allowedAuthors: options.allowedAuthors,
     });
   }
 
@@ -625,7 +644,7 @@ export default function register(ctx: PluginContext): void {
     .option('--git-branch <ref>', 'Git ref to store worklog data (use refs/worklog/data to avoid GitHub PR banners)', DEFAULT_GIT_BRANCH)
     .option('--no-push', 'Skip pushing changes back to git')
     .option('--dry-run', 'Show what would be synced without making changes')
-    .option('--allow-foreign-author', 'Allow merging commits authored by a different identity than the store user.email (never bypasses the empty-author-email gate) — overrides syncAllowForeignAuthor config')
+    .option('--allow-foreign-author', 'Allow any author (allow-all override for sync author gate; syncAllowedAuthors: [] default, list, null/true allow-all). Never bypasses empty-email gate; overrides syncAllowedAuthors/syncAllowForeignAuthor config')
     .option('--accept-regressions', 'Accept regressions: allow remote defaults to overwrite local non-default values (regression guard bypass)')
     .option('--if-idle', 'Skip (exit 0) if another sync is already in progress — lock-aware guard for auto-sync spawners; prevents process pile-up under lock contention')
     .option('--no-re-sort', 'Skip automatic re-sort after sync')
@@ -638,8 +657,11 @@ export default function register(ctx: PluginContext): void {
       const defaults = getSyncDefaults(config || undefined);
       const gitRemote = options.gitRemote || defaults.gitRemote;
       const gitBranch = options.gitBranch || defaults.gitBranch;
-      // Author-identity gate override: CLI flag wins over config (default false).
-      const allowForeignAuthor = options.allowForeignAuthor ?? defaults.allowForeignAuthor;
+      // Author-identity gate: CLI flag --allow-foreign-author overrides config to allow-all.
+      // whitelist precedence: explicit syncAllowedAuthors wins; otherwise legacy boolean.
+      const cliAllowForeign = options.allowForeignAuthor === true;
+      const allowForeignAuthor = cliAllowForeign ? true : defaults.allowForeignAuthor;
+      const allowedAuthors = cliAllowForeign ? null : defaults.allowedAuthors;
       // Regression guard override: CLI flag wins over default (default false).
       const acceptRegressions = options.acceptRegressions ?? false;
       
@@ -664,6 +686,7 @@ export default function register(ctx: PluginContext): void {
               isJsonMode,
               isVerbose,
               allowForeignAuthor,
+              allowedAuthors,
               acceptRegressions
             }),
           options.ifIdle ? { skipIfLocked: true } : undefined

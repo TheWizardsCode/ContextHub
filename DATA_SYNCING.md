@@ -72,11 +72,14 @@ Set in `.worklog/config.yaml` (local) or `.worklog/config.defaults.yaml` (team d
   - Git remote used for sync
 - `syncBranch` (string, default `refs/worklog/data`)
   - Git ref used for the canonical JSONL file
-- `syncAllowForeignAuthor` (boolean, default false)
-  - Allow merging commits authored by a different identity than the store's
-    configured `user.email` (see [Author-Identity Gate](#author-identity-gate)).
-    The CLI flag `wl sync --allow-foreign-author` takes precedence over this
-    config value.
+- `syncAllowedAuthors` (allow-list, default `[]`)
+  - Emails allowed to merge during `wl sync` besides the local `user.email`.
+    `[]` = only `user.email`; `['a@x','b@y']` = plus listed emails
+    (case-insensitive, trimmed); `null`/`true` = allow any author.
+    See [Author-Identity Gate](#author-identity-gate). Empty-author commits
+    are always refused. CLI flag `wl sync --allow-foreign-author` overrides
+    to allow-all. Legacy `syncAllowForeignAuthor: true` still works as a
+    deprecated alias when `syncAllowedAuthors` is absent.
 
 ### Author-Identity Gate
 
@@ -91,8 +94,10 @@ local database untouched:
   (e.g. a store whose git `user.email` is unset) is never merged, even with
   `--allow-foreign-author`.
 - **Foreign author email** → refused by default when it differs from the repo's
-  configured `user.email`; allowed when `wl sync --allow-foreign-author` is
-  passed or `syncAllowForeignAuthor: true` is set in config.
+  configured `user.email` and is not in `syncAllowedAuthors`; allowed when
+  the email is in the whitelist, `syncAllowedAuthors` is `null`/`true`,
+  `wl sync --allow-foreign-author` is passed, or legacy
+  `syncAllowForeignAuthor: true` is set (allow-all fallback when whitelist absent).
 - **`user.email` unset** → the foreign-email comparison is skipped (only the
   empty-email gate applies).
 
