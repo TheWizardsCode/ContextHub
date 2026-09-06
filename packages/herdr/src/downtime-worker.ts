@@ -1118,8 +1118,17 @@ export interface DowntimeWorkerDeps {
    * reason:'stale'}` and the dispatcher aborts (no pane, no marker, no
    * success record). A `{ok:false, reason:'error'}` is a wl CLI failure
    * (a strike, never silently discarded — WL-0MSLWJ310000ND0X absorbed).
+   *
+   * `cwd` (optional, WL-0MTQ14W7L003II5A) is the worklog root the item
+   * lives in — the coordination leader claims offers in the offering
+   * instance's OWN root, which may differ from the leader pane's module
+   * override. Absent/undefined → legacy behavior (module override / cwd).
    */
-  claimItem(itemId: string, expected: DowntimeClaimExpected): Promise<DowntimeClaimResult>;
+  claimItem(
+    itemId: string,
+    expected: DowntimeClaimExpected,
+    cwd?: string,
+  ): Promise<DowntimeClaimResult>;
   /**
    * Open a visible pi agent pane running the prompt (via send-to-pi.sh).
    * Resolves `{ok:true}` when the pane opened (or the probe window elapsed
@@ -1388,7 +1397,10 @@ async function dispatchClaimedTier(
   opts: { model: string; cwd: string },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
-  const claim = await deps.claimItem(candidate.id, expected);
+  // Cross-root claim (WL-0MTQ14W7L003II5A): opts.cwd is the item's worklog
+  // root — the coordination leader passes the OFFER's root so the CAS claim
+  // lands in the item's own database (never the leader's module override).
+  const claim = await deps.claimItem(candidate.id, expected, opts.cwd);
   if (!claim.ok) {
     return claim.reason === 'stale'
       ? { dispatched: false, reason: 'claim-failed' }

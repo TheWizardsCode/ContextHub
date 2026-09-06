@@ -1750,9 +1750,13 @@ describe('createDowntimeDeps recordDispatch', () => {
       cwd: '/repo',
     });
 
+    // The comment is targeted at the dispatch root (event.cwd) via stateless
+    // buildWlArgsForRoot — the item's own DB, never the ambient override.
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
       [
+        '--worklog-dir',
+        '/repo/.worklog',
         'comment',
         'add',
         'WL-ABC',
@@ -1766,7 +1770,7 @@ describe('createDowntimeDeps recordDispatch', () => {
     );
   });
 
-  it('passes --worklog-dir to wl comment add when the tab resolved a worklog root', async () => {
+  it('targets the comment at event.cwd (the item root) even when the module override points elsewhere', async () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
     setExecFileAsync(mockExec as never);
     setWorklogDir('/home/user/projects/SorraAgents/.worklog');
@@ -1776,11 +1780,12 @@ describe('createDowntimeDeps recordDispatch', () => {
       itemId: 'SA-ABC',
       kind: 'plan',
       dispatchedAt: '2026-01-01T00:00:00.000Z',
-      cwd: '/repo',
+      cwd: '/home/user/projects/SorraAgents',
     });
 
-    // The audit comment must land on the item in ITS project's DB, not the
-    // plugin process's cwd (WL-0MSI7DQL10016QYX).
+    // The audit comment must land on the item in ITS project's DB — the
+    // dispatch root event.cwd (WL-0MSI7DQL10016QYX semantics preserved;
+    // cross-root leader dispatches target the offer's root, WL-0MTQ14W7L003II5A).
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
       [

@@ -254,7 +254,15 @@ dispatches; the other herdr instances coordinate instead of polling:
   eagerly without pane or dispatched marker**, and dispatch continues to
   the next offer. The dispatched entry is **removed**; its owner re-offers
   its next Herdr head at the next check-in. There is **no TTL-based
-  pruning**.
+  pruning**. **Every per-entry `wl` invocation — the dispatch-time
+  `fetchItem`/audit-enrichment lookups, the CAS claim (`wl update`) and the
+  `wl comment add` trail — resolves against the OFFER's own `worklogRoot`
+  via stateless per-call `--worklog-dir` (`buildWlArgsForRoot`,
+  WL-0MTQ14W7L003II5A), never the leader pane's ambient root: a foreign
+  offer (AH-/CG-/…) is claimed, commented and dispatched in its OWN
+  project's database. The pre-fix wrong-root resolution fired `wl show` at
+  the leader's database ("Work item not found" → 3 strikes → 60-minute
+  pause with idle slots unused).
 - **Non-leaders** — skip proxy polling and dispatch entirely; they only
   refresh their lease check (a cheap local file read) and their
   coordination entry.

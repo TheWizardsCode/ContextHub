@@ -35,6 +35,7 @@ import {
   claimWorkItem,
   getExecFileAsync,
   buildWlArgs,
+  buildWlArgsForRoot,
 } from './fetcher.js';
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
 import {
@@ -595,11 +596,19 @@ export function createDowntimeDeps(
   // freshness signal — otherwise an item with a valid audit could be
   // re-audited on classification alone. Fail-closed: {ok:false} on any wl
   // failure or unparseable output.
+  //
+  // Cross-root (WL-0MTQ14W7L003II5A): BOTH lookups resolve against the
+  // PASSED-IN `cwd` (the offer's own worklog root) via stateless
+  // `buildWlArgsForRoot` — never the leader pane's module-level
+  // `_worklogDir`. The pre-fix code ignored `cwd` and fired `wl show` at
+  // the leader's database, so a foreign offer (AH- in AI_Hell, CG- in
+  // Tableau-Card-Engine) produced "Work item not found" → 3 strikes →
+  // 60-minute pause with idle slots unused.
   const fetchAuditItemById = async (itemId: string, cwd: string): Promise<DowntimeItemResult> => {
     try {
       const { stdout } = await withTransientRetry(() => getExecFileAsync()(
         'wl',
-        buildWlArgs(['show', itemId, '--json']),
+        buildWlArgsForRoot(cwd, ['show', itemId, '--json']),
         { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
       ));
       const info = parseShowItemOutput(stdout);
@@ -607,7 +616,7 @@ export function createDowntimeDeps(
       if (info.status === 'completed' && info.stage === 'in_review') {
         const { stdout: listOut } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
-          buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
+          buildWlArgsForRoot(cwd, ['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
         ));
         const audits = parseAuditCandidatesOutput(listOut);
@@ -938,7 +947,11 @@ export function createDowntimeDeps(
     async recordScheduledPromptTrigger(cwd: string, promptId: string, at: string): Promise<boolean> {
       return updateScheduledPromptLastTriggered(cwd, promptId, at);
     },
-    async claimItem(itemId: string, expected: DowntimeClaimExpected): Promise<DowntimeClaimResult> {
+    async claimItem(
+      itemId: string,
+      expected: DowntimeClaimExpected,
+      cwd?: string,
+    ): Promise<DowntimeClaimResult> {
       // CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1): the transition
       // only applies while the item is still in the state the tier selected
       // it in — exactly one concurrent pane wins. A stale result (another
@@ -947,7 +960,13 @@ export function createDowntimeDeps(
       // discarded (WL-0MSLWJ310000ND0X absorbed): the outcome reason
       // ('claim-failed' / 'wl-error') is the durable observable, and the
       // failure detail is written to stderr like claimItemForAgentCommand.
-      const result = await claimWorkItem(itemId, assignee, expected);
+      //
+      // Cross-root (WL-0MTQ14W7L003II5A): `cwd` is the offer's worklog root
+      // — the coordination leader claims offers in the offering instance's
+      // OWN database. Without it the update fired at the leader's database
+      // and a dispatchable foreign offer struck at claim time (the same
+      // wrong-root failure as the fetch). Undefined → legacy behavior.
+      const result = await claimWorkItem(itemId, assignee, expected, cwd);
       if (result.success) return { ok: true };
       process.stderr.write(
         `[worklog-plugin] Downtime claim failed for ${itemId}: ` +
@@ -972,18 +991,21 @@ export function createDowntimeDeps(
     },
     async recordDispatch(event: DowntimeDispatchEvent): Promise<boolean> {
       // 1. Durable trail: a comment on the item itself (survives wl sync).
-      // buildWlArgs() prepends the resolved --worklog-dir override so the
-      // comment lands on the item in ITS project's DB, not the plugin
-      // process's own cwd (WL-0MSI7DQL10016QYX). A comment failure is
-      // tolerated — the comment is the durable cross-machine trail, not the
-      // marker. Scheduled-prompt dispatches (noItemComment, AC4) have no
-      // work item — the comment is skipped entirely (there is no item to
-      // comment on).
+      // The comment lands on the item in ITS OWN project's DB — targeted at
+      // `event.cwd` (the dispatch root) via stateless buildWlArgsForRoot
+      // (WL-0MTQ14W7L003II5A). The pre-fix code resolved via the module
+      // override, so a coordination leader's foreign dispatch (cwd = the
+      // offer's root ≠ the leader pane's root) commented the WRONG database
+      // — the comment failed silently on a foreign prefix and the durable
+      // item trail was lost. A comment failure is tolerated — the comment is
+      // the durable cross-machine trail, not the marker. Scheduled-prompt
+      // dispatches (noItemComment, AC4) have no work item — the comment is
+      // skipped entirely (there is no item to comment on).
       if (!event.noItemComment) {
         try {
           await getExecFileAsync()(
             'wl',
-            buildWlArgs([
+            buildWlArgsForRoot(event.cwd, [
               'comment',
               'add',
               event.itemId,

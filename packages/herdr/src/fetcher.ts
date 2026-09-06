@@ -9,6 +9,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { join } from 'node:path';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
 import type { AgentState } from './agent-tracker.js';
@@ -79,12 +80,35 @@ export function getWorklogDir(): string | undefined {
  * `wl comment add`) use this so their commands resolve against the same
  * worklog root as the worklist — without the override the argument vector is
  * returned unchanged (current behavior preserved).
+ *
+ * `dirOverride` (the `.worklog/` directory itself, e.g.
+ * `/project/.worklog`) wins over the module-level override for THIS call
+ * only — the module state is never mutated (see `buildWlArgsForRoot` for the
+ * root-accepting convenience form).
  */
-export function buildWlArgs(args: string[]): string[] {
-  if (_worklogDir !== undefined) {
-    return ['--worklog-dir', _worklogDir, ...args];
+export function buildWlArgs(args: string[], dirOverride?: string): string[] {
+  const dir = dirOverride ?? _worklogDir;
+  if (dir !== undefined) {
+    return ['--worklog-dir', dir, ...args];
   }
   return args;
+}
+
+/**
+ * Build wl args targeting a SPECIFIC worklog root's database — stateless,
+ * per-call `--worklog-dir <root>/.worklog` targeting that never mutates the
+ * module-level override (WL-0MTQ14W7L003II5A). `root` is the project
+ * directory that CONTAINS `.worklog/` (e.g. `/home/user/projects/AI_Hell`),
+ * the convention every downtime/coordination caller passes as `cwd`.
+ *
+ * The downtime leader uses this for every per-entry wl invocation on a
+ * coordination offer: the offer's item lives in ITS OWN instance's worklog
+ * root, which may differ from the leader pane's resolved root — resolving
+ * against the module override instead fired `wl show`/`update` at the wrong
+ * database ("Work item not found" → 3 strikes → 60-minute pause).
+ */
+export function buildWlArgsForRoot(root: string, args: string[]): string[] {
+  return ['--worklog-dir', join(root, '.worklog'), ...args];
 }
 
 /**
@@ -322,9 +346,10 @@ const MEMO_MAX_ENTRIES = 64;
  */
 const inflightFetchMemo = new Map<string, Promise<string>>();
 
-function fetchMemoKey(args: string[], includeJson: boolean): string {
-  // Include the worklog-dir override so a dir change never cross-contaminates.
-  return `${_worklogDir ?? ''}\u0000${includeJson ? '1' : '0'}\u0000${args.join('\u0000')}`;
+function fetchMemoKey(args: string[], includeJson: boolean, dirOverride?: string): string {
+  // Include the effective worklog-dir override (per-call or module-level) so
+  // a dir change never cross-contaminates racing reads across roots.
+  return `${dirOverride ?? _worklogDir ?? ''}\u0000${includeJson ? '1' : '0'}\u0000${args.join('\u0000')}`;
 }
 
 /**
@@ -345,7 +370,12 @@ export function _fetchMemoSize(): number {
   return inflightFetchMemo.size;
 }
 
-async function runWlInner(args: string[], includeJson: boolean, timeoutMs?: number): Promise<string> {
+async function runWlInner(
+  args: string[],
+  includeJson: boolean,
+  timeoutMs?: number,
+  dirOverride?: string,
+): Promise<string> {
   let lastError: unknown;
 
   for (const binary of CLI_BINARIES) {
@@ -357,8 +387,9 @@ async function runWlInner(args: string[], includeJson: boolean, timeoutMs?: numb
         fullArgs = args;
       }
 
-      // Prepend --worklog-dir when set (global option before the subcommand).
-      fullArgs = buildWlArgs(fullArgs);
+      // Prepend --worklog-dir when set (per-call override first, then the
+      // module override — global option before the subcommand).
+      fullArgs = buildWlArgs(fullArgs, dirOverride);
 
       // Bounded timeout: use the caller's override if supplied, otherwise
       // apply DEFAULT_WL_TIMEOUT_MS so a hung wl process cannot block the
@@ -387,24 +418,29 @@ async function runWlInner(args: string[], includeJson: boolean, timeoutMs?: numb
   throw new Error(`wl CLI not found: ${String(lastError)}`);
 }
 
-async function runWl(args: string[], includeJson = true, timeoutMs?: number): Promise<string> {
+async function runWl(
+  args: string[],
+  includeJson = true,
+  timeoutMs?: number,
+  dirOverride?: string,
+): Promise<string> {
   const command = args[0];
 
   // Writes must never be deduplicated or share pre-write read results: drop
   // any in-flight read memo so a read issued after this write spawns fresh.
   if (!MEMOIZABLE_COMMANDS.has(command)) {
     if (inflightFetchMemo.size > 0) inflightFetchMemo.clear();
-    return runWlInner(args, includeJson, timeoutMs);
+    return runWlInner(args, includeJson, timeoutMs, dirOverride);
   }
 
   // Read: dedupe concurrent identical fetches within this process (F4).
-  const key = fetchMemoKey(args, includeJson);
+  const key = fetchMemoKey(args, includeJson, dirOverride);
   const inFlight = inflightFetchMemo.get(key);
   if (inFlight) {
     return inFlight;
   }
 
-  const promise = runWlInner(args, includeJson, timeoutMs).finally(() => {
+  const promise = runWlInner(args, includeJson, timeoutMs, dirOverride).finally(() => {
     // Remove on settle: the memo only dedupes CONCURRENT fetches, so a
     // later identical read always spawns fresh (never stale across writes).
     if (inflightFetchMemo.get(key) === promise) {
@@ -704,6 +740,12 @@ const CLAIM_TIMEOUT_MS = 3000;
  * the dispatch. A stale result is detected from the wl CLI's `"error":
  * "stale"` JSON payload on stderr.
  *
+ * `worklogRoot` (optional, WL-0MTQ14W7L003II5A) targets the update at a
+ * specific worklog root's database via per-call `--worklog-dir` — the
+ * downtime leader's cross-root claims (coordination offers live in the
+ * offering instance's root, not the leader's). Undefined → the module
+ * override (or ambient cwd) decides, as before.
+ *
  * Never throws — failures are returned so callers can log them without
  * blocking the agent pane from opening.
  */
@@ -711,6 +753,7 @@ export async function claimWorkItem(
   id: string,
   assignee: string,
   expected?: { status?: string; stage?: string },
+  worklogRoot?: string,
 ): Promise<ClaimResult> {
   try {
     const args = ['update', id, '--status', 'in_progress', '--assignee', assignee];
@@ -720,7 +763,13 @@ export async function claimWorkItem(
     if (expected?.stage) {
       args.push('--if-stage', expected.stage);
     }
-    await runWl(args, true, CLAIM_TIMEOUT_MS);
+    // Per-call --worklog-dir targeting (WL-0MTQ14W7L003II5A): the downtime
+    // leader claims coordination offers in the OFFER's own worklog root,
+    // which may differ from the module override (the leader pane's root).
+    // Passing the root resolves the update against the item's own database;
+    // absent/undefined keeps the historical module-override behavior.
+    const dirOverride = worklogRoot !== undefined ? join(worklogRoot, '.worklog') : undefined;
+    await runWl(args, true, CLAIM_TIMEOUT_MS, dirOverride);
     return { success: true };
   } catch (err: any) {
     const message = err.message ?? String(err);

@@ -360,7 +360,7 @@ describe('dispatch selection', () => {
 
     // The claim carries the expected state the tier selected the item in
     // (RCA WL-0MSRBFFLN005W3VT design point 1 — compare-and-swap).
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-ABC', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-ABC', { status: 'open', stage: 'intake_complete' }, '/repo');
     const claimOrder = (deps.claimItem as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(claimOrder).toBeLessThan(spawnOrder);
@@ -380,7 +380,7 @@ describe('dispatch selection', () => {
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.kind).toBe('intake');
     expect(outcome.candidate?.id).toBe('WL-DEF');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-DEF', { status: 'open', stage: 'idea' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-DEF', { status: 'open', stage: 'idea' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-DEF'),
       expect.anything(),
@@ -431,7 +431,7 @@ describe('dispatch selection', () => {
     expect(outcome.candidate?.id).toBe('WL-IDE');
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-IDE', { status: 'open', stage: 'idea' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-IDE', { status: 'open', stage: 'idea' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-IDE'),
       expect.anything(),
@@ -494,7 +494,7 @@ describe('dispatch audit tier', () => {
     expect(outcome.kind).toBe('audit');
     expect(outcome.candidate?.id).toBe('WL-AUD');
     expect(deps.getNextItem).not.toHaveBeenCalled();
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit WL-AUD'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-AUD', itemTitle: 'Audit me' },
@@ -618,7 +618,7 @@ describe('audit tier interim freshness re-check (WL-0MT8KSTOE00871E7)', () => {
     expect(outcome.candidate?.id).toBe('WL-PLN');
     // No AUDIT dispatch side-effects: the audit candidate is never claimed,
     // no audit comment/marker, no audit spawn.
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLN', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLN', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.recordDispatch).not.toHaveBeenCalledWith(
       expect.objectContaining({ itemId: 'WL-AUD', kind: 'audit' }),
     );
@@ -707,7 +707,7 @@ describe('audit tier interim freshness re-check (WL-0MT8KSTOE00871E7)', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('audit');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' }, '/repo');
     expect(deps.recordDispatch).toHaveBeenCalledTimes(1); // marker/comment written
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit WL-AUD'),
@@ -1149,7 +1149,7 @@ describe('dispatch implement tier', () => {
     expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextImplementCandidate).toHaveBeenCalledWith('/repo');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP', { status: 'open', stage: 'plan_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP', { status: 'open', stage: 'plan_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-IMP'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-IMP', itemTitle: 'Implement me' },
@@ -1299,7 +1299,7 @@ describe('dispatch code-freeze gate', () => {
     expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete', '/repo');
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLAN', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLAN', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-PLAN'),
       expect.anything(),
@@ -5692,7 +5692,7 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.candidate?.id).toBe('WL-CRIT-I');
     expect(deps.getNextCriticalCandidate).toHaveBeenCalledWith('/repo');
     expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-I', { status: 'open', stage: 'idea' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-I', { status: 'open', stage: 'idea' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-CRIT-I'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-CRIT-I', itemTitle: 'Critical idea WL-CRIT-I' },
@@ -5717,7 +5717,7 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('WL-CRIT-R');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-CRIT-R'),
       expect.anything(),
@@ -5737,7 +5737,7 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('implement');
     expect(outcome.candidate?.id).toBe('WL-CRIT-P');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-P', { status: 'open', stage: 'plan_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-P', { status: 'open', stage: 'plan_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-CRIT-P'),
       expect.anything(),
@@ -5853,7 +5853,7 @@ describe('dispatch critical-first tier', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-CRIT-R'),
       expect.anything(),
@@ -5917,7 +5917,7 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('WL-BLOCKER');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-BLOCKER', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-BLOCKER', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-BLOCKER'),
       expect.anything(),
