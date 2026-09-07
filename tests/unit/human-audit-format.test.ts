@@ -8,7 +8,7 @@ const baseItem: any = {
   status: 'open',
   priority: 'medium',
   sortIndex: 100,
-  stage: 'in_progress',
+  stage: 'plan_complete',
   createdAt: '2026-03-26T00:00:00Z',
   updatedAt: '2026-03-26T00:00:00Z',
   tags: [],

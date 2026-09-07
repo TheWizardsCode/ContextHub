@@ -87,13 +87,6 @@ describe('Colour Mapping', () => {
       expect(coloured.length).toBeGreaterThan(0);
     });
 
-    it('should colour in_progress stage items with yellow', () => {
-      const item = createMockWorkItem({ stage: 'in_progress' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toBeTypeOf('string');
-      expect(coloured.length).toBeGreaterThan(0);
-    });
-
     it('should colour in_review stage items with green', () => {
       const item = createMockWorkItem({ stage: 'in_review' });
       const coloured = formatTitleOnly(item);
@@ -120,7 +113,7 @@ describe('Colour Mapping', () => {
       const item = createMockWorkItem({
         title: 'Blocked Work',
         status: 'blocked',
-        stage: 'in_progress',
+        stage: 'plan_complete',
       });
       const coloured = formatTitleOnly(item);
       expect(coloured).toContain('Blocked Work');
@@ -185,7 +178,7 @@ describe('Colour Mapping', () => {
 
     it('should fall back to plain text in CLI when colours disabled for all stages', () => {
       process.env.FORCE_COLOR = '0';
-      const stages = ['idea', 'intake_complete', 'plan_complete', 'in_progress', 'in_review', 'done'];
+      const stages = ['idea', 'intake_complete', 'plan_complete', 'in_review', 'done'];
       
       for (const stage of stages) {
         const item = createMockWorkItem({ stage });

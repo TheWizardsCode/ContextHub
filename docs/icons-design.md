@@ -54,7 +54,6 @@ across the CLI (chalk) and TUI rendering paths. It covers:
 | idea             | `💡`   | `[IDEA]`      | "Stage: Idea"                  |
 | intake_complete  | `📥`   | `[INTAKE]`    | "Stage: Intake Complete"       |
 | plan_complete    | `📋`   | `[PLAN]`      | "Stage: Plan Complete"         |
-| in_progress      | `🛠️`  | `[PROG]`      | "Stage: In Progress"           |
 | in_review        | `🔍`   | `[REVIEW]`    | "Stage: In Review"             |
 | done             | `🏁`   | `[DONE]`      | "Stage: Done"                  |
 

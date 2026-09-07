@@ -276,7 +276,6 @@ const STAGE_ICON: Record<string, string> = {
   idea:            '\u{1F4A1}',          // 💡
   intake_complete: '\u{1F4E5}',          // 📥
   plan_complete:   '\u{1F4CB}',          // 📋
-  in_progress:     '\u{1F6E0}\u{FE0F}', // 🛠️
   in_review:       '\u{1F50D}',          // 🔍
   done:            '\u{1F3C1}',          // 🏁
 };
@@ -285,7 +284,6 @@ const STAGE_FALLBACK: Record<string, string> = {
   idea:            '[IDEA]',
   intake_complete: '[INTAKE]',
   plan_complete:   '[PLAN]',
-  in_progress:     '[PROG]',
   in_review:       '[REVIEW]',
   done:            '[DONE]',
 };
@@ -294,7 +292,6 @@ const STAGE_LABEL: Record<string, string> = {
   idea:            'Stage: Idea',
   intake_complete: 'Stage: Intake Complete',
   plan_complete:   'Stage: Plan Complete',
-  in_progress:     'Stage: In Progress',
   in_review:       'Stage: In Review',
   done:            'Stage: Done',
 };
@@ -408,7 +405,7 @@ export function effortFallback(effort: string | undefined | null): string {
 /**
  * Get the icon string (emoji or text fallback) for a work item stage.
  *
- * @param stage - The stage value (e.g. 'idea', 'in_progress', 'done').
+ * @param stage - The stage value (e.g. 'idea', 'plan_complete', 'done').
  * @param opts - Options controlling fallback behaviour.
  * @returns The icon string (emoji or bracketed text).
  */

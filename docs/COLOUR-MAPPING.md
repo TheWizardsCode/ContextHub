@@ -15,7 +15,6 @@ Work item titles are colour-coded based on their **stage** using a progression c
 | `idea` | Gray | `gray` | Initial ideation phase |
 | `intake_complete` | Blue | `blue` | Intake process completed |
 | `plan_complete` | Cyan | `cyan` | Planning phase completed |
-| `in_progress` | Yellow | `yellow` | Work in progress |
 | `in_review` | Green | `green` | Under review |
 | `done` | White | `white` | Work completed |
 
