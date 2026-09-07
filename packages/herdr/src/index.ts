@@ -114,6 +114,11 @@ import {
   loadScheduledPrompts,
   updateScheduledPromptLastTriggered,
 } from './scheduled-prompts.js';
+import {
+  getDispatcherAnchor as resolveDispatcherAnchor,
+  createDispatcherAnchorDeps,
+  type DispatcherAnchor,
+} from './dispatcher-anchor.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -562,17 +567,41 @@ async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<Criti
 }
 
 /**
+ * Default Dispatcher-anchor resolver used by {@link createDowntimeDeps}
+ * (C0 WL-0MTR01EU7005SYZG): resolves the machine-wide dedicated Dispatcher
+ * anchor pane via the herdr CLI (F1 WL-0MTR2CD4X006XI7U), provisioning the
+ * Dispatcher workspace idempotently on first dispatch. Null on any
+ * failure — dispatch degrades to "no dispatch this cycle". Injectable for
+ * tests that build real deps without a live herdr session.
+ */
+async function defaultDispatcherAnchorResolver(
+  cwd: string,
+): Promise<DispatcherAnchor | null> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    return await resolveDispatcherAnchor(cwd, createDispatcherAnchorDeps(cwd, herdrBin));
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
  * `wl next --stage <stage> --json` for dispatch selection, `wl update
  * <id> --status in_progress` for the pre-dispatch claim, and
  * `send-to-pi.sh` for the visible (non-focus-stealing) agent pane. Every
  * boundary is fail-closed: a wl failure yields no candidate (no dispatch)
  * rather than an exception.
+ *
+ * @param anchorResolver Dispatcher-anchor resolver (C0 WL-0MTR01EU7005SYZG).
+ *   Defaults to the real herdr-CLI-backed resolver; injectable for tests that
+ *   build real deps without a live herdr session.
  */
 export function createDowntimeDeps(
   scriptPath: string,
   assignee: string,
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
+  anchorResolver: DowntimeWorkerDeps['getDispatcherAnchor'] = defaultDispatcherAnchorResolver,
 ): DowntimeWorkerDeps {
   // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
   // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
@@ -630,6 +659,13 @@ export function createDowntimeDeps(
     }
   };
   return {
+    // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): the machine-wide dedicated
+    // Dispatcher workspace/pane resolver (F1 WL-0MTR2CD4X006XI7U). Every
+    // downtime pane spawn resolves this anchor so panes land in the Dispatcher
+    // workspace regardless of leadership. Null → dispatch degrades to "no
+    // dispatch this cycle". Injected (default = real herdr CLI) so tests that
+    // build real deps without a live herdr session can stub it.
+    getDispatcherAnchor: anchorResolver,
     // Herdr list head (WL-0MTK1ILM2009QYB2): canonical ranking via fetcher → smart-selection → grouping.
     // The dispatcher treats this as the single ranking source; remaining safety gates are filters.
     // Batch size 30: enough to filter through (code-freeze, dispatched-marker, single-flight)
@@ -979,7 +1015,14 @@ export function createDowntimeDeps(
     },
     async spawnAgentPane(
       prompt: string,
-      opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
+      opts: {
+        model: string;
+        cwd: string;
+        paneName?: string;
+        itemTitle?: string;
+        itemId?: string;
+        anchorId?: string;
+      },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(

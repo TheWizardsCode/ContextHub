@@ -191,3 +191,53 @@ describe('send-to-pi.sh --model forwarding', () => {
     expect(run).not.toContain('code');
   });
 });
+
+describe('send-to-pi.sh --anchor (Dispatcher anchor-by-ID, C0 WL-0MTR01EU7005SYZG)', () => {
+  it('splits the given anchor pane by ID and never calls pane current (no-resize mode)', () => {
+    const { status, log } = runScript(['--no-resize', '--anchor', 'wD:pANCHOR', '--cwd', '/repo', '/skill:audit <id>']);
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('pane current'))).toBe(false);
+    const split = splitInvocation(log);
+    expect(split).toBeDefined();
+    expect(split).toContain('--pane');
+    expect(split).toContain('wD:pANCHOR');
+    expect(split).toContain('--cwd');
+    expect(split).toContain('/repo');
+  });
+
+  it('resize mode passes the anchor id to the grid helper and never calls pane current', () => {
+    // Resize mode (default) delegates the split to grid.py via HERDR_GRID_BIN.
+    const gridLog = join(tmpDir, 'grid.log');
+    writeFileSync(
+      join(tmpDir, 'mock-grid.py'),
+      `#!/usr/bin/env python3
+import sys, json
+with open("${gridLog}", "a") as f:
+    f.write(" ".join(sys.argv[1:]) + "\\n")
+print('{"pane_id": "grid-pane-1"}')
+`,
+      { mode: 0o755 },
+    );
+    const { status, log } = runScript(
+      ['--anchor', 'wD:pANCHOR', '--cwd', '/repo', '/skill:audit <id>'],
+      { HERDR_GRID_BIN: join(tmpDir, 'mock-grid.py') },
+    );
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('pane current'))).toBe(false);
+    const gridArgs = existsSync(gridLog) ? readFileSync(gridLog, 'utf-8').trim() : '';
+    expect(gridArgs).toContain('wD:pANCHOR');
+    expect(gridArgs).toContain('--cwd');
+    expect(gridArgs).toContain('/repo');
+    // The pane still receives the command + --no-focus (focus not stolen).
+    expect(log.some((line) => line.includes('pane run') && line.includes('/skill:audit'))).toBe(true);
+  });
+
+  it('without --anchor keeps the legacy pane-current fallback (backward compat)', () => {
+    const { log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '/skill:audit <id>']);
+    // Legacy no-resize path resolves the current pane only for --anchor; the
+    // plain split uses --current (mock herdr logs the pane split args).
+    const split = splitInvocation(log);
+    expect(split).toBeDefined();
+    expect(split).toContain('--current');
+  });
+});

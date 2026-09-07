@@ -474,6 +474,117 @@ describe('dispatch selection', () => {
   });
 });
 
+// ── Dispatcher anchor wiring (C0 WL-0MTR01EU7005SYZG / F2 WL-0MTR2HLLJ009PTPJ) ──
+
+describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
+  it('AC1: buildDowntimePaneArgs appends --anchor <id> when an anchorId is provided', () => {
+    const args = buildDowntimePaneArgs('plan', 'Run /skill:plan WL-ABC — Some task.', {
+      model: 'plan',
+      cwd: '/repo',
+      anchorId: 'wD:pANCHOR',
+    });
+    expect(args).toContain('--anchor');
+    expect(args).toContain('wD:pANCHOR');
+    expect(args).toContain('--no-focus');
+    expect(args).toContain('--cwd');
+    expect(args).toContain('/repo');
+    expect(args).toContain('--model');
+    expect(args).toContain('plan');
+  });
+
+  it('AC1 backward-compat: buildDowntimePaneArgs omits --anchor when no anchorId is given', () => {
+    const args = buildDowntimePaneArgs('plan', 'Run /skill:plan WL-ABC — Some task.', {
+      model: 'plan',
+      cwd: '/repo',
+    });
+    expect(args).not.toContain('--anchor');
+    expect(args).not.toContain('wD:pANCHOR');
+    expect(args[0]).toBe('--pane-name');
+  });
+
+  it('AC3: dispatchDowntimeWork resolves the anchor and passes its pane id to spawnAgentPane', async () => {
+    const deps = makeDeps({
+      getDispatcherAnchor: vi.fn().mockResolvedValue({
+        paneId: 'wD:pANCHOR',
+        workspaceId: 'wD',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.getDispatcherAnchor).toHaveBeenCalled();
+    // The resolved anchor pane id flows into the spawn opts (→ --anchor in
+    // the send-to-pi.sh args built by buildDowntimePaneArgs).
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-ABC'),
+      expect.objectContaining({ anchorId: 'wD:pANCHOR' }),
+    );
+  });
+
+  it('AC1 legacy wiring: without the getDispatcherAnchor dep no anchorId key is added (backward compat)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-ABC'),
+      expect.not.objectContaining({ anchorId: expect.anything() }),
+    );
+  });
+
+  it('fail-safe: a null anchor (provisioning failed) aborts the dispatch with anchor-unavailable', async () => {
+    const deps = makeDeps({
+      getDispatcherAnchor: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('scheduled-prompt spawns resolve the anchor and forward anchorId (dispatchDowntimeWork path)', async () => {
+    const deps = makeDeps({
+      getDispatcherAnchor: vi.fn().mockResolvedValue({
+        paneId: 'wD:pANCHOR',
+        workspaceId: 'wD',
+      }),
+      getDueScheduledPrompt: vi.fn().mockResolvedValue({
+        id: 'prompt-1',
+        prompt: 'Run the nightly sweep',
+        frequencyMinutes: 60,
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('scheduled');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      'Run the nightly sweep',
+      expect.objectContaining({ anchorId: 'wD:pANCHOR' }),
+    );
+  });
+});
+
 // ── Audit-tier dispatch (WL-0MSI8H3HP000K0RG) ─────────────────────────
 
 describe('dispatch audit tier', () => {

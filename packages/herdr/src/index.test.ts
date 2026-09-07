@@ -1572,7 +1572,11 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+    // The real deps resolve the Dispatcher anchor via the herdr CLI, which is
+    // absent in tests — inject a stub anchor so the C0 anchored spawn path is
+    // exercised without a live herdr session (WL-0MTR2HLLJ009PTPJ).
+    const anchorResolver = vi.fn().mockResolvedValue({ paneId: 'wD:pTEST', workspaceId: 'wD' });
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn, anchorResolver as never);
     const cwd = makeTempDir();
 
     // Idle window 1: audit candidate selected and dispatched.
@@ -1580,6 +1584,12 @@ describe('createDowntimeDeps', () => {
     expect(first.dispatched).toBe(true);
     expect(first.kind).toBe('audit');
     expect(first.candidate?.id).toBe('WL-ONCE');
+    // The resolved Dispatcher anchor pane id is forwarded to send-to-pi.sh as
+    // --anchor (C0): the pane lands in the Dispatcher workspace.
+    expect(anchorResolver).toHaveBeenCalled();
+    const spawnArgs = (spawnFn as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string[] | undefined;
+    expect(spawnArgs).toContain('--anchor');
+    expect(spawnArgs).toContain('wD:pTEST');
 
     // The durable marker landed in the shared log (kind:audit).
     const entries = await readDowntimeLogEntries(cwd);

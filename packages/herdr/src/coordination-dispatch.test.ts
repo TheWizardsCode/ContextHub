@@ -255,6 +255,51 @@ describe('dispatchFromCoordination', () => {
     expect(spawnCall).toContain('/skill:plan WL-B');
   });
 
+  it('forwards the resolved Dispatcher anchor pane id into the spawn opts (C0)', async () => {
+    const deps = makeCoordinationDeps({
+      getDispatcherAnchor: vi.fn().mockResolvedValue({ paneId: 'wD:pANCHOR', workspaceId: 'wD' }),
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete' }) }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [makeEntry('inst-1', 'WL-PLAN')], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.getDispatcherAnchor).toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-PLAN'),
+      expect.objectContaining({ anchorId: 'wD:pANCHOR' }),
+    );
+  });
+
+  it('stops the cycle (keeps the offer) when the Dispatcher anchor cannot be provisioned', async () => {
+    const entry = makeEntry('inst-1', 'WL-PLAN');
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      getDispatcherAnchor: vi.fn().mockResolvedValue(null),
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete' }) }),
+      spawnAgentPane: vi.fn(),
+    });
+    const outcome = await dispatchFromCoordination(deps, [entry], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // The offer stays in the file (anchor failure is transient, not stale).
+    expect(getEntry(testDir, 'inst-1')).not.toBe(null);
+  });
+
+  it('legacy wiring without getDispatcherAnchor spawns without an anchorId key', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete' }) }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [makeEntry('inst-1', 'WL-PLAN')], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-PLAN'),
+      expect.not.objectContaining({ anchorId: expect.anything() }),
+    );
+  });
+
   it('gates the audit tier by the code-freeze marker (frozen → plan still runs)', async () => {
     const deps = makeCoordinationDeps({
       readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),

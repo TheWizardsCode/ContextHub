@@ -63,7 +63,14 @@
  *    `AUDIT_PHASE2_PARALLELISM=1` makes the audit skill's Phase 2 child
  *    deep-analysis strictly sequential so a parent audit needs exactly
  *    2 local slots (parent + one child), fitting cheap mode's capacity
- *    (WL-0MSORQ1RG005DGUS).
+ *    (WL-0MSORQ1RG005DGUS). Dispatcher anchor (C0 WL-0MTR01EU7005SYZG):
+ *    every spawn resolves the dedicated machine-wide Dispatcher anchor pane
+ *    (`deps.getDispatcherAnchor`, F1 WL-0MTR2CD4X006XI7U) and forwards it as
+ *    `--anchor <id>` so send-to-pi.sh splits from THAT pane — dispatched
+ *    panes always land in the Dispatcher workspace regardless of which
+ *    instance holds the leader lease. Anchor provisioning failure degrades
+ *    to reason 'anchor-unavailable' (neutral "no dispatch this cycle", never
+ *    a fallback to the leader's pane).
  *  - `createDowntimeWorker` — per-tick orchestrator (poll → evaluate →
  *    track → dispatch) with settings re-read each tick, plus the
  *    no-candidate cooldown (WL-0MSI7DQL10016QYX): a genuine empty backlog
@@ -135,6 +142,7 @@ import {
   dispatchedItemStages as _dispatchedStages,
 } from './downtime-log.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
+import type { DispatcherAnchor } from './dispatcher-anchor.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 export type { CoordinationEntry } from './coordination.js';
@@ -1139,11 +1147,38 @@ export interface DowntimeWorkerDeps {
    * scheduled-prompts tier passes `Downtime <entryId>` (WL-0MSS1Q5ER007QDKX).
    * `itemTitle`/`itemId` thread the candidate's context so the pane is named
    * `Downtime triggered <kind> <title> - <id>` (WL-0MSJ4E8UA005KG9Y).
+   * `anchorId` (C0 WL-0MTR01EU7005SYZG) forwards the dedicated Dispatcher
+   * anchor pane id so send-to-pi.sh splits from THAT pane (--anchor) instead
+   * of the leader's current pane — dispatched panes always land in the
+   * Dispatcher workspace regardless of leadership. Absent → legacy
+   * current-pane behavior (non-downtime/TUI spawns and pre-C0 callers).
    */
   spawnAgentPane(
     prompt: string,
-    opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
+    opts: {
+      model: string;
+      cwd: string;
+      paneName?: string;
+      itemTitle?: string;
+      itemId?: string;
+      anchorId?: string;
+    },
   ): Promise<DowntimeSpawnResult>;
+  /**
+   * Resolve the dedicated machine-wide Dispatcher anchor pane (C0
+   * WL-0MTR01EU7005SYZG, F1 WL-0MTR2CD4X006XI7U): the persisted anchor pane
+   * id in the 'Dispatcher' workspace, provisioning it idempotently on first
+   * dispatch. Every downtime pane spawn must anchor to this pane so dispatch
+   * placement is independent of which instance holds the leader lease.
+   * Resolves null on provisioning failure — the caller degrades to "no
+   * dispatch this cycle" (fail-safe, never a fallback to the leader's pane).
+   * Optional: when ABSENT the worker spawns without an anchor (legacy
+   * behavior — the send-to-pi.sh `pane current` fallback), which preserves
+   * backward compatibility for callers that predate C0. Production wiring
+   * (`createDowntimeDeps`) always provides it, so downtime dispatch is
+   * always anchored.
+   */
+  getDispatcherAnchor?(cwd: string): Promise<DispatcherAnchor | null>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
@@ -1274,7 +1309,10 @@ export interface DowntimeDispatchOutcome {
    * another pane won; neutral) | 'marker-write-failed' (fail-closed abort
    * BEFORE spawn — includes the scheduled-prompt persist failure) |
    * 'spawn-failed' (handled spawn error or non-zero script exit; outcome is
-   * not success) | 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
+   * not success) | 'anchor-unavailable' (C0 WL-0MTR01EU7005SYZG: the
+   * machine-wide Dispatcher anchor pane could not be provisioned — neutral
+   * "no dispatch this cycle", never a fallback to the leader's pane) |
+   * 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
    * in flight) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
    * was recorded during interim). When `reason` is 'wl-error', `error`
    * may carry the underlying wl/CLI error details (timeout, SQLITE_BUSY,
@@ -1423,6 +1461,24 @@ async function dispatchClaimedTier(
   opts: { model: string; cwd: string },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
+  // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): resolve the dedicated
+  // Dispatcher anchor pane BEFORE the claim so a provisioning failure
+  // degrades to "no dispatch this cycle" (F1 AC6 — caller fail-safe) without
+  // claiming/marking an item that can never spawn a pane. Absent dep
+  // (legacy/test callers) → no anchor, legacy current-pane behavior.
+  let anchorId: string | undefined;
+  if (typeof deps.getDispatcherAnchor === 'function') {
+    let anchor: DispatcherAnchor | null = null;
+    try {
+      anchor = await deps.getDispatcherAnchor(opts.cwd);
+    } catch {
+      anchor = null; // fail-closed on any anchor error
+    }
+    if (anchor === null) {
+      return { dispatched: false, reason: 'anchor-unavailable' };
+    }
+    anchorId = anchor.paneId;
+  }
   // Cross-root claim (WL-0MTQ14W7L003II5A): opts.cwd is the item's worklog
   // root — the coordination leader passes the OFFER's root so the CAS claim
   // lands in the item's own database (never the leader's module override).
@@ -1464,6 +1520,11 @@ async function dispatchClaimedTier(
       // `Downtime triggered <kind> <title> - <id>`.
       itemTitle: candidate.title,
       itemId: candidate.id,
+      // Dispatcher anchor (C0): split from the dedicated Dispatcher anchor
+      // pane so this pane lands in the Dispatcher workspace regardless of
+      // leadership. Only set when the anchor resolved (never a bare
+      // undefined key — legacy callers keep their exact opts shape).
+      ...(anchorId !== undefined ? { anchorId } : {}),
     },
   );
   if (!spawn.ok) {
@@ -1549,6 +1610,26 @@ async function dispatchScheduledPrompt(
 ): Promise<DowntimeDispatchOutcome> {
   const at = new Date().toISOString();
 
+  // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): scheduled-prompt panes are
+  // downtime-worker spawns too — resolve the dedicated Dispatcher anchor
+  // BEFORE the trigger persist so a provisioning failure degrades to "no
+  // dispatch this cycle" without consuming the scheduled entry (it stays
+  // due for the next idle slot). Absent dep (legacy/test callers) → no
+  // anchor, legacy current-pane behavior.
+  let anchorId: string | undefined;
+  if (typeof deps.getDispatcherAnchor === 'function') {
+    let anchor: DispatcherAnchor | null = null;
+    try {
+      anchor = await deps.getDispatcherAnchor(opts.cwd);
+    } catch {
+      anchor = null; // fail-closed on any anchor error
+    }
+    if (anchor === null) {
+      return { dispatched: false, reason: 'anchor-unavailable' };
+    }
+    anchorId = anchor.paneId;
+  }
+
   // 1. Persist lastTriggeredAt (atomic tmp+rename). A failure aborts BEFORE
   // the log marker or the spawn — an unrecorded dispatch never runs and the
   // entry remains due (AC4 fail-closed).
@@ -1583,6 +1664,7 @@ async function dispatchScheduledPrompt(
     model: opts.model,
     cwd: opts.cwd,
     paneName: `Downtime ${prompt.id}`,
+    ...(anchorId !== undefined ? { anchorId } : {}),
   });
   if (!spawn.ok) {
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2 pattern): the audit log
@@ -1961,6 +2043,13 @@ export async function dispatchFromCoordination(
       // A wl failure is a strike — stop the cycle (three-strike rule
       // decides when to pause). Carry the entry's workItemId for logging.
       return { ...outcome, workItemId: entry.workItemId };
+    }
+    if (outcome.reason === 'anchor-unavailable') {
+      // Dispatcher anchor provisioning failed (C0 WL-0MTR01EU7005SYZG): the
+      // anchor is MACHINE-WIDE, so no other offer can spawn either — stop the
+      // cycle now (neutral, no strike, no cooldown; the next idle tick
+      // retries the provisioning). Keep the entry: the offer is still valid.
+      return outcome;
     }
     if (outcome.reason === 'spawn-failed' || outcome.reason === 'marker-write-failed') {
       // The item is claimed (+ marked) but the pane never appeared:
@@ -2463,21 +2552,28 @@ export async function dispatchDowntimeWork(
 export function buildDowntimePaneArgs(
   kind: DowntimeSkillKind,
   prompt: string,
-  opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
+  opts: {
+    model: string;
+    cwd: string;
+    paneName?: string;
+    itemTitle?: string;
+    itemId?: string;
+    anchorId?: string;
+  },
 ): string[] {
   const paneName =
     opts.paneName ??
     buildDowntimePaneTitle(kind, opts.itemTitle, opts.itemId);
-  return [
-    '--pane-name',
-    paneName,
-    '--no-focus',
-    '--cwd',
-    opts.cwd,
-    '--model',
-    opts.model,
-    prompt,
-  ];
+  const args = ['--pane-name', paneName, '--no-focus'];
+  // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): when the caller resolved the
+  // dedicated Dispatcher anchor pane id (F1 WL-0MTR2CD4X006XI7U), forward it
+  // as `--anchor <id>` so send-to-pi.sh splits from THAT pane instead of the
+  // leader's current pane. Absent → legacy `pane current` behavior.
+  if (opts.anchorId) {
+    args.push('--anchor', opts.anchorId);
+  }
+  args.push('--cwd', opts.cwd, '--model', opts.model, prompt);
+  return args;
 }
 
 /**
