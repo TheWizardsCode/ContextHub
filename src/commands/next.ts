@@ -20,7 +20,7 @@ export default function register(ctx: PluginContext): void {
     .command('next')
     .description('Find the next work item to work on based on priority and status (excludes dependency-blocked items by default)')
     .option('-a, --assignee <assignee>', 'Filter by assignee')
-    .option('--stage <stage>', 'Filter by stage (idea, intake_complete, plan_complete, in_progress, in_review, done)')
+    .option('--stage <stage>', 'Filter by stage (idea, intake_complete, plan_complete, in_review, done)')
     .option('--risk <level>', 'Filter by risk level, at-most semantics (low, medium, high, severe). Items with unset risk never match.')
     .option('--effort <level>', 'Filter by effort level, at-most semantics (xs/extra-small, s/small, m/medium, l/large, xl/extra-large). Items with unset effort never match.')
     .option('--search <term>', 'Search term for fuzzy matching against title, description, and comments')
