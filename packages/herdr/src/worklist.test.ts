@@ -2338,6 +2338,12 @@ describe('formatMetadataPanel — field rendering and scrolling', () => {
   it('renders all WorkItem metadata fields for the selected item', () => {
     const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0).join('\n');
     expect(joined).toContain('WL-RICH1');
+    // ID is shown in the header line but not duplicated in the data table (WL-0MSHIJR7T007Q9R7).
+    const lines = formatMetadataPanel(makeRichItem(), 80, 20, 0);
+    expect(lines[0]).toContain('WL-RICH1');
+    for (const line of lines.slice(1)) {
+      expect(line).not.toMatch(/^\s+ID\b/);
+    }
     expect(joined).toContain('Rich metadata item');
     expect(joined).toContain('Status');
     expect(joined).toContain('in_progress');
@@ -2543,9 +2549,10 @@ describe('formatMetadataPanel — description preview (WL-0MT9ZJF28004UJ28)', ()
     expect(top).not.toContain('p1');
     // The four compacted field pairs (Status+Stage, Priority+Type,
     // Created+Updated, Audit+AuditedAt, WL-0MSNIX4V60012266) remove 4
-    // rows from the rich item, so the p1..p3 preview window sits 4 rows
-    // earlier than before (offset 15 instead of 19).
-    const previewView = formatMetadataPanel(item, 80, 3, 15).join('\n');
+    // rows from the rich item, and dropping the ID row (WL-0MSHIJR7T007Q9R7)
+    // removes one more, so the p1..p3 preview window sits 5 rows
+    // earlier than before (offset 14 instead of 19).
+    const previewView = formatMetadataPanel(item, 80, 3, 14).join('\n');
     expect(previewView).toContain('p1');
     expect(previewView).toContain('p3');
     // [m/M scroll] indicator still shown when content overflows

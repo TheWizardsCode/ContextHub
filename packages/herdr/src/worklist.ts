@@ -1653,7 +1653,8 @@ export function formatMetadataPanel(
 
   // Metadata rows — pair Status+Stage, Priority+Type, Created+Updated,
   // Audit+AuditedAt onto single rows for a more compact display (WL-0MSNIX4V60012266).
-  const metaRows = pairMetaRows(buildMetaRows(item, noIcons));
+  // Drop the ID row since the panel header already shows the ID (WL-0MSHIJR7T007Q9R7).
+  const metaRows = pairMetaRows(buildMetaRows(item, noIcons)).filter(([label]) => label !== 'ID');
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
     for (const [label, value] of metaRows) {
