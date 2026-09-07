@@ -169,17 +169,16 @@ export function loadConfig(): WorklogConfig | null {
       { value: 'idea', label: 'Idea' },
       { value: 'intake_complete', label: 'Intake Complete' },
       { value: 'plan_complete', label: 'Plan Complete' },
-      { value: 'in_progress', label: 'In Progress' },
       { value: 'in_review', label: 'In Review' },
       { value: 'done', label: 'Done' },
     ];
   }
   if (!config.statusStageCompatibility) {
     config.statusStageCompatibility = {
-      'open': ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
-      'in-progress': ['intake_complete', 'plan_complete', 'in_progress'],
+      'open': ['idea', 'intake_complete', 'plan_complete'],
+      'in-progress': ['intake_complete', 'plan_complete'],
       // Allow 'input_needed' in early stages where intake questions are asked
-      'input_needed': ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
+      'input_needed': ['idea', 'intake_complete', 'plan_complete'],
       'blocked': ['idea', 'intake_complete', 'plan_complete'],
       'completed': ['in_review', 'done'],
       'deleted': ['idea', 'intake_complete', 'plan_complete', 'done'],
