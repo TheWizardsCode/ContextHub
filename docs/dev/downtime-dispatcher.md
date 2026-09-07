@@ -58,7 +58,7 @@ reports explicitly when a filter moves the pick deeper in the SAME sequence).
                 ~/.herdr/downtime/downtime-leader-lease.json  (5-min TTL, per poll)     │
                 ~/.herdr/downtime/downtime-coordination.json  (one entry per instance)  │
                 │                                                                      │
-  herdr B ──▶   checks in every 30 min: offers its own worklog's most-important item    │
+  herdr B ──▶   checks in every 5 min (WL-0MTMPSCL8000O45H): offers its own most-important item  │
                 │                                                                      │
   leader ⊇ A     polls llama-proxy → idle gate → dispatch tiers → removes entry         │
                 └──────────────────────────────────────────────────────────────────────┘
@@ -114,8 +114,9 @@ Unreadable/missing machine files degrade to "no dispatch this cycle" (fail-safe)
 Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expiring contract):
 
 1. **Check-in** — every instance reads the file on startup; leaders re-offer every ~4 minutes
-   (`DEFAULT_LEADER_CHECK_IN_MS = 4 min`) and followers every 30 minutes
-   (`DEFAULT_COORDINATION_CHECK_IN_MS`), recomputing their worklog's **most-important item** (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained) and upserting (`add` if absent, `update` if changed). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
+   (`DEFAULT_LEADER_CHECK_IN_MS = 4 min`) and followers every 5 minutes
+   (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H — was 30 min, clamped ≥ 60 s),
+   recomputing their worklog's **most-important item** (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained) and upserting (`add` if absent, `update` if changed). When the leader removes an entry on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
 2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**. A non-dispatchable entry (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via `removeEntry` **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the tier loop **continues to the next entry**. Entries do **not** expire by wall-clock age.
 3. **Pruning — retired (WL-0MTMPIQBE001J41P)** — wall-clock TTL pruning on `lastUpdated` is removed (`pruneStaleEntries` is a no-op returning `0`, no age-based removal on the machine `downtime-coordination.json` or legacy per-worklog file). Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
 
@@ -162,7 +163,7 @@ the worklog still holds dispatchable work. Therefore:
   lookup can never masquerade as an empty backlog, `deps.recordError` is
   called before any pause).
 - **Check-in is never suppressed:** the cooldown gate runs AFTER the
-  leader-election/check-in block, so the 30-min coordination check-in
+  leader-election/check-in block, so the coordination check-in
   (the only re-offer mechanism) still lands during a pause and the leader
   lease keeps refreshing (self-healing `refreshLease()` renews an
   owned-but-expired lease — the zombie can never lose its renewal path).
@@ -344,7 +345,7 @@ status refresh unchanged at 30s.**
 | Proxy status refresh | 30 s (`refreshIntervalMs`) | `settings.ts` (unchanged, pre-refactor cadence) |
 | Leader lease TTL | 5 min (`DEFAULT_LEASE_TTL_SECONDS = 300`) | `leader-election.ts` |
 | Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.ts`, `leader-election.ts` |
-| Follower check-in | 30 min (`DEFAULT_COORDINATION_CHECK_IN_MS`) — non-leader re-offer | `downtime-worker.ts` |
+| Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin

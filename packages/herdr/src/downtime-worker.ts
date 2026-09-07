@@ -87,7 +87,7 @@
  *    (`computeMostImportantItem`) before pausing and only a genuinely
  *    empty backlog pauses (a probe CLI error is itself a three-strike
  *    event, never a silent pause). The cooldown gate runs AFTER the
- *    leader-election/check-in block so the 30-min check-in (the only
+ *    leader-election/check-in block so the check-in (the only
  *    re-offer mechanism) still lands during a pause, and a successful
  *    re-offer (`checkIn.updated && offered !== null`) cancels the pause
  *    immediately.
@@ -293,17 +293,18 @@ export const DEFAULT_DOWNTIME_PROXY_URL = 'http://192.168.0.199:8000';
 export const DEFAULT_DOWNTIME_MODEL = 'plan';
 
 /**
- * Default coordination check-in interval: 30 minutes (parent AC3).
- * Every instance re-verifies/updates its entry in the shared coordination
- * file at this cadence. The leader checks in more often
- * (WL-0MTOCBP1D009P4U3) — see DEFAULT_LEADER_CHECK_IN_MS.
+ * Default coordination check-in interval: 5 minutes (WL-0MTMPSCL8000O45H,
+ * parent AC3 — was 30 min). Every instance re-verifies/updates its entry
+ * in the shared coordination file at this cadence. The leader checks in
+ * more often (WL-0MTOCBP1D009P4U3) — see DEFAULT_LEADER_CHECK_IN_MS.
  */
-export const DEFAULT_COORDINATION_CHECK_IN_MS = 30 * 60 * 1000;
+export const DEFAULT_COORDINATION_CHECK_IN_MS = 5 * 60 * 1000;
 
 /**
  * Leader coordination check-in interval (WL-0MTOCBP1D009P4U3): the leader
  * re-offers every 4 minutes so offers stay fresh and the lease is renewed
- * inside the 5-minute TTL with ~1 min grace. Non-leaders stay at 30 min.
+ * inside the 5-minute TTL with ~1 min grace. Non-leaders use
+ * DEFAULT_COORDINATION_CHECK_IN_MS (5 min, WL-0MTMPSCL8000O45H).
  */
 export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
 
@@ -2085,14 +2086,15 @@ export async function dispatchFromCoordination(
 }
 
 /**
- * One 30-minute coordination check-in (parent AC3): recompute this
- * instance's most-important item and upsert its entry in the shared
- * coordination file. When the instance has NOTHING dispatchable (genuine
- * empty backlog, no CLI errors) the own entry is removed — the leader must
- * not float a dead offer; the owner re-offers when work appears. On a
- * CLI-error computation the existing entry is kept (fail-open) — a
- * transient wl failure must never drop a valid offer. Returns the stored
- * item id (or null when nothing was offered).
+ * One coordination check-in (WL-0MTMPSCL8000O45H — default every 5 min,
+ * parent AC3): recompute this instance's most-important item and upsert
+ * its entry in the shared coordination file. When the instance has NOTHING
+ * dispatchable (genuine empty backlog, no CLI errors) the own entry is
+ * removed — the leader must not float a dead offer; the owner re-offers
+ * when work appears (immediately on next tick after dispatch removes it —
+ * WL-0MTMPSCL8000O45H AC2). On a CLI-error computation the existing entry
+ * is kept (fail-open) — a transient wl failure must never drop a valid
+ * offer. Returns the stored item id (or null when nothing was offered).
  */
 export async function runCoordinationCheckIn(
   deps: DowntimeWorkerDeps,
@@ -2760,15 +2762,18 @@ export interface DowntimeWorkerConfig {
   /** Leader lease TTL seconds (parent AC2 — default 5 minutes). */
   leaseTtlSeconds?: number;
   /**
-   * Coordination check-in interval (parent AC3 — default 30 minutes):
-   * every instance re-verifies/updates its entry at this cadence, whether
-   * leader or not.
+   * Coordination check-in interval (WL-0MTMPSCL8000O45H — default 5
+   * minutes, parent AC3): every instance re-verifies/updates its entry at
+   * this cadence, whether leader or not. Clamped to ≥ 60 000 ms to avoid
+   * CLI churn.
    */
   checkInIntervalMs?: number;
   /**
    * Leader coordination check-in interval (WL-0MTOCBP1D009P4U3 — default
-   * 4 minutes): the leader re-offers at this cadence; followers stay at
-   * 30 min. The value must be < lease TTL (5 min) so renewal is inside.
+   * 4 minutes): the leader re-offers at this cadence; followers use
+   * checkInIntervalMs (5 min default, WL-0MTMPSCL8000O45H). The value
+   * must be < lease TTL (5 min) so renewal is inside. Clamped to ≥ 60 000
+   * ms.
    */
   leaderCheckInIntervalMs?: number;
 }
@@ -2902,13 +2907,24 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       })
     : null;
   const instanceId = leaderManager ? leaderManager.getInstanceId() : (opts.instanceId ?? 'legacy');
-  const checkInIntervalMs = opts.checkInIntervalMs ?? DEFAULT_COORDINATION_CHECK_IN_MS;
-  const leaderCheckInMs = (opts as { leaderCheckInIntervalMs?: number }).leaderCheckInIntervalMs
-    ?? DEFAULT_LEADER_CHECK_IN_MS;
-  // Timestamp of the last coordination check-in (30-min cadence, parent
-  // AC3). null until the first tick so every instance checks in on startup
-  // (first check-in on startup — parent Constraint).
+  const DOWNTIME_CHECK_IN_FLOOR_MS = 60_000;
+  const _rawCheckInMs = opts.checkInIntervalMs ?? DEFAULT_COORDINATION_CHECK_IN_MS;
+  const checkInIntervalMs = Math.max(_rawCheckInMs, DOWNTIME_CHECK_IN_FLOOR_MS);
+  const _rawLeaderMs =
+    (opts as { leaderCheckInIntervalMs?: number }).leaderCheckInIntervalMs
+      ?? DEFAULT_LEADER_CHECK_IN_MS;
+  const leaderCheckInMs = Math.max(_rawLeaderMs, DOWNTIME_CHECK_IN_FLOOR_MS);
+  // Timestamp of the last coordination check-in (WL-0MTMPSCL8000O45H —
+  // default 5-min cadence, parent AC3). null until the first tick so every
+  // instance checks in on startup (first check-in on startup — parent
+  // Constraint).
   let lastCheckInAt: number | null = null;
+  // WL-0MTMPSCL8000O45H AC2 — churn guard: true when the LAST
+  // runCoordinationCheckIn offered nothing (genuine empty backlog). While
+  // true the immediate re-offer is suppressed (re-probing an empty worklog
+  // every ~10 s tick would churn wl); the periodic cadence retries until
+  // work appears and an offer lands.
+  let lastOfferEmpty = false;
   // Per-tick cached leadership decision (the lease read is cheap but let a
   // tick observe ONE consistent state — an election win mid-tick applies
   // next tick). Legacy mode (no coordinationDir) is always the leader.
@@ -3131,13 +3147,34 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         }
 
         // Coordination check-in (parent AC3 — first on startup, then every
-        // 30 minutes): recompute THIS instance's most-important item and
-        // verify/update its entry in the shared coordination file. Runs for
-        // leader AND non-leader alike — every instance contributes its most
-        // important item; the single elected leader dispatches from the list.
-        // WL-0MTOCBP1D009P4U3: leader every 4 min (renews lease), followers every 30 min.
+        // 5 min, WL-0MTMPSCL8000O45H): recompute THIS instance's most-
+        // important item and verify/update its entry in the shared
+        // coordination file. Runs for leader AND non-leader alike — every
+        // instance contributes its most important item; the single elected
+        // leader dispatches from the list. Leader every 4 min
+        // (WL-0MTOCBP1D009P4U3); clamp ≥ 60 s.
+        //
+        // WL-0MTMPSCL8000O45H AC2 — immediate re-offer when the owner's own
+        // entry was removed by the leader's dispatch (push-based re-offer
+        // via coordination-file observation on the next tick). Fail-open:
+        // unreadable coordination file → no re-offer → the periodic cadence
+        // retries. Not while paused (no-candidate cooldown is a full stop;
+        // the periodic boundary below still cancels the pause on a fresh
+        // offer) and not while the last check-in offered nothing (churn
+        // guard — the periodic cadence re-probes for new work).
+        let reOfferDue = false;
+        try {
+          const notPaused = cooldownUntil === null || Date.now() >= cooldownUntil;
+          reOfferDue =
+            notPaused
+            && !disableMarkerExists(cfg.cwd)
+            && !lastOfferEmpty
+            && getEntry(opts.coordinationDir!, instanceId) === null;
+        } catch {
+          reOfferDue = false;
+        }
         const effectiveCheckInMs = leaderState ? leaderCheckInMs : checkInIntervalMs;
-        if (lastCheckInAt === null || tickNow - lastCheckInAt >= effectiveCheckInMs) {
+        if (reOfferDue || lastCheckInAt === null || tickNow - lastCheckInAt >= effectiveCheckInMs) {
           lastCheckInAt = tickNow;
           try {
             const checkIn = await runCoordinationCheckIn(opts.deps, {
@@ -3145,6 +3182,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
               coordinationDir: opts.coordinationDir!,
               instanceId,
             }, tickNow);
+            lastOfferEmpty = checkIn.offered === null;
             // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
             // backlog is dispatchable again — cancel any no-candidate pause
             // so the leader resumes polling/dispatch this very tick. The
@@ -3182,8 +3220,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
 
       // Cooldown gate (WL-0MTEZ4XZJ006Y9U7 AC2 — ordering): the check-in
       // block above runs FIRST, so a no-candidate pause never suppresses the
-      // 30-min re-offer (the only mechanism that re-offers work once the
-      // coordination file empties); a fresh re-offer cancels the pause
+      // coordination check-in (the only mechanism that re-offers work once
+      // the coordination file empties); a fresh re-offer cancels the pause
       // directly. While paused the worker performs NO proxy polling, NO
       // idle tracking, and NO dispatch. The pause is a full stop (user
       // confirmed "pause completely"); once it expires the idle tracker is
@@ -3327,10 +3365,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // is an OFFER LIST, not the backlog — after a dispatch the leader
           // removes the entry, so an empty file is a TRANSIENT gap while the
           // worklog still has dispatchable work (the pre-fix code paused on
-          // it for the full cooldown, stalling ~60 of every 62 minutes).
+          // it for the full cooldown, stalling the dispatch).
+          // WL-0MTMPSCL8000O45H AC2: the owner also observes its own entry
+          // missing and re-offers immediately on the next tick (not while in
+          // noCandidate cooldown and not when the last check-in found nothing).
           // Probe the worklog before pausing; only a GENUINELY empty backlog
           // pauses (legacy non-coordination semantics unchanged):
-          //  - probe finds a candidate → no pause, no strike: the 30-min
+          //  - probe finds a candidate → no pause, no strike: the periodic
           //    check-in re-offers it and dispatch resumes;
           //  - probe fails (wl/CLI errors) → fail-closed strike (a broken
           //    lookup must never look like an empty backlog — the

@@ -112,7 +112,7 @@ function makeWorker(opts: {
   freeSlots?: number;
   /** noCandidateCooldownMs (default 60 min). */
   cooldownMs?: number;
-  /** checkInIntervalMs (default 30 min). */
+  /** checkInIntervalMs (default 5 min, WL-0MTMPSCL8000O45H). */
   checkInIntervalMs?: number;
 }): DowntimeWorker {
   const fetcher = vi.fn(async () => {
@@ -138,7 +138,7 @@ function makeWorker(opts: {
       noCandidateCooldownMs: opts.cooldownMs ?? 3_600_000,
     }),
     leaseTtlSeconds: 300,
-    checkInIntervalMs: opts.checkInIntervalMs ?? 30 * 60 * 1000,
+    checkInIntervalMs: opts.checkInIntervalMs ?? 5 * 60 * 1000, // WL-0MTMPSCL8000O45H default
   });
 }
 
@@ -191,7 +191,7 @@ describe('integration: leader election → coordination → dispatch', () => {
       expect(String(spawnArgs[0])).toContain('/skill:plan WL-B1');
       expect(spawnArgs[1].cwd).toBe(dirB);
 
-      // B's next 30-min check-in: its old item was dispatched — it re-queues
+      // B's next check-in: its old item was dispatched — it re-queues
       // its NEXT most-important item (AC8 re-queue).
       vi.setSystemTime(20_000_000 + 31 * 60_000);
       await workerB.tick();

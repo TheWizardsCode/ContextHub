@@ -14,7 +14,7 @@
  *    after dispatch / empty-backlog removal / fail-open on wl errors
  *  - Worker integration: leader polls + dispatches from coordination;
  *    non-leader skips proxy polling and dispatches nothing; stale-leader
- *    takeover; 30-min check-in cadence
+ *    takeover; 5-min check-in cadence (WL-0MTMPSCL8000O45H)
  */
 
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
@@ -1003,7 +1003,7 @@ describe('downtime worker leader/non-leader orchestration (coordination mode)', 
 // dispatchable candidates — pausing on that wastes ~60 of every 62 minutes
 // (the 1-hour no-candidate cooldown). The fix: (AC1) probe the worklog
 // before entering the cooldown, pausing only on a genuinely empty backlog;
-// (AC2) run the 30-min check-in BEFORE the cooldown gate and cancel the
+// (AC2) run the check-in BEFORE the cooldown gate and cancel the
 // pause when a fresh re-offer lands.
 
 describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () => {
@@ -1012,9 +1012,11 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
     // single-entry coordination file. After the leader dispatches the entry
     // the file is EMPTY, so the next dispatch attempt returns no-candidate —
     // but the worklog still has a candidate (B), so the worker must NOT
-    // enter the 60-min cooldown; the leader's 4-min check-in re-offers B
-    // and dispatch resumes well within min(noCandidateCooldownMs,
-    // leaderCheckInMs). Non-leaders stay at 30 min (WL-0MTOCBP1D009P4U3).
+    // enter the 60-min cooldown. WL-0MTMPSCL8000O45H: the owner re-offers
+    // immediately after dispatch (entry-missing observer), so the second
+    // dispatch arrives at the next idle threshold — not on the 4-min
+    // boundary. Non-leaders stay at 5 min (WL-0MTMPSCL8000O45H, was 30 min
+    // pre-WL-0MTMPSCL8000O45H, WL-0MTOCBP1D009P4U3).
     vi.useFakeTimers();
     const T0 = 10_000_000;
     vi.setSystemTime(T0);
@@ -1048,33 +1050,18 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
       const firstDispatchAt = worker.lastDispatchAt ?? 0;
       expect(getEntry(testDir, 'inst-a')).toBe(null);
 
-      // A fresh full idle period elapses, then the empty-file dispatch
-      // attempt returns no-candidate. The worker probes the worklog (B is
-      // dispatchable) and must NOT enter the 60-min cooldown.
+      // WL-0MTMPSCL8000O45H: the owner re-offers B on its next tick (own
+      // entry missing). The next idle threshold tick dispatches it — gap is
+      // only one idle window, not the 4-min cadence. First dispatch resets
+      // the idle clock, so the next dispatch needs a fresh threshold.
       vi.setSystemTime(T0 + 120_001);
-      await worker.tick(); // fresh idle run starts
+      const second = await worker.tick(); // fresh idle run starts + immediate re-offer (own entry missing)
+      expect(getEntry(testDir, 'inst-a')?.workItemId).toBe('WL-B'); // re-offer landed immediately
       vi.setSystemTime(T0 + 180_001);
-      const attempt = await worker.tick(); // empty-file dispatch attempt
-      expect(attempt.dispatched).toBe(false);
-      expect(worker.paused).toBe(false); // BUG (pre-fix): 60-min cooldown entered
-
-      // The leader's 4-min check-in re-offers B and the next idle evaluation
-      // dispatches it — well inside noCandidateCooldownMs=60min.
-      // 4 min from T0 is 240k; we tick there (check-in due → re-offer B).
-      vi.setSystemTime(T0 + 4 * 60_000 + 1);
-      const second = await worker.tick(); // leader check-in due → re-offer B
-      // Dispatch may land on this same tick (idle already met) or next idle
-      // tick — either way the gap from first dispatch stays bounded by the
-      // 4-min cadence + idle threshold. Poll until dispatched (≤ 1 extra tick).
-      let gap = (worker.lastDispatchAt ?? 0) - firstDispatchAt;
-      if (!second.dispatched) {
-        vi.setSystemTime(T0 + 4 * 60_000 + 60_002);
-        const extra = await worker.tick();
-        expect(extra.dispatched).toBe(true);
-        gap = (worker.lastDispatchAt ?? 0) - firstDispatchAt;
-      } else {
-        expect(second.dispatched).toBe(true);
-      }
+      const attempt = await worker.tick(); // idle threshold met → dispatch B
+      expect(attempt.dispatched).toBe(true);
+      expect(worker.paused).toBe(false);
+      const gap = (worker.lastDispatchAt ?? 0) - firstDispatchAt;
       expect(getEntry(testDir, 'inst-a')).toBe(null);
       expect(gap).toBeLessThan(5 * 60_000 + 60_002);
       expect(gap).toBeGreaterThan(0);

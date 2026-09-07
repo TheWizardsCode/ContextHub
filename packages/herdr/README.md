@@ -231,9 +231,9 @@ dispatches; the other herdr instances coordinate instead of polling:
   migration — stale files orphaned, ignored).
 - **Shared coordination file** — machine-wide
   `~/.herdr/downtime/downtime-coordination.json` (or
-  `HERDR_COORDINATION_DIR`): entries **do not expire by age**; every instance checks in on startup — **leaders every ~4 minutes** (`DEFAULT_LEADER_CHECK_IN_MS`, renewing the 5-min lease inside its TTL) and **followers every 30 minutes** (`DEFAULT_COORDINATION_CHECK_IN_MS`) — offering its most-important item as
+  `HERDR_COORDINATION_DIR`): entries **do not expire by age**; every instance checks in on startup — **leaders every ~4 minutes** (`DEFAULT_LEADER_CHECK_IN_MS`, renewing the 5-min lease inside its TTL) and **followers every 5 minutes** (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — offering its most-important item as
   `{instanceId, workItemId, worklogRoot/directory, assignedAt, lastUpdated}`
-  (`worklogRoot` lets the single leader dispatch across roots — F4). Re-offer also refreshes leadership every tick from the lease file.
+  (`worklogRoot` lets the single leader dispatch across roots — F4). When the leader dispatches an entry and removes it, the owning instance **re-offers immediately on its next tick** (coordination-file observation — no extra poll). Re-offer also refreshes leadership every tick from the lease file.
 - **Leader dispatch** — only the leader polls the proxy; once idle for the
   threshold, it first checks **scheduled-prompts** (a due prompt dispatches
   immediately — WL-0MSS1Q5ER007QDKX, see *Scheduled prompts*); otherwise it
