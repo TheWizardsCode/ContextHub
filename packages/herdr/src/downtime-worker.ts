@@ -1243,6 +1243,25 @@ export interface DowntimeErrorEvent {
   message: string;
   /** Underlying wl/CLI error (timeout, SQLITE_BUSY, parse failure, stderr) — WL-0MTL4PC0Y005GXTI. */
   error?: string;
+
+  // ── Enriched per-strike fields (WL-0MTJPYM53003ORCV) ──
+
+  /** Excerpt of stderr from the failing wl CLI invocation, truncated to 200 chars with `[truncated]` marker if longer. */
+  stderrExcerpt?: string;
+  /** Exit code from the failing wl CLI spawn (null = killed by signal). */
+  exitCode?: number | null;
+  /** Timeout in ms that was configured for the wl CLI invocation. */
+  timeoutMs?: number;
+  /** Work item id that was being dispatched when the error occurred. */
+  workItemId?: string;
+  /** The wl subcommand that failed (e.g. "wl show <id>", "wl close <id>"). */
+  command?: string;
+  /** Which strike this is in the three-strike sequence (1, 2, or 3). */
+  attempt?: number;
+  /** Distinguishes coordination probe failures from dispatch-path CLI failures.
+   * `"coordination-probe"` = worklog probe failed while shared coordination file held no dispatchable entry.
+   * `"dispatch-cli"` = wl CLI error during dispatch (spawn-failed / claim-failed / fetchItem failure). */
+  probeContext?: string;
 }
 
 export interface DowntimeDispatchOutcome {
@@ -1281,6 +1300,13 @@ export interface DowntimeDispatchOutcome {
    * signal — WL-0MSLWJ3I70031Z8U AC2).
    */
   exitCode?: number | null;
+
+  // ── Enriched per-strike error fields (WL-0MTJPYM53003ORCV) ──
+
+  /** Timeout in ms that was used for the wl CLI call that failed. */
+  timeoutMs?: number;
+  /** Work item id being dispatched (set on dispatch-tier failures). */
+  workItemId?: string;
 }
 
 /**
@@ -1878,6 +1904,7 @@ export async function dispatchFromCoordination(
   let fetchAttempts = 0;
   let fetchFailures = 0;
   let lastFetchError: string | undefined;
+  let lastEntryWorkItemId: string | undefined; // WL-0MTJPYM53003ORCV
   for (const entry of entries) {
     if (entry.instanceId.length === 0 || entry.workItemId.length === 0) continue;
     fetchAttempts += 1;
@@ -1888,6 +1915,7 @@ export async function dispatchFromCoordination(
       // one broken worklog must not starve the rest).
       fetchFailures += 1;
       lastFetchError = (result as { error?: string }).error ?? 'fetchItem failed';
+      lastEntryWorkItemId = entry.workItemId; // WL-0MTJPYM53003ORCV
       continue;
     }
     // Sequential FILTERS on the offer (never a ranking).
@@ -1931,8 +1959,8 @@ export async function dispatchFromCoordination(
     }
     if (outcome.reason === 'wl-error') {
       // A wl failure is a strike — stop the cycle (three-strike rule
-      // decides when to pause).
-      return outcome;
+      // decides when to pause). Carry the entry's workItemId for logging.
+      return { ...outcome, workItemId: entry.workItemId };
     }
     if (outcome.reason === 'spawn-failed' || outcome.reason === 'marker-write-failed') {
       // The item is claimed (+ marked) but the pane never appeared:
@@ -1945,9 +1973,15 @@ export async function dispatchFromCoordination(
 
   // A wl lookup that failed for EVERY entry is a persistent CLI/parse
   // failure — a strike (never a silent no-candidate). Per-instance
-  // failures are tolerated (fail-open).
+  // failures are tolerated (fail-open). Carry the last entry's workItemId
+  // for per-strike logging (WL-0MTJPYM53003ORCV).
   if (fetchAttempts > 0 && fetchFailures === fetchAttempts) {
-    return { dispatched: false, reason: 'wl-error', error: lastFetchError ?? 'all fetchItem lookups failed' };
+    return {
+      dispatched: false,
+      reason: 'wl-error',
+      error: lastFetchError ?? 'all fetchItem lookups failed',
+      workItemId: lastEntryWorkItemId,
+    };
   }
 
   // No offer survived the dispatch-time filters (or a freeze skip with no
@@ -2790,19 +2824,52 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // error so it is auditable. A single transient failure does NOT pause —
   // it retries on the next idle period. Fail-closed: error logging must
   // never crash the worker.
-  const pauseAfterPersistentErrors = async (message: string, error?: string): Promise<void> => {
+  // WL-0MTJPYM53003ORCV: log on EVERY strike (not just 3) with structured
+  // fields for debuggability.
+  const pauseAfterPersistentErrors = async (
+    message: string,
+    error?: string,
+    extra?: {
+      workItemId?: string;
+      command?: string;
+      stderrExcerpt?: string;
+      exitCode?: number | null;
+      timeoutMs?: number;
+      probeContext?: string;
+    },
+  ): Promise<void> => {
     errorStrikes += 1;
+    const attempt = errorStrikes;
+    // Enrich stderr: the explicit stderr excerpt wins; otherwise fall back
+    // to the plain error string (fetcher.ts builds it from
+    // `stderr || stdout || error.message`, so it IS the stderr in most
+    // wl-error cases). Truncate to 200 chars with [truncated] marker
+    // (WL-0MTJPYM53003ORCV).
+    const rawStderr = extra?.stderrExcerpt ?? error ?? '';
+    const stderrExcerpt =
+      rawStderr.length > 0
+        ? rawStderr.length > 200
+          ? rawStderr.slice(0, 200) + '[truncated]'
+          : rawStderr
+        : undefined;
+    try {
+      await opts.deps.recordError({
+        cwd: opts.config().cwd,
+        at: new Date().toISOString(),
+        message,
+        ...(error ? { error } : {}),
+        ...(stderrExcerpt ? { stderrExcerpt } : {}),
+        ...(extra?.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
+        ...(extra?.timeoutMs !== undefined ? { timeoutMs: extra.timeoutMs } : {}),
+        ...(extra?.workItemId ? { workItemId: extra.workItemId } : {}),
+        ...(extra?.command ? { command: extra.command } : {}),
+        attempt,
+        ...(extra?.probeContext ? { probeContext: extra.probeContext } : {}),
+      });
+    } catch {
+      // fail-closed: error logging must never crash the worker
+    }
     if (errorStrikes >= DOWNTIME_ERROR_STRIKE_LIMIT) {
-      try {
-        await opts.deps.recordError({
-          cwd: opts.config().cwd,
-          at: new Date().toISOString(),
-          message,
-          ...(error ? { error } : {}),
-        });
-      } catch {
-        // fail-closed: error logging must never crash the worker
-      }
       cooldownUntil = Date.now() + opts.config().noCandidateCooldownMs;
       errorStrikes = 0;
       tracker.record(false);
@@ -3188,6 +3255,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 `coordination file held no dispatchable entry — ` +
                 `${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive errors, pausing ` +
                 `dispatch for ${cfg.noCandidateCooldownMs}ms.`,
+                undefined,
+                { probeContext: 'coordination-probe', timeoutMs: DOWNTIME_WL_TIMEOUT_MS },
               );
             }
             // probe.ok with a candidate: no pause — the empty file is a
@@ -3206,11 +3275,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // worker entirely (no dispatch) AFTER logging the persistent error
           // so the failure is auditable. A single transient error does NOT
           // pause — it retries on the next idle period. Carry the
-          // underlying wl error (WL-0MTL4PC0Y005GXTI) so the pause entry is actionable.
+          // underlying wl error (WL-0MTL4PC0Y005GXTI) so the pause entry is
+          // actionable. WL-0MTJPYM53003ORCV: pass structured error context.
           await pauseAfterPersistentErrors(
             `Downtime worker: ${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive ` +
             `wl CLI errors — pausing dispatch for ${cfg.noCandidateCooldownMs}ms.`,
             outcome.error,
+            { probeContext: 'dispatch-cli', timeoutMs: DOWNTIME_WL_TIMEOUT_MS, workItemId: outcome.workItemId },
           );
         }
         // Any other non-dispatch outcome (dispatch-in-flight, code-freeze

@@ -102,6 +102,34 @@ describe('downtime rolling log', () => {
     expect(JSON.parse(lines[0])).toEqual({ itemId: 'WL-A', kind: 'plan', n: 1 });
   });
 
+  // ── Enriched per-strike error entries (WL-0MTJPYM53003ORCV) ─────────
+
+  it('tolerantly parses error entries with the new structured fields (WL-0MTJPYM53003ORCV)', async () => {
+    const cwd = makeTempCwd();
+    const enrichedEntry = JSON.stringify({
+      cwd: '/repo',
+      at: '2026-09-07T01:00:00.000Z',
+      message: '3 consecutive wl CLI errors — pausing dispatch for 3600000ms.',
+      error: 'SQLITE_BUSY',
+      stderrExcerpt: 'database is locked',
+      exitCode: 1,
+      timeoutMs: 10_000,
+      workItemId: 'WL-ABC',
+      command: 'wl show WL-ABC',
+      attempt: 2,
+      probeContext: 'dispatch-cli',
+    });
+    await appendDowntimeLogEntry(cwd, enrichedEntry);
+    const entries = await readDowntimeLogEntries(cwd);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].stderrExcerpt).toBe('database is locked');
+    expect(entries[0].exitCode).toBe(1);
+    expect(entries[0].timeoutMs).toBe(10_000);
+    expect(entries[0].workItemId).toBe('WL-ABC');
+    expect(entries[0].attempt).toBe(2);
+    expect(entries[0].probeContext).toBe('dispatch-cli');
+  });
+
   it('appends to an existing log file without truncating prior entries', async () => {
     const cwd = makeTempCwd();
     mkdirSync(join(cwd, '.worklog'));
@@ -127,6 +155,27 @@ describe('downtime rolling log', () => {
     expect(lines).toHaveLength(DOWNTIME_LOG_MAX_ENTRIES);
     expect(JSON.parse(lines[0])).toEqual({ n: total - DOWNTIME_LOG_MAX_ENTRIES });
     expect(JSON.parse(lines[lines.length - 1])).toEqual({ n: total - 1 });
+  });
+
+  it('rolling bound DOWNTIME_LOG_MAX_ENTRIES=100 trimming still works with enriched error entries (WL-0MTJPYM53003ORCV)', async () => {
+    const cwd = makeTempCwd();
+    const total = DOWNTIME_LOG_MAX_ENTRIES + 5;
+    // Write enriched error entries simulating per-strike logs
+    for (let i = 0; i < total; i++) {
+      await appendDowntimeLogEntry(cwd, JSON.stringify({
+        cwd: '/repo',
+        at: `2026-09-07T01:00:${String(i).padStart(2, '0')}.000Z`,
+        message: `Strike ${i % 3 + 1} error`,
+        attempt: i % 3 + 1,
+        probeContext: 'dispatch-cli',
+        timeoutMs: 10_000,
+      }));
+    }
+    const lines = readLog(cwd);
+    expect(lines).toHaveLength(DOWNTIME_LOG_MAX_ENTRIES);
+    // The newest entries are retained (last 100 of 105)
+    const lastEntry = JSON.parse(lines[lines.length - 1]);
+    expect(lastEntry.attempt).toBe(3);
   });
 });
 

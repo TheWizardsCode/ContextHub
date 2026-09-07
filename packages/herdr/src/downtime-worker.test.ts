@@ -3727,7 +3727,8 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     expect(worker.paused).toBe(false); // a single error is NOT an empty backlog
     expect(worker.errorStrikes).toBe(1); // ...but it IS the first strike
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-    expect(deps.recordError).not.toHaveBeenCalled();
+    // WL-0MTJPYM53003ORCV: every strike is logged (per-strike observability).
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
   });
 
   it('does not enter the cooldown when the dispatch guard reports in-flight', async () => {
@@ -4050,11 +4051,14 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     expect(s3.dispatched).toBe(false);
     expect(worker.paused).toBe(true);
     expect(worker.errorStrikes).toBe(0); // counter reset once paused
-    expect(deps.recordError).toHaveBeenCalledTimes(1);
-    const event = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(event.cwd).toBe('/repo');
-    expect(event.message).toContain('3 consecutive');
-    expect(Number.isNaN(Date.parse(event.at))).toBe(false);
+    // WL-0MTJPYM53003ORCV: every strike is logged — 3 per-strike entries
+    // (attempt 1/2/3), not just the pause marker at strike 3.
+    expect(deps.recordError).toHaveBeenCalledTimes(3);
+    const event3 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[2][0];
+    expect(event3.cwd).toBe('/repo');
+    expect(event3.message).toContain('3 consecutive');
+    expect(event3.attempt).toBe(3);
+    expect(Number.isNaN(Date.parse(event3.at))).toBe(false);
   });
 
   it('an audit-tier wl failure counts toward the three-strike rule (WL-0MSLWJ2KP0002SV0)', async () => {
@@ -4083,13 +4087,14 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     const s2 = await worker.tick();
     expect(s2.dispatched).toBe(false);
     expect(worker.errorStrikes).toBe(2);
-    expect(deps.recordError).not.toHaveBeenCalled();
+    // WL-0MTJPYM53003ORCV: strikes 1 and 2 are already logged per-strike.
+    expect(deps.recordError).toHaveBeenCalledTimes(2);
 
     const s3 = await worker.tick(); // strike 3 → pause + durable trace
     expect(s3.dispatched).toBe(false);
     expect(worker.paused).toBe(true);
     expect(worker.errorStrikes).toBe(0);
-    expect(deps.recordError).toHaveBeenCalledTimes(1);
+    expect(deps.recordError).toHaveBeenCalledTimes(3);
     expect(deps.recordError).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: '/repo' }),
     );
@@ -4155,7 +4160,9 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
 
     await worker.tick(); // strike 3 → paused
     expect(worker.paused).toBe(true);
-    expect(deps.recordError).toHaveBeenCalledTimes(1);
+    // WL-0MTJPYM53003ORCV: per-strike logging — 1 (pre-dispatch strike) +
+    // 3 (fresh strikes 1-3) = 4 recordError calls.
+    expect(deps.recordError).toHaveBeenCalledTimes(4);
   });
 
   it('does not strike on a no-candidate outcome (CLI answered — healthy)', async () => {
@@ -4173,14 +4180,108 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     await worker.tick();
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
 
-    await worker.tick(); // strike 1
+    await worker.tick(); // strike 1 → recordError logged
     expect(worker.errorStrikes).toBe(1);
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
 
     const result = await worker.tick(); // no-candidate → cooldown, strikes reset
     expect(result.dispatched).toBe(false);
     expect(worker.paused).toBe(true); // genuine empty backlog pauses the worker
     expect(worker.errorStrikes).toBe(0);
-    expect(deps.recordError).not.toHaveBeenCalled(); // no persistent-error log
+    // recordError was called for strike 1; no-candidate does NOT add a strike
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Per-strike logging (WL-0MTJPYM53003ORCV) ────────────────────────
+
+  it('records a persistent error on EVERY strike (1, 2, and 3), not just strike 3', async () => {
+    const { worker, deps } = makeErrorWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+
+    await worker.tick(); // strike 1
+    expect(worker.errorStrikes).toBe(1);
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
+
+    await worker.tick(); // strike 2
+    expect(worker.errorStrikes).toBe(2);
+    expect(deps.recordError).toHaveBeenCalledTimes(2);
+
+    await worker.tick(); // strike 3 → pause + log
+    expect(worker.errorStrikes).toBe(0);
+    expect(deps.recordError).toHaveBeenCalledTimes(3);
+  });
+
+  it('per-strike log entries carry attempt/probeContext/timeoutMs on every strike (WL-0MTJPYM53003ORCV)', async () => {
+    const { worker, deps } = makeErrorWorker({
+      deps: {
+        // Carry a stderr-ish message so stderrExcerpt is populated from the
+        // error string (fetcher.ts builds error from stderr||stdout||message).
+        getNextItem: vi.fn().mockResolvedValue({ ok: false, error: 'SQLITE_BUSY: database is locked' }),
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+
+    await worker.tick(); // strike 1
+    const event1 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event1.cwd).toBe('/repo');
+    expect(event1.attempt).toBe(1);
+    expect(event1.probeContext).toBe('dispatch-cli');
+    expect(event1.timeoutMs).toBe(10_000);
+    expect(event1.stderrExcerpt).toBe('SQLITE_BUSY: database is locked');
+    expect(Number.isNaN(Date.parse(event1.at))).toBe(false);
+
+    await worker.tick(); // strike 2
+    const event2 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[1][0];
+    expect(event2.attempt).toBe(2);
+    expect(event2.probeContext).toBe('dispatch-cli');
+    expect(event2.stderrExcerpt).toBe('SQLITE_BUSY: database is locked');
+
+    await worker.tick(); // strike 3
+    const event3 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[2][0];
+    expect(event3.attempt).toBe(3);
+    expect(event3.probeContext).toBe('dispatch-cli');
+  });
+
+  it('stderr excerpt is truncated to 200 chars with [truncated] marker (WL-0MTJPYM53003ORCV)', async () => {
+    const longStderr = 'database is locked '.repeat(50); // > 200 chars
+    const { worker, deps } = makeErrorWorker({
+      deps: {
+        getNextItem: vi.fn().mockResolvedValue({ ok: false, error: longStderr }),
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick(); // strike 1
+    const event = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event.stderrExcerpt.length).toBeLessThanOrEqual(200 + '[truncated]'.length);
+    expect(event.stderrExcerpt.endsWith('[truncated]')).toBe(true);
+    expect(event.stderrExcerpt.length).toBe(200 + '[truncated]'.length);
+  });
+
+  it('probeContext is dispatch-cli for the legacy dispatch path (WL-0MTJPYM53003ORCV)', async () => {
+    // The makeErrorWorker fixture runs in legacy (non-coordination) mode,
+    // so all errors flow through the dispatch-cli path.
+    const { worker, deps } = makeErrorWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+
+    await worker.tick(); // strike 1
+    const event1 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event1.probeContext).toBe('dispatch-cli');
+
+    await worker.tick(); // strike 2
+    const event2 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[1][0];
+    expect(event2.probeContext).toBe('dispatch-cli');
   });
 });
 
