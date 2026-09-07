@@ -374,6 +374,92 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
   continuously, and the coordination list has offers. Check
   `downtime-coordination.log` for check-ins and the dispatches log for the
   last dispatch.
+- **Diagnosing wl errors with per-strike logs (WL-0MTJPYM53003ORCV):**
+  when the downtime worker encounters CLI errors, it now logs a **structured
+  JSONL entry on every strike** (not just the third). To diagnose:
+
+  ```bash
+  # Extract all per-strike error entries for a specific time window
+  grep '"message":.*consecutive' .worklog/downtime-dispatches.log \
+    | jq -s '[.[] | select(.at > "2026-09-02T01:00:00" and .at < "2026-09-02T06:00:00")]' \
+    | jq '.[].stderrExcerpt'
+  ```
+
+  **Distinguishing probe failures from dispatch failures:** look at the
+  `probeContext` field:
+
+  - `probeContext: "coordination-probe"` — the coordination probe failed
+    (the shared coordination file check-in or offer probe errored). This
+    usually indicates a worklog-root accessibility issue on the leader.
+  - `probeContext: "dispatch-cli"` — the dispatch-tier `wl` lookup failed
+    (e.g. `wl next` or `wl list` returned an error). This usually points
+    to a worklog parsing or network issue.
+
+  **Aggregating across machines:** in a multi-machine setup, each machine
+  has its own `~/.herdr/downtime/` directory. Collect the
+  `downtime-dispatches.log` from each machine's `.worklog/` directory and
+  correlate by `at` timestamp to build a complete picture.
+
+  **Key fields:** see [Log schema](#log-schema) below for all documented
+  fields. The `attempt` field (1, 2, or 3) identifies the strike number;
+  `stderrExcerpt` (≤ 200 chars) carries the truncated error output;
+  `exitCode` (if available) is the CLI exit code.
+
+## Log schema
+
+### `DowntimeErrorEvent` fields (per-strike error log entries)
+
+These fields are written to `.worklog/downtime-dispatches.log` when
+`pauseAfterPersistentErrors` is called (every wl-error strike and the
+three-strike pause). All fields except `message`, `at`, and `cwd` are
+optional — only fields with actual data are serialized.
+
+| Field | Type | Description |
+|---|---|---|
+| `message` | string | Human-readable summary (e.g. "Downtime worker: 3 consecutive wl CLI errors…") |
+| `at` | string (ISO 8601) | UTC timestamp of the event |
+| `cwd` | string | The worklog root directory from which the dispatch was attempted |
+| `attempt` | number | Strike number (1, 2, or 3) — the sequence index of this consecutive error |
+| `stderrExcerpt` | string (≤ 200 chars + `[truncated]`) | Truncated stderr output from the failing `wl` command; appended with `[truncated]` if longer than 200 chars |
+| `exitCode` | number \| null | Non-zero exit code of the `wl` command, or null if not available |
+| `timeoutMs` | number | Timeout in milliseconds for the failing `wl` command (typically `DOWNTIME_WL_TIMEOUT_MS = 10_000`) |
+| `workItemId` | string | The work item ID being dispatched when the error occurred (may be `undefined` for coordination-probe failures) |
+| `command` | string | The CLI command that failed (e.g. `wl next <stage>`, `wl list --priority critical`) |
+| `probeContext` | string | One of `"coordination-probe"` (shared coordination file probe) or `"dispatch-cli"` (dispatch-tier `wl` call) |
+
+### Rolling log trimming
+
+The log file is bounded to the most recent 100 entries
+(`DOWNTIME_LOG_MAX_ENTRIES`). Entries are appended; when the file exceeds
+100 lines the first lines are truncated. All new schema fields are
+preserved during trimming.
+
+### Backward compatibility
+
+The `DowntimeLogEntry` interface treats all new fields as optional:
+
+```typescript
+export interface DowntimeLogEntry {
+  at: string;
+  cwd: string;
+  message: string;
+  // Legacy
+  error?: string;
+  // Enriched (WL-0MTJPYM53003ORCV)
+  stderrExcerpt?: string;
+  exitCode?: number | null;
+  timeoutMs?: number;
+  workItemId?: string;
+  command?: string;
+  probeContext?: string;
+  attempt?: number;
+}
+```
+
+Older herdr versions reading the log will see `undefined` for the new
+fields and continue to work — they simply ignore them.
+
+- **Two leaders:** impossible with `O_CREAT|O_EXCL` on one machine; if it
 - **Two leaders:** impossible with `O_CREAT|O_EXCL` on one machine; if it
   appears, check for leftover stale lock files — delete the **machine-dir**
   `~/.herdr/downtime/downtime-leader.lock` + lease to force re-election (per-

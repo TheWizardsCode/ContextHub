@@ -728,11 +728,19 @@ dispatcher's marker read and the pane spawn.
 
 **Three-strike rule on CLI errors** — a dispatch attempt that ends in a `wl`
 CLI error counts as one strike. Three **consecutive** strikes pause the
-worker entirely (same full pause as the empty-backlog cooldown) *after*
-logging the persistent error to the rolling downtime log, so a persistently
-broken `wl` CLI stops burning idle cycles instead of retrying forever. A
-successful dispatch, a genuine no-candidate outcome, or an expired pause
-resets the strike counter; a single transient error never pauses on its own.
+worker entirely (same full pause as the empty-backlog cooldown). Since
+**WL-0MTJPYM53003ORCV** the worker logs a **structured per-strike entry**
+to the rolling downtime log on **every** strike (1, 2, and 3), not just
+the third. Each entry carries `attempt`, `stderrExcerpt` (truncated stderr,
+≤ 200 chars), `exitCode`, `timeoutMs`, `probeContext` (`"dispatch-cli"` or
+`"coordination-probe"`), and optionally `workItemId` / `command` — see
+[downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#log-schema)
+for the full schema. This makes it possible to diagnose *which* wl command
+was failing, *what* the stderr said, and *whether* it was a dispatch-tier
+call or a coordination-probe call, **before** the worker even reaches the
+pause. A successful dispatch, a genuine no-candidate outcome, or an expired
+pause resets the strike counter; a single transient error never pauses on
+its own.
 
 **Hang protection** — every downtime `wl` invocation (`wl next` and
 `wl list` selection lookups) runs with a bounded 10s timeout, so a hung `wl`
@@ -795,9 +803,11 @@ advancement releases it (RCA WL-0MSRBFFLN005W3VT design point 3). Plan /
 intake markers are scoped to their own tiers and never suppress audit
 selection. `kind: scheduled` entries are log-only (no work item) and are
 scoped to the scheduled-prompts tier — they never suppress any worklog-tier
-selection. A three-strike CLI-error pause additionally writes a JSONL entry
-to the same rolling log (with the `at` timestamp and an error message) so
-the persistent failure is auditable even though nothing was dispatched. The
+selection. A three-strike CLI-error pause additionally writes **three JSONL entries**
+(one per strike, since WL-0MTJPYM53003ORCV) to the same rolling log
+(each carrying `attempt`, `stderrExcerpt`, `probeContext`, etc.) so
+the persistent failure is auditable at per-strike granularity even though
+nothing was dispatched. The
 `.worklog` log file is gitignored and local-only.
 
 **Failure-path logging** — a complete account of what each dispatch outcome
@@ -807,9 +817,8 @@ leaves behind (documented for WL-0MSKUG2WW0058A7W, audit gap AC2):
 |---|---|---|
 | Successful dispatch | comment on the item + JSONL entry (`kind`, `itemId`, `dispatchedAt`, `stage` for plan/intake) | the only fully-visible success outcome |
 | Genuine empty backlog (no-candidate) | **none** — intentionally silent | full cooldown pause (default 60 min); worker stops polling |
-| 1–2 transient wl CLI errors (strikes) | **none** — silent | one strike per `wl-error` outcome; retries on the next idle window |
-| 3rd consecutive wl CLI error | `recordError` JSONL entry | three-strike pause; the only failure path that logs |
-| Audit-tier wl/parse failure | **none** — silent, but **counts as a `wl-error` strike** | `getNextAuditCandidate` resolves `{ok:false}` (never a `null` that looks like an empty tier, WL-0MSLWJ2KP0002SV0); the dispatch fails closed to busy — no fall-through to the implement/plan tiers — and the three-strike rule pauses + logs it after 3 consecutive failures |
+| 1st–3rd consecutive wl CLI errors (strikes) | `recordError` JSONL entry **on every strike** | each entry carries `attempt` (1/2/3), `stderrExcerpt`, `probeContext`, etc. — see [WL-0MTJPYM53003ORCV](../../docs/dev/downtime-dispatcher.md#log-schema); the 3rd also triggers a full pause |
+| Audit-tier wl/parse failure | `recordError` JSONL entry **on every strike** | `getNextAuditCandidate` resolves `{ok:false}` (never a `null` that looks like an empty tier, WL-0MSLWJ2KP0002SV0); the dispatch fails closed to busy — no fall-through to the implement/plan tiers — and each failure now logs per-strike, pausing after 3 consecutive failures |
 | Lost CAS claim race (`--if-status`/`--if-stage` stale) | **none** — and **no marker, no pane, no success record** | the dispatch ABORTS with reason `claim-failed` (neutral — another pane won); the failure is observable via the outcome and a stderr line, never silently discarded (WL-0MSLWJ310000ND0X absorbed) |
 | Claim wl CLI failure (non-stale) | **none** — counts as a `wl-error` strike | dispatch aborts; three consecutive such failures pause the worker |
 | Marker write failure | **none** — the item stays claimed (`in_progress`) | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched; the claim still removes it from `wl next`, so no other pane selects it) |
