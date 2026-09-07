@@ -224,14 +224,13 @@ export function assignItemGroups(
 // ── Within-group ordering ────────────────────────────────────────────
 
 /**
- * Stage sub-order within a group: in_progress first (actively being worked),
- * then plan_complete, then intake_complete, then all remaining stages.
+ * Stage sub-order within a group: plan_complete first (ready to work),
+ * then intake_complete, then all remaining stages.
  * No headings are rendered between sub-groups.
  */
 const WITHIN_GROUP_STAGE_ORDER: Record<string, number> = {
-  in_progress: 0,
-  plan_complete: 1,
-  intake_complete: 2,
+  plan_complete: 0,
+  intake_complete: 1,
 };
 // Any stage not listed above (including undefined/empty) → 3 (remaining).
 const REMAINING_STAGE_ORDER = 3;

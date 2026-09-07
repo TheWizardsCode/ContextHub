@@ -44,7 +44,6 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
       { id: 'WL-C1', stage: 'plan_complete', filePaths: ['src/c.ts'], priority: 'critical' },
       { id: 'WL-P1', stage: 'plan_complete', filePaths: ['src/p1.ts'], priority: 'high' },
       { id: 'WL-I1', stage: 'intake_complete', filePaths: ['src/i1.ts'], priority: 'medium' },
-      { id: 'WL-IP1', stage: 'in_progress', filePaths: ['src/ip1.ts'], priority: 'high' },
       { id: 'WL-idea', stage: 'idea', filePaths: [], priority: 'low' },
       { id: 'WL-other', stage: 'custom', filePaths: [], priority: 'medium' },
       { id: 'WL-R1', stage: 'in_review', filePaths: [], priority: 'medium' },
@@ -52,10 +51,9 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
     const groups = assignItemGroups(items, 3);
     const groupOf = (id: string): number => groups.get(id)!.group;
     expect(groups.get('WL-C1')!.groupLabel).toBe('Critical Group 1');
-    // Plan/intake/in_progress items share Group N (no stage prefix in the label).
+    // Plan/intake items share Group N (no stage prefix in the label).
     expect(groups.get('WL-P1')!.groupLabel).toBe('Group 1');
     expect(groups.get('WL-I1')!.groupLabel).toBe('Group 1');
-    expect(groups.get('WL-IP1')!.groupLabel).toBe('Group 1');
     expect(groupOf('WL-C1')).toBeLessThan(groupOf('WL-P1'));
     expect(groupOf('WL-P1')).toBeLessThan(groupOf('WL-idea'));
     expect(groupOf('WL-idea')).toBeLessThan(groupOf('WL-other'));
@@ -89,12 +87,11 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
     expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
   });
 
-  it('never places canonical stages in "Other" (in_progress joins Group N)', () => {
+  it('never places canonical stages in "Other" (plan_complete + intake_complete join Group N)', () => {
     const items: GroupableItem[] = [
       { id: 'WL-idea', stage: 'idea', filePaths: ['src/idea.ts'], priority: 'medium' },
       { id: 'WL-intake', stage: 'intake_complete', filePaths: ['src/intake.ts'], priority: 'medium' },
       { id: 'WL-plan', stage: 'plan_complete', filePaths: ['src/plan.ts'], priority: 'medium' },
-      { id: 'WL-progress', stage: 'in_progress', filePaths: ['src/progress.ts'], priority: 'medium' },
       { id: 'WL-review', stage: 'in_review', filePaths: ['src/review.ts'], priority: 'medium' },
     ];
     const groups = assignItemGroups(items, 3);
@@ -106,15 +103,15 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
     expect(unknown.get('WL-x')!.groupLabel).toBe('Other');
   });
 
-  it('sorts in_progress items first within a group (stage sub-order)', () => {
+  it('sorts plan_complete items before intake_complete within a group (stage sub-order)', () => {
     const items: GroupableItem[] = [
       { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
-      { id: 'IP-high', stage: 'in_progress', filePaths: [], priority: 'high' },
       { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
-      { id: 'IP-low', stage: 'in_progress', filePaths: [], priority: 'low' },
+      { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
+      { id: 'I-high', stage: 'intake_complete', filePaths: [], priority: 'high' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['IP-high', 'IP-low', 'P-med', 'I-low']);
+    expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
   });
 });
 
