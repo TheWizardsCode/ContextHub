@@ -82,7 +82,7 @@ wl show <id> --format full
 Mark the item as in-progress and assign it to yourself:
 
 ```bash
-wl update <id> -s in-progress --stage in_progress -a "Your Name"
+wl update <id> -s in-progress -a "Your Name"
 ```
 
 Verify the change:
@@ -91,7 +91,7 @@ Verify the change:
 wl show <id>
 ```
 
-The status should now read `in-progress`, the stage `in_progress`, and the assignee should show your name.
+The status should now read `in-progress` and the assignee should show your name (stage is left unchanged on claim).
 
 ### Change the priority
 
