@@ -4,7 +4,7 @@ exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outp
 "Audit formatting test TEST-1
 | Field     | Value |
 | --------- | ----- |
-| Status    | 🔓 Open [OPEN] · Stage: In Progress \\| Priority: 📋 medium [MED ] |
+| Status    | 🔓 Open [OPEN] · Stage: Plan Complete \\| Priority: 📋 medium [MED ] |
 | SortIndex | 100 |
 | Risk      | — |
 | Effort    | — |
@@ -18,7 +18,7 @@ exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outp
 | Field     | Value |
 | --------- | ----- |
 | ID        | TEST-1 |
-| Status    | 🔓 Open [OPEN] · Stage: In Progress \\| Priority: 📋 medium [MED ] |
+| Status    | 🔓 Open [OPEN] · Stage: Plan Complete \\| Priority: 📋 medium [MED ] |
 | Type      | task |
 | SortIndex | 100 |
 | Risk      | — |
@@ -44,7 +44,7 @@ exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outp
 | --------- | ----- |
 | ID        | TEST-1 |
 | Title     | Audit formatting test |
-| Status    | 🔓 Open [OPEN] · Stage: In Progress \\| Priority: 📋 medium [MED ] |
+| Status    | 🔓 Open [OPEN] · Stage: Plan Complete \\| Priority: 📋 medium [MED ] |
 | SortIndex | 100 |
 | Risk      | — |
 | Effort    | — |
@@ -57,7 +57,7 @@ exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outp
 "Audit formatting test TEST-1
 | Field     | Value |
 | --------- | ----- |
-| Status    | 🔓 Open [OPEN] · Stage: In Progress \\| Priority: 📋 medium [MED ] |
+| Status    | 🔓 Open [OPEN] · Stage: Plan Complete \\| Priority: 📋 medium [MED ] |
 | SortIndex | 100 |
 | Risk      | — |
 | Effort    | — |
@@ -70,7 +70,7 @@ exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outp
 | Field     | Value |
 | --------- | ----- |
 | ID        | TEST-1 |
-| Status    | 🔓 Open [OPEN] · Stage: In Progress \\| Priority: 📋 medium [MED ] |
+| Status    | 🔓 Open [OPEN] · Stage: Plan Complete \\| Priority: 📋 medium [MED ] |
 | Type      | task |
 | SortIndex | 100 |
 | Risk      | — |
@@ -87,7 +87,7 @@ exports[`humanFormatWorkItem audit formatting > renders concise/normal/full outp
 | --------- | ----- |
 | ID        | TEST-1 |
 | Title     | Audit formatting test |
-| Status    | 🔓 Open [OPEN] · Stage: In Progress \\| Priority: 📋 medium [MED ] |
+| Status    | 🔓 Open [OPEN] · Stage: Plan Complete \\| Priority: 📋 medium [MED ] |
 | SortIndex | 100 |
 | Risk      | — |
 | Effort    | — |

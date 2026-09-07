@@ -339,7 +339,8 @@ describe('delegate subcommand guard rails', () => {
     const updated = t.db.get('WL-STATE-1');
     expect(updated.status).toBe('in-progress');
     expect(updated.assignee).toBe('@github-copilot');
-    expect(updated.stage).toBe('in_progress');
+    // WL-0MTQZ6JDH no longer sets stage on delegation — stage stays as-is
+    expect(updated.stage).toBe('');
   });
 
   it('outputs human-readable success messages', async () => {

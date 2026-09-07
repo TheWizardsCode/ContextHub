@@ -504,15 +504,17 @@ describe('assignItemGroups — Idea / Other / In Review', () => {
 // ── compareGroupableItems — within-group ordering ─────────────────────
 
 describe('compareGroupableItems — within-group ordering', () => {
-  it('orders in_progress before plan_complete before intake_complete before remaining stages', () => {
+  it('orders plan_complete before intake_complete before remaining stages (WL-0MTQZ7HZY: in_progress is now remaining)', () => {
     const progress = { id: 'IP', stage: 'in_progress', filePaths: [], priority: 'medium' };
     const plan = { id: 'P', stage: 'plan_complete', filePaths: [], priority: 'medium' };
     const intake = { id: 'I', stage: 'intake_complete', filePaths: [], priority: 'medium' };
     const other = { id: 'O', stage: 'done', filePaths: [], priority: 'medium' };
-    expect(compareGroupableItems(progress, plan)).toBeLessThan(0);
     expect(compareGroupableItems(plan, intake)).toBeLessThan(0);
     expect(compareGroupableItems(intake, other)).toBeLessThan(0);
-    expect(compareGroupableItems(progress, other)).toBeLessThan(0);
+    expect(compareGroupableItems(plan, other)).toBeLessThan(0);
+    // in_progress is now Remaining (same bucket as done), ordered by id tie-break after stage/priority
+    expect(compareGroupableItems(plan, progress)).toBeLessThan(0);
+    expect(compareGroupableItems(intake, progress)).toBeLessThan(0);
   });
 
   it('orders by priority (high → medium → low) within the same stage sub-group', () => {
@@ -550,7 +552,7 @@ describe('compareGroupableItems — within-group ordering', () => {
     expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
   });
 
-  it('sorts in_progress items to the top of a mixed group, then plan_complete, then intake_complete', () => {
+  it('sorts plan_complete first, then intake_complete, then remaining (WL-0MTQZ7HZY: in_progress is remaining)', () => {
     const items = [
       { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
       { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
@@ -559,17 +561,19 @@ describe('compareGroupableItems — within-group ordering', () => {
       { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['IP-high', 'IP-low', 'P-high', 'P-med', 'I-low']);
+    // WL-0MTQZ7HZY: in_progress is Remaining (order 3), so plan_complete (0) < intake_complete (1) < remaining (3)
+    expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-low', 'IP-high', 'IP-low']);
   });
 
-  it('sorts a critical group with the same stage sub-sort', () => {
+  it('sorts a critical group with the same stage sub-sort (WL-0MTQZ7HZY: in_progress is remaining)', () => {
     const items = [
       { id: 'C-other', stage: 'in_progress', filePaths: [], priority: 'critical' },
       { id: 'C-intake', stage: 'intake_complete', filePaths: [], priority: 'critical' },
       { id: 'C-plan', stage: 'plan_complete', filePaths: [], priority: 'critical' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['C-other', 'C-plan', 'C-intake']);
+    // WL-0MTQZ7HZY: in_progress is Remaining
+    expect(sorted.map(i => i.id)).toEqual(['C-plan', 'C-intake', 'C-other']);
   });
 });
 
