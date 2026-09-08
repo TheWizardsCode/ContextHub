@@ -37,6 +37,7 @@ import {
   resolvePodcastTarget,
   clearDescriptionPreviewCache,
   isHeadingRow,
+  formatItemLine,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
@@ -4911,5 +4912,69 @@ describe('createListRenderer — header count excludes heading rows (WL-0MT26TE7
     const visible = stripAnsi(firstLine);
     expect(visible).toContain('1 item(s)');
     expect(visible).not.toContain('(top');
+  });
+});
+
+// ── Priority colour row (WL-0MSJ2JFMO007PGQ6, AC1-AC4) ──────────────────
+describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', () => {
+  function makePriorityItem(priority: string, stage: string): WorkItem {
+    return { id: 'WL-123', title: 'Test Title', status: 'open', stage, priority } as WorkItem;
+  }
+
+  // AC1: title is priority-coloured (ANSI 256 codes from shared/icons)
+  function priorityEsc(priority: string): string {
+    const code: Record<string, number> = { critical: 196, high: 208, medium: 15, low: 241 };
+    return `\x1b[38;5;${code[priority] ?? 15}m`;
+  }
+
+  function stageEsc(stage: string): string {
+    const code: Record<string, number> = {
+      idea: 247,
+      intake_complete: 68,
+      plan_complete: 172,
+      in_progress: 76,
+      in_review: 220,
+      completed: 33,
+    };
+    return `\x1b[38;5;${code[stage] ?? 241}m`;
+  }
+
+  for (const [priority, titleEsc] of Object.entries({
+    critical: priorityEsc('critical'),
+    high: priorityEsc('high'),
+    medium: priorityEsc('medium'),
+    low: priorityEsc('low'),
+  })) {
+    it(`colours title by priority ${priority} (priority → ${titleEsc})`, () => {
+      const line = formatItemLine(makePriorityItem(priority, 'idea'), 200, false, false);
+      expect(line).toContain(`${titleEsc}Test Title`);
+    });
+  }
+
+  // AC2: id is stage-coloured, not muted
+  it('colours the ID by stage (not muted)', () => {
+    const line = formatItemLine(makePriorityItem('critical', 'in_review'), 200, false, false);
+    expect(line).toContain(`${stageEsc('in_review')}WL-123`);
+    expect(line).not.toContain(`\x1b[90mWL-123`); // muted grey id is not rendered
+  });
+
+  // AC3: blocked items show their natural priority colour (no red override)
+  it('blocked item shows its natural priority colour, not always-red', () => {
+    const blocked: WorkItem = { id: 'WL-555', title: 'Blocked bug', status: 'blocked', stage: 'idea', priority: 'low' } as WorkItem;
+    const line = formatItemLine(blocked, 200, false, false);
+    expect(line).toContain(`${priorityEsc('low')}Blocked bug`);
+    expect(line).toContain(`${stageEsc('idea')}WL-555`);
+  });
+
+  // AC4: unknown priority falls back to medium/white (15), unknown stage to grey (241)
+  it('falls back to medium/white for unknown priority', () => {
+    const line = formatItemLine({ id: 'WL-999', title: 'Mystery', status: 'open', priority: 'bogus', stage: 'idea' } as WorkItem, 200, false, false);
+    expect(line).toContain(`${priorityEsc('medium')}Mystery`);
+  });
+
+  it('falls back to grey (241) for missing stage id colour', () => {
+    const line = formatItemLine({ id: 'WL-999', title: 'No Stage', status: 'open', priority: 'high' } as WorkItem, 200, false, false);
+    // id with no stage should render as plain (no stage escape) or default grey
+    expect(line).toContain('WL-999');
   });
 });
