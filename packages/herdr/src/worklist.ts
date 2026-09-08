@@ -1249,6 +1249,23 @@ function truncateLine(line: string, maxWidth: number): string {
 }
 
 /**
+ * Wrap a row in reverse video for the selected-row highlight.
+ *
+ * Row content (item lines) can contain its own SGR colour segments, each
+ * ending in a full `\x1b[0m` reset (priority-coloured ID/title,
+ * WL-0MSJ2JFMO007PGQ6). A plain `reverse + line + reset` wrap lets those
+ * interior resets clear the reverse attribute mid-row, so only the prefix
+ * before the first coloured segment renders highlighted and the rest of the
+ * row loses the selection bar. Re-assert reverse after every interior reset
+ * so the WHOLE selected row stays highlighted; the trailing reset still
+ * closes it. Lines without interior resets (heading rows) are unaffected.
+ */
+function reverseWrap(line: string): string {
+  const reasserted = line.replace(/\x1b\[0m/g, `${ANSI.reset}${ANSI.reverse}`);
+  return `${ANSI.reverse}${reasserted}${ANSI.reset}`;
+}
+
+/**
  * Format an ISO-8601 timestamp for display as `DD/MM/YY HH:MM` in the
  * user's local time zone (zero-padded, 24-hour clock).
  *
@@ -3333,7 +3350,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
         const arrow = row.collapsed ? '▶' : '▼';
         const indent = (row.depth ?? 0) > 0 ? '  '.repeat(row.depth!) : '';
         const line = `${indent} ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
-        output.push(isSelected ? `${ANSI.reverse}${line}${ANSI.reset}` : line);
+        output.push(isSelected ? reverseWrap(line) : line);
         continue;
       }
 
@@ -3345,7 +3362,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
 
       const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
       if (isSelected) {
-        output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
+        output.push(reverseWrap(line));
       } else {
         output.push(line);
       }

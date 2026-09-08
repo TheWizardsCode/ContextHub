@@ -312,8 +312,11 @@ describe('AC3: rows - 1 invariant under collapse configurations', () => {
 /** Extract the reverse-video selected row from the last render. */
 function selectedRowText(): string {
   const raw = lastRender();
-  // Selected rows are wrapped in ANSI.reverse (7m). The wrapped content may
-  // itself contain fg color codes, so match non-greedily up to the reset.
-  const m = raw.match(/\x1b\[7m(.*?)\x1b\[0m/);
-  return m ? stripAnsi(m[1]) : '';
+  // The selected row is the (single) line containing a reverse-video SGR
+  // (`\x1b[7m`). Row content may itself contain colour segments, each ending
+  // in its own `\x1b[0m` reset (priority-coloured ID/title,
+  // WL-0MSJ2JFMO007PGQ6) — matching up to the FIRST reset would truncate
+  // the row at the ID. Take the whole line and strip all SGR codes instead.
+  const line = raw.split('\n').find((l) => l.includes('\x1b[7m'));
+  return line ? stripAnsi(line) : '';
 }
