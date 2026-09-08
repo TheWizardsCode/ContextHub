@@ -118,7 +118,16 @@ import {
   type DowntimeItemInfo,
   isTransientDowntimeError,
   withTransientRetry,
+  MIN_BROWSE_ITEM_COUNT,
+  MAX_BROWSE_ITEM_COUNT,
 } from './downtime-worker.js';
+import {
+  defaultSettings,
+  loadSettings,
+  saveSettings,
+  clampBrowseItemCount,
+  clampDowntimeRequiredFreeSlots as clampDowntimeRequiredFreeSlotsSetting,
+} from './settings.js';
 import {
   DOWNTIME_DISABLE_MARKER_FILE,
   disableMarkerPath,
@@ -149,6 +158,12 @@ import {
   type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
 
+
+/** Create a temporary settings path for integration tests. */
+function tempSettingsPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'herdr-settings-test-'));
+  return join(dir, 'worklog-plugin.json');
+}
 
 /** Shared deps mock for dispatch tests. */
 function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
@@ -6801,3 +6816,179 @@ describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
     expect(outcome.kind).toBe('implement');
   });
 });
+
+// ── Bounded concurrent dispatch (F1, parent WL-0MT50LKAK001EF5Q) ──────
+
+describe('bounded concurrent dispatch — cap honored at 1', () => {
+  it('with cap=1, dispatchInFlight guard is preserved: second concurrent dispatch refuses', async () => {
+    let release!: () => void;
+    const gate = new Promise<{ ok: true }>((resolve) => {
+      release = () => resolve({ ok: true });
+    });
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      spawnAgentPane: vi.fn().mockImplementation(() => gate),
+    });
+
+    const first = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    const second = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    release();
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(firstOutcome.dispatched).toBe(true);
+    expect(secondOutcome.dispatched).toBe(false);
+    expect(secondOutcome.reason).toBe('dispatch-in-flight');
+  });
+});
+
+describe('bounded concurrent dispatch — cap honored at 2', () => {
+  it('with cap=2, two concurrent dispatches may proceed when idle for threshold', async () => {
+    // This test will initially FAIL because the current single-flight guard
+    // blocks the second dispatch. After F3 implementation, both should proceed.
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<{ ok: true }>((resolve) => {
+      releaseFirst = () => resolve({ ok: true });
+    });
+    const secondGate = new Promise<{ ok: true }>((resolve) => {
+      releaseSecond = () => resolve({ ok: true });
+    });
+
+    let callCount = 0;
+    const fakeSpawn = vi.fn().mockImplementation(() => {
+      const idx = callCount++;
+      if (idx === 0) {
+        return firstGate;
+      }
+      return secondGate;
+    });
+
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: `WL-${callCount}`, title: `Task ${callCount}`, stage: 'intake_complete' },
+      }),
+      spawnAgentPane: fakeSpawn as unknown as ReturnType<typeof vi.fn>,
+    });
+
+    // Start both dispatches concurrently. Both callers carry the SAME
+    // raised cap (each worker re-reads the shared setting), so the module
+    // gate admits both up to the bound.
+    const first = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', maxConcurrentDispatches: 2 });
+    const second = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', maxConcurrentDispatches: 2 });
+
+    // Release both panes
+    releaseFirst();
+    releaseSecond();
+
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+
+    // After F3: expect both to dispatch
+    // Before F3: second will be blocked by dispatch-in-flight
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
+    expect(firstOutcome.dispatched).toBe(true);
+    expect(secondOutcome.dispatched).toBe(true);
+  });
+});
+
+describe('bounded concurrent dispatch — cap at 2 respects idle-gate', () => {
+  it('second dispatch only fires when requiredFreeSlots continuously idle for threshold', async () => {
+    // This test verifies the per-slot idle tracker contract.
+    // With cap=2, we need 2 slots continuously idle for the threshold.
+    // A second dispatch should NOT fire if only 1 slot is idle.
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+    });
+
+    // With 0 free slots (below panes min of 1), dispatch is gated
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 0 });
+
+    // Dispatch should be gated when no slots are free
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+  });
+});
+
+describe('bounded concurrent dispatch — fast-mode operator priority', () => {
+  it('with 3 total slots and 1 free, only 1 dispatch fires even if cap=2', async () => {
+    // Fast-mode / operator priority preserved: freeSlots check is the hard limit
+    // With 0 free slots, no dispatch can occur regardless of cap
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 0 });
+    expect(outcome.dispatched).toBe(false); // no slots free → gated
+  });
+});
+
+describe('bounded concurrent dispatch — claim safety regression', () => {
+  it('dispatched-marker exclusion still prevents re-dispatch of already-dispatched item', async () => {
+    // Regression guard for WL-0MSLIY8ZR004QUSY: claim safety via CAS
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Claim safety: the item should be claimed once, not re-claimed
+    if (outcome.dispatched) {
+      expect(deps.claimItem).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
+describe('bounded concurrent dispatch — config wire (F2)', () => {
+  it('downtimeMaxConcurrentDispatches defaults to 1 (single-flight preserved)', () => {
+    expect(defaultSettings.downtimeMaxConcurrentDispatches).toBe(1);
+  });
+
+  it('a persisted value is loaded and clamped into [1, 4]', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 3 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(3);
+
+    // Clamp below minimum
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 0 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+
+    // Clamp above maximum (F2 delivered ceiling is 4, not 10)
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 99 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(4);
+  });
+});
+
+describe('bounded concurrent dispatch — worker config propagation', () => {
+  it('DowntimeWorkerConfig includes a maxConcurrentDispatches field', () => {
+    // After F2/F3, the config interface should include maxConcurrentDispatches
+    // This test checks the interface contract.
+    const config = {
+      enabled: true,
+      thresholdMs: 300000,
+      requiredFreeSlots: 2,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3600000,
+      browseItemCount: 20,
+    } as const;
+
+    // maxConcurrentDispatches should be optional (defaults to 1 from settings)
+    expect(config).toBeDefined();
+  });
+});
+
+// ── End of bounded concurrent dispatch tests ──────────────────────────

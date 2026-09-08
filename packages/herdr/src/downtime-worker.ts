@@ -1366,13 +1366,16 @@ export interface DowntimeDispatchOutcome {
 }
 
 /**
- * Per-process single-flight guard: at most one dispatch can be in flight at
- * a time (concurrent calls are refused, not queued). Cross-pane
- * serialization is handled by the pre-dispatch claim (Q5 — no lock file):
- * the CAS claim atomically moves the item out of `wl next`'s selection set
- * for other panes.
+ * Per-process bounded dispatch guard (WL-0MT50LKAK001EF5Q F3): at most
+ * `maxConcurrentDispatches` dispatch pipelines can be in flight at a time
+ * in this process (concurrent callers beyond the cap are refused, not
+ * queued). Default 1 = exact single-flight semantics; when the operator
+ * raises the setting, cheap-mode slots are used concurrently but never
+ * beyond the cap. Cross-pane serialization is handled by the pre-dispatch
+ * claim (Q5 — no lock file): the CAS claim atomically moves the item out of
+ * `wl next`'s selection set for other panes.
  */
-let dispatchInFlight = false;
+let dispatchInFlightCount = 0;
 
 /**
  * Expected claim state per tier (RCA WL-0MSRBFFLN005W3VT design point 1):
@@ -2259,12 +2262,29 @@ export async function runCoordinationCheckIn(
  */
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
-  opts: { model: string; cwd: string; freeSlots?: number; browseItemCount?: number },
+  opts: {
+    model: string;
+    cwd: string;
+    freeSlots?: number;
+    browseItemCount?: number;
+    /** Bounded concurrency cap (F2/F3 WL-0MT50LKAK001EF5Q). Optional — defaults to 1 (single-flight). */
+    maxConcurrentDispatches?: number;
+  },
 ): Promise<DowntimeDispatchOutcome> {
-  if (dispatchInFlight) {
+  // Bounded in-flight gate (F3): the cap is re-read per call and clamped to
+  // [1, 4], so a same-process concurrent caller with the same raised cap
+  // proceeds up to the bound; beyond it a caller is refused with the legacy
+  // single-flight reason ('dispatch-in-flight' — neutral, never a strike).
+  // cap=1 reproduces the pre-F3 behavior exactly. The count decrements in
+  // the finally below — a failed spawn / marker failure / claim loss ends
+  // the pipeline and never leaks an in-flight slot.
+  const maxConcurrent = clampDowntimeMaxConcurrentDispatches(
+    opts.maxConcurrentDispatches ?? DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
+  );
+  if (dispatchInFlightCount >= maxConcurrent) {
     return { dispatched: false, reason: 'dispatch-in-flight' };
   }
-  dispatchInFlight = true;
+  dispatchInFlightCount += 1;
   try {
     // Unified contract WL-0MTK1ILM2009QYB2: Herdr list is the sole ranking path.
     // dispatchDowntimeWork consumes the Herdr selection list head (getHerdrListHead)
@@ -2592,7 +2612,7 @@ export async function dispatchDowntimeWork(
     // governs when consecutive errors pause the worker).
     return { dispatched: false, reason: 'wl-error', error: (idea as { error?: string }).error ?? tier2ErrorDetail };
   } finally {
-    dispatchInFlight = false;
+    dispatchInFlightCount -= 1;
   }
 }
 
@@ -3412,6 +3432,11 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 cwd: cfg.cwd,
                 freeSlots,
                 browseItemCount: cfg.browseItemCount,
+                // Bounded concurrency cap (F3): thread the operator setting
+                // so same-process concurrent workers honor the raised bound;
+                // absent config → 1 (exact single-flight default).
+                maxConcurrentDispatches:
+                  cfg.maxConcurrentDispatches ?? DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
               });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
