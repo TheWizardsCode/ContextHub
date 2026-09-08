@@ -24,14 +24,14 @@ export const theme = {
     inReview: chalk.green,
     done: chalk.white,
   },
-  // Priority colours for work item TITLE colouring:
+  // Priority colours for work item TITLE/ID colouring:
   // critical → red (immediate attention), high → orange (important),
-  // medium → white (default), low → dimmed (recede)
+  // medium → yellow (default), low → white (recede)
   priority: {
     critical: chalk.red,
     high: chalk.hex('#FFA500'),  // orange — matches theme.text.readyNo
-    medium: chalk.white,
-    low: chalk.dim,
+    medium: chalk.yellow,
+    low: chalk.white,
   },
 } as const;
 

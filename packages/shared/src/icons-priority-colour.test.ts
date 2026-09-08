@@ -4,7 +4,7 @@
  * Verifies:
  * - priorityColor maps each priority to the canonical 256-code
  * - applyPriorityColour wraps text in the correct ANSI escape, resets after
- * - Unknown/missing priority falls back to medium/white (15)
+ * - Unknown/missing priority falls back to medium/yellow (220)
  *
  * Run: npx vitest run packages/shared/src/priority-colour.test.ts
  */
@@ -31,18 +31,18 @@ describe('priorityColor (WL-0MSJ2JFMO007PGQ6 AC1/AC4)', () => {
     expect(priorityColor('high')).toBe(208);
   });
 
-  it('maps medium → 15 (white)', () => {
-    expect(priorityColor('medium')).toBe(15);
+  it('maps medium → 220 (yellow)', () => {
+    expect(priorityColor('medium')).toBe(220);
   });
 
-  it('maps low → 241 (dim)', () => {
-    expect(priorityColor('low')).toBe(241);
+  it('maps low → 15 (white)', () => {
+    expect(priorityColor('low')).toBe(15);
   });
 
-  it('unknown priority falls back to medium/white (15)', () => {
-    expect(priorityColor('bogus')).toBe(15);
-    expect(priorityColor(undefined)).toBe(15);
-    expect(priorityColor('')).toBe(15);
+  it('unknown priority falls back to medium/yellow (220)', () => {
+    expect(priorityColor('bogus')).toBe(220);
+    expect(priorityColor(undefined)).toBe(220);
+    expect(priorityColor('')).toBe(220);
   });
 });
 
@@ -50,13 +50,13 @@ describe('applyPriorityColour (WL-0MSJ2JFMO007PGQ6 AC1/AC4)', () => {
   it('wraps text in ANSI 256 and resets after each priority', () => {
     expect(applyPriorityColour('hello', 'critical')).toBe(esc256(196, 'hello'));
     expect(applyPriorityColour('hello', 'high')).toBe(esc256(208, 'hello'));
-    expect(applyPriorityColour('hello', 'medium')).toBe(esc256(15, 'hello'));
-    expect(applyPriorityColour('hello', 'low')).toBe(esc256(241, 'hello'));
+    expect(applyPriorityColour('hello', 'medium')).toBe(esc256(220, 'hello'));
+    expect(applyPriorityColour('hello', 'low')).toBe(esc256(15, 'hello'));
   });
 
-  it('falls back to white (15) for unknown/undefined priority', () => {
-    expect(applyPriorityColour('hello', 'bogus')).toBe(esc256(15, 'hello'));
-    expect(applyPriorityColour('hello', undefined)).toBe(esc256(15, 'hello'));
+  it('falls back to yellow (220) for unknown/undefined priority', () => {
+    expect(applyPriorityColour('hello', 'bogus')).toBe(esc256(220, 'hello'));
+    expect(applyPriorityColour('hello', undefined)).toBe(esc256(220, 'hello'));
   });
 
   it('encodes as a single ANSI open + reset pair (no extra prefixes)', () => {

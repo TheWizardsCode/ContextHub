@@ -56,7 +56,7 @@ describe('Colour Mapping', () => {
       expect(theme.stage.done).toBeTypeOf('function');
     });
 
-    it('should have priority colours defined: critical=red, high=orange, medium=white, low=dim', () => {
+    it('should have priority colours defined: critical=red, high=orange, medium=yellow, low=white', () => {
       expect(theme.priority.critical).toBeTypeOf('function');
       expect(theme.priority.high).toBeTypeOf('function');
       expect(theme.priority.medium).toBeTypeOf('function');
@@ -72,11 +72,14 @@ describe('Colour Mapping', () => {
     });
   });
 
-  // Stage colours are now used for IDs; title colours are priority-based.
-  describe('Stage-based ID colouring (AC2 — stage retained for IDs)', () => {
-    it('should colour idea stage IDs with gray (via formatTitleAndId / humanFormat)', () => {
-      // IDs retain stage colours after AC2 refactor — smoke-test the mapping exists
-      expect(theme.stage.idea).toBeTypeOf('function');
+  // Both title and ID are now coloured by priority.
+  describe('Priority-based ID colouring (AC2 — title and ID same priority colour)', () => {
+    it('should colour IDs by priority (same as title), not stage', () => {
+      // IDs and titles share the same priority colour mapping
+      expect(theme.priority.critical).toBeTypeOf('function');
+      expect(theme.priority.high).toBeTypeOf('function');
+      expect(theme.priority.medium).toBeTypeOf('function');
+      expect(theme.priority.low).toBeTypeOf('function');
     });
   });
 
@@ -89,7 +92,7 @@ describe('Colour Mapping', () => {
       });
     }
 
-    it('should colour unknown/bogus priority with medium (white) fallback', () => {
+    it('should colour unknown/bogus priority with medium (yellow) fallback', () => {
       const item = createMockWorkItem({ priority: 'bogus', title: 'Unknown priority' });
       const coloured = formatTitleOnly(item);
       expect(coloured).toContain('Unknown priority');
@@ -121,8 +124,8 @@ describe('Colour Mapping', () => {
   });
 
   describe('Default/fallback behaviour (AC4 — unknown priority/missing stage)', () => {
-    it('should use gray colour for the ID when stage is undefined', () => {
-      // Title colour is now priority-based; ID colour is stage-based
+    it('should use priority-based colour for the ID when stage is undefined', () => {
+      // Both title and ID are priority-based; ID falls back to medium/yellow
       const item = createMockWorkItem({ stage: undefined, status: 'open', priority: 'medium', title: 'No Stage' });
       expect(formatTitleOnly(item)).toContain('No Stage');
     });
@@ -132,7 +135,7 @@ describe('Colour Mapping', () => {
       expect(formatTitleOnly(item)).toContain('Low Priority');
     });
 
-    it('should use medium/white fallback for unknown priority', () => {
+    it('should use medium/yellow fallback for unknown priority', () => {
       const unknown = createMockWorkItem({ priority: 'unknown_stage' as any, status: 'open', title: 'Unknown' } as any);
       expect(formatTitleOnly(unknown)).toContain('Unknown');
     });

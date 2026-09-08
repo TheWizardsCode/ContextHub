@@ -1176,11 +1176,9 @@ export function formatItemLine(
   const iconPrefix = getIconPrefix(item, { noIcons });
   const iconStr = iconPrefix.length > 0 ? `${iconPrefix}` : '';
 
-  // Apply priority colouring to the title; stage colouring to the ID
+  // Apply priority colouring to both title and ID (same colour)
   const colouredTitle = applyPriorityColour(item.title, item.priority);
-  const stageColouredId = item.stage
-    ? applyStageColour(item.id, item.stage)
-    : item.id;
+  const priorityColouredId = applyPriorityColour(item.id, item.priority);
 
   const priorityStr = item.priority
     ? ` ${priorityIcon(item.priority, { noIcons })} ${item.priority}`
@@ -1190,7 +1188,7 @@ export function formatItemLine(
     ? ` [${item.stage}]`
     : '';
 
-  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${stageColouredId} ${colouredTitle}${stageTag}${priorityStr}`;
+  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}`;
 
   // Truncate to fit terminal width, accounting for ANSI codes
   const visibleLength = line.replace(/\x1b\[[0-9;]*m/g, '').length;

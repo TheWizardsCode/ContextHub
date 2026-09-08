@@ -344,23 +344,23 @@ export function applyStageColour(text: string, stage: string | undefined): strin
 /**
  * Map priority to ANSI 256-color code.
  *
- * Critical → red (196), high → orange (208), medium → white (15),
- * low → dim gray (241). Unknown/missing priority falls back to medium (15).
+ * Critical → red (196), high → orange (208), medium → yellow (220),
+ * low → white (15). Unknown/missing priority falls back to medium (220).
  */
 export function priorityColor(priority: string | undefined): number {
   const colors: Record<string, number> = {
     critical: 196, // bright red
     high: 208,     // orange
-    medium: 15,    // white
-    low: 241,      // dim gray
+    medium: 220,   // yellow
+    low: 15,       // white
   };
-  return colors[priority || ''] ?? 15; // fallback to medium/white
+  return colors[priority || ''] ?? 220; // fallback to medium/yellow
 }
 
 /**
  * Apply priority colour to text using ANSI escape codes.
  *
- * Unknown/missing priority falls back to medium/white (code 15).
+ * Unknown/missing priority falls back to medium/yellow (code 220).
  */
 export function applyPriorityColour(text: string, priority: string | undefined): string {
   const color = priorityColor(priority);

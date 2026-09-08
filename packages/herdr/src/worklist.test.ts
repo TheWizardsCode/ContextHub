@@ -4923,8 +4923,8 @@ describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', (
 
   // AC1: title is priority-coloured (ANSI 256 codes from shared/icons)
   function priorityEsc(priority: string): string {
-    const code: Record<string, number> = { critical: 196, high: 208, medium: 15, low: 241 };
-    return `\x1b[38;5;${code[priority] ?? 15}m`;
+    const code: Record<string, number> = { critical: 196, high: 208, medium: 220, low: 15 };
+    return `\x1b[38;5;${code[priority] ?? 220}m`;
   }
 
   function stageEsc(stage: string): string {
@@ -4951,10 +4951,10 @@ describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', (
     });
   }
 
-  // AC2: id is stage-coloured, not muted
-  it('colours the ID by stage (not muted)', () => {
+  // AC2: id is priority-coloured (same as title), not muted, not stage
+  it('colours the ID by priority same as title (not muted, not stage)', () => {
     const line = formatItemLine(makePriorityItem('critical', 'in_review'), 200, false, false);
-    expect(line).toContain(`${stageEsc('in_review')}WL-123`);
+    expect(line).toContain(`${priorityEsc('critical')}WL-123`);
     expect(line).not.toContain(`\x1b[90mWL-123`); // muted grey id is not rendered
   });
 
@@ -4963,11 +4963,11 @@ describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', (
     const blocked: WorkItem = { id: 'WL-555', title: 'Blocked bug', status: 'blocked', stage: 'idea', priority: 'low' } as WorkItem;
     const line = formatItemLine(blocked, 200, false, false);
     expect(line).toContain(`${priorityEsc('low')}Blocked bug`);
-    expect(line).toContain(`${stageEsc('idea')}WL-555`);
+    expect(line).toContain(`${priorityEsc('low')}WL-555`);
   });
 
-  // AC4: unknown priority falls back to medium/white (15), unknown stage to grey (241)
-  it('falls back to medium/white for unknown priority', () => {
+  // AC4: unknown priority falls back to medium/yellow (220), unknown stage to grey (241)
+  it('falls back to medium/yellow for unknown priority', () => {
     const line = formatItemLine({ id: 'WL-999', title: 'Mystery', status: 'open', priority: 'bogus', stage: 'idea' } as WorkItem, 200, false, false);
     expect(line).toContain(`${priorityEsc('medium')}Mystery`);
   });
