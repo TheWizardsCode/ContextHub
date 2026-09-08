@@ -14,9 +14,8 @@ export const theme = {
     readyYes: chalk.green,
     readyNo: chalk.hex('#FFA500'),
   },
-  // Blocked status override: always red, regardless of stage
-  blocked: chalk.redBright,
   // Stage-progression colours: gray → blue → cyan → yellow → green → white
+  // (used for work item ID colouring — see helpers.ts)
   stage: {
     idea: chalk.gray,
     intakeComplete: chalk.blue,
@@ -25,11 +24,14 @@ export const theme = {
     inReview: chalk.green,
     done: chalk.white,
   },
+  // Priority colours for work item TITLE colouring:
+  // critical → red (immediate attention), high → orange (important),
+  // medium → white (default), low → dimmed (recede)
   priority: {
-    critical: chalk.redBright,
-    high: chalk.yellowBright,
-    medium: chalk.blueBright,
-    low: chalk.gray,
+    critical: chalk.red,
+    high: chalk.hex('#FFA500'),  // orange — matches theme.text.readyNo
+    medium: chalk.white,
+    low: chalk.dim,
   },
 } as const;
 

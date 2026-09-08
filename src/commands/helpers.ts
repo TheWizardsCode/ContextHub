@@ -51,14 +51,9 @@ export function sortByPriorityDateAndId(a: WorkItem, b: WorkItem): number {
   return a.id.localeCompare(b.id);
 }
 
-// Format title and id with consistent coloring used in tree/list outputs
+// Format title and id with consistent coloring: title by priority, id by stage
 export function formatTitleAndId(item: WorkItem, prefix: string = ''): string {
-  return `${prefix}${renderTitle(item)} ${theme.text.muted('-')} ${theme.text.muted(item.id)}`;
-}
-
-// Format only the title (consistent color)
-export function formatTitleOnly(item: WorkItem): string {
-  return renderTitle(item);
+  return `${prefix}${renderTitle(item)} ${theme.text.muted('-')} ${renderStageColouredId(item.id, item.stage)}`;
 }
 
 // Return chalk function appropriate for a given stage (for console output)
@@ -83,15 +78,41 @@ function titleColorForStage(stage?: string): (text: string) => string {
   }
 }
 
-// Render a work item title with the color appropriate to its status or stage
-// Blocked items always appear red, regardless of stage. Otherwise, stage-based colours apply.
-function renderTitle(item: WorkItem, prefix: string = ''): string {
-  // Blocked status overrides everything
-  if (item.status === 'blocked') {
-    return theme.blocked(prefix + item.title);
+// Render a work item ID coloured by stage (unknown stage falls back to gray)
+function renderStageColouredId(id: string, stage?: string): string {
+  const colorFn = titleColorForStage(stage || undefined);
+  return colorFn(id);
+}
+
+// Format only the title (consistent color)
+export function formatTitleOnly(item: WorkItem): string {
+  return renderTitle(item);
+}
+
+// Return chalk function appropriate for a given priority (for console output)
+// Priority colours: critical → red, high → orange, medium → white, low → dimmed
+function titleColorForPriority(priority?: string): (text: string) => string {
+  const p = (priority || '').toLowerCase().trim();
+  switch (p) {
+    case 'critical':
+      return theme.priority.critical;
+    case 'high':
+      return theme.priority.high;
+    case 'medium':
+      return theme.priority.medium;
+    case 'low':
+      return theme.priority.low;
+    default:
+      // Unknown/missing priority falls back to medium/white
+      return theme.priority.medium;
   }
-  // Use stage-based colour; fallback to idea/gray when stage is undefined or empty
-  const colorFn = titleColorForStage(item.stage || undefined);
+}
+
+// Render a work item title coloured by priority.
+// Blocked items show their natural priority colour — no unconditional red override.
+// Unknown priority falls back to medium/white.
+function renderTitle(item: WorkItem, prefix: string = ''): string {
+  const colorFn = titleColorForPriority(item.priority || undefined);
   return colorFn(prefix + item.title);
 }
 
@@ -393,7 +414,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   // summary: truly minimal - just title, status, priority
   if (fmt === 'summary') {
     const lines: string[] = [];
-    lines.push(`${formatTitleOnly(item)} ${theme.text.muted(item.id)}`);
+    lines.push(`${formatTitleOnly(item)} ${renderStageColouredId(item.id, item.stage)}`);
     const sLine = formatStatusWithIcon(item.status);
     lines.push(`Status: ${sLine} | Priority: ${formatPriorityWithIcon(item.priority)}`);
     return lines.join('\n');
@@ -406,7 +427,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     if (fmt === 'concise') {
       const lines: string[] = [];
       // First line: title + id (compact)
-      lines.push(`${formatTitleOnly(item)} ${theme.text.muted(item.id)}`);
+      lines.push(`${formatTitleOnly(item)} ${renderStageColouredId(item.id, item.stage)}`);
     // Build metadata as a markdown table
     const metaRows: Array<[string, string]> = [];
     if (item.stage !== undefined) {
@@ -438,7 +459,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   if (fmt === 'normal') {
     // Build metadata as a markdown table (ID, Title, Status, SortIndex, Risk, Effort, Assignee, Audit, Parent)
     const metaRows: Array<[string, string]> = [];
-    metaRows.push(['ID', theme.text.muted(item.id)]);
+    metaRows.push(['ID', renderStageColouredId(item.id, item.stage)]);
     metaRows.push(['Title', formatTitleOnly(item)]);
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
@@ -501,7 +522,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     : `${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`;
   // Build metadata as a markdown table
   const frontmatter: Array<[string, string]> = [
-    ['ID', theme.text.muted(item.id)],
+    ['ID', renderStageColouredId(item.id, item.stage)],
     ['Status', statusPriorityValue],
     ['Type', issueTypeLabel],
     ['SortIndex', String(item.sortIndex)]

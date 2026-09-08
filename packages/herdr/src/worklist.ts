@@ -33,6 +33,8 @@ import {
   getIconPrefix,
   applyStageColour,
   stageColor,
+  applyPriorityColour,
+  priorityColor,
   type IconOptions,
 } from '@worklog/shared/icons';
 import {
@@ -1174,10 +1176,11 @@ export function formatItemLine(
   const iconPrefix = getIconPrefix(item, { noIcons });
   const iconStr = iconPrefix.length > 0 ? `${iconPrefix}` : '';
 
-  // Apply stage colouring to the title
-  const colouredTitle = item.stage
-    ? applyStageColour(item.title, item.stage)
-    : item.title;
+  // Apply priority colouring to the title; stage colouring to the ID
+  const colouredTitle = applyPriorityColour(item.title, item.priority);
+  const stageColouredId = item.stage
+    ? applyStageColour(item.id, item.stage)
+    : item.id;
 
   const priorityStr = item.priority
     ? ` ${priorityIcon(item.priority, { noIcons })} ${item.priority}`
@@ -1187,7 +1190,7 @@ export function formatItemLine(
     ? ` [${item.stage}]`
     : '';
 
-  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${item.id} ${colouredTitle}${stageTag}${priorityStr}`;
+  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${stageColouredId} ${colouredTitle}${stageTag}${priorityStr}`;
 
   // Truncate to fit terminal width, accounting for ANSI codes
   const visibleLength = line.replace(/\x1b\[[0-9;]*m/g, '').length;

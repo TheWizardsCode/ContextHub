@@ -339,6 +339,34 @@ export function applyStageColour(text: string, stage: string | undefined): strin
   return `\x1b[38;5;${color}m${text}\x1b[0m`;
 }
 
+// ── Priority colour ───────────────────────────────────────────────────
+
+/**
+ * Map priority to ANSI 256-color code.
+ *
+ * Critical → red (196), high → orange (208), medium → white (15),
+ * low → dim gray (241). Unknown/missing priority falls back to medium (15).
+ */
+export function priorityColor(priority: string | undefined): number {
+  const colors: Record<string, number> = {
+    critical: 196, // bright red
+    high: 208,     // orange
+    medium: 15,    // white
+    low: 241,      // dim gray
+  };
+  return colors[priority || ''] ?? 15; // fallback to medium/white
+}
+
+/**
+ * Apply priority colour to text using ANSI escape codes.
+ *
+ * Unknown/missing priority falls back to medium/white (code 15).
+ */
+export function applyPriorityColour(text: string, priority: string | undefined): string {
+  const color = priorityColor(priority);
+  return `\x1b[38;5;${color}m${text}\x1b[0m`;
+}
+
 // ── Terminal display width helpers ────────────────────────────────────
 
 /**
