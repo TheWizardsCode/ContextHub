@@ -95,6 +95,7 @@
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
  *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs`
+ *    / `clampDowntimeMaxConcurrentDispatches`
  *    — settings clamps, wired into `settings.ts`.
  *  - `selectWithRotation` (WL-0MSSRED76008LGB6) — rotation-aware selection:
  *    within each tier, candidates sharing the same priority level are
@@ -199,6 +200,13 @@ export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
 
 /** Default pause after a genuine empty backlog: 60 minutes. */
 export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
+
+/** Default bounded concurrency cap: 1 (single-flight, current behavior). */
+export const DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES = 1;
+/** Clamp floor for the concurrency cap. */
+export const DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR = 1;
+/** Clamp ceiling for the concurrency cap. */
+export const DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING = 4;
 
 /**
  * Audit-tier recency window: a completed/in_review candidate is only
@@ -2780,6 +2788,8 @@ export interface DowntimeWorkerConfig {
     noCandidateCooldownMs: number;
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
     browseItemCount?: number;
+    /** Bounded concurrency cap (F2 WL-0MTSAB0QU003KTLA). Optional — defaults to 1 (single-flight). */
+    maxConcurrentDispatches?: number;
   };
   /**
    * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
@@ -4455,6 +4465,19 @@ export function clampDowntimeRequiredFreeSlots(value: number): number {
 export function clampDowntimeNoCandidateCooldownMs(value: number): number {
   if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS;
   return Math.max(Math.round(value), DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS);
+}
+
+/**
+ * Clamp the bounded concurrency cap to [1, 4] (WL-0MT50LKAK001EF5Q F2):
+ * 1 = single-flight (default), 4 = operator-requested ceiling. Non-finite
+ * input falls back to the default (1, the safe single-flight default).
+ */
+export function clampDowntimeMaxConcurrentDispatches(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR),
+    DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING,
+  );
 }
 
 // ── Round-robin helpers (WL-0MTJE0FXC006WAOX) ──────────────────────────

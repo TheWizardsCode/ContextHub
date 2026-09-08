@@ -1301,6 +1301,7 @@ async function main(): Promise<void> {
         enabled: s.downtimeEnabled,
         thresholdMs: s.downtimeIdleThresholdMs,
         requiredFreeSlots: s.downtimeRequiredFreeSlots,
+        maxConcurrentDispatches: s.downtimeMaxConcurrentDispatches,
         model: s.downtimeModel,
         cwd: targetCwd,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
