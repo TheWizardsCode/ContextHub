@@ -36,6 +36,8 @@ import {
   getExecFileAsync,
   buildWlArgs,
   buildWlArgsForRoot,
+  extractJson,
+  extractItems,
 } from './fetcher.js';
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
 import {
@@ -818,6 +820,35 @@ export function createDowntimeDeps(
         // the audit tier and falls through to the next tier; dispatch is
         // never blocked by an unanswerable check (fail-safe).
         return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    async getReviewQueueCount(cwd: string): Promise<number | null> {
+      // Review-queue depth gate (WL-0MT2UQWOR007CYY9): count completed/in_review
+      // root items via `wl list --status completed --stage in_review
+      // --root-only --json`. Bounded by DOWNTIME_WL_TIMEOUT_MS so a hung wl
+      // child fails closed (gate active → only critical implements). A
+      // failure or unparseable output resolves to null (gate active),
+      // consistent with the code-freeze "ambiguous ⇒ frozen" convention.
+      try {
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
+          'wl',
+          buildWlArgs([
+            'list',
+            '--status',
+            'completed',
+            '--stage',
+            'in_review',
+            '--root-only',
+            '--json',
+          ]),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        ));
+        const items = extractItems(extractJson(stdout));
+        return items.length;
+      } catch {
+        // Fail-closed: a wl error means the gate is active (only critical
+        // implements remain eligible).
+        return null;
       }
     },
     async getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null> {

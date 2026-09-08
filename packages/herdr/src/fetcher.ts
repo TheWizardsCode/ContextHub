@@ -188,7 +188,12 @@ export interface WorkItem {
  * Extract the first complete JSON object from a string that may contain
  * leading/trailing non-JSON text (e.g., log output mixed with JSON).
  */
-function extractJson(raw: string): unknown {
+/**
+ * Extract the first complete JSON object from a string that may contain
+ * leading/trailing non-JSON text (e.g., log output mixed with JSON).
+ * Exported for use by the downtime worker's review-queue gate.
+ */
+export function extractJson(raw: string): unknown {
   const start = raw.indexOf('{');
   if (start < 0) throw new Error('No JSON object in output');
 
@@ -260,7 +265,12 @@ function normalizeItem(raw: any): WorkItem {
  * Extract work items from a wl CLI response, handling different response
  * shapes (direct array, { workItems: [...] }, { results: [...] }).
  */
-function extractItems(payload: unknown): WorkItem[] {
+/**
+ * Extract work items from a wl CLI response, handling different response
+ * shapes (direct array, { workItems: [...] }, { results: [...] }).
+ * Exported for use by the downtime worker's review-queue gate.
+ */
+export function extractItems(payload: unknown): WorkItem[] {
   if (Array.isArray(payload)) {
     return payload.map(normalizeItem);
   }

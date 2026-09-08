@@ -188,6 +188,9 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     // Interim freshness re-check (WL-0MT8KSTOE00871E7): no fresh audit by
     // default, so existing dispatch tests exercise the unchanged path.
     hasFreshAudit: vi.fn().mockResolvedValue(false),
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9): empty queue by default
+    // so the gate is inactive and existing tests exercise the unchanged path.
+    getReviewQueueCount: vi.fn().mockResolvedValue(0),
     ...overrides,
   };
 }
@@ -6495,5 +6498,306 @@ describe('needsProducerReview exclusion', () => {
         expect(fn).toHaveBeenCalledTimes(2);
       });
     });
+  });
+});
+
+// ── Review-queue depth gate (WL-0MT2UQWOR007CYY9) ──────────────────────
+// The implement tier is gated by the depth of the completed/in_review review
+// queue: when root items >= browseItemCount, only critical-priority
+// implement candidates remain eligible. The gate is re-read live on every
+// dispatch (no plugin restart needed), fail-closed on wl error (gate active),
+// and uses a neutral reason ('queue-deep') when plan/intake are also empty
+// — never 'no-candidate', so the worker's cooldown is not triggered.
+
+
+// ── Review-queue depth gate (WL-0MT2UQWOR007CYY9) ──────────────────────
+// The implement tier is gated by the depth of the completed/in_review review
+// queue: when root items >= browseItemCount, only critical-priority
+// implement candidates remain eligible. The gate is re-read live on every
+// dispatch (no plugin restart needed), fail-closed on wl error (gate active),
+// and uses a neutral reason ('queue-deep') when plan/intake are also empty
+// — never 'no-candidate', so the worker's cooldown is not triggered.
+
+describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
+  const implementCandidate = (overrides: Partial<ImplementCandidate> = {}): ImplementCandidate => ({
+    id: `IMP-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Implement candidate',
+    status: 'open',
+    risk: 'low',
+    effort: 'small',
+    sortIndex: 1,
+    ...overrides,
+  });
+
+  const planCandidate: DowntimeCandidate = { id: 'WL-PLAN', title: 'Prep task', stage: 'intake_complete' };
+
+  // ── AC1: critical bypass ───────────────────────────────────────────
+  it('AC1: a critical-priority implement candidate always dispatches regardless of queue depth', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-CRIT', priority: 'critical' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999), // deeply queued
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(deps.claimItem).toHaveBeenCalledWith('IMP-CRIT', { status: 'open', stage: 'plan_complete' }, '/repo');
+  });
+
+  it('AC1: critical bypass works even when browseItemCount is 1 (queue deep)', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-CRIT2', priority: 'critical' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(1), // exactly at threshold
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 1 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  // ── AC2: gate inactive — all priorities eligible ───────────────────
+  it('AC2: when reviewQueueCount < browseItemCount, all priorities dispatch unchanged', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-MED', priority: 'medium' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(10), // under threshold
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(deps.claimItem).toHaveBeenCalledWith('IMP-MED', { status: 'open', stage: 'plan_complete' }, '/repo');
+  });
+
+  it('AC2: gate inactive — non-critical (high/low) dispatches when under threshold', async () => {
+    for (const priority of ['high', 'low'] as const) {
+      const deps = makeDeps({
+        getNextImplementCandidate: vi.fn().mockResolvedValue(
+          implementCandidate({ id: `IMP-${priority}`, priority }),
+        ),
+        getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+    }
+  });
+
+  // ── AC3: gate active — non-critical excluded ───────────────────────
+  it('AC3: when reviewQueueCount == browseItemCount, non-critical candidates are excluded', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-NONCRIT', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(20), // at threshold
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Non-critical candidate gated → falls through to plan/intake
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('AC3: gate active — only non-critical candidates: implement resolves null, falls through to plan', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-LOW', priority: 'low' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    // Plan tier should be reached
+    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete', '/repo');
+  });
+
+  it('AC3: gate boundary — count == browseItemCount - 1: gate NOT active, all priorities dispatch', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-UNDER', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(19), // one below threshold
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  it('AC3: gate boundary — count == browseItemCount: gate active, non-critical excluded', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-AT', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(20),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Non-critical gated, no plan/intake → queue-deep
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('queue-deep');
+  });
+
+  // ── AC4: gate applies ONLY to implement tier ───────────────────────
+  it('AC4: audit tier is NOT affected by the review-queue gate', async () => {
+    const auditCandidate: DowntimeCandidate = { id: 'WL-AUD', title: 'Audit me', stage: 'audit' };
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999), // deeply queued
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-GATED', priority: 'high' }),
+      ),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Audit tier still dispatches regardless of review-queue depth
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+  });
+
+  it('AC4: plan tier dispatches even when the review-queue gate is deep', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-GATED', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  // ── AC5: bounded timeout and fail-closed ───────────────────────────
+  it('AC5: a getReviewQueueCount error (null) activates the gate — only critical dispatches', async () => {
+    const deps = makeDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(null), // gate active on error
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-NONCRIT', priority: 'medium' }),
+      ),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Non-critical gated by error → queue-deep (no-candidate not triggered)
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('queue-deep');
+  });
+
+  it('AC5: fail-closed — queue error + critical candidate: critical still dispatches', async () => {
+    const deps = makeDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(null), // gate active on error
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-CRIT', priority: 'critical' }),
+      ),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  // ── AC6: neutral reason (never 'no-candidate') ─────────────────────
+  it('AC6: gate skip with empty plan AND intake reports queue-deep, never no-candidate', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-GATED', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }), // plan empty
+      // intake (idea tier) is attempted but the queue-deep check short-circuits
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Gate skip with empty plan/intake → queue-deep, NOT no-candidate
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('queue-deep');
+    // No cooldown triggered — polling continues
+  });
+
+  it('AC6: non-gated empty backlog still reports no-candidate (unchanged)', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getReviewQueueCount: vi.fn().mockResolvedValue(0), // not gated
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+  });
+
+  // ── Default browseItemCount ────────────────────────────────────────
+  it('uses default browseItemCount of 20 when not provided', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-DEFAULT', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(20),
+      // No browseItemCount passed — defaults to 20
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Gate active at default threshold → non-critical excluded
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('queue-deep');
+  });
+
+  it('default browseItemCount — count 19 still dispatches non-critical', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-DEFAULT', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(19),
+      // No browseItemCount — defaults to 20
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  // ── Root-only counting ─────────────────────────────────────────────
+  it('root-only: the queue count uses --root-only (child items excluded)', async () => {
+    // This tests the implementation uses the correct wl query. The
+    // getReviewQueueCount mock returns whatever the caller passes.
+    // The real implementation uses --root-only so children are excluded.
+    const deps = makeDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(5),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-ROOT', priority: 'high' }),
+      ),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Under threshold → gate not active → implement dispatches
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
   });
 });

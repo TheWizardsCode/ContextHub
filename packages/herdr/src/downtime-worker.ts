@@ -1055,6 +1055,15 @@ export interface DowntimeWorkerDeps {
    */
   getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult>;
   /**
+   * Count completed/in_review root items for the review-queue depth gate
+   * (WL-0MT2UQWOR007CYY9): `wl list --status completed --stage in_review
+   * --root-only --json`, bounded by `DOWNTIME_WL_TIMEOUT_MS`. Returns the
+   * count, or `null` on failure — a failure means "gate active" (only
+   * critical implements remain eligible), consistent with the code-freeze
+   * ambiguous ⇒ frozen convention.
+   */
+  getReviewQueueCount(cwd: string): Promise<number | null>;
+  /**
    * Look up the next implement-tier candidate (WL-0MSMAYPQP001FLR6): the
    * highest-priority open plan_complete item with risk ≤ Medium / effort ≤ Medium,
    * excluding dependency-blocked items (wl next default) and items already
@@ -2242,7 +2251,7 @@ export async function runCoordinationCheckIn(
  */
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
-  opts: { model: string; cwd: string; freeSlots?: number },
+  opts: { model: string; cwd: string; freeSlots?: number; browseItemCount?: number },
 ): Promise<DowntimeDispatchOutcome> {
   if (dispatchInFlight) {
     return { dispatched: false, reason: 'dispatch-in-flight' };
@@ -2456,22 +2465,63 @@ export async function dispatchDowntimeWork(
     }
 
     if (!frozen && panesEligible) {
+      // Review-queue depth gate (WL-0MT2UQWOR007CYY9): when the completed/
+      // in_review review queue is deep enough (root items >= browseItemCount),
+      // gate non-critical implement candidates. The gate is re-read live from
+      // settings on every dispatch (no plugin restart needed). Fail-closed:
+      // a wl error counting the queue → gate active (only critical remains
+      // eligible). Critical-priority candidates BYPASS the gate entirely.
+      const reviewQueueCount = await deps.getReviewQueueCount(opts.cwd);
+      const browseItemCount = opts.browseItemCount ?? 20;
+      const gateActive = reviewQueueCount === null || reviewQueueCount >= browseItemCount;
+
       // Implement tier (WL-0MSMAYPQP001FLR6): after the critical-first
       // gate, dispatch /skill:implement for the highest-priority open
       // plan_complete item with
-      // risk ≤ Medium / effort ≤ Medium. getNextImplementCandidate is fail-closed
-      // (null on wl failure or no candidate), so a null here means the tier is
-      // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
-      // error at the implement tier does NOT short-circuit the fallback).
+      // risk ≤ Medium / effort ≤ Medium. When the review-queue depth gate is
+      // active, only critical-priority candidates remain eligible. When only
+      // non-critical candidates exist under the gate, the implement tier is
+      // skipped and dispatch falls through to plan/intake — the skip reason
+      // must never be 'no-candidate' (the neutral reason keeps polling alive
+      // so a critical implement / new plan / intake dispatches immediately).
+      // getNextImplementCandidate is fail-closed (null on wl failure or no
+      // candidate), so a null here means the tier is exhausted and the
+      // plan/intake tiers below still run (AC5/AC6 — a wl error at the
+      // implement tier does NOT short-circuit the fallback).
       // Pane minimum (parent WL-0MT32F90V008UAD2 AC3 / F3-fix
       // WL-0MT4RQTID000GT69): ≥ 1 free slot at selection time, matching the
       // critical/audit/plan/intake tiers — a direct dispatchDowntimeWork(
       // {freeSlots:0}) must never dispatch implement. 0 free slots is
       // ineligible (never a strike): the lookup is skipped entirely and
       // dispatch falls through to the plan tier's defensive no-candidate.
-      const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
+      let implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
       if (implementCandidate !== null && implementCandidate.needsProducerReview !== true) {
-        return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
+        // Gate enforcement: only critical candidates bypass the review-queue
+        // depth throttle. Non-critical candidates are excluded when the gate
+        // is active.
+        if (!gateActive || implementCandidate.priority === 'critical') {
+          return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
+        }
+        // Non-critical candidate gated by review-queue depth — skip to
+        // plan/intake tiers.
+      }
+      // Gate-active with no eligible implement candidate (or only non-critical):
+      // fall through to plan/intake. The caller below must NOT report 'no-
+      // candidate' when the remaining backlog is empty and the gate is active;
+      // it must report 'queue-deep' instead (never 'no-candidate'), so the
+      // no-candidate cooldown is not triggered.
+      if (gateActive) {
+        let planIntakeEmpty = true;
+        if (panesEligible) {
+          const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
+          if (intakeComplete.ok && intakeComplete.candidate !== null && intakeComplete.candidate.needsProducerReview !== true) {
+            planIntakeEmpty = false;
+          }
+        }
+        if (planIntakeEmpty) {
+          return { dispatched: false, reason: 'queue-deep' };
+        }
+        // plan/intake has candidates — fall through below to dispatch them.
       }
     }
     // Tier 2 (intake_complete → /skill:plan). A CLI error here does NOT
@@ -3351,6 +3401,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 model: cfg.model,
                 cwd: cfg.cwd,
                 freeSlots,
+                browseItemCount: cfg.browseItemCount,
               });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
