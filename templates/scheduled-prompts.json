@@ -10,6 +10,7 @@
       "id": "/skill:standup",
       "prompt": "/skill:standup",
       "intervalDays": 1,
+      "time": "06:05",
       "lastTriggeredAt": null
     }
   ]

@@ -386,7 +386,7 @@ describe('CLI Init Tests', () => {
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       expect(Array.isArray(config.entries)).toBe(true);
       // The base set starts with /skill:refactor (intervalDays 3)
-      // and /skill:standup (intervalDays 1), both lastTriggeredAt null.
+      // and /skill:standup at 06:05 (intervalDays 1, WL-0MTMN7W63001FCQR).
       expect(config.entries).toEqual([
         {
           id: '/skill:refactor',
@@ -398,6 +398,7 @@ describe('CLI Init Tests', () => {
           id: '/skill:standup',
           prompt: '/skill:standup',
           intervalDays: 1,
+          time: '06:05',
           lastTriggeredAt: null,
         },
       ]);
