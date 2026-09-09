@@ -25,6 +25,7 @@ import {
   appendCoordinationLogEntry,
   auditDispatchedItemIds,
   implementDispatchedItemIds,
+  riskEffortDispatchedItemIds,
   planDispatchedItemStages,
   intakeDispatchedItemStages,
   dispatchedItemStages,
@@ -102,6 +103,34 @@ describe('downtime rolling log', () => {
     expect(JSON.parse(lines[0])).toEqual({ itemId: 'WL-A', kind: 'plan', n: 1 });
   });
 
+  // ── Enriched per-strike error entries (WL-0MTJPYM53003ORCV) ─────────
+
+  it('tolerantly parses error entries with the new structured fields (WL-0MTJPYM53003ORCV)', async () => {
+    const cwd = makeTempCwd();
+    const enrichedEntry = JSON.stringify({
+      cwd: '/repo',
+      at: '2026-09-07T01:00:00.000Z',
+      message: '3 consecutive wl CLI errors — pausing dispatch for 3600000ms.',
+      error: 'SQLITE_BUSY',
+      stderrExcerpt: 'database is locked',
+      exitCode: 1,
+      timeoutMs: 10_000,
+      workItemId: 'WL-ABC',
+      command: 'wl show WL-ABC',
+      attempt: 2,
+      probeContext: 'dispatch-cli',
+    });
+    await appendDowntimeLogEntry(cwd, enrichedEntry);
+    const entries = await readDowntimeLogEntries(cwd);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].stderrExcerpt).toBe('database is locked');
+    expect(entries[0].exitCode).toBe(1);
+    expect(entries[0].timeoutMs).toBe(10_000);
+    expect(entries[0].workItemId).toBe('WL-ABC');
+    expect(entries[0].attempt).toBe(2);
+    expect(entries[0].probeContext).toBe('dispatch-cli');
+  });
+
   it('appends to an existing log file without truncating prior entries', async () => {
     const cwd = makeTempCwd();
     mkdirSync(join(cwd, '.worklog'));
@@ -127,6 +156,27 @@ describe('downtime rolling log', () => {
     expect(lines).toHaveLength(DOWNTIME_LOG_MAX_ENTRIES);
     expect(JSON.parse(lines[0])).toEqual({ n: total - DOWNTIME_LOG_MAX_ENTRIES });
     expect(JSON.parse(lines[lines.length - 1])).toEqual({ n: total - 1 });
+  });
+
+  it('rolling bound DOWNTIME_LOG_MAX_ENTRIES=100 trimming still works with enriched error entries (WL-0MTJPYM53003ORCV)', async () => {
+    const cwd = makeTempCwd();
+    const total = DOWNTIME_LOG_MAX_ENTRIES + 5;
+    // Write enriched error entries simulating per-strike logs
+    for (let i = 0; i < total; i++) {
+      await appendDowntimeLogEntry(cwd, JSON.stringify({
+        cwd: '/repo',
+        at: `2026-09-07T01:00:${String(i).padStart(2, '0')}.000Z`,
+        message: `Strike ${i % 3 + 1} error`,
+        attempt: i % 3 + 1,
+        probeContext: 'dispatch-cli',
+        timeoutMs: 10_000,
+      }));
+    }
+    const lines = readLog(cwd);
+    expect(lines).toHaveLength(DOWNTIME_LOG_MAX_ENTRIES);
+    // The newest entries are retained (last 100 of 105)
+    const lastEntry = JSON.parse(lines[lines.length - 1]);
+    expect(lastEntry.attempt).toBe(3);
   });
 });
 
@@ -274,6 +324,32 @@ describe('implementDispatchedItemIds (implement-tier-only scope guard)', () => {
   });
 });
 
+// risk-effort dispatched markers (WL-0MTTSWCJR003OMN7)
+describe('riskEffortDispatchedItemIds (risk-effort-tier-only scope guard)', () => {
+  it('collects only risk-effort-kind entries that carry an itemId', () => {
+    const ids = riskEffortDispatchedItemIds([
+      { itemId: 'WL-A', kind: 'risk-effort' },
+      { itemId: 'WL-B', kind: 'implement' },
+      { itemId: 'WL-C', kind: 'plan' },
+      { kind: 'risk-effort' }, // error-style entry without itemId → ignored
+      { itemId: 'WL-D', kind: 'risk-effort' },
+    ]);
+    expect([...ids].sort()).toEqual(['WL-A', 'WL-D']);
+  });
+
+  it('does not collect implement markers (risk-effort tier is scoped to kind risk-effort only)', () => {
+    const ids = riskEffortDispatchedItemIds([
+      { itemId: 'WL-AUD', kind: 'audit' },
+      { itemId: 'WL-RE', kind: 'risk-effort' },
+    ]);
+    expect([...ids]).toEqual(['WL-RE']);
+  });
+
+  it('returns an empty set for empty input', () => {
+    expect([...riskEffortDispatchedItemIds([])]).toEqual([]);
+  });
+});
+
 describe('plan/intake dispatched-item stages (change-guard maps)', () => {
   it('planDispatchedItemStages maps plan markers to their dispatched-at stage', () => {
     const stages = planDispatchedItemStages([
@@ -313,5 +389,20 @@ describe('plan/intake dispatched-item stages (change-guard maps)', () => {
   it('returns an empty map for empty input', () => {
     expect(planDispatchedItemStages([]).size).toBe(0);
     expect(intakeDispatchedItemStages([]).size).toBe(0);
+  });
+
+  // risk-effort stage guard (WL-0MTTSWCJR003OMN7)
+  it('dispatchedItemStages with risk-effort maps to plan_complete stage', () => {
+    const stages = dispatchedItemStages(
+      [
+        { itemId: 'WL-RE1', kind: 'risk-effort', stage: 'plan_complete' },
+        { itemId: 'WL-RE2', kind: 'risk-effort' }, // legacy entry without stage
+        { itemId: 'WL-X', kind: 'implement', stage: 'plan_complete' },
+      ],
+      'risk-effort',
+    );
+    expect(stages.get('WL-RE1')).toBe('plan_complete');
+    expect(stages.get('WL-RE2')).toBe('');
+    expect(stages.has('WL-X')).toBe(false);
   });
 });

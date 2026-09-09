@@ -252,8 +252,9 @@
     "command": "/prompt:",
     "view": "both",
     "label": "new session",
-    "description": "Open a new Pi agent session with a blank prompt.",
-    "model": "plan"
+    "description": "Open a new Pi agent session with a blank prompt. Focuses the new pane immediately (WL-0MT70LC6B009TL3Q).",
+    "model": "plan",
+    "focus": true
   },
   {
     "chord": [

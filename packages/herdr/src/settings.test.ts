@@ -18,6 +18,12 @@ import {
   MIN_BROWSE_ITEM_COUNT,
   MAX_BROWSE_ITEM_COUNT,
 } from './settings.js';
+import {
+  clampDowntimeMaxConcurrentDispatches,
+  DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
+  DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR,
+  DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING,
+} from './downtime-worker.js';
 
 function tempSettingsPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'herdr-settings-test-'));
@@ -255,5 +261,78 @@ describe('maxSyncStalenessMs', () => {
     const path = tempSettingsPath();
     saveSettings(path, { ...defaultSettings, maxSyncStalenessMs: 1234.7 });
     expect(loadSettings(path).maxSyncStalenessMs).toBe(1235);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// downtimeMaxConcurrentDispatches (F2 WL-0MTSAB0QU003KTLA)
+// ---------------------------------------------------------------------------
+
+describe('downtimeMaxConcurrentDispatches', () => {
+  it('defaults to 1 (single-flight, unchanged from before F2)', () => {
+    expect(DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES).toBe(1);
+    expect(defaultSettings.downtimeMaxConcurrentDispatches).toBe(1);
+  });
+
+  it('loads a persisted value', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 2 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(2);
+  });
+
+  it('clamps values below the floor to 1', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 0 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: -5 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+  });
+
+  it('clamps values above the ceiling to 4', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 10 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(4);
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 99 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(4);
+  });
+
+  it('falls back to the default when not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxConcurrentDispatches: 'many' }), 'utf-8');
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+  });
+
+  it('existing config without the key behaves as single-flight', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxConcurrentDispatches: undefined }), 'utf-8');
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+  });
+});
+
+describe('clampDowntimeMaxConcurrentDispatches', () => {
+  it('keeps in-range values', () => {
+    expect(clampDowntimeMaxConcurrentDispatches(1)).toBe(1);
+    expect(clampDowntimeMaxConcurrentDispatches(2)).toBe(2);
+    expect(clampDowntimeMaxConcurrentDispatches(4)).toBe(4);
+  });
+
+  it('clamps below floor to 1', () => {
+    expect(clampDowntimeMaxConcurrentDispatches(0)).toBe(1);
+    expect(clampDowntimeMaxConcurrentDispatches(-1)).toBe(1);
+  });
+
+  it('clamps above ceiling to 4', () => {
+    expect(clampDowntimeMaxConcurrentDispatches(5)).toBe(4);
+    expect(clampDowntimeMaxConcurrentDispatches(99)).toBe(4);
+  });
+
+  it('rounds fractional values', () => {
+    expect(clampDowntimeMaxConcurrentDispatches(2.6)).toBe(3);
+    expect(clampDowntimeMaxConcurrentDispatches(2.4)).toBe(2);
+  });
+
+  it('returns the default (1) for non-finite input', () => {
+    expect(clampDowntimeMaxConcurrentDispatches(NaN)).toBe(1);
+    expect(clampDowntimeMaxConcurrentDispatches(Infinity)).toBe(1);
   });
 });

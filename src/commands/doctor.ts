@@ -986,17 +986,19 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
         for (const f of findings) {
           try {
             const ctx = (f && (f as any).context) || {};
-            // completed + (in_progress|intake_complete|idea) -> completed + in_review
-            if (f.type === 'incompatible-status-stage' && ctx.status === 'completed' && (ctx.stage === 'in_progress' || ctx.stage === 'intake_complete' || ctx.stage === 'idea')) {
+            // completed + (intake_complete|idea) -> completed + in_review
+            if (f.type === 'incompatible-status-stage' && ctx.status === 'completed' && (ctx.stage === 'intake_complete' || ctx.stage === 'idea')) {
               const current = (f.proposedFix && typeof f.proposedFix === 'object') ? (f.proposedFix as Record<string, unknown>) : {};
               (f as any).proposedFix = Object.assign({}, current, { stage: 'in_review' });
               (f as any).safe = true;
             }
 
-            // deleted + in_progress -> deleted + done
-            if (f.type === 'incompatible-status-stage' && ctx.status === 'deleted' && ctx.stage === 'in_progress') {
+            // migrated stage (in_progress -> plan_complete): general fallback
+            // Items with stage=in_progress are migrated to plan_complete (the
+            // highest-priority actionable stage after removal of in_progress).
+            if (f.type === 'incompatible-status-stage' && ctx.stage === 'in_progress') {
               const current = (f.proposedFix && typeof f.proposedFix === 'object') ? (f.proposedFix as Record<string, unknown>) : {};
-              (f as any).proposedFix = Object.assign({}, current, { stage: 'done' });
+              (f as any).proposedFix = Object.assign({}, current, { stage: 'plan_complete' });
               (f as any).safe = true;
             }
           } catch (e) {

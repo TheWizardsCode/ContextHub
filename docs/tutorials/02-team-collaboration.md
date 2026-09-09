@@ -83,7 +83,7 @@ wl list
 Both items should appear. Bob can now update his assigned item:
 
 ```bash
-wl update <id> -s in-progress --stage in_progress
+wl update <id> -s in-progress
 wl sync
 ```
 
@@ -194,7 +194,7 @@ When `githubImportCreateNew` is `true`, `wl github import` will create new Workl
 wl sync
 
 # Work normally: create, update, comment
-wl update <id> -s in-progress --stage in_progress
+wl update <id> -s in-progress
 wl comment add <id> -c "Started implementation" -a "Your Name"
 
 # End of day: push your changes

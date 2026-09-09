@@ -67,6 +67,18 @@ export interface ShortcutEntry {
    * `code_freeze` pattern.
    */
   openPane?: boolean;
+  /**
+   * Whether dispatching this shortcut should focus the newly opened pane
+   * (WL-0MT70LC6B009TL3Q). Omitted (or `false`) opens the pane without
+   * stealing focus from the selection list (the current default for all
+   * shortcuts). When `true`, the new pane is focused/zoomed immediately
+   * after opening — useful for shortcuts like `P n` (new Pi session) where
+   * the user wants to start typing without an extra focus step.
+   * Parsed from the `focus` key in shortcuts.json; invalid values are
+   * logged and treated as omitted (no-focus), mirroring the `open_pane`
+   * pattern.
+   */
+  focus?: boolean;
 }
 
 // ── Registry ──────────────────────────────────────────────────────────
@@ -288,6 +300,16 @@ export function parseShortcutEntry(raw: unknown): ShortcutEntry | undefined {
     // default) — a bad value must never hide or break a shortcut
     // (WL-0MSJLD1I70045ZUL).
     console.error(`[shortcut-config] Invalid open_pane value "${String(openPane)}" for shortcut "${command}"; expected true or false, treating as omitted (open a pane)`);
+  }
+
+  const focus = entry.focus;
+  if (focus === true || focus === false) {
+    shortcutEntry.focus = focus;
+  } else if (focus !== undefined) {
+    // Invalid values are logged and treated as omit (no-focus — the
+    // default) — a bad value must never hide or break a shortcut
+    // (WL-0MT70LC6B009TL3Q).
+    console.error(`[shortcut-config] Invalid focus value "${String(focus)}" for shortcut "${command}"; expected true or false, treating as omitted (no-focus)`);
   }
 
   // Agent-bound commands without an explicit model run on the default

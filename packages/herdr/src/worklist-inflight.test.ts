@@ -156,11 +156,15 @@ describe('worklist doRefresh in-flight guard (WL-0MSBVYBMD004007C)', () => {
     await vi.advanceTimersByTimeAsync(30_000);
     expect(fetcher).toHaveBeenCalledTimes(1);
 
-    // Resolve the in-flight cycle, then the next tick (t=90s) refreshes
-    // again — the skipped tick did not leave the list stale forever.
+    // Resolve the in-flight cycle. With the trailing refresh fix
+    // (WL-0MTIB7JAN004MQ8N), the pending second tick now fires as a
+    // trailing refresh immediately on resolve (fetches twice); then the
+    // t=90s tick adds one more fetch (total 3).
     resolveFetch([]);
-    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(0);
     expect(fetcher).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(3);
 
     await quit(p);
   });
@@ -194,6 +198,120 @@ describe('worklist doRefresh in-flight guard (WL-0MSBVYBMD004007C)', () => {
     fail = false;
     await vi.advanceTimersByTimeAsync(30_000);
     expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await quit(p);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Coalescing / trailing refresh tests (WL-0MTIB7JAN004MQ8N)
+// ---------------------------------------------------------------------------
+// Trailing refresh: when a refresh is in-flight and a second refresh is
+// requested (e.g. a background `u p c` / `wl update` exiting while the
+// initial immediate fetch is still awaiting), the second request is not
+// silently dropped — it runs as a trailing refresh after the first completes.
+
+describe('worklist doRefresh trailing/coalescing refresh (WL-0MTIB7JAN004MQ8N)', () => {
+  it('two ticks while fetcher is pending → trailing refresh runs after in-flight completes (not dropped)', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock(true) as any);
+
+    // Deferred fetcher: in-flight until test resolves it — so the second
+    // tick (the onExit) fires while the fetch is still pending.
+    let resolveFetch!: (items: WorkItem[]) => void;
+    const deferredPromise = new Promise<WorkItem[]>((r) => { resolveFetch = r; });
+    const fetcher = vi.fn(() => deferredPromise);
+
+    const p = runWorklistTui(fetcher, [], undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    fetcher.mockClear();
+
+    // First tick: starts a fetch (in-flight)
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Second tick while fetcher is still pending: the trailing refresh is
+    // not dropped — the pending flag is set.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Resolve the pending fetch — the trailing refresh now fires.
+    resolveFetch([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await quit(p);
+  });
+
+  it('at-most-one trailing — three rapid deferred ticks while pending coalesce into one trailing', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock(true) as any);
+
+    let resolveFetch!: (items: WorkItem[]) => void;
+    const deferredPromise = new Promise<WorkItem[]>((r) => { resolveFetch = r; });
+    const fetcher = vi.fn(() => deferredPromise);
+
+    const p = runWorklistTui(fetcher, [], undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    fetcher.mockClear();
+
+    // First tick: starts a fetch
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Three more ticks while still pending — pending flag stays true, at most
+    // one trailing runs, not three.
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Resolve — exactly ONE trailing refresh
+    resolveFetch([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await quit(p);
+  });
+
+  it('no trailing when no tick fired — no extra fetch after resolve when pending flag was never set', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock(true) as any);
+
+    let resolveFetch!: (items: WorkItem[]) => void;
+    const deferredPromise = new Promise<WorkItem[]>((r) => { resolveFetch = r; });
+    const fetcher = vi.fn(() => deferredPromise);
+
+    const p = runWorklistTui(fetcher, [], undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    fetcher.mockClear();
+
+    // First tick: starts a fetch; no second tick while pending
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // No extra tick — pending stays false
+    resolveFetch([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
 
     await quit(p);
   });

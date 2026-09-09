@@ -21,7 +21,6 @@ validation helpers and UI wiring.
     - idea
     - intake_complete
     - plan_complete
-    - in_progress
     - in_review
     - done
   - Defaulting behavior on create/import: idea for CLI create, blank stage on import
@@ -33,8 +32,8 @@ Defined in config defaults.
 - Source of truth: .worklog/config.defaults.yaml (statusStageCompatibility)
 - Runtime loader: src/status-stage-rules.ts
 - Current defaults:
-  - open -> idea, intake_complete, plan_complete, in_progress
-  - in-progress -> intake_complete, plan_complete, in_progress
+  - open -> idea, intake_complete, plan_complete
+  - in-progress -> intake_complete, plan_complete
   - blocked -> idea, intake_complete, plan_complete
   - completed -> in_review, done
   - deleted -> idea, intake_complete, plan_complete, done
@@ -50,7 +49,7 @@ TUI update dialog rejects invalid status/stage combinations.
 - Tests: tests/tui/tui-update-dialog.test.ts (removed — file was part of the deprecated Blessed TUI)
   - Rejects invalid status/stage combinations.
   - Accepts compatible updates and applies changes.
-  - Note: The validation logic permits common transitional combinations by default, e.g. `status=in-progress` (or `in_progress`) while `stage` is `idea`, `in_progress`, or `in_review`. This mirrors TUI/agent workflows that may set an item as in-progress before advancing its stage.
+  - Note: The validation logic permits common transitional combinations by default, e.g. `status=in-progress` (or `in_progress`) while `stage` is `idea` or `in_review`. This mirrors TUI/agent workflows that may set an item as in-progress before advancing its stage.
 
 ### Close Dialog Status/Stage Mapping
 Close dialog sets status/stage pairs as follows:
@@ -101,10 +100,9 @@ The next-item selection logic treats in_review specially and filters statuses.
 
 ## Examples
 - Valid: status=open, stage=idea
-- Valid: status=in-progress, stage=in_progress
+- Valid: status=in-progress, stage=plan_complete
 - Valid: status=completed, stage=in_review
  - Invalid (TUI rejected): status=completed, stage=idea
  - Invalid (TUI rejected): status=deleted, stage=in_review
  - Transitional valid: status=in-progress (or in_progress), stage=idea
- - Transitional valid: status=in-progress (or in_progress), stage=in_progress
  - Transitional valid: status=in-progress (or in_progress), stage=in_review

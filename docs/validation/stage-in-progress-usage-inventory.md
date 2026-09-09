@@ -7,6 +7,10 @@
 
 ---
 
+**Note (WL-0MTOHS5B4001Y9FX):** `stage in_progress` has been removed from the valid stage values.
+The stage enumeration is now `idea`, `intake_complete`, `plan_complete`, `in_review`, `done`.
+This inventory documents the pre-removal state; entries for `--stage in_progress` are now historical/invalid.
+
 ## Canonical Reference: Status vs Stage (from `AGENTS.md`)
 
 | Concept | Purpose | Values | When to set |
@@ -19,7 +23,7 @@ The global `AGENTS.md` (line 21) uses **status-only** for claiming:
 wl update <id> --status in_progress --assignee <your-agent-name>
 ```
 
-Setting `--stage in_progress` should only occur when the item is entering the **implementation phase** of its lifecycle. Using it as a temporary "actively working" signal during intake or planning conflates the two dimensions.
+`--stage in_progress` is **no longer valid** — it has been removed from the stage enumeration. Claiming an item sets `status=in_progress` only; stage is left unchanged. The implementation phase is now represented by `stage=plan_complete` (WL-0MTOHS5B4001Y9FX).
 
 ---
 
@@ -27,8 +31,8 @@ Setting `--stage in_progress` should only occur when the item is entering the **
 
 | Skill | SKILL.md (docs) | Scripts (implementation) | Documentation-Match? | Stage-semantic correctness |
 |-------|-----------------|--------------------------|---------------------|---------------------------|
-| **implement** | `--status in_progress --stage in_progress` (Claim) | N/A (no scripts) | ✅ N/A | ✅ Correct — entering implementation phase |
-| **implement-single** | `--status in_progress --stage in_progress` (Claim) | N/A (no scripts) | ✅ N/A | ✅ Correct — entering implementation phase |
+| **implement** | `--status in_progress --stage in_progress` (Claim) — **invalid after WL-0MTOHS5B4001Y9FX** | N/A (no scripts) | ✅ N/A | ✅ Correct — entering implementation phase |
+| **implement-single** | `--status in_progress --stage in_progress` (Claim) — **invalid after WL-0MTOHS5B4001Y9FX** | N/A (no scripts) | ✅ N/A | ✅ Correct — entering implementation phase |
 | **implementall** | `--status in_progress` (status-only in docs) | `--status in_progress --stage in_progress` (dual-set) | ❌ Docs say status-only, code dual-sets | ✅ Correct — dual-set is right for implementation; docs need updating |
 | **planall** | `--status in_progress` (status-only in docs) | `--status in_progress --stage in_progress` (dual-set) | ❌ Docs say status-only, code dual-sets | ❌ Dual-set is wrong — planning is not implementation |
 | **intakeall** | `--status in_progress --stage in_progress` (dual-set in docs) | `--status in_progress --stage in_progress` (dual-set) | ✅ Match | ❌ Dual-set is wrong — intake is not implementation |

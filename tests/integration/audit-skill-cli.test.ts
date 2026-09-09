@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { execAsync, enterTempDir, leaveTempDir, writeConfig, writeInitSemaphore, cliPath } from '../cli/cli-helpers.js';
+import { isAuditFresh } from '@worklog/shared/icons';
 import { writeFileSync } from 'fs';
 import { join } from 'path';
 
@@ -255,5 +256,27 @@ describe('integration: audit skill CLI write path', () => {
       expect(result.error).toBe('audit-invalid-first-line');
       expect(result.indicators.gutterChars).toBe(true);
     }
+  });
+
+  // WL-0MTHRY9NP004R9MC — audit-text path freshness parity with audit-set
+  it('wl update --audit-text keeps audit fresh and survives a follow-up comment', async () => {
+    const { stdout: created } = await execAsync(`tsx ${cliPath} --json create -t "Freshness audit-text path test"`);
+    const id = JSON.parse(created).workItem.id;
+    const { stdout: updated } = await execAsync(`tsx ${cliPath} --json update ${id} --audit-text "Ready to close: Yes"`);
+    const updatedRes = JSON.parse(updated);
+    expect(updatedRes.success).toBe(true);
+    const { stdout: shown } = await execAsync(`tsx ${cliPath} --json show ${id}`);
+    const shownRes = JSON.parse(shown);
+    const wi = shownRes.workItem;
+    const auditedAt = shownRes.auditResult?.auditedAt ?? wi.audit?.time;
+    // audit-text path must atomically set updatedAt = auditedAt so the audit is fresh immediately
+    expect(isAuditFresh(auditedAt, wi.updatedAt)).toBe(true);
+    // A comment shortly after must not invalidate the audit (60 s grace window)
+    await execAsync(`tsx ${cliPath} --json comment add ${id} --author tester --comment "Follow-up after audit"`);
+    const { stdout: shown2 } = await execAsync(`tsx ${cliPath} --json show ${id}`);
+    const parsed2 = JSON.parse(shown2);
+    const wi2 = parsed2.workItem;
+    const auditedAt2 = parsed2.auditResult?.auditedAt ?? wi2.audit?.time;
+    expect(isAuditFresh(auditedAt2, wi2.updatedAt)).toBe(true);
   });
 });

@@ -41,9 +41,11 @@ across the CLI (chalk) and TUI rendering paths. It covers:
 
 **Colour association:** The emoji colours are enhanced with chalk color tags to match the existing colour scheme in the theme (`theme.priority` colours) so scanning by colour remains consistent.
 - critical: red (🚨)
-- high: yellow (⭐)
-- medium: blue (📋)
-- low: gray (🐢)
+- high: orange (⭐)
+- medium: yellow (📋)
+- low: white (🐢)
+
+> The underlying title/id text colour scheme is priority-based: critical → red, high → orange, medium → yellow, low → white (revised 2026-09-08, WL-0MSJ2JFMO007PGQ6). See [COLOUR-MAPPING.md](COLOUR-MAPPING.md).
 
 ---
 
@@ -54,7 +56,6 @@ across the CLI (chalk) and TUI rendering paths. It covers:
 | idea             | `💡`   | `[IDEA]`      | "Stage: Idea"                  |
 | intake_complete  | `📥`   | `[INTAKE]`    | "Stage: Intake Complete"       |
 | plan_complete    | `📋`   | `[PLAN]`      | "Stage: Plan Complete"         |
-| in_progress      | `🛠️`  | `[PROG]`      | "Stage: In Progress"           |
 | in_review        | `🔍`   | `[REVIEW]`    | "Stage: In Review"             |
 | done             | `🏁`   | `[DONE]`      | "Stage: Done"                  |
 

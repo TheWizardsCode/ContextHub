@@ -321,10 +321,6 @@ describe('stageIcon', () => {
     expect(stageIcon('plan_complete')).toBe('\u{1F4CB}'); // 📋
   });
 
-  it('returns emoji for in_progress stage', () => {
-    expect(stageIcon('in_progress')).toBe('\u{1F6E0}\u{FE0F}'); // 🛠️
-  });
-
   it('returns emoji for in_review stage', () => {
     expect(stageIcon('in_review')).toBe('\u{1F50D}'); // 🔍
   });
@@ -345,7 +341,7 @@ describe('stageIcon', () => {
 
   it('is case-insensitive', () => {
     expect(stageIcon('IDEA')).toBe('\u{1F4A1}');
-    expect(stageIcon('In_Progress')).toBe('\u{1F6E0}\u{FE0F}');
+    expect(stageIcon('PLAN_COMPLETE')).toBe('\u{1F4CB}');
   });
 
   describe('with noIcons option', () => {
@@ -359,10 +355,6 @@ describe('stageIcon', () => {
 
     it('returns text fallback for plan_complete', () => {
       expect(stageIcon('plan_complete', { noIcons: true })).toBe('[PLAN]');
-    });
-
-    it('returns text fallback for in_progress', () => {
-      expect(stageIcon('in_progress', { noIcons: true })).toBe('[PROG]');
     });
 
     it('returns text fallback for in_review', () => {
@@ -392,10 +384,6 @@ describe('stageFallback', () => {
     expect(stageFallback('plan_complete')).toBe('[PLAN]');
   });
 
-  it('returns bracketed text for in_progress', () => {
-    expect(stageFallback('in_progress')).toBe('[PROG]');
-  });
-
   it('returns bracketed text for in_review', () => {
     expect(stageFallback('in_review')).toBe('[REVIEW]');
   });
@@ -420,10 +408,6 @@ describe('stageLabel', () => {
 
   it('returns label for plan_complete', () => {
     expect(stageLabel('plan_complete')).toBe('Stage: Plan Complete');
-  });
-
-  it('returns label for in_progress', () => {
-    expect(stageLabel('in_progress')).toBe('Stage: In Progress');
   });
 
   it('returns label for in_review', () => {

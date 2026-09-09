@@ -14,6 +14,13 @@
 #   --pane-name <name>   Name to assign to the new pane (default: "Pi Agent")
 #   --focus              Zoom/focus the new pane (default: on)
 #   --no-focus           Explicitly skip zoom/focus
+#   --anchor <id>        Split from the given pane id (a Dispatcher anchor)
+#                        instead of the current pane. When set, resize mode
+#                        grows the grid around that pane (grid.py <anchor>)
+#                        and no-resize mode splits that pane directly
+#                        (`herdr pane split --pane <id>`); the current-pane
+#                        resolution is skipped entirely. Absent = legacy
+#                        behavior (leader's current pane).
 #   --resize             Split right AND rebalance the right side into an even
 #                        grid (anchor keeps 50% width x 100% height) (default)
 #   --no-resize          Plain herdr split-right, no layout changes (default is resize)
@@ -55,6 +62,7 @@ check_cli=false
 cwd_arg=""
 model_arg=""
 pane_id_file=""
+anchor_arg=""
 resize=true
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
 grid_bin="${HERDR_GRID_BIN:-$(cd "$(dirname "$0")" && pwd)/grid.py}"
@@ -96,6 +104,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --cwd=*)
       cwd_arg="${1#*=}"
+      shift
+      ;;
+    --anchor)
+      anchor_arg="$2"
+      shift 2
+      ;;
+    --anchor=*)
+      anchor_arg="${1#*=}"
       shift
       ;;
     --model)
@@ -154,17 +170,26 @@ fi
 # otherwise inherit the source pane's CWD (e.g. the plugin directory).
 target_cwd="${cwd_arg:-${HERDR_RESOLVED_CWD:-$PWD}}"
 
-# ── Split the current pane to the right ──────────────────────────────
+# ── Split the anchor pane to the right ─────────────────────────────
 if [ "$resize" = true ]; then
   # Resize mode: resolve the anchor pane and let the grid helper perform the
   # split and rebalance (safe ops only: pane.split + layout.set_split_ratio).
-  # `pane current` emits JSON by default; it does NOT accept --json
-  # (herdr 0.7.5: "unknown option: --json", exit 2).
-  # The sed tolerates optional whitespace after the colon (json.dumps in
-  # grid.py emits `"pane_id": "..."` while the herdr CLI emits `"pane_id":"..."`).
-  anchor="$("$herdr_bin" pane current 2>/dev/null | sed -n 's/.*"pane_id": *"\([^"]*\)".*/\1/p' | head -n1)"
+  #   --anchor <id>  → the GIVEN pane id (dispatcher-anchor mode): the grid
+  #                    grows around the dedicated Dispatcher anchor in its
+  #                    own workspace (C0 WL-0MTR01EU7005SYZG). `pane current`
+  #                    is NEVER called in this mode.
+  #   no --anchor    → the current pane (legacy interactive behavior).
+  if [ -n "$anchor_arg" ]; then
+    anchor="$anchor_arg"
+  else
+    # `pane current` emits JSON by default; it does NOT accept --json
+    # (herdr 0.7.5: "unknown option: --json", exit 2).
+    # The sed tolerates optional whitespace after the colon (json.dumps in
+    # grid.py emits `"pane_id": "..."` while the herdr CLI emits `"pane_id":"..."`).
+    anchor="$("$herdr_bin" pane current 2>/dev/null | sed -n 's/.*"pane_id": *"\([^"]*\)".*/\1/p' | head -n1)"
+  fi
   if [ -z "$anchor" ]; then
-    echo "Error: Could not resolve the current pane. Ensure you are inside a herdr session." >&2
+    echo "Error: Could not resolve the split anchor pane. Ensure you are inside a herdr session (or pass --anchor with a valid pane id)." >&2
     exit 1
   fi
   # Forward the resolved target CWD so the new pane starts in the correct
@@ -177,10 +202,16 @@ if [ "$resize" = true ]; then
   fi
   np="$(printf '%s' "$grid_out" | sed -n 's/.*"pane_id": *"\([^"]*\)".*/\1/p' | head -n1)"
 else
-  # Plain split-right (herdr default), no layout changes.
-  split_out="$("$herdr_bin" pane split --current --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
+  # Plain split-right (herdr default), no layout changes. Anchor mode targets
+  # the given pane id directly (`pane split --pane <id>`); legacy targets the
+  # current pane.
+  if [ -n "$anchor_arg" ]; then
+    split_out="$("$herdr_bin" pane split --pane "$anchor_arg" --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
+  else
+    split_out="$("$herdr_bin" pane split --current --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
+  fi
   if [ -z "$split_out" ]; then
-    echo "Error: Failed to split pane. Ensure you are inside a herdr session." >&2
+    echo "Error: Failed to split pane. Ensure you are inside a herdr session (or pass --anchor with a valid pane id)." >&2
     exit 1
   fi
   np="$(printf '%s' "$split_out" | sed -n 's/.*"pane_id": *"\([^"]*\)".*/\1/p' | head -n1)"

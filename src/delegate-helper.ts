@@ -229,7 +229,6 @@ export async function delegateWorkItem(
     db.update(itemId, {
       status: 'in-progress',
       assignee: '@github-copilot',
-      stage: 'in_progress',
     });
 
     const postAssignComments = db.getAllComments();

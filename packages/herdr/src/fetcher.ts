@@ -9,6 +9,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { join } from 'node:path';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
 import type { AgentState } from './agent-tracker.js';
@@ -79,12 +80,35 @@ export function getWorklogDir(): string | undefined {
  * `wl comment add`) use this so their commands resolve against the same
  * worklog root as the worklist — without the override the argument vector is
  * returned unchanged (current behavior preserved).
+ *
+ * `dirOverride` (the `.worklog/` directory itself, e.g.
+ * `/project/.worklog`) wins over the module-level override for THIS call
+ * only — the module state is never mutated (see `buildWlArgsForRoot` for the
+ * root-accepting convenience form).
  */
-export function buildWlArgs(args: string[]): string[] {
-  if (_worklogDir !== undefined) {
-    return ['--worklog-dir', _worklogDir, ...args];
+export function buildWlArgs(args: string[], dirOverride?: string): string[] {
+  const dir = dirOverride ?? _worklogDir;
+  if (dir !== undefined) {
+    return ['--worklog-dir', dir, ...args];
   }
   return args;
+}
+
+/**
+ * Build wl args targeting a SPECIFIC worklog root's database — stateless,
+ * per-call `--worklog-dir <root>/.worklog` targeting that never mutates the
+ * module-level override (WL-0MTQ14W7L003II5A). `root` is the project
+ * directory that CONTAINS `.worklog/` (e.g. `/home/user/projects/AI_Hell`),
+ * the convention every downtime/coordination caller passes as `cwd`.
+ *
+ * The downtime leader uses this for every per-entry wl invocation on a
+ * coordination offer: the offer's item lives in ITS OWN instance's worklog
+ * root, which may differ from the leader pane's resolved root — resolving
+ * against the module override instead fired `wl show`/`update` at the wrong
+ * database ("Work item not found" → 3 strikes → 60-minute pause).
+ */
+export function buildWlArgsForRoot(root: string, args: string[]): string[] {
+  return ['--worklog-dir', join(root, '.worklog'), ...args];
 }
 
 /**
@@ -164,7 +188,12 @@ export interface WorkItem {
  * Extract the first complete JSON object from a string that may contain
  * leading/trailing non-JSON text (e.g., log output mixed with JSON).
  */
-function extractJson(raw: string): unknown {
+/**
+ * Extract the first complete JSON object from a string that may contain
+ * leading/trailing non-JSON text (e.g., log output mixed with JSON).
+ * Exported for use by the downtime worker's review-queue gate.
+ */
+export function extractJson(raw: string): unknown {
   const start = raw.indexOf('{');
   if (start < 0) throw new Error('No JSON object in output');
 
@@ -228,7 +257,7 @@ function normalizeItem(raw: any): WorkItem {
     groupLabel: raw?.groupLabel ? String(raw.groupLabel) : undefined,
     needsProducerReview: raw?.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
     auditResult: raw?.auditResult !== undefined ? raw.auditResult : null,
-    auditedAt: raw?.auditedAt !== undefined ? String(raw.auditedAt) : undefined,
+    auditedAt: raw?.auditedAt == null ? (raw?.auditedAt as null | undefined) : String(raw.auditedAt),
   };
 }
 
@@ -236,7 +265,12 @@ function normalizeItem(raw: any): WorkItem {
  * Extract work items from a wl CLI response, handling different response
  * shapes (direct array, { workItems: [...] }, { results: [...] }).
  */
-function extractItems(payload: unknown): WorkItem[] {
+/**
+ * Extract work items from a wl CLI response, handling different response
+ * shapes (direct array, { workItems: [...] }, { results: [...] }).
+ * Exported for use by the downtime worker's review-queue gate.
+ */
+export function extractItems(payload: unknown): WorkItem[] {
   if (Array.isArray(payload)) {
     return payload.map(normalizeItem);
   }
@@ -322,9 +356,10 @@ const MEMO_MAX_ENTRIES = 64;
  */
 const inflightFetchMemo = new Map<string, Promise<string>>();
 
-function fetchMemoKey(args: string[], includeJson: boolean): string {
-  // Include the worklog-dir override so a dir change never cross-contaminates.
-  return `${_worklogDir ?? ''}\u0000${includeJson ? '1' : '0'}\u0000${args.join('\u0000')}`;
+function fetchMemoKey(args: string[], includeJson: boolean, dirOverride?: string): string {
+  // Include the effective worklog-dir override (per-call or module-level) so
+  // a dir change never cross-contaminates racing reads across roots.
+  return `${dirOverride ?? _worklogDir ?? ''}\u0000${includeJson ? '1' : '0'}\u0000${args.join('\u0000')}`;
 }
 
 /**
@@ -345,7 +380,12 @@ export function _fetchMemoSize(): number {
   return inflightFetchMemo.size;
 }
 
-async function runWlInner(args: string[], includeJson: boolean, timeoutMs?: number): Promise<string> {
+async function runWlInner(
+  args: string[],
+  includeJson: boolean,
+  timeoutMs?: number,
+  dirOverride?: string,
+): Promise<string> {
   let lastError: unknown;
 
   for (const binary of CLI_BINARIES) {
@@ -357,8 +397,9 @@ async function runWlInner(args: string[], includeJson: boolean, timeoutMs?: numb
         fullArgs = args;
       }
 
-      // Prepend --worklog-dir when set (global option before the subcommand).
-      fullArgs = buildWlArgs(fullArgs);
+      // Prepend --worklog-dir when set (per-call override first, then the
+      // module override — global option before the subcommand).
+      fullArgs = buildWlArgs(fullArgs, dirOverride);
 
       // Bounded timeout: use the caller's override if supplied, otherwise
       // apply DEFAULT_WL_TIMEOUT_MS so a hung wl process cannot block the
@@ -387,24 +428,29 @@ async function runWlInner(args: string[], includeJson: boolean, timeoutMs?: numb
   throw new Error(`wl CLI not found: ${String(lastError)}`);
 }
 
-async function runWl(args: string[], includeJson = true, timeoutMs?: number): Promise<string> {
+async function runWl(
+  args: string[],
+  includeJson = true,
+  timeoutMs?: number,
+  dirOverride?: string,
+): Promise<string> {
   const command = args[0];
 
   // Writes must never be deduplicated or share pre-write read results: drop
   // any in-flight read memo so a read issued after this write spawns fresh.
   if (!MEMOIZABLE_COMMANDS.has(command)) {
     if (inflightFetchMemo.size > 0) inflightFetchMemo.clear();
-    return runWlInner(args, includeJson, timeoutMs);
+    return runWlInner(args, includeJson, timeoutMs, dirOverride);
   }
 
   // Read: dedupe concurrent identical fetches within this process (F4).
-  const key = fetchMemoKey(args, includeJson);
+  const key = fetchMemoKey(args, includeJson, dirOverride);
   const inFlight = inflightFetchMemo.get(key);
   if (inFlight) {
     return inFlight;
   }
 
-  const promise = runWlInner(args, includeJson, timeoutMs).finally(() => {
+  const promise = runWlInner(args, includeJson, timeoutMs, dirOverride).finally(() => {
     // Remove on settle: the memo only dedupes CONCURRENT fetches, so a
     // later identical read always spawns fresh (never stale across writes).
     if (inflightFetchMemo.get(key) === promise) {
@@ -468,10 +514,21 @@ function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
  * mitigate refresh latency.
  */
 async function fetchMandatorySubsets(): Promise<WorkItem[]> {
-  // Root-only (WL-0MS964SIA0057ABR): child items are hidden from the
-  // top-level worklist — they are only visible under their parent via expand.
+  // Critical items: fetch ALL critical items across all statuses (open,
+  // in-progress, blocked, completed) regardless of root/child status. This
+  // ensures child critical items that block releases (e.g., untriaged
+  // test-failures) are always visible in the worklist — they are not filtered
+  // out by the rootOnly gate in selectWorkItems (WL-0MS964SIA0057ABR).
+  //
+  // We query all statuses because `wl list --priority critical` only returns
+  // `open` and `completed` items by default, missing `in-progress` critical
+  // items that the ship critical-items gate detects.
+  //
+  // Review items: root-only is appropriate because the in_review queue
+  // is about producer review of parent items; child items are handled by
+  // the parent's review lifecycle.
   const [criticalOutput, reviewOutput] = await Promise.all([
-    runWl(['list', '--priority', 'critical', '--root-only']),
+    runWl(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed']),
     runWl(['list', '--status', 'completed', '--stage', 'in_review', '--root-only']),
   ]);
   const criticalItems = extractItems(extractJson(criticalOutput));
@@ -615,6 +672,29 @@ export async function runWlSync(): Promise<{ success: boolean; error?: string }>
 }
 
 /**
+ * Count completed + in_review work items (root-only) for the sprint-complete
+ * check (parent WL-0MTHSHN5V008R5L0). Returns the count, or undefined on
+ * failure — callers treat undefined as "unknown" and must NOT auto-disable
+ * on a query failure (fail-closed, AC1).
+ *
+ * Uses `wl list --status completed --stage in_review --root-only --json`
+ * and counts the resulting items. A CLI error or unparseable output
+ * resolves to undefined (never throws).
+ */
+export async function fetchCompletedItemCount(): Promise<number | undefined> {
+  try {
+    const output = await runWl(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']);
+    const payload = extractJson(output);
+    const items = extractItems(payload);
+    return items.length;
+  } catch {
+    // Fail-closed: a query failure means we cannot determine completion status
+    // — the conservative default is to NOT auto-disable (AC1).
+    return undefined;
+  }
+}
+
+/**
  * Fetch child work items for a given parent ID (via `wl list --parent`).
  *
  * Child items are returned with the given hierarchy `depth` for display
@@ -670,6 +750,12 @@ const CLAIM_TIMEOUT_MS = 3000;
  * the dispatch. A stale result is detected from the wl CLI's `"error":
  * "stale"` JSON payload on stderr.
  *
+ * `worklogRoot` (optional, WL-0MTQ14W7L003II5A) targets the update at a
+ * specific worklog root's database via per-call `--worklog-dir` — the
+ * downtime leader's cross-root claims (coordination offers live in the
+ * offering instance's root, not the leader's). Undefined → the module
+ * override (or ambient cwd) decides, as before.
+ *
  * Never throws — failures are returned so callers can log them without
  * blocking the agent pane from opening.
  */
@@ -677,6 +763,7 @@ export async function claimWorkItem(
   id: string,
   assignee: string,
   expected?: { status?: string; stage?: string },
+  worklogRoot?: string,
 ): Promise<ClaimResult> {
   try {
     const args = ['update', id, '--status', 'in_progress', '--assignee', assignee];
@@ -686,7 +773,13 @@ export async function claimWorkItem(
     if (expected?.stage) {
       args.push('--if-stage', expected.stage);
     }
-    await runWl(args, true, CLAIM_TIMEOUT_MS);
+    // Per-call --worklog-dir targeting (WL-0MTQ14W7L003II5A): the downtime
+    // leader claims coordination offers in the OFFER's own worklog root,
+    // which may differ from the module override (the leader pane's root).
+    // Passing the root resolves the update against the item's own database;
+    // absent/undefined keeps the historical module-override behavior.
+    const dirOverride = worklogRoot !== undefined ? join(worklogRoot, '.worklog') : undefined;
+    await runWl(args, true, CLAIM_TIMEOUT_MS, dirOverride);
     return { success: true };
   } catch (err: any) {
     const message = err.message ?? String(err);

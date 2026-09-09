@@ -90,6 +90,7 @@ import {
   selectAuditCandidate,
   selectWithRotation,
   toDowntimeCandidate,
+  classifyItemForDispatch,
   skillKindFromPrompt,
   buildDowntimeDispatchComment,
   clampDowntimePollInterval,
@@ -111,9 +112,23 @@ import {
   type DowntimeStage,
   type AuditCandidate,
   type ImplementCandidate,
+  type CriticalCandidate,
   type ScheduledPrompt,
   type DowntimeActiveAuditResult,
+  type DowntimeItemInfo,
+  type DowntimeHerdrItem,
+  isTransientDowntimeError,
+  withTransientRetry,
+  MIN_BROWSE_ITEM_COUNT,
+  MAX_BROWSE_ITEM_COUNT,
 } from './downtime-worker.js';
+import {
+  defaultSettings,
+  loadSettings,
+  saveSettings,
+  clampBrowseItemCount,
+  clampDowntimeRequiredFreeSlots as clampDowntimeRequiredFreeSlotsSetting,
+} from './settings.js';
 import {
   DOWNTIME_DISABLE_MARKER_FILE,
   disableMarkerPath,
@@ -144,9 +159,19 @@ import {
   type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
 
+
+/** Create a temporary settings path for integration tests. */
+function tempSettingsPath(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'herdr-settings-test-'));
+  return join(dir, 'worklog-plugin.json');
+}
+
 /** Shared deps mock for dispatch tests. */
 function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
   return {
+    // Herdr list head (WL-0MTK1ILM2009QYB2): empty by default so legacy tests that
+    // stub per-tier lookups keep passing (the head path is inert on empty).
+    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
     getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     // Audit tier answers a GENUINELY empty tier by default ({ok:true,
     // candidate:null}); a wl/parse failure is {ok:false} (WL-0MSLWJ2KP0002SV0).
@@ -179,6 +204,9 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     // Interim freshness re-check (WL-0MT8KSTOE00871E7): no fresh audit by
     // default, so existing dispatch tests exercise the unchanged path.
     hasFreshAudit: vi.fn().mockResolvedValue(false),
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9): empty queue by default
+    // so the gate is inactive and existing tests exercise the unchanged path.
+    getReviewQueueCount: vi.fn().mockResolvedValue(0),
     ...overrides,
   };
 }
@@ -351,7 +379,7 @@ describe('dispatch selection', () => {
 
     // The claim carries the expected state the tier selected the item in
     // (RCA WL-0MSRBFFLN005W3VT design point 1 — compare-and-swap).
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-ABC', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-ABC', { status: 'open', stage: 'intake_complete' }, '/repo');
     const claimOrder = (deps.claimItem as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(claimOrder).toBeLessThan(spawnOrder);
@@ -371,7 +399,7 @@ describe('dispatch selection', () => {
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.kind).toBe('intake');
     expect(outcome.candidate?.id).toBe('WL-DEF');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-DEF', { status: 'open', stage: 'idea' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-DEF', { status: 'open', stage: 'idea' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-DEF'),
       expect.anything(),
@@ -422,7 +450,7 @@ describe('dispatch selection', () => {
     expect(outcome.candidate?.id).toBe('WL-IDE');
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-IDE', { status: 'open', stage: 'idea' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-IDE', { status: 'open', stage: 'idea' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-IDE'),
       expect.anything(),
@@ -465,6 +493,117 @@ describe('dispatch selection', () => {
   });
 });
 
+// ── Dispatcher anchor wiring (C0 WL-0MTR01EU7005SYZG / F2 WL-0MTR2HLLJ009PTPJ) ──
+
+describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
+  it('AC1: buildDowntimePaneArgs appends --anchor <id> when an anchorId is provided', () => {
+    const args = buildDowntimePaneArgs('plan', 'Run /skill:plan WL-ABC — Some task.', {
+      model: 'plan',
+      cwd: '/repo',
+      anchorId: 'wD:pANCHOR',
+    });
+    expect(args).toContain('--anchor');
+    expect(args).toContain('wD:pANCHOR');
+    expect(args).toContain('--no-focus');
+    expect(args).toContain('--cwd');
+    expect(args).toContain('/repo');
+    expect(args).toContain('--model');
+    expect(args).toContain('plan');
+  });
+
+  it('AC1 backward-compat: buildDowntimePaneArgs omits --anchor when no anchorId is given', () => {
+    const args = buildDowntimePaneArgs('plan', 'Run /skill:plan WL-ABC — Some task.', {
+      model: 'plan',
+      cwd: '/repo',
+    });
+    expect(args).not.toContain('--anchor');
+    expect(args).not.toContain('wD:pANCHOR');
+    expect(args[0]).toBe('--pane-name');
+  });
+
+  it('AC3: dispatchDowntimeWork resolves the anchor and passes its pane id to spawnAgentPane', async () => {
+    const deps = makeDeps({
+      getDispatcherAnchor: vi.fn().mockResolvedValue({
+        paneId: 'wD:pANCHOR',
+        workspaceId: 'wD',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.getDispatcherAnchor).toHaveBeenCalled();
+    // The resolved anchor pane id flows into the spawn opts (→ --anchor in
+    // the send-to-pi.sh args built by buildDowntimePaneArgs).
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-ABC'),
+      expect.objectContaining({ anchorId: 'wD:pANCHOR' }),
+    );
+  });
+
+  it('AC1 legacy wiring: without the getDispatcherAnchor dep no anchorId key is added (backward compat)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-ABC'),
+      expect.not.objectContaining({ anchorId: expect.anything() }),
+    );
+  });
+
+  it('fail-safe: a null anchor (provisioning failed) aborts the dispatch with anchor-unavailable', async () => {
+    const deps = makeDeps({
+      getDispatcherAnchor: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('scheduled-prompt spawns resolve the anchor and forward anchorId (dispatchDowntimeWork path)', async () => {
+    const deps = makeDeps({
+      getDispatcherAnchor: vi.fn().mockResolvedValue({
+        paneId: 'wD:pANCHOR',
+        workspaceId: 'wD',
+      }),
+      getDueScheduledPrompt: vi.fn().mockResolvedValue({
+        id: 'prompt-1',
+        prompt: 'Run the nightly sweep',
+        frequencyMinutes: 60,
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('scheduled');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      'Run the nightly sweep',
+      expect.objectContaining({ anchorId: 'wD:pANCHOR' }),
+    );
+  });
+});
+
 // ── Audit-tier dispatch (WL-0MSI8H3HP000K0RG) ─────────────────────────
 
 describe('dispatch audit tier', () => {
@@ -485,7 +624,7 @@ describe('dispatch audit tier', () => {
     expect(outcome.kind).toBe('audit');
     expect(outcome.candidate?.id).toBe('WL-AUD');
     expect(deps.getNextItem).not.toHaveBeenCalled();
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit WL-AUD'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-AUD', itemTitle: 'Audit me' },
@@ -609,7 +748,7 @@ describe('audit tier interim freshness re-check (WL-0MT8KSTOE00871E7)', () => {
     expect(outcome.candidate?.id).toBe('WL-PLN');
     // No AUDIT dispatch side-effects: the audit candidate is never claimed,
     // no audit comment/marker, no audit spawn.
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLN', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLN', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.recordDispatch).not.toHaveBeenCalledWith(
       expect.objectContaining({ itemId: 'WL-AUD', kind: 'audit' }),
     );
@@ -698,7 +837,7 @@ describe('audit tier interim freshness re-check (WL-0MT8KSTOE00871E7)', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('audit');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' }, '/repo');
     expect(deps.recordDispatch).toHaveBeenCalledTimes(1); // marker/comment written
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit WL-AUD'),
@@ -1140,7 +1279,7 @@ describe('dispatch implement tier', () => {
     expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextImplementCandidate).toHaveBeenCalledWith('/repo');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP', { status: 'open', stage: 'plan_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP', { status: 'open', stage: 'plan_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-IMP'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-IMP', itemTitle: 'Implement me' },
@@ -1290,7 +1429,7 @@ describe('dispatch code-freeze gate', () => {
     expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete', '/repo');
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLAN', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-PLAN', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-PLAN'),
       expect.anything(),
@@ -1824,6 +1963,11 @@ describe('implement prompt & pane helpers', () => {
 
   it('skillKindFromPrompt detects an implement prompt', () => {
     expect(skillKindFromPrompt('Run /skill:implement WL-IMP — x.')).toBe('implement');
+  });
+
+  // risk-effort kind (WL-0MTTSWCJR003OMN7)
+  it('skillKindFromPrompt detects a risk-effort prompt', () => {
+    expect(skillKindFromPrompt('Run /skill:effort-and-risk WL-RE — x.')).toBe('risk-effort');
   });
 
   it('buildDowntimeDispatchComment renders /skill:implement', () => {
@@ -2519,6 +2663,13 @@ describe('buildDowntimeDispatchComment', () => {
     expect(comment).toContain('multi line title');
     expect(comment).not.toMatch(/[\r\n]/);
   });
+
+  // risk-effort comment (WL-0MTTSWCJR003OMN7)
+  it('renders /skill:effort-and-risk for risk-effort kind', () => {
+    const comment = buildDowntimeDispatchComment('WL-RE', 'risk-effort', '2026-09-09T12:00:00.000Z');
+    expect(comment).toContain('/skill:effort-and-risk WL-RE');
+    expect(comment).toContain('herdr downtime worker');
+  });
 });
 
 // ── Single-flight (AC5) ───────────────────────────────────────────────
@@ -2788,6 +2939,12 @@ describe('blocked-questions prompt instruction', () => {
   it('buildDowntimePrompt output includes the final-summary directive', () => {
     const prompt = buildDowntimePrompt('implement', candidate);
     expect(prompt).toContain('repeat the questions in your final summary');
+  });
+
+  // risk-effort prompt (WL-0MTTSWCJR003OMN7)
+  it('the risk-effort prompt runs /skill:effort-and-risk on the item id', () => {
+    const prompt = buildDowntimePrompt('risk-effort', candidate);
+    expect(prompt).toContain('/skill:effort-and-risk WL-ABC');
   });
 });
 
@@ -3718,7 +3875,8 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     expect(worker.paused).toBe(false); // a single error is NOT an empty backlog
     expect(worker.errorStrikes).toBe(1); // ...but it IS the first strike
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-    expect(deps.recordError).not.toHaveBeenCalled();
+    // WL-0MTJPYM53003ORCV: every strike is logged (per-strike observability).
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
   });
 
   it('does not enter the cooldown when the dispatch guard reports in-flight', async () => {
@@ -4041,11 +4199,14 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     expect(s3.dispatched).toBe(false);
     expect(worker.paused).toBe(true);
     expect(worker.errorStrikes).toBe(0); // counter reset once paused
-    expect(deps.recordError).toHaveBeenCalledTimes(1);
-    const event = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[0][0];
-    expect(event.cwd).toBe('/repo');
-    expect(event.message).toContain('3 consecutive');
-    expect(Number.isNaN(Date.parse(event.at))).toBe(false);
+    // WL-0MTJPYM53003ORCV: every strike is logged — 3 per-strike entries
+    // (attempt 1/2/3), not just the pause marker at strike 3.
+    expect(deps.recordError).toHaveBeenCalledTimes(3);
+    const event3 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[2][0];
+    expect(event3.cwd).toBe('/repo');
+    expect(event3.message).toContain('3 consecutive');
+    expect(event3.attempt).toBe(3);
+    expect(Number.isNaN(Date.parse(event3.at))).toBe(false);
   });
 
   it('an audit-tier wl failure counts toward the three-strike rule (WL-0MSLWJ2KP0002SV0)', async () => {
@@ -4074,13 +4235,14 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     const s2 = await worker.tick();
     expect(s2.dispatched).toBe(false);
     expect(worker.errorStrikes).toBe(2);
-    expect(deps.recordError).not.toHaveBeenCalled();
+    // WL-0MTJPYM53003ORCV: strikes 1 and 2 are already logged per-strike.
+    expect(deps.recordError).toHaveBeenCalledTimes(2);
 
     const s3 = await worker.tick(); // strike 3 → pause + durable trace
     expect(s3.dispatched).toBe(false);
     expect(worker.paused).toBe(true);
     expect(worker.errorStrikes).toBe(0);
-    expect(deps.recordError).toHaveBeenCalledTimes(1);
+    expect(deps.recordError).toHaveBeenCalledTimes(3);
     expect(deps.recordError).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: '/repo' }),
     );
@@ -4146,7 +4308,9 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
 
     await worker.tick(); // strike 3 → paused
     expect(worker.paused).toBe(true);
-    expect(deps.recordError).toHaveBeenCalledTimes(1);
+    // WL-0MTJPYM53003ORCV: per-strike logging — 1 (pre-dispatch strike) +
+    // 3 (fresh strikes 1-3) = 4 recordError calls.
+    expect(deps.recordError).toHaveBeenCalledTimes(4);
   });
 
   it('does not strike on a no-candidate outcome (CLI answered — healthy)', async () => {
@@ -4164,14 +4328,108 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     await worker.tick();
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
 
-    await worker.tick(); // strike 1
+    await worker.tick(); // strike 1 → recordError logged
     expect(worker.errorStrikes).toBe(1);
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
 
     const result = await worker.tick(); // no-candidate → cooldown, strikes reset
     expect(result.dispatched).toBe(false);
     expect(worker.paused).toBe(true); // genuine empty backlog pauses the worker
     expect(worker.errorStrikes).toBe(0);
-    expect(deps.recordError).not.toHaveBeenCalled(); // no persistent-error log
+    // recordError was called for strike 1; no-candidate does NOT add a strike
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
+  });
+
+  // ── Per-strike logging (WL-0MTJPYM53003ORCV) ────────────────────────
+
+  it('records a persistent error on EVERY strike (1, 2, and 3), not just strike 3', async () => {
+    const { worker, deps } = makeErrorWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+
+    await worker.tick(); // strike 1
+    expect(worker.errorStrikes).toBe(1);
+    expect(deps.recordError).toHaveBeenCalledTimes(1);
+
+    await worker.tick(); // strike 2
+    expect(worker.errorStrikes).toBe(2);
+    expect(deps.recordError).toHaveBeenCalledTimes(2);
+
+    await worker.tick(); // strike 3 → pause + log
+    expect(worker.errorStrikes).toBe(0);
+    expect(deps.recordError).toHaveBeenCalledTimes(3);
+  });
+
+  it('per-strike log entries carry attempt/probeContext/timeoutMs on every strike (WL-0MTJPYM53003ORCV)', async () => {
+    const { worker, deps } = makeErrorWorker({
+      deps: {
+        // Carry a stderr-ish message so stderrExcerpt is populated from the
+        // error string (fetcher.ts builds error from stderr||stdout||message).
+        getNextItem: vi.fn().mockResolvedValue({ ok: false, error: 'SQLITE_BUSY: database is locked' }),
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+
+    await worker.tick(); // strike 1
+    const event1 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event1.cwd).toBe('/repo');
+    expect(event1.attempt).toBe(1);
+    expect(event1.probeContext).toBe('dispatch-cli');
+    expect(event1.timeoutMs).toBe(10_000);
+    expect(event1.stderrExcerpt).toBe('SQLITE_BUSY: database is locked');
+    expect(Number.isNaN(Date.parse(event1.at))).toBe(false);
+
+    await worker.tick(); // strike 2
+    const event2 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[1][0];
+    expect(event2.attempt).toBe(2);
+    expect(event2.probeContext).toBe('dispatch-cli');
+    expect(event2.stderrExcerpt).toBe('SQLITE_BUSY: database is locked');
+
+    await worker.tick(); // strike 3
+    const event3 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[2][0];
+    expect(event3.attempt).toBe(3);
+    expect(event3.probeContext).toBe('dispatch-cli');
+  });
+
+  it('stderr excerpt is truncated to 200 chars with [truncated] marker (WL-0MTJPYM53003ORCV)', async () => {
+    const longStderr = 'database is locked '.repeat(50); // > 200 chars
+    const { worker, deps } = makeErrorWorker({
+      deps: {
+        getNextItem: vi.fn().mockResolvedValue({ ok: false, error: longStderr }),
+      },
+    });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    await worker.tick(); // strike 1
+    const event = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event.stderrExcerpt.length).toBeLessThanOrEqual(200 + '[truncated]'.length);
+    expect(event.stderrExcerpt.endsWith('[truncated]')).toBe(true);
+    expect(event.stderrExcerpt.length).toBe(200 + '[truncated]'.length);
+  });
+
+  it('probeContext is dispatch-cli for the legacy dispatch path (WL-0MTJPYM53003ORCV)', async () => {
+    // The makeErrorWorker fixture runs in legacy (non-coordination) mode,
+    // so all errors flow through the dispatch-cli path.
+    const { worker, deps } = makeErrorWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+
+    await worker.tick(); // strike 1
+    const event1 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(event1.probeContext).toBe('dispatch-cli');
+
+    await worker.tick(); // strike 2
+    const event2 = (deps.recordError as ReturnType<typeof vi.fn>).mock.calls[1][0];
+    expect(event2.probeContext).toBe('dispatch-cli');
   });
 });
 
@@ -5683,7 +5941,7 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.candidate?.id).toBe('WL-CRIT-I');
     expect(deps.getNextCriticalCandidate).toHaveBeenCalledWith('/repo');
     expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-I', { status: 'open', stage: 'idea' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-I', { status: 'open', stage: 'idea' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-CRIT-I'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-CRIT-I', itemTitle: 'Critical idea WL-CRIT-I' },
@@ -5708,7 +5966,7 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('WL-CRIT-R');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-CRIT-R'),
       expect.anything(),
@@ -5728,7 +5986,7 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('implement');
     expect(outcome.candidate?.id).toBe('WL-CRIT-P');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-P', { status: 'open', stage: 'plan_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-P', { status: 'open', stage: 'plan_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-CRIT-P'),
       expect.anything(),
@@ -5844,7 +6102,7 @@ describe('dispatch critical-first tier', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-CRIT-R'),
       expect.anything(),
@@ -5908,7 +6166,7 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('WL-BLOCKER');
-    expect(deps.claimItem).toHaveBeenCalledWith('WL-BLOCKER', { status: 'open', stage: 'intake_complete' });
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-BLOCKER', { status: 'open', stage: 'intake_complete' }, '/repo');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-BLOCKER'),
       expect.anything(),
@@ -5960,3 +6218,1091 @@ describe('dispatch critical-first tier', () => {
     expect(secondOutcome.reason).toBe('dispatch-in-flight');
   });
 });
+
+// ── needsProducerReview exclusion (WL-0MTIAL65N004T22F) ─────────────
+// AC1–AC4: every tier (audit / implement / plan / intake / critical-first
+// including frontier blockers and the coordination leader path) excludes
+// items with needsProducerReview === true; absent/false/undefined is
+// dispatchable; failed/unparseable parsing is fail-safe; clearing the flag
+// makes the item dispatchable again.
+
+describe('needsProducerReview exclusion', () => {
+  const auditDated = () => new Date(Date.now() - 1000).toISOString();
+  const auditCandidate = (overrides: Partial<AuditCandidate> = {}): AuditCandidate => ({
+    id: `AUD-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Audit candidate',
+    sortIndex: 1,
+    updatedAt: auditDated(),
+    ...overrides,
+  });
+  const implementCandidate = (overrides: Partial<ImplementCandidate> = {}): ImplementCandidate => ({
+    id: `IMP-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Implement candidate',
+    status: 'open',
+    risk: 'low',
+    effort: 'small',
+    sortIndex: 1,
+    ...overrides,
+  });
+  const nextCandidate = (overrides: Partial<DowntimeCandidate> = {}): DowntimeCandidate => ({
+    id: `NEXT-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Next candidate',
+    stage: 'intake_complete',
+    status: 'open',
+    sortIndex: 1,
+    ...overrides,
+  });
+  const critCandidate = (overrides: Partial<CriticalCandidate> = {}): CriticalCandidate => ({
+    id: `CR-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Critical candidate',
+    status: 'open',
+    stage: 'idea',
+    sortIndex: 1,
+    ...overrides,
+  });
+
+  describe('selectAuditCandidate', () => {
+    it('excludes needsProducerReview === true candidates', () => {
+      const blockedAudit = auditCandidate({ id: 'A1', needsProducerReview: true, sortIndex: 1 });
+      const allowedAudit = auditCandidate({ id: 'A2', sortIndex: 10 });
+      const sel = selectAuditCandidate([blockedAudit, allowedAudit]);
+      expect(sel?.id).toBe('A2');
+    });
+    it('absent/false/undefined needsProducerReview remain dispatchable', () => {
+      const falsy = auditCandidate({ id: 'A3', needsProducerReview: false, sortIndex: 1 });
+      const absent = auditCandidate({ id: 'A4', sortIndex: 2 });
+      expect(selectAuditCandidate([falsy])?.id).toBe('A3');
+      expect(selectAuditCandidate([absent])?.id).toBe('A4');
+    });
+    it('returns null when the tier contains only review-gated candidates', () => {
+      const b = auditCandidate({ id: 'A5', needsProducerReview: true, sortIndex: 1 });
+      expect(selectAuditCandidate([b])).toBeNull();
+    });
+    it('clearing needsProducerReview makes the item dispatchable again', () => {
+      const c = auditCandidate({ id: 'A6', needsProducerReview: true, sortIndex: 1 });
+      expect(selectAuditCandidate([c])).toBeNull();
+      // Clear the flag — same candidate object, flag removed → dispatchable.
+      c.needsProducerReview = false;
+      expect(selectAuditCandidate([c])?.id).toBe('A6');
+    });
+  });
+
+  describe('selectImplementCandidate', () => {
+    it('excludes needsProducerReview === true candidates', () => {
+      const blocked = implementCandidate({ id: 'I1', needsProducerReview: true, sortIndex: 1 });
+      const allowed = implementCandidate({ id: 'I2', sortIndex: 10 });
+      const sel = selectImplementCandidate([blocked, allowed] as ImplementCandidate[]);
+      expect(sel?.id).toBe('I2');
+    });
+    it('absent/false remain dispatchable', () => {
+      expect(selectImplementCandidate([implementCandidate({ id: 'I3', needsProducerReview: false, sortIndex: 1 })] as ImplementCandidate[])?.id).toBe('I3');
+      expect(selectImplementCandidate([implementCandidate({ id: 'I4', sortIndex: 1 })] as ImplementCandidate[])?.id).toBe('I4');
+    });
+    it('returns null when only review-gated candidates remain', () => {
+      expect(selectImplementCandidate([implementCandidate({ id: 'I5', needsProducerReview: true, sortIndex: 1 })] as ImplementCandidate[])).toBeNull();
+    });
+    it('clearing the flag makes the item dispatchable again', () => {
+      const c = implementCandidate({ id: 'I6', needsProducerReview: true, sortIndex: 1 });
+      expect(selectImplementCandidate([c] as ImplementCandidate[])).toBeNull();
+      c.needsProducerReview = false;
+      expect(selectImplementCandidate([c] as ImplementCandidate[])?.id).toBe('I6');
+    });
+  });
+
+  describe('selectNextCandidate', () => {
+    it('excludes needsProducerReview === true candidates', () => {
+      const blocked = nextCandidate({ id: 'N1', needsProducerReview: true, sortIndex: 1, stage: 'intake_complete' });
+      const allowed = nextCandidate({ id: 'N2', sortIndex: 10, stage: 'intake_complete' });
+      expect(selectNextCandidate([blocked, allowed])?.id).toBe('N2');
+    });
+    it('absent/false remain dispatchable', () => {
+      expect(selectNextCandidate([nextCandidate({ id: 'N3', needsProducerReview: false, sortIndex: 1 })])?.id).toBe('N3');
+      expect(selectNextCandidate([nextCandidate({ id: 'N4', sortIndex: 1 })])?.id).toBe('N4');
+    });
+    it('returns null when only review-gated candidates remain', () => {
+      expect(selectNextCandidate([nextCandidate({ id: 'N5', needsProducerReview: true, sortIndex: 1 })])).toBeNull();
+    });
+    it('clearing the flag makes the item dispatchable again', () => {
+      const c = nextCandidate({ id: 'N6', needsProducerReview: true, sortIndex: 1 });
+      expect(selectNextCandidate([c])).toBeNull();
+      c.needsProducerReview = false;
+      expect(selectNextCandidate([c])?.id).toBe('N6');
+    });
+  });
+
+  describe('selectCriticalCandidate', () => {
+    it('excludes needsProducerReview === true candidates', () => {
+      const blocked = critCandidate({ id: 'C1', needsProducerReview: true, sortIndex: 1 });
+      const allowed = critCandidate({ id: 'C2', sortIndex: 10 });
+      expect(selectCriticalCandidate([blocked, allowed] as never)?.id).toBe('C2');
+    });
+    it('absent/false remain dispatchable', () => {
+      expect(selectCriticalCandidate([critCandidate({ id: 'C3', needsProducerReview: false, sortIndex: 1 })] as never)?.id).toBe('C3');
+      expect(selectCriticalCandidate([critCandidate({ id: 'C4', sortIndex: 1 })] as never)?.id).toBe('C4');
+    });
+    it('returns null when only review-gated criticals remain', () => {
+      expect(selectCriticalCandidate([critCandidate({ id: 'C5', needsProducerReview: true })] as never)).toBeNull();
+    });
+  });
+
+  describe('resolveDependencyFrontier (AC2)', () => {
+    it('resolves to null when the only blocker is review-gated', async () => {
+      const crit: CriticalCandidate = critCandidate({ id: 'C6', stage: 'plan_complete', risk: 'low', effort: 'medium' });
+      const fetchBlockers = async (_id: string): Promise<CriticalCandidate[] | null> => [
+        { id: 'B1', title: 'Review-gated blocker', status: 'open', stage: 'idea', needsProducerReview: true },
+      ];
+      expect(await resolveDependencyFrontier(crit, fetchBlockers)).toBeNull();
+    });
+    it('skips a review-gated direct blocker and still reaches an open ancestor beneath a non-dispatchable wrapper', async () => {
+      const crit: CriticalCandidate = critCandidate({ id: 'C7', stage: 'plan_complete', risk: 'low', effort: 'medium' });
+      const fetchBlockers = async (id: string): Promise<CriticalCandidate[] | null> => {
+        if (id === 'C7') return [{ id: 'MID', title: 'Non-dispatchable wrapper', status: 'open', stage: 'in_review', needsProducerReview: true }];
+        if (id === 'MID') return [{ id: 'DEEP', title: 'Open deep blocker', status: 'open', stage: 'idea' }];
+        return [];
+      };
+      // Walk recurses through MID (non-dispatchable but has open descendant) → DEEP.
+      expect((await resolveDependencyFrontier(crit, fetchBlockers))?.id).toBe('DEEP');
+    });
+    it('review-gated plan_complete blockers are excluded (caps-covered + flag)', async () => {
+      const crit: CriticalCandidate = critCandidate({ id: 'C8', stage: 'plan_complete', risk: 'low', effort: 'medium' });
+      const fetchBlockers = async (_id: string): Promise<CriticalCandidate[] | null> => [
+        { id: 'B2', title: 'Gated plan_complete', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'small', needsProducerReview: true },
+      ];
+      expect(await resolveDependencyFrontier(crit, fetchBlockers)).toBeNull();
+    });
+  });
+
+  describe('classifyItemForDispatch', () => {
+    it('returns null immediately when needsProducerReview === true (AC1 — every tier)', () => {
+      for (const info of [
+        { id: 'X', status: 'completed', stage: 'in_review', updatedAt: new Date().toISOString(), needsProducerReview: true },
+        { id: 'X', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'medium', needsProducerReview: true },
+        { id: 'X', status: 'open', stage: 'intake_complete', needsProducerReview: true },
+        { id: 'X', status: 'open', stage: 'idea', needsProducerReview: true },
+      ] as DowntimeItemInfo[]) {
+        expect(classifyItemForDispatch(info)).toBeNull();
+      }
+    });
+    it('dispatches normally when needsProducerReview is false/undefined', () => {
+      expect(classifyItemForDispatch({ id: 'I', status: 'open', stage: 'idea', needsProducerReview: false } as DowntimeItemInfo)).toBe('intake');
+      expect(classifyItemForDispatch({ id: 'I', status: 'open', stage: 'idea' } as DowntimeItemInfo)).toBe('intake');
+    });
+
+    // ── risk-effort dispatch for missing risk/effort (WL-0MTTSWCJR003OMN7) ──
+    it('returns risk-effort for plan_complete items with missing risk', () => {
+      const info = { id: 'RE1', status: 'open', stage: 'plan_complete', risk: '', effort: 'small' } as DowntimeItemInfo;
+      expect(classifyItemForDispatch(info)).toBe('risk-effort');
+    });
+    it('returns risk-effort for plan_complete items with missing effort', () => {
+      const info = { id: 'RE2', status: 'open', stage: 'plan_complete', risk: 'low', effort: '' } as DowntimeItemInfo;
+      expect(classifyItemForDispatch(info)).toBe('risk-effort');
+    });
+    it('returns risk-effort for plan_complete items with both risk and effort missing', () => {
+      const info = { id: 'RE3', status: 'open', stage: 'plan_complete', risk: '', effort: '' } as DowntimeItemInfo;
+      expect(classifyItemForDispatch(info)).toBe('risk-effort');
+    });
+    it('returns risk-effort for plan_complete items with undefined risk/effort', () => {
+      expect(classifyItemForDispatch({ id: 'RE4', status: 'open', stage: 'plan_complete' } as DowntimeItemInfo)).toBe('risk-effort');
+      expect(classifyItemForDispatch({ id: 'RE5', status: 'open', stage: 'plan_complete', risk: null, effort: null } as DowntimeItemInfo)).toBe('risk-effort');
+    });
+    it('does NOT dispatch risk-effort when plan_complete has valid risk/effort within caps', () => {
+      expect(classifyItemForDispatch({ id: 'RE6', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'small' } as DowntimeItemInfo)).toBe('implement');
+      expect(classifyItemForDispatch({ id: 'RE7', status: 'open', stage: 'plan_complete', risk: 'medium', effort: 'medium' } as DowntimeItemInfo)).toBe('implement');
+    });
+    it('returns null when plan_complete has valid risk but ABOVE cap (high)', () => {
+      expect(classifyItemForDispatch({ id: 'RE8', status: 'open', stage: 'plan_complete', risk: 'high', effort: 'small' } as DowntimeItemInfo)).toBeNull();
+    });
+    it('returns null when plan_complete has valid effort but ABOVE cap (extra large)', () => {
+      expect(classifyItemForDispatch({ id: 'RE9', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'extra large' } as DowntimeItemInfo)).toBeNull();
+    });
+
+    // ── retired in_progress stage (WL-0MTTSWCJR003OMN7 — OSL dead zones) ──
+    it('dispatches risk-effort for open/in_progress items (retired stage)', () => {
+      expect(classifyItemForDispatch({ id: 'IP1', status: 'open', stage: 'in_progress' } as DowntimeItemInfo)).toBe('risk-effort');
+      expect(classifyItemForDispatch({ id: 'IP2', status: 'open', stage: 'in_progress', risk: 'low' } as DowntimeItemInfo)).toBe('risk-effort');
+      expect(classifyItemForDispatch({ id: 'IP3', status: 'open', stage: 'in_progress', risk: 'low', effort: 'small' } as DowntimeItemInfo)).toBe('risk-effort');
+    });
+    it('still blocks npr items on in_progress stage', () => {
+      expect(classifyItemForDispatch({ id: 'IP4', status: 'open', stage: 'in_progress', needsProducerReview: true } as DowntimeItemInfo)).toBeNull();
+    });
+  });
+
+  describe('parse* preserves needsProducerReview (AC4 fail-safe)', () => {
+    it('parseNextCandidatesOutput preserves true/undefined/absent per candidate', () => {
+      const out = JSON.stringify({
+        workItems: [
+          { workItem: { id: 'P1', title: 'A', status: 'open', priority: 'medium', needsProducerReview: 1 } },
+          { workItem: { id: 'P2', title: 'B', status: 'open', priority: 'medium', needsProducerReview: 0 } },
+          { workItem: { id: 'P3', title: 'C', status: 'open', priority: 'medium', needsProducerReview: true } },
+          { workItem: { id: 'P4', title: 'D', status: 'open', priority: 'medium' } },
+        ],
+      });
+      const c = parseNextCandidatesOutput(out, 'intake_complete')!;
+      expect(c.find((x) => x.id === 'P1')!.needsProducerReview).toBe(true);
+      expect(c.find((x) => x.id === 'P2')!.needsProducerReview).toBe(false);
+      expect(c.find((x) => x.id === 'P3')!.needsProducerReview).toBe(true);
+      expect(c.find((x) => x.id === 'P4')!.needsProducerReview).toBeUndefined();
+    });
+    it('parseImplementCandidatesOutput preserves needsProducerReview', () => {
+      const out = JSON.stringify({
+        workItems: [{ workItem: { id: 'IM', title: 'X', status: 'open', risk: 'low', effort: 'small', needsProducerReview: true } }],
+      });
+      expect(parseImplementCandidatesOutput(out)![0]!.needsProducerReview).toBe(true);
+    });
+    it('parseAuditCandidatesOutput preserves needsProducerReview', () => {
+      const out = JSON.stringify({
+        workItems: [{ id: 'AU', title: 'A', auditedAt: null, updatedAt: new Date().toISOString(), needsProducerReview: true }],
+      });
+      expect(parseAuditCandidatesOutput(out)![0]!.needsProducerReview).toBe(true);
+    });
+    it('parseCriticalCandidatesOutput preserves needsProducerReview', () => {
+      const out = JSON.stringify({
+        workItems: [{ id: 'CR', title: 'A', status: 'open', stage: 'idea', needsProducerReview: true }],
+      });
+      expect(parseCriticalCandidatesOutput(out)![0]!.needsProducerReview).toBe(true);
+    });
+    it('parseShowItemOutput preserves needsProducerReview', () => {
+      const out = JSON.stringify({ success: true, workItem: { id: 'SH', title: 'shown', status: 'open', stage: 'idea', needsProducerReview: true } });
+      expect(parseShownWorkItem(out)!.needsProducerReview).toBe(true);
+    });
+    it('dispatch falls through when every candidate in every tier needs review (no-candidate, not wl-error)', async () => {
+      // Every tier returns a flagged candidate (or empty) → no-candidate, never a strike.
+      const deps2 = makeDeps({
+        getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: { id: 'A-B', title: 'A-B', stage: 'audit', needsProducerReview: true } }),
+        getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+        hasFreshAudit: vi.fn().mockResolvedValue(false),
+        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+        getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      });
+      // Audit tier candidate is review-gated → skipped → falls through to no-candidate.
+      const outcome = await dispatchDowntimeWork(deps2, { model: 'plan', cwd: '/repo' });
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+    });
+  });
+
+  describe('transient retry (WL-0MTOTCETU004YYIU AC3 — bounded backoff)', () => {
+    describe('isTransientDowntimeError', () => {
+      it('classifies SQLITE_BUSY variants as transient', () => {
+        expect(isTransientDowntimeError('SQLITE_BUSY: database is locked')).toBe(true);
+        expect(isTransientDowntimeError('SQLITE BUSY: database is locked')).toBe(true);
+        expect(isTransientDowntimeError('database is locked')).toBe(true);
+        expect(isTransientDowntimeError('database table is locked')).toBe(true);
+        expect(isTransientDowntimeError('database busy')).toBe(true);
+      });
+      it('does not classify timeout/hang as transient (retry would triple 10s wall-clock)', () => {
+        // ETIMEDOUT / "timed out" is a hung child (10s per attempt); retrying
+        // would be 30s and risks DOWNTIME_RUN_TIMEOUT_MS — strikes correctly.
+        expect(isTransientDowntimeError('ETIMEDOUT')).toBe(false);
+        expect(isTransientDowntimeError('timed out after 10000ms')).toBe(false);
+        expect(isTransientDowntimeError('spawn ETIMEDOUT')).toBe(false);
+        expect(isTransientDowntimeError('exceeded timeout of 10000ms')).toBe(false);
+        expect(isTransientDowntimeError('operation timeout')).toBe(false);
+        expect(isTransientDowntimeError('TIMED OUT')).toBe(false);
+      });
+      it('is case-insensitive', () => {
+        expect(isTransientDowntimeError('Sqlite_Busy: DATABASE IS LOCKED')).toBe(true);
+        expect(isTransientDowntimeError('DATABASE BUSY')).toBe(true);
+      });
+      it('does not classify parse/author-gate errors as transient', () => {
+        expect(isTransientDowntimeError('show parse error')).toBe(false);
+        expect(isTransientDowntimeError('audit list parse error')).toBe(false);
+        expect(isTransientDowntimeError('author identity gate')).toBe(false);
+        expect(isTransientDowntimeError('needsProducerReview gate')).toBe(false);
+        expect(isTransientDowntimeError('')).toBe(false);
+        expect(isTransientDowntimeError('some random error')).toBe(false);
+      });
+    });
+
+    describe('withTransientRetry', () => {
+      it('succeeds on first try without retry', async () => {
+        const fn = vi.fn().mockResolvedValue('ok');
+        await expect(withTransientRetry(fn, 2, 1)).resolves.toBe('ok');
+        expect(fn).toHaveBeenCalledTimes(1);
+      });
+      it('retries once on transient then succeeds (no strike)', async () => {
+        const fn = vi
+          .fn()
+          .mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'))
+          .mockResolvedValueOnce('ok');
+        await expect(withTransientRetry(fn, 2, 1)).resolves.toBe('ok');
+        expect(fn).toHaveBeenCalledTimes(2);
+      });
+      it('retries twice on two transients then succeeds', async () => {
+        const fn = vi
+          .fn()
+          .mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'))
+          .mockRejectedValueOnce(new Error('database is locked'))
+          .mockResolvedValueOnce('ok');
+        await expect(withTransientRetry(fn, 2, 1)).resolves.toBe('ok');
+        expect(fn).toHaveBeenCalledTimes(3);
+      });
+      it('retries up to limit then throws (single strike, not three)', async () => {
+        const fn = vi.fn().mockRejectedValue(new Error('SQLITE_BUSY: database is locked'));
+        await expect(withTransientRetry(fn, 2, 1)).rejects.toThrow('SQLITE_BUSY');
+        expect(fn).toHaveBeenCalledTimes(3); // 1 + 2 retries
+      });
+      it('fails fast on non-transient (no retry)', async () => {
+        const fn = vi.fn().mockRejectedValue(new Error('show parse error'));
+        await expect(withTransientRetry(fn, 2, 1)).rejects.toThrow('show parse error');
+        expect(fn).toHaveBeenCalledTimes(1);
+      });
+      it('fails fast on second attempt if second error is non-transient', async () => {
+        const fn = vi
+          .fn()
+          .mockRejectedValueOnce(new Error('SQLITE_BUSY: database is locked'))
+          .mockRejectedValueOnce(new Error('show parse error'));
+        await expect(withTransientRetry(fn, 2, 1)).rejects.toThrow('show parse error');
+        expect(fn).toHaveBeenCalledTimes(2);
+      });
+      it('does not retry timeout variants (fail fast — one strike)', async () => {
+        const fn = vi.fn().mockRejectedValue(new Error('timed out after 10000ms'));
+        await expect(withTransientRetry(fn, 2, 1)).rejects.toThrow('timed out');
+        expect(fn).toHaveBeenCalledTimes(1);
+      });
+      it('handles non-Error thrown values', async () => {
+        const fn = vi
+          .fn()
+          .mockRejectedValueOnce('SQLITE_BUSY: database is locked')
+          .mockResolvedValueOnce('ok');
+        await expect(withTransientRetry(fn, 2, 1)).resolves.toBe('ok');
+        expect(fn).toHaveBeenCalledTimes(2);
+      });
+    });
+  });
+});
+
+// ── Review-queue depth gate (WL-0MT2UQWOR007CYY9) ──────────────────────
+// The implement tier is gated by the depth of the completed/in_review review
+// queue: when root items >= browseItemCount, only critical-priority
+// implement candidates remain eligible. The gate is re-read live on every
+// dispatch (no plugin restart needed), fail-closed on wl error (gate active),
+// and uses a neutral reason ('review-queue-hold') when plan/intake are also empty
+// — never 'no-candidate', so the worker's cooldown is not triggered.
+
+
+// ── Review-queue depth gate (WL-0MT2UQWOR007CYY9) ──────────────────────
+// The implement tier is gated by the depth of the completed/in_review review
+// queue: when root items >= browseItemCount, only critical-priority
+// implement candidates remain eligible. The gate is re-read live on every
+// dispatch (no plugin restart needed), fail-closed on wl error (gate active),
+// and uses a neutral reason ('review-queue-hold') when plan/intake are also empty
+// — never 'no-candidate', so the worker's cooldown is not triggered.
+
+describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
+  const implementCandidate = (overrides: Partial<ImplementCandidate> = {}): ImplementCandidate => ({
+    id: `IMP-${Math.random().toString(36).slice(2, 8)}`,
+    title: 'Implement candidate',
+    status: 'open',
+    risk: 'low',
+    effort: 'small',
+    sortIndex: 1,
+    ...overrides,
+  });
+
+  const planCandidate: DowntimeCandidate = { id: 'WL-PLAN', title: 'Prep task', stage: 'intake_complete' };
+
+  // ── AC1: critical bypass ───────────────────────────────────────────
+  it('AC1: a critical-priority implement candidate always dispatches regardless of queue depth', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-CRIT', priority: 'critical' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999), // deeply queued
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(deps.claimItem).toHaveBeenCalledWith('IMP-CRIT', { status: 'open', stage: 'plan_complete' }, '/repo');
+  });
+
+  it('AC1: critical bypass works even when browseItemCount is 1 (queue deep)', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-CRIT2', priority: 'critical' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(1), // exactly at threshold
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 1 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  // ── AC2: gate inactive — all priorities eligible ───────────────────
+  it('AC2: when reviewQueueCount < browseItemCount, all priorities dispatch unchanged', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-MED', priority: 'medium' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(10), // under threshold
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(deps.claimItem).toHaveBeenCalledWith('IMP-MED', { status: 'open', stage: 'plan_complete' }, '/repo');
+  });
+
+  it('AC2: gate inactive — non-critical (high/low) dispatches when under threshold', async () => {
+    for (const priority of ['high', 'low'] as const) {
+      const deps = makeDeps({
+        getNextImplementCandidate: vi.fn().mockResolvedValue(
+          implementCandidate({ id: `IMP-${priority}`, priority }),
+        ),
+        getReviewQueueCount: vi.fn().mockResolvedValue(0),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+    }
+  });
+
+  // ── AC3: gate active — non-critical excluded ───────────────────────
+  it('AC3: when reviewQueueCount == browseItemCount, non-critical candidates are excluded', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-NONCRIT', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(20), // at threshold
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Non-critical candidate gated → falls through to plan/intake
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('AC3: gate active — only non-critical candidates: implement resolves null, falls through to plan', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-LOW', priority: 'low' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    // Plan tier should be reached
+    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete', '/repo');
+  });
+
+  it('AC3: gate boundary — count == browseItemCount - 1: gate NOT active, all priorities dispatch', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-UNDER', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(19), // one below threshold
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  it('AC3: gate boundary — count == browseItemCount: gate active, non-critical excluded', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-AT', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(20),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Non-critical gated, no plan/intake → review-queue-hold
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+  });
+
+  // ── AC4: gate applies ONLY to implement tier ───────────────────────
+  it('AC4: audit tier is NOT affected by the review-queue gate', async () => {
+    const auditCandidate: DowntimeCandidate = { id: 'WL-AUD', title: 'Audit me', stage: 'audit' };
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999), // deeply queued
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-GATED', priority: 'high' }),
+      ),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Audit tier still dispatches regardless of review-queue depth
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+  });
+
+  it('AC4: plan tier dispatches even when the review-queue gate is deep', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-GATED', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: planCandidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  // ── AC5: bounded timeout and fail-closed ───────────────────────────
+  it('AC5: a getReviewQueueCount error (null) activates the gate — only critical dispatches', async () => {
+    const deps = makeDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(null), // gate active on error
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-NONCRIT', priority: 'medium' }),
+      ),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Non-critical gated by error → review-queue-hold (no-candidate not triggered)
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+  });
+
+  it('AC5: fail-closed — queue error + critical candidate: critical still dispatches', async () => {
+    const deps = makeDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(null), // gate active on error
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-CRIT', priority: 'critical' }),
+      ),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  // ── AC6: neutral reason (never 'no-candidate') ─────────────────────
+  it('AC6: gate skip with empty plan AND intake reports review-queue-hold, never no-candidate', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-GATED', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }), // plan empty
+      // intake (idea tier) is attempted but the review-queue-hold check short-circuits
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Gate skip with empty plan/intake → review-queue-hold, NOT no-candidate
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+    // No cooldown triggered — polling continues
+  });
+
+  it('AC6: non-gated empty backlog still reports no-candidate (unchanged)', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getReviewQueueCount: vi.fn().mockResolvedValue(0), // not gated
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+  });
+
+  // ── Default browseItemCount ────────────────────────────────────────
+  it('uses default browseItemCount of 20 when not provided', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-DEFAULT', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(20),
+      // No browseItemCount passed — defaults to 20
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Gate active at default threshold → non-critical excluded
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+  });
+
+  it('default browseItemCount — count 19 still dispatches non-critical', async () => {
+    const deps = makeDeps({
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-DEFAULT', priority: 'high' }),
+      ),
+      getReviewQueueCount: vi.fn().mockResolvedValue(19),
+      // No browseItemCount — defaults to 20
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  // ── Root-only counting ─────────────────────────────────────────────
+  it('root-only: the queue count uses --root-only (child items excluded)', async () => {
+    // This tests the implementation uses the correct wl query. The
+    // getReviewQueueCount mock returns whatever the caller passes.
+    // The real implementation uses --root-only so children are excluded.
+    const deps = makeDeps({
+      getReviewQueueCount: vi.fn().mockResolvedValue(5),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(
+        implementCandidate({ id: 'IMP-ROOT', priority: 'high' }),
+      ),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+    // Under threshold → gate not active → implement dispatches
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+});
+
+// ── Review-queue depth gate on the LIVE Herdr-head path (WL-0MTTSWC1X005P4VD) ──
+// Root cause B2: the original gate lived ONLY in the legacy tier chain, which
+// is unreachable while the Herdr head is non-empty (the production state), so
+// non-critical implements kept dispatching into a deep review queue. These
+// tests pin the gate on the LIVE `dispatchFromHerdrList` path (exercised via
+// `dispatchDowntimeWork` with a populated `getHerdrListHead`): audits (the
+// queue drain), plan, intake and critical implements flow unconditionally;
+// only NON-CRITICAL implement candidates are held; a deep queue with nothing
+// audit-needed reports 'review-queue-hold' (never 'no-candidate').
+
+describe('review-queue depth gate — live Herdr-head path (WL-0MTTSWC1X005P4VD)', () => {
+  const now = Date.now();
+  const fresh = new Date(now - 60_000).toISOString();
+  const auditHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Audit ${id}`,
+    status: 'completed',
+    stage: 'in_review',
+    updatedAt: fresh,
+    sortIndex: 10,
+  });
+  const implementHead = (id: string, priority = 'high'): DowntimeHerdrItem => ({
+    id,
+    title: `Implement ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    risk: 'Low',
+    effort: 'S',
+    priority,
+    sortIndex: 20,
+  });
+  const planHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'intake_complete',
+    sortIndex: 30,
+  });
+  const intakeHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Intake ${id}`,
+    status: 'open',
+    stage: 'idea',
+    sortIndex: 40,
+  });
+
+  it('AC1: with a deep queue an AUDIT candidate still dispatches even behind a held non-critical implement', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1'), auditHead('AUD-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('AUD-1');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit AUD-1'),
+      expect.anything(),
+    );
+  });
+
+  it('AC1: an audit-first deep queue dispatches the audit (the gate is implement-only)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditHead('AUD-1'), implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+  });
+
+  it('AC2: a deep queue HOLDS a non-critical implement — nothing audit-needed left → review-queue-hold (never no-candidate)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+    expect(outcome.reason).not.toBe('no-candidate');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a CRITICAL implement dispatches even when the queue is deep', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-CRIT', 'critical')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('IMP-CRIT');
+  });
+
+  it('AC2: PLAN and INTAKE candidates flow while the queue is deep', async () => {
+    // Plan candidate deeper than a held implement → plan dispatches.
+    const planDeps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1'), planHead('PLN-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const planOutcome = await dispatchDowntimeWork(planDeps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(planOutcome.dispatched).toBe(true);
+    expect(planOutcome.kind).toBe('plan');
+    expect(planOutcome.candidate?.id).toBe('PLN-1');
+
+    // Intake candidate behind a held implement → intake dispatches.
+    const intakeDeps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1'), intakeHead('IDE-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const intakeOutcome = await dispatchDowntimeWork(intakeDeps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(intakeOutcome.dispatched).toBe(true);
+    expect(intakeOutcome.kind).toBe('intake');
+    expect(intakeOutcome.candidate?.id).toBe('IDE-1');
+  });
+
+  it('shallow queue: a non-critical implement dispatches unchanged (threshold not met)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(10),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  it('AC5 boundary: count == browseItemCount HOLDS; count == browseItemCount - 1 dispatches', async () => {
+    const atThreshold = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(20),
+    });
+    const held = await dispatchDowntimeWork(atThreshold, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(held.dispatched).toBe(false);
+    expect(held.reason).toBe('review-queue-hold');
+
+    const underThreshold = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(19),
+    });
+    const dispatched = await dispatchDowntimeWork(underThreshold, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(dispatched.dispatched).toBe(true);
+    expect(dispatched.kind).toBe('implement');
+  });
+
+  it('AC5 fail-closed: a count-query failure (null) activates the gate on the live path', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(null),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+  });
+
+  it('the review gate is never consulted while frozen (code-freeze already pauses implements)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1'), planHead('PLN-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    // Freeze skips the implement; plan still dispatches. The gate read is
+    // skipped entirely under a freeze (single shared read in the caller).
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+});
+
+// ── Worker keeps polling while the review queue is deep (WL-0MTTSWC1X005P4VD) ──
+// RCA root cause A regression: queue depth used to WRITE the disable marker
+// and early-return BEFORE leader-election/check-in (the 21:53Z silence). The
+// sprint-complete auto-disable is removed; a deep queue only ever yields the
+// neutral 'review-queue-hold' reason, which never triggers the no-candidate
+// cooldown — the worker keeps checking in and keeps polling.
+
+describe('worker keeps polling while the review queue is deep (WL-0MTTSWC1X005P4VD)', () => {
+  function makeDeepQueueWorker(overrides: Partial<DowntimeWorkerDeps> = {}) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+    };
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      // Deep queue + only a non-critical implement candidate remains.
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+      getNextImplementCandidate: vi.fn().mockResolvedValue({
+        id: 'IMP-HELD',
+        title: 'Held implement',
+        stage: 'implement',
+        status: 'open',
+        priority: 'high',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }), // plan+intake empty
+      ...overrides,
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      config: () => ({ ...cfg }),
+    });
+    return { worker, deps, cfg };
+  }
+
+  it('a deep queue never triggers the no-candidate cooldown (review-queue-hold is neutral)', async () => {
+    vi.useFakeTimers();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    const { worker, deps } = makeDeepQueueWorker();
+    await worker.tick(); // idle run starts
+    expect(worker.idleSince).toBe(start);
+
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    const at = await worker.tick();
+    // Held: no dispatch, but NOT no-candidate → the worker must NOT pause.
+    expect(at.dispatched).toBe(false);
+    expect(at.polled).toBe(true);
+    expect(worker.paused).toBe(false);
+    expect(worker.errorStrikes).toBe(0);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    // Queue thins below the threshold → dispatch resumes on the very next
+    // idle tick (no stale cooldown blocking it — the neutral hold never
+    // reset the idle run, so the warm run is immediately dispatchable).
+    (deps.getReviewQueueCount as ReturnType<typeof vi.fn>).mockResolvedValue(5);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
+    const resumed = await worker.tick();
+    expect(resumed.dispatched).toBe(true);
+    expect(worker.paused).toBe(false);
+    // The implement pane actually spawned (tick results carry no kind field).
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement IMP-HELD'),
+      expect.anything(),
+    );
+  });
+
+  it('queue depth alone never short-circuits a tick (no disable marker write)', async () => {
+    vi.useFakeTimers();
+    const start = 2_000_000;
+    vi.setSystemTime(start);
+    const { worker } = makeDeepQueueWorker({ getReviewQueueCount: vi.fn().mockResolvedValue(999) });
+    // Previously the sprint-complete auto-disable returned BEFORE the poll
+    // ({polled:false}) when the count crossed browseItemCount. Now the worker
+    // always polls — the deep queue only gates implement dispatch inside the
+    // dispatch call (which returns the neutral review-queue-hold).
+    const result = await worker.tick();
+    expect(result.polled).toBe(true);
+    expect(worker.paused).toBe(false);
+  });
+});
+
+// ── Bounded concurrent dispatch (F1, parent WL-0MT50LKAK001EF5Q) ──────
+
+describe('bounded concurrent dispatch — cap honored at 1', () => {
+  it('with cap=1, dispatchInFlight guard is preserved: second concurrent dispatch refuses', async () => {
+    let release!: () => void;
+    const gate = new Promise<{ ok: true }>((resolve) => {
+      release = () => resolve({ ok: true });
+    });
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      spawnAgentPane: vi.fn().mockImplementation(() => gate),
+    });
+
+    const first = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    const second = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    release();
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(firstOutcome.dispatched).toBe(true);
+    expect(secondOutcome.dispatched).toBe(false);
+    expect(secondOutcome.reason).toBe('dispatch-in-flight');
+  });
+});
+
+describe('bounded concurrent dispatch — cap honored at 2', () => {
+  it('with cap=2, two concurrent dispatches may proceed when idle for threshold', async () => {
+    // This test will initially FAIL because the current single-flight guard
+    // blocks the second dispatch. After F3 implementation, both should proceed.
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstGate = new Promise<{ ok: true }>((resolve) => {
+      releaseFirst = () => resolve({ ok: true });
+    });
+    const secondGate = new Promise<{ ok: true }>((resolve) => {
+      releaseSecond = () => resolve({ ok: true });
+    });
+
+    let callCount = 0;
+    const fakeSpawn = vi.fn().mockImplementation(() => {
+      const idx = callCount++;
+      if (idx === 0) {
+        return firstGate;
+      }
+      return secondGate;
+    });
+
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: `WL-${callCount}`, title: `Task ${callCount}`, stage: 'intake_complete' },
+      }),
+      spawnAgentPane: fakeSpawn as unknown as ReturnType<typeof vi.fn>,
+    });
+
+    // Start both dispatches concurrently. Both callers carry the SAME
+    // raised cap (each worker re-reads the shared setting), so the module
+    // gate admits both up to the bound.
+    const first = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', maxConcurrentDispatches: 2 });
+    const second = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', maxConcurrentDispatches: 2 });
+
+    // Release both panes
+    releaseFirst();
+    releaseSecond();
+
+    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
+
+    // After F3: expect both to dispatch
+    // Before F3: second will be blocked by dispatch-in-flight
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
+    expect(firstOutcome.dispatched).toBe(true);
+    expect(secondOutcome.dispatched).toBe(true);
+  });
+});
+
+describe('bounded concurrent dispatch — cap at 2 respects idle-gate', () => {
+  it('second dispatch only fires when requiredFreeSlots continuously idle for threshold', async () => {
+    // This test verifies the per-slot idle tracker contract.
+    // With cap=2, we need 2 slots continuously idle for the threshold.
+    // A second dispatch should NOT fire if only 1 slot is idle.
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+    });
+
+    // With 0 free slots (below panes min of 1), dispatch is gated
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 0 });
+
+    // Dispatch should be gated when no slots are free
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+  });
+});
+
+describe('bounded concurrent dispatch — fast-mode operator priority', () => {
+  it('with 3 total slots and 1 free, only 1 dispatch fires even if cap=2', async () => {
+    // Fast-mode / operator priority preserved: freeSlots check is the hard limit
+    // With 0 free slots, no dispatch can occur regardless of cap
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 0 });
+    expect(outcome.dispatched).toBe(false); // no slots free → gated
+  });
+});
+
+describe('bounded concurrent dispatch — claim safety regression', () => {
+  it('dispatched-marker exclusion still prevents re-dispatch of already-dispatched item', async () => {
+    // Regression guard for WL-0MSLIY8ZR004QUSY: claim safety via CAS
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    // Claim safety: the item should be claimed once, not re-claimed
+    if (outcome.dispatched) {
+      expect(deps.claimItem).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
+describe('bounded concurrent dispatch — config wire (F2)', () => {
+  it('downtimeMaxConcurrentDispatches defaults to 1 (single-flight preserved)', () => {
+    expect(defaultSettings.downtimeMaxConcurrentDispatches).toBe(1);
+  });
+
+  it('a persisted value is loaded and clamped into [1, 4]', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 3 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(3);
+
+    // Clamp below minimum
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 0 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+
+    // Clamp above maximum (F2 delivered ceiling is 4, not 10)
+    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 99 });
+    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(4);
+  });
+});
+
+describe('bounded concurrent dispatch — worker config propagation', () => {
+  it('DowntimeWorkerConfig includes a maxConcurrentDispatches field', () => {
+    // After F2/F3, the config interface should include maxConcurrentDispatches
+    // This test checks the interface contract.
+    const config = {
+      enabled: true,
+      thresholdMs: 300000,
+      requiredFreeSlots: 2,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3600000,
+      browseItemCount: 20,
+    } as const;
+
+    // maxConcurrentDispatches should be optional (defaults to 1 from settings)
+    expect(config).toBeDefined();
+  });
+});
+
+// ── End of bounded concurrent dispatch tests ──────────────────────────

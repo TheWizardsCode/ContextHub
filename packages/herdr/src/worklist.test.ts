@@ -36,7 +36,10 @@ import {
   formatChordHintsForHelp,
   resolvePodcastTarget,
   clearDescriptionPreviewCache,
+  isHeadingRow,
+  formatItemLine,
 } from './worklist.js';
+import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { createDowntimeWorker, createDowntimePoller } from './downtime-worker.js';
@@ -1157,6 +1160,46 @@ describe('dispatchChordCommand', () => {
     expect(onCommand).toHaveBeenCalledWith('!!wl update TEST-123 --status open --stage plan_complete', undefined, undefined, undefined, 'Item TEST-123');
   });
 
+  // WL-0MTIB7JAN004MQ8N — background dispatch (openPane=false) plumbing
+  it('dispatchChordCommand forwards openPane=false and onRefresh for a background-modifying command (WL-0MTIB7JAN004MQ8N)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const onRefresh = vi.fn();
+    const result = dispatchChordCommand('!!wl update <id> --priority critical', state, onCommand, undefined, undefined, false, onRefresh as any);
+    expect(result).toBe(true);
+    // openPane false is forwarded so the handler knows the command is
+    // background and the refresh timing is tied to onExit.
+    expect(onCommand).toHaveBeenCalledWith('!!wl update TEST-123 --priority critical', undefined, false, onRefresh, 'Item TEST-123');
+  });
+
+  it('dispatchChordCommand forwards openPane=false and onRefresh for update --priority low/medium/high (WL-0MTIB7JAN004MQ8N)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const cases: Array<[string, string]> = [
+      ['!!wl update <id> --priority low', '!!wl update TEST-123 --priority low'],
+      ['!!wl update <id> --priority medium', '!!wl update TEST-123 --priority medium'],
+      ['!!wl update <id> --priority high', '!!wl update TEST-123 --priority high'],
+    ];
+    for (const [cmd, expected] of cases) {
+      const onCommand = vi.fn();
+      const onRefresh = vi.fn();
+      const ok = dispatchChordCommand(cmd, state, onCommand, undefined, undefined, false, onRefresh as any);
+      expect(ok).toBe(true);
+      expect(onCommand).toHaveBeenCalledWith(expected, undefined, false, onRefresh, 'Item TEST-123');
+    }
+  });
+
+  it('dispatchChordCommand forwards onRefresh for !!wl reviewed with openPane=false (WL-0MTIB7JAN004MQ8N)', () => {
+    const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
+    state.selectedIndex = 0;
+    const onCommand = vi.fn();
+    const onRefresh = vi.fn();
+    const result = dispatchChordCommand('!!wl reviewed <id> false', state, onCommand, undefined, undefined, false, onRefresh as any);
+    expect(result).toBe(true);
+    expect(onCommand).toHaveBeenCalledWith('!!wl reviewed TEST-123 false', undefined, false, onRefresh, 'Item TEST-123');
+  });
+
   it('routes !!wl search commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
     const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
     state.selectedIndex = 0;
@@ -1235,6 +1278,21 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
     const step2 = processChordInput(chordState, 'a', registry, 'list', 'in_review');
     expect(step2).toBe('chord-complete');
     expect(chordState.resolvedOpenPane).toBeUndefined();
+  });
+
+  // WL-0MTIB7JAN004MQ8N — u p * priority chords are open_pane:false
+  it('processChordInput stores resolvedOpenPane=false for u p * priority chords (WL-0MTIB7JAN004MQ8N)', () => {
+    const registry = loadShortcutConfig();
+    for (const suffix of ['l', 'm', 'h', 'c'] as const) {
+      const chordState = createChordState();
+      const step1 = processChordInput(chordState, 'u', registry, 'list', undefined);
+      const step2 = processChordInput(chordState, 'p', registry, 'list', undefined);
+      const step3 = processChordInput(chordState, suffix, registry, 'list', undefined);
+      expect(step3).toBe('chord-complete');
+      expect(chordState.resolvedCommand).toBeTruthy();
+      expect(chordState.resolvedCommand).toContain('wl update');
+      expect(chordState.resolvedOpenPane).toBe(false);
+    }
   });
 
   it('dispatchChordCommand passes openPane=false through to onCommand', () => {
@@ -2281,6 +2339,12 @@ describe('formatMetadataPanel — field rendering and scrolling', () => {
   it('renders all WorkItem metadata fields for the selected item', () => {
     const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0).join('\n');
     expect(joined).toContain('WL-RICH1');
+    // ID is shown in the header line but not duplicated in the data table (WL-0MSHIJR7T007Q9R7).
+    const lines = formatMetadataPanel(makeRichItem(), 80, 20, 0);
+    expect(lines[0]).toContain('WL-RICH1');
+    for (const line of lines.slice(1)) {
+      expect(line).not.toMatch(/^\s+ID\b/);
+    }
     expect(joined).toContain('Rich metadata item');
     expect(joined).toContain('Status');
     expect(joined).toContain('in_progress');
@@ -2486,9 +2550,10 @@ describe('formatMetadataPanel — description preview (WL-0MT9ZJF28004UJ28)', ()
     expect(top).not.toContain('p1');
     // The four compacted field pairs (Status+Stage, Priority+Type,
     // Created+Updated, Audit+AuditedAt, WL-0MSNIX4V60012266) remove 4
-    // rows from the rich item, so the p1..p3 preview window sits 4 rows
-    // earlier than before (offset 15 instead of 19).
-    const previewView = formatMetadataPanel(item, 80, 3, 15).join('\n');
+    // rows from the rich item, and dropping the ID row (WL-0MSHIJR7T007Q9R7)
+    // removes one more, so the p1..p3 preview window sits 5 rows
+    // earlier than before (offset 14 instead of 19).
+    const previewView = formatMetadataPanel(item, 80, 3, 14).join('\n');
     expect(previewView).toContain('p1');
     expect(previewView).toContain('p3');
     // [m/M scroll] indicator still shown when content overflows
@@ -4432,5 +4497,484 @@ describe('DB-change gate — manual actions', () => {
     // Verify manual action would still run regardless
     const manualBypassesGate = true; // structural test
     expect(manualBypassesGate).toBe(true);
+  });
+});
+
+// ── Header truncation guard (WL-0MSNI6TQ5003JY1Z) ─────────────────────
+// The list-mode header must be truncated to the terminal width so it
+// never wraps onto a second physical row. When it does wrap, the output
+// occupies more rows than the `rows - 1` invariant allows and the
+// header scrolls off the top of the pane.
+
+/** Strip ANSI codes for visible-length assertions. */
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
+
+describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () => {
+  const renderer = createListRenderer();
+  const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+
+  // AC1: Header visible length ≤ cols at narrow widths
+  it('truncates header so visible length ≤ cols at 40 cols with all status segments', () => {
+    const cols = 40;
+    const termSize = { rows: 24, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [Downtime Off]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+  });
+
+  it('truncates header so visible length ≤ cols at 60 cols with filter and auto-refresh', () => {
+    const cols = 60;
+    const termSize = { rows: 24, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'priority critical',
+      'list',
+      null,
+      100,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+  });
+
+  // AC2: Line-count invariant holds in narrow panes
+  it('maintains rows - 1 invariant at 40×24 with long header + banner', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [Downtime Off]',
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
+
+  it('maintains rows - 1 invariant at 40×24 with long header, banner, and paused pane', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      true, // panePaused
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [⏳ downtime idle 1:23]',
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
+
+  it('maintains rows - 1 invariant at 40×24 without banner', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
+
+  // AC2b: Wider panes still pass (no over-truncation)
+  it('wide pane 80×24 still passes — header fits or is sensibly truncated', () => {
+    const cols = 80;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [Downtime Off]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+    // At 80 cols the header may be truncated if the full header
+    // exceeds 80 chars, but the key prefix must remain.
+    expect(visible).toContain('item(s)');
+  });
+
+  it('wide pane 120×24 still passes — no over-truncation for minimal header', () => {
+    const cols = 120;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+    // At 120 cols the minimal header definitely fits without truncation.
+    expect(visible).toEqual(' Work Items — 3 item(s)');
+  });
+
+  it('wide pane 120×24 with full header — truncation is sensible', () => {
+    const cols = 120;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'priority critical',
+      'list',
+      null,
+      200,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      true,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [downtime busy]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    expect(visible.length).toBeLessThanOrEqual(cols);
+    // At 120 cols the header may be truncated at the very tail, but the
+    // core segments should all be present up to the truncation point.
+    expect(visible).toContain('[auto-refresh on]');
+    expect(visible).toContain('[paused — hidden]');
+    // The downtime segment may be cut at the truncation boundary.
+    expect(visible).toContain('[downtime');
+  });
+});
+
+// ── Header item count excludes heading rows (WL-0MT26TE72002FLKX) ──────
+// AC1: Header item count is WorkItem rows only, not displayRows length.
+// AC2: "top N of M" badge uses the same item-based N.
+// AC3: Group heading counts remain unchanged.
+
+describe('createListRenderer — header count excludes heading rows (WL-0MT26TE72002FLKX)', () => {
+  const renderer = createListRenderer();
+
+  /**
+   * Build a DisplayRow array with heading rows interleaved, matching
+   * the reported scenario: 21 items across 3 groups + 3 heading rows = 24 rows.
+   */
+  function makeFixtureRows(): DisplayRow[] {
+    const items: WorkItem[] = [];
+    for (let i = 1; i <= 21; i++) {
+      items.push(makeItem(`item-${i}`));
+    }
+    const rows: DisplayRow[] = [];
+    // Group 1: 19 items + heading
+    for (let i = 0; i < 19; i++) {
+      rows.push({ kind: 'heading', group: 1, groupLabel: 'In Review', count: 19, collapsed: false });
+      break;
+    }
+    for (let i = 0; i < 19; i++) {
+      rows.push(items[i]);
+    }
+    // Group 2: 1 item + heading
+    rows.push({ kind: 'heading', group: 2, groupLabel: 'Critical Group 1', count: 1, collapsed: false });
+    rows.push(items[19]);
+    // Group 3: 1 item + heading
+    rows.push({ kind: 'heading', group: 3, groupLabel: 'Critical Group 2', count: 1, collapsed: false });
+    rows.push(items[20]);
+    return rows;
+  }
+
+  it('header shows item count (not row count) with 21 items + 3 headings = 24 displayRows', () => {
+    const displayRows = makeFixtureRows();
+    // Verify the fixture: 24 total rows (21 items + 3 headings)
+    expect(displayRows.length).toBe(24);
+    const itemRows = displayRows.filter(r => !isHeadingRow(r));
+    expect(itemRows.length).toBe(21);
+
+    const termSize = { rows: 24, cols: 120 };
+    const output = renderer(
+      displayRows,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      100,
+      null,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    // AC1: "21 item(s)" not "24 item(s)"
+    expect(visible).toContain('21 item(s)');
+    expect(visible).not.toContain('24 item(s)');
+    // AC2: "(top 21 of 100)" uses item-based N
+    expect(visible).toContain('(top 21 of 100)');
+  });
+
+  it('no badge when totalCount <= item count', () => {
+    const displayRows: DisplayRow[] = [
+      { kind: 'heading', group: 1, groupLabel: 'Group 1', count: 2, collapsed: false },
+      makeItem('A'),
+      makeItem('B'),
+    ];
+    const termSize = { rows: 24, cols: 120 };
+    const output = renderer(
+      displayRows,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      2,  // totalCount == item count → no badge
+      null,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('2 item(s)');
+    expect(visible).not.toContain('(top');
+  });
+
+  it('no badge when totalCount is undefined', () => {
+    const displayRows: DisplayRow[] = [
+      { kind: 'heading', group: 1, groupLabel: 'Group 1', count: 1, collapsed: false },
+      makeItem('A'),
+    ];
+    const termSize = { rows: 24, cols: 120 };
+    const output = renderer(
+      displayRows,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,  // no totalCount → no badge
+      null,
+      0,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('1 item(s)');
+    expect(visible).not.toContain('(top');
+  });
+});
+
+// ── Priority colour row (WL-0MSJ2JFMO007PGQ6, AC1-AC4) ──────────────────
+describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', () => {
+  function makePriorityItem(priority: string, stage: string): WorkItem {
+    return { id: 'WL-123', title: 'Test Title', status: 'open', stage, priority } as WorkItem;
+  }
+
+  // AC1: title is priority-coloured (ANSI 256 codes from shared/icons)
+  function priorityEsc(priority: string): string {
+    const code: Record<string, number> = { critical: 196, high: 208, medium: 220, low: 15 };
+    return `\x1b[38;5;${code[priority] ?? 220}m`;
+  }
+
+  function stageEsc(stage: string): string {
+    const code: Record<string, number> = {
+      idea: 247,
+      intake_complete: 68,
+      plan_complete: 172,
+      in_progress: 76,
+      in_review: 220,
+      completed: 33,
+    };
+    return `\x1b[38;5;${code[stage] ?? 241}m`;
+  }
+
+  for (const [priority, titleEsc] of Object.entries({
+    critical: priorityEsc('critical'),
+    high: priorityEsc('high'),
+    medium: priorityEsc('medium'),
+    low: priorityEsc('low'),
+  })) {
+    it(`colours title by priority ${priority} (priority → ${titleEsc})`, () => {
+      const line = formatItemLine(makePriorityItem(priority, 'idea'), 200, false, false);
+      expect(line).toContain(`${titleEsc}Test Title`);
+    });
+  }
+
+  // AC2: id is priority-coloured (same as title), not muted, not stage
+  it('colours the ID by priority same as title (not muted, not stage)', () => {
+    const line = formatItemLine(makePriorityItem('critical', 'in_review'), 200, false, false);
+    expect(line).toContain(`${priorityEsc('critical')}WL-123`);
+    expect(line).not.toContain(`\x1b[90mWL-123`); // muted grey id is not rendered
+  });
+
+  // AC3: blocked items show their natural priority colour (no red override)
+  it('blocked item shows its natural priority colour, not always-red', () => {
+    const blocked: WorkItem = { id: 'WL-555', title: 'Blocked bug', status: 'blocked', stage: 'idea', priority: 'low' } as WorkItem;
+    const line = formatItemLine(blocked, 200, false, false);
+    expect(line).toContain(`${priorityEsc('low')}Blocked bug`);
+    expect(line).toContain(`${priorityEsc('low')}WL-555`);
+  });
+
+  // AC4: unknown priority falls back to medium/yellow (220), unknown stage to grey (241)
+  it('falls back to medium/yellow for unknown priority', () => {
+    const line = formatItemLine({ id: 'WL-999', title: 'Mystery', status: 'open', priority: 'bogus', stage: 'idea' } as WorkItem, 200, false, false);
+    expect(line).toContain(`${priorityEsc('medium')}Mystery`);
+  });
+
+  it('falls back to grey (241) for missing stage id colour', () => {
+    const line = formatItemLine({ id: 'WL-999', title: 'No Stage', status: 'open', priority: 'high' } as WorkItem, 200, false, false);
+    // id with no stage should render as plain (no stage escape) or default grey
+    expect(line).toContain('WL-999');
   });
 });

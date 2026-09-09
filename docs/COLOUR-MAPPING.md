@@ -1,43 +1,56 @@
 # Colour Mapping for Work Items
 
-This document describes the colour-coding system used for work item titles in the CLI and TUI.
+This document describes the colour-coding system used for work item titles and ids in the CLI and Herdr.
 
 ## Overview
 
-Work item titles are colour-coded based on their **stage** using a progression colour scheme (gray → blue → cyan → yellow → green → white), with a **red override for blocked items** that takes priority regardless of stage. When a work item has `status: blocked`, it always displays in red.
+Work item **titles and ids** are colour-coded based on their **priority** using a consistent scheme
+(critical → red, high → orange, medium → yellow, low → white). The same mapping is used in both the
+CLI (`src/theme.ts`, chalk) and the Herdr worklist (`packages/shared/src/icons.ts`, ANSI 256).
+
+There is **no blocked override**: blocked items display their natural priority colour like every other
+item (per clarification Q3b on WL-0MSJ2JFMO007PGQ6).
+
+> **Revision note (2026-09-08):** the original scheme specified `medium → white`, `low → dimmed`, with
+> ids coloured by **stage**. A producer review of the first delivery changed this: medium is **yellow**
+> (better contrast than white), low is **white** (dim was too low-contrast), and ids share the title's
+> priority colour for a consistent visual cue. The docs, code comments and tests reflect the revised
+> scheme.
 
 ## Colour Mapping Table
 
-### Stage Progression Colours
+### Priority Colours (titles and ids)
 
-| Stage | CLI Colour | Colour Name | Description |
-|-------|-----------|-------------|-------------|
-| `idea` | Gray | `gray` | Initial ideation phase |
-| `intake_complete` | Blue | `blue` | Intake process completed |
-| `plan_complete` | Cyan | `cyan` | Planning phase completed |
-| `in_progress` | Yellow | `yellow` | Work in progress |
-| `in_review` | Green | `green` | Under review |
-| `done` | White | `white` | Work completed |
-
-### Blocked Override
-
-| Condition | CLI Colour | Colour Name | Description |
-|-----------|-----------|-------------|-------------|
-| `status: blocked` | Red Bright | `red` | Always red, overriding any stage colour |
+| Priority | CLI Colour (chalk) | Herdr ANSI 256 | Colour Name | Description |
+|----------|--------------------|----------------|-------------|-------------|
+| `critical` | `chalk.red` | `196` | Red | Immediate attention |
+| `high` | `chalk.hex('#FFA500')` | `208` | Orange | Important |
+| `medium` | `chalk.yellow` | `220` | Yellow | Standard/default |
+| `low` | `chalk.white` | `15` | White | Recedes |
 
 ### Default Fallback
 
-| Condition | CLI Colour | Colour Name | Description |
-|-----------|-----------|-------------|-------------|
-| No stage, not blocked | Gray | `gray` | Falls back to idea/gray colour |
+| Condition | CLI Colour | Herdr ANSI 256 | Description |
+|-----------|------------|----------------|-------------|
+| Unknown/missing priority | Medium (yellow) | `220` | Falls back to medium/yellow |
+
+### Stage Colours (unchanged — used by the stage filter dialog and separators)
+
+| Stage | CLI Colour | Colour Name |
+|-------|-----------|-------------|
+| `idea` | Gray | `gray` |
+| `intake_complete` | Blue | `blue` |
+| `plan_complete` | Cyan | `cyan` |
+| `in_progress` | Yellow | `yellow` |
+| `in_review` | Green | `green` |
+| `done` | White | `white` |
 
 ## Priority Rules
 
-1. **Blocked override**: When a work item has `status: blocked`, it always displays in red, regardless of its stage value
-2. **Stage progression**: When a work item has a stage set, the stage progression colour is used
-3. **Default**: When no stage is set (or stage is empty/unknown) and status is not blocked, the default gray colour (idea) is used
-
-
+1. **Priority colour**: A work item's title and id are coloured by its priority (critical/high/medium/low).
+2. **No blocked override**: Blocked items display their natural priority colour — there is no unconditional
+   red override for `status: blocked`.
+3. **Default fallback**: When priority is missing or unknown, the medium/yellow colour is used.
 
 ## Accessibility
 
@@ -59,36 +72,27 @@ The colour-coding system is designed with accessibility in mind:
 
 ### Files
 
-- `src/theme.ts` - Theme definitions for CLI and TUI colours (stage progression and blocked override)
-- `src/commands/helpers.ts` - Helper functions for title rendering
+- `src/theme.ts` — canonical priority colour mapping (chalk) for the CLI
+- `src/commands/helpers.ts` — `titleColorForPriority`, `renderTitle`, `formatTitleAndId` (both title and id by priority)
+- `packages/shared/src/icons.ts` — `priorityColor(priority)` / `applyPriorityColour(text, priority)` (ANSI 256) for Herdr
+- `packages/herdr/src/worklist.ts` — `formatItemLine` (title and id both via priority colour)
 
 ### Functions
 
-- `titleColorForStage(stage)` - Returns Chalk function for stage-based colour
-- `renderTitle(item)` - Renders title with appropriate colour; checks blocked status first
+- `titleColorForPriority(priority)` — Returns Chalk function for priority colour (unknown → medium/yellow)
+- `renderTitle(item)` — Renders title coloured by priority (no blocked override)
+- `priorityColor(priority)` / `applyPriorityColour(text, priority)` — Herdr ANSI 256 equivalents
 
-### Changing the Colour Mapping
+### Keeping CLI and Herdr Colours Consistent
 
-To modify colours:
-
-1. Edit `src/theme.ts`: Update `theme.stage` objects or `theme.blocked`
-2. The colour functions in `src/commands/helpers.ts` automatically pick up theme changes
-
-### Adding New Stages
-
-To add a new stage colour:
-
-1. Add the entry to `theme.stage` in `src/theme.ts`
-2. Add a case to `titleColorForStage` in `src/commands/helpers.ts`
+The CLI uses chalk named/hex colours and Herdr renders raw ANSI 256 escape codes. The two maps must stay
+consistent: `critical` ≈ red (196), `high` ≈ orange (208), `medium` ≈ yellow (220), `low` ≈ white (15).
+When changing colours, update both `src/theme.ts` and `packages/shared/src/icons.ts`.
 
 ## Testing
 
-Tests are located in `tests/unit/colour-mapping.test.ts`:
+Tests are located in:
 
-- Theme structure verification (stage colours, blocked override)
-- Stage-based colour mapping
-- Blocked status override (always red regardless of stage)
-- Default/fallback behaviour (gray when no stage, not blocked)
-- Accessibility (preserving text labels)
-- Fallback behaviour (colours disabled)
-- Visual regression tests (snapshot-like)
+- `tests/unit/colour-mapping.test.ts` — CLI helpers colour mapping (titles and ids by priority, blocked items show priority, unknown fallback)
+- `packages/shared/src/icons-priority-colour.test.ts` — Herdr `priorityColor` / `applyPriorityColour` ANSI 256 mapping
+- `packages/herdr/src/worklist.test.ts` (see `formatItemLine — priority title + stage id` describe block) — Herdr row colouring

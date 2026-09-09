@@ -123,12 +123,12 @@ describe('wl show formatting integration', () => {
       ],
       stages: [
         { value: 'idea', label: 'Idea' },
-        { value: 'in_progress', label: 'In Progress' },
+        { value: 'plan_complete', label: 'Plan Complete' },
         { value: 'in_review', label: 'In Review' },
         { value: 'done', label: 'Done' },
       ],
       statusStageCompatibility: {
-        open: ['idea', 'in_progress'],
+        open: ['idea', 'plan_complete'],
         completed: ['in_review', 'done'],
         deleted: ['idea'],
       },

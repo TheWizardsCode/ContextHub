@@ -51,9 +51,15 @@ export function sortByPriorityDateAndId(a: WorkItem, b: WorkItem): number {
   return a.id.localeCompare(b.id);
 }
 
-// Format title and id with consistent coloring used in tree/list outputs
+// Format title and id with consistent coloring: both title and id by priority
 export function formatTitleAndId(item: WorkItem, prefix: string = ''): string {
-  return `${prefix}${renderTitle(item)} ${theme.text.muted('-')} ${theme.text.muted(item.id)}`;
+  return `${prefix}${renderTitle(item)} ${theme.text.muted('-')} ${renderPriorityColouredId(item.id, item.priority)}`;
+}
+
+// Render a work item ID coloured by priority (same as title, unknown falls back to medium/yellow)
+function renderPriorityColouredId(id: string, priority?: string): string {
+  const colorFn = titleColorForPriority(priority);
+  return colorFn(id);
 }
 
 // Format only the title (consistent color)
@@ -61,37 +67,30 @@ export function formatTitleOnly(item: WorkItem): string {
   return renderTitle(item);
 }
 
-// Return chalk function appropriate for a given stage (for console output)
-// Stage progression: gray → blue → cyan → yellow → green → white
-function titleColorForStage(stage?: string): (text: string) => string {
-  const s = (stage || '').toLowerCase().trim();
-  switch (s) {
-    case 'idea':
-      return theme.stage.idea;
-    case 'intake_complete':
-      return theme.stage.intakeComplete;
-    case 'plan_complete':
-      return theme.stage.planComplete;
-    case 'in_progress':
-      return theme.stage.inProgress;
-    case 'in_review':
-      return theme.stage.inReview;
-    case 'done':
-      return theme.stage.done;
+// Return chalk function appropriate for a given priority (for console output)
+// Priority colours: critical → red, high → orange, medium → yellow, low → white
+function titleColorForPriority(priority?: string): (text: string) => string {
+  const p = (priority || '').toLowerCase().trim();
+  switch (p) {
+    case 'critical':
+      return theme.priority.critical;
+    case 'high':
+      return theme.priority.high;
+    case 'medium':
+      return theme.priority.medium;
+    case 'low':
+      return theme.priority.low;
     default:
-      return theme.stage.idea; // default to idea/gray colour
+      // Unknown/missing priority falls back to medium/yellow
+      return theme.priority.medium;
   }
 }
 
-// Render a work item title with the color appropriate to its status or stage
-// Blocked items always appear red, regardless of stage. Otherwise, stage-based colours apply.
+// Render a work item title coloured by priority.
+// Blocked items show their natural priority colour — no unconditional red override.
+// Unknown priority falls back to medium/yellow.
 function renderTitle(item: WorkItem, prefix: string = ''): string {
-  // Blocked status overrides everything
-  if (item.status === 'blocked') {
-    return theme.blocked(prefix + item.title);
-  }
-  // Use stage-based colour; fallback to idea/gray when stage is undefined or empty
-  const colorFn = titleColorForStage(item.stage || undefined);
+  const colorFn = titleColorForPriority(item.priority || undefined);
   return colorFn(prefix + item.title);
 }
 
@@ -393,7 +392,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   // summary: truly minimal - just title, status, priority
   if (fmt === 'summary') {
     const lines: string[] = [];
-    lines.push(`${formatTitleOnly(item)} ${theme.text.muted(item.id)}`);
+    lines.push(`${formatTitleOnly(item)} ${renderPriorityColouredId(item.id, item.priority)}`);
     const sLine = formatStatusWithIcon(item.status);
     lines.push(`Status: ${sLine} | Priority: ${formatPriorityWithIcon(item.priority)}`);
     return lines.join('\n');
@@ -406,7 +405,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     if (fmt === 'concise') {
       const lines: string[] = [];
       // First line: title + id (compact)
-      lines.push(`${formatTitleOnly(item)} ${theme.text.muted(item.id)}`);
+      lines.push(`${formatTitleOnly(item)} ${renderPriorityColouredId(item.id, item.priority)}`);
     // Build metadata as a markdown table
     const metaRows: Array<[string, string]> = [];
     if (item.stage !== undefined) {
@@ -438,7 +437,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
   if (fmt === 'normal') {
     // Build metadata as a markdown table (ID, Title, Status, SortIndex, Risk, Effort, Assignee, Audit, Parent)
     const metaRows: Array<[string, string]> = [];
-    metaRows.push(['ID', theme.text.muted(item.id)]);
+    metaRows.push(['ID', renderPriorityColouredId(item.id, item.priority)]);
     metaRows.push(['Title', formatTitleOnly(item)]);
     if (item.stage !== undefined) {
       const stageLabel = item.stage === '' ? getStageLabel('', rules) || 'Undefined' : getStageLabel(item.stage, rules) || item.stage;
@@ -501,7 +500,7 @@ export function humanFormatWorkItem(item: WorkItem, db: WorklogDatabase | null, 
     : `${formatStatusWithIcon(item.status)} | Priority: ${formatPriorityWithIcon(item.priority)}`;
   // Build metadata as a markdown table
   const frontmatter: Array<[string, string]> = [
-    ['ID', theme.text.muted(item.id)],
+    ['ID', renderPriorityColouredId(item.id, item.priority)],
     ['Status', statusPriorityValue],
     ['Type', issueTypeLabel],
     ['SortIndex', String(item.sortIndex)]
@@ -828,12 +827,20 @@ function isFilePath(candidate: string): boolean {
 
 /**
  * Input item for grouping — must have an `id`, `stage`, and a list of `filePaths`.
+ *
+ * Optional audit fields are used for the 6-bucket sort when
+ * `stage === 'in_review'` (WL-0MSLPM5ZB003TADT).
  */
 export interface GroupableItem {
   id: string;
   stage?: string;
   filePaths: string[];
   priority?: string;
+  // Optional audit fields — used for in_review bucket sort
+  needsProducerReview?: boolean;
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  updatedAt?: string | null;
 }
 
 /**

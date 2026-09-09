@@ -35,6 +35,9 @@ import {
   claimWorkItem,
   getExecFileAsync,
   buildWlArgs,
+  buildWlArgsForRoot,
+  extractJson,
+  extractItems,
 } from './fetcher.js';
 import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
 import {
@@ -48,6 +51,7 @@ import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
+import { getMachineCoordinationDir } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
 import {
   createDowntimeWorker,
@@ -90,6 +94,7 @@ import {
   DOWNTIME_AUDIT_STALE_WINDOW_MS,
   parseInProgressOutput,
   type DowntimeActiveAuditResult,
+  withTransientRetry,
 } from './downtime-worker.js';
 import {
   createModeSwitchWorker,
@@ -111,6 +116,11 @@ import {
   loadScheduledPrompts,
   updateScheduledPromptLastTriggered,
 } from './scheduled-prompts.js';
+import {
+  getDispatcherAnchor as resolveDispatcherAnchor,
+  createDispatcherAnchorDeps,
+  type DispatcherAnchor,
+} from './dispatcher-anchor.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
 // At runtime (tsx or dist), __dirname equivalent from import.meta.url
@@ -196,10 +206,11 @@ export { stripAgentPromptPrefix };
  * pane gets a descriptive title (WL-0MSJ4E8UA005KG9Y). Without the flag the
  * script falls back to its default "Pi Agent".
  *
- * Every selection-list agent dispatch passes `--no-focus` (WL-0MSHIA53D009DJOT)
- * so shared/send-to-pi.sh skips its final zoom and the selection list keeps
- * focus while the pi agent pane opens in the background. The shared script's
- * own default (focus on) is unchanged for its other consumers.
+ * Focus control (WL-0MT70LC6B009TL3Q): when `focus` is `true`, `--focus`
+ * is passed so send-to-pi.sh zooms the new pane. When `focus` is `false`
+ * or `undefined`, `--no-focus` is passed so the selection list keeps focus
+ * (the default for most shortcuts). The shared script's own default
+ * (focus=true) is unchanged for its other consumers.
  */
 export function buildSendToPiArgs(
   command: string,
@@ -207,9 +218,10 @@ export function buildSendToPiArgs(
   model?: string,
   paneIdFile?: string,
   paneName?: string,
+  focus?: boolean,
 ): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
-  const args = ['--no-focus', '--cwd', targetCwd];
+  const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
   if (paneName) {
     args.push('--pane-name', paneName);
   }
@@ -227,16 +239,20 @@ export function buildSendToPiArgs(
  * Build the argument vector for spawning `scripts/run-in-pane.sh` for a
  * command-output pane (`!!`/`!`-prefixed pane route and plain shell stdout
  * route). Mirrors `buildSendToPiArgs`: `--no-focus` (WL-0MSHIA53D009DJOT) is
- * always passed so opening the command-output pane does not steal focus from
- * the selection list, followed by `--cwd <targetCwd>` so the pane starts in
- * the resolved project root. `run-in-pane.sh` parses all three options at
+ * passed by default so opening the command-output pane does not steal focus
+ * from the selection list, followed by `--cwd <targetCwd>` so the pane starts
+ * in the resolved project root. `run-in-pane.sh` parses all three options at
  * the head of argv; everything else is the command itself.
+ *
+ * Focus control (WL-0MT70LC6B009TL3Q): when `focus` is `true`, `--focus`
+ * is passed so run-in-pane.sh zooms the new pane. When `focus` is `false`
+ * or `undefined`, `--no-focus` is passed (the default for most shortcuts).
  *
  * When `paneName` is provided, `--pane-name <paneName>` replaces the
  * script's default "Command Output" (WL-0MSJ4E8UA005KG9Y).
  */
-export function buildRunInPaneArgs(command: string, targetCwd: string, paneName?: string): string[] {
-  const args = ['--no-focus', '--cwd', targetCwd];
+export function buildRunInPaneArgs(command: string, targetCwd: string, paneName?: string, focus?: boolean): string[] {
+  const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
   if (paneName) {
     args.push('--pane-name', paneName);
   }
@@ -537,25 +553,44 @@ export async function claimItemForAgentCommand(command: string): Promise<void> {
  * empty frontier (AC5: no silent fall-through).
  */
 async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<CriticalCandidate[]> {
-  const { stdout } = await getExecFileAsync()(
+  const { stdout } = await withTransientRetry(() => getExecFileAsync()(
     'wl',
     buildWlArgs(['dep', 'list', itemId, '--json']),
     { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-  );
+  ));
   const blockerRefs = parseDepListBlockersOutput(stdout);
   if (blockerRefs === null) throw new Error('wl dep list parse failure');
   const blockers: CriticalCandidate[] = [];
   for (const ref of blockerRefs) {
-    const { stdout: showOut } = await getExecFileAsync()(
+    const { stdout: showOut } = await withTransientRetry(() => getExecFileAsync()(
       'wl',
       buildWlArgs(['show', ref.id, '--json']),
       { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-    );
+    ));
     const full = parseShownWorkItem(showOut);
     if (full === null) throw new Error(`wl show parse failure for ${ref.id}`);
     blockers.push(full);
   }
   return blockers;
+}
+
+/**
+ * Default Dispatcher-anchor resolver used by {@link createDowntimeDeps}
+ * (C0 WL-0MTR01EU7005SYZG): resolves the machine-wide dedicated Dispatcher
+ * anchor pane via the herdr CLI (F1 WL-0MTR2CD4X006XI7U), provisioning the
+ * Dispatcher workspace idempotently on first dispatch. Null on any
+ * failure — dispatch degrades to "no dispatch this cycle". Injectable for
+ * tests that build real deps without a live herdr session.
+ */
+async function defaultDispatcherAnchorResolver(
+  cwd: string,
+): Promise<DispatcherAnchor | null> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    return await resolveDispatcherAnchor(cwd, createDispatcherAnchorDeps(cwd, herdrBin));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -565,11 +600,16 @@ async function fetchCriticalBlockers(cwd: string, itemId: string): Promise<Criti
  * `send-to-pi.sh` for the visible (non-focus-stealing) agent pane. Every
  * boundary is fail-closed: a wl failure yields no candidate (no dispatch)
  * rather than an exception.
+ *
+ * @param anchorResolver Dispatcher-anchor resolver (C0 WL-0MTR01EU7005SYZG).
+ *   Defaults to the real herdr-CLI-backed resolver; injectable for tests that
+ *   build real deps without a live herdr session.
  */
 export function createDowntimeDeps(
   scriptPath: string,
   assignee: string,
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
+  anchorResolver: DowntimeWorkerDeps['getDispatcherAnchor'] = defaultDispatcherAnchorResolver,
 ): DowntimeWorkerDeps {
   // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
   // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
@@ -593,32 +633,60 @@ export function createDowntimeDeps(
   // freshness signal — otherwise an item with a valid audit could be
   // re-audited on classification alone. Fail-closed: {ok:false} on any wl
   // failure or unparseable output.
+  //
+  // Cross-root (WL-0MTQ14W7L003II5A): BOTH lookups resolve against the
+  // PASSED-IN `cwd` (the offer's own worklog root) via stateless
+  // `buildWlArgsForRoot` — never the leader pane's module-level
+  // `_worklogDir`. The pre-fix code ignored `cwd` and fired `wl show` at
+  // the leader's database, so a foreign offer (AH- in AI_Hell, CG- in
+  // Tableau-Card-Engine) produced "Work item not found" → 3 strikes →
+  // 60-minute pause with idle slots unused.
   const fetchAuditItemById = async (itemId: string, cwd: string): Promise<DowntimeItemResult> => {
     try {
-      const { stdout } = await getExecFileAsync()(
+      const { stdout } = await withTransientRetry(() => getExecFileAsync()(
         'wl',
-        buildWlArgs(['show', itemId, '--json']),
+        buildWlArgsForRoot(cwd, ['show', itemId, '--json']),
         { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-      );
+      ));
       const info = parseShowItemOutput(stdout);
-      if (info === null) return { ok: false };
+      if (info === null) return { ok: false, error: 'show parse error' };
       if (info.status === 'completed' && info.stage === 'in_review') {
-        const { stdout: listOut } = await getExecFileAsync()(
+        const { stdout: listOut } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
-          buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
+          buildWlArgsForRoot(cwd, ['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const audits = parseAuditCandidatesOutput(listOut);
-        if (audits === null) return { ok: false };
+        if (audits === null) return { ok: false, error: 'audit list parse error' };
         const found = audits.find((a) => a.id === itemId);
         info.auditedAt = found?.auditedAt ?? null;
       }
       return { ok: true, info };
-    } catch {
-      return { ok: false };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
     }
   };
   return {
+    // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): the machine-wide dedicated
+    // Dispatcher workspace/pane resolver (F1 WL-0MTR2CD4X006XI7U). Every
+    // downtime pane spawn resolves this anchor so panes land in the Dispatcher
+    // workspace regardless of leadership. Null → dispatch degrades to "no
+    // dispatch this cycle". Injected (default = real herdr CLI) so tests that
+    // build real deps without a live herdr session can stub it.
+    getDispatcherAnchor: anchorResolver,
+    // Herdr list head (WL-0MTK1ILM2009QYB2): canonical ranking via fetcher → smart-selection → grouping.
+    // The dispatcher treats this as the single ranking source; remaining safety gates are filters.
+    // Batch size 30: enough to filter through (code-freeze, dispatched-marker, single-flight)
+    // without excessive overhead; fetchNextItems applies mandatory-always, browseItemCount
+    // windowing, and regroupWorkItems grouping — the sole ranking path.
+    getHerdrListHead: async (_cwd: string): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
+      try {
+        const items = await fetchNextItems(30);
+        return { ok: true, items };
+      } catch (err) {
+        return { ok: false, error: String(err) };
+      }
+    },
     async getNextItem(stage: DowntimeStage, cwd: string): Promise<DowntimeNextResult> {
       try {
         // buildWlArgs() prepends the tab's resolved --worklog-dir override
@@ -630,13 +698,13 @@ export function createDowntimeDeps(
         // timeout (WL-0MSJIPHD0001L1J9) kills a hung wl child so the lookup
         // fails closed to a strike instead of wedging the dispatch task
         // until the pane restarts.
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs(['next', '--stage', stage, '-n', '10', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const candidates = parseNextCandidatesOutput(stdout, stage);
-        if (candidates === null) return { ok: false };
+        if (candidates === null) return { ok: false, error: `${stage} parse error` };
         // Plan/intake dispatched-marker exclusion with change-guard (RCA
         // WL-0MSRBFFLN005W3VT design point 3, RC-2): read the shared rolling
         // dispatch log for THIS worklog root and exclude any candidate the
@@ -654,10 +722,11 @@ export function createDowntimeDeps(
               : new Map<string, string>();
         const selected = selectNextCandidate(candidates, dispatched, registryFor(cwd));
         return { ok: true, candidate: selected };
-      } catch {
+      } catch (err) {
         // Transient wl failure → fail closed to busy: no dispatch, and the
         // worker must NOT treat it as an empty backlog (no cooldown).
-        return { ok: false };
+        // Capture error details for the three-strike pause log (WL-0MTL4PC0Y005GXTI).
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): fresh tri-state read of the
@@ -680,13 +749,13 @@ export function createDowntimeDeps(
         // CLI-error strike — NOT a null that is indistinguishable from a
         // genuinely empty audit tier. The bounded timeout
         // (WL-0MSJIPHD0001L1J9) applies here too.
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const candidates = parseAuditCandidatesOutput(stdout);
-        if (candidates === null) return { ok: false };
+        if (candidates === null) return { ok: false, error: `audit parse error` };
         // Dispatched-marker exclusion (WL-0MSLIY8ZR004QUSY): read the shared
         // rolling dispatch log for THIS worklog root (the same <cwd> that
         // recordDispatch writes) and exclude any candidate the downtime
@@ -704,11 +773,12 @@ export function createDowntimeDeps(
         return selected === null
           ? { ok: true, candidate: null }
           : { ok: true, candidate: toDowntimeCandidate(selected) };
-      } catch {
+      } catch (err) {
         // Fail-closed: a wl failure yields a CLI-error outcome, never a
         // candidate and never a null that looks like an empty tier — the
         // caller counts it as a strike (WL-0MSLWJ2KP0002SV0).
-        return { ok: false };
+        // Capture error details for the three-strike pause log (WL-0MTL4PC0Y005GXTI).
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
     async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
@@ -739,23 +809,57 @@ export function createDowntimeDeps(
         // (dispatched but not yet completed/reviewed — the audit pane
         // transitions the item when it finishes). The bounded timeout
         // (WL-0MSJIPHD0001L1J9) kills a hung wl child.
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs(['list', '--status', 'in_progress', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const inProgress = parseInProgressOutput(stdout);
         if (inProgress === null) {
           // Unparseable query → the check cannot complete → fail-open.
-          return { ok: false };
+          return { ok: false, error: 'in_progress parse error' } as const;
         }
         const active = [...auditCandidateIds].some((id) => inProgress.has(id));
         return { ok: true, active };
-      } catch {
+      } catch (err) {
         // Fail-open: a wl failure yields {ok:false} — the dispatcher skips
         // the audit tier and falls through to the next tier; dispatch is
         // never blocked by an unanswerable check (fail-safe).
-        return { ok: false };
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+    async getReviewQueueCount(cwd: string): Promise<number | null> {
+      // Review-queue depth gate (WL-0MT2UQWOR007CYY9): count completed/in_review
+      // root items via `wl list --status completed --stage in_review
+      // --root-only --json`. Bounded by DOWNTIME_WL_TIMEOUT_MS so a hung wl
+      // child fails closed (gate active → only critical implements). A
+      // failure or unparseable output resolves to null (gate active),
+      // consistent with the code-freeze "ambiguous ⇒ frozen" convention.
+      //
+      // Per-root targeting (WL-0MTTSWC1X005P4VD): the coordination leader
+      // applies the gate to EACH offer's OWN worklog root — the count must
+      // resolve against `cwd`'s database (stateless buildWlArgsForRoot), the
+      // same convention as fetchItem, never the leader pane's module override.
+      try {
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
+          'wl',
+          buildWlArgsForRoot(cwd, [
+            'list',
+            '--status',
+            'completed',
+            '--stage',
+            'in_review',
+            '--root-only',
+            '--json',
+          ]),
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        ));
+        const items = extractItems(extractJson(stdout));
+        return items.length;
+      } catch {
+        // Fail-closed: a wl error means the gate is active (only critical
+        // implements remain eligible).
+        return null;
       }
     },
     async getNextImplementCandidate(cwd: string): Promise<DowntimeCandidate | null> {
@@ -770,7 +874,7 @@ export function createDowntimeDeps(
         // (WL-0MSJIPHD0001L1J9) kills a hung wl child. Fail-closed: a wl
         // failure yields no candidate (no dispatch) and never short-circuits
         // the plan/intake fallback (AC6).
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs([
             'next',
@@ -785,7 +889,7 @@ export function createDowntimeDeps(
             '--json',
           ]),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const candidates = parseImplementCandidatesOutput(stdout);
         if (candidates === null) return null;
         // Dispatched-marker exclusion (AC6): read the shared rolling
@@ -816,13 +920,13 @@ export function createDowntimeDeps(
         // of the next one. The bounded timeout (WL-0MSJIPHD0001L1J9) kills
         // a hung wl child so the lookup fails closed to a strike instead
         // of wedging the dispatch task.
-        const { stdout } = await getExecFileAsync()(
+        const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
           buildWlArgs(['list', '--priority', 'critical', '--status', 'open', '-n', '10', '--json']),
           { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
-        );
+        ));
         const candidates = parseCriticalCandidatesOutput(stdout);
-        if (candidates === null) return { ok: false };
+        if (candidates === null) return { ok: false, error: `critical parse error` };
         // Dispatched-marker change-guard (WL-0MSRBFFLN005W3VT design point
         // 3 semantics): read the shared rolling dispatch log for THIS
         // worklog root and exclude any critical item the downtime worker
@@ -870,11 +974,11 @@ export function createDowntimeDeps(
             stage: frontier.stage as DowntimeStage,
           },
         };
-      } catch {
+      } catch (err) {
         // Fail-closed: a wl failure yields a CLI-error outcome, never a
         // candidate and never a null that looks like an empty tier — the
-        // caller counts it as a strike.
-        return { ok: false };
+        // caller counts it as a strike. Capture error for pause log.
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
       }
     },
     // Leader-coordination item fetch (parent WL-0MST3OJ8S0001ROL AC4):
@@ -921,7 +1025,11 @@ export function createDowntimeDeps(
     async recordScheduledPromptTrigger(cwd: string, promptId: string, at: string): Promise<boolean> {
       return updateScheduledPromptLastTriggered(cwd, promptId, at);
     },
-    async claimItem(itemId: string, expected: DowntimeClaimExpected): Promise<DowntimeClaimResult> {
+    async claimItem(
+      itemId: string,
+      expected: DowntimeClaimExpected,
+      cwd?: string,
+    ): Promise<DowntimeClaimResult> {
       // CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1): the transition
       // only applies while the item is still in the state the tier selected
       // it in — exactly one concurrent pane wins. A stale result (another
@@ -930,7 +1038,13 @@ export function createDowntimeDeps(
       // discarded (WL-0MSLWJ310000ND0X absorbed): the outcome reason
       // ('claim-failed' / 'wl-error') is the durable observable, and the
       // failure detail is written to stderr like claimItemForAgentCommand.
-      const result = await claimWorkItem(itemId, assignee, expected);
+      //
+      // Cross-root (WL-0MTQ14W7L003II5A): `cwd` is the offer's worklog root
+      // — the coordination leader claims offers in the offering instance's
+      // OWN database. Without it the update fired at the leader's database
+      // and a dispatchable foreign offer struck at claim time (the same
+      // wrong-root failure as the fetch). Undefined → legacy behavior.
+      const result = await claimWorkItem(itemId, assignee, expected, cwd);
       if (result.success) return { ok: true };
       process.stderr.write(
         `[worklog-plugin] Downtime claim failed for ${itemId}: ` +
@@ -938,12 +1052,19 @@ export function createDowntimeDeps(
           `${result.stale ? ' (another pane won the claim race — dispatch aborted)' : ''}\n`,
       );
       return result.stale
-        ? { ok: false, reason: 'stale' }
-        : { ok: false, reason: 'error' };
+        ? { ok: false, reason: 'stale', error: result.error }
+        : { ok: false, reason: 'error', error: result.error ?? 'claim failed' };
     },
     async spawnAgentPane(
       prompt: string,
-      opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
+      opts: {
+        model: string;
+        cwd: string;
+        paneName?: string;
+        itemTitle?: string;
+        itemId?: string;
+        anchorId?: string;
+      },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
@@ -955,18 +1076,21 @@ export function createDowntimeDeps(
     },
     async recordDispatch(event: DowntimeDispatchEvent): Promise<boolean> {
       // 1. Durable trail: a comment on the item itself (survives wl sync).
-      // buildWlArgs() prepends the resolved --worklog-dir override so the
-      // comment lands on the item in ITS project's DB, not the plugin
-      // process's own cwd (WL-0MSI7DQL10016QYX). A comment failure is
-      // tolerated — the comment is the durable cross-machine trail, not the
-      // marker. Scheduled-prompt dispatches (noItemComment, AC4) have no
-      // work item — the comment is skipped entirely (there is no item to
-      // comment on).
+      // The comment lands on the item in ITS OWN project's DB — targeted at
+      // `event.cwd` (the dispatch root) via stateless buildWlArgsForRoot
+      // (WL-0MTQ14W7L003II5A). The pre-fix code resolved via the module
+      // override, so a coordination leader's foreign dispatch (cwd = the
+      // offer's root ≠ the leader pane's root) commented the WRONG database
+      // — the comment failed silently on a foreign prefix and the durable
+      // item trail was lost. A comment failure is tolerated — the comment is
+      // the durable cross-machine trail, not the marker. Scheduled-prompt
+      // dispatches (noItemComment, AC4) have no work item — the comment is
+      // skipped entirely (there is no item to comment on).
       if (!event.noItemComment) {
         try {
           await getExecFileAsync()(
             'wl',
-            buildWlArgs([
+            buildWlArgsForRoot(event.cwd, [
               'comment',
               'add',
               event.itemId,
@@ -1175,23 +1299,24 @@ async function main(): Promise<void> {
     registry: createRoundRobinRegistry({
       worklogDir: join(targetCwd, '.worklog'),
     }),
-    // Leader-election + coordination refactor (parent WL-0MST3OJ8S0001ROL):
-    // the shared coordination dir is THIS worklog's .worklog (single-machine
-    // v1 — every herdr instance contributing to the same list passes its own
-    // root; the coordination file + leader lock/lease live there). The
-    // instance id is auto-generated at worker construction (stable for the
-    // process lifetime; re-offers under a fresh id after a restart, the dead
-    // lease expiring in the TTL).
-    coordinationDir: join(targetCwd, '.worklog'),
+    // Leader-election + coordination refactor (parent WL-0MTF0KLO10043YAN
+    // F3): single machine-wide coordination dir — one election, one lease
+    // machine-wide. HERDR_COORDINATION_DIR override wins; default is
+    // ~/.herdr/downtime/. The per-worklog join(targetCwd, '.worklog')
+    // coupling is retired (F6). The instance id is auto-generated at
+    // worker construction (stable for the process lifetime).
+    coordinationDir: getMachineCoordinationDir() ?? join(targetCwd, '.worklog'),
     config: () => {
       const s = loadSettings();
       return {
         enabled: s.downtimeEnabled,
         thresholdMs: s.downtimeIdleThresholdMs,
         requiredFreeSlots: s.downtimeRequiredFreeSlots,
+        maxConcurrentDispatches: s.downtimeMaxConcurrentDispatches,
         model: s.downtimeModel,
         cwd: targetCwd,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
+        browseItemCount: s.browseItemCount,
       };
     },
   });
@@ -1211,6 +1336,8 @@ async function main(): Promise<void> {
       refreshIntervalMs: runSettings.refreshIntervalMs,
       autoSync: runSettings.autoSync,
       syncIntervalMs: runSettings.syncIntervalMs,
+      browseItemCount: clampBrowseItemCount(runSettings.browseItemCount ?? defaultSettings.browseItemCount),
+      cwd: targetCwd,
       showHelpText: runSettings.showHelpText,
       showIcons: runSettings.showIcons,
       downtimeWorker,
@@ -1235,7 +1362,7 @@ async function main(): Promise<void> {
       modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
       modeSwitchEnabled: runSettings.modeSwitchEnabled,
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
-      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => {
+      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -1320,7 +1447,7 @@ async function main(): Promise<void> {
           // `--model <pattern>` so the pi CLI opens with the right model.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName),
+            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName, focus),
             {
               detached: true,
               stdio: 'ignore',
@@ -1366,7 +1493,7 @@ async function main(): Promise<void> {
           const shellPaneName = buildShellPaneTitle(clean, paneTitle, shellItemId);
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(clean, targetCwd, shellPaneName),
+            buildRunInPaneArgs(clean, targetCwd, shellPaneName, focus),
             {
               detached: true,
               stdio: 'ignore',
@@ -1399,7 +1526,7 @@ async function main(): Promise<void> {
           }
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, extractWorkItemId(command))),
+            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, extractWorkItemId(command)), focus),
             {
               detached: true,
               stdio: 'ignore',

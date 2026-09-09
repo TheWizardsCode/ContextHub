@@ -25,11 +25,20 @@ refused, surfaced to the operator, and never re-exported or pushed back.
 - Before any merge/import, `wl sync` runs
   `git log <remoteTrackingRef> --format=%h%x09%ae --not <lastSyncedRef>` and
   inspects every incoming commit's author email.
-- **Empty author email** → unconditional refusal. `--allow-foreign-author`
-  never bypasses this.
-- **Foreign author email** (differs from the repo's `git config user.email`)
-  → refused by default; allowed with `wl sync --allow-foreign-author` or
-  `syncAllowForeignAuthor: true` in `.worklog/config.yaml`.
+- **Empty author email** → unconditional refusal. No whitelist or flag ever
+  bypasses this.
+- **Whitelist `syncAllowedAuthors`** (new, WL-0MTGDW58X007UJDS) — the canonical
+  gate setting in `.worklog/config.yaml` / `config.defaults.yaml`:
+  - `[]` (default) — only the local `user.email` is allowed (strict).
+  - `['a@x', 'b@y']` — `user.email` plus any listed email (case-insensitive,
+    trimmed). Foreign commit allowed only if its email is in the list.
+  - `null` or `true` — allow any author (allow-all, equivalent to the flag).
+- **Legacy `syncAllowForeignAuthor: true`** still works as a deprecated alias
+  that maps to allow-all when `syncAllowedAuthors` is absent; when
+  `syncAllowedAuthors` is explicitly set it takes precedence.
+- **CLI `--allow-foreign-author`** still works and overrides the config to
+  allow-all for that invocation (help: `wl sync --help` explains the
+  whitelist model).
 - **`user.email` unset locally** → the foreign-email comparison is skipped;
   only the empty-email gate applies.
 - The last-known sync point is stored in `.worklog/last-synced-ref` after each
@@ -73,18 +82,33 @@ wl sync --no-push --allow-foreign-author
 wl sync --no-push --allow-foreign-author
 ```
 
-## Config flag
+## Config — whitelist `syncAllowedAuthors`
 
-`syncAllowForeignAuthor` (default `false`) in `.worklog/config.yaml` (or
-`.worklog/config.defaults.yaml` for team defaults) allows foreign-email
-commits without a CLI flag:
+Canonical (WL-0MTGDW58X007UJDS) — `syncAllowedAuthors` in `.worklog/config.yaml`
+(or `config.defaults.yaml` for team defaults):
 
 ```yaml
-syncAllowForeignAuthor: true
+# strict (default): only user.email
+syncAllowedAuthors: []
+
+# allow specific collaborators / bot
+syncAllowedAuthors:
+  - alice@company.com
+  - ci-bot@company.com
+
+# allow any author (e.g. shared repo)
+syncAllowedAuthors: null   # or true
 ```
 
-The CLI flag `wl sync --allow-foreign-author` takes precedence over the config
-value. Neither ever bypasses the empty-author-email gate.
+Invalid types (e.g. number, `false`, list with non-string entries) are
+rejected with a clear error (`Invalid config: syncAllowedAuthors …`).
+
+### Legacy `syncAllowForeignAuthor`
+
+`syncAllowForeignAuthor: true` still works as a deprecated alias that maps to
+allow-all when `syncAllowedAuthors` is absent. When `syncAllowedAuthors` is
+explicitly set it wins. The CLI flag `wl sync --allow-foreign-author` always
+wins over either config key. Nothing ever bypasses the empty-author gate.
 
 ## Recovery for a polluted ref
 

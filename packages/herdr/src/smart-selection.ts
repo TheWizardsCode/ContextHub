@@ -41,11 +41,14 @@ export function selectWorkItems<T extends Pick<WorkItem, 'priority' | 'status' |
   items: T[],
   browseItemCount: number,
 ): T[] {
-  // Defensive root-only filter (WL-0MS964SIA0057ABR): merged lists can never
-  // contain child items regardless of source. Children are only visible under
-  // their parent via expand.
-  const rootOnly = items.filter((i) => !i.parentId);
-  const actionable = rootOnly.filter((i) => i.stage !== 'done');
+  // Defensive root-only filter for non-critical items (WL-0MS964SIA0057ABR):
+  // child items are hidden from the top-level worklist — they are only
+  // visible under their parent via expand. HOWEVER, critical items are an
+  // exception: child critical items must always be visible so the team can
+  // see blocking items (e.g., untriaged test-failures) that the ship
+  // critical-items gate detects.
+  const nonCriticals = items.filter((i) => !i.parentId || i.priority === 'critical');
+  const actionable = nonCriticals.filter((i) => i.stage !== 'done');
   const criticals = actionable.filter((i) => i.priority === 'critical');
   const reviews = actionable.filter((i) => i.status === 'completed' && i.stage === 'in_review' && i.priority !== 'critical');
   const others = actionable.filter((i) => !isMandatoryItem(i));

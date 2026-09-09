@@ -39,7 +39,26 @@ describe('buildSendToPiArgs', () => {
   // Selection-list agent dispatch must NOT steal focus from the list
   // (WL-0MSHIA53D009DJOT): every agent-pane spawn passes --no-focus so
   // shared/send-to-pi.sh skips its final zoom. The flag is emitted before
-  // --cwd, mirroring buildDowntimePaneArgs.
+  // --cwd, mirroring buildDowntimePaneArgs. The P n shortcut opts in to
+  // --focus (WL-0MT70LC6B009TL3Q).
+  it('P n (new session) passes --focus so the new pane immediately receives focus', () => {
+    expect(buildSendToPiArgs('/prompt:', '/project', 'plan', undefined, undefined, true)).toEqual([
+      '--focus',
+      '--cwd',
+      '/project',
+      '--model',
+      'plan',
+      '',
+    ]);
+  });
+
+  it('passes --no-focus when focus is false/undefined (current default)', () => {
+    // Unfocused agent shortcuts (the vast majority) keep --no-focus.
+    expect(buildSendToPiArgs('/prompt:Review the item', '/project', 'plan')).toContain('--no-focus');
+    expect(buildSendToPiArgs('/prompt:Review', '/project', 'plan', undefined, undefined, false)).toContain('--no-focus');
+    expect(buildSendToPiArgs('/prompt:Review', '/project', 'plan', undefined, undefined, undefined)).toContain('--no-focus');
+  });
+
   it('includes --model <model> for agent commands with a model', () => {
     expect(buildSendToPiArgs('/skill:implement <id>', '/project', 'code')).toEqual([
       '--no-focus',
@@ -120,6 +139,17 @@ describe('buildSendToPiArgs', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildRunInPaneArgs', () => {
+  // Focus opt-in (WL-0MT70LC6B009TL3Q): like buildSendToPiArgs,
+  // --focus is passed when focus is true, --no-focus otherwise.
+  it('passes --focus + --cwd when focus is true (focused shortcut)', () => {
+    expect(buildRunInPaneArgs('wl update WL-1 --priority high', '/project', undefined, true)).toEqual([
+      '--focus',
+      '--cwd',
+      '/project',
+      'wl update WL-1 --priority high',
+    ]);
+  });
+
   it('passes --no-focus + --cwd before a !!-prefixed command (pane route)', () => {
     expect(buildRunInPaneArgs('wl update <id> --priority high', '/project')).toEqual([
       '--no-focus',
@@ -337,6 +367,15 @@ describe('shortcuts.json command routing', () => {
     for (const e of filterEntries) {
       expect(e.command.startsWith('!!')).toBe(false);
     }
+  });
+
+  it('routes the P n blank-session command with focus:true (WL-0MT70LC6B009TL3Q)', () => {
+    const _here2 = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(_here2, 'shortcuts.json'), 'utf8');
+    const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
+    const pn = parsed.find((e) => Array.isArray(e.chord) && e.chord.join(',') === 'P,n');
+    expect(pn).toBeDefined();
+    expect(pn!.focus).toBe(true);
   });
 
   it('binds P-p to the free-form prompt, P-a to the audit-gaps prompt, and P-n to a blank session', () => {
@@ -747,7 +786,7 @@ describe('createDowntimeDeps', () => {
   it('getNextItem fails closed ({ok:false}) when wl errors', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextItem('idea', '/repo')).toEqual({ ok: false });
+    expect(await deps.getNextItem('idea', '/repo')).toEqual({ ok: false, error: 'wl boom' });
   });
 
   it('getNextItem passes a bounded timeout so a hung wl fails closed', async () => {
@@ -788,7 +827,7 @@ describe('createDowntimeDeps', () => {
       await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS - 1);
       // Still pending just before the timeout — no premature resolution.
       await vi.advanceTimersByTimeAsync(1);
-      await expect(resultPromise).resolves.toEqual({ ok: false });
+      await expect(resultPromise).resolves.toEqual({ ok: false, error: 'ETIMEDOUT' });
 
       // The hung invocation received the bounded timeout option.
       expect(hungExec.mock.calls[0][2]).toMatchObject({ timeout: DOWNTIME_WL_TIMEOUT_MS });
@@ -886,7 +925,7 @@ describe('createDowntimeDeps', () => {
   it('getNextAuditCandidate resolves ok:false when wl errors (a strike, never a null empty tier)', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false });
+    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false, error: 'wl boom' });
   });
 
   it('getNextAuditCandidate passes a bounded timeout so a hung wl fails closed', async () => {
@@ -921,7 +960,7 @@ describe('createDowntimeDeps', () => {
 
       const resultPromise = deps.getNextAuditCandidate('/repo');
       await vi.advanceTimersByTimeAsync(DOWNTIME_WL_TIMEOUT_MS);
-      await expect(resultPromise).resolves.toEqual({ ok: false });
+      await expect(resultPromise).resolves.toEqual({ ok: false, error: 'ETIMEDOUT' });
     } finally {
       vi.useRealTimers();
     }
@@ -932,7 +971,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false });
+    expect(await deps.getNextAuditCandidate('/repo')).toEqual({ ok: false, error: 'audit parse error' });
   });
 
   it('getNextAuditCandidate excludes an item already dispatched for audit (marker in the log, no fresh audit)', async () => {
@@ -1387,7 +1426,7 @@ describe('createDowntimeDeps', () => {
   it('getNextCriticalCandidate fails closed ({ok:false}) on wl error (never a silent empty)', async () => {
     setExecFileAsync(vi.fn().mockRejectedValue(new Error('wl boom')) as never);
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false });
+    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false, error: 'wl boom' });
   });
 
   it('getNextCriticalCandidate fails closed ({ok:false}) on malformed wl output', async () => {
@@ -1395,7 +1434,7 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
 
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
-    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false });
+    expect(await deps.getNextCriticalCandidate('/repo')).toEqual({ ok: false, error: 'critical parse error' });
   });
 
   it('getNextCriticalCandidate passes a bounded timeout so a hung wl fails closed', async () => {
@@ -1527,7 +1566,7 @@ describe('createDowntimeDeps', () => {
 
     // A dependency look-up failure must NOT look like an empty tier — it
     // is a wl-error strike.
-    expect(result).toEqual({ ok: false });
+    expect(result).toEqual({ ok: false, error: 'wl dep boom' });
   });
 
   it('end-to-end: two consecutive idle windows dispatch a single unaudited candidate exactly once', async () => {
@@ -1544,6 +1583,8 @@ describe('createDowntimeDeps', () => {
     const candidate = {
       id: 'WL-ONCE',
       title: 'dispatch me once',
+      status: 'completed',
+      stage: 'in_review',
       auditedAt: null,
       updatedAt: new Date(now - 60_000).toISOString(),
       sortIndex: 100,
@@ -1570,7 +1611,11 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+    // The real deps resolve the Dispatcher anchor via the herdr CLI, which is
+    // absent in tests — inject a stub anchor so the C0 anchored spawn path is
+    // exercised without a live herdr session (WL-0MTR2HLLJ009PTPJ).
+    const anchorResolver = vi.fn().mockResolvedValue({ paneId: 'wD:pTEST', workspaceId: 'wD' });
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn, anchorResolver as never);
     const cwd = makeTempDir();
 
     // Idle window 1: audit candidate selected and dispatched.
@@ -1578,6 +1623,12 @@ describe('createDowntimeDeps', () => {
     expect(first.dispatched).toBe(true);
     expect(first.kind).toBe('audit');
     expect(first.candidate?.id).toBe('WL-ONCE');
+    // The resolved Dispatcher anchor pane id is forwarded to send-to-pi.sh as
+    // --anchor (C0): the pane lands in the Dispatcher workspace.
+    expect(anchorResolver).toHaveBeenCalled();
+    const spawnArgs = (spawnFn as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string[] | undefined;
+    expect(spawnArgs).toContain('--anchor');
+    expect(spawnArgs).toContain('wD:pTEST');
 
     // The durable marker landed in the shared log (kind:audit).
     const entries = await readDowntimeLogEntries(cwd);
@@ -1628,7 +1679,7 @@ describe('createDowntimeDeps', () => {
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'idea' });
 
-    expect(result).toEqual({ ok: false, reason: 'stale' });
+    expect(result).toEqual({ ok: false, reason: 'stale', error: '{"success":false,"error":"stale","message":"Conditional update skipped"}' });
   });
 
   it('claimItem resolves error (a strike) when wl fails for any other reason', async () => {
@@ -1637,7 +1688,7 @@ describe('createDowntimeDeps', () => {
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
     const result = await deps.claimItem('WL-ABC', { status: 'open', stage: 'idea' });
 
-    expect(result).toEqual({ ok: false, reason: 'error' });
+    expect(result).toEqual({ ok: false, reason: 'error', error: 'wl boom' });
   });
 
   it('spawnAgentPane spawns send-to-pi.sh with the derived pane name and args', async () => {
@@ -1748,9 +1799,13 @@ describe('createDowntimeDeps recordDispatch', () => {
       cwd: '/repo',
     });
 
+    // The comment is targeted at the dispatch root (event.cwd) via stateless
+    // buildWlArgsForRoot — the item's own DB, never the ambient override.
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
       [
+        '--worklog-dir',
+        '/repo/.worklog',
         'comment',
         'add',
         'WL-ABC',
@@ -1764,7 +1819,7 @@ describe('createDowntimeDeps recordDispatch', () => {
     );
   });
 
-  it('passes --worklog-dir to wl comment add when the tab resolved a worklog root', async () => {
+  it('targets the comment at event.cwd (the item root) even when the module override points elsewhere', async () => {
     const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
     setExecFileAsync(mockExec as never);
     setWorklogDir('/home/user/projects/SorraAgents/.worklog');
@@ -1774,11 +1829,12 @@ describe('createDowntimeDeps recordDispatch', () => {
       itemId: 'SA-ABC',
       kind: 'plan',
       dispatchedAt: '2026-01-01T00:00:00.000Z',
-      cwd: '/repo',
+      cwd: '/home/user/projects/SorraAgents',
     });
 
-    // The audit comment must land on the item in ITS project's DB, not the
-    // plugin process's cwd (WL-0MSI7DQL10016QYX).
+    // The audit comment must land on the item in ITS project's DB — the
+    // dispatch root event.cwd (WL-0MSI7DQL10016QYX semantics preserved;
+    // cross-root leader dispatches target the offer's root, WL-0MTQ14W7L003II5A).
     expect(mockExec).toHaveBeenCalledWith(
       'wl',
       [

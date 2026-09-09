@@ -136,7 +136,7 @@ wl next -a "Alice"
 Use stages to indicate workflow progress. Start working on the schema task:
 
 ```bash
-wl update <schema-id> -s in-progress --stage in_progress -a "Your Name"
+wl update <schema-id> -s in-progress -a "Your Name"
 ```
 
 Common stage progression:
@@ -146,7 +146,6 @@ Common stage progression:
 | `idea` | Identified but not yet analyzed |
 | `intake_complete` | Requirements understood |
 | `plan_complete` | Implementation planned |
-| `in_progress` | Active development |
 | `in_review` | Code review or QA |
 
 Track what is currently in progress:
@@ -175,14 +174,14 @@ Continue working through the tasks:
 
 ```bash
 # Start registration endpoint
-wl update <registration-id> -s in-progress --stage in_progress
+wl update <registration-id> -s in-progress
 
 # ... implement ...
 
 wl close <registration-id> -r "Registration endpoint implemented with validation"
 
 # Start login endpoint
-wl update <login-id> -s in-progress --stage in_progress
+wl update <login-id> -s in-progress
 
 # ... implement ...
 
