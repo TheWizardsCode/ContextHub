@@ -3481,6 +3481,64 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     // cheap mode's 2 local slots (WL-0MSORQ1RG005DGUS).
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
+
+  // ── Mode-aware PARALLELISM (WL-0MT50S9JW001DHME) ──────────────────
+
+  it('buildDowntimeSpawnOptions defaults to PARALLELISM=1 when config is absent', () => {
+    // Backward compatibility: no config → '1'
+    const options = buildDowntimeSpawnOptions('/repo');
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+
+    const optionsWithEmptyConfig = buildDowntimeSpawnOptions('/repo', { config: undefined });
+    expect(optionsWithEmptyConfig.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
+
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 in fast mode', () => {
+    const options = buildDowntimeSpawnOptions('/repo', {
+      config: { mode: 'fast', slotBudget: 3, concurrentDispatchCap: 1 },
+    });
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
+
+  it('buildDowntimeSpawnOptions returns PARALLELISM=2 for cheap mode with free second slot and dispatch budget allows', () => {
+    // Cheap mode, 2 slots, only 1 concurrent dispatch allowed → 2 children = 2 streams total
+    const options = buildDowntimeSpawnOptions('/repo', {
+      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 0 },
+    });
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('2');
+  });
+
+  it('buildDowntimeSpawnOptions returns PARALLELISM=2 for cheap mode with dispatch cap = 1', () => {
+    // Single dispatch at a time in cheap mode → 2 children = 2 streams total
+    const options = buildDowntimeSpawnOptions('/repo', {
+      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 1 },
+    });
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('2');
+  });
+
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when concurrent dispatch budget would exceed slot capacity', () => {
+    // 2+ concurrent dispatches × 2 children each = 4 streams, exceeds 2-slot budget
+    const options = buildDowntimeSpawnOptions('/repo', {
+      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 2 },
+    });
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
+
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when cheap mode slot budget is insufficient', () => {
+    // Only 1 slot available — cannot run 2 children
+    const options = buildDowntimeSpawnOptions('/repo', {
+      config: { mode: 'cheap', slotBudget: 1, concurrentDispatchCap: 1 },
+    });
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
+
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 for cheap mode with high dispatch cap', () => {
+    // 3+ concurrent dispatches × 2 children = 6 streams, far exceeds budget
+    const options = buildDowntimeSpawnOptions('/repo', {
+      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 3 },
+    });
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
 });
 
 // ── Worker orchestrator (AC1/AC5) ─────────────────────────────────────

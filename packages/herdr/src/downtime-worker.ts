@@ -2913,37 +2913,104 @@ export type DowntimeSpawnResult =
 export type DowntimeSpawn = (
   scriptPath: string,
   args: string[],
-  opts: { cwd: string },
+  opts: { cwd: string; config?: DowntimeSpawnConfig },
 ) => DowntimeSpawnHandle;
+
+/**
+ * Optional spawn-time configuration for mode-aware `AUDIT_PHASE2_PARALLELISM`
+ * (WL-0MT50S9JW001DHME).
+ *
+ * When supplied, `buildDowntimeSpawnOptions` selects the Phase 2 parallelism
+ * level based on the current operating mode and the available dispatch budget:
+ *
+ * - `'1'` (safe default): fast mode, cheap mode with full budget, or config
+ *   not supplied.
+ * - `'2'`: cheap mode AND a second slot is free AND the concurrent dispatch
+ *   budget allows it (combined streams ≤ slot budget).
+ *
+ * When the config is absent the function falls back to `'1'` (the historic,
+ * backward-compatible value).
+ */
+export interface DowntimeSpawnConfig {
+  /** `'cheap'` or `'fast'` — the proxy's current operating mode. */
+  mode: 'cheap' | 'fast';
+  /** Total number of local proxy slots available (cheap = 2, fast = 3). */
+  slotBudget: number;
+  /** Maximum number of concurrent downtime dispatches allowed (0 = unbounded). */
+  concurrentDispatchCap: number;
+}
 
 /**
  * Spawn options for `send-to-pi.sh`: detached, stdio ignored, resolved cwd
  * forwarded so the pane opens in the right project root.
+ *
+ * `AUDIT_PHASE2_PARALLELISM` is mode-aware (WL-0MT50S9JW001DHME):
+ *
+ * - `'1'` (safe default): fast mode, cheap mode with full budget, or config
+ *   not supplied.
+ * - `'2'`: cheap mode AND a second slot is free AND the concurrent dispatch
+ *   budget allows it — up to 2 Phase 2 children run in parallel, fitting the
+ *   2-slot cheap-mode pool (parent already done Phase 1).
+ *
+ * The parent audit always completes Phase 1 before Phase 2 children start,
+ * so the max concurrent streams per audit is 2 (the children). This fits
+ * cheap mode's slot budget when a second slot is genuinely free.
  */
-export function buildDowntimeSpawnOptions(cwd: string): {
+export function buildDowntimeSpawnOptions(
+  cwd: string,
+  opts?: { config?: DowntimeSpawnConfig },
+): {
   detached: boolean;
   stdio: 'ignore';
   cwd: string;
   env: NodeJS.ProcessEnv;
 } {
+  // Derive Phase 2 parallelism from config (WL-0MT50S9JW001DHME).
+  // Default to '1' for backward compatibility when config is absent.
+  let parallelism = '1';
+  if (opts?.config) {
+    const { mode, slotBudget, concurrentDispatchCap } = opts.config;
+    if (mode === 'cheap' && slotBudget >= 2) {
+      // In cheap mode with ≥ 2 slots, check if a second slot is free.
+      // PARALLELISM=2 means up to 2 Phase 2 children run in parallel.
+      // The parent already completed Phase 1, so max concurrent streams = 2.
+      // Only enable when the dispatch budget allows it:
+      // - If concurrentDispatchCap is 0 (unbounded), only 1 dispatch at a time
+      //   during cheap mode → 2 children per audit = 2 streams total → safe.
+      // - If concurrentDispatchCap >= 2, multiple audits could run → each with
+      //   PARALLELISM=2 would exceed 2-slot budget → stay at '1'.
+      const dispatchBudgetAllows =
+        concurrentDispatchCap === 0 || concurrentDispatchCap === 1;
+      if (dispatchBudgetAllows) {
+        parallelism = '2';
+      }
+    }
+    // Fast mode, insufficient budget, or config-supplied but constraints not met → '1'
+  }
+
   return {
     detached: true,
     stdio: 'ignore',
     cwd,
-    // AUDIT_PHASE2_PARALLELISM=1 bounds the dispatched audit's Phase 2 child
-    // deep-analysis fan-out to strictly sequential (parent runs first, then
-    // one child at a time — the audit skill's documented historical mode), so
-    // a child-heavy parent audit needs exactly 2 local slots and fits cheap
-    // mode's full capacity (WL-0MSORQ1RG005DGUS). The audit skill honours
-    // this env var (legacy fallback, integer >= 1); no audit-skill change
-    // needed. Interactive (non-downtime) panes are unaffected.
-    env: { ...process.env, HERDR_RESOLVED_CWD: cwd, AUDIT_PHASE2_PARALLELISM: '1' },
+    // AUDIT_PHASE2_PARALLELISM controls Phase 2 child deep-analysis concurrency.
+    // The audit skill honours this env var (legacy fallback, integer >= 1);
+    // no audit-skill change needed. Interactive (non-downtime) panes are
+    // unaffected.
+    env: {
+      ...process.env,
+      HERDR_RESOLVED_CWD: cwd,
+      AUDIT_PHASE2_PARALLELISM: parallelism,
+    },
   };
 }
 
 /** Default spawn: detached, stdio ignored, resolved cwd forwarded. */
-export const defaultDowntimeSpawn: DowntimeSpawn = (scriptPath, args, opts) =>
-  spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd));
+export const defaultDowntimeSpawn: DowntimeSpawn = (
+  scriptPath,
+  args,
+  opts,
+) =>
+  spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd, { config: opts.config }));
 
 /**
  * How long to wait for a spawn-level `error` event or an immediate

@@ -396,11 +396,12 @@ of `total` slots free never dispatches without per-slot identity.
 selection time, against the latest polled status, each dispatch tier
 additionally requires a minimum number of free slots (independent of the
 idle-duration gate): the **audit** tier needs **≥ 2 free slots** (a parent
-audit plus its Phase 2 child at `AUDIT_PHASE2_PARALLELISM=1` needs two
-local slots), while the single-pane tiers (scheduled prompts, critical,
-implement, plan, intake) need **≥ 1 free slot**. An unmet minimum skips that
-tier to the next eligible one — an ineligible skip, never a three-strike
-error and never an empty-backlog cooldown (mirrors the code-freeze skip).
+audit's Phase 2 children require up to 2 local slots at `AUDIT_PHASE2_PARALLELISM=2`;
+the sequential `AUDIT_PHASE2_PARALLELISM=1` case needs just 1), while the
+single-pane tiers (scheduled prompts, critical, implement, plan, intake)
+need **≥ 1 free slot**. An unmet minimum skips that tier to the next
+eligible one — an ineligible skip, never a three-strike error and never an
+empty-backlog cooldown (mirrors the code-freeze skip).
 
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --root-only
@@ -454,21 +455,35 @@ makes the item dispatchable again on the next idle poll.
 > the check lives in the audit-tier dispatch path with no new
 > instance-local state, so non-leader instances never dispatch audits).
 
-> **Bounded audit fan-out (WL-0MSORQ1RG005DGUS):** dispatched panes run
-> with `AUDIT_PHASE2_PARALLELISM=1` in the pane environment (inherited by
-> the pi process via `send-to-pi.sh`). The audit skill's Phase 2 deep
-> analysis (`audit_runner.py`) honours this env var (legacy fallback,
-> integer ≥ 1), so a parent audit's child deep-analysis calls run strictly
-> sequentially — the skill's documented historical mode. A parent audit
-> therefore needs exactly **2 local slots** (parent + at most one child),
-> fitting cheap mode's full capacity (2 × 262144 ctx) where the default
-> fan-out of 2 would need 3 and spill children to remote. Wall-clock
-> tradeoff: child-heavy audits take longer — acceptable for overnight
-> downtime work. Interactive (non-downtime) panes are unaffected. (Scope:
-> this bounds parallelism WITHIN one audit pane; fan-out ACROSS audit
-> dispatches is prevented outright by the single-active-audit guarantee
-> above — WL-0MT3PHW4I002SNOV — so at most one `/skill:audit` pane can
-> ever be dispatched at a time.)
+> **Bounded audit fan-out (WL-0MSORQ1RG005DGUS, WL-0MT50S9JW001DHME):**
+> dispatched panes run with a mode-aware `AUDIT_PHASE2_PARALLELISM` in the
+> pane environment (inherited by the pi process via `send-to-pi.sh`). The
+> audit skill's Phase 2 deep analysis (`audit_runner.py`) honours this env
+> var (legacy fallback, integer ≥ 1):
+>
+> - **`AUDIT_PHASE2_PARALLELISM=1`** (safe default): fast mode, cheap mode
+>   with full dispatch budget, or config absent. Children run strictly
+>   sequentially — the skill's documented historical mode. A parent audit
+>   needs exactly **2 local slots** (parent + at most one child).
+> - **`AUDIT_PHASE2_PARALLELISM=2`**: cheap mode AND a second slot is free
+>   AND the concurrent dispatch budget allows (≤ 1 concurrent dispatch).
+>   Up to 2 Phase 2 children run in parallel. Since the parent already
+>   completed Phase 1, the max concurrent streams per audit is 2 — the
+>   children — which fits cheap mode's 2-slot pool. This is only enabled
+>   when the combined dispatch budget would not exceed the slot capacity
+>   (e.g., with concurrent-dispatch cap ≥ 2, PARALLELISM stays at 1 to
+>   prevent multiple audits × 2 children from exceeding the 2-slot budget).
+>
+> A parent audit therefore needs at most **2 local slots** (the two
+> parallel children), fitting cheap mode's full capacity (2 × 262144 ctx)
+> where the default fan-out of 2 would need 3 and spill children to remote.
+> Wall-clock tradeoff: sequential child-heavy audits take longer — acceptable
+> for overnight downtime work. Interactive (non-downtime) panes are
+> unaffected. (Scope: this bounds parallelism WITHIN one audit pane; fan-out
+> ACROSS audit dispatches is constrained by both the single-active-audit
+> guarantee — WL-0MT3PHW4I002SNOV — and the concurrent-dispatch cap —
+> WL-0MT50LKAK001EF5Q — so total in-flight streams never exceed cheap mode's
+> 2-slot pool.)
 
 > **Audit-tier error channel (WL-0MSLWJ2KP0002SV0):** the audit lookup
 > resolves through the same `DowntimeNextResult` error channel as the
