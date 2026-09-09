@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchCompletedItemCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
@@ -33,6 +33,8 @@ import {
   getIconPrefix,
   applyStageColour,
   stageColor,
+  applyPriorityColour,
+  priorityColor,
   type IconOptions,
 } from '@worklog/shared/icons';
 import {
@@ -1173,10 +1175,9 @@ export function formatItemLine(
   const iconPrefix = getIconPrefix(item, { noIcons });
   const iconStr = iconPrefix.length > 0 ? `${iconPrefix}` : '';
 
-  // Apply stage colouring to the title
-  const colouredTitle = item.stage
-    ? applyStageColour(item.title, item.stage)
-    : item.title;
+  // Apply priority colouring to both title and ID (same colour)
+  const colouredTitle = applyPriorityColour(item.title, item.priority);
+  const priorityColouredId = applyPriorityColour(item.id, item.priority);
 
   const priorityStr = item.priority
     ? ` ${priorityIcon(item.priority, { noIcons })} ${item.priority}`
@@ -1186,7 +1187,7 @@ export function formatItemLine(
     ? ` [${item.stage}]`
     : '';
 
-  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${item.id} ${colouredTitle}${stageTag}${priorityStr}`;
+  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}`;
 
   // Truncate to fit terminal width, accounting for ANSI codes
   const visibleLength = line.replace(/\x1b\[[0-9;]*m/g, '').length;
@@ -1244,6 +1245,23 @@ function truncateLine(line: string, maxWidth: number): string {
   // Close open ANSI and append ellipsis
   result += `${ANSI.reset}…`;
   return result;
+}
+
+/**
+ * Wrap a row in reverse video for the selected-row highlight.
+ *
+ * Row content (item lines) can contain its own SGR colour segments, each
+ * ending in a full `\x1b[0m` reset (priority-coloured ID/title,
+ * WL-0MSJ2JFMO007PGQ6). A plain `reverse + line + reset` wrap lets those
+ * interior resets clear the reverse attribute mid-row, so only the prefix
+ * before the first coloured segment renders highlighted and the rest of the
+ * row loses the selection bar. Re-assert reverse after every interior reset
+ * so the WHOLE selected row stays highlighted; the trailing reset still
+ * closes it. Lines without interior resets (heading rows) are unaffected.
+ */
+function reverseWrap(line: string): string {
+  const reasserted = line.replace(/\x1b\[0m/g, `${ANSI.reset}${ANSI.reverse}`);
+  return `${ANSI.reverse}${reasserted}${ANSI.reset}`;
 }
 
 /**
@@ -1652,7 +1670,8 @@ export function formatMetadataPanel(
 
   // Metadata rows — pair Status+Stage, Priority+Type, Created+Updated,
   // Audit+AuditedAt onto single rows for a more compact display (WL-0MSNIX4V60012266).
-  const metaRows = pairMetaRows(buildMetaRows(item, noIcons));
+  // Drop the ID row since the panel header already shows the ID (WL-0MSHIJR7T007Q9R7).
+  const metaRows = pairMetaRows(buildMetaRows(item, noIcons)).filter(([label]) => label !== 'ID');
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
     for (const [label, value] of metaRows) {
@@ -2195,6 +2214,7 @@ export function createChordState(): ChordState {
     resolvedCommand: null,
     resolvedModel: null,
     resolvedOpenPane: undefined,
+    resolvedFocus: undefined,
   };
 }
 
@@ -2237,6 +2257,10 @@ export function processChordInput(
     // openPane is undefined when the entry did not set open_pane → the
     // dispatch defaults to opening a pane (WL-0MSJLD1I70045ZUL).
     chordState.resolvedOpenPane = entry.openPane ?? undefined;
+    // focus is undefined/omitted when the entry did not set `focus` → no-focus
+    // (current default); `true` defers the zoom toggle to the spawned pane
+    // (WL-0MT70LC6B009TL3Q).
+    chordState.resolvedFocus = entry.focus ?? undefined;
     return 'chord-complete';
   }
 
@@ -2370,6 +2394,14 @@ export interface ChordState {
    * after execution.
    */
   resolvedOpenPane: boolean | undefined;
+  /**
+   * Whether the resolved shortcut wants the new pane focused
+   * (WL-0MT70LC6B009TL3Q). `undefined`/`false` = open without focus
+   * (current default); `true` = the new pane is zoomed/focused immediately
+   * after opening. Only `P n` (new session) sets this to `true` today.
+   * Cleared (undefined) after execution.
+   */
+  resolvedFocus: boolean | undefined;
 }
 
 /**
@@ -3135,6 +3167,12 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   showHelpText?: boolean,
   codeFreezeAmbiguous?: boolean,
   hoverTooltip?: string[],
+  /** When true, the review queue is deep (completed/in_review root items >= browseItemCount): display-only banner, NEVER auto-disables dispatch (WL-0MTTSWC1X005P4VD). */
+  sprintComplete?: boolean,
+  /** Number of completed+in_review items counted (used for the banner). (parent WL-0MTHSHN5V008R5L0) */
+  sprintCompletedCount?: number,
+  /** browseItemCount threshold for the review-queue-depth banner. (parent WL-0MTHSHN5V008R5L0) */
+  browseItemCount?: number,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -3166,6 +3204,9 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     showHelpText?: boolean,
     codeFreezeAmbiguous?: boolean,
     hoverTooltip?: string[],
+    sprintComplete?: boolean,
+    sprintCompletedCount?: number,
+    browseItemCount?: number,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -3209,10 +3250,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
 
     // ── Render list mode ──────────────────────────────────────────
 
-    // Header with total count and auto-refresh indicator. `displayRows`
-    // includes heading rows, so the item count shown is the row count — the
-    // same metric the header has always shown for the flattened list.
-    const totalItems = displayRows.length;
+    // Header with total count and auto-refresh indicator. `totalItems` is
+    // the count of WorkItem rows only (heading rows are excluded so the
+    // header reconciles with per-group heading counts).
+    const totalItems = displayRows.filter((row) => !isHeadingRow(row)).length;
     const filterLabel = activeFilter ? ` (filtered: ${activeFilter})` : '';
     let header = ` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`;
     if (totalCount !== undefined && totalCount > totalItems) {
@@ -3227,6 +3268,17 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     if (downtimeStatus) {
       header += downtimeStatus;
     }
+    // ── Header truncation guard (WL-0MSNI6TQ5003JY1Z) ────────────
+    // In narrow panes the concatenated header can exceed `cols`,
+    // causing the terminal to wrap it onto a second physical row.
+    // That extra row shifts the entire output down and, when the
+    // rendered line count exceeds `rows - 1` (WL-0MSAAON63003N6LO),
+    // the first line scrolls off the top of the pane. Truncating
+    // the header to exactly `cols` visible characters guarantees it
+    // occupies one output row, preserving the `rows - 1` invariant
+    // and keeping the header visible at row 0. ANSI styling is
+    // preserved; trailing segments are dropped with an ellipsis.
+    header = truncateLine(header, cols);
     output.push(header);
 
     // Code Freeze banners — a prominent warning that implementation is
@@ -3310,7 +3362,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
         const arrow = row.collapsed ? '▶' : '▼';
         const indent = (row.depth ?? 0) > 0 ? '  '.repeat(row.depth!) : '';
         const line = `${indent} ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
-        output.push(isSelected ? `${ANSI.reverse}${line}${ANSI.reset}` : line);
+        output.push(isSelected ? reverseWrap(line) : line);
         continue;
       }
 
@@ -3322,7 +3374,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
 
       const line = formatItemLine(expandedItem, cols, isSelected, noIcons);
       if (isSelected) {
-        output.push(`${ANSI.reverse}${line}${ANSI.reset}`);
+        output.push(reverseWrap(line));
       } else {
         output.push(line);
       }
@@ -3347,11 +3399,27 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // (WL-0MSGJDSMJ004128E). Note: gating only affects rendering — chord key
     // handling/accumulation in chordState continues regardless.
     //
-    // Hover tooltip (WL-0MT9XRZDK006GMUH): when tooltip lines are supplied
-    // they REPLACE the footer hints — the overlay lives in the footer area,
-    // directly above the metadata panel.
+    // ── Review-queue depth banner (display-only — WL-0MTTSWC1X005P4VD) ─
+    // Replaces the help text footer when the root-only completed/in_review
+    // count is at/over browseItemCount. Green background, white text. This is
+    // a REVIEW-QUEUE DEPTH indicator (the producer's distinct "queue is deep"
+    // signal) — it is display-only and NEVER disables dispatch: audits keep
+    // draining the queue and check-ins continue (RCA root cause A). The
+    // former "Sprint Complete, hit S to ship" copy was the queue-depth
+    // masquerade; a genuine sprint-complete signal would be a separate,
+    // explicit mechanism (out of scope). Only shown when help text is
+    // enabled (`showHelpText: true`); does NOT interfere with code-freeze
+    // banners (those render above the list).
+    const isSprintComplete = sprintComplete ?? false;
+    const completedCount = sprintCompletedCount ?? 0;
     const helpEnabled = showHelpText ?? true;
-    if (hoverTooltip && hoverTooltip.length > 0) {
+    if (isSprintComplete && helpEnabled) {
+      const countDisplay = browseItemCount !== undefined ? ` (${completedCount} of ${browseItemCount} completed/in_review)` : '';
+      const bannerText = `Review queue deep${countDisplay} — audits will drain it`;
+      const bannerLine = `${ANSI.bg(40)}${ANSI.fg(255)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+    } else if (hoverTooltip && hoverTooltip.length > 0) {
+      // Hover tooltip — replace the footer hints
       for (const line of formatTooltipOverlay(cols, hoverTooltip)) {
         output.push(line);
       }
@@ -3466,10 +3534,11 @@ function logCommandForItem(command: string, itemId?: string): void {
 function resolveAndRouteCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => void,
   model?: string,
   openPane?: boolean,
   onRefresh?: () => Promise<void>,
+  focus?: boolean,
 ): boolean {
   let resolvedCommand = command;
   let itemId: string | undefined;
@@ -3501,27 +3570,42 @@ function resolveAndRouteCommand(
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
+    // (WL-0MSJLD1I70045ZUL). Focus (WL-0MT70LC6B009TL3Q) follows the same
+    // "append when explicitly true" rule: omitted/false keeps the current
+    // no-focus default. The onRefresh hook is appended only for
     // background (no-pane) dispatches (openPane === false) so they can
     // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
-    // pane-opening paths keep their existing arity. Pane titles are
-    // appended only when the command opens a pane and a title exists.
+    // pane-opening paths keep their existing arity. The focuses arg slots
+    // after paneTitle so callers that pass a title keep their position;
+    // callers that don't pass a focus flag see no extra arg (backward
+    // compatible). Pane titles are appended only when the command opens a
+    // pane and a title exists.
+    // Focus handling (WL-0MT70LC6B009TL3Q): when focus is true, the new pane
+    // is zoomed. The value is appended as a 6th arg only when true so
+    // omitting/undefined stays backward compatible — callers without a focus
+    // flag see today's arity (no trailing undefined).
     if (openPane === undefined) {
       if (paneTitle !== undefined) {
-        onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
+        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, paneTitle, true);
+        else onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
       } else {
-        onCommand(resolvedCommand, model);
+        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, undefined, true);
+        else onCommand(resolvedCommand, model);
       }
     } else if (onRefresh) {
       if (paneTitle !== undefined) {
-        onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
+        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle, true);
+        else onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
       } else {
-        onCommand(resolvedCommand, model, openPane, onRefresh);
+        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, undefined, true);
+        else onCommand(resolvedCommand, model, openPane, onRefresh);
       }
     } else if (paneTitle !== undefined) {
-      onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
+      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, paneTitle, true);
+      else onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
     } else {
-      onCommand(resolvedCommand, model, openPane);
+      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, undefined, true);
+      else onCommand(resolvedCommand, model, openPane);
     }
   }
   return true;
@@ -3676,11 +3760,12 @@ export function fetchItemsForView(
 export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => void,
   model?: string,
   onDowntimeToggle?: () => void,
   openPane?: boolean,
   onRefresh?: () => Promise<void>,
+  focus?: boolean,
 ): boolean {
   // ── /downtime toggle (internal action, WL-0MSZ4NSOE007AQEF) ──────
   // Per-instance in-memory toggle of downtime dispatch for the current
@@ -3730,30 +3815,30 @@ export function dispatchChordCommand(
 
   // ── Agent skill invocations ─────────────────────────────
   if (command.startsWith('/skill:implement')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.startsWith('/skill:audit')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.startsWith('/skill:ship')) {
     // Dev→main release (Ship It shortcut, WL-0MSGG5N5Z0074TLY). Global
     // release — no <id> substitution; routed to the agent channel like
     // other /skill:* commands. NOT blocked during a Code Freeze (the ship
     // skill gates itself); only the confirmation dialog precedes dispatch.
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
 
   // ── Agent workflow commands ─────────────────────────────
   if (command.startsWith('/intake')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.startsWith('/plan')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
 
   // ── Producer review / audit compound commands ───────────
   if (command.startsWith('!!wl reviewed')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   // ── Data-modifying wl commands (close/delete/update/search) ──
   // These mutate the work-item data set or change the list contents, so
@@ -3761,10 +3846,10 @@ export function dispatchChordCommand(
   // isWlModifyingCommand check sees 'dispatched' and triggers an immediate
   // list refresh after the command completes (WL-0MTA217DZ003H5K8).
   if (/^!!\s*wl\s+(close|delete|update|search)\b/i.test(command)) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.includes('&& wl audit-set')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
 
   // Unknown command — not handled
@@ -3942,12 +4027,13 @@ export async function resolvePodcastTarget(
 export function executeResolvedCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => void,
   codeFreezeActive = false,
   model?: string,
   onDowntimeToggle?: () => void,
   openPane?: boolean,
   onRefresh?: () => Promise<void>,
+  focus?: boolean,
 ): ExecuteResult {
   // Code Freeze guard: never route implement commands while frozen.
   // This runs BEFORE dispatchChordCommand so no pane spawn, claim, or
@@ -3957,8 +4043,10 @@ export function executeResolvedCommand(
   }
 
   // Try dispatchChordCommand first — handles /wl, /downtime, /skill:,
-  // /intake, /plan, !!wl reviewed, and compound audit commands
-  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane, onRefresh)) {
+  // /intake, /plan, !!wl reviewed, and compound audit commands. Focus
+  // (WL-0MT70LC6B009TL3Q) is threaded through so the new pane can be focused
+  // when requested (only `P n` today).
+  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane, onRefresh, focus)) {
     return 'dispatched';
   }
 
@@ -3996,26 +4084,34 @@ export function executeResolvedCommand(
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
-    // background (no-pane) dispatches (openPane === false) so they can
-    // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
-    // pane-opening paths keep their existing arity.
+    // (WL-0MSJLD1I70045ZUL). Focus (WL-0MT70LC6B009TL3Q) follows the same
+    // append-when-explicitly-true rule — omitted/false keeps today's arity.
+    // The onRefresh hook is appended only for background (no-pane)
+    // dispatches (openPane === false) so they can trigger a refresh when
+    // the child exits (WL-0MT1KB70U0012X6T); pane-opening paths keep their
+    // existing arity.
     if (openPane === undefined) {
       if (paneTitle !== undefined) {
-        onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
+        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, paneTitle, true);
+        else onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
       } else {
-        onCommand(resolvedCommand, model);
+        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, undefined, true);
+        else onCommand(resolvedCommand, model);
       }
     } else if (onRefresh) {
       if (paneTitle !== undefined) {
-        onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
+        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle, true);
+        else onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
       } else {
-        onCommand(resolvedCommand, model, openPane, onRefresh);
+        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, undefined, true);
+        else onCommand(resolvedCommand, model, openPane, onRefresh);
       }
     } else if (paneTitle !== undefined) {
-      onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
+      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, paneTitle, true);
+      else onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
     } else {
-      onCommand(resolvedCommand, model, openPane);
+      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, undefined, true);
+      else onCommand(resolvedCommand, model, openPane);
     }
   }
   return 'callback';
@@ -4038,7 +4134,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void> },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -4062,6 +4158,7 @@ export async function runWorklistTui(
     modeSwitchEnabled: options?.modeSwitchEnabled ?? true,
     maxSyncStalenessMs: options?.maxSyncStalenessMs ?? 60_000,
     onRefresh: options?.onRefresh,
+    cwd: options?.cwd,
   };
 
   let termSize = getTermSize();
@@ -4129,6 +4226,34 @@ export async function runWorklistTui(
 
   // Initial Code Freeze state read (fail-open: no marker => not frozen).
   refreshFreezeState();
+
+  // ── Review-queue depth indicator (display-only — parent
+  // WL-0MTHSHN5V008R5L0's "sprint complete" banner reconciled by
+  // WL-0MTTSWC1X005P4VD) ───────────────────────────────────────
+  // A completed + in_review ROOT-ITEM count >= browseItemCount is a
+  // REVIEW-QUEUE DEPTH signal, NOT a sprint completion: queue depth must
+  // never auto-disable the downtime worker (RCA root cause A — the
+  // auto-disable halted coordination check-ins/audits/plan/intake and
+  // caused the 21:53Z silence). The banner is display-only; the
+  // `.herdr-downtime-disabled` marker is written ONLY by the manual `d`
+  // toggle in the downtime worker.
+  let sprintComplete = false;
+  let sprintCompletedCount = 0;
+
+  /**
+   * Refresh the review-queue-depth indicator by counting completed/
+   * in_review ROOT items. Fail-closed: a query failure leaves
+   * `sprintComplete` unchanged (conservative). Display-only — NEVER
+   * writes/removes the disable marker (WL-0MTTSWC1X005P4VD).
+   */
+  const refreshSprintState = async (): Promise<void> => {
+    const count = await fetchCompletedItemCount();
+    if (count === undefined) return; // fail-closed: unknown count → no state change
+    sprintCompletedCount = count;
+    // Re-read browseItemCount live so a settings change applies without a plugin restart.
+    const liveBrowseCount = loadSettings().browseItemCount ?? opts.browseItemCount;
+    sprintComplete = count >= liveBrowseCount;
+  };
 
   // Pane-visibility gating (pause-when-hidden). When the pane's tab is not
   // focused, auto-refresh/auto-sync timer ticks are skipped so hidden panes
@@ -4347,12 +4472,28 @@ export async function runWorklistTui(
   let refreshInFlight = false;
 
   /**
+   * Coalescing flag: set when a refresh is requested while one is already
+   * in-flight. The trailing refresh runs after the current cycle completes
+   * (WL-0MTIB7JAN004MQ8N). This ensures that an `onExit` refresh triggered
+   * by a background command's exit is never silently dropped when another
+   * refresh (e.g. from a prior immediate dispatch) is still running.
+   *
+   * At-most-one trailing refresh: multiple simultaneous refresh requests
+   * while in-flight coalesce into a single trailing run, not an unbounded
+   * queue (prevents refresh storms).
+   */
+  let refreshPending = false;
+
+  /**
    * Fetch and apply updated items, with optional notification.
    */
   const doRefresh = async (showNotification = false): Promise<void> => {
-    // Single-flight guard: skip the tick while the previous refresh cycle is
-    // still running, so overlapping wl spawn bursts cannot happen.
+    // Single-flight guard with trailing/coalescing: if a refresh is already
+    // in-flight, record the request as pending and return. The pending flag
+    // is checked in the `finally` block so a trailing refresh runs after the
+    // current cycle completes — without unbounded queuing (WL-0MTIB7JAN004MQ8N).
     if (refreshInFlight) {
+      refreshPending = true;
       return;
     }
     refreshInFlight = true;
@@ -4416,6 +4557,11 @@ export async function runWorklistTui(
         // Re-read the Code Freeze marker so a freeze that started (or ended)
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
+        // Refresh the review-queue-depth banner indicator (display-only;
+        // completed+in_review root count vs browseItemCount). Fail-closed:
+        // query failure leaves state unchanged. Queue depth never writes the
+        // disable marker (WL-0MTTSWC1X005P4VD).
+        await refreshSprintState();
         // Merge agent-status state into the refreshed items (top-level +
         // expanded children) so the agent icons reflect the latest tracker
         // state (WL-0MSBQUJQX005RAT9). Fail-open: no herdr CLI → no icons.
@@ -4445,6 +4591,14 @@ export async function runWorklistTui(
       // Always clear the guard — a successful, failed, or aborted cycle must
       // never block the next refresh tick.
       refreshInFlight = false;
+      // Trailing/coalescing refresh (WL-0MTIB7JAN004MQ8N): if a refresh was
+      // requested while this cycle was in-flight, run it now. The flag is
+      // reset before the recursive call to prevent infinite loops — only one
+      // trailing run per in-flight cycle.
+      if (refreshPending) {
+        refreshPending = false;
+        void doRefresh(false);
+      }
     }
   };
 
@@ -4695,9 +4849,13 @@ export async function runWorklistTui(
         // openPane: undefined (default) = open a pane; false = background,
         // no pane (WL-0MSJLD1I70045ZUL). Cleared after execution.
         const openPane = chordState.resolvedOpenPane;
+        // focus: true = focus the new pane immediately (WL-0MT70LC6B009TL3Q).
+        // Omitted/false = current no-focus behavior. Cleared after execution.
+        const focus = chordState.resolvedFocus;
         chordState.resolvedCommand = null;
         chordState.resolvedModel = null;
         chordState.resolvedOpenPane = undefined;
+        chordState.resolvedFocus = undefined;
         if (command) {
           // Podcast-progression markers (<podcast-target>/<podcast-script>/
           // <podcast-review>/<podcast-both>) are resolved from the selected
@@ -4892,7 +5050,7 @@ export async function runWorklistTui(
             if (frozen) {
               codeFreezeActive = true;
             }
-            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle, openPane, opts.onRefresh);
+            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle, openPane, opts.onRefresh, focus);
             if (result === 'blocked') {
               // Code Freeze — show the notice dialog; the command was NOT
               // routed, no pane spawned, no work item claimed.
@@ -4911,7 +5069,13 @@ export async function runWorklistTui(
             // search): refetch so the selection list reflects the change
             // immediately instead of waiting for the auto-refresh cycle
             // (WL-0MTA217DZ003H5K8).
-            if (result === 'dispatched' && (isWlViewCommand(command) || isWlModifyingCommand(command))) {
+            // Background dispatches (openPane === false) suppress the immediate
+            // refresh — the onExit handler (onRefresh) fires after the
+            // background command completes and provides the correct freshness
+            // point without racing ahead of the data-modifying command
+            // (WL-0MTIB7JAN004MQ8N).
+            if (result === 'dispatched' && openPane !== false
+                && (isWlViewCommand(command) || isWlModifyingCommand(command))) {
               await doRefresh(true);
             }
           } catch (e) {
@@ -5045,7 +5209,9 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle, singleOpenPane, opts.onRefresh);
+          // Focus (WL-0MT70LC6B009TL3Q): single-entry focus flag (only `P n` sets true today).
+          const singleFocus = singleEntry.focus ?? undefined;
+          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle, singleOpenPane, opts.onRefresh, singleFocus);
           if (result === 'blocked') {
             // Code Freeze — show the notice dialog; no pane spawned.
             codeFreezeNotice = true;
@@ -5061,7 +5227,13 @@ export async function runWorklistTui(
           // search): refetch so the selection list reflects the change
           // immediately instead of waiting for the auto-refresh cycle
           // (WL-0MTA217DZ003H5K8).
-          if (result === 'dispatched' && (isWlViewCommand(singleCmd) || isWlModifyingCommand(singleCmd))) {
+          // Background dispatches (singleOpenPane === false) suppress the
+          // immediate refresh — the onExit handler (onRefresh) fires after
+          // the background command completes and provides the correct
+          // freshness point without racing ahead of the data-modifying
+          // command (WL-0MTIB7JAN004MQ8N).
+          if (result === 'dispatched' && singleOpenPane !== false
+              && (isWlViewCommand(singleCmd) || isWlModifyingCommand(singleCmd))) {
             await doRefresh(true);
           }
           render();
@@ -5085,6 +5257,8 @@ export async function runWorklistTui(
           chordState.hints = formatChordHintsForHelp(nextChords, [key]);
           chordState.resolvedCommand = null;
           chordState.resolvedModel = null;
+          chordState.resolvedOpenPane = undefined;
+          chordState.resolvedFocus = undefined;
           render();
           return;
         }
@@ -5341,6 +5515,10 @@ export async function runWorklistTui(
       codeFreezeAmbiguous,
       // Hover tooltip lines for the footer overlay (WL-0MT9XRZDK006GMUH).
       hoverTooltipLines,
+      // Sprint-complete banner state (parent WL-0MTHSHN5V008R5L0).
+      sprintComplete,
+      sprintCompletedCount,
+      loadSettings().browseItemCount ?? opts.browseItemCount,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

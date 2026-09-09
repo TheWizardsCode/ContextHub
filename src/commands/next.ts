@@ -20,7 +20,7 @@ export default function register(ctx: PluginContext): void {
     .command('next')
     .description('Find the next work item to work on based on priority and status (excludes dependency-blocked items by default)')
     .option('-a, --assignee <assignee>', 'Filter by assignee')
-    .option('--stage <stage>', 'Filter by stage (idea, intake_complete, plan_complete, in_progress, in_review, done)')
+    .option('--stage <stage>', 'Filter by stage (idea, intake_complete, plan_complete, in_review, done)')
     .option('--risk <level>', 'Filter by risk level, at-most semantics (low, medium, high, severe). Items with unset risk never match.')
     .option('--effort <level>', 'Filter by effort level, at-most semantics (xs/extra-small, s/small, m/medium, l/large, xl/extra-large). Items with unset effort never match.')
     .option('--search <term>', 'Search term for fuzzy matching against title, description, and comments')
@@ -128,13 +128,22 @@ export default function register(ctx: PluginContext): void {
         const maxGroups = Number.isNaN(groupsOpt) || groupsOpt < 1 ? 3 : groupsOpt;
         if (maxGroups > 0) {
           groupsEnabled = true;
-          // Extract file paths and priority from each work item's description
-          const groupableItems = availableResults.map((result: any) => ({
-            id: result.workItem.id,
-            stage: result.workItem.stage,
-            filePaths: extractFilePaths(result.workItem.description || ''),
-            priority: result.workItem.priority,
-          }));
+          // Extract file paths and priority from each work item's description.
+          // Also attach audit fields for in_review bucket sort (WL-0MSLPM5ZB003TADT).
+          const groupableItems = availableResults.map((result: any) => {
+            const wi = result.workItem;
+            const ar = db.getAuditResult(wi?.id);
+            return {
+              id: wi.id,
+              stage: wi.stage,
+              filePaths: extractFilePaths(wi.description || ''),
+              priority: wi.priority,
+              needsProducerReview: wi.needsProducerReview,
+              auditResult: ar?.readyToClose ?? null,
+              auditedAt: ar?.auditedAt ?? null,
+              updatedAt: wi.updatedAt,
+            };
+          });
           groupMap = assignItemGroups(groupableItems, maxGroups);
         }
       }
@@ -179,12 +188,20 @@ export default function register(ctx: PluginContext): void {
               stage: a.workItem?.stage,
               priority: a.workItem?.priority,
               filePaths: [],
+              needsProducerReview: a.workItem?.needsProducerReview,
+              auditResult: a.workItem?.auditResult,
+              auditedAt: a.workItem?.auditedAt,
+              updatedAt: a.workItem?.updatedAt,
             },
             {
               id: b.workItem?.id,
               stage: b.workItem?.stage,
               priority: b.workItem?.priority,
               filePaths: [],
+              needsProducerReview: b.workItem?.needsProducerReview,
+              auditResult: b.workItem?.auditResult,
+              auditedAt: b.workItem?.auditedAt,
+              updatedAt: b.workItem?.updatedAt,
             },
           );
         };
@@ -238,26 +255,37 @@ export default function register(ctx: PluginContext): void {
       console.log('===============================\n');
 
       // Sort by group for display (groups first, then within groups by stage
-      // sub-order and priority).
+      // sub-order and priority, with in_review bucket sort — WL-0MSLPM5ZB003TADT).
       const displayResults = [...availableResults];
       if (groupsEnabled && groupMap) {
-        displayResults.sort((a: any, b: any) =>
-          compareGroupedItems(
+        displayResults.sort((a: any, b: any) => {
+          // Attach audit fields for in_review bucket sort
+          const arA = db.getAuditResult(a.workItem?.id);
+          const arB = db.getAuditResult(b.workItem?.id);
+          return compareGroupedItems(
             groupMap!,
             {
               id: a.workItem?.id,
               stage: a.workItem?.stage,
               priority: a.workItem?.priority,
               filePaths: [],
+              needsProducerReview: a.workItem?.needsProducerReview,
+              auditResult: arA?.readyToClose ?? null,
+              auditedAt: arA?.auditedAt ?? null,
+              updatedAt: a.workItem?.updatedAt,
             },
             {
               id: b.workItem?.id,
               stage: b.workItem?.stage,
               priority: b.workItem?.priority,
               filePaths: [],
+              needsProducerReview: b.workItem?.needsProducerReview,
+              auditResult: arB?.readyToClose ?? null,
+              auditedAt: arB?.auditedAt ?? null,
+              updatedAt: b.workItem?.updatedAt,
             },
-          ),
-        );
+          );
+        });
       }
 
       let lastGroup: number | null = null;

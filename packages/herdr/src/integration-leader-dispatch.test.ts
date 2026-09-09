@@ -87,6 +87,9 @@ function baseDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
     getNextImplementCandidate: vi.fn().mockResolvedValue(null),
     getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Herdr list head (WL-0MTK1ILM2009QYB2): the canonical ranking the
+    // coordination check-in / no-candidate probe consume. Default empty.
+    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
     claimItem: vi.fn().mockResolvedValue({ ok: true }),
     spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
     recordDispatch: vi.fn().mockResolvedValue(true),
@@ -96,6 +99,9 @@ function baseDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
     readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
     fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-X', 'idea') }),
+    // Review-queue depth gate (WL-0MTTSWC1X005P4VD): shallow default so
+    // implement offers dispatch unchanged.
+    getReviewQueueCount: vi.fn().mockResolvedValue(0),
     ...overrides,
   } as DowntimeWorkerDeps;
 }
@@ -109,7 +115,7 @@ function makeWorker(opts: {
   freeSlots?: number;
   /** noCandidateCooldownMs (default 60 min). */
   cooldownMs?: number;
-  /** checkInIntervalMs (default 30 min). */
+  /** checkInIntervalMs (default 5 min, WL-0MTMPSCL8000O45H). */
   checkInIntervalMs?: number;
 }): DowntimeWorker {
   const fetcher = vi.fn(async () => {
@@ -135,7 +141,7 @@ function makeWorker(opts: {
       noCandidateCooldownMs: opts.cooldownMs ?? 3_600_000,
     }),
     leaseTtlSeconds: 300,
-    checkInIntervalMs: opts.checkInIntervalMs ?? 30 * 60 * 1000,
+    checkInIntervalMs: opts.checkInIntervalMs ?? 5 * 60 * 1000, // WL-0MTMPSCL8000O45H default
   });
 }
 
@@ -149,13 +155,15 @@ describe('integration: leader election → coordination → dispatch', () => {
       // Instance A is the leader; instance B offers its item.
       // Sequence B's most-important item: first WL-B1, then (after its item
       // is dispatched) the NEXT item WL-B2 at the following check-in.
+      // Instance B offers items from its own Herdr list head: first WL-B1,
+      // then (after its item is dispatched) the NEXT head WL-B2 at the
+      // following check-in.
       const depsB = baseDeps({
-        getNextCriticalCandidate: vi.fn()
-          .mockResolvedValueOnce({ ok: true, candidate: { id: 'WL-B1', title: 'B one', stage: 'intake_complete', status: 'open' } })
-          .mockResolvedValue({ ok: true, candidate: { id: 'WL-B2', title: 'B two', stage: 'plan_complete', status: 'open' } }),
+        getHerdrListHead: vi.fn()
+          .mockResolvedValueOnce({ ok: true, items: [{ id: 'WL-B1', title: 'B one', status: 'open', stage: 'intake_complete' }] })
+          .mockResolvedValue({ ok: true, items: [{ id: 'WL-B2', title: 'B two', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }] }),
       });
       const depsA = baseDeps({
-        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
         // The leader classifies the coordination entries by re-fetching them.
         fetchItem: vi.fn().mockImplementation(async (id: string) => {
           if (id === 'WL-B1') return { ok: true, info: itemInfo('WL-B1', 'intake_complete') };
@@ -186,7 +194,7 @@ describe('integration: leader election → coordination → dispatch', () => {
       expect(String(spawnArgs[0])).toContain('/skill:plan WL-B1');
       expect(spawnArgs[1].cwd).toBe(dirB);
 
-      // B's next 30-min check-in: its old item was dispatched — it re-queues
+      // B's next check-in: its old item was dispatched — it re-queues
       // its NEXT most-important item (AC8 re-queue).
       vi.setSystemTime(20_000_000 + 31 * 60_000);
       await workerB.tick();
@@ -223,7 +231,9 @@ describe('integration: leader election → coordination → dispatch', () => {
       writeCoordinationFile(sharedCoord, { version: 1, entries: [entry] });
       const depsA = baseDeps({
         // Instance B's item is ALREADY claimed by another pane (in_progress).
-        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-B1', 'in_progress') }),
+        // WL-0MTMPIQBE001J41P: stale entries are dropped at dispatch time —
+        // the entry is removed without dispatching or advancing the cursor.
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: { ...itemInfo('WL-B1', 'idea'), status: 'in_progress' } }),
         spawnAgentPane: vi.fn(),
       });
       const workerA = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-a', cwd: dirA, deps: depsA });
@@ -232,16 +242,16 @@ describe('integration: leader election → coordination → dispatch', () => {
       vi.setSystemTime(30_000_000 + 60_001);
       const at = await workerA.tick();
       // An already-in-progress item is classified as not dispatchable —
-      // never re-dispatched (no pane, no marker).
+      // the stale entry is removed (WL-0MTMPIQBE001J41P) with no pane/marker.
       expect(at.dispatched).toBe(false);
       expect(depsA.spawnAgentPane).not.toHaveBeenCalled();
-      expect(getEntry(sharedCoord, 'inst-b')).not.toBe(null); // entry intact
+      expect(getEntry(sharedCoord, 'inst-b')).toBe(null); // stale entry removed
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('stale coordination entries are pruned by the leader dispatch cycle', async () => {
+  it('stale entries are NOT pruned by age — they persist until dispatch-time eligibility (WL-0MTMPIQBE001J41P)', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(40_000_000);
     try {
@@ -252,17 +262,15 @@ describe('integration: leader election → coordination → dispatch', () => {
       const depsA = baseDeps({
         getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
         fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-DEAD', 'idea') }),
-        spawnAgentPane: vi.fn(),
       });
       const workerA = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-a', cwd: dirA, deps: depsA });
       await workerA.tick(); // elect A
       await workerA.tick(); // idle
       vi.setSystemTime(40_000_000 + 60_001);
-      await workerA.tick(); // dispatch cycle — prunes the stale entry
-      // The stale (crashed-instance) entry was pruned during the cycle and
-      // never dispatched (its owner is gone; lastUpdated > lease TTL).
-      expect(getEntry(sharedCoord, 'inst-dead')).toBe(null);
-      expect(depsA.spawnAgentPane).not.toHaveBeenCalled();
+      await workerA.tick(); // dispatch cycle — entry persists (no wall-clock prune), dispatched via fetchItem classify
+      // The old entry (lastUpdated > 5 min) is NOT pruned — it is dispatched via eligibility check.
+      expect(getEntry(sharedCoord, 'inst-dead')).toBe(null); // removed after successful dispatch
+      expect(depsA.spawnAgentPane).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
@@ -281,9 +289,10 @@ describe('integration: leader election → coordination → dispatch', () => {
     const t0 = 50_000_000;
     vi.setSystemTime(t0);
     try {
-      // A: normal idle leader (4 free slots).
+      // A: normal idle leader (4 free slots). Its own Herdr head is empty
+      // (nothing to offer — A enters the cooldown on the empty offer file).
       const depsA = baseDeps({
-        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
         // A (pre-fix zombie) classifies B's entry by re-fetching it: WL-B1 is
         // dispatchable (intake_complete → plan tier).
         fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-B1', 'intake_complete') }),
@@ -293,12 +302,9 @@ describe('integration: leader election → coordination → dispatch', () => {
       // way WL-B1 gets dispatched is A's zombie. B offers nothing until its
       // SECOND check-in (after A is safely paused).
       const depsB = baseDeps({
-        getNextCriticalCandidate: vi.fn()
-          .mockResolvedValueOnce({ ok: true, candidate: null })
-          .mockResolvedValue({
-            ok: true,
-            candidate: { id: 'WL-B1', title: 'B one', stage: 'intake_complete', status: 'open' },
-          }),
+        getHerdrListHead: vi.fn()
+          .mockResolvedValueOnce({ ok: true, items: [] })
+          .mockResolvedValue({ ok: true, items: [{ id: 'WL-B1', title: 'B one', status: 'open', stage: 'intake_complete' }] }),
       });
       const workerA = makeWorker({
         coordinationDir: sharedCoord,

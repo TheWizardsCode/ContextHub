@@ -1255,10 +1255,25 @@ export class SqlitePersistentStore {
       audit.author ?? null,
     ];
     const normalized = normalizeSqliteBindings(values);
-    const result = stmt.run(...normalized);
-    if (result.changes === 0) {
-      throw new Error(`Audit result could not be persisted for work item ${audit.workItemId}`);
-    }
+    const updateWorkItemUpdatedAt = this.db.prepare(`UPDATE workitems SET updatedAt = ? WHERE id = ?`);
+    // Both writes must be atomic so no intermediate read sees stale
+    // auditedAt/updatedAt (AC2). A single better-sqlite3 transaction covers
+    // this without exposing a window between the two UPDATEs.
+    const saveTx = this.db.transaction(() => {
+      const result = stmt.run(...normalized);
+      if (result.changes === 0) {
+        throw new Error(`Audit result could not be persisted for work item ${audit.workItemId}`);
+      }
+      const item = this.getWorkItem(audit.workItemId);
+      if (item) {
+        updateWorkItemUpdatedAt.run(audit.auditedAt, audit.workItemId);
+      }
+    });
+    saveTx();
+    // Invalidate caches after the transaction commits so readers never
+    // observe a half-committed state.
+    this.invalidateWorkItemCaches();
+    this.cacheInvalidate(`workitem_${audit.workItemId}`);
   }
 
   /**

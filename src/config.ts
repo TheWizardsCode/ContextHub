@@ -169,21 +169,27 @@ export function loadConfig(): WorklogConfig | null {
       { value: 'idea', label: 'Idea' },
       { value: 'intake_complete', label: 'Intake Complete' },
       { value: 'plan_complete', label: 'Plan Complete' },
-      { value: 'in_progress', label: 'In Progress' },
       { value: 'in_review', label: 'In Review' },
       { value: 'done', label: 'Done' },
     ];
   }
   if (!config.statusStageCompatibility) {
     config.statusStageCompatibility = {
-      'open': ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
-      'in-progress': ['intake_complete', 'plan_complete', 'in_progress'],
+      'open': ['idea', 'intake_complete', 'plan_complete'],
+      'in-progress': ['intake_complete', 'plan_complete'],
       // Allow 'input_needed' in early stages where intake questions are asked
-      'input_needed': ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
+      'input_needed': ['idea', 'intake_complete', 'plan_complete'],
       'blocked': ['idea', 'intake_complete', 'plan_complete'],
       'completed': ['in_review', 'done'],
       'deleted': ['idea', 'intake_complete', 'plan_complete', 'done'],
     };
+  }
+
+  // Validate syncAllowedAuthors whitelist (AC1): [], string[], null, true allowed; other types rejected.
+  const syncAllowedAuthorsError = validateSyncAllowedAuthors(config);
+  if (syncAllowedAuthorsError) {
+    console.error(syncAllowedAuthorsError);
+    return null;
   }
 
   const statusStageError = validateStatusStageConfig(config);
@@ -193,6 +199,24 @@ export function loadConfig(): WorklogConfig | null {
   }
   
   return config;
+}
+
+function validateSyncAllowedAuthors(config: WorklogConfig): string | null {
+  const value = (config as any).syncAllowedAuthors;
+  if (value === undefined) return null;
+  if (value === null || value === true) return null;
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      if (typeof entry !== 'string' || entry.trim() === '') {
+        return 'Invalid config: syncAllowedAuthors must be a list of non-empty email strings, null, or true (got an entry that is not a non-empty string)';
+      }
+    }
+    return null;
+  }
+  if (value === false) {
+    return 'Invalid config: syncAllowedAuthors must be a list of email strings, null, or true (false is not valid; use [] for strict mode)';
+  }
+  return 'Invalid config: syncAllowedAuthors must be a list of email strings, null, or true';
 }
 
 /**

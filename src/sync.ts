@@ -317,10 +317,32 @@ export interface IncomingCommit {
   authorEmail: string;  // may be '' when the commit has an empty author email
 }
 
+export type SyncAllowedAuthors = string[] | null | boolean;
+
 export interface AuthorIdentityOptions {
   remoteTrackingRef: string;     // e.g. refs/worklog/remotes/origin/worklog/data
   expectedAuthorEmail?: string;  // repo `git config user.email`; undefined = not configured
-  allowForeignAuthor?: boolean;  // `wl sync --allow-foreign-author`
+  allowForeignAuthor?: boolean;  // `wl sync --allow-foreign-author` (legacy override)
+  allowedAuthors?: SyncAllowedAuthors; // whitelist: []=strict, string[]=allow listed, null/true=allow all
+}
+
+/** Normalize email for comparison: trimmed, lowercased. */
+function normalizeEmail(email: string): string {
+  return email.trim().toLowerCase();
+}
+
+/** Resolve whether whitelist allows all authors. */
+function isAllowAllAuthors(allowedAuthors: SyncAllowedAuthors | undefined, allowForeignAuthor: boolean): boolean {
+  if (allowForeignAuthor) return true;
+  if (allowedAuthors === null || allowedAuthors === true) return true;
+  return false;
+}
+
+/** Check if email is in whitelist (case-insensitive, trimmed). Always false for empty/allow-all. */
+function isEmailWhitelisted(email: string, allowedAuthors: SyncAllowedAuthors | undefined): boolean {
+  if (!Array.isArray(allowedAuthors) || allowedAuthors.length === 0) return false;
+  const normalized = normalizeEmail(email);
+  return allowedAuthors.some((entry) => typeof entry === 'string' && normalizeEmail(entry) === normalized);
 }
 
 export interface AuthorIdentityViolation {
@@ -388,16 +410,25 @@ export function checkAuthorIdentity(
   commits: IncomingCommit[],
   options: AuthorIdentityOptions
 ): AuthorIdentityResult {
-  const { remoteTrackingRef, expectedAuthorEmail, allowForeignAuthor = false } = options;
+  const { remoteTrackingRef, expectedAuthorEmail, allowForeignAuthor = false, allowedAuthors } = options;
   const violations: AuthorIdentityViolation[] = [];
+  const allowAll = isAllowAllAuthors(allowedAuthors, allowForeignAuthor);
 
   for (const commit of commits) {
     const email = (commit.authorEmail || '').trim();
     if (email === '') {
       violations.push({ commit: commit.hash, authorEmail: '', reason: 'empty-email' });
-    } else if (expectedAuthorEmail !== undefined && email !== expectedAuthorEmail && !allowForeignAuthor) {
-      violations.push({ commit: commit.hash, authorEmail: email, reason: 'foreign-email' });
+    } else if (allowAll) {
+      // allow-all (whitelist null/true or CLI flag) — skip foreign check, empty already handled
+      continue;
+    } else if (expectedAuthorEmail !== undefined) {
+      const matchesExpected = normalizeEmail(email) === normalizeEmail(expectedAuthorEmail);
+      const whitelisted = isEmailWhitelisted(email, allowedAuthors);
+      if (!matchesExpected && !whitelisted) {
+        violations.push({ commit: commit.hash, authorEmail: email, reason: 'foreign-email' });
+      }
     }
+    // expectedAuthorEmail undefined -> only empty gate applies (already handled)
   }
 
   const allowed = violations.length === 0;
@@ -496,7 +527,7 @@ export async function getRemoteTrackingRefSha(remoteTrackingRef: string): Promis
 export async function enforceAuthorIdentityGate(
   remoteTrackingRef: string,
   dataFilePath: string,
-  options: { expectedAuthorEmail?: string; allowForeignAuthor?: boolean }
+  options: { expectedAuthorEmail?: string; allowForeignAuthor?: boolean; allowedAuthors?: SyncAllowedAuthors }
 ): Promise<void> {
   const lastSyncedRef = readLastSyncedRef(dataFilePath);
   const commits = await getRemoteAuthorCommits(remoteTrackingRef, lastSyncedRef);
@@ -504,6 +535,7 @@ export async function enforceAuthorIdentityGate(
     remoteTrackingRef,
     expectedAuthorEmail: options.expectedAuthorEmail,
     allowForeignAuthor: options.allowForeignAuthor,
+    allowedAuthors: options.allowedAuthors,
   });
   if (!result.allowed) {
     throw new Error(result.message);

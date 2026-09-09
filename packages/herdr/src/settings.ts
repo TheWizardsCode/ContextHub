@@ -9,10 +9,12 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
   clampDowntimeIdleThresholdMs,
+  clampDowntimeMaxConcurrentDispatches,
   clampDowntimeNoCandidateCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
@@ -85,6 +87,12 @@ export interface PluginSettings {
    * Default 60000 (60 s), clamped to [1000, 300000] (1 s – 5 min).
    */
   maxSyncStalenessMs: number;
+  /**
+   * Bounded concurrency cap (WL-0MT50LKAK001EF5Q F2). Default 1 = single-flight
+   * (current behavior); clamped to [1, 4] on load; manually configured per
+   * operator. Cheap mode uses extra slots only when the operator raises this.
+   */
+  downtimeMaxConcurrentDispatches: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -108,6 +116,7 @@ export const defaultSettings: PluginSettings = {
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
   maxSyncStalenessMs: 60_000,
+  downtimeMaxConcurrentDispatches: DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
 };
 
 /** Minimum allowed browseItemCount. */
@@ -219,6 +228,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       maxSyncStalenessMs: typeof parsed.maxSyncStalenessMs === 'number'
         ? clampMaxSyncStalenessMs(parsed.maxSyncStalenessMs)
         : defaultSettings.maxSyncStalenessMs,
+      downtimeMaxConcurrentDispatches: typeof parsed.downtimeMaxConcurrentDispatches === 'number'
+        ? clampDowntimeMaxConcurrentDispatches(parsed.downtimeMaxConcurrentDispatches)
+        : defaultSettings.downtimeMaxConcurrentDispatches,
     };
   } catch {
     return { ...defaultSettings };

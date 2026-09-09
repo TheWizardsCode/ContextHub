@@ -7,6 +7,7 @@ import type { ListOptions } from '../cli-types.js';
 import type { WorkItemQuery, WorkItemStatus, WorkItemPriority } from '../types.js';
 import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
 import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, humanFormatProjected, resolveFormat, sortByPriorityAndDate } from './helpers.js';
+import { compareGroupableItems } from './grouping.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -138,11 +139,45 @@ export default function register(ctx: PluginContext): void {
         });
       }
       
-      // Sort then apply limit so we return the intended order
+      // Sort then apply limit so we return the intended order.
+      // For filtered `wl list --stage in_review` apply the 6-bucket predicate
+      // (WL-0MSLPM5ZB003TADT) before other tie-breaks.
       const allowedIds = new Set(items.map(item => item.id));
       const orderedItems = db.getAllOrderedByHierarchySortIndex().filter(item => allowedIds.has(item.id));
       const positions = new Map(orderedItems.map((item, index) => [item.id, index]));
+      const stageFilter = (options.stage || '').toLowerCase().trim().replace(/-/g, '_');
+      const isInReviewList = stageFilter === 'in_review';
+      let auditMapForSort: Map<string, { readyToClose: boolean; auditedAt: string | null }> | null = null;
+      if (isInReviewList) {
+        auditMapForSort = new Map();
+        for (const ar of db.getAllAuditResults()) {
+          auditMapForSort.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null });
+        }
+      }
       const sortedAll = items.slice().sort((a, b) => {
+        // In-review lists: bucket sort first
+        if (isInReviewList && auditMapForSort) {
+          const arA = auditMapForSort.get(a.id);
+          const arB = auditMapForSort.get(b.id);
+          const bucketCmp = compareGroupableItems(
+            { id: a.id, stage: a.stage, priority: a.priority, filePaths: [],
+              needsProducerReview: a.needsProducerReview,
+              auditResult: arA ? arA.readyToClose : null,
+              auditedAt: arA ? arA.auditedAt : null,
+              updatedAt: a.updatedAt,
+            },
+            { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
+              needsProducerReview: b.needsProducerReview,
+              auditResult: arB ? arB.readyToClose : null,
+              auditedAt: arB ? arB.auditedAt : null,
+              updatedAt: b.updatedAt,
+            },
+          );
+          // Only return immediately if bucket predicate is non-zero.
+          // If equal bucket, fall through to the default ordering.
+          if (bucketCmp !== 0) return bucketCmp;
+        }
+
         const aPos = positions.get(a.id);
         const bPos = positions.get(b.id);
         if (aPos === undefined && bPos === undefined) {

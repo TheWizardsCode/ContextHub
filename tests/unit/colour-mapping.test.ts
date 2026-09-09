@@ -56,8 +56,15 @@ describe('Colour Mapping', () => {
       expect(theme.stage.done).toBeTypeOf('function');
     });
 
-    it('should have a blocked colour override defined for CLI', () => {
-      expect(theme.blocked).toBeTypeOf('function');
+    it('should have priority colours defined: critical=red, high=orange, medium=yellow, low=white', () => {
+      expect(theme.priority.critical).toBeTypeOf('function');
+      expect(theme.priority.high).toBeTypeOf('function');
+      expect(theme.priority.medium).toBeTypeOf('function');
+      expect(theme.priority.low).toBeTypeOf('function');
+    });
+
+    it('should NOT have a blocked override (removed, AC3)', () => {
+      expect((theme as any).blocked).toBeUndefined();
     });
 
     it('should NOT have status colours defined (removed)', () => {
@@ -65,85 +72,72 @@ describe('Colour Mapping', () => {
     });
   });
 
-  describe('Stage-based colour mapping (CLI)', () => {
-    it('should colour idea stage items with gray', () => {
-      const item = createMockWorkItem({ stage: 'idea' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toBeTypeOf('string');
-      expect(coloured.length).toBeGreaterThan(0);
-    });
-
-    it('should colour intake_complete stage items with blue', () => {
-      const item = createMockWorkItem({ stage: 'intake_complete' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toBeTypeOf('string');
-      expect(coloured.length).toBeGreaterThan(0);
-    });
-
-    it('should colour plan_complete stage items with cyan', () => {
-      const item = createMockWorkItem({ stage: 'plan_complete' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toBeTypeOf('string');
-      expect(coloured.length).toBeGreaterThan(0);
-    });
-
-    it('should colour in_progress stage items with yellow', () => {
-      const item = createMockWorkItem({ stage: 'in_progress' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toBeTypeOf('string');
-      expect(coloured.length).toBeGreaterThan(0);
-    });
-
-    it('should colour in_review stage items with green', () => {
-      const item = createMockWorkItem({ stage: 'in_review' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toBeTypeOf('string');
-      expect(coloured.length).toBeGreaterThan(0);
-    });
-
-    it('should colour done stage items with white', () => {
-      const item = createMockWorkItem({ stage: 'done' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toBeTypeOf('string');
-      expect(coloured.length).toBeGreaterThan(0);
+  // Both title and ID are now coloured by priority.
+  describe('Priority-based ID colouring (AC2 — title and ID same priority colour)', () => {
+    it('should colour IDs by priority (same as title), not stage', () => {
+      // IDs and titles share the same priority colour mapping
+      expect(theme.priority.critical).toBeTypeOf('function');
+      expect(theme.priority.high).toBeTypeOf('function');
+      expect(theme.priority.medium).toBeTypeOf('function');
+      expect(theme.priority.low).toBeTypeOf('function');
     });
   });
 
-  describe('Blocked status override', () => {
-    it('should apply red colour when status is blocked, regardless of stage (CLI)', () => {
-      const item = createMockWorkItem({ status: 'blocked', stage: 'in_review', title: 'Blocked Item' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toContain('Blocked Item');
-    });
-
-    it('should preserve text for blocked items', () => {
-      const item = createMockWorkItem({
-        title: 'Blocked Work',
-        status: 'blocked',
-        stage: 'in_progress',
+  describe('Priority-based title colouring (AC1 — WL-0MSJ2JFMO007PGQ6)', () => {
+    for (const priority of ['critical', 'high', 'medium', 'low'] as const) {
+      it(`should colour ${priority} priority titles via theme.priority.${priority}`, () => {
+        const item = createMockWorkItem({ priority, title: `Priority ${priority}` });
+        const coloured = formatTitleOnly(item);
+        expect(coloured).toContain(`Priority ${priority}`);
       });
+    }
+
+    it('should colour unknown/bogus priority with medium (yellow) fallback', () => {
+      const item = createMockWorkItem({ priority: 'bogus', title: 'Unknown priority' });
       const coloured = formatTitleOnly(item);
-      expect(coloured).toContain('Blocked Work');
+      expect(coloured).toContain('Unknown priority');
+      // Fallback produces same output as medium
+      expect(coloured).toBe(formatTitleOnly(createMockWorkItem({ priority: 'medium', title: 'Unknown priority' })));
+    });
+
+    it('should colour empty priority with medium fallback', () => {
+      const item = createMockWorkItem({ priority: '', title: 'Empty priority' });
+      expect(formatTitleOnly(item)).toContain('Empty priority');
     });
   });
 
-  describe('Default/fallback behaviour', () => {
-    it('should use gray colour when stage is undefined and status is not blocked', () => {
-      const item = createMockWorkItem({ stage: undefined, status: 'open', title: 'No Stage' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toContain('No Stage');
+  describe('Blocked items show their natural priority colour, not always-red (AC3)', () => {
+    it('should colour a blocked low-priority item with low/dim, not red', () => {
+      const blockedLow = createMockWorkItem({ status: 'blocked', priority: 'low', stage: 'in_review', title: 'Blocked Low' });
+      const coloured = formatTitleOnly(blockedLow);
+      expect(coloured).toContain('Blocked Low');
+      // With blocked override removed, blocked low must match non-blocked low exactly
+      const normalLow = createMockWorkItem({ status: 'open', priority: 'low', stage: 'in_review', title: 'Blocked Low' });
+      expect(coloured).toBe(formatTitleOnly(normalLow));
     });
 
-    it('should use gray colour when stage is empty string and status is not blocked', () => {
-      const item = createMockWorkItem({ stage: '', status: 'open', title: 'Empty Stage' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toContain('Empty Stage');
+    it('should colour a blocked critical item with critical/red, not a generic blocked red', () => {
+      const blockedCrit = createMockWorkItem({ status: 'blocked', priority: 'critical', stage: 'plan_complete', title: 'Blocked Critical' });
+      const normalCrit = createMockWorkItem({ status: 'open', priority: 'critical', stage: 'plan_complete', title: 'Blocked Critical' });
+      expect(formatTitleOnly(blockedCrit)).toBe(formatTitleOnly(normalCrit));
+    });
+  });
+
+  describe('Default/fallback behaviour (AC4 — unknown priority/missing stage)', () => {
+    it('should use priority-based colour for the ID when stage is undefined', () => {
+      // Both title and ID are priority-based; ID falls back to medium/yellow
+      const item = createMockWorkItem({ stage: undefined, status: 'open', priority: 'medium', title: 'No Stage' });
+      expect(formatTitleOnly(item)).toContain('No Stage');
     });
 
-    it('should use gray colour when stage is unknown and status is not blocked', () => {
-      const item = createMockWorkItem({ stage: 'unknown_stage', status: 'open', title: 'Unknown Stage' });
-      const coloured = formatTitleOnly(item);
-      expect(coloured).toContain('Unknown Stage');
+    it('should render titles with low-priority colour without stage dependency', () => {
+      const item = createMockWorkItem({ stage: '', status: 'open', priority: 'low', title: 'Low Priority' });
+      expect(formatTitleOnly(item)).toContain('Low Priority');
+    });
+
+    it('should use medium/yellow fallback for unknown priority', () => {
+      const unknown = createMockWorkItem({ priority: 'unknown_stage' as any, status: 'open', title: 'Unknown' } as any);
+      expect(formatTitleOnly(unknown)).toContain('Unknown');
     });
   });
 
@@ -185,7 +179,7 @@ describe('Colour Mapping', () => {
 
     it('should fall back to plain text in CLI when colours disabled for all stages', () => {
       process.env.FORCE_COLOR = '0';
-      const stages = ['idea', 'intake_complete', 'plan_complete', 'in_progress', 'in_review', 'done'];
+      const stages = ['idea', 'intake_complete', 'plan_complete', 'in_review', 'done'];
       
       for (const stage of stages) {
         const item = createMockWorkItem({ stage });

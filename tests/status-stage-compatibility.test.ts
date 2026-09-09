@@ -37,10 +37,6 @@ describe('Status/stage compatibility', () => {
     // -----------------------------------------------------------------------
     // Positive — combinations that were already allowed (regression guard)
     // -----------------------------------------------------------------------
-    it('should allow in-progress status with in_progress stage', () => {
-      expect(isStatusStageCompatible('in-progress', 'in_progress')).toBe(true);
-    });
-
     it('should allow in-progress status with in_review stage', () => {
       expect(isStatusStageCompatible('in-progress', 'in_review')).toBe(true);
     });
@@ -68,9 +64,5 @@ describe('Status/stage compatibility', () => {
       expect(stages).toContain('plan_complete');
     });
 
-    it('should include in_progress for in-progress status', () => {
-      const stages = getAllowedStagesForStatus('in-progress');
-      expect(stages).toContain('in_progress');
-    });
   });
 });

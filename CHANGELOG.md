@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.0.14 (2026-09-09)
+### Features
+- Single machine-wide downtime leader across all worklogs (replace per-worklog elections) (WL-0MTF0KLO10043YAN)
+- indent group headings in children list (WL-0MTCP0ILG008YV84)
+- Auto-disable dispatching when sprint is complete (WL-0MTHSHN5V008R5L0)
+- Downtime dispatch panes all spawn in the leader's workspace regardless of project (C0: anchor-by-ID into dedicated Dispatcher workspace) (WL-0MTR01EU7005SYZG)
+- Downtime dispatcher: exclude items needing producer review from selection (WL-0MTIAL65N004T22F)
+- Sort in_review items (WL-0MSLPM5ZB003TADT)
+- Allow herdr shortcuts to optionally give the new pane focus (WL-0MT70LC6B009TL3Q)
+- Audit freshness: keep audit valid after post-audit comments; persist auditedAt atomically; remove audit-content comments (WL-0MT8KTE3E001Q1D9)
+- Replace binary author-identity gate with configurable author whitelist (WL-0MTGDW58X007UJDS)
+### Bug Fixes
+- counts in Herdr selection list are incorrect (WL-0MT26TE72002FLKX)
+- Downtime: fetchAuditItemById ignores cwd — cross-root contamination causes 3-strike pause on foreign offers (WL-0MTQ14W7L003II5A)
+- Downtime dispatches land in Podcast workspace instead of Dispatcher workspace (WL-0MTRBOU0Y002M2CX)
+- Downtime dispatcher: make wl-error pauses debuggable (log per-strike stderr/exitCode/timeout and probe context) (WL-0MTJPYM53003ORCV)
+- Downtime pause log should include underlying wl error details (WL-0MTL4PC0Y005GXTI)
+- fix: worklist-integration truncate hides Item title (▸ + colour makes line overflow 80cols) (WL-0MTSOASC6009N9O9)
+- Downtime dispatch: gate non-critical implement tier on review-queue depth (WL-0MT2UQWOR007CYY9)
+### Other
+- Enable automatic crash reporting and review existing crash dumps (WL-0MT1KJNMV0018SWP)
+- Remove the in_progress stage (WL-0MTOHS5B4001Y9FX)
+- Herdr metadata panel: drop duplicate ID row from data section (WL-0MSHIJR7T007Q9R7)
+- Shorten coordination check-in and re-offer immediately after dispatch (WL-0MTMPSCL8000O45H)
+- Update Priority in selection list does not instantly update the list (WL-0MTFRJ2V6005IMW1)
+- Colour code work items by priority in selection lists (CLI + Herdr) (WL-0MSJ2JFMO007PGQ6)
+
 ## v1.0.13 (2026-09-01)
 
 ## v1.0.12 (2026-08-25)

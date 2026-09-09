@@ -50,7 +50,7 @@ export const isStatusStageCompatible = (
   // This may be called on items in any non-done stage (e.g. a
   // `completed/in_review` item being re-audited). The config-defined
   // compatibility table only maps `in-progress` status to stages
-  // `intake_complete`, `plan_complete`, and `in_progress` — which would
+  // `intake_complete`, and `plan_complete` — which would
   // reject `in-progress`/`in_review`. This exception bridges that gap.
   //
   // RISK: This exception allows potentially invalid state combinations
@@ -65,7 +65,7 @@ export const isStatusStageCompatible = (
   const statusNorm = status;
   const stageNorm = stage;
   if ((statusNorm === 'in-progress' || statusNorm === 'in_progress') &&
-      (stageNorm === 'in_review' || stageNorm === 'in-review' || stageNorm === 'idea' || stageNorm === 'in_progress' || stageNorm === 'in-progress' || stageNorm === 'intake_complete' || stageNorm === 'plan_complete')) {
+      (stageNorm === 'in_review' || stageNorm === 'in-review' || stageNorm === 'idea' || stageNorm === 'intake_complete' || stageNorm === 'plan_complete')) {
     return true;
   }
   const allowedStages = getAllowedStagesForStatus(status, rules);

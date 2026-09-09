@@ -326,6 +326,47 @@ else
 fi
 
 echo ""
+echo "=== Test: --anchor mode splits from the given pane id (no pane current) ==="
+# Resize + --anchor: grid helper invoked with the ANCHOR id; pane current NOT called
+run_send --anchor wD:pANCHOR "do the thing" >/dev/null 2>&1 || true
+if grep -q "grid:--cwd .* wD:pANCHOR" "$GRID_LOG" 2>/dev/null; then
+  pass "send-to-pi --anchor (resize) passes the anchor id to the grid helper"
+else
+  fail "send-to-pi --anchor (resize) should pass the anchor id to the grid helper"
+  echo "  grid log: $(cat "$GRID_LOG" 2>/dev/null)"
+fi
+if grep -q "pane current" "$HERDR_LOG" 2>/dev/null; then
+  fail "send-to-pi --anchor must NOT call 'pane current' (dispatcher anchor-by-ID)"
+  echo "  herdr log: $(cat "$HERDR_LOG" 2>/dev/null)"
+else
+  pass "send-to-pi --anchor never calls 'pane current'"
+fi
+
+# No-resize + --anchor: plain split targets the given pane id
+run_send --no-resize --anchor wD:pANCHOR "do the thing" >/dev/null 2>&1 || true
+if grep -q "pane split --pane wD:pANCHOR --direction right --no-focus" "$HERDR_LOG" 2>/dev/null; then
+  pass "send-to-pi --anchor (no-resize) uses 'pane split --pane <id>'"
+else
+  fail "send-to-pi --anchor (no-resize) should split the given pane id"
+  echo "  herdr log: $(cat "$HERDR_LOG" 2>/dev/null)"
+fi
+if grep -q "pane current" "$HERDR_LOG" 2>/dev/null; then
+  fail "send-to-pi --no-resize --anchor must NOT call 'pane current'"
+else
+  pass "send-to-pi --no-resize --anchor never calls 'pane current'"
+fi
+
+# No --anchor: legacy behavior unchanged (pane current + grid.py in resize mode)
+run_send "do the thing" >/dev/null 2>&1 || true
+if grep -q "pane current" "$HERDR_LOG" 2>/dev/null && grep -q "grid:--cwd .* anchor-pane-9" "$GRID_LOG" 2>/dev/null; then
+  pass "send-to-pi without --anchor keeps legacy pane-current + grid.py behavior"
+else
+  fail "send-to-pi without --anchor should keep legacy pane-current + grid.py behavior"
+  echo "  herdr log: $(cat "$HERDR_LOG" 2>/dev/null)"
+  echo "  grid log: $(cat "$GRID_LOG" 2>/dev/null)"
+fi
+
+echo ""
 echo "=== Test: grid helper failure exits non-zero with clear message ==="
 MOCK_GRID_FAIL="$SANDBOX/mock-grid-fail.py"
 cat > "$MOCK_GRID_FAIL" <<MOCK

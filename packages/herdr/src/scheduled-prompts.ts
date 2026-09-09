@@ -14,7 +14,11 @@
  *    `/skill:refactor`),
  *  - a best-effort `intervalDays` frequency (whole days; a delayed dispatch
  *    never fires more often than the frequency),
- *  - `lastTriggeredAt` (ISO-8601 UTC datetime; `null` = never run).
+ *  - `lastTriggeredAt` (ISO-8601 UTC datetime; `null` = never run),
+ *  - optional `time` (wall-clock `HH:MM`, e.g. `06:05`) — when present,
+ *    dispatch waits until the first idle window at/after that time (local
+ *    wall-clock) and the interval gate has elapsed; when absent, the
+ *    existing `now - last >= intervalDays` semantics are unchanged.
  *
  * Fail-closed philosophy (mirrors settings.ts + the downtime worker): an
  * absent config is an EMPTY set (silent — absence is the expected state;
@@ -47,6 +51,12 @@ export interface ScheduledPrompt {
   intervalDays: number;
   /** ISO-8601 UTC datetime of the last dispatch; null = never run. */
   lastTriggeredAt: string | null;
+  /** Optional wall-clock time `HH:MM` (local calendar day, e.g. `06:05`). When
+   * present the entry is due only when BOTH the interval gate and the
+   * at-or-after-time check pass; when absent behaviour is identical to
+   * today (backward-compatible). Invalid values cause the entry to be
+   * skipped (fail-closed). */
+  time?: string;
 }
 
 /** Root shape of `.worklog/scheduled-prompts.json`. */
@@ -91,7 +101,11 @@ export function scheduledPromptsPath(cwd: string): string {
  *  - intervalDays must be a finite number > 0,
  *  - lastTriggeredAt must be null, absent (⇒ normalized to null = due), or
  *    an ISO-8601 string; a non-string or unparseable value rejects the
- *    whole entry (skipped with a warning — never a crash).
+ *    whole entry (skipped with a warning — never a crash),
+ *  - time, when present, must be a wall-clock `HH:MM` 24-hour time
+ *    (e.g. `06:05`); an invalid value rejects the whole entry (skipped
+ *    with a warning — fail-closed). When absent, the field is omitted
+ *    and the due check is interval-only (backward-compatible).
  */
 export function parseScheduledPrompt(entry: unknown): ScheduledPrompt | null {
   if (typeof entry !== 'object' || entry === null) return null;
@@ -110,7 +124,21 @@ export function parseScheduledPrompt(entry: unknown): ScheduledPrompt | null {
     lastTriggeredAt = o.lastTriggeredAt;
   }
 
-  return { id: o.id, prompt: o.prompt, intervalDays: o.intervalDays, lastTriggeredAt };
+  let time: string | undefined;
+  if (o.time !== undefined) {
+    if (typeof o.time !== 'string' || !isValidTimeHHMM(o.time)) return null;
+    time = o.time;
+  }
+
+  return time === undefined
+    ? { id: o.id, prompt: o.prompt, intervalDays: o.intervalDays, lastTriggeredAt }
+    : { id: o.id, prompt: o.prompt, intervalDays: o.intervalDays, lastTriggeredAt, time };
+}
+
+/** Validate `HH:MM` 24-hour wall-clock time (e.g. `06:05`, `23:59`). */
+export function isValidTimeHHMM(value: string): boolean {
+  const m = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(value);
+  return m !== null;
 }
 
 /** Parse predicate: true when the entry is a valid scheduled prompt. */
@@ -126,13 +154,51 @@ export function isValidScheduledPrompt(entry: unknown): entry is ScheduledPrompt
  * (`now - last >= intervalDays * DAY_MS`). A `lastTriggeredAt` in the
  * future (clock skew) is not due.
  */
+export function isAtOrAfterScheduledTime(entry: ScheduledPrompt, now: number = Date.now()): boolean {
+  if (entry.time === undefined) return true;
+  // Fail-closed: an invalid time (constructed directly, bypassing
+  // parseScheduledPrompt) is never due — invalid entries should have
+  // been skipped at load time.
+  if (!isValidTimeHHMM(entry.time)) return false;
+  const [hh, mm] = entry.time.split(':').map(Number) as [number, number];
+  const d = new Date(now);
+  const tMs = hh * 60 * 60 * 1000 + mm * 60 * 1000;
+  const nowMs = d.getHours() * 60 * 60 * 1000 + d.getMinutes() * 60 * 1000 + d.getSeconds() * 1000 + d.getMilliseconds();
+  return nowMs >= tMs;
+}
+
+/**
+ * Due-check for ONE entry (best-effort frequency): due iff
+ * `lastTriggeredAt` is null (never run) or the interval has fully elapsed
+ * (`now - last >= intervalDays * DAY_MS`) AND (when `time` is set) `now`
+ * is at or after `time` on the calendar day of `now` (local wall-clock).
+ * A `lastTriggeredAt` in the future (clock skew) is not due.
+ * When `time` is absent the check is identical to today (backward-compatible).
+ */
 export function isDueScheduledPrompt(entry: ScheduledPrompt, now: number = Date.now()): boolean {
-  if (entry.lastTriggeredAt === null) return true;
-  const last = new Date(entry.lastTriggeredAt).getTime();
-  // Defensive: an unparseable timestamp (constructed directly, bypassing
-  // parseScheduledPrompt) is NaN → never due (fail-closed).
-  if (Number.isNaN(last)) return false;
-  return now - last >= entry.intervalDays * DAY_MS;
+  // Interval gate: when `time` is set, compare calendar days (so a daily
+  // 06:05 entry dispatched late at 08:00 is still due tomorrow at 06:05
+  // and does not drift; AC3). Without `time`, use the existing 24h gate
+  // (backward-compatible).
+  let intervalDue: boolean;
+  if (entry.lastTriggeredAt === null) {
+    intervalDue = true;
+  } else if (entry.time !== undefined) {
+    const last = new Date(entry.lastTriggeredAt);
+    if (Number.isNaN(last.getTime())) return false;
+    // Calendar-day difference in local time.
+    const nowDate = new Date(now);
+    const lastDay = new Date(last.getFullYear(), last.getMonth(), last.getDate()).getTime();
+    const nowDay = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate()).getTime();
+    const daysDiff = Math.floor((nowDay - lastDay) / DAY_MS);
+    intervalDue = daysDiff >= entry.intervalDays;
+  } else {
+    const last = new Date(entry.lastTriggeredAt).getTime();
+    if (Number.isNaN(last)) return false;
+    intervalDue = now - last >= entry.intervalDays * DAY_MS;
+  }
+  if (!intervalDue) return false;
+  return isAtOrAfterScheduledTime(entry, now);
 }
 
 /**

@@ -726,6 +726,100 @@ describe('loadShortcutConfig — project-local shortcuts.json overrides', () => 
 // stages (plan_complete / in_review / done); w-s keeps today's four-stage
 // gate. All three stay gated to podcast-typed items.
 
+// ── focus field (WL-0MT70LC6B009TL3Q) ──────────────────────────────────
+//
+// A per-entry `focus` flag lets a shortcut opt in to *focusing* the newly
+// opened pane. The flag is optional:
+//   - omitted / false → no-focus (current default)
+//   - true            → focus / zoom the new pane
+// Invalid values are logged and treated as omitted (no-focus), mirroring
+// the `open_pane` pattern.
+
+describe('parseShortcutEntry — focus field (WL-0MT70LC6B009TL3Q)', () => {
+  it('parses focus: true', () => {
+    const entry = parseShortcutEntry({
+      chord: ['P', 'n'],
+      command: '/prompt:',
+      view: 'both',
+      focus: true,
+    });
+    expect(entry?.focus).toBe(true);
+  });
+
+  it('parses focus: false', () => {
+    const entry = parseShortcutEntry({
+      chord: ['P', 'p'],
+      command: '/prompt:<prompt>',
+      view: 'both',
+      focus: false,
+    });
+    expect(entry?.focus).toBe(false);
+  });
+
+  it('treats a missing focus as omit (backward compatible — no-focus)', () => {
+    const entry = parseShortcutEntry({
+      chord: ['s'],
+      command: '!!wl search <search_term>',
+      view: 'both',
+    });
+    expect(entry?.focus).toBeUndefined();
+  });
+
+  it('logs and treats an invalid focus as omit', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const cases: unknown[] = ['yes', 'true', 0, 1, null, [], {}];
+    for (const bad of cases) {
+      const entry = parseShortcutEntry({
+        chord: ['x'],
+        command: '!!wl close <id>',
+        view: 'both',
+        focus: bad,
+      });
+      expect(entry?.focus).toBeUndefined();
+    }
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it('keeps other fields intact when focus is present', () => {
+    const entry = parseShortcutEntry({
+      chord: ['P', 'n'],
+      command: '/prompt:',
+      view: 'both',
+      label: 'new session',
+      model: 'plan',
+      focus: true,
+    });
+    expect(entry).toMatchObject({
+      chord: ['P', 'n'],
+      command: '/prompt:',
+      view: 'both',
+      label: 'new session',
+      model: 'plan',
+      focus: true,
+    });
+  });
+});
+
+describe('loadShortcutConfig — focus: true for P n (WL-0MT70LC6B009TL3Q)', () => {
+  it('marks the P n blank-session shortcut as focused', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['P', 'n'], 'list');
+    expect(entry).toBeDefined();
+    expect(entry?.focus).toBe(true);
+  });
+
+  it('leaves every other bundled shortcut without focus (no-focus default)', () => {
+    const registry = loadShortcutConfig();
+    for (const entry of registry.getEntries()) {
+      const isPn = entry.chord.join(',') === 'P,n';
+      if (!isPn) {
+        expect(entry?.focus).toBeUndefined();
+      }
+    }
+  });
+});
+
 describe('loadShortcutConfig — w chord split stage gating', () => {
   let tempRoots: string[] = [];
 

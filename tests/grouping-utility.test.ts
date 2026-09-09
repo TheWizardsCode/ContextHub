@@ -504,15 +504,17 @@ describe('assignItemGroups — Idea / Other / In Review', () => {
 // ── compareGroupableItems — within-group ordering ─────────────────────
 
 describe('compareGroupableItems — within-group ordering', () => {
-  it('orders in_progress before plan_complete before intake_complete before remaining stages', () => {
+  it('orders plan_complete before intake_complete before remaining stages (WL-0MTQZ7HZY: in_progress is now remaining)', () => {
     const progress = { id: 'IP', stage: 'in_progress', filePaths: [], priority: 'medium' };
     const plan = { id: 'P', stage: 'plan_complete', filePaths: [], priority: 'medium' };
     const intake = { id: 'I', stage: 'intake_complete', filePaths: [], priority: 'medium' };
     const other = { id: 'O', stage: 'done', filePaths: [], priority: 'medium' };
-    expect(compareGroupableItems(progress, plan)).toBeLessThan(0);
     expect(compareGroupableItems(plan, intake)).toBeLessThan(0);
     expect(compareGroupableItems(intake, other)).toBeLessThan(0);
-    expect(compareGroupableItems(progress, other)).toBeLessThan(0);
+    expect(compareGroupableItems(plan, other)).toBeLessThan(0);
+    // in_progress is now Remaining (same bucket as done), ordered by id tie-break after stage/priority
+    expect(compareGroupableItems(plan, progress)).toBeLessThan(0);
+    expect(compareGroupableItems(intake, progress)).toBeLessThan(0);
   });
 
   it('orders by priority (high → medium → low) within the same stage sub-group', () => {
@@ -550,7 +552,7 @@ describe('compareGroupableItems — within-group ordering', () => {
     expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
   });
 
-  it('sorts in_progress items to the top of a mixed group, then plan_complete, then intake_complete', () => {
+  it('sorts plan_complete first, then intake_complete, then remaining (WL-0MTQZ7HZY: in_progress is remaining)', () => {
     const items = [
       { id: 'I-low', stage: 'intake_complete', filePaths: [], priority: 'low' },
       { id: 'P-med', stage: 'plan_complete', filePaths: [], priority: 'medium' },
@@ -559,16 +561,124 @@ describe('compareGroupableItems — within-group ordering', () => {
       { id: 'P-high', stage: 'plan_complete', filePaths: [], priority: 'high' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['IP-high', 'IP-low', 'P-high', 'P-med', 'I-low']);
+    // WL-0MTQZ7HZY: in_progress is Remaining (order 3), so plan_complete (0) < intake_complete (1) < remaining (3)
+    expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-low', 'IP-high', 'IP-low']);
   });
 
-  it('sorts a critical group with the same stage sub-sort', () => {
+  it('sorts a critical group with the same stage sub-sort (WL-0MTQZ7HZY: in_progress is remaining)', () => {
     const items = [
       { id: 'C-other', stage: 'in_progress', filePaths: [], priority: 'critical' },
       { id: 'C-intake', stage: 'intake_complete', filePaths: [], priority: 'critical' },
       { id: 'C-plan', stage: 'plan_complete', filePaths: [], priority: 'critical' },
     ];
     const sorted = items.slice().sort(compareGroupableItems);
-    expect(sorted.map(i => i.id)).toEqual(['C-other', 'C-plan', 'C-intake']);
+    // WL-0MTQZ7HZY: in_progress is Remaining
+    expect(sorted.map(i => i.id)).toEqual(['C-plan', 'C-intake', 'C-other']);
+  });
+});
+
+// ── in_review 6-bucket sort (WL-0MSLPM5ZB003TADT) ──────────────────────
+
+import { inReviewBucket, compareInReviewItems } from '../src/commands/grouping.js';
+
+describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
+  // isAuditFresh(auditedAt, updatedAt) → auditedAt > updatedAt - 60s
+  // So auditedAt === updatedAt is fresh; auditedAt 10m before updatedAt is stale.
+  const updatedAt = '2026-01-10T10:00:00.000Z';
+  const freshAuditedAt = '2026-01-10T10:00:00.000Z'; // same instant → fresh
+  const staleAuditedAt = '2026-01-10T09:40:00.000Z'; // 20m earlier → stale
+
+  function inReviewItem(overrides: Record<string, unknown> = {}) {
+    return { id: 'WL-x', stage: 'in_review', filePaths: [], priority: 'medium', ...overrides };
+  }
+
+  it('inReviewBucket returns correct bucket for each category', () => {
+    expect(inReviewBucket({
+      stage: 'in_review', needsProducerReview: true,
+      auditResult: null, auditedAt: null, updatedAt,
+    })).toBe(1);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: false, auditedAt: freshAuditedAt, updatedAt,
+    })).toBe(2);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: false, auditedAt: staleAuditedAt, updatedAt,
+    })).toBe(3);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: null, auditedAt: null, updatedAt,
+    })).toBe(4);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: true, auditedAt: staleAuditedAt, updatedAt,
+    })).toBe(5);
+    expect(inReviewBucket({
+      stage: 'in_review', auditResult: true, auditedAt: freshAuditedAt, updatedAt,
+    })).toBe(6);
+    // Non in_review stages return sentinel 0
+    expect(inReviewBucket({
+      stage: 'plan_complete', auditResult: false, auditedAt: freshAuditedAt, updatedAt,
+    })).toBe(0);
+  });
+
+  it('orders the six buckets: needsProducerReview → failed fresh → failed stale → no audit → passed stale → passed fresh', () => {
+    const items = [
+      inReviewItem({ id: 'WL-passed-fresh', auditResult: true, auditedAt: freshAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-passed-stale', auditResult: true, auditedAt: staleAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-no-audit', auditResult: null, auditedAt: null, updatedAt }),
+      inReviewItem({ id: 'WL-failed-stale', auditResult: false, auditedAt: staleAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-failed-fresh', auditResult: false, auditedAt: freshAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-needs-producer', needsProducerReview: true, auditResult: false, auditedAt: freshAuditedAt, updatedAt }),
+    ];
+    // Shuffle then sort
+    const shuffled = [items[0], items[3], items[1], items[5], items[2], items[4]];
+    const sorted = shuffled.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual([
+      'WL-needs-producer',
+      'WL-failed-fresh',
+      'WL-failed-stale',
+      'WL-no-audit',
+      'WL-passed-stale',
+      'WL-passed-fresh',
+    ]);
+  });
+
+  it('within the same bucket orders by priority high → medium → low', () => {
+    const items = [
+      inReviewItem({ id: 'WL-low', priority: 'low', auditResult: null }),
+      inReviewItem({ id: 'WL-high', priority: 'high', auditResult: null }),
+      inReviewItem({ id: 'WL-med', priority: 'medium', auditResult: null }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual(['WL-high', 'WL-med', 'WL-low']);
+  });
+
+  it('within same bucket and priority orders by updatedAt older first', () => {
+    const items = [
+      inReviewItem({ id: 'WL-newer', auditResult: null, updatedAt: '2026-01-10T12:00:00.000Z' }),
+      inReviewItem({ id: 'WL-older', auditResult: null, updatedAt: '2026-01-10T08:00:00.000Z' }),
+      inReviewItem({ id: 'WL-mid', auditResult: null, updatedAt: '2026-01-10T10:00:00.000Z' }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual(['WL-older', 'WL-mid', 'WL-newer']);
+  });
+
+  it('uses id as deterministic tie-break when bucket, priority, and timestamp are equal', () => {
+    const items = [
+      inReviewItem({ id: 'WL-b', auditResult: null, updatedAt }),
+      inReviewItem({ id: 'WL-a', auditResult: null, updatedAt }),
+      inReviewItem({ id: 'WL-c', auditResult: null, updatedAt }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual(['WL-a', 'WL-b', 'WL-c']);
+  });
+
+  it('does not apply bucket sort to non-in_review items', () => {
+    const a = { id: 'WL-a', stage: 'plan_complete', filePaths: [], priority: 'medium', needsProducerReview: true };
+    const b = { id: 'WL-b', stage: 'plan_complete', filePaths: [], priority: 'medium' };
+    expect(compareGroupableItems(a, b)).toBeLessThan(0); // WL-a < WL-b lexicographically
+  });
+
+  it('compareInReviewItems returns 0 for non-in_review items', () => {
+    const a = { id: 'WL-a', stage: 'plan_complete', filePaths: [], priority: 'medium', needsProducerReview: true } as any;
+    const b = { id: 'WL-b', stage: 'intake_complete', filePaths: [], priority: 'medium' } as any;
+    expect(compareInReviewItems(a, b)).toBe(0);
   });
 });

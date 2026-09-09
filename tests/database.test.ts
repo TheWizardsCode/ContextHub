@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorklogDatabase } from '../src/database.js';
+import { isAuditFresh } from '@worklog/shared/icons';
 import { createTempDir, cleanupTempDir, createTempJsonlPath, createTempDbPath } from './test-utils.js';
 
 describe('WorklogDatabase', () => {
@@ -102,6 +103,65 @@ describe('WorklogDatabase', () => {
       expect(auditResult).not.toBeNull();
       expect(auditResult?.author).toBe('tester');
       expect(auditResult?.summary).toBe('Ready to close: Yes');
+    });
+
+    it('should set updatedAt = auditedAt atomically on saveAuditResult (WL-0MT8KTE3E001Q1D9)', () => {
+      const item = db.create({
+        title: 'Audited item for freshness test',
+        description: 'Testing audit freshness clock',
+      });
+      const auditedAt = new Date().toISOString();
+      db.saveAuditResult({
+        workItemId: item.id,
+        readyToClose: true,
+        auditedAt: auditedAt,
+        author: 'tester',
+        summary: 'Ready to close: Yes',
+        rawOutput: null,
+      });
+      const updated = db.get(item.id);
+      expect(updated?.updatedAt).toBe(auditedAt);
+    });
+
+    it('audit-then-comment ordering: audit stays fresh after a comment (WL-0MTHRY9NP004R9MC)', () => {
+      // Use wall-clock times so touchWorkItemUpdatedAt (Date.now()) stays
+      // within the 60 s freshness window.
+      const item = db.create({ title: 'Ordering test', description: 'audit then comment' });
+      const auditedAt = new Date().toISOString();
+      db.saveAuditResult({
+        workItemId: item.id,
+        readyToClose: true,
+        auditedAt,
+        author: 'tester',
+        summary: 'Ready to close: Yes',
+        rawOutput: null,
+      });
+      db.createComment({ workItemId: item.id, author: 'tester', comment: 'Follow-up note' });
+      const itemAfterComment = db.get(item.id)!;
+      const auditResult = db.getAuditResult(item.id)!;
+      // Post-audit comment bumps updatedAt; the 60 s grace window keeps the
+      // audit fresh (WL-0MT8KTE3E001Q1D9 / WL-0MTHRSZJK008ATDB).
+      expect(isAuditFresh(auditResult.auditedAt, itemAfterComment.updatedAt)).toBe(true);
+    });
+
+    it('comment after audit keeps audit fresh via isAuditFresh (WL-0MTHRSZJK008ATDB)', () => {
+      const item = db.create({ title: 'Freshness regression: comment after audit', description: 'regression' });
+      const auditedAt = new Date().toISOString();
+      db.saveAuditResult({
+        workItemId: item.id,
+        readyToClose: true,
+        auditedAt,
+        author: 'tester',
+        summary: 'Ready to close: Yes',
+        rawOutput: null,
+      });
+      db.createComment({ workItemId: item.id, author: 'tester', comment: 'Just a comment after the audit' });
+      const afterComment = db.get(item.id)!;
+      const auditResult = db.getAuditResult(item.id)!;
+      expect(auditResult.auditedAt).toBe(auditedAt);
+      // Comment bumps updatedAt but within the 60 s window the audit is still
+      // fresh and the TUI keeps the passed icon (not stale).
+      expect(isAuditFresh(auditResult.auditedAt, afterComment.updatedAt)).toBe(true);
     });
 
     it('should create a work item with a parent', () => {
@@ -3371,9 +3431,10 @@ describe('WorklogDatabase', () => {
       void base;
       void missing;
 
-      const staleItem = db.get(stale.id)!;
-      // Make the audit stale: auditedAt distinctly < updatedAt (use 1 min in the past).
-      const staleAuditedAt = new Date(new Date(staleItem.updatedAt).getTime() - 60_000).toISOString();
+      // Make the audit stale: save with auditedAt now, then advance updatedAt 61 s
+      // into the future (saveAuditResult sets updatedAt=auditedAt, so the
+      // advance must happen *after* the save to achieve staleness).
+      const staleAuditedAt = new Date().toISOString();
       db.saveAuditResult({
         workItemId: stale.id,
         readyToClose: false,
@@ -3382,6 +3443,17 @@ describe('WorklogDatabase', () => {
         rawOutput: null,
         author: null,
       });
+      const futureUpdatedAt = new Date(new Date(staleAuditedAt).getTime() + 61_000).toISOString();
+      // Bump updatedAt via a title save so the stale audit is detectable.
+      const bumpRes = db.update(stale.id, { title: db.get(stale.id)!.title });
+      void bumpRes;
+      // Force updatedAt to the deterministic future value.
+      try {
+        const ps: any = db.store;
+        ps.db.prepare('UPDATE workitems SET updatedAt = ? WHERE id = ?').run(futureUpdatedAt, stale.id);
+        ps.invalidateWorkItemCaches();
+        ps.cacheInvalidate(`workitem_${stale.id}`);
+      } catch (e) { /* best-effort */ }
       const after = db.get(stale.id)!;
       expect(new Date(db.getAuditResult(stale.id)!.auditedAt).getTime()).toBeLessThan(
         new Date(after.updatedAt).getTime(),

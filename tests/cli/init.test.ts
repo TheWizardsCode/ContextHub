@@ -385,13 +385,20 @@ describe('CLI Init Tests', () => {
       expect(fs.existsSync(configPath)).toBe(true);
       const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       expect(Array.isArray(config.entries)).toBe(true);
-      // The base set starts with a single /skill:refactor entry
-      // (intervalDays 3, lastTriggeredAt null).
+      // The base set starts with /skill:refactor (intervalDays 3)
+      // and /skill:standup at 06:05 (intervalDays 1, WL-0MTMN7W63001FCQR).
       expect(config.entries).toEqual([
         {
           id: '/skill:refactor',
           prompt: '/skill:refactor',
           intervalDays: 3,
+          lastTriggeredAt: null,
+        },
+        {
+          id: '/skill:standup',
+          prompt: '/skill:standup',
+          intervalDays: 1,
+          time: '06:05',
           lastTriggeredAt: null,
         },
       ]);

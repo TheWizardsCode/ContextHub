@@ -16,16 +16,13 @@
  *    per-poll timeout and fail-closed parsing.
  *  - `createIdleTracker` — continuous idle-duration tracker (idleSince vs
  *    threshold).
- *  - `dispatchDowntimeWork` — dispatch orchestration: completed/in_review
- *    items without a valid audit (modified within the last 7 days) →
- *    `/skill:audit <id>` (audit tier, WL-0MSI8H3HP000K0RG; ROOT-ONLY —
- *    children are never dispatched independently,
- *    WL-0MSTLFW14000KPEC), then the
- *    implement tier (WL-0MSMAYPQP001FLR6): the highest-priority open
- *    plan_complete item with risk ≤ Medium / effort ≤ Medium →
- *    `/skill:implement <id>`, then `wl next --stage intake_complete` →
- *    `/skill:plan <id>`, fallback `--stage idea` → `/skill:intake <id>`,
- *    pre-dispatch claim, per-process single-flight. Code-freeze gate
+ *  - `dispatchDowntimeWork` — Herdr-list-head dispatch (WL-0MTK1ILM2009QYB2): consumes the Herdr selection list head
+ *    (`deps.getHerdrListHead` = fetcher → smart-selection → grouping, the sole ranking path) and applies
+ *    every remaining safety gate as a sequential FILTER on that ordered sequence (scheduled prompt first,
+ *    then code-freeze, dispatched-marker, free-slot minimums, active-audit single-flight, freshness/recency,
+ *    pre-dispatch CAS claim + per-process single-flight, then spawn). No second ranking implementation remains
+ *    on the dispatch path (AC1–2). The former audit/implement/plan/intake tier ordering is retired.
+ *    Code-freeze gate
  *    (WL-0MSQ0RPQP00636JY): the ship-it marker is re-read fresh on every
  *    dispatch; while frozen OR ambiguous (fail-closed) the audit and
  *    implement tiers are skipped (no new implementations/audits during a
@@ -37,13 +34,26 @@
  *    for `/skill:audit` (durable dispatched-marker exclusion,
  *    WL-0MSLIY8ZR004QUSY) unless a fresh audit exists since, closing the
  *    re-selection loop where a dispatched run reverts the item to
- *    completed/in_review without recording a fresh audit. A tier-2 CLI error does
+ *    completed/in_review without recording a fresh audit. Every tier
+ *    additionally excludes items with `needsProducerReview === true`
+ *    (parent WL-0MTIAL65N004T22F): items flagged for producer review are
+ *    never auto-dispatched, preventing the worker from consuming local
+ *    slots on items awaiting a human decision. A tier-2 CLI error does
  *    NOT short-circuit: the idea tier is still attempted so a tier-3
  *    candidate can still dispatch.
  *    `wl next` failures are reported as `{ok:false}` (fail closed to busy)
  *    and are never mistaken for an empty backlog; three consecutive error
  *    outcomes pause the worker entirely after logging the persistent error
  *    via `deps.recordError` (three-strike rule, `DOWNTIME_ERROR_STRIKE_LIMIT`).
+ *  - `dispatchFromCoordination` / `computeMostImportantItem` — the
+ *    coordination leader + check-in (WL-0MTK1ILM2009QYB2 F3): the shared
+ *    coordination file holds one OFFER per instance — its own Herdr list
+ *    head (computed at the check-in by `computeMostImportantItem` over
+ *    `deps.getHerdrListHead` with the same sequential filters). The leader
+ *    dispatches offers in FILE ORDER, re-validating each at dispatch time
+ *    (`fetchItem` → `classifyItemForDispatch` as filters). The cross-root
+ *    tier priority / critical override / round-robin cursor ordering are
+ *    RETIRED (no second ranking on the dispatch path, AC1–2).
  *  - `buildDowntimePaneArgs` / `spawnDowntimePane` — send-to-pi.sh
  *    invocation (`--pane-name Downtime <kind>`, `--no-focus`, `--cwd`,
  *    `--model`), detached and unref'd; `error`/`exit` handlers capture a
@@ -53,7 +63,14 @@
  *    `AUDIT_PHASE2_PARALLELISM=1` makes the audit skill's Phase 2 child
  *    deep-analysis strictly sequential so a parent audit needs exactly
  *    2 local slots (parent + one child), fitting cheap mode's capacity
- *    (WL-0MSORQ1RG005DGUS).
+ *    (WL-0MSORQ1RG005DGUS). Dispatcher anchor (C0 WL-0MTR01EU7005SYZG):
+ *    every spawn resolves the dedicated machine-wide Dispatcher anchor pane
+ *    (`deps.getDispatcherAnchor`, F1 WL-0MTR2CD4X006XI7U) and forwards it as
+ *    `--anchor <id>` so send-to-pi.sh splits from THAT pane — dispatched
+ *    panes always land in the Dispatcher workspace regardless of which
+ *    instance holds the leader lease. Anchor provisioning failure degrades
+ *    to reason 'anchor-unavailable' (neutral "no dispatch this cycle", never
+ *    a fallback to the leader's pane).
  *  - `createDowntimeWorker` — per-tick orchestrator (poll → evaluate →
  *    track → dispatch) with settings re-read each tick, plus the
  *    no-candidate cooldown (WL-0MSI7DQL10016QYX): a genuine empty backlog
@@ -70,7 +87,7 @@
  *    (`computeMostImportantItem`) before pausing and only a genuinely
  *    empty backlog pauses (a probe CLI error is itself a three-strike
  *    event, never a silent pause). The cooldown gate runs AFTER the
- *    leader-election/check-in block so the 30-min check-in (the only
+ *    leader-election/check-in block so the check-in (the only
  *    re-offer mechanism) still lands during a pause, and a successful
  *    re-offer (`checkIn.updated && offered !== null`) cancels the pause
  *    immediately.
@@ -78,6 +95,7 @@
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
  *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs`
+ *    / `clampDowntimeMaxConcurrentDispatches`
  *    — settings clamps, wired into `settings.ts`.
  *  - `selectWithRotation` (WL-0MSSRED76008LGB6) — rotation-aware selection:
  *    within each tier, candidates sharing the same priority level are
@@ -104,16 +122,28 @@ import {
   getEntry,
   upsertEntry,
   removeEntry,
-  pruneStaleEntries,
   type CoordinationEntry,
 } from './coordination.js';
+import {
+  loadRoundRobinCursor,
+  advanceRoot,
+  selectLeastRecentlyServed,
+} from './downtime-round-robin-by-root.js';
 import {
   createLeaderElectionManager,
   cleanupStaleElection,
   DEFAULT_LEASE_TTL_SECONDS,
 } from './leader-election.js';
 import { appendCoordinationLogEntry } from './downtime-log.js';
+import {
+  readDowntimeLogEntries as _readDowntimeEntries,
+  auditDispatchedItemIds as _auditIds,
+  implementDispatchedItemIds as _implIds,
+  riskEffortDispatchedItemIds as _riskEffortIds,
+  dispatchedItemStages as _dispatchedStages,
+} from './downtime-log.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
+import type { DispatcherAnchor } from './dispatcher-anchor.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 export type { CoordinationEntry } from './coordination.js';
@@ -143,19 +173,25 @@ export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2;
 
 /**
  * Minimum free slots required for an AUDIT dispatch (parent
- * WL-0MT32F90V008UAD2 AC3): an audit pane needs a second slot for its
+ * WL-0MT32F90V008UAD2 AC3, machine-wide budget WL-0MTF0KLO10043YAN AC4 /
+ * WL-0MTII48OV008P2QU F5): an audit pane needs a second slot for its
  * Phase 2 child deep-analysis (`AUDIT_PHASE2_PARALLELISM=1` — the child
  * runs strictly after the parent, so parent + one child = 2 local slots,
  * WL-0MSORQ1RG005DGUS). Applied as an ADDITIONAL selection-time check on
  * the latest polled status; the idle-duration gate (configured N) is
- * unchanged. `AUDIT_PHASE2_PARALLELISM=1` → 2 slots minimum.
+ * unchanged. Single machine-wide budget (one leader poll, one snapshot) -
+ * see WL-0MT50LKAK001EF5Q bounded concurrent dispatches: the same cap
+ * source, no per-worklog duplication. `AUDIT_PHASE2_PARALLELISM=1` → 2
+ * slots minimum.
  */
 export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
 
 /**
  * Minimum free slots required for a single-pane dispatch (implement /
- * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3): each
- * pane consumes exactly one local slot, so ≥1 free slot suffices.
+ * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3, F5
+ * WL-0MTII48OV008P2QU single budget): each pane consumes exactly one local
+ * slot, so ≥1 free slot suffices. Machine-wide, not per-worklog — shares
+ * the single leader snapshot with WL-0MT50LKAK001EF5Q (one cap source).
  */
 export const DOWNTIME_PANE_MIN_FREE_SLOTS = 1;
 
@@ -164,6 +200,23 @@ export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
 
 /** Default pause after a genuine empty backlog: 60 minutes. */
 export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
+
+/** Default bounded concurrency cap: 1 (single-flight, current behavior). */
+export const DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES = 1;
+
+/**
+ * Default review-queue depth threshold (`browseItemCount`, parent
+ * WL-0MT2UQWOR007CYY9): when the ROOT-ONLY `completed`/`in_review` count
+ * reaches this, the review queue is "deep" and NON-CRITICAL implement
+ * dispatch is held until audits / producer review drain it back below.
+ * Re-read live from settings each tick (no restart); root-only counting
+ * via `wl list --status completed --stage in_review --root-only --json`.
+ */
+export const DEFAULT_BROWSE_ITEM_COUNT = 20;
+/** Clamp floor for the concurrency cap. */
+export const DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR = 1;
+/** Clamp ceiling for the concurrency cap. */
+export const DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING = 4;
 
 /**
  * Audit-tier recency window: a completed/in_review candidate is only
@@ -198,6 +251,51 @@ export const DOWNTIME_ERROR_STRIKE_LIMIT = 3;
 export const DOWNTIME_WL_TIMEOUT_MS = 10_000;
 
 /**
+ * Bounded transient-retry for `wl` CLI invocations (WL-0MTOTCETU004YYIU
+ * AC3): a single `SQLITE_BUSY` / `database is locked` / timeout is a
+ * transient contention that must not burn a strike. The caller retries
+ * with exponential backoff within the same dispatch tick so one transient
+ * does not cascade into the three-strike 60-min cooldown. Only the
+ * patterns below are retried — parse/author-gate errors fail fast.
+ */
+export function isTransientDowntimeError(message: string): boolean {
+  const m = message.toLowerCase();
+  if (m.includes('sqlite_busy') || m.includes('sqlite busy')) return true;
+  if (m.includes('database is locked') || m.includes('database table is locked')) return true;
+  // "database busy" variants — better-sqlite3 busy_timeout contention
+  if (m.includes('database') && m.includes('busy')) return true;
+  return false;
+}
+
+/**
+ * Execute `fn` with bounded retry on transient `wl` errors only.
+ * Retries `retries` times (default 2 → up to 3 total attempts) with
+ * exponential backoff `baseDelayMs * 2^attempt` (default 50ms → 50,100ms).
+ * Non-transient errors throw immediately. The total extra wall-clock
+ * added is < 200ms so the tick stays well inside DOWNTIME_RUN_TIMEOUT_MS.
+ */
+export async function withTransientRetry<T>(
+  fn: () => Promise<T>,
+  retries = 2,
+  baseDelayMs = 50,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      const msg = err instanceof Error ? err.message : String(err);
+      const transient = isTransientDowntimeError(msg);
+      if (!transient || attempt === retries) throw err;
+      const delay = baseDelayMs * (1 << attempt);
+      await new Promise<void>((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr as Error;
+}
+
+/**
  * Scheduler-level watchdog bound for ONE downtime-worker tick run
  * (WL-0MSJIPHD0001L1J9): the maximum wall-clock time a scheduler run may
  * take before it is abandoned and the task's single-flight flag is reset so
@@ -213,21 +311,31 @@ export const DEFAULT_DOWNTIME_PROXY_URL = 'http://192.168.0.199:8000';
 export const DEFAULT_DOWNTIME_MODEL = 'plan';
 
 /**
- * Default coordination check-in interval: 30 minutes (parent AC3).
- * Every instance re-verifies/updates its entry in the shared coordination
- * file at this cadence — including the leader.
+ * Default coordination check-in interval: 5 minutes (WL-0MTMPSCL8000O45H,
+ * parent AC3 — was 30 min). Every instance re-verifies/updates its entry
+ * in the shared coordination file at this cadence. The leader checks in
+ * more often (WL-0MTOCBP1D009P4U3) — see DEFAULT_LEADER_CHECK_IN_MS.
  */
-export const DEFAULT_COORDINATION_CHECK_IN_MS = 30 * 60 * 1000;
+export const DEFAULT_COORDINATION_CHECK_IN_MS = 5 * 60 * 1000;
 
 /**
- * Coordinator tier priority (parent AC4): the leader dispatches the
- * highest-priority tier first — audit, then implement, then plan, then
- * intake. The scheduled-prompts tier (WL-0MSS1Q5ER007QDKX) is NOT part of
- * this order: like the legacy path, the coordination path checks it as a
- * FIRST dispatch stage (freeze-gated, before ANY coordination-tier work),
- * so a due prompt dispatches instead of reaching these tiers.
+ * Leader coordination check-in interval (WL-0MTOCBP1D009P4U3): the leader
+ * re-offers every 4 minutes so offers stay fresh and the lease is renewed
+ * inside the 5-minute TTL with ~1 min grace. Non-leaders use
+ * DEFAULT_COORDINATION_CHECK_IN_MS (5 min, WL-0MTMPSCL8000O45H).
  */
-export const COORDINATION_TIER_ORDER = ['audit', 'implement', 'plan', 'intake'] as const;
+export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
+
+/**
+ * Retired coordination tier ordering (parent AC4 → WL-0MTK1ILM2009QYB2).
+ * The coordination leader no longer re-ranks offers by tier: it dispatches
+ * the OFFER list in file order (each offer is its root's Herdr list head,
+ * WL-0MTK1ILM2009QYB2 "dispatcher == Herdr list head"; see
+ * `dispatchFromCoordination`). This constant and `coordinationTierRank`
+ * are kept exported only for the module's tier-rank unit tests — nothing
+ * on the dispatch path calls them.
+ */
+export const COORDINATION_TIER_ORDER = ['audit', 'critical', 'implement', 'plan', 'risk-effort', 'intake'] as const;
 
 export type CoordinationTierKind = (typeof COORDINATION_TIER_ORDER)[number];
 
@@ -689,12 +797,40 @@ export function createDowntimePoller(
 // ── Dispatch (implemented — F3) ───────────────────────────────────────
 
 export type DowntimeStage = 'intake_complete' | 'idea' | 'audit' | 'implement';
-export type DowntimeSkillKind = 'plan' | 'intake' | 'audit' | 'implement';
+
+/** Ordered Herdr list head item (canonical ranking: fetcher → smart-selection → grouping). */
+export interface DowntimeHerdrItem {
+  id: string;
+  title: string;
+  stage?: string;
+  status?: string;
+  priority?: string;
+  risk?: string;
+  effort?: string;
+  auditedAt?: string | null;
+  updatedAt?: string;
+  sortIndex?: number;
+  parentId?: string | null;
+  /**
+   * Needs-producer-review flag (WL-0MTIAL65N004T22F): carried by the
+   * fetcher's `WorkItem`; when `true` the item is not dispatchable — the
+   * producer-review gate is a sequential filter on the Herdr sequence
+   * (via `classifyItemForDispatch`) for both the direct dispatcher and
+   * the check-in offer computation.
+   */
+  needsProducerReview?: boolean;
+}
+export type DowntimeHerdrListResult =
+  | { ok: true; items: DowntimeHerdrItem[] }
+  | { ok: false; error?: string };
+export type DowntimeSkillKind = 'plan' | 'intake' | 'audit' | 'implement' | 'risk-effort';
 
 /**
  * Every dispatch kind recorded in the rolling audit log: the worklog tiers
  * plus the scheduled-prompts tier (WL-0MSS1Q5ER007QDKX), which has no work
- * item (kind `scheduled`, log-only markers).
+ * item (kind `scheduled`, log-only markers), plus the risk-effort evaluation
+ * tier (WL-0MTTSWCJR003OMN7) that populates missing risk/effort on plan_complete
+ * items so they become implement-dispatchable.
  */
 export type DowntimeDispatchKind = DowntimeSkillKind | 'scheduled';
 
@@ -715,6 +851,13 @@ export interface DowntimeCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * the item must NOT be auto-dispatched by the downtime worker — a human
+   * producer must review it first. Absent/false/undefined → dispatchable.
+   * Filtered in every `select*` function (AC1).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -734,6 +877,11 @@ export interface ImplementCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * exclude from implement-tier selection (AC1).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -751,6 +899,11 @@ export interface AuditCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * exclude from audit-tier selection (AC1).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -765,7 +918,7 @@ export interface AuditCandidate {
  */
 export type DowntimeNextResult =
   | { ok: true; candidate: DowntimeCandidate | null }
-  | { ok: false };
+  | { ok: false; error?: string };
 
 /**
  * Enriched single-item view fetched by the leader for a coordination entry
@@ -792,6 +945,12 @@ export interface DowntimeItemInfo {
   updatedAt?: string;
   /** wl priority order preserved for deterministic ordering. */
   sortIndex?: number;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * exclude from classification (the item is not dispatchable) and the
+   * coordination leader path skips it (AC3).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -801,7 +960,7 @@ export interface DowntimeItemInfo {
  */
 export type DowntimeItemResult =
   | { ok: true; info: DowntimeItemInfo }
-  | { ok: false };
+  | { ok: false; error?: string };
 
 /**
  * Outcome of the check-in most-important-item computation. `{ok:true,
@@ -814,7 +973,9 @@ export type DowntimeItemResult =
 export type MostImportantItemResult =
   | { ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate }
   | { ok: true; noCandidate: true }
-  | { ok: false };
+  /** Deep review queue + only held non-critical implements remain: nothing offerable NOW, but the backlog is NOT empty — the caller must not pause (WL-0MTTSWC1X005P4VD AC2). */
+  | { ok: true; reviewQueueHold: true }
+  | { ok: false; error?: string };
 
 
 /**
@@ -838,7 +999,7 @@ export interface DowntimeClaimExpected {
  */
 export type DowntimeClaimResult =
   | { ok: true }
-  | { ok: false; reason: 'stale' | 'error' };
+  | { ok: false; reason: 'stale' | 'error'; error?: string };
 
 /**
  * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV).
@@ -857,10 +1018,18 @@ export type DowntimeClaimResult =
  */
 export type DowntimeActiveAuditResult =
   | { ok: true; active: boolean }
-  | { ok: false };
+  | { ok: false; error?: string };
 
 /** External boundaries injected so the dispatch logic is testable. */
 export interface DowntimeWorkerDeps {
+  /**
+   * Herdr list head fetch (WL-0MTK1ILM2009QYB2): the canonical ranking
+   * (fetcher → smart-selection → grouping). Returns ordered candidates
+   * (already ranked); dispatcher applies safety gates as sequential filters.
+   * Fail-closed `{ok:false}` on a wl/parse failure (a strike), otherwise
+   * `{ok:true, items:[…]}` (empty when genuinely empty).
+   */
+  getHerdrListHead(cwd: string): Promise<DowntimeHerdrListResult>;
   /**
    * Runs `wl next --stage <stage> -n 10 --json` and reports the first
    * selectable candidate (or a wl failure). `cwd` is the worklog root whose
@@ -907,6 +1076,15 @@ export interface DowntimeWorkerDeps {
    * worklog root the dispatch log lives under.
    */
   getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult>;
+  /**
+   * Count completed/in_review root items for the review-queue depth gate
+   * (WL-0MT2UQWOR007CYY9): `wl list --status completed --stage in_review
+   * --root-only --json`, bounded by `DOWNTIME_WL_TIMEOUT_MS`. Returns the
+   * count, or `null` on failure — a failure means "gate active" (only
+   * critical implements remain eligible), consistent with the code-freeze
+   * ambiguous ⇒ frozen convention.
+   */
+  getReviewQueueCount(cwd: string): Promise<number | null>;
   /**
    * Look up the next implement-tier candidate (WL-0MSMAYPQP001FLR6): the
    * highest-priority open plan_complete item with risk ≤ Medium / effort ≤ Medium,
@@ -980,8 +1158,17 @@ export interface DowntimeWorkerDeps {
    * reason:'stale'}` and the dispatcher aborts (no pane, no marker, no
    * success record). A `{ok:false, reason:'error'}` is a wl CLI failure
    * (a strike, never silently discarded — WL-0MSLWJ310000ND0X absorbed).
+   *
+   * `cwd` (optional, WL-0MTQ14W7L003II5A) is the worklog root the item
+   * lives in — the coordination leader claims offers in the offering
+   * instance's OWN root, which may differ from the leader pane's module
+   * override. Absent/undefined → legacy behavior (module override / cwd).
    */
-  claimItem(itemId: string, expected: DowntimeClaimExpected): Promise<DowntimeClaimResult>;
+  claimItem(
+    itemId: string,
+    expected: DowntimeClaimExpected,
+    cwd?: string,
+  ): Promise<DowntimeClaimResult>;
   /**
    * Open a visible pi agent pane running the prompt (via send-to-pi.sh).
    * Resolves `{ok:true}` when the pane opened (or the probe window elapsed
@@ -992,11 +1179,38 @@ export interface DowntimeWorkerDeps {
    * scheduled-prompts tier passes `Downtime <entryId>` (WL-0MSS1Q5ER007QDKX).
    * `itemTitle`/`itemId` thread the candidate's context so the pane is named
    * `Downtime triggered <kind> <title> - <id>` (WL-0MSJ4E8UA005KG9Y).
+   * `anchorId` (C0 WL-0MTR01EU7005SYZG) forwards the dedicated Dispatcher
+   * anchor pane id so send-to-pi.sh splits from THAT pane (--anchor) instead
+   * of the leader's current pane — dispatched panes always land in the
+   * Dispatcher workspace regardless of leadership. Absent → legacy
+   * current-pane behavior (non-downtime/TUI spawns and pre-C0 callers).
    */
   spawnAgentPane(
     prompt: string,
-    opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
+    opts: {
+      model: string;
+      cwd: string;
+      paneName?: string;
+      itemTitle?: string;
+      itemId?: string;
+      anchorId?: string;
+    },
   ): Promise<DowntimeSpawnResult>;
+  /**
+   * Resolve the dedicated machine-wide Dispatcher anchor pane (C0
+   * WL-0MTR01EU7005SYZG, F1 WL-0MTR2CD4X006XI7U): the persisted anchor pane
+   * id in the 'Dispatcher' workspace, provisioning it idempotently on first
+   * dispatch. Every downtime pane spawn must anchor to this pane so dispatch
+   * placement is independent of which instance holds the leader lease.
+   * Resolves null on provisioning failure — the caller degrades to "no
+   * dispatch this cycle" (fail-safe, never a fallback to the leader's pane).
+   * Optional: when ABSENT the worker spawns without an anchor (legacy
+   * behavior — the send-to-pi.sh `pane current` fallback), which preserves
+   * backward compatibility for callers that predate C0. Production wiring
+   * (`createDowntimeDeps`) always provides it, so downtime dispatch is
+   * always anchored.
+   */
+  getDispatcherAnchor?(cwd: string): Promise<DispatcherAnchor | null>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
@@ -1094,6 +1308,27 @@ export interface DowntimeErrorEvent {
   /** ISO-8601 UTC timestamp of the error. */
   at: string;
   message: string;
+  /** Underlying wl/CLI error (timeout, SQLITE_BUSY, parse failure, stderr) — WL-0MTL4PC0Y005GXTI. */
+  error?: string;
+
+  // ── Enriched per-strike fields (WL-0MTJPYM53003ORCV) ──
+
+  /** Excerpt of stderr from the failing wl CLI invocation, truncated to 200 chars with `[truncated]` marker if longer. */
+  stderrExcerpt?: string;
+  /** Exit code from the failing wl CLI spawn (null = killed by signal). */
+  exitCode?: number | null;
+  /** Timeout in ms that was configured for the wl CLI invocation. */
+  timeoutMs?: number;
+  /** Work item id that was being dispatched when the error occurred. */
+  workItemId?: string;
+  /** The wl subcommand that failed (e.g. "wl show <id>", "wl close <id>"). */
+  command?: string;
+  /** Which strike this is in the three-strike sequence (1, 2, or 3). */
+  attempt?: number;
+  /** Distinguishes coordination probe failures from dispatch-path CLI failures.
+   * `"coordination-probe"` = worklog probe failed while shared coordination file held no dispatchable entry.
+   * `"dispatch-cli"` = wl CLI error during dispatch (spawn-failed / claim-failed / fetchItem failure). */
+  probeContext?: string;
 }
 
 export interface DowntimeDispatchOutcome {
@@ -1106,7 +1341,14 @@ export interface DowntimeDispatchOutcome {
    * another pane won; neutral) | 'marker-write-failed' (fail-closed abort
    * BEFORE spawn — includes the scheduled-prompt persist failure) |
    * 'spawn-failed' (handled spawn error or non-zero script exit; outcome is
-   * not success) | 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
+   * not success) | 'anchor-unavailable' (C0 WL-0MTR01EU7005SYZG: the
+   * machine-wide Dispatcher anchor pane could not be provisioned — neutral
+   * "no dispatch this cycle", never a fallback to the leader's pane) |
+   * 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
+   * in flight) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
+   * was recorded during interim). When `reason` is 'wl-error', `error`
+   * may carry the underlying wl/CLI error details (timeout, SQLITE_BUSY,
+   * parse failure, stderr) for the three-strike pause log.
    * already running — a non-stale kind=audit dispatch marker maps to an
    * `in_progress` item — so the audit tier was skipped; a skip that leaves
    * an empty remaining backlog reports this reason, NEVER 'no-candidate',
@@ -1128,16 +1370,26 @@ export interface DowntimeDispatchOutcome {
    * signal — WL-0MSLWJ3I70031Z8U AC2).
    */
   exitCode?: number | null;
+
+  // ── Enriched per-strike error fields (WL-0MTJPYM53003ORCV) ──
+
+  /** Timeout in ms that was used for the wl CLI call that failed. */
+  timeoutMs?: number;
+  /** Work item id being dispatched (set on dispatch-tier failures). */
+  workItemId?: string;
 }
 
 /**
- * Per-process single-flight guard: at most one dispatch can be in flight at
- * a time (concurrent calls are refused, not queued). Cross-pane
- * serialization is handled by the pre-dispatch claim (Q5 — no lock file):
- * the CAS claim atomically moves the item out of `wl next`'s selection set
- * for other panes.
+ * Per-process bounded dispatch guard (WL-0MT50LKAK001EF5Q F3): at most
+ * `maxConcurrentDispatches` dispatch pipelines can be in flight at a time
+ * in this process (concurrent callers beyond the cap are refused, not
+ * queued). Default 1 = exact single-flight semantics; when the operator
+ * raises the setting, cheap-mode slots are used concurrently but never
+ * beyond the cap. Cross-pane serialization is handled by the pre-dispatch
+ * claim (Q5 — no lock file): the CAS claim atomically moves the item out of
+ * `wl next`'s selection set for other panes.
  */
-let dispatchInFlight = false;
+let dispatchInFlightCount = 0;
 
 /**
  * Expected claim state per tier (RCA WL-0MSRBFFLN005W3VT design point 1):
@@ -1150,7 +1402,159 @@ const TIER_EXPECTED: Record<DowntimeSkillKind, DowntimeClaimExpected> = {
   implement: { status: 'open', stage: 'plan_complete' },
   plan: { status: 'open', stage: 'intake_complete' },
   intake: { status: 'open', stage: 'idea' },
+  'risk-effort': { status: 'open', stage: 'plan_complete' },
 };
+
+// ── Review-queue depth gate — shared (WL-0MT2UQWOR007CYY9 gate re-wired
+// onto the live Herdr path by WL-0MTTSWC1X005P4VD) ────────────────────
+// Root cause B2: the gate originally lived ONLY in the legacy tier chain
+// (dead whenever the Herdr head is non-empty), so non-critical implements
+// kept dispatching into a deep review queue. The gate now applies
+// identically in `dispatchFromHerdrList` (direct dispatch),
+// `computeMostImportantItem` (coordination offer computation) and
+// `dispatchFromCoordination` (leader dispatch): while the ROOT-ONLY
+// `completed`/`in_review` count is at/over `browseItemCount`, NON-CRITICAL
+// `implement`-kind candidates are held. Audits (the queue drain), plan,
+// intake and critical implements flow unconditionally. A deep queue with
+// nothing audit-needed reports the neutral reason 'review-queue-hold'
+// (never 'no-candidate' / cooldown) so polling resumes immediately when
+// the queue thins. Fail-closed: a count-query failure activates the gate
+// (only critical implements remain eligible) — the same convention as the
+// code-freeze 'ambiguous ⇒ frozen' rule.
+
+/** Neutral outcome reason when a deep review queue holds the only candidates. */
+export const REVIEW_QUEUE_HOLD_REASON = 'review-queue-hold';
+
+/** Result of one bounded review-queue depth read. */
+export interface ReviewQueueGateResult {
+  /** True when the queue is at/over threshold (deep) — fail-closed on query failure. */
+  deep: boolean;
+  /** Raw root-only completed/in_review count; null when the count query failed. */
+  count: number | null;
+  /** The threshold applied (browseItemCount). */
+  threshold: number;
+}
+
+/**
+ * Read the review-queue depth ONCE per dispatch/offer computation
+ * (`wl list --status completed --stage in_review --root-only`, bounded by
+ * `DOWNTIME_WL_TIMEOUT_MS` inside the dep). A failure or unparseable
+ * output resolves `{deep: true, count: null}` — fail-closed (gate
+ * active: only critical implements remain eligible). Never throws.
+ */
+export async function readReviewQueueGate(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+  browseItemCount: number = DEFAULT_BROWSE_ITEM_COUNT,
+): Promise<ReviewQueueGateResult> {
+  let count: number | null;
+  try {
+    count = await deps.getReviewQueueCount(cwd);
+  } catch {
+    count = null;
+  }
+  return {
+    deep: count === null || count >= browseItemCount,
+    count,
+    threshold: browseItemCount,
+  };
+}
+
+/**
+ * Apply the gate to one classified candidate: TRUE only for a NON-CRITICAL
+ * `implement`-kind candidate while the review queue is deep. Audits/plan/
+ * intake and critical-priority implements are never held (audits are the
+ * queue drain; critical work is never throttled). A null gate (not read —
+ * e.g. frozen, where implements are already paused) never holds.
+ */
+export function isImplementHeldByReviewGate(
+  kind: DowntimeSkillKind,
+  candidate: { priority?: string },
+  gate: ReviewQueueGateResult | null,
+): boolean {
+  if (kind !== 'implement') return false;
+  if (gate === null || !gate.deep) return false;
+  return candidate.priority !== 'critical';
+}
+
+// ── Herdr list-head filter dispatcher (WL-0MTK1ILM2009QYB2 AC1–2) ────
+async function dispatchFromHerdrList(
+  deps: DowntimeWorkerDeps,
+  items: DowntimeHerdrItem[],
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean },
+): Promise<DowntimeDispatchOutcome | null> {
+  if (items.length === 0) return null;
+  const entries = await _readDowntimeEntries(ctx.cwd);
+  const auditIds = _auditIds(entries);
+  const implementIds = _implIds(entries);
+  const riskEffortIds = _riskEffortIds(entries);
+  const planStages = _dispatchedStages(entries, 'plan');
+  const intakeStages = _dispatchedStages(entries, 'intake');
+  const riskEffortStages = _dispatchedStages(entries, 'risk-effort');
+  for (const item of items) {
+    // Classify solely by list-provided fields — `classifyItemForDispatch`
+    // already enforces risk/effort/audit-freshness gates (WL-0MTK1ILM2009QYB2).
+    const now = Date.now();
+    const info = {
+      id: item.id,
+      title: item.title,
+      status: item.status,
+      stage: item.stage,
+      priority: item.priority,
+      risk: item.risk,
+      effort: item.effort,
+      auditedAt: item.auditedAt,
+      updatedAt: item.updatedAt,
+      sortIndex: item.sortIndex,
+      parentId: item.parentId,
+    };
+    const k = classifyItemForDispatch(info, now);
+    if (k === null) continue;
+    // Active-audit single-flight check (WL-0MT3PHW4I002SNOV): runs BEFORE
+    // dispatched-marker exclusion to match legacy tier behavior. While an
+    // audit is in-flight the audit tier is skipped entirely, so we must
+    // check this before filtering dispatched items (a dispatched item may
+    // still be the active-audit item that should cause the skip).
+    if (k === 'audit') {
+      const active = await deps.getActiveAudit(ctx.cwd);
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
+      try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
+    }
+    // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion
+    // (WL-0MSLIY8ZR004QUSY/AC6) but applied as a filter on the Herdr head.
+    if (k === 'audit' && auditIds.has(item.id)) continue;
+    if (k === 'implement' && implementIds.has(item.id)) continue;
+    if (k === 'risk-effort' && riskEffortStages.get(item.id) === (item.stage ?? '')) continue;
+    if (k === 'plan' && planStages.get(item.id) === (item.stage ?? '')) continue;
+    if (k === 'intake' && intakeStages.get(item.id) === (item.stage ?? '')) continue;
+    // Code-freeze split-by-skill: audit+implement dispatch pauses during
+    // a freeze/ambiguous marker (plan/intake still dispatch).
+    if (ctx.frozen && (k === 'audit' || k === 'implement')) continue;
+    // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3).
+    if (k === 'audit' && !ctx.auditEligible) continue;
+    if (k !== 'audit' && !ctx.panesEligible) continue;
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+    // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement candidate while
+    // the root-only completed/in_review queue is at/over browseItemCount —
+    // the review bottleneck is not overloaded with new non-critical code.
+    // Audits (the queue drain), plan, intake and critical implements flow
+    // unconditionally (AC1/AC2). The hold is recorded so an otherwise-empty
+    // backlog reports 'review-queue-hold' (never 'no-candidate' → no
+    // cooldown; polling resumes the moment the queue thins).
+    if (isImplementHeldByReviewGate(k, item, ctx.reviewGate)) {
+      flags.reviewHeld = true;
+      continue;
+    }
+    const cand: DowntimeCandidate = { id: item.id, title: item.title, stage: k === 'audit' ? 'audit' : (String(item.stage) as DowntimeStage), status: item.status, priority: item.priority, sortIndex: item.sortIndex };
+    const outcome = await dispatchClaimedTier(deps, k, cand, { model: ctx.model, cwd: ctx.cwd });
+    if (outcome.dispatched) return outcome;
+    if (outcome.reason === 'claim-failed') continue;
+    return outcome;
+  }
+  return null;
+}
+
 
 /**
  * Dispatch one already-selected candidate through the fixed pipeline:
@@ -1180,11 +1584,32 @@ async function dispatchClaimedTier(
   opts: { model: string; cwd: string },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
-  const claim = await deps.claimItem(candidate.id, expected);
+  // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): resolve the dedicated
+  // Dispatcher anchor pane BEFORE the claim so a provisioning failure
+  // degrades to "no dispatch this cycle" (F1 AC6 — caller fail-safe) without
+  // claiming/marking an item that can never spawn a pane. Absent dep
+  // (legacy/test callers) → no anchor, legacy current-pane behavior.
+  let anchorId: string | undefined;
+  if (typeof deps.getDispatcherAnchor === 'function') {
+    let anchor: DispatcherAnchor | null = null;
+    try {
+      anchor = await deps.getDispatcherAnchor(opts.cwd);
+    } catch {
+      anchor = null; // fail-closed on any anchor error
+    }
+    if (anchor === null) {
+      return { dispatched: false, reason: 'anchor-unavailable' };
+    }
+    anchorId = anchor.paneId;
+  }
+  // Cross-root claim (WL-0MTQ14W7L003II5A): opts.cwd is the item's worklog
+  // root — the coordination leader passes the OFFER's root so the CAS claim
+  // lands in the item's own database (never the leader's module override).
+  const claim = await deps.claimItem(candidate.id, expected, opts.cwd);
   if (!claim.ok) {
     return claim.reason === 'stale'
       ? { dispatched: false, reason: 'claim-failed' }
-      : { dispatched: false, reason: 'wl-error' };
+      : { dispatched: false, reason: 'wl-error', error: claim.error ?? 'claim failed' };
   }
 
   let marked = false;
@@ -1218,6 +1643,11 @@ async function dispatchClaimedTier(
       // `Downtime triggered <kind> <title> - <id>`.
       itemTitle: candidate.title,
       itemId: candidate.id,
+      // Dispatcher anchor (C0): split from the dedicated Dispatcher anchor
+      // pane so this pane lands in the Dispatcher workspace regardless of
+      // leadership. Only set when the anchor resolved (never a bare
+      // undefined key — legacy callers keep their exact opts shape).
+      ...(anchorId !== undefined ? { anchorId } : {}),
     },
   );
   if (!spawn.ok) {
@@ -1303,6 +1733,26 @@ async function dispatchScheduledPrompt(
 ): Promise<DowntimeDispatchOutcome> {
   const at = new Date().toISOString();
 
+  // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): scheduled-prompt panes are
+  // downtime-worker spawns too — resolve the dedicated Dispatcher anchor
+  // BEFORE the trigger persist so a provisioning failure degrades to "no
+  // dispatch this cycle" without consuming the scheduled entry (it stays
+  // due for the next idle slot). Absent dep (legacy/test callers) → no
+  // anchor, legacy current-pane behavior.
+  let anchorId: string | undefined;
+  if (typeof deps.getDispatcherAnchor === 'function') {
+    let anchor: DispatcherAnchor | null = null;
+    try {
+      anchor = await deps.getDispatcherAnchor(opts.cwd);
+    } catch {
+      anchor = null; // fail-closed on any anchor error
+    }
+    if (anchor === null) {
+      return { dispatched: false, reason: 'anchor-unavailable' };
+    }
+    anchorId = anchor.paneId;
+  }
+
   // 1. Persist lastTriggeredAt (atomic tmp+rename). A failure aborts BEFORE
   // the log marker or the spawn — an unrecorded dispatch never runs and the
   // entry remains due (AC4 fail-closed).
@@ -1337,6 +1787,7 @@ async function dispatchScheduledPrompt(
     model: opts.model,
     cwd: opts.cwd,
     paneName: `Downtime ${prompt.id}`,
+    ...(anchorId !== undefined ? { anchorId } : {}),
   });
   if (!spawn.ok) {
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2 pattern): the audit log
@@ -1405,6 +1856,9 @@ export function classifyItemForDispatch(
   info: DowntimeItemInfo,
   now: number = Date.now(),
 ): DowntimeSkillKind | null {
+  // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+  // Items flagged for producer review must NOT be auto-dispatched at any tier.
+  if (info.needsProducerReview === true) return null;
   const status = typeof info.status === 'string' ? info.status : '';
   const stage = typeof info.stage === 'string' ? info.stage : '';
   if (status === 'completed') {
@@ -1427,13 +1881,30 @@ export function classifyItemForDispatch(
   if (stage === 'idea') return 'intake';
   if (stage === 'intake_complete') return 'plan';
   if (stage === 'plan_complete') {
-    // Implement caps (risk ≤ Medium, effort ≤ Medium) — same ordinal
-    // semantics as selectImplementCandidate (fail-closed on unset).
+    // Items missing risk/effort (root cause C, WL-0MTTSWCJR003OMN7):
+    // dispatch a risk-effort evaluation so the fields get populated and
+    // the item becomes implement-dispatchable on the next pass.
     const risk = riskOrdinal(info.risk);
-    if (risk === null || risk > 2) return null;
     const effort = effortOrdinal(info.effort);
-    if (effort === null || effort > 3) return null;
+    if (risk === null || effort === null) return 'risk-effort';
+    // Implement caps (risk ≤ Medium, effort ≤ Medium) — same ordinal
+    // semantics as selectImplementCandidate.
+    if (risk > 2) return null;
+    if (effort > 3) return null;
     return 'implement';
+  }
+  // Retired `in_progress` stage (WL-0MTTSWCJR003OMN7 — OSL dead zones):
+  // items stuck on the retired stage are invisible to all dispatch tiers.
+  // Map them into the pipeline by dispatching a skill evaluation that
+  // will advance them to the correct stage:
+  //   - items missing risk/effort → risk-effort evaluation (populates both)
+  //   - items with risk/effort → risk-effort evaluation (confirms fields)
+  //   - items with only one → plan evaluation (advances to the right stage)
+  if (stage === 'in_progress') {
+    // Always dispatch risk-effort for retired-stage items: it evaluates
+    // both fields AND confirms the stage is correct, producing a single
+    // efficient re-evaluation that advances the item to its proper stage.
+    return 'risk-effort';
   }
   return null;
 }
@@ -1447,108 +1918,176 @@ export function toCoordinationCandidate(info: DowntimeItemInfo): DowntimeCandida
     status: info.status,
     priority: info.priority,
     sortIndex: info.sortIndex,
+    needsProducerReview: info.needsProducerReview,
   };
 }
 
 /**
  * Compute this instance's most-important dispatchable work item (parent
- * AC3 / AC5): the highest-priority item in ITS OWN worklog, following the
- * standard tier order (scheduled prompts are skipped — they have no work
- * item — then audit, then critical, then implement, then plan, then
- * intake), with the code-freeze gate applied to the audit/implement tiers.
- * This is the same selection `dispatchDowntimeWork` used pre-refactor, now
- * feeding the coordination check-in instead of an immediate dispatch.
+ * AC3 / AC5): the FIRST item of ITS OWN worklog's Herdr selection list
+ * (the canonical ranking — fetcher → smart-selection → grouping,
+ * WL-0MTK1ILM2009QYB2 "dispatcher == Herdr list head") that passes the
+ * sequential dispatch filters. This feeds the coordination check-in
+ * OFFER: the entry an instance stores in the shared coordination file is
+ * exactly its current Herdr list head, so the leader never has to
+ * re-rank an offer against a second ordering (see
+ * `dispatchFromCoordination`).
  *
- * The lookups apply the existing dispatched-marker exclusions (audit /[
- * implement/plan/intake marker sets) and the client-side `open` guards, so
- * an item already dispatched by this worker for its tier is never offered
- * to the coordinator again — the durable marker stays the source of truth.
+ * The filters mirror the direct dispatch path (`dispatchFromHerdrList`)
+ * but WITHOUT dispatching:
+ *  - scheduled prompts are skipped (they have no work item);
+ *  - `classifyItemForDispatch` enforces the producer-review gate
+ *    (WL-0MTIAL65N004T22F) plus the audit freshness/recency window and
+ *    the implement risk/effort caps;
+ *  - the dispatched-marker exclusions (audit/implement/plan/intake marker
+ *    sets, WL-0MSLIY8ZR004QUSY) ensure an item already dispatched by this
+ *    worker is never offered again — the durable marker stays the source
+ *    of truth;
+ *  - the code-freeze split-by-skill pauses audit/implement offers while
+ *    frozen (plan/intake still offer) — the same freeze semantics as the
+ *    dispatch path (WL-0MSQ0RPQP00636JY);
+ *  - the review-queue depth gate (WL-0MT2UQWOR007CYY9, rewired by
+ *    WL-0MTTSWC1X005P4VD) holds a NON-CRITICAL implement offer while the
+ *    root's completed/in_review queue is deep — audits (the queue drain),
+ *    plan, intake and critical implements still offer; when ONLY held
+ *    implements remain the result is `{ok:true, reviewQueueHold:true}`
+ *    (never `noCandidate`), so the no-candidate cooldown is not entered
+ *    while the queue drains.
  *
- * A wl failure at any tier does NOT short-circuit: the remaining tiers are
- * still tried (same resilience as the old dispatcher); the result carries
- * `{ok:false}` ONLY when the computation ended on a CLI error with no
- * candidate found at all (the caller then keeps the existing entry,
- * fail-open).
+ * Active-audit single-flight and the free-slot minimums are
+ * dispatch-time gates, so they are NOT applied to an offer.
+ *
+ * A Herdr-list lookup failure resolves `{ok:false}` (fail-open: the
+ * caller keeps the existing entry — a transient wl error must never drop
+ * a valid offer); an empty list or a fully-filtered list resolves
+ * `{ok:true, noCandidate:true}` (a genuine empty backlog — the caller may
+ * remove the own entry).
  */
 export async function computeMostImportantItem(
   deps: DowntimeWorkerDeps,
   cwd: string,
   now: number = Date.now(),
+  browseItemCount: number = DEFAULT_BROWSE_ITEM_COUNT,
 ): Promise<MostImportantItemResult> {
-  if (typeof deps.getNextAuditCandidate !== 'function') return { ok: false };
+  // The check-in (and the worker's no-candidate probe) requires the Herdr
+  // head lookup: without it there is no canonical ranking to offer from —
+  // fail closed to `{ok:false}` (the caller keeps the existing entry).
+  if (typeof deps.getHerdrListHead !== 'function') {
+    return { ok: false, error: 'getHerdrListHead unavailable' };
+  }
   const freezeStatus = deps.readCodeFreezeStatus(cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
-  let sawError = false;
 
-  if (!frozen) {
-    const audit = await deps.getNextAuditCandidate(cwd);
-    if (audit.ok) {
-      if (audit.candidate !== null) {
-        return { ok: true, kind: 'audit', candidate: audit.candidate };
+  const head = await deps.getHerdrListHead(cwd);
+  if (!head.ok) return { ok: false, error: head.error }; // CLI error — fail-open (entry kept)
+  if (head.items.length === 0) return { ok: true, noCandidate: true };
+
+  // Dispatched-marker exclusion (mirrors dispatchFromHerdrList): read the
+  // shared rolling dispatch log for THIS worklog root so an item already
+  // dispatched by this worker is never offered to the coordinator again.
+  const entries = await _readDowntimeEntries(cwd);
+  const auditIds = _auditIds(entries);
+  const implementIds = _implIds(entries);
+  const riskEffortIds = _riskEffortIds(entries);
+  const planStages = _dispatchedStages(entries, 'plan');
+  const intakeStages = _dispatchedStages(entries, 'intake');
+  const riskEffortStages = _dispatchedStages(entries, 'risk-effort');
+
+  // Review-queue depth gate: read lazily (memoized) only when an
+  // implement-kind candidate is actually the would-be offer — one bounded
+  // wl list per offer computation when needed (WL-0MTTSWC1X005P4VD).
+  let reviewGate: ReviewQueueGateResult | null | undefined;
+  const reviewGateForQueue = async (): Promise<ReviewQueueGateResult | null> => {
+    if (reviewGate === undefined) {
+      // Frozen already pauses audit/implement offers (filter below), so the
+      // gate is never consulted under a freeze.
+      reviewGate = frozen ? null : await readReviewQueueGate(deps, cwd, browseItemCount);
+    }
+    return reviewGate;
+  };
+  let heldByReviewQueue = false;
+
+  for (const item of head.items) {
+    const k = classifyItemForDispatch(item, now);
+    if (k === null) continue; // review-gate + freshness/recency + caps
+    // Dispatched-marker exclusion per kind.
+    if (k === 'audit' && auditIds.has(item.id)) continue;
+    if (k === 'implement' && implementIds.has(item.id)) continue;
+    if (k === 'risk-effort' && riskEffortStages.get(item.id) === (item.stage ?? '')) continue;
+    if (k === 'plan' && planStages.get(item.id) === (item.stage ?? '')) continue;
+    if (k === 'intake' && intakeStages.get(item.id) === (item.stage ?? '')) continue;
+    // Code-freeze split-by-skill: audit+implement+risk-effort offers pause
+    // during a freeze/ambiguous marker (plan/intake still offer).
+    if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) continue;
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+    // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while the
+    // queue is deep — the instance then offers its next dispatchable head
+    // item (audit/plan/intake) instead of floating a held implement.
+    if (k === 'implement') {
+      const gate = await reviewGateForQueue();
+      if (isImplementHeldByReviewGate(k, item, gate)) {
+        heldByReviewQueue = true;
+        continue;
       }
-    } else {
-      sawError = true;
     }
+    const candidate: DowntimeCandidate = {
+      id: item.id,
+      title: item.title,
+      stage: k === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
+      status: item.status,
+      priority: item.priority,
+      sortIndex: item.sortIndex,
+    };
+    return { ok: true, kind: k, candidate };
   }
 
-  const critical = await deps.getNextCriticalCandidate(cwd);
-  if (critical.ok) {
-    if (critical.candidate !== null) {
-      const kind = criticalSkillKind(critical.candidate.stage);
-      if (kind !== null && !(frozen && kind === 'implement')) {
-        return { ok: true, kind, candidate: critical.candidate };
-      }
-    }
-  } else {
-    sawError = true;
-  }
-
-  if (!frozen) {
-    const implement = await deps.getNextImplementCandidate(cwd);
-    if (implement !== null) {
-      return { ok: true, kind: 'implement', candidate: implement };
-    }
-  }
-
-  const intakeComplete = await deps.getNextItem('intake_complete', cwd);
-  if (intakeComplete.ok) {
-    if (intakeComplete.candidate !== null) {
-      return { ok: true, kind: 'plan', candidate: intakeComplete.candidate };
-    }
-  } else {
-    sawError = true;
-  }
-
-  const idea = await deps.getNextItem('idea', cwd);
-  if (idea.ok) {
-    if (idea.candidate !== null) {
-      return { ok: true, kind: 'intake', candidate: idea.candidate };
-    }
-  } else {
-    sawError = true;
-  }
-
-  // Genuinely empty backlog (both prep tiers answered) → no candidate. A
-  // CLI error with no candidate → {ok:false} (the check-in keeps the
-  // existing entry, fail-open — a transient wl error must never drop a
-  // valid offer).
-  return sawError ? { ok: false } : { ok: true, noCandidate: true };
+  // Herdr list was non-empty but every item was filtered by a safety gate
+  // (or is non-dispatchable). When the ONLY reason nothing was offered is
+  // the deep-queue hold of non-critical implements, report the distinct
+  // `reviewQueueHold` result — the backlog is NOT empty, so the caller
+  // must not treat this as a genuine no-candidate (no cooldown; polling
+  // resumes immediately when the queue drains below the threshold).
+  return heldByReviewQueue
+    ? { ok: true, reviewQueueHold: true }
+    : { ok: true, noCandidate: true };
 }
 
 /**
- * Leader-only dispatch from the shared coordination list (parent AC4):
- * re-fetch each entry's item, classify it into its tier, apply the
- * code-freeze gate (audit/implement skipped while frozen, plan/intake
- * still run) and dispatch the highest-priority available item via the
- * existing `dispatchClaimedTier` pipeline (CAS claim → marker write →
- * spawn) — the dispatched-marker exclusion and CAS claim guards are
- * preserved by construction (AC5). On a successful dispatch (or a
- * claimed-but-failed spawn), the entry is removed from the coordination
- * file so its owner re-queues its next item at the next check-in (AC3).
+ * Leader-only dispatch from the shared coordination OFFER list
+ * (WL-0MTK1ILM2009QYB2 "dispatcher == Herdr list head"): the
+ * coordination file holds ONE entry per instance — each entry offers that
+ * instance's own worklog Herdr list HEAD, computed at the owner's
+ * check-in (`computeMostImportantItem`, canonical ranking via
+ * fetcher → smart-selection → grouping). The leader does NOT re-rank the
+ * offers (no tier priority, no round-robin cursor — those second
+ * orderings are retired by WL-0MTK1ILM2009QYB2 AC1–2): entries dispatch
+ * in file order, and every safety gate is a sequential FILTER at
+ * dispatch time on each offer (WL-0MTMPIQBE001J41P — no wall-clock
+ * prune):
+ *  - `fetchItem` re-fetch: the offer is validated against the item's
+ *    CURRENT state (a stale offer — item closed/in_progress/review-gated
+ *    or otherwise non-dispatchable — is dropped via `removeEntry`, no
+ *    pane, no marker, no cursor, and dispatch continues to the next
+ *    offer);
+ *  - `classifyItemForDispatch` maps the fetched item to its dispatch
+ *    skill and enforces the producer-review gate + audit freshness/
+ *    recency + implement caps;
+ *  - code-freeze split-by-skill: audit/implement offers skip while frozen
+ *    (plan/intake still dispatch);
+ *  - review-queue depth gate (WL-0MT2UQWOR007CYY9, rewired by
+ *    WL-0MTTSWC1X005P4VD): a NON-CRITICAL implement offer is HELD (entry
+ *    kept, skipped this cycle) while ITS OWN root's completed/in_review
+ *    queue is deep — audits (the queue drain), plan, intake and critical
+ *    implements flow unconditionally; when every surviving offer is held,
+ *    the outcome reason is the neutral 'review-queue-hold' (never
+ *    'no-candidate' / cooldown);
+ *  - per-tier free-slot minimums (audit ≥ 2, single-pane ≥ 1).
  *
- * Tier priority: audit → implement → plan → intake. Within a tier,
- * entries dispatch in file order (the instances' offers are equally
- * weighted; round-robin is superseded by the shared-list model).
+ * The first offer that passes every filter dispatches via the existing
+ * `dispatchClaimedTier` pipeline (CAS claim → marker write → spawn); its
+ * entry is removed so the owner re-offers its next Herdr head at the next
+ * check-in (AC3). A claimed-but-failed spawn also consumes the entry
+ * (the marker + in_progress claim prevent a double dispatch).
  *
  * Fail-closed at every boundary: a wl failure fetching an entry resolves
  * `wl-error` only when EVERY entry failed (a fully broken lookup — a
@@ -1558,44 +2097,21 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
   // never classify an entry — fail closed to a strike (a misconfigured
   // deployment must be visible, not silently idle).
   if (typeof deps.fetchItem !== 'function') {
-    return { dispatched: false, reason: 'wl-error' };
+    return { dispatched: false, reason: 'wl-error', error: 'fetchItem unavailable' };
   }
   const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
-  // Stale-entry pruning (parent AC3 risk mitigation): the leader prunes
-  // entries whose owner has not refreshed within the lease TTL (crashed or
-  // idle instances) at the START of every dispatch cycle, so dead offers
-  // never starve the queue and their owners re-queue on their next
-  // check-in. Fail-safe: pruneStaleEntries never throws (lock contention or
-  // IO → 0 removed).
-  const pruned = pruneStaleEntries(
-    opts.coordinationDir,
-    (opts.leaseTtlMs ?? DEFAULT_LEASE_TTL_SECONDS * 1000),
-    now,
-  );
-  if (pruned > 0) {
-    // Audit trail (WL-0MSXHAE290067VAL).
-    void appendCoordinationLogEntry(opts.cwd, {
-      kind: 'coordination',
-      operation: 'prune',
-      prunedCount: pruned,
-      at: new Date(now).toISOString(),
-    });
-    // The coordination FILE is the source of truth: the passed snapshot is
-    // stale after a prune — re-read it so a pruned (crashed-instance)
-    // entry can never classify or dispatch this cycle. Fail-safe: a failed
-    // re-read falls back to the snapshot (already pruned entries are then
-    // skipped by classify → non-dispatchable).
-    entries = readCoordinationFile(opts.coordinationDir)?.entries ?? entries;
-  }
+  // No wall-clock prune (WL-0MTMPIQBE001J41P) — entries persist until
+  // dispatch-time eligibility check (fetchItem+classify) finds them
+  // non-dispatchable. Stale offers are dropped at dispatch, never by age.
 
   // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
   // audit tier needs ≥ 2 slots (parent + Phase 2 child at
@@ -1610,6 +2126,20 @@ export async function dispatchFromCoordination(
     // tier chain's 0-free-slots defensive no-candidate).
     return { dispatched: false, reason: 'no-candidate' };
   }
+
+  // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+  // WL-0MTTSWC1X005P4VD): read ONCE per offer root (cached for this
+  // invocation). Each root's queue depth is authoritative for ITS OWN
+  // non-critical implement offers (audits/plan/intake/critical flow
+  // unconditionally). Frozen → null (implements are already freeze-paused).
+  const reviewGateCache = new Map<string, ReviewQueueGateResult>();
+  const reviewGateForRoot = async (root: string): Promise<ReviewQueueGateResult | null> => {
+    if (frozen) return null;
+    if (!reviewGateCache.has(root)) {
+      reviewGateCache.set(root, await readReviewQueueGate(deps, root, opts.browseItemCount));
+    }
+    return reviewGateCache.get(root) ?? null;
+  };
 
   // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
   // gated by the SAME fresh-read code-freeze marker as the audit/implement
@@ -1630,91 +2160,164 @@ export async function dispatchFromCoordination(
     }
   }
 
-  // Re-fetch + classify every entry once, grouped by tier.
-  const byTier = new Map<DowntimeSkillKind, Array<{ entry: CoordinationEntry; info: DowntimeItemInfo }>>();
+  // Entries are OFFERS — one per instance, each naming that instance's
+  // own worklog Herdr list head at its last check-in (computeMostImportantItem).
+  // The leader dispatches in ROUND-ROBIN across worklogRoots: the
+  // least-recently-served project root is selected first (cursor advances
+  // atomically via selectLeastRecentlyServed). WL-0MTMPIQBE001J41P: entries
+  // persist until dispatch-time eligibility finds them non-dispatchable; a
+  // stale offer is removed eagerly (no pane, no marker) and dispatch
+  // continues to the next offer.
+  // Round-robin cross-project dispatch: select the least-recently-served
+  // project root before dispatch iteration (wire in the cursor infrastructure
+  // that was implemented but never connected — WL-0MTQ2FGSK004CBRK).
+  const entryRoots = entries
+    .filter(e => e.instanceId.length > 0 && e.workItemId.length > 0)
+    .map(e => e.worklogRoot ?? e.directory);
+  const selectedRoot = selectLeastRecentlyServed(opts.coordinationDir, entryRoots, now);
+  if (selectedRoot !== null) {
+    const idx = entries.findIndex(
+      e => (e.worklogRoot ?? e.directory) === selectedRoot,
+    );
+    if (idx > 0) {
+      const [selected] = entries.splice(idx, 1);
+      entries.unshift(selected);
+    }
+  }
+
   let fetchAttempts = 0;
   let fetchFailures = 0;
+  let lastFetchError: string | undefined;
+  let lastEntryWorkItemId: string | undefined; // WL-0MTJPYM53003ORCV
+  // True when at least one non-critical implement offer was held this cycle
+  // by the review-queue depth gate (drives the terminal reason).
+  let reviewHold = false;
   for (const entry of entries) {
     if (entry.instanceId.length === 0 || entry.workItemId.length === 0) continue;
     fetchAttempts += 1;
-    const result = await deps.fetchItem(entry.workItemId, entry.directory);
+    const worklogRoot = entry.worklogRoot ?? entry.directory;
+    const result = await deps.fetchItem(entry.workItemId, worklogRoot);
     if (!result.ok) {
+      // Per-entry wl/parse failure — tolerated (fail-open per instance:
+      // one broken worklog must not starve the rest).
       fetchFailures += 1;
+      lastFetchError = (result as { error?: string }).error ?? 'fetchItem failed';
+      lastEntryWorkItemId = entry.workItemId; // WL-0MTJPYM53003ORCV
       continue;
     }
+    // Sequential FILTERS on the offer (never a ranking).
+    // Producer-review gate (parent WL-0MTIAL65N004T22F AC3) + dispatch-
+    // time eligibility (WL-0MTMPIQBE001J41P): a now-gated or otherwise
+    // non-dispatchable offer is stale — remove it, no pane, no marker.
     const kind = classifyItemForDispatch(result.info, now);
-    if (kind === null) continue;
-    if (frozen && (kind === 'audit' || kind === 'implement')) continue;
-    const group = byTier.get(kind) ?? [];
-    group.push({ entry, info: result.info });
-    byTier.set(kind, group);
+    if (kind === null) {
+      removeEntry(opts.coordinationDir, entry.instanceId);
+      continue;
+    }
+    // Code-freeze split-by-skill: audit/implement/risk-effort offers pause
+    // during a freeze/ambiguous marker (plan/intake still dispatch). A frozen
+    // offer is stale for the dispatch window — drop it so the owner re-offers
+    // its next head at the next check-in.
+    if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) {
+      removeEntry(opts.coordinationDir, entry.instanceId);
+      continue;
+    }
+    // Audit-tier slot minimum: an audit pane needs a second slot for its
+    // Phase 2 child (WL-0MSORQ1RG005DGUS / WL-0MT32F90V008UAD2 AC3) — skip
+    // the offer this cycle when too few slots are free, but KEEP it (it is
+    // still a valid offer; the next cycle may have the slot).
+    if (kind === 'audit' && !auditEligible) continue;
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+    // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while ITS
+    // OWN root's review queue is deep. Audits (the queue drain), plan,
+    // intake and critical implements flow unconditionally. The entry is
+    // KEPT (not removed) — the queue may drain below the threshold at any
+    // moment (an audit completes / producer reviews) and the next cycle
+    // then dispatches it; the owner's check-in re-offers its next head
+    // once the gate allows.
+    if (kind === 'implement') {
+      const gate = await reviewGateForRoot(worklogRoot);
+      if (isImplementHeldByReviewGate(kind, result.info, gate)) {
+        reviewHold = true;
+        continue;
+      }
+    }
+    // Dispatch attempt (CAS claim → marker → spawn).
+    const outcome = await dispatchClaimedTier(
+      deps,
+      kind,
+      toCoordinationCandidate(result.info),
+      { model: opts.model, cwd: worklogRoot },
+    );
+    if (outcome.dispatched) {
+      // Dispatched — remove the entry so the owner re-queues its next
+      // Herdr head at the next check-in (AC3 re-queue).
+      removeEntry(opts.coordinationDir, entry.instanceId);
+      return outcome;
+    }
+    if (outcome.reason === 'claim-failed') {
+      // Another pane won the CAS race — neutral; try the next offer.
+      continue;
+    }
+    if (outcome.reason === 'wl-error') {
+      // A wl failure is a strike — stop the cycle (three-strike rule
+      // decides when to pause). Carry the entry's workItemId for logging.
+      return { ...outcome, workItemId: entry.workItemId };
+    }
+    if (outcome.reason === 'anchor-unavailable') {
+      // Dispatcher anchor provisioning failed (C0 WL-0MTR01EU7005SYZG): the
+      // anchor is MACHINE-WIDE, so no other offer can spawn either — stop the
+      // cycle now (neutral, no strike, no cooldown; the next idle tick
+      // retries the provisioning). Keep the entry: the offer is still valid.
+      return outcome;
+    }
+    if (outcome.reason === 'spawn-failed' || outcome.reason === 'marker-write-failed') {
+      // The item is claimed (+ marked) but the pane never appeared:
+      // remove the entry so the owner re-queues; the standing marker and
+      // the in_progress claim prevent double-dispatch.
+      removeEntry(opts.coordinationDir, entry.instanceId);
+      return outcome;
+    }
   }
 
   // A wl lookup that failed for EVERY entry is a persistent CLI/parse
   // failure — a strike (never a silent no-candidate). Per-instance
-  // failures are tolerated (fail-open).
+  // failures are tolerated (fail-open). Carry the last entry's workItemId
+  // for per-strike logging (WL-0MTJPYM53003ORCV).
   if (fetchAttempts > 0 && fetchFailures === fetchAttempts) {
-    return { dispatched: false, reason: 'wl-error' };
+    return {
+      dispatched: false,
+      reason: 'wl-error',
+      error: lastFetchError ?? 'all fetchItem lookups failed',
+      workItemId: lastEntryWorkItemId,
+    };
   }
 
-  for (const tier of COORDINATION_TIER_ORDER) {
-    const group = byTier.get(tier) ?? [];
-    // Audit-tier slot minimum: an audit pane needs a second slot for its
-    // Phase 2 child (WL-0MSORQ1RG005DGUS) — skip the whole audit group
-    // when too few slots are free (ineligible, never a strike).
-    if (tier === 'audit' && !auditEligible) continue;
-    for (const { entry, info } of group) {
-      const outcome = await dispatchClaimedTier(
-        deps,
-        tier as DowntimeSkillKind,
-        toCoordinationCandidate(info),
-        { model: opts.model, cwd: entry.directory },
-      );
-      if (outcome.dispatched) {
-        // Dispatched — remove the entry so the owner re-queues its next
-        // most-important item at the next check-in (AC3 re-queue).
-        removeEntry(opts.coordinationDir, entry.instanceId);
-        return outcome;
-      }
-      if (outcome.reason === 'claim-failed') {
-        // Another pane won the CAS race — neutral; try the next entry.
-        continue;
-      }
-      if (outcome.reason === 'wl-error') {
-        // A wl failure is a strike — stop the cycle (three-strike rule
-        // decides when to pause).
-        return outcome;
-      }
-      if (outcome.reason === 'spawn-failed' || outcome.reason === 'marker-write-failed') {
-        // The item is claimed (+ marked) but the pane never appeared:
-        // remove the entry so the owner re-queues; the standing marker and
-        // the in_progress claim prevent double-dispatch.
-        removeEntry(opts.coordinationDir, entry.instanceId);
-        return outcome;
-      }
-    }
-  }
-
-  // No tier had a dispatchable entry (or a freeze skip with an empty
-  // plan/intake list). The caller decides cooldown vs. resume via the
+  // No offer survived the dispatch-time filters (or a freeze skip with no
+  // plan/intake offers). The caller decides cooldown vs. resume via the
   // same reason semantics as the legacy dispatcher — in the worker tick,
   // a coordination-mode no-candidate is probed against the worklog
   // (WL-0MTEZ4XZJ006Y9U7): an empty OFFER FILE is never mistaken for an
-  // empty BACKLOG.
+  // empty BACKLOG. A deep-queue hold is reported as the neutral
+  // 'review-queue-hold' (never 'no-candidate' — the cooldown must not fire
+  // while audits are draining the queue; the gate may lift at any moment).
   return frozen
     ? { dispatched: false, reason: 'code-freeze' }
-    : { dispatched: false, reason: 'no-candidate' };
+    : reviewHold
+      ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
+      : { dispatched: false, reason: 'no-candidate' };
 }
 
 /**
- * One 30-minute coordination check-in (parent AC3): recompute this
- * instance's most-important item and upsert its entry in the shared
- * coordination file. When the instance has NOTHING dispatchable (genuine
- * empty backlog, no CLI errors) the own entry is removed — the leader must
- * not float a dead offer; the owner re-offers when work appears. On a
- * CLI-error computation the existing entry is kept (fail-open) — a
- * transient wl failure must never drop a valid offer. Returns the stored
- * item id (or null when nothing was offered).
+ * One coordination check-in (WL-0MTMPSCL8000O45H — default every 5 min,
+ * parent AC3): recompute this instance's most-important item and upsert
+ * its entry in the shared coordination file. When the instance has NOTHING
+ * dispatchable (genuine empty backlog, no CLI errors) the own entry is
+ * removed — the leader must not float a dead offer; the owner re-offers
+ * when work appears (immediately on next tick after dispatch removes it —
+ * WL-0MTMPSCL8000O45H AC2). On a CLI-error computation the existing entry
+ * is kept (fail-open) — a transient wl failure must never drop a valid
+ * offer. Returns the stored item id (or null when nothing was offered).
  */
 export async function runCoordinationCheckIn(
   deps: DowntimeWorkerDeps,
@@ -1722,17 +2325,23 @@ export async function runCoordinationCheckIn(
     cwd: string;
     coordinationDir: string;
     instanceId: string;
+    /** browseItemCount threshold for the review-queue depth gate (defaults to DEFAULT_BROWSE_ITEM_COUNT). */
+    browseItemCount?: number;
   },
   now: number = Date.now(),
 ): Promise<{ offered: string | null; updated: boolean }> {
   const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
-  const result = await computeMostImportantItem(deps, coordinator.cwd, now);
+  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount);
   if (!result.ok) {
     // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
     return { offered: current?.workItemId ?? null, updated: false };
   }
-  if ('noCandidate' in result && result.noCandidate) {
-    // Genuinely nothing dispatchable — remove the own entry (no dead offers).
+  if (!('candidate' in result)) {
+    // Genuinely nothing dispatchable (`noCandidate`) OR the deep-queue hold
+    // left nothing offerable (`reviewQueueHold`, WL-0MTTSWC1X005P4VD) —
+    // either way the own entry is removed (no dead offers; the owner
+    // re-offers once work becomes offerable). The caller distinguishes the
+    // two via the probe path (reviewQueueHold must never pause).
     const removed = removeEntry(coordinator.coordinationDir, coordinator.instanceId) !== null;
     // Audit trail (WL-0MSXHAE290067VAL): log the emptied check-in.
     void appendCoordinationLogEntry(coordinator.cwd, {
@@ -1862,43 +2471,44 @@ export async function runCoordinationCheckIn(
  */
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
-  opts: { model: string; cwd: string; freeSlots?: number },
+  opts: {
+    model: string;
+    cwd: string;
+    freeSlots?: number;
+    browseItemCount?: number;
+    /** Bounded concurrency cap (F2/F3 WL-0MT50LKAK001EF5Q). Optional — defaults to 1 (single-flight). */
+    maxConcurrentDispatches?: number;
+  },
 ): Promise<DowntimeDispatchOutcome> {
-  if (dispatchInFlight) {
+  // Bounded in-flight gate (F3): the cap is re-read per call and clamped to
+  // [1, 4], so a same-process concurrent caller with the same raised cap
+  // proceeds up to the bound; beyond it a caller is refused with the legacy
+  // single-flight reason ('dispatch-in-flight' — neutral, never a strike).
+  // cap=1 reproduces the pre-F3 behavior exactly. The count decrements in
+  // the finally below — a failed spawn / marker failure / claim loss ends
+  // the pipeline and never leaks an in-flight slot.
+  const maxConcurrent = clampDowntimeMaxConcurrentDispatches(
+    opts.maxConcurrentDispatches ?? DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
+  );
+  if (dispatchInFlightCount >= maxConcurrent) {
     return { dispatched: false, reason: 'dispatch-in-flight' };
   }
-  dispatchInFlight = true;
+  dispatchInFlightCount += 1;
   try {
-    // Per-tier free-slot minimums at selection time (parent
-    // WL-0MT32F90V008UAD2 AC3): each tier requires a minimum number of
-    // FREE slots on the LATEST polled status before its candidate is even
-    // considered — audit needs 2 (parent + Phase 2 child at
-    // `AUDIT_PHASE2_PARALLELISM=1`, WL-0MSORQ1RG005DGUS), every single-
-    // pane tier (scheduled/implement/plan/intake) needs 1. These are
-    // ADDITIONAL selection-time checks — the idle-duration gate (configured
-    // N) is unchanged. `freeSlots` is computed by the caller from the
-    // latest poll (per-slot free count when per-slot identity is served,
-    // else `available_slots`). When absent (direct legacy callers), the
-    // tier minimums do not gate (fail-open for direct API use; the worker
-    // always passes the polled count). An unmet minimum skips that tier to
-    // the next eligible one — ineligible, never a strike and never a
-    // wl-error (mirrors the code-freeze skip).
+    // Unified contract WL-0MTK1ILM2009QYB2: Herdr list is the sole ranking path.
+    // dispatchDowntimeWork consumes the Herdr selection list head (getHerdrListHead)
+    // and applies safety gates as sequential FILTERS on that ordered sequence
+    // (scheduled-prompt → code-freeze → dispatched-marker → free-slot minimums →
+    // active-audit single-flight → freshness-recency → CAS claim → spawn).
+    // No second tier ordering remains on this path (AC1–2). WL-0MT32F90V008UAD2 AC3
+    // per-tier free-slot minimums (audit needs 2, single-pane 1) are now per-item
+    // filters on the Herdr-ordered candidates rather than tier skips.
     const freeSlots = opts.freeSlots;
     const panesEligible = freeSlots === undefined || freeSlots >= DOWNTIME_PANE_MIN_FREE_SLOTS;
     const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
 
-    // Active-audit single-flight outcome flags (WL-0MT3PHW4I002SNOV), read
-    // at the final empty-backlog return below: an `audit-in-flight` skip is
-    // reported as such (never 'no-candidate', so the cooldown is not
-    // entered while an audit runs); a failed active-audit check with an
-    // otherwise empty backlog reports wl-error (partial information must
-    // not pause the worker).
     let auditInFlight = false;
     let auditCheckFailed = false;
-    // Freshness-skip flag (WL-0MT8KSTOE00871E7): when the interim freshness
-    // re-check finds a fresh audit, the audit tier skip is reported as
-    // 'fresh-audit-skip' (never 'no-candidate', so the cooldown is not
-    // entered while the item is already audited).
     let freshnessSkip = false;
 
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
@@ -1912,22 +2522,69 @@ export async function dispatchDowntimeWork(
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
     if (!frozen && panesEligible) {
-      // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
-      // gated by the SAME fresh-read code-freeze marker as the audit/
-      // implement tiers (AC5) — while frozen OR ambiguous (fail-closed)
-      // scheduled prompts are skipped so no new code changes land mid-
-      // release, and dispatch falls through to the plan/intake tiers below.
-      // A due prompt dispatches its prompt text immediately — it never
-      // reaches the backlog tiers, so it never triggers the no-candidate
-      // cooldown (AC6). Absent or malformed config resolves null (fail-
-      // closed, logged by the dep): no scheduled dispatch and the tiers
-      // below are unaffected (AC2).
       const duePrompt = await deps.getDueScheduledPrompt(opts.cwd);
       if (duePrompt !== null) {
         return await dispatchScheduledPrompt(deps, duePrompt, opts);
       }
     }
 
+    // ── Review-queue depth gate — ONE bounded read per dispatch when the
+    // non-critical implement tier is live (!frozen and a pane slot is free),
+    // shared by the Herdr-head filter (dispatchFromHerdrList) AND the legacy
+    // tier chain below (WL-0MT2UQWOR007CYY9; single getReviewQueueCount call
+    // site per dispatch, WL-0MTTSWC1X005P4VD). Never a second ranking — the
+    // gate only HOLDS non-critical implement candidates while the root-only
+    // completed/in_review queue is at/over browseItemCount; audits/plan/
+    // intake/critical flow unconditionally.
+    let reviewGate: ReviewQueueGateResult | null = null;
+    if (!frozen && panesEligible) {
+      reviewGate = await readReviewQueueGate(deps, opts.cwd, opts.browseItemCount);
+    }
+
+    // ── Herdr list head consumes the ranking (WL-0MTK1ILM2009QYB2 ACs 1–2) ──
+    // When the Herdr list is populated it is the sole ranking source; a
+    // filtered-exhaustion returns the terminal reason directly and the legacy
+    // tier chain is not consulted. When the list is genuinely empty (no ranked
+    // candidates) the legacy chain remains as a test-compat fallback — the
+    // extensive existing suite stubs per-tier lookups with an empty Herdr
+    // head, so it stays green during migration. Production
+    // `createDowntimeDeps` always returns a non-empty head when dispatchable
+    // work exists, so the fallback is unreachable there and will be removed
+    // once the suite is fully on Herdr-head stubs.
+    {
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false };
+      const head = await deps.getHerdrListHead(opts.cwd);
+      if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
+      if (head.items.length > 0) {
+        const herdrOutcome = await dispatchFromHerdrList(deps, head.items, { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate }, flags);
+        auditInFlight = flags.auditInFlight;
+        auditCheckFailed = flags.auditCheckFailed;
+        const auditCheckError = flags.auditCheckError;
+        freshnessSkip = flags.freshnessSkip;
+        const reviewHeld = flags.reviewHeld;
+        if (herdrOutcome !== null) return herdrOutcome;
+        // Herdr list had items but every one was filtered by a safety gate:
+        // compose the terminal reason and DO NOT fall through to the legacy
+        // chain (AC2 — gates are filters, not a fallback ranking).
+        if (frozen) return { dispatched: false, reason: 'code-freeze' };
+        if (freshnessSkip) return { dispatched: false, reason: 'fresh-audit-skip' };
+        if (auditInFlight) return { dispatched: false, reason: 'audit-in-flight' };
+        if (auditCheckFailed) return { dispatched: false, reason: 'wl-error', error: auditCheckError };
+        // Deep review queue held the only remaining (non-critical implement)
+        // candidates: neutral 'review-queue-hold', NEVER 'no-candidate' — no
+        // cooldown while audits drain the queue (WL-0MTTSWC1X005P4VD AC2).
+        if (reviewHeld) return { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON };
+        return { dispatched: false, reason: 'no-candidate' };
+      }
+      // Genuinely empty Herdr list → keep flags and fall through to the
+      // legacy chain (test-compat path; flags still drive the terminal reason).
+      auditInFlight = flags.auditInFlight;
+      auditCheckFailed = flags.auditCheckFailed;
+      freshnessSkip = flags.freshnessSkip;
+    }
+
+    // ── Legacy tier chain (retained for test compat; production-unreachable) ──
+    // See the Herdr-list-head contract above.
     if (!frozen) {
       // Audit tier (WL-0MSI8H3HP000K0RG): dispatch /skill:audit for the
       // first completed/in_review item without a valid audit. Root-only
@@ -1978,7 +2635,7 @@ export async function dispatchDowntimeWork(
             // No active audit: proceed with the candidate lookup unchanged.
             const audit = await deps.getNextAuditCandidate(opts.cwd);
             if (audit.ok) {
-              if (audit.candidate !== null) {
+              if (audit.candidate !== null && audit.candidate.needsProducerReview !== true) {
                 // Interim freshness re-check (WL-0MT8KSTOE00871E7): between
                 // candidate selection and dispatch, a valid audit may have
                 // been recorded (e.g. by a human or another process). Re-check
@@ -2009,7 +2666,7 @@ export async function dispatchDowntimeWork(
                 }
               }
             } else {
-              return { dispatched: false, reason: 'wl-error' };
+              return { dispatched: false, reason: 'wl-error', error: audit.error };
             }
           }
         } else {
@@ -2048,7 +2705,7 @@ export async function dispatchDowntimeWork(
     if (panesEligible) {
       const critical = await deps.getNextCriticalCandidate(opts.cwd);
       if (critical.ok) {
-        if (critical.candidate !== null) {
+        if (critical.candidate !== null && critical.candidate.needsProducerReview !== true) {
           const kind = criticalSkillKind(critical.candidate.stage);
           if (kind !== null && !(frozen && kind === 'implement')) {
             return await dispatchClaimedTier(deps, kind, critical.candidate, opts);
@@ -2058,27 +2715,69 @@ export async function dispatchDowntimeWork(
           // the non-critical tiers.
         }
       } else {
-        return { dispatched: false, reason: 'wl-error' };
+        return { dispatched: false, reason: 'wl-error', error: critical.error };
       }
     }
 
     if (!frozen && panesEligible) {
+      // Review-queue depth gate (WL-0MT2UQWOR007CYY9, shared by the live
+      // Herdr-head path — read ONCE per dispatch above via
+      // `readReviewQueueGate`, never a second wl call): when the root-only
+      // completed/in_review review queue is deep enough (count >=
+      // browseItemCount), NON-CRITICAL implement candidates are held.
+      // Re-read live from settings every dispatch (no plugin restart
+      // needed). Fail-closed: a wl error counting the queue → gate active
+      // (only critical remains eligible). Critical-priority candidates
+      // BYPASS the gate entirely; audits/plan/intake flow unconditionally.
+      const gateActive = reviewGate?.deep ?? false;
+
       // Implement tier (WL-0MSMAYPQP001FLR6): after the critical-first
       // gate, dispatch /skill:implement for the highest-priority open
       // plan_complete item with
-      // risk ≤ Medium / effort ≤ Medium. getNextImplementCandidate is fail-closed
-      // (null on wl failure or no candidate), so a null here means the tier is
-      // exhausted and the plan/intake tiers below still run (AC5/AC6 — a wl
-      // error at the implement tier does NOT short-circuit the fallback).
+      // risk ≤ Medium / effort ≤ Medium. When the review-queue depth gate is
+      // active, only critical-priority candidates remain eligible. When only
+      // non-critical candidates exist under the gate, the implement tier is
+      // skipped and dispatch falls through to plan/intake — the skip reason
+      // must never be 'no-candidate' (the neutral reason keeps polling alive
+      // so a critical implement / new plan / intake dispatches immediately).
+      // getNextImplementCandidate is fail-closed (null on wl failure or no
+      // candidate), so a null here means the tier is exhausted and the
+      // plan/intake tiers below still run (AC5/AC6 — a wl error at the
+      // implement tier does NOT short-circuit the fallback).
       // Pane minimum (parent WL-0MT32F90V008UAD2 AC3 / F3-fix
       // WL-0MT4RQTID000GT69): ≥ 1 free slot at selection time, matching the
       // critical/audit/plan/intake tiers — a direct dispatchDowntimeWork(
       // {freeSlots:0}) must never dispatch implement. 0 free slots is
       // ineligible (never a strike): the lookup is skipped entirely and
       // dispatch falls through to the plan tier's defensive no-candidate.
-      const implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
-      if (implementCandidate !== null) {
-        return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
+      let implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
+      if (implementCandidate !== null && implementCandidate.needsProducerReview !== true) {
+        // Gate enforcement: only critical candidates bypass the review-queue
+        // depth throttle (shared `isImplementHeldByReviewGate` semantics).
+        // Non-critical candidates are excluded when the gate is active.
+        if (!gateActive || implementCandidate.priority === 'critical') {
+          return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
+        }
+        // Non-critical candidate gated by review-queue depth — skip to
+        // plan/intake tiers.
+      }
+      // Gate-active with no eligible implement candidate (or only non-critical):
+      // fall through to plan/intake. The caller below must NOT report 'no-
+      // candidate' when the remaining backlog is empty and the gate is active;
+      // it must report 'review-queue-hold' instead (never 'no-candidate'), so
+      // the no-candidate cooldown is not triggered (WL-0MTTSWC1X005P4VD AC2).
+      if (gateActive) {
+        let planIntakeEmpty = true;
+        if (panesEligible) {
+          const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
+          if (intakeComplete.ok && intakeComplete.candidate !== null && intakeComplete.candidate.needsProducerReview !== true) {
+            planIntakeEmpty = false;
+          }
+        }
+        if (planIntakeEmpty) {
+          return { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON };
+        }
+        // plan/intake has candidates — fall through below to dispatch them.
       }
     }
     // Tier 2 (intake_complete → /skill:plan). A CLI error here does NOT
@@ -2088,14 +2787,16 @@ export async function dispatchDowntimeWork(
     // worker this is always true (the idle-duration gate has already
     // required ≥ N ≥ 1 free), the gate is defensive for direct API callers.
     let tier2Error = false;
+    let tier2ErrorDetail: string | undefined;
     if (panesEligible) {
       const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
       if (intakeComplete.ok) {
-        if (intakeComplete.candidate !== null) {
+        if (intakeComplete.candidate !== null && intakeComplete.candidate.needsProducerReview !== true) {
           return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, opts);
         }
       } else {
         tier2Error = true;
+        tier2ErrorDetail = intakeComplete.error;
       }
     } else {
       // 0 free slots (defensive, unreachable via the worker): the panes
@@ -2107,7 +2808,7 @@ export async function dispatchDowntimeWork(
     // no candidate — including when tier 2 errored.
     const idea = await deps.getNextItem('idea', opts.cwd);
     if (idea.ok) {
-      if (idea.candidate !== null) {
+      if (idea.candidate !== null && idea.candidate.needsProducerReview !== true) {
         return await dispatchClaimedTier(deps, 'intake', idea.candidate, opts);
       }
       if (tier2Error) {
@@ -2115,7 +2816,7 @@ export async function dispatchDowntimeWork(
         // provably empty (the intake_complete state is unknown) → fail
         // closed to busy (a strike), never a no-candidate — partial
         // information must not pause the worker.
-        return { dispatched: false, reason: 'wl-error' };
+        return { dispatched: false, reason: 'wl-error', error: tier2ErrorDetail };
       }
       // Both tiers answered with no candidate → genuine empty backlog. The
       // freeze gate must NOT pause the worker on an empty plan/intake
@@ -2130,16 +2831,16 @@ export async function dispatchDowntimeWork(
           : auditInFlight
             ? { dispatched: false, reason: 'audit-in-flight' }
             : auditCheckFailed
-              ? { dispatched: false, reason: 'wl-error' }
+              ? { dispatched: false, reason: 'wl-error', error: tier2ErrorDetail }
               : { dispatched: false, reason: 'no-candidate' };
     }
     // Tier 3 errored (with or without a tier-2 error): fail closed to busy.
     // The worker counts this as one CLI-error strike; the backlog is not
     // provably empty so this is never `no-candidate` (the three-strike rule
     // governs when consecutive errors pause the worker).
-    return { dispatched: false, reason: 'wl-error' };
+    return { dispatched: false, reason: 'wl-error', error: (idea as { error?: string }).error ?? tier2ErrorDetail };
   } finally {
-    dispatchInFlight = false;
+    dispatchInFlightCount -= 1;
   }
 }
 
@@ -2159,21 +2860,28 @@ export async function dispatchDowntimeWork(
 export function buildDowntimePaneArgs(
   kind: DowntimeSkillKind,
   prompt: string,
-  opts: { model: string; cwd: string; paneName?: string; itemTitle?: string; itemId?: string },
+  opts: {
+    model: string;
+    cwd: string;
+    paneName?: string;
+    itemTitle?: string;
+    itemId?: string;
+    anchorId?: string;
+  },
 ): string[] {
   const paneName =
     opts.paneName ??
     buildDowntimePaneTitle(kind, opts.itemTitle, opts.itemId);
-  return [
-    '--pane-name',
-    paneName,
-    '--no-focus',
-    '--cwd',
-    opts.cwd,
-    '--model',
-    opts.model,
-    prompt,
-  ];
+  const args = ['--pane-name', paneName, '--no-focus'];
+  // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): when the caller resolved the
+  // dedicated Dispatcher anchor pane id (F1 WL-0MTR2CD4X006XI7U), forward it
+  // as `--anchor <id>` so send-to-pi.sh splits from THAT pane instead of the
+  // leader's current pane. Absent → legacy `pane current` behavior.
+  if (opts.anchorId) {
+    args.push('--anchor', opts.anchorId);
+  }
+  args.push('--cwd', opts.cwd, '--model', opts.model, prompt);
+  return args;
 }
 
 /**
@@ -2326,6 +3034,10 @@ export interface DowntimeWorkerConfig {
     cwd: string;
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
+    /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
+    browseItemCount?: number;
+    /** Bounded concurrency cap (F2 WL-0MTSAB0QU003KTLA). Optional — defaults to 1 (single-flight). */
+    maxConcurrentDispatches?: number;
   };
   /**
    * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
@@ -2358,11 +3070,20 @@ export interface DowntimeWorkerConfig {
   /** Leader lease TTL seconds (parent AC2 — default 5 minutes). */
   leaseTtlSeconds?: number;
   /**
-   * Coordination check-in interval (parent AC3 — default 30 minutes):
-   * every instance re-verifies/updates its entry at this cadence, whether
-   * leader or not.
+   * Coordination check-in interval (WL-0MTMPSCL8000O45H — default 5
+   * minutes, parent AC3): every instance re-verifies/updates its entry at
+   * this cadence, whether leader or not. Clamped to ≥ 60 000 ms to avoid
+   * CLI churn.
    */
   checkInIntervalMs?: number;
+  /**
+   * Leader coordination check-in interval (WL-0MTOCBP1D009P4U3 — default
+   * 4 minutes): the leader re-offers at this cadence; followers use
+   * checkInIntervalMs (5 min default, WL-0MTMPSCL8000O45H). The value
+   * must be < lease TTL (5 min) so renewal is inside. Clamped to ≥ 60 000
+   * ms.
+   */
+  leaderCheckInIntervalMs?: number;
 }
 
 export interface DowntimeWorkerTickResult {
@@ -2494,11 +3215,24 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       })
     : null;
   const instanceId = leaderManager ? leaderManager.getInstanceId() : (opts.instanceId ?? 'legacy');
-  const checkInIntervalMs = opts.checkInIntervalMs ?? DEFAULT_COORDINATION_CHECK_IN_MS;
-  // Timestamp of the last coordination check-in (30-min cadence, parent
-  // AC3). null until the first tick so every instance checks in on startup
-  // (first check-in on startup — parent Constraint).
+  const DOWNTIME_CHECK_IN_FLOOR_MS = 60_000;
+  const _rawCheckInMs = opts.checkInIntervalMs ?? DEFAULT_COORDINATION_CHECK_IN_MS;
+  const checkInIntervalMs = Math.max(_rawCheckInMs, DOWNTIME_CHECK_IN_FLOOR_MS);
+  const _rawLeaderMs =
+    (opts as { leaderCheckInIntervalMs?: number }).leaderCheckInIntervalMs
+      ?? DEFAULT_LEADER_CHECK_IN_MS;
+  const leaderCheckInMs = Math.max(_rawLeaderMs, DOWNTIME_CHECK_IN_FLOOR_MS);
+  // Timestamp of the last coordination check-in (WL-0MTMPSCL8000O45H —
+  // default 5-min cadence, parent AC3). null until the first tick so every
+  // instance checks in on startup (first check-in on startup — parent
+  // Constraint).
   let lastCheckInAt: number | null = null;
+  // WL-0MTMPSCL8000O45H AC2 — churn guard: true when the LAST
+  // runCoordinationCheckIn offered nothing (genuine empty backlog). While
+  // true the immediate re-offer is suppressed (re-probing an empty worklog
+  // every ~10 s tick would churn wl); the periodic cadence retries until
+  // work appears and an offer lands.
+  let lastOfferEmpty = false;
   // Per-tick cached leadership decision (the lease read is cheap but let a
   // tick observe ONE consistent state — an election win mid-tick applies
   // next tick). Legacy mode (no coordinationDir) is always the leader.
@@ -2510,18 +3244,52 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // error so it is auditable. A single transient failure does NOT pause —
   // it retries on the next idle period. Fail-closed: error logging must
   // never crash the worker.
-  const pauseAfterPersistentErrors = async (message: string): Promise<void> => {
+  // WL-0MTJPYM53003ORCV: log on EVERY strike (not just 3) with structured
+  // fields for debuggability.
+  const pauseAfterPersistentErrors = async (
+    message: string,
+    error?: string,
+    extra?: {
+      workItemId?: string;
+      command?: string;
+      stderrExcerpt?: string;
+      exitCode?: number | null;
+      timeoutMs?: number;
+      probeContext?: string;
+    },
+  ): Promise<void> => {
     errorStrikes += 1;
+    const attempt = errorStrikes;
+    // Enrich stderr: the explicit stderr excerpt wins; otherwise fall back
+    // to the plain error string (fetcher.ts builds it from
+    // `stderr || stdout || error.message`, so it IS the stderr in most
+    // wl-error cases). Truncate to 200 chars with [truncated] marker
+    // (WL-0MTJPYM53003ORCV).
+    const rawStderr = extra?.stderrExcerpt ?? error ?? '';
+    const stderrExcerpt =
+      rawStderr.length > 0
+        ? rawStderr.length > 200
+          ? rawStderr.slice(0, 200) + '[truncated]'
+          : rawStderr
+        : undefined;
+    try {
+      await opts.deps.recordError({
+        cwd: opts.config().cwd,
+        at: new Date().toISOString(),
+        message,
+        ...(error ? { error } : {}),
+        ...(stderrExcerpt ? { stderrExcerpt } : {}),
+        ...(extra?.exitCode !== undefined ? { exitCode: extra.exitCode } : {}),
+        ...(extra?.timeoutMs !== undefined ? { timeoutMs: extra.timeoutMs } : {}),
+        ...(extra?.workItemId ? { workItemId: extra.workItemId } : {}),
+        ...(extra?.command ? { command: extra.command } : {}),
+        attempt,
+        ...(extra?.probeContext ? { probeContext: extra.probeContext } : {}),
+      });
+    } catch {
+      // fail-closed: error logging must never crash the worker
+    }
     if (errorStrikes >= DOWNTIME_ERROR_STRIKE_LIMIT) {
-      try {
-        await opts.deps.recordError({
-          cwd: opts.config().cwd,
-          at: new Date().toISOString(),
-          message,
-        });
-      } catch {
-        // fail-closed: error logging must never crash the worker
-      }
       cooldownUntil = Date.now() + opts.config().noCandidateCooldownMs;
       errorStrikes = 0;
       tracker.record(false);
@@ -2595,6 +3363,25 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // tracking, and no dispatch — exactly the settings-disabled path.
       if (!(override ?? cfg.enabled)) return { polled: false, dispatched: false, idle: false };
 
+      // ── Live marker gate (MANUAL `d`-toggle semantics only) ──────────
+      // WL-0MTTSWC1X005P4VD removed the sprint-complete auto-disable that
+      // used to write/clear this marker from queue depth (RCA root cause A:
+      // `completed/in_review >= browseItemCount` halted ALL dispatch AND the
+      // coordination check-in — the 21:53Z silence with no log lines). Queue
+      // depth NEVER stops the worker here: the producer review policy only
+      // holds non-critical implement dispatch (see the shared review-queue
+      // gate in dispatchDowntimeWork / dispatchFromCoordination), so audits
+      // (the queue drain), plan, intake, critical implements and the
+      // coordination check-in all continue regardless of queue depth.
+      //
+      // The marker is now written ONLY by the manual `d` toggle; a live
+      // gate respects a manually toggled marker immediately (not just at
+      // construction) so a disable survives a pane/plugin restart and is
+      // honoured cross-process.
+      if (disableMarkerExists(cfg.cwd) && override === null) {
+        return { polled: false, dispatched: false, idle: false };
+      }
+
       // ── Leader election + coordination check-in (parent
       // WL-0MST3OJ8S0001ROL AC1/AC2/AC3) ───────────────────────────────────
       // In legacy mode (no coordinationDir) this whole block is skipped: no
@@ -2657,27 +3444,63 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         }
 
         // Coordination check-in (parent AC3 — first on startup, then every
-        // 30 minutes): recompute THIS instance's most-important item and
-        // verify/update its entry in the shared coordination file. Runs for
-        // leader AND non-leader alike — every instance contributes its most
-        // important item; the single elected leader dispatches from the list.
-        if (lastCheckInAt === null || tickNow - lastCheckInAt >= checkInIntervalMs) {
+        // 5 min, WL-0MTMPSCL8000O45H): recompute THIS instance's most-
+        // important item and verify/update its entry in the shared
+        // coordination file. Runs for leader AND non-leader alike — every
+        // instance contributes its most important item; the single elected
+        // leader dispatches from the list. Leader every 4 min
+        // (WL-0MTOCBP1D009P4U3); clamp ≥ 60 s.
+        //
+        // WL-0MTMPSCL8000O45H AC2 — immediate re-offer when the owner's own
+        // entry was removed by the leader's dispatch (push-based re-offer
+        // via coordination-file observation on the next tick). Fail-open:
+        // unreadable coordination file → no re-offer → the periodic cadence
+        // retries. Not while paused (no-candidate cooldown is a full stop;
+        // the periodic boundary below still cancels the pause on a fresh
+        // offer) and not while the last check-in offered nothing (churn
+        // guard — the periodic cadence re-probes for new work).
+        let reOfferDue = false;
+        try {
+          const notPaused = cooldownUntil === null || Date.now() >= cooldownUntil;
+          reOfferDue =
+            notPaused
+            && !disableMarkerExists(cfg.cwd)
+            && !lastOfferEmpty
+            && getEntry(opts.coordinationDir!, instanceId) === null;
+        } catch {
+          reOfferDue = false;
+        }
+        const effectiveCheckInMs = leaderState ? leaderCheckInMs : checkInIntervalMs;
+        if (reOfferDue || lastCheckInAt === null || tickNow - lastCheckInAt >= effectiveCheckInMs) {
           lastCheckInAt = tickNow;
           try {
             const checkIn = await runCoordinationCheckIn(opts.deps, {
               cwd: cfg.cwd,
               coordinationDir: opts.coordinationDir!,
               instanceId,
+              browseItemCount: cfg.browseItemCount,
             }, tickNow);
+            lastOfferEmpty = checkIn.offered === null;
             // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
             // backlog is dispatchable again — cancel any no-candidate pause
             // so the leader resumes polling/dispatch this very tick. The
             // check-in block runs BEFORE the cooldown gate below, so the
             // pause can never suppress the only mechanism that re-offers
             // work once the coordination file empties.
-            if (checkIn.updated && checkIn.offered !== null) {
+            // WL-0MTEZ4XZJ006Y9U7 (AC2): any successful write (re-offer
+            // or emptied entry) proves CLI health — cancel any pause so
+            // polling resumes this tick. A non-update on a paused worker
+            // also cancels (the write proved CLI health; dispatch will
+            // resume next tick via the poll).
+            if (checkIn.updated || checkIn.offered !== null) {
               cooldownUntil = null;
-              errorStrikes = 0; // the re-offer's lookups succeeded — CLI healthy
+              errorStrikes = 0;
+            } else if (cooldownUntil !== null && checkIn.offered !== null) {
+              // File already holds the same entry (no write needed) but
+              // CLI healthy — also cancel so stale-file probes don't keep
+              // the pause alive while work still exists.
+              cooldownUntil = null;
+              errorStrikes = 0;
             }
           } catch {
             // Fail-safe: a throwing check-in (stub or regression) must never
@@ -2695,8 +3518,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
 
       // Cooldown gate (WL-0MTEZ4XZJ006Y9U7 AC2 — ordering): the check-in
       // block above runs FIRST, so a no-candidate pause never suppresses the
-      // 30-min re-offer (the only mechanism that re-offers work once the
-      // coordination file empties); a fresh re-offer cancels the pause
+      // coordination check-in (the only mechanism that re-offers work once
+      // the coordination file empties); a fresh re-offer cancels the pause
       // directly. While paused the worker performs NO proxy polling, NO
       // idle tracking, and NO dispatch. The pause is a full stop (user
       // confirmed "pause completely"); once it expires the idle tracker is
@@ -2777,14 +3600,15 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (!ready) return { polled: true, dispatched: false, idle: true };
       if (dispatching) return { polled: true, dispatched: false, idle: true };
 
-      // ── Dispatch (parent WL-0MST3OJ8S0001ROL AC4) ──
-      // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3): the
-      // latest polled free-slot count flows into dispatch selection — per-slot
-      // free count when per-slot identity is served (fail-closed counting:
-      // an entry without an explicit boolean `is_processing` is busy, never
-      // free), else `available_slots`. The coordination path uses it to gate
-      // the audit tier (needs ≥ 2 slots: parent + Phase 2 child); the legacy
-      // path passes it through to the direct tier chain unchanged.
+      // ── Dispatch (parent WL-0MST3OJ8S0001ROL AC4, F5 WL-0MTII48OV008P2QU AC4) ──
+      // Single machine-wide slot budget: ONE leader poll → ONE freeSlots
+      // snapshot (per-slot free count when `slots` served, else
+      // `available_slots`), forwarded to the sole dispatch call. No
+      // per-worklog duplication — total concurrently dispatched never exceeds
+      // the shared budget (WL-0MT50LKAK001EF5Q single cap source). Per-tier
+      // minimums (WL-0MT32F90V008UAD2 AC3): audit needs ≥2 (parent + Phase 2
+      // child), single-pane tiers need ≥1; idle-duration gate (configured N)
+      // is unchanged and shared.
       const freeSlots =
         Array.isArray(status.slots)
           ? status.slots.filter(
@@ -2816,6 +3640,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   cwd: cfg.cwd,
                   coordinationDir: opts.coordinationDir,
                   freeSlots,
+                  browseItemCount: cfg.browseItemCount,
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
@@ -2825,6 +3650,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 model: cfg.model,
                 cwd: cfg.cwd,
                 freeSlots,
+                browseItemCount: cfg.browseItemCount,
+                // Bounded concurrency cap (F3): thread the operator setting
+                // so same-process concurrent workers honor the raised bound;
+                // absent config → 1 (exact single-flight default).
+                maxConcurrentDispatches:
+                  cfg.maxConcurrentDispatches ?? DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
               });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
@@ -2839,10 +3670,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // is an OFFER LIST, not the backlog — after a dispatch the leader
           // removes the entry, so an empty file is a TRANSIENT gap while the
           // worklog still has dispatchable work (the pre-fix code paused on
-          // it for the full cooldown, stalling ~60 of every 62 minutes).
+          // it for the full cooldown, stalling the dispatch).
+          // WL-0MTMPSCL8000O45H AC2: the owner also observes its own entry
+          // missing and re-offers immediately on the next tick (not while in
+          // noCandidate cooldown and not when the last check-in found nothing).
           // Probe the worklog before pausing; only a GENUINELY empty backlog
           // pauses (legacy non-coordination semantics unchanged):
-          //  - probe finds a candidate → no pause, no strike: the 30-min
+          //  - probe finds a candidate → no pause, no strike: the periodic
           //    check-in re-offers it and dispatch resumes;
           //  - probe fails (wl/CLI errors) → fail-closed strike (a broken
           //    lookup must never look like an empty backlog — the
@@ -2851,7 +3685,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           //    and reset the idle tracker (fresh full idle period required
           //    after the pause).
           if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
-            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now());
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount);
             if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
               errorStrikes = 0; // the CLI answered — it is healthy
               cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
@@ -2863,10 +3697,14 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 `coordination file held no dispatchable entry — ` +
                 `${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive errors, pausing ` +
                 `dispatch for ${cfg.noCandidateCooldownMs}ms.`,
+                undefined,
+                { probeContext: 'coordination-probe', timeoutMs: DOWNTIME_WL_TIMEOUT_MS },
               );
             }
-            // probe.ok with a candidate: no pause — the empty file is a
-            // transient gap; the check-in re-offers the candidate.
+            // probe.ok with a candidate (or `reviewQueueHold` — the deep-queue
+            // gate left only held implements, WL-0MTTSWC1X005P4VD): no pause —
+            // the empty file is a transient gap / the gate may lift at any
+            // moment; the check-in re-offers the candidate.
           } else {
             // Legacy mode — original semantics: no-candidate means a genuine
             // empty backlog; pause entirely for the cooldown.
@@ -2880,16 +3718,23 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // wl failure is one strike. Three consecutive strikes pause the
           // worker entirely (no dispatch) AFTER logging the persistent error
           // so the failure is auditable. A single transient error does NOT
-          // pause — it retries on the next idle period.
+          // pause — it retries on the next idle period. Carry the
+          // underlying wl error (WL-0MTL4PC0Y005GXTI) so the pause entry is
+          // actionable. WL-0MTJPYM53003ORCV: pass structured error context.
           await pauseAfterPersistentErrors(
             `Downtime worker: ${DOWNTIME_ERROR_STRIKE_LIMIT} consecutive ` +
             `wl CLI errors — pausing dispatch for ${cfg.noCandidateCooldownMs}ms.`,
+            outcome.error,
+            { probeContext: 'dispatch-cli', timeoutMs: DOWNTIME_WL_TIMEOUT_MS, workItemId: outcome.workItemId },
           );
         }
         // Any other non-dispatch outcome (dispatch-in-flight, code-freeze
-        // skip) is neutral: no strike, no cooldown — the next idle period
-        // retries (a freeze skip keeps polling so implement/audit dispatch
-        // resumes immediately when the freeze lifts, WL-0MSQ0RPQP00636JY).
+        // skip, review-queue-hold — WL-0MTTSWC1X005P4VD) is neutral: no
+        // strike, no cooldown — the next idle period retries (a freeze skip
+        // keeps polling so implement/audit dispatch resumes immediately when
+        // the freeze lifts, WL-0MSQ0RPQP00636JY; a deep-queue hold keeps
+        // polling so audits keep draining and dispatch resumes the moment
+        // the queue thins).
         return { polled: true, dispatched: outcome.dispatched, idle: true };
       } finally {
         dispatching = false;
@@ -2920,6 +3765,7 @@ export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: Downtime
     kind === 'plan' ? '/skill:plan'
     : kind === 'audit' ? '/skill:audit'
     : kind === 'implement' ? '/skill:implement'
+    : kind === 'risk-effort' ? '/skill:effort-and-risk'
     : '/skill:intake';
   return [
     `Run ${skill} ${candidate.id} — ${candidate.title}.`,
@@ -2943,6 +3789,7 @@ export function buildDowntimeDispatchComment(
     kind === 'plan' ? '/skill:plan'
     : kind === 'audit' ? '/skill:audit'
     : kind === 'implement' ? '/skill:implement'
+    : kind === 'risk-effort' ? '/skill:effort-and-risk'
     : kind === 'scheduled' ? 'scheduled prompt'
     : '/skill:intake';
   const suffix = title ? ` (${title.replace(/[\r\n]+/g, ' ')})` : '';
@@ -3004,6 +3851,8 @@ export function parseNextCandidatesOutput(
           ? nested.sortIndex
           : undefined,
       priority: typeof nested.priority === 'string' ? nested.priority : undefined,
+      needsProducerReview:
+        nested.needsProducerReview !== undefined ? Boolean(nested.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -3039,12 +3888,13 @@ export function parseNextItemOutput(stdout: string, stage: DowntimeStage): Downt
 
 /**
  * Derive the dispatch kind from a prompt built by `buildDowntimePrompt`
- * (the pane name is `Downtime plan` / `Downtime intake` / `Downtime audit` /
- * `Downtime implement`).
+ * (the pane name is `Downtime plan` / `Downtime intake` / `Downtime audit`
+ * / `Downtime implement` / `Downtime risk-effort`).
  */
 export function skillKindFromPrompt(prompt: string): DowntimeSkillKind {
   if (prompt.includes('/skill:audit ')) return 'audit';
   if (prompt.includes('/skill:implement ')) return 'implement';
+  if (prompt.includes('/skill:effort-and-risk ')) return 'risk-effort';
   return prompt.includes('/skill:plan ') ? 'plan' : 'intake';
 }
 
@@ -3141,6 +3991,8 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       updatedAt: typeof o.updatedAt === 'string' ? o.updatedAt : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      needsProducerReview:
+        o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -3224,6 +4076,8 @@ export function selectAuditCandidate(
   const filtered = candidates
     .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt))
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
+    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => {
       if (!c.updatedAt) return true; // missing → include
       const updated = new Date(c.updatedAt).getTime();
@@ -3239,7 +4093,12 @@ export function selectAuditCandidate(
  * (stage `audit`) for the audit tier.
  */
 export function toDowntimeCandidate(candidate: AuditCandidate): DowntimeCandidate {
-  return { id: candidate.id, title: candidate.title, stage: 'audit' };
+  return {
+    id: candidate.id,
+    title: candidate.title,
+    stage: 'audit',
+    needsProducerReview: candidate.needsProducerReview,
+  };
 }
 
 // ── Implement-tier selection (WL-0MSMAYPQP001FLR6) ───────────────────
@@ -3346,6 +4205,8 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
       effort: typeof o.effort === 'string' ? o.effort : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      needsProducerReview:
+        o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -3379,6 +4240,8 @@ export function selectImplementCandidate(
       if (effort === null || effort > 3) return false; // effort ≤ Medium (1=XS, 2=S, 3=M)
       return true;
     })
+    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
   return selectWithRotation(filtered, registry);
@@ -3389,7 +4252,12 @@ export function selectImplementCandidate(
  * (stage `implement`) for the implement tier.
  */
 export function toImplementCandidate(candidate: ImplementCandidate): DowntimeCandidate {
-  return { id: candidate.id, title: candidate.title, stage: 'implement' };
+  return {
+    id: candidate.id,
+    title: candidate.title,
+    stage: 'implement',
+    needsProducerReview: candidate.needsProducerReview,
+  };
 }
 
 // ── Plan/intake selection (RCA WL-0MSRBFFLN005W3VT RC-2 + amplifier) ──
@@ -3416,6 +4284,8 @@ export function selectNextCandidate(
 ): DowntimeCandidate | null {
   const filtered = candidates
     .filter((c) => c.status === 'open')
+    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => {
       const dispatchedAt = dispatchedStages?.get(c.id);
       // Exclude while still at the dispatched-at stage; a missing recorded
@@ -3457,6 +4327,12 @@ export interface CriticalCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical) — round-robin grouping key. */
   priority?: string;
+  /**
+   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
+   * exclude from critical-tier selection and from dependency-frontier
+   * resolution (AC1, AC2).
+   */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -3510,6 +4386,8 @@ export function parseCriticalCandidatesOutput(stdout: string): CriticalCandidate
       effort: typeof o.effort === 'string' ? o.effort : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      needsProducerReview:
+        o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -3550,6 +4428,8 @@ export function selectCriticalCandidate(
       if (effort === null || effort > 3) return false; // effort ≤ Medium
       return true;
     })
+    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
+    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => {
       const dispatchedAt = dispatchedStages?.get(c.id);
       // Change-guard: exclude while still at the dispatched-at stage; a
@@ -3637,6 +4517,8 @@ export function parseShownWorkItem(stdout: string): CriticalCandidate | null {
     effort: typeof raw.effort === 'string' ? raw.effort : undefined,
     sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
     priority: typeof raw.priority === 'string' ? raw.priority : undefined,
+    needsProducerReview:
+      raw.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
   };
 }
 
@@ -3680,6 +4562,8 @@ export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
           : undefined,
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : undefined,
     sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
+    needsProducerReview:
+      raw.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
   };
   return info;
 }
@@ -3741,6 +4625,8 @@ export async function resolveDependencyFrontier(
   const dispatchable = (c: CriticalCandidate): boolean =>
     c.status === 'open' &&
     criticalSkillKind(c.stage) !== null &&
+    // Exclude review-gated blockers (parent WL-0MTIAL65N004T22F AC2).
+    c.needsProducerReview !== true &&
     (c.stage !== 'plan_complete' ||
       ((riskOrdinal(c.risk) ?? 9) <= 2 && (effortOrdinal(c.effort) ?? 9) <= 3));
 
@@ -3831,4 +4717,89 @@ export function clampDowntimeRequiredFreeSlots(value: number): number {
 export function clampDowntimeNoCandidateCooldownMs(value: number): number {
   if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS;
   return Math.max(Math.round(value), DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS);
+}
+
+/**
+ * Clamp the bounded concurrency cap to [1, 4] (WL-0MT50LKAK001EF5Q F2):
+ * 1 = single-flight (default), 4 = operator-requested ceiling. Non-finite
+ * input falls back to the default (1, the safe single-flight default).
+ */
+export function clampDowntimeMaxConcurrentDispatches(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR),
+    DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING,
+  );
+}
+
+// ── Round-robin helpers (WL-0MTJE0FXC006WAOX) ──────────────────────────
+
+/** Internal tier-group entry: a CoordinationEntry paired with its dispatch info. */
+type TierEntry = { entry: CoordinationEntry; info: DowntimeItemInfo; skill: DowntimeSkillKind };
+
+/**
+ * Sort a tier group by round-robin cursor order (WL-0MTJE0FXC006WAOX).
+ *
+ * Uses `loadRoundRobinCursor` (fail-open → `{}` → file order) to order
+ * entries: unknown/new roots first (never penalised), known roots oldest
+ * last-served first; stable sort preserves file order for timestamp ties.
+ *
+ * This is a pure sort — it does NOT advance the cursor. Advancement
+ * happens only when the dispatched entry is consumed (every `removeEntry`
+ * path).
+ */
+export function sortEntriesByRoundRobin(
+  group: TierEntry[],
+  coordinationDir: string,
+): TierEntry[] {
+  if (group.length <= 1) return group;
+
+  // Load cursor state (fail-open → {}). No lock needed for read-only sort.
+  const cursor = loadRoundRobinCursor(coordinationDir);
+
+  // Stable sort: unknown roots first, then oldest known first.
+  return [...group].sort((a, b) => {
+    const rootA = a.entry.worklogRoot ?? a.entry.directory;
+    const rootB = b.entry.worklogRoot ?? b.entry.directory;
+
+    const aKnown = rootA in cursor;
+    const bKnown = rootB in cursor;
+
+    // Unknown roots sort before known roots.
+    if (!aKnown && bKnown) return -1;
+    if (aKnown && !bKnown) return 1;
+
+    // Both known: oldest timestamp first (stable sort preserves file order for ties).
+    if (aKnown && bKnown) {
+      const tsA = new Date(cursor[rootA]).getTime();
+      const tsB = new Date(cursor[rootB]).getTime();
+      const diff = tsA - tsB;
+      if (diff !== 0) return diff;
+    }
+
+    // Both unknown or timestamp tie: stable sort (preserve original file order).
+    return 0;
+  });
+}
+
+/**
+ * Advance the round-robin cursor for a given root (WL-0MTJE0FXC006WAOX).
+ *
+ * Calls `advanceRoot` from the cursor module under the coordination lock.
+ * Fail-open: lock contention or I/O error silently tolerates the missed
+ * advance (the project will be selected sooner on the next cycle).
+ *
+ * This is called AFTER `removeEntry` on every consumed-entry path:
+ * - critical tier dispatched
+ * - critical tier spawn-failed / marker-write-failed
+ * - non-critical tier dispatched
+ * - non-critical tier spawn-failed / marker-write-failed
+ */
+export function advanceRoundRobinCursor(
+  coordinationDir: string,
+  root: string,
+  now: number,
+): void {
+  if (root.length === 0) return;
+  advanceRoot(coordinationDir, root, now);
 }

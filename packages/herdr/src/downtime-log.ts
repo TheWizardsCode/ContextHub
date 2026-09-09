@@ -4,8 +4,12 @@
  *
  * The log lives at `<cwd>/.worklog/downtime-dispatches.log` (the `.worklog`
  * directory is gitignored, so the file is a local artifact; the worklog
- * comment added alongside it is the durable cross-machine trail). The file
- * is bounded — only the most recent DOWNTIME_LOG_MAX_ENTRIES entries are
+ * comment added alongside it is the durable cross-machine trail). F6
+ * WL-0MTII4CWT00452HU decision: dispatch/coordination logs stay per-root
+ * (retained location) for per-project observability; the single
+ * machine-wide coordination file/lease is authoritative for dispatch
+ * decisions, but logs are not migrated — stale per-worklog coordination
+ * files do not imply log migration. The file is bounded — only the most recent DOWNTIME_LOG_MAX_ENTRIES entries are
  * kept — so it rolls instead of growing unbounded over a long-lived plugin
  * pane. Callers must treat failures as fail-closed (never crash the worker).
  *
@@ -220,6 +224,16 @@ export function recentAuditDispatchedItemIds(
  */
 export function implementDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string> {
   return dispatchedItemIds(entries, 'implement');
+}
+
+/**
+ * Build the set of itemIds the downtime worker has already dispatched for
+ * risk-effort evaluation (`kind === 'risk-effort'` entries only). Entries
+ * without an itemId are ignored. A risk-effort marker prevents re-dispatching
+ * the evaluation until the item advances past plan_complete (WL-0MTTSWCJR003OMN7).
+ */
+export function riskEffortDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string> {
+  return dispatchedItemIds(entries, 'risk-effort');
 }
 
 /**

@@ -128,9 +128,11 @@ describe('fetchNextItems', () => {
     expect(items[1].title).toBe('Has title');
   });
 
-  it('fetches mandatory subsets root-only (WL-0MS964SIA0057ABR)', async () => {
-    // Both mandatory-subset `wl list` queries must pass --root-only so child
-    // items never appear in the top-level worklist.
+  it('fetches mandatory subsets root-only (WL-0MS964SIA0057ABR, cae8ea8a)', async () => {
+    // Mandatory subsets are fetched with mixed root-only: critical is
+    // deliberately NOT root-only so child critical blockers are visible
+    // (cae8ea8a — test-failure children must surface); the review queue is
+    // root-only (producer reviews parent deliverables).
     const mockFn = vi.fn().mockImplementation((_bin: string, args: string[]) => {
       const stdout = JSON.stringify({ workItems: [] });
       return Promise.resolve({ stdout, stderr: '' });
@@ -140,11 +142,12 @@ describe('fetchNextItems', () => {
     await fetchNextItems(10);
     const calls = mockFn.mock.calls.map((c: any) => c[1]);
     const listCalls = calls.filter((args: string[]) => args[0] === 'list');
-    // Two mandatory-subset queries: critical + completed/in_review.
+    // Two mandatory-subset queries: critical (includes children) + completed/in_review (root-only).
     expect(listCalls.length).toBeGreaterThanOrEqual(2);
-    for (const args of listCalls) {
-      expect(args).toContain('--root-only');
-    }
+    const reviewCall = listCalls.find((a: string[]) => a.includes('in_review'));
+    expect(reviewCall).toContain('--root-only');
+    const criticalCall = listCalls.find((a: string[]) => a.includes('critical'));
+    expect(criticalCall).not.toContain('--root-only');
     // Drill-down (children) is NOT root-only — children must remain fetchable.
     expect(calls.some((args: string[]) => args.includes('--parent'))).toBe(false);
   });
