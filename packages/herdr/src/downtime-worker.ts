@@ -139,6 +139,7 @@ import {
   readDowntimeLogEntries as _readDowntimeEntries,
   auditDispatchedItemIds as _auditIds,
   implementDispatchedItemIds as _implIds,
+  riskEffortDispatchedItemIds as _riskEffortIds,
   dispatchedItemStages as _dispatchedStages,
 } from './downtime-log.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
@@ -334,7 +335,7 @@ export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
  * are kept exported only for the module's tier-rank unit tests — nothing
  * on the dispatch path calls them.
  */
-export const COORDINATION_TIER_ORDER = ['audit', 'critical', 'implement', 'plan', 'intake'] as const;
+export const COORDINATION_TIER_ORDER = ['audit', 'critical', 'implement', 'plan', 'risk-effort', 'intake'] as const;
 
 export type CoordinationTierKind = (typeof COORDINATION_TIER_ORDER)[number];
 
@@ -822,12 +823,14 @@ export interface DowntimeHerdrItem {
 export type DowntimeHerdrListResult =
   | { ok: true; items: DowntimeHerdrItem[] }
   | { ok: false; error?: string };
-export type DowntimeSkillKind = 'plan' | 'intake' | 'audit' | 'implement';
+export type DowntimeSkillKind = 'plan' | 'intake' | 'audit' | 'implement' | 'risk-effort';
 
 /**
  * Every dispatch kind recorded in the rolling audit log: the worklog tiers
  * plus the scheduled-prompts tier (WL-0MSS1Q5ER007QDKX), which has no work
- * item (kind `scheduled`, log-only markers).
+ * item (kind `scheduled`, log-only markers), plus the risk-effort evaluation
+ * tier (WL-0MTTSWCJR003OMN7) that populates missing risk/effort on plan_complete
+ * items so they become implement-dispatchable.
  */
 export type DowntimeDispatchKind = DowntimeSkillKind | 'scheduled';
 
@@ -1399,6 +1402,7 @@ const TIER_EXPECTED: Record<DowntimeSkillKind, DowntimeClaimExpected> = {
   implement: { status: 'open', stage: 'plan_complete' },
   plan: { status: 'open', stage: 'intake_complete' },
   intake: { status: 'open', stage: 'idea' },
+  'risk-effort': { status: 'open', stage: 'plan_complete' },
 };
 
 // ── Review-queue depth gate — shared (WL-0MT2UQWOR007CYY9 gate re-wired
@@ -1484,8 +1488,10 @@ async function dispatchFromHerdrList(
   const entries = await _readDowntimeEntries(ctx.cwd);
   const auditIds = _auditIds(entries);
   const implementIds = _implIds(entries);
+  const riskEffortIds = _riskEffortIds(entries);
   const planStages = _dispatchedStages(entries, 'plan');
   const intakeStages = _dispatchedStages(entries, 'intake');
+  const riskEffortStages = _dispatchedStages(entries, 'risk-effort');
   for (const item of items) {
     // Classify solely by list-provided fields — `classifyItemForDispatch`
     // already enforces risk/effort/audit-freshness gates (WL-0MTK1ILM2009QYB2).
@@ -1519,6 +1525,7 @@ async function dispatchFromHerdrList(
     // (WL-0MSLIY8ZR004QUSY/AC6) but applied as a filter on the Herdr head.
     if (k === 'audit' && auditIds.has(item.id)) continue;
     if (k === 'implement' && implementIds.has(item.id)) continue;
+    if (k === 'risk-effort' && riskEffortStages.get(item.id) === (item.stage ?? '')) continue;
     if (k === 'plan' && planStages.get(item.id) === (item.stage ?? '')) continue;
     if (k === 'intake' && intakeStages.get(item.id) === (item.stage ?? '')) continue;
     // Code-freeze split-by-skill: audit+implement dispatch pauses during
@@ -1874,13 +1881,30 @@ export function classifyItemForDispatch(
   if (stage === 'idea') return 'intake';
   if (stage === 'intake_complete') return 'plan';
   if (stage === 'plan_complete') {
-    // Implement caps (risk ≤ Medium, effort ≤ Medium) — same ordinal
-    // semantics as selectImplementCandidate (fail-closed on unset).
+    // Items missing risk/effort (root cause C, WL-0MTTSWCJR003OMN7):
+    // dispatch a risk-effort evaluation so the fields get populated and
+    // the item becomes implement-dispatchable on the next pass.
     const risk = riskOrdinal(info.risk);
-    if (risk === null || risk > 2) return null;
     const effort = effortOrdinal(info.effort);
-    if (effort === null || effort > 3) return null;
+    if (risk === null || effort === null) return 'risk-effort';
+    // Implement caps (risk ≤ Medium, effort ≤ Medium) — same ordinal
+    // semantics as selectImplementCandidate.
+    if (risk > 2) return null;
+    if (effort > 3) return null;
     return 'implement';
+  }
+  // Retired `in_progress` stage (WL-0MTTSWCJR003OMN7 — OSL dead zones):
+  // items stuck on the retired stage are invisible to all dispatch tiers.
+  // Map them into the pipeline by dispatching a skill evaluation that
+  // will advance them to the correct stage:
+  //   - items missing risk/effort → risk-effort evaluation (populates both)
+  //   - items with risk/effort → risk-effort evaluation (confirms fields)
+  //   - items with only one → plan evaluation (advances to the right stage)
+  if (stage === 'in_progress') {
+    // Always dispatch risk-effort for retired-stage items: it evaluates
+    // both fields AND confirms the stage is correct, producing a single
+    // efficient re-evaluation that advances the item to its proper stage.
+    return 'risk-effort';
   }
   return null;
 }
@@ -1964,8 +1988,10 @@ export async function computeMostImportantItem(
   const entries = await _readDowntimeEntries(cwd);
   const auditIds = _auditIds(entries);
   const implementIds = _implIds(entries);
+  const riskEffortIds = _riskEffortIds(entries);
   const planStages = _dispatchedStages(entries, 'plan');
   const intakeStages = _dispatchedStages(entries, 'intake');
+  const riskEffortStages = _dispatchedStages(entries, 'risk-effort');
 
   // Review-queue depth gate: read lazily (memoized) only when an
   // implement-kind candidate is actually the would-be offer — one bounded
@@ -1987,11 +2013,12 @@ export async function computeMostImportantItem(
     // Dispatched-marker exclusion per kind.
     if (k === 'audit' && auditIds.has(item.id)) continue;
     if (k === 'implement' && implementIds.has(item.id)) continue;
+    if (k === 'risk-effort' && riskEffortStages.get(item.id) === (item.stage ?? '')) continue;
     if (k === 'plan' && planStages.get(item.id) === (item.stage ?? '')) continue;
     if (k === 'intake' && intakeStages.get(item.id) === (item.stage ?? '')) continue;
-    // Code-freeze split-by-skill: audit+implement offers pause during a
-    // freeze/ambiguous marker (plan/intake still offer).
-    if (frozen && (k === 'audit' || k === 'implement')) continue;
+    // Code-freeze split-by-skill: audit+implement+risk-effort offers pause
+    // during a freeze/ambiguous marker (plan/intake still offer).
+    if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) continue;
     // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
     // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while the
     // queue is deep — the instance then offers its next dispatchable head
@@ -2187,11 +2214,11 @@ export async function dispatchFromCoordination(
       removeEntry(opts.coordinationDir, entry.instanceId);
       continue;
     }
-    // Code-freeze split-by-skill: audit/implement offers pause during a
-    // freeze/ambiguous marker (plan/intake still dispatch). A frozen offer
-    // is stale for the dispatch window — drop it so the owner re-offers
+    // Code-freeze split-by-skill: audit/implement/risk-effort offers pause
+    // during a freeze/ambiguous marker (plan/intake still dispatch). A frozen
+    // offer is stale for the dispatch window — drop it so the owner re-offers
     // its next head at the next check-in.
-    if (frozen && (kind === 'audit' || kind === 'implement')) {
+    if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) {
       removeEntry(opts.coordinationDir, entry.instanceId);
       continue;
     }
@@ -3738,6 +3765,7 @@ export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: Downtime
     kind === 'plan' ? '/skill:plan'
     : kind === 'audit' ? '/skill:audit'
     : kind === 'implement' ? '/skill:implement'
+    : kind === 'risk-effort' ? '/skill:effort-and-risk'
     : '/skill:intake';
   return [
     `Run ${skill} ${candidate.id} — ${candidate.title}.`,
@@ -3761,6 +3789,7 @@ export function buildDowntimeDispatchComment(
     kind === 'plan' ? '/skill:plan'
     : kind === 'audit' ? '/skill:audit'
     : kind === 'implement' ? '/skill:implement'
+    : kind === 'risk-effort' ? '/skill:effort-and-risk'
     : kind === 'scheduled' ? 'scheduled prompt'
     : '/skill:intake';
   const suffix = title ? ` (${title.replace(/[\r\n]+/g, ' ')})` : '';
@@ -3859,12 +3888,13 @@ export function parseNextItemOutput(stdout: string, stage: DowntimeStage): Downt
 
 /**
  * Derive the dispatch kind from a prompt built by `buildDowntimePrompt`
- * (the pane name is `Downtime plan` / `Downtime intake` / `Downtime audit` /
- * `Downtime implement`).
+ * (the pane name is `Downtime plan` / `Downtime intake` / `Downtime audit`
+ * / `Downtime implement` / `Downtime risk-effort`).
  */
 export function skillKindFromPrompt(prompt: string): DowntimeSkillKind {
   if (prompt.includes('/skill:audit ')) return 'audit';
   if (prompt.includes('/skill:implement ')) return 'implement';
+  if (prompt.includes('/skill:effort-and-risk ')) return 'risk-effort';
   return prompt.includes('/skill:plan ') ? 'plan' : 'intake';
 }
 

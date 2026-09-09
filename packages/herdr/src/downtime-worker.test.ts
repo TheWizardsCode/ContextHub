@@ -1965,6 +1965,11 @@ describe('implement prompt & pane helpers', () => {
     expect(skillKindFromPrompt('Run /skill:implement WL-IMP — x.')).toBe('implement');
   });
 
+  // risk-effort kind (WL-0MTTSWCJR003OMN7)
+  it('skillKindFromPrompt detects a risk-effort prompt', () => {
+    expect(skillKindFromPrompt('Run /skill:effort-and-risk WL-RE — x.')).toBe('risk-effort');
+  });
+
   it('buildDowntimeDispatchComment renders /skill:implement', () => {
     const comment = buildDowntimeDispatchComment('WL-IMP', 'implement', '2026-01-01T00:00:00.000Z');
     expect(comment).toContain('/skill:implement WL-IMP');
@@ -2658,6 +2663,13 @@ describe('buildDowntimeDispatchComment', () => {
     expect(comment).toContain('multi line title');
     expect(comment).not.toMatch(/[\r\n]/);
   });
+
+  // risk-effort comment (WL-0MTTSWCJR003OMN7)
+  it('renders /skill:effort-and-risk for risk-effort kind', () => {
+    const comment = buildDowntimeDispatchComment('WL-RE', 'risk-effort', '2026-09-09T12:00:00.000Z');
+    expect(comment).toContain('/skill:effort-and-risk WL-RE');
+    expect(comment).toContain('herdr downtime worker');
+  });
 });
 
 // ── Single-flight (AC5) ───────────────────────────────────────────────
@@ -2927,6 +2939,12 @@ describe('blocked-questions prompt instruction', () => {
   it('buildDowntimePrompt output includes the final-summary directive', () => {
     const prompt = buildDowntimePrompt('implement', candidate);
     expect(prompt).toContain('repeat the questions in your final summary');
+  });
+
+  // risk-effort prompt (WL-0MTTSWCJR003OMN7)
+  it('the risk-effort prompt runs /skill:effort-and-risk on the item id', () => {
+    const prompt = buildDowntimePrompt('risk-effort', candidate);
+    expect(prompt).toContain('/skill:effort-and-risk WL-ABC');
   });
 });
 
@@ -6368,6 +6386,44 @@ describe('needsProducerReview exclusion', () => {
     it('dispatches normally when needsProducerReview is false/undefined', () => {
       expect(classifyItemForDispatch({ id: 'I', status: 'open', stage: 'idea', needsProducerReview: false } as DowntimeItemInfo)).toBe('intake');
       expect(classifyItemForDispatch({ id: 'I', status: 'open', stage: 'idea' } as DowntimeItemInfo)).toBe('intake');
+    });
+
+    // ── risk-effort dispatch for missing risk/effort (WL-0MTTSWCJR003OMN7) ──
+    it('returns risk-effort for plan_complete items with missing risk', () => {
+      const info = { id: 'RE1', status: 'open', stage: 'plan_complete', risk: '', effort: 'small' } as DowntimeItemInfo;
+      expect(classifyItemForDispatch(info)).toBe('risk-effort');
+    });
+    it('returns risk-effort for plan_complete items with missing effort', () => {
+      const info = { id: 'RE2', status: 'open', stage: 'plan_complete', risk: 'low', effort: '' } as DowntimeItemInfo;
+      expect(classifyItemForDispatch(info)).toBe('risk-effort');
+    });
+    it('returns risk-effort for plan_complete items with both risk and effort missing', () => {
+      const info = { id: 'RE3', status: 'open', stage: 'plan_complete', risk: '', effort: '' } as DowntimeItemInfo;
+      expect(classifyItemForDispatch(info)).toBe('risk-effort');
+    });
+    it('returns risk-effort for plan_complete items with undefined risk/effort', () => {
+      expect(classifyItemForDispatch({ id: 'RE4', status: 'open', stage: 'plan_complete' } as DowntimeItemInfo)).toBe('risk-effort');
+      expect(classifyItemForDispatch({ id: 'RE5', status: 'open', stage: 'plan_complete', risk: null, effort: null } as DowntimeItemInfo)).toBe('risk-effort');
+    });
+    it('does NOT dispatch risk-effort when plan_complete has valid risk/effort within caps', () => {
+      expect(classifyItemForDispatch({ id: 'RE6', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'small' } as DowntimeItemInfo)).toBe('implement');
+      expect(classifyItemForDispatch({ id: 'RE7', status: 'open', stage: 'plan_complete', risk: 'medium', effort: 'medium' } as DowntimeItemInfo)).toBe('implement');
+    });
+    it('returns null when plan_complete has valid risk but ABOVE cap (high)', () => {
+      expect(classifyItemForDispatch({ id: 'RE8', status: 'open', stage: 'plan_complete', risk: 'high', effort: 'small' } as DowntimeItemInfo)).toBeNull();
+    });
+    it('returns null when plan_complete has valid effort but ABOVE cap (extra large)', () => {
+      expect(classifyItemForDispatch({ id: 'RE9', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'extra large' } as DowntimeItemInfo)).toBeNull();
+    });
+
+    // ── retired in_progress stage (WL-0MTTSWCJR003OMN7 — OSL dead zones) ──
+    it('dispatches risk-effort for open/in_progress items (retired stage)', () => {
+      expect(classifyItemForDispatch({ id: 'IP1', status: 'open', stage: 'in_progress' } as DowntimeItemInfo)).toBe('risk-effort');
+      expect(classifyItemForDispatch({ id: 'IP2', status: 'open', stage: 'in_progress', risk: 'low' } as DowntimeItemInfo)).toBe('risk-effort');
+      expect(classifyItemForDispatch({ id: 'IP3', status: 'open', stage: 'in_progress', risk: 'low', effort: 'small' } as DowntimeItemInfo)).toBe('risk-effort');
+    });
+    it('still blocks npr items on in_progress stage', () => {
+      expect(classifyItemForDispatch({ id: 'IP4', status: 'open', stage: 'in_progress', needsProducerReview: true } as DowntimeItemInfo)).toBeNull();
     });
   });
 

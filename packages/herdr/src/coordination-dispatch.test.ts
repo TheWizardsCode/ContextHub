@@ -146,8 +146,8 @@ describe('classifyItemForDispatch', () => {
   it('rejects plan_complete above the implement caps (effort Large)', () => {
     expect(classifyItemForDispatch(itemInfo({ id: 'WL-1', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'L' }))).toBeNull();
   });
-  it('rejects plan_complete with unknown risk (fail-closed)', () => {
-    expect(classifyItemForDispatch(itemInfo({ id: 'WL-1', status: 'open', stage: 'plan_complete' }))).toBeNull();
+  it('dispatches risk-effort for plan_complete with unknown/missing risk or effort (WL-0MTTSWCJR003OMN7)', () => {
+    expect(classifyItemForDispatch(itemInfo({ id: 'WL-1', status: 'open', stage: 'plan_complete' }))).toBe('risk-effort');
   });
   it('maps completed/in_review without a fresh audit → audit', () => {
     const now = Date.now();

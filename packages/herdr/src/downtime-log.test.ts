@@ -25,6 +25,7 @@ import {
   appendCoordinationLogEntry,
   auditDispatchedItemIds,
   implementDispatchedItemIds,
+  riskEffortDispatchedItemIds,
   planDispatchedItemStages,
   intakeDispatchedItemStages,
   dispatchedItemStages,
@@ -323,6 +324,32 @@ describe('implementDispatchedItemIds (implement-tier-only scope guard)', () => {
   });
 });
 
+// risk-effort dispatched markers (WL-0MTTSWCJR003OMN7)
+describe('riskEffortDispatchedItemIds (risk-effort-tier-only scope guard)', () => {
+  it('collects only risk-effort-kind entries that carry an itemId', () => {
+    const ids = riskEffortDispatchedItemIds([
+      { itemId: 'WL-A', kind: 'risk-effort' },
+      { itemId: 'WL-B', kind: 'implement' },
+      { itemId: 'WL-C', kind: 'plan' },
+      { kind: 'risk-effort' }, // error-style entry without itemId → ignored
+      { itemId: 'WL-D', kind: 'risk-effort' },
+    ]);
+    expect([...ids].sort()).toEqual(['WL-A', 'WL-D']);
+  });
+
+  it('does not collect implement markers (risk-effort tier is scoped to kind risk-effort only)', () => {
+    const ids = riskEffortDispatchedItemIds([
+      { itemId: 'WL-AUD', kind: 'audit' },
+      { itemId: 'WL-RE', kind: 'risk-effort' },
+    ]);
+    expect([...ids]).toEqual(['WL-RE']);
+  });
+
+  it('returns an empty set for empty input', () => {
+    expect([...riskEffortDispatchedItemIds([])]).toEqual([]);
+  });
+});
+
 describe('plan/intake dispatched-item stages (change-guard maps)', () => {
   it('planDispatchedItemStages maps plan markers to their dispatched-at stage', () => {
     const stages = planDispatchedItemStages([
@@ -362,5 +389,20 @@ describe('plan/intake dispatched-item stages (change-guard maps)', () => {
   it('returns an empty map for empty input', () => {
     expect(planDispatchedItemStages([]).size).toBe(0);
     expect(intakeDispatchedItemStages([]).size).toBe(0);
+  });
+
+  // risk-effort stage guard (WL-0MTTSWCJR003OMN7)
+  it('dispatchedItemStages with risk-effort maps to plan_complete stage', () => {
+    const stages = dispatchedItemStages(
+      [
+        { itemId: 'WL-RE1', kind: 'risk-effort', stage: 'plan_complete' },
+        { itemId: 'WL-RE2', kind: 'risk-effort' }, // legacy entry without stage
+        { itemId: 'WL-X', kind: 'implement', stage: 'plan_complete' },
+      ],
+      'risk-effort',
+    );
+    expect(stages.get('WL-RE1')).toBe('plan_complete');
+    expect(stages.get('WL-RE2')).toBe('');
+    expect(stages.has('WL-X')).toBe(false);
   });
 });

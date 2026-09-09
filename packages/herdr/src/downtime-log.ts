@@ -227,6 +227,16 @@ export function implementDispatchedItemIds(entries: DowntimeLogEntry[]): Set<str
 }
 
 /**
+ * Build the set of itemIds the downtime worker has already dispatched for
+ * risk-effort evaluation (`kind === 'risk-effort'` entries only). Entries
+ * without an itemId are ignored. A risk-effort marker prevents re-dispatching
+ * the evaluation until the item advances past plan_complete (WL-0MTTSWCJR003OMN7).
+ */
+export function riskEffortDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string> {
+  return dispatchedItemIds(entries, 'risk-effort');
+}
+
+/**
  * Build the kind-scoped id → dispatched-at-stage map used by the plan/intake
  * change-guard (RCA WL-0MSRBFFLN005W3VT design point 3): entries of the
  * given kind map itemId to the worklog stage the item had when it was
