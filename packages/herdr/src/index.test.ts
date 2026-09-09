@@ -39,7 +39,26 @@ describe('buildSendToPiArgs', () => {
   // Selection-list agent dispatch must NOT steal focus from the list
   // (WL-0MSHIA53D009DJOT): every agent-pane spawn passes --no-focus so
   // shared/send-to-pi.sh skips its final zoom. The flag is emitted before
-  // --cwd, mirroring buildDowntimePaneArgs.
+  // --cwd, mirroring buildDowntimePaneArgs. The P n shortcut opts in to
+  // --focus (WL-0MT70LC6B009TL3Q).
+  it('P n (new session) passes --focus so the new pane immediately receives focus', () => {
+    expect(buildSendToPiArgs('/prompt:', '/project', 'plan', undefined, undefined, true)).toEqual([
+      '--focus',
+      '--cwd',
+      '/project',
+      '--model',
+      'plan',
+      '',
+    ]);
+  });
+
+  it('passes --no-focus when focus is false/undefined (current default)', () => {
+    // Unfocused agent shortcuts (the vast majority) keep --no-focus.
+    expect(buildSendToPiArgs('/prompt:Review the item', '/project', 'plan')).toContain('--no-focus');
+    expect(buildSendToPiArgs('/prompt:Review', '/project', 'plan', undefined, undefined, false)).toContain('--no-focus');
+    expect(buildSendToPiArgs('/prompt:Review', '/project', 'plan', undefined, undefined, undefined)).toContain('--no-focus');
+  });
+
   it('includes --model <model> for agent commands with a model', () => {
     expect(buildSendToPiArgs('/skill:implement <id>', '/project', 'code')).toEqual([
       '--no-focus',
@@ -120,6 +139,17 @@ describe('buildSendToPiArgs', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildRunInPaneArgs', () => {
+  // Focus opt-in (WL-0MT70LC6B009TL3Q): like buildSendToPiArgs,
+  // --focus is passed when focus is true, --no-focus otherwise.
+  it('passes --focus + --cwd when focus is true (focused shortcut)', () => {
+    expect(buildRunInPaneArgs('wl update WL-1 --priority high', '/project', undefined, true)).toEqual([
+      '--focus',
+      '--cwd',
+      '/project',
+      'wl update WL-1 --priority high',
+    ]);
+  });
+
   it('passes --no-focus + --cwd before a !!-prefixed command (pane route)', () => {
     expect(buildRunInPaneArgs('wl update <id> --priority high', '/project')).toEqual([
       '--no-focus',
@@ -337,6 +367,15 @@ describe('shortcuts.json command routing', () => {
     for (const e of filterEntries) {
       expect(e.command.startsWith('!!')).toBe(false);
     }
+  });
+
+  it('routes the P n blank-session command with focus:true (WL-0MT70LC6B009TL3Q)', () => {
+    const _here2 = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(_here2, 'shortcuts.json'), 'utf8');
+    const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
+    const pn = parsed.find((e) => Array.isArray(e.chord) && e.chord.join(',') === 'P,n');
+    expect(pn).toBeDefined();
+    expect(pn!.focus).toBe(true);
   });
 
   it('binds P-p to the free-form prompt, P-a to the audit-gaps prompt, and P-n to a blank session', () => {

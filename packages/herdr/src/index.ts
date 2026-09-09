@@ -206,10 +206,11 @@ export { stripAgentPromptPrefix };
  * pane gets a descriptive title (WL-0MSJ4E8UA005KG9Y). Without the flag the
  * script falls back to its default "Pi Agent".
  *
- * Every selection-list agent dispatch passes `--no-focus` (WL-0MSHIA53D009DJOT)
- * so shared/send-to-pi.sh skips its final zoom and the selection list keeps
- * focus while the pi agent pane opens in the background. The shared script's
- * own default (focus on) is unchanged for its other consumers.
+ * Focus control (WL-0MT70LC6B009TL3Q): when `focus` is `true`, `--focus`
+ * is passed so send-to-pi.sh zooms the new pane. When `focus` is `false`
+ * or `undefined`, `--no-focus` is passed so the selection list keeps focus
+ * (the default for most shortcuts). The shared script's own default
+ * (focus=true) is unchanged for its other consumers.
  */
 export function buildSendToPiArgs(
   command: string,
@@ -217,9 +218,10 @@ export function buildSendToPiArgs(
   model?: string,
   paneIdFile?: string,
   paneName?: string,
+  focus?: boolean,
 ): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
-  const args = ['--no-focus', '--cwd', targetCwd];
+  const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
   if (paneName) {
     args.push('--pane-name', paneName);
   }
@@ -237,16 +239,20 @@ export function buildSendToPiArgs(
  * Build the argument vector for spawning `scripts/run-in-pane.sh` for a
  * command-output pane (`!!`/`!`-prefixed pane route and plain shell stdout
  * route). Mirrors `buildSendToPiArgs`: `--no-focus` (WL-0MSHIA53D009DJOT) is
- * always passed so opening the command-output pane does not steal focus from
- * the selection list, followed by `--cwd <targetCwd>` so the pane starts in
- * the resolved project root. `run-in-pane.sh` parses all three options at
+ * passed by default so opening the command-output pane does not steal focus
+ * from the selection list, followed by `--cwd <targetCwd>` so the pane starts
+ * in the resolved project root. `run-in-pane.sh` parses all three options at
  * the head of argv; everything else is the command itself.
+ *
+ * Focus control (WL-0MT70LC6B009TL3Q): when `focus` is `true`, `--focus`
+ * is passed so run-in-pane.sh zooms the new pane. When `focus` is `false`
+ * or `undefined`, `--no-focus` is passed (the default for most shortcuts).
  *
  * When `paneName` is provided, `--pane-name <paneName>` replaces the
  * script's default "Command Output" (WL-0MSJ4E8UA005KG9Y).
  */
-export function buildRunInPaneArgs(command: string, targetCwd: string, paneName?: string): string[] {
-  const args = ['--no-focus', '--cwd', targetCwd];
+export function buildRunInPaneArgs(command: string, targetCwd: string, paneName?: string, focus?: boolean): string[] {
+  const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
   if (paneName) {
     args.push('--pane-name', paneName);
   }
@@ -1356,7 +1362,7 @@ async function main(): Promise<void> {
       modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
       modeSwitchEnabled: runSettings.modeSwitchEnabled,
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
-      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => {
+      onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
         // pane opened to the right. Commands prefixed with `!!`/`!` (shell-executed
         // shortcuts like audit approve/reject, priority updates, close/delete) are
@@ -1441,7 +1447,7 @@ async function main(): Promise<void> {
           // `--model <pattern>` so the pi CLI opens with the right model.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName),
+            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName, focus),
             {
               detached: true,
               stdio: 'ignore',
@@ -1487,7 +1493,7 @@ async function main(): Promise<void> {
           const shellPaneName = buildShellPaneTitle(clean, paneTitle, shellItemId);
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(clean, targetCwd, shellPaneName),
+            buildRunInPaneArgs(clean, targetCwd, shellPaneName, focus),
             {
               detached: true,
               stdio: 'ignore',
@@ -1520,7 +1526,7 @@ async function main(): Promise<void> {
           }
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, extractWorkItemId(command))),
+            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, extractWorkItemId(command)), focus),
             {
               detached: true,
               stdio: 'ignore',

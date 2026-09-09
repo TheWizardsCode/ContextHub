@@ -2214,6 +2214,7 @@ export function createChordState(): ChordState {
     resolvedCommand: null,
     resolvedModel: null,
     resolvedOpenPane: undefined,
+    resolvedFocus: undefined,
   };
 }
 
@@ -2256,6 +2257,10 @@ export function processChordInput(
     // openPane is undefined when the entry did not set open_pane → the
     // dispatch defaults to opening a pane (WL-0MSJLD1I70045ZUL).
     chordState.resolvedOpenPane = entry.openPane ?? undefined;
+    // focus is undefined/omitted when the entry did not set `focus` → no-focus
+    // (current default); `true` defers the zoom toggle to the spawned pane
+    // (WL-0MT70LC6B009TL3Q).
+    chordState.resolvedFocus = entry.focus ?? undefined;
     return 'chord-complete';
   }
 
@@ -2389,6 +2394,14 @@ export interface ChordState {
    * after execution.
    */
   resolvedOpenPane: boolean | undefined;
+  /**
+   * Whether the resolved shortcut wants the new pane focused
+   * (WL-0MT70LC6B009TL3Q). `undefined`/`false` = open without focus
+   * (current default); `true` = the new pane is zoomed/focused immediately
+   * after opening. Only `P n` (new session) sets this to `true` today.
+   * Cleared (undefined) after execution.
+   */
+  resolvedFocus: boolean | undefined;
 }
 
 /**
@@ -3521,10 +3534,11 @@ function logCommandForItem(command: string, itemId?: string): void {
 function resolveAndRouteCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => void,
   model?: string,
   openPane?: boolean,
   onRefresh?: () => Promise<void>,
+  focus?: boolean,
 ): boolean {
   let resolvedCommand = command;
   let itemId: string | undefined;
@@ -3556,27 +3570,42 @@ function resolveAndRouteCommand(
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
+    // (WL-0MSJLD1I70045ZUL). Focus (WL-0MT70LC6B009TL3Q) follows the same
+    // "append when explicitly true" rule: omitted/false keeps the current
+    // no-focus default. The onRefresh hook is appended only for
     // background (no-pane) dispatches (openPane === false) so they can
     // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
-    // pane-opening paths keep their existing arity. Pane titles are
-    // appended only when the command opens a pane and a title exists.
+    // pane-opening paths keep their existing arity. The focuses arg slots
+    // after paneTitle so callers that pass a title keep their position;
+    // callers that don't pass a focus flag see no extra arg (backward
+    // compatible). Pane titles are appended only when the command opens a
+    // pane and a title exists.
+    // Focus handling (WL-0MT70LC6B009TL3Q): when focus is true, the new pane
+    // is zoomed. The value is appended as a 6th arg only when true so
+    // omitting/undefined stays backward compatible — callers without a focus
+    // flag see today's arity (no trailing undefined).
     if (openPane === undefined) {
       if (paneTitle !== undefined) {
-        onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
+        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, paneTitle, true);
+        else onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
       } else {
-        onCommand(resolvedCommand, model);
+        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, undefined, true);
+        else onCommand(resolvedCommand, model);
       }
     } else if (onRefresh) {
       if (paneTitle !== undefined) {
-        onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
+        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle, true);
+        else onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
       } else {
-        onCommand(resolvedCommand, model, openPane, onRefresh);
+        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, undefined, true);
+        else onCommand(resolvedCommand, model, openPane, onRefresh);
       }
     } else if (paneTitle !== undefined) {
-      onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
+      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, paneTitle, true);
+      else onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
     } else {
-      onCommand(resolvedCommand, model, openPane);
+      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, undefined, true);
+      else onCommand(resolvedCommand, model, openPane);
     }
   }
   return true;
@@ -3731,11 +3760,12 @@ export function fetchItemsForView(
 export function dispatchChordCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => void,
   model?: string,
   onDowntimeToggle?: () => void,
   openPane?: boolean,
   onRefresh?: () => Promise<void>,
+  focus?: boolean,
 ): boolean {
   // ── /downtime toggle (internal action, WL-0MSZ4NSOE007AQEF) ──────
   // Per-instance in-memory toggle of downtime dispatch for the current
@@ -3785,30 +3815,30 @@ export function dispatchChordCommand(
 
   // ── Agent skill invocations ─────────────────────────────
   if (command.startsWith('/skill:implement')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.startsWith('/skill:audit')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.startsWith('/skill:ship')) {
     // Dev→main release (Ship It shortcut, WL-0MSGG5N5Z0074TLY). Global
     // release — no <id> substitution; routed to the agent channel like
     // other /skill:* commands. NOT blocked during a Code Freeze (the ship
     // skill gates itself); only the confirmation dialog precedes dispatch.
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
 
   // ── Agent workflow commands ─────────────────────────────
   if (command.startsWith('/intake')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.startsWith('/plan')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
 
   // ── Producer review / audit compound commands ───────────
   if (command.startsWith('!!wl reviewed')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   // ── Data-modifying wl commands (close/delete/update/search) ──
   // These mutate the work-item data set or change the list contents, so
@@ -3816,10 +3846,10 @@ export function dispatchChordCommand(
   // isWlModifyingCommand check sees 'dispatched' and triggers an immediate
   // list refresh after the command completes (WL-0MTA217DZ003H5K8).
   if (/^!!\s*wl\s+(close|delete|update|search)\b/i.test(command)) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.includes('&& wl audit-set')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh);
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
 
   // Unknown command — not handled
@@ -3997,12 +4027,13 @@ export async function resolvePodcastTarget(
 export function executeResolvedCommand(
   command: string,
   state: WorkItemListState,
-  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void,
+  onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => void,
   codeFreezeActive = false,
   model?: string,
   onDowntimeToggle?: () => void,
   openPane?: boolean,
   onRefresh?: () => Promise<void>,
+  focus?: boolean,
 ): ExecuteResult {
   // Code Freeze guard: never route implement commands while frozen.
   // This runs BEFORE dispatchChordCommand so no pane spawn, claim, or
@@ -4012,8 +4043,10 @@ export function executeResolvedCommand(
   }
 
   // Try dispatchChordCommand first — handles /wl, /downtime, /skill:,
-  // /intake, /plan, !!wl reviewed, and compound audit commands
-  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane, onRefresh)) {
+  // /intake, /plan, !!wl reviewed, and compound audit commands. Focus
+  // (WL-0MT70LC6B009TL3Q) is threaded through so the new pane can be focused
+  // when requested (only `P n` today).
+  if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane, onRefresh, focus)) {
     return 'dispatched';
   }
 
@@ -4051,26 +4084,34 @@ export function executeResolvedCommand(
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL). The onRefresh hook is appended only for
-    // background (no-pane) dispatches (openPane === false) so they can
-    // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
-    // pane-opening paths keep their existing arity.
+    // (WL-0MSJLD1I70045ZUL). Focus (WL-0MT70LC6B009TL3Q) follows the same
+    // append-when-explicitly-true rule — omitted/false keeps today's arity.
+    // The onRefresh hook is appended only for background (no-pane)
+    // dispatches (openPane === false) so they can trigger a refresh when
+    // the child exits (WL-0MT1KB70U0012X6T); pane-opening paths keep their
+    // existing arity.
     if (openPane === undefined) {
       if (paneTitle !== undefined) {
-        onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
+        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, paneTitle, true);
+        else onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
       } else {
-        onCommand(resolvedCommand, model);
+        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, undefined, true);
+        else onCommand(resolvedCommand, model);
       }
     } else if (onRefresh) {
       if (paneTitle !== undefined) {
-        onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
+        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle, true);
+        else onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
       } else {
-        onCommand(resolvedCommand, model, openPane, onRefresh);
+        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, undefined, true);
+        else onCommand(resolvedCommand, model, openPane, onRefresh);
       }
     } else if (paneTitle !== undefined) {
-      onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
+      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, paneTitle, true);
+      else onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
     } else {
-      onCommand(resolvedCommand, model, openPane);
+      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, undefined, true);
+      else onCommand(resolvedCommand, model, openPane);
     }
   }
   return 'callback';
@@ -4808,9 +4849,13 @@ export async function runWorklistTui(
         // openPane: undefined (default) = open a pane; false = background,
         // no pane (WL-0MSJLD1I70045ZUL). Cleared after execution.
         const openPane = chordState.resolvedOpenPane;
+        // focus: true = focus the new pane immediately (WL-0MT70LC6B009TL3Q).
+        // Omitted/false = current no-focus behavior. Cleared after execution.
+        const focus = chordState.resolvedFocus;
         chordState.resolvedCommand = null;
         chordState.resolvedModel = null;
         chordState.resolvedOpenPane = undefined;
+        chordState.resolvedFocus = undefined;
         if (command) {
           // Podcast-progression markers (<podcast-target>/<podcast-script>/
           // <podcast-review>/<podcast-both>) are resolved from the selected
@@ -5005,7 +5050,7 @@ export async function runWorklistTui(
             if (frozen) {
               codeFreezeActive = true;
             }
-            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle, openPane, opts.onRefresh);
+            const result = executeResolvedCommand(command, state, opts.onCommand, frozen, model ?? undefined, opts.onDowntimeToggle, openPane, opts.onRefresh, focus);
             if (result === 'blocked') {
               // Code Freeze — show the notice dialog; the command was NOT
               // routed, no pane spawned, no work item claimed.
@@ -5164,7 +5209,9 @@ export async function runWorklistTui(
           if (frozen) {
             codeFreezeActive = true;
           }
-          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle, singleOpenPane, opts.onRefresh);
+          // Focus (WL-0MT70LC6B009TL3Q): single-entry focus flag (only `P n` sets true today).
+          const singleFocus = singleEntry.focus ?? undefined;
+          const result = executeResolvedCommand(singleCmd, state, opts.onCommand, frozen, singleModel, opts.onDowntimeToggle, singleOpenPane, opts.onRefresh, singleFocus);
           if (result === 'blocked') {
             // Code Freeze — show the notice dialog; no pane spawned.
             codeFreezeNotice = true;
@@ -5210,6 +5257,8 @@ export async function runWorklistTui(
           chordState.hints = formatChordHintsForHelp(nextChords, [key]);
           chordState.resolvedCommand = null;
           chordState.resolvedModel = null;
+          chordState.resolvedOpenPane = undefined;
+          chordState.resolvedFocus = undefined;
           render();
           return;
         }
