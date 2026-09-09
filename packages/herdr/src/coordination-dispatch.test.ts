@@ -106,6 +106,10 @@ function makeCoordinationDeps(overrides: Partial<DowntimeWorkerDeps> = {}): Down
     recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
     readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
     fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-X', stage: 'idea' }) }),
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9 / WL-0MTTSWC1X005P4VD):
+    // shallow (empty) queue by default so the gate is INACTIVE and existing
+    // tests dispatch implement offers unchanged.
+    getReviewQueueCount: vi.fn().mockResolvedValue(0),
     ...overrides,
   } as DowntimeWorkerDeps;
 }
@@ -1144,6 +1148,249 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
       await worker.tick(); // strike 3 → three-strike pause
       expect(worker.paused).toBe(true);
       expect(deps.recordError).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+// ── Review-queue depth gate on the live coordination path (WL-0MTTSWC1X005P4VD) ──
+// Root cause B2: the gate originally lived only in the legacy tier chain (dead
+// while the Herdr head is non-empty), so non-critical implements kept
+// dispatching into a deep review queue. These tests pin the gate on the live
+// leader path (`dispatchFromCoordination`) and the offer computation
+// (`computeMostImportantItem` / `runCoordinationCheckIn`): audits (the queue
+// drain), plan, intake and critical implements flow unconditionally; only
+// NON-CRITICAL implement offers are held while the OWNING root's review queue
+// is deep; a deep queue never pauses the worker (check-ins continue).
+
+describe('review-queue depth gate — coordination leader path (WL-0MTTSWC1X005P4VD)', () => {
+  const implementOffer = (id: string, priority?: string) =>
+    itemInfo({ id, status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S', priority });
+
+  it('AC1: an AUDIT offer dispatches while another root is deep (queue drain never gated)', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockImplementation(async (id: string) => {
+        if (id === 'WL-AUD') {
+          return { ok: true, info: itemInfo({ id, status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString() }) };
+        }
+        return { ok: true, info: implementOffer(id) };
+      }),
+      // The IMPLEMENTING root's queue is deep; the audit root's is shallow.
+      getReviewQueueCount: vi.fn().mockImplementation(async (root: string) =>
+        root === '/impl-root' ? 999 : 0,
+      ),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entries = [
+      makeEntry('inst-aud', 'WL-AUD', '/audit-root'),
+      makeEntry('inst-impl', 'WL-IMPL', '/impl-root'),
+    ];
+    // Seed the coordination file so entry removal/retention is observable.
+    writeCoordinationFile(testDir, { version: 1, entries });
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir, browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('/skill:audit WL-AUD');
+    // The held implement entry was NOT removed — it stays for a later cycle.
+    expect(getEntry(testDir, 'inst-impl')).not.toBe(null);
+  });
+
+  it('AC2: a deep queue holds a NON-CRITICAL implement offer (entry kept) and reports review-queue-hold', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: implementOffer('WL-IMPL', 'high') }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    });
+    const entry = makeEntry('inst-impl', 'WL-IMPL', '/impl-root');
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+    const outcome = await dispatchFromCoordination(deps, [entry], { model: 'plan', cwd: '/repo', coordinationDir: testDir, browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // The offer is KEPT (the queue may drain at any moment; the next cycle
+    // then dispatches it) — unlike a stale/frozen offer, a held offer is not
+    // dropped.
+    expect(getEntry(testDir, 'inst-impl')).not.toBe(null);
+  });
+
+  it('AC2: a CRITICAL implement offer dispatches even when the queue is deep', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: implementOffer('WL-CRIT', 'critical') }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const outcome = await dispatchFromCoordination(deps, [makeEntry('inst-crit', 'WL-CRIT', '/impl-root')], { model: 'plan', cwd: '/repo', coordinationDir: testDir, browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  it('AC2: a PLAN offer dispatches while the queue is deep', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-PLAN', status: 'open', stage: 'intake_complete' }) }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const outcome = await dispatchFromCoordination(deps, [makeEntry('inst-plan', 'WL-PLAN', '/impl-root')], { model: 'plan', cwd: '/repo', coordinationDir: testDir, browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('shallow queue: a non-critical implement offer dispatches unchanged', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: implementOffer('WL-IMPL', 'high') }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(19), // below threshold
+    });
+    const outcome = await dispatchFromCoordination(deps, [makeEntry('inst-impl', 'WL-IMPL', '/impl-root')], { model: 'plan', cwd: '/repo', coordinationDir: testDir, browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  it('fail-closed: a count-query failure (null) holds non-critical implements', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: implementOffer('WL-IMPL', 'high') }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(null),
+    });
+    const outcome = await dispatchFromCoordination(deps, [makeEntry('inst-impl', 'WL-IMPL', '/impl-root')], { model: 'plan', cwd: '/repo', coordinationDir: testDir, browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+  });
+
+  it('computeMostImportantItem: a deep queue holds a non-critical implement head → reviewQueueHold (never noCandidate)', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [headItem({ id: 'WL-IMP', title: 'Impl', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S', priority: 'high' })],
+      }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+    });
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    expect('noCandidate' in result && result.noCandidate).toBe(false);
+    expect('reviewQueueHold' in result && result.reviewQueueHold).toBe(true);
+  });
+
+  it('computeMostImportantItem: the next dispatchable head item is offered while the head implement is held', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [
+          headItem({ id: 'WL-IMP', title: 'Impl', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S', priority: 'high', sortIndex: 10 }),
+          headItem({ id: 'WL-AUD', title: 'Audit', status: 'completed', stage: 'in_review', updatedAt: new Date(Date.now() - 60_000).toISOString(), sortIndex: 20 }),
+        ],
+      }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+    });
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    // The held implement is skipped; the deeper AUDIT (queue drain) is offered.
+    expect(result.candidate.id).toBe('WL-AUD');
+    expect(result.kind).toBe('audit');
+  });
+
+  it('computeMostImportantItem: a critical implement is still offered while the queue is deep', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [headItem({ id: 'WL-CRIT', title: 'Crit', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S', priority: 'critical' })],
+      }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    expect(result.candidate.id).toBe('WL-CRIT');
+    expect(result.kind).toBe('implement');
+  });
+
+  it('runCoordinationCheckIn: a reviewQueueHold result removes the own (unofferable) entry', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [headItem({ id: 'WL-IMP', title: 'Impl', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S', priority: 'high' })],
+      }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+    });
+    writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-OLD', '/repo')] });
+    const result = await runCoordinationCheckIn(deps, { cwd: '/repo', coordinationDir: testDir, instanceId: 'inst-1', browseItemCount: 20 });
+    expect(result.offered).toBe(null);
+    expect(getEntry(testDir, 'inst-1')).toBe(null);
+  });
+
+  it('worker tick: a deep queue with only a held implement offer never pauses and keeps polling (AC2/AC3)', async () => {
+    vi.useFakeTimers();
+    const T0 = 40_000_000;
+    vi.setSystemTime(T0);
+    try {
+      // The only coordination entry is a non-critical implement in a DEEP root.
+      const entry = makeEntry('inst-impl', 'WL-IMPL', '/impl-root');
+      writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+      const deps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: implementOffer('WL-IMPL', 'high') }),
+        getReviewQueueCount: vi.fn().mockResolvedValue(25),
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }), // nothing else offerable
+      });
+      const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-lead', depsOverrides: deps });
+
+      await worker.tick(); // election + check-in + first poll (idle run starts)
+      expect(worker.isLeader).toBe(true);
+      vi.setSystemTime(T0 + 60_001);
+      const attempt = await worker.tick(); // threshold met → hold → review-queue-hold
+      expect(attempt.dispatched).toBe(false);
+      expect(attempt.polled).toBe(true);
+      // NOT paused: a deep-queue hold is neutral (no no-candidate cooldown).
+      expect(worker.paused).toBe(false);
+      expect(worker.errorStrikes).toBe(0);
+      // The offer is still there for a later cycle.
+      expect(getEntry(testDir, 'inst-impl')).not.toBe(null);
+
+      // The queue drains below the threshold → the very next idle tick
+      // dispatches the previously-held implement (resume is immediate — the
+      // neutral hold never reset the warm idle run).
+      (deps.getReviewQueueCount as ReturnType<typeof vi.fn>).mockResolvedValue(10);
+      vi.setSystemTime(T0 + 120_002);
+      const resumed = await worker.tick();
+      expect(resumed.dispatched).toBe(true);
+      expect(worker.paused).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('worker tick: a deep queue never suppresses the coordination check-in (RCA root cause A regression)', async () => {
+    vi.useFakeTimers();
+    const T0 = 50_000_000;
+    vi.setSystemTime(T0);
+    try {
+      const deps = makeCoordinationDeps({
+        // The instance's own head holds a non-critical implement while deep
+        // (head non-empty → offer computation consults the gate each check-in).
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [headItem({ id: 'WL-IMP', title: 'Impl', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S', priority: 'high' })],
+        }),
+        getReviewQueueCount: vi.fn().mockResolvedValue(25),
+        fetchItem: vi.fn().mockResolvedValue({ ok: true, info: implementOffer('WL-IMP', 'high') }),
+      });
+      // An OLD entry already floats for this instance; with the queue deep
+      // and its head a held non-critical implement, the check-in must REMOVE
+      // it (nothing offerable) — but the removal only happens if the
+      // check-in actually RAN (the sprint-complete auto-disable that halted
+      // check-ins before leader-election is removed).
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-x', 'WL-OLD', '/repo')] });
+      const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-x', depsOverrides: deps });
+
+      // Tick 1: election + FIRST check-in still lands while the queue is deep.
+      await worker.tick();
+      expect(worker.isLeader).toBe(true);
+      expect(worker.lastDispatchAt).toBe(null); // nothing dispatched — held
+      // The check-in ran: the hold result removed the own (unofferable) entry
+      // rather than floating a held implement.
+      expect(getEntry(testDir, 'inst-x')).toBe(null); // own stale offer removed by the check-in
+      // The worker is NOT disabled by queue depth — polling continues.
+      vi.setSystemTime(T0 + 60_001);
+      const attempt = await worker.tick();
+      expect(attempt.polled).toBe(true);
+      expect(worker.paused).toBe(false);
     } finally {
       vi.useRealTimers();
     }

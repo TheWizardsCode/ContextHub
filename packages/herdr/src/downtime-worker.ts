@@ -115,7 +115,6 @@ import { spawn } from 'node:child_process';
 import { isAuditFresh } from '@worklog/shared/icons';
 import type { CodeFreezeStatus } from './code-freeze.js';
 import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './downtime-disable-marker.js';
-import { fetchCompletedItemCount } from './fetcher.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
 import {
@@ -203,6 +202,16 @@ export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
 
 /** Default bounded concurrency cap: 1 (single-flight, current behavior). */
 export const DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES = 1;
+
+/**
+ * Default review-queue depth threshold (`browseItemCount`, parent
+ * WL-0MT2UQWOR007CYY9): when the ROOT-ONLY `completed`/`in_review` count
+ * reaches this, the review queue is "deep" and NON-CRITICAL implement
+ * dispatch is held until audits / producer review drain it back below.
+ * Re-read live from settings each tick (no restart); root-only counting
+ * via `wl list --status completed --stage in_review --root-only --json`.
+ */
+export const DEFAULT_BROWSE_ITEM_COUNT = 20;
 /** Clamp floor for the concurrency cap. */
 export const DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR = 1;
 /** Clamp ceiling for the concurrency cap. */
@@ -961,6 +970,8 @@ export type DowntimeItemResult =
 export type MostImportantItemResult =
   | { ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate }
   | { ok: true; noCandidate: true }
+  /** Deep review queue + only held non-critical implements remain: nothing offerable NOW, but the backlog is NOT empty — the caller must not pause (WL-0MTTSWC1X005P4VD AC2). */
+  | { ok: true; reviewQueueHold: true }
   | { ok: false; error?: string };
 
 
@@ -1390,12 +1401,84 @@ const TIER_EXPECTED: Record<DowntimeSkillKind, DowntimeClaimExpected> = {
   intake: { status: 'open', stage: 'idea' },
 };
 
+// ── Review-queue depth gate — shared (WL-0MT2UQWOR007CYY9 gate re-wired
+// onto the live Herdr path by WL-0MTTSWC1X005P4VD) ────────────────────
+// Root cause B2: the gate originally lived ONLY in the legacy tier chain
+// (dead whenever the Herdr head is non-empty), so non-critical implements
+// kept dispatching into a deep review queue. The gate now applies
+// identically in `dispatchFromHerdrList` (direct dispatch),
+// `computeMostImportantItem` (coordination offer computation) and
+// `dispatchFromCoordination` (leader dispatch): while the ROOT-ONLY
+// `completed`/`in_review` count is at/over `browseItemCount`, NON-CRITICAL
+// `implement`-kind candidates are held. Audits (the queue drain), plan,
+// intake and critical implements flow unconditionally. A deep queue with
+// nothing audit-needed reports the neutral reason 'review-queue-hold'
+// (never 'no-candidate' / cooldown) so polling resumes immediately when
+// the queue thins. Fail-closed: a count-query failure activates the gate
+// (only critical implements remain eligible) — the same convention as the
+// code-freeze 'ambiguous ⇒ frozen' rule.
+
+/** Neutral outcome reason when a deep review queue holds the only candidates. */
+export const REVIEW_QUEUE_HOLD_REASON = 'review-queue-hold';
+
+/** Result of one bounded review-queue depth read. */
+export interface ReviewQueueGateResult {
+  /** True when the queue is at/over threshold (deep) — fail-closed on query failure. */
+  deep: boolean;
+  /** Raw root-only completed/in_review count; null when the count query failed. */
+  count: number | null;
+  /** The threshold applied (browseItemCount). */
+  threshold: number;
+}
+
+/**
+ * Read the review-queue depth ONCE per dispatch/offer computation
+ * (`wl list --status completed --stage in_review --root-only`, bounded by
+ * `DOWNTIME_WL_TIMEOUT_MS` inside the dep). A failure or unparseable
+ * output resolves `{deep: true, count: null}` — fail-closed (gate
+ * active: only critical implements remain eligible). Never throws.
+ */
+export async function readReviewQueueGate(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+  browseItemCount: number = DEFAULT_BROWSE_ITEM_COUNT,
+): Promise<ReviewQueueGateResult> {
+  let count: number | null;
+  try {
+    count = await deps.getReviewQueueCount(cwd);
+  } catch {
+    count = null;
+  }
+  return {
+    deep: count === null || count >= browseItemCount,
+    count,
+    threshold: browseItemCount,
+  };
+}
+
+/**
+ * Apply the gate to one classified candidate: TRUE only for a NON-CRITICAL
+ * `implement`-kind candidate while the review queue is deep. Audits/plan/
+ * intake and critical-priority implements are never held (audits are the
+ * queue drain; critical work is never throttled). A null gate (not read —
+ * e.g. frozen, where implements are already paused) never holds.
+ */
+export function isImplementHeldByReviewGate(
+  kind: DowntimeSkillKind,
+  candidate: { priority?: string },
+  gate: ReviewQueueGateResult | null,
+): boolean {
+  if (kind !== 'implement') return false;
+  if (gate === null || !gate.deep) return false;
+  return candidate.priority !== 'critical';
+}
+
 // ── Herdr list-head filter dispatcher (WL-0MTK1ILM2009QYB2 AC1–2) ────
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean },
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -1444,6 +1527,18 @@ async function dispatchFromHerdrList(
     // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3).
     if (k === 'audit' && !ctx.auditEligible) continue;
     if (k !== 'audit' && !ctx.panesEligible) continue;
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+    // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement candidate while
+    // the root-only completed/in_review queue is at/over browseItemCount —
+    // the review bottleneck is not overloaded with new non-critical code.
+    // Audits (the queue drain), plan, intake and critical implements flow
+    // unconditionally (AC1/AC2). The hold is recorded so an otherwise-empty
+    // backlog reports 'review-queue-hold' (never 'no-candidate' → no
+    // cooldown; polling resumes the moment the queue thins).
+    if (isImplementHeldByReviewGate(k, item, ctx.reviewGate)) {
+      flags.reviewHeld = true;
+      continue;
+    }
     const cand: DowntimeCandidate = { id: item.id, title: item.title, stage: k === 'audit' ? 'audit' : (String(item.stage) as DowntimeStage), status: item.status, priority: item.priority, sortIndex: item.sortIndex };
     const outcome = await dispatchClaimedTier(deps, k, cand, { model: ctx.model, cwd: ctx.cwd });
     if (outcome.dispatched) return outcome;
@@ -1826,7 +1921,14 @@ export function toCoordinationCandidate(info: DowntimeItemInfo): DowntimeCandida
  *    of truth;
  *  - the code-freeze split-by-skill pauses audit/implement offers while
  *    frozen (plan/intake still offer) — the same freeze semantics as the
- *    dispatch path (WL-0MSQ0RPQP00636JY).
+ *    dispatch path (WL-0MSQ0RPQP00636JY);
+ *  - the review-queue depth gate (WL-0MT2UQWOR007CYY9, rewired by
+ *    WL-0MTTSWC1X005P4VD) holds a NON-CRITICAL implement offer while the
+ *    root's completed/in_review queue is deep — audits (the queue drain),
+ *    plan, intake and critical implements still offer; when ONLY held
+ *    implements remain the result is `{ok:true, reviewQueueHold:true}`
+ *    (never `noCandidate`), so the no-candidate cooldown is not entered
+ *    while the queue drains.
  *
  * Active-audit single-flight and the free-slot minimums are
  * dispatch-time gates, so they are NOT applied to an offer.
@@ -1841,6 +1943,7 @@ export async function computeMostImportantItem(
   deps: DowntimeWorkerDeps,
   cwd: string,
   now: number = Date.now(),
+  browseItemCount: number = DEFAULT_BROWSE_ITEM_COUNT,
 ): Promise<MostImportantItemResult> {
   // The check-in (and the worker's no-candidate probe) requires the Herdr
   // head lookup: without it there is no canonical ranking to offer from —
@@ -1864,6 +1967,20 @@ export async function computeMostImportantItem(
   const planStages = _dispatchedStages(entries, 'plan');
   const intakeStages = _dispatchedStages(entries, 'intake');
 
+  // Review-queue depth gate: read lazily (memoized) only when an
+  // implement-kind candidate is actually the would-be offer — one bounded
+  // wl list per offer computation when needed (WL-0MTTSWC1X005P4VD).
+  let reviewGate: ReviewQueueGateResult | null | undefined;
+  const reviewGateForQueue = async (): Promise<ReviewQueueGateResult | null> => {
+    if (reviewGate === undefined) {
+      // Frozen already pauses audit/implement offers (filter below), so the
+      // gate is never consulted under a freeze.
+      reviewGate = frozen ? null : await readReviewQueueGate(deps, cwd, browseItemCount);
+    }
+    return reviewGate;
+  };
+  let heldByReviewQueue = false;
+
   for (const item of head.items) {
     const k = classifyItemForDispatch(item, now);
     if (k === null) continue; // review-gate + freshness/recency + caps
@@ -1875,6 +1992,17 @@ export async function computeMostImportantItem(
     // Code-freeze split-by-skill: audit+implement offers pause during a
     // freeze/ambiguous marker (plan/intake still offer).
     if (frozen && (k === 'audit' || k === 'implement')) continue;
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+    // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while the
+    // queue is deep — the instance then offers its next dispatchable head
+    // item (audit/plan/intake) instead of floating a held implement.
+    if (k === 'implement') {
+      const gate = await reviewGateForQueue();
+      if (isImplementHeldByReviewGate(k, item, gate)) {
+        heldByReviewQueue = true;
+        continue;
+      }
+    }
     const candidate: DowntimeCandidate = {
       id: item.id,
       title: item.title,
@@ -1887,9 +2015,14 @@ export async function computeMostImportantItem(
   }
 
   // Herdr list was non-empty but every item was filtered by a safety gate
-  // (or is non-dispatchable): nothing to offer — a genuine empty backlog
-  // from the dispatcher's perspective.
-  return { ok: true, noCandidate: true };
+  // (or is non-dispatchable). When the ONLY reason nothing was offered is
+  // the deep-queue hold of non-critical implements, report the distinct
+  // `reviewQueueHold` result — the backlog is NOT empty, so the caller
+  // must not treat this as a genuine no-candidate (no cooldown; polling
+  // resumes immediately when the queue drains below the threshold).
+  return heldByReviewQueue
+    ? { ok: true, reviewQueueHold: true }
+    : { ok: true, noCandidate: true };
 }
 
 /**
@@ -1914,6 +2047,13 @@ export async function computeMostImportantItem(
  *    recency + implement caps;
  *  - code-freeze split-by-skill: audit/implement offers skip while frozen
  *    (plan/intake still dispatch);
+ *  - review-queue depth gate (WL-0MT2UQWOR007CYY9, rewired by
+ *    WL-0MTTSWC1X005P4VD): a NON-CRITICAL implement offer is HELD (entry
+ *    kept, skipped this cycle) while ITS OWN root's completed/in_review
+ *    queue is deep — audits (the queue drain), plan, intake and critical
+ *    implements flow unconditionally; when every surviving offer is held,
+ *    the outcome reason is the neutral 'review-queue-hold' (never
+ *    'no-candidate' / cooldown);
  *  - per-tier free-slot minimums (audit ≥ 2, single-pane ≥ 1).
  *
  * The first offer that passes every filter dispatches via the existing
@@ -1930,7 +2070,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -1959,6 +2099,20 @@ export async function dispatchFromCoordination(
     // tier chain's 0-free-slots defensive no-candidate).
     return { dispatched: false, reason: 'no-candidate' };
   }
+
+  // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+  // WL-0MTTSWC1X005P4VD): read ONCE per offer root (cached for this
+  // invocation). Each root's queue depth is authoritative for ITS OWN
+  // non-critical implement offers (audits/plan/intake/critical flow
+  // unconditionally). Frozen → null (implements are already freeze-paused).
+  const reviewGateCache = new Map<string, ReviewQueueGateResult>();
+  const reviewGateForRoot = async (root: string): Promise<ReviewQueueGateResult | null> => {
+    if (frozen) return null;
+    if (!reviewGateCache.has(root)) {
+      reviewGateCache.set(root, await readReviewQueueGate(deps, root, opts.browseItemCount));
+    }
+    return reviewGateCache.get(root) ?? null;
+  };
 
   // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
   // gated by the SAME fresh-read code-freeze marker as the audit/implement
@@ -2008,6 +2162,9 @@ export async function dispatchFromCoordination(
   let fetchFailures = 0;
   let lastFetchError: string | undefined;
   let lastEntryWorkItemId: string | undefined; // WL-0MTJPYM53003ORCV
+  // True when at least one non-critical implement offer was held this cycle
+  // by the review-queue depth gate (drives the terminal reason).
+  let reviewHold = false;
   for (const entry of entries) {
     if (entry.instanceId.length === 0 || entry.workItemId.length === 0) continue;
     fetchAttempts += 1;
@@ -2043,6 +2200,21 @@ export async function dispatchFromCoordination(
     // the offer this cycle when too few slots are free, but KEEP it (it is
     // still a valid offer; the next cycle may have the slot).
     if (kind === 'audit' && !auditEligible) continue;
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+    // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while ITS
+    // OWN root's review queue is deep. Audits (the queue drain), plan,
+    // intake and critical implements flow unconditionally. The entry is
+    // KEPT (not removed) — the queue may drain below the threshold at any
+    // moment (an audit completes / producer reviews) and the next cycle
+    // then dispatches it; the owner's check-in re-offers its next head
+    // once the gate allows.
+    if (kind === 'implement') {
+      const gate = await reviewGateForRoot(worklogRoot);
+      if (isImplementHeldByReviewGate(kind, result.info, gate)) {
+        reviewHold = true;
+        continue;
+      }
+    }
     // Dispatch attempt (CAS claim → marker → spawn).
     const outcome = await dispatchClaimedTier(
       deps,
@@ -2099,10 +2271,14 @@ export async function dispatchFromCoordination(
   // same reason semantics as the legacy dispatcher — in the worker tick,
   // a coordination-mode no-candidate is probed against the worklog
   // (WL-0MTEZ4XZJ006Y9U7): an empty OFFER FILE is never mistaken for an
-  // empty BACKLOG.
+  // empty BACKLOG. A deep-queue hold is reported as the neutral
+  // 'review-queue-hold' (never 'no-candidate' — the cooldown must not fire
+  // while audits are draining the queue; the gate may lift at any moment).
   return frozen
     ? { dispatched: false, reason: 'code-freeze' }
-    : { dispatched: false, reason: 'no-candidate' };
+    : reviewHold
+      ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
+      : { dispatched: false, reason: 'no-candidate' };
 }
 
 /**
@@ -2122,17 +2298,23 @@ export async function runCoordinationCheckIn(
     cwd: string;
     coordinationDir: string;
     instanceId: string;
+    /** browseItemCount threshold for the review-queue depth gate (defaults to DEFAULT_BROWSE_ITEM_COUNT). */
+    browseItemCount?: number;
   },
   now: number = Date.now(),
 ): Promise<{ offered: string | null; updated: boolean }> {
   const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
-  const result = await computeMostImportantItem(deps, coordinator.cwd, now);
+  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount);
   if (!result.ok) {
     // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
     return { offered: current?.workItemId ?? null, updated: false };
   }
-  if ('noCandidate' in result && result.noCandidate) {
-    // Genuinely nothing dispatchable — remove the own entry (no dead offers).
+  if (!('candidate' in result)) {
+    // Genuinely nothing dispatchable (`noCandidate`) OR the deep-queue hold
+    // left nothing offerable (`reviewQueueHold`, WL-0MTTSWC1X005P4VD) —
+    // either way the own entry is removed (no dead offers; the owner
+    // re-offers once work becomes offerable). The caller distinguishes the
+    // two via the probe path (reviewQueueHold must never pause).
     const removed = removeEntry(coordinator.coordinationDir, coordinator.instanceId) !== null;
     // Audit trail (WL-0MSXHAE290067VAL): log the emptied check-in.
     void appendCoordinationLogEntry(coordinator.cwd, {
@@ -2319,6 +2501,19 @@ export async function dispatchDowntimeWork(
       }
     }
 
+    // ── Review-queue depth gate — ONE bounded read per dispatch when the
+    // non-critical implement tier is live (!frozen and a pane slot is free),
+    // shared by the Herdr-head filter (dispatchFromHerdrList) AND the legacy
+    // tier chain below (WL-0MT2UQWOR007CYY9; single getReviewQueueCount call
+    // site per dispatch, WL-0MTTSWC1X005P4VD). Never a second ranking — the
+    // gate only HOLDS non-critical implement candidates while the root-only
+    // completed/in_review queue is at/over browseItemCount; audits/plan/
+    // intake/critical flow unconditionally.
+    let reviewGate: ReviewQueueGateResult | null = null;
+    if (!frozen && panesEligible) {
+      reviewGate = await readReviewQueueGate(deps, opts.cwd, opts.browseItemCount);
+    }
+
     // ── Herdr list head consumes the ranking (WL-0MTK1ILM2009QYB2 ACs 1–2) ──
     // When the Herdr list is populated it is the sole ranking source; a
     // filtered-exhaustion returns the terminal reason directly and the legacy
@@ -2330,15 +2525,16 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false };
       const head = await deps.getHerdrListHead(opts.cwd);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
-        const herdrOutcome = await dispatchFromHerdrList(deps, head.items, { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible }, flags);
+        const herdrOutcome = await dispatchFromHerdrList(deps, head.items, { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate }, flags);
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
+        const reviewHeld = flags.reviewHeld;
         if (herdrOutcome !== null) return herdrOutcome;
         // Herdr list had items but every one was filtered by a safety gate:
         // compose the terminal reason and DO NOT fall through to the legacy
@@ -2347,6 +2543,10 @@ export async function dispatchDowntimeWork(
         if (freshnessSkip) return { dispatched: false, reason: 'fresh-audit-skip' };
         if (auditInFlight) return { dispatched: false, reason: 'audit-in-flight' };
         if (auditCheckFailed) return { dispatched: false, reason: 'wl-error', error: auditCheckError };
+        // Deep review queue held the only remaining (non-critical implement)
+        // candidates: neutral 'review-queue-hold', NEVER 'no-candidate' — no
+        // cooldown while audits drain the queue (WL-0MTTSWC1X005P4VD AC2).
+        if (reviewHeld) return { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON };
         return { dispatched: false, reason: 'no-candidate' };
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
@@ -2493,15 +2693,16 @@ export async function dispatchDowntimeWork(
     }
 
     if (!frozen && panesEligible) {
-      // Review-queue depth gate (WL-0MT2UQWOR007CYY9): when the completed/
-      // in_review review queue is deep enough (root items >= browseItemCount),
-      // gate non-critical implement candidates. The gate is re-read live from
-      // settings on every dispatch (no plugin restart needed). Fail-closed:
-      // a wl error counting the queue → gate active (only critical remains
-      // eligible). Critical-priority candidates BYPASS the gate entirely.
-      const reviewQueueCount = await deps.getReviewQueueCount(opts.cwd);
-      const browseItemCount = opts.browseItemCount ?? 20;
-      const gateActive = reviewQueueCount === null || reviewQueueCount >= browseItemCount;
+      // Review-queue depth gate (WL-0MT2UQWOR007CYY9, shared by the live
+      // Herdr-head path — read ONCE per dispatch above via
+      // `readReviewQueueGate`, never a second wl call): when the root-only
+      // completed/in_review review queue is deep enough (count >=
+      // browseItemCount), NON-CRITICAL implement candidates are held.
+      // Re-read live from settings every dispatch (no plugin restart
+      // needed). Fail-closed: a wl error counting the queue → gate active
+      // (only critical remains eligible). Critical-priority candidates
+      // BYPASS the gate entirely; audits/plan/intake flow unconditionally.
+      const gateActive = reviewGate?.deep ?? false;
 
       // Implement tier (WL-0MSMAYPQP001FLR6): after the critical-first
       // gate, dispatch /skill:implement for the highest-priority open
@@ -2525,8 +2726,8 @@ export async function dispatchDowntimeWork(
       let implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
       if (implementCandidate !== null && implementCandidate.needsProducerReview !== true) {
         // Gate enforcement: only critical candidates bypass the review-queue
-        // depth throttle. Non-critical candidates are excluded when the gate
-        // is active.
+        // depth throttle (shared `isImplementHeldByReviewGate` semantics).
+        // Non-critical candidates are excluded when the gate is active.
         if (!gateActive || implementCandidate.priority === 'critical') {
           return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
         }
@@ -2536,8 +2737,8 @@ export async function dispatchDowntimeWork(
       // Gate-active with no eligible implement candidate (or only non-critical):
       // fall through to plan/intake. The caller below must NOT report 'no-
       // candidate' when the remaining backlog is empty and the gate is active;
-      // it must report 'queue-deep' instead (never 'no-candidate'), so the
-      // no-candidate cooldown is not triggered.
+      // it must report 'review-queue-hold' instead (never 'no-candidate'), so
+      // the no-candidate cooldown is not triggered (WL-0MTTSWC1X005P4VD AC2).
       if (gateActive) {
         let planIntakeEmpty = true;
         if (panesEligible) {
@@ -2547,7 +2748,7 @@ export async function dispatchDowntimeWork(
           }
         }
         if (planIntakeEmpty) {
-          return { dispatched: false, reason: 'queue-deep' };
+          return { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON };
         }
         // plan/intake has candidates — fall through below to dispatch them.
       }
@@ -3135,32 +3336,21 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // tracking, and no dispatch — exactly the settings-disabled path.
       if (!(override ?? cfg.enabled)) return { polled: false, dispatched: false, idle: false };
 
-      // ── Sprint Complete auto-disable (parent WL-0MTHSHN5V008R5L0) ────
-      // Check sprint completeness: count completed + in_review items vs
-      // browseItemCount. When the count meets or exceeds the threshold,
-      // write the disable marker (same as `d` shortcut). When below,
-      // remove the marker (re-enable dispatch). Fail-closed: any query
-      // failure leaves the marker unchanged. Live marker check gates
-      // dispatch so the current process respects an auto-written marker
-      // without waiting for a restart.
-      try {
-        const completedCount = await fetchCompletedItemCount();
-        if (completedCount !== undefined) {
-          const threshold = cfg.browseItemCount ?? 20;
-          const isSprintComplete = completedCount >= threshold;
-          const markerExists = disableMarkerExists(cfg.cwd);
-          if (isSprintComplete && !markerExists) {
-            writeDisableMarker(cfg.cwd);
-          } else if (!isSprintComplete && markerExists) {
-            removeDisableMarker(cfg.cwd);
-          }
-        }
-      } catch {
-        // Fail-closed: sprint check failure must never crash the worker.
-      }
-      // Live marker gate: respect an auto-written (or manually toggled)
-      // `.herdr-downtime-disabled` marker immediately, not just at
-      // construction. Effective enabled = override ?? (marker ? false : cfg.enabled).
+      // ── Live marker gate (MANUAL `d`-toggle semantics only) ──────────
+      // WL-0MTTSWC1X005P4VD removed the sprint-complete auto-disable that
+      // used to write/clear this marker from queue depth (RCA root cause A:
+      // `completed/in_review >= browseItemCount` halted ALL dispatch AND the
+      // coordination check-in — the 21:53Z silence with no log lines). Queue
+      // depth NEVER stops the worker here: the producer review policy only
+      // holds non-critical implement dispatch (see the shared review-queue
+      // gate in dispatchDowntimeWork / dispatchFromCoordination), so audits
+      // (the queue drain), plan, intake, critical implements and the
+      // coordination check-in all continue regardless of queue depth.
+      //
+      // The marker is now written ONLY by the manual `d` toggle; a live
+      // gate respects a manually toggled marker immediately (not just at
+      // construction) so a disable survives a pane/plugin restart and is
+      // honoured cross-process.
       if (disableMarkerExists(cfg.cwd) && override === null) {
         return { polled: false, dispatched: false, idle: false };
       }
@@ -3261,6 +3451,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
               cwd: cfg.cwd,
               coordinationDir: opts.coordinationDir!,
               instanceId,
+              browseItemCount: cfg.browseItemCount,
             }, tickNow);
             lastOfferEmpty = checkIn.offered === null;
             // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
@@ -3422,6 +3613,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   cwd: cfg.cwd,
                   coordinationDir: opts.coordinationDir,
                   freeSlots,
+                  browseItemCount: cfg.browseItemCount,
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
@@ -3466,7 +3658,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           //    and reset the idle tracker (fresh full idle period required
           //    after the pause).
           if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
-            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now());
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount);
             if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
               errorStrikes = 0; // the CLI answered — it is healthy
               cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
@@ -3482,8 +3674,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 { probeContext: 'coordination-probe', timeoutMs: DOWNTIME_WL_TIMEOUT_MS },
               );
             }
-            // probe.ok with a candidate: no pause — the empty file is a
-            // transient gap; the check-in re-offers the candidate.
+            // probe.ok with a candidate (or `reviewQueueHold` — the deep-queue
+            // gate left only held implements, WL-0MTTSWC1X005P4VD): no pause —
+            // the empty file is a transient gap / the gate may lift at any
+            // moment; the check-in re-offers the candidate.
           } else {
             // Legacy mode — original semantics: no-candidate means a genuine
             // empty backlog; pause entirely for the cooldown.
@@ -3508,9 +3702,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           );
         }
         // Any other non-dispatch outcome (dispatch-in-flight, code-freeze
-        // skip) is neutral: no strike, no cooldown — the next idle period
-        // retries (a freeze skip keeps polling so implement/audit dispatch
-        // resumes immediately when the freeze lifts, WL-0MSQ0RPQP00636JY).
+        // skip, review-queue-hold — WL-0MTTSWC1X005P4VD) is neutral: no
+        // strike, no cooldown — the next idle period retries (a freeze skip
+        // keeps polling so implement/audit dispatch resumes immediately when
+        // the freeze lifts, WL-0MSQ0RPQP00636JY; a deep-queue hold keeps
+        // polling so audits keep draining and dispatch resumes the moment
+        // the queue thins).
         return { polled: true, dispatched: outcome.dispatched, idle: true };
       } finally {
         dispatching = false;

@@ -99,6 +99,9 @@ function baseDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
     readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
     fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-X', 'idea') }),
+    // Review-queue depth gate (WL-0MTTSWC1X005P4VD): shallow default so
+    // implement offers dispatch unchanged.
+    getReviewQueueCount: vi.fn().mockResolvedValue(0),
     ...overrides,
   } as DowntimeWorkerDeps;
 }

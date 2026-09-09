@@ -829,10 +829,15 @@ export function createDowntimeDeps(
       // child fails closed (gate active → only critical implements). A
       // failure or unparseable output resolves to null (gate active),
       // consistent with the code-freeze "ambiguous ⇒ frozen" convention.
+      //
+      // Per-root targeting (WL-0MTTSWC1X005P4VD): the coordination leader
+      // applies the gate to EACH offer's OWN worklog root — the count must
+      // resolve against `cwd`'s database (stateless buildWlArgsForRoot), the
+      // same convention as fetchItem, never the leader pane's module override.
       try {
         const { stdout } = await withTransientRetry(() => getExecFileAsync()(
           'wl',
-          buildWlArgs([
+          buildWlArgsForRoot(cwd, [
             'list',
             '--status',
             'completed',

@@ -46,7 +46,6 @@ import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
 import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
-import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './downtime-disable-marker.js';
 import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
@@ -3155,11 +3154,11 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   showHelpText?: boolean,
   codeFreezeAmbiguous?: boolean,
   hoverTooltip?: string[],
-  /** When true, sprint is complete: write disable marker, replace help text with banner. (parent WL-0MTHSHN5V008R5L0) */
+  /** When true, the review queue is deep (completed/in_review root items >= browseItemCount): display-only banner, NEVER auto-disables dispatch (WL-0MTTSWC1X005P4VD). */
   sprintComplete?: boolean,
   /** Number of completed+in_review items counted (used for the banner). (parent WL-0MTHSHN5V008R5L0) */
   sprintCompletedCount?: number,
-  /** browseItemCount threshold for the sprint-complete banner. (parent WL-0MTHSHN5V008R5L0) */
+  /** browseItemCount threshold for the review-queue-depth banner. (parent WL-0MTHSHN5V008R5L0) */
   browseItemCount?: number,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
@@ -3387,18 +3386,23 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // (WL-0MSGJDSMJ004128E). Note: gating only affects rendering — chord key
     // handling/accumulation in chordState continues regardless.
     //
-    // ── Sprint Complete banner (parent WL-0MTHSHN5V008R5L0) ──────────
-    // Replaces the help text footer when the sprint is complete (completed
-    // + in_review count >= browseItemCount). Green background, white text:
-    // "Sprint Complete, hit S to ship". Only shown when help text is
+    // ── Review-queue depth banner (display-only — WL-0MTTSWC1X005P4VD) ─
+    // Replaces the help text footer when the root-only completed/in_review
+    // count is at/over browseItemCount. Green background, white text. This is
+    // a REVIEW-QUEUE DEPTH indicator (the producer's distinct "queue is deep"
+    // signal) — it is display-only and NEVER disables dispatch: audits keep
+    // draining the queue and check-ins continue (RCA root cause A). The
+    // former "Sprint Complete, hit S to ship" copy was the queue-depth
+    // masquerade; a genuine sprint-complete signal would be a separate,
+    // explicit mechanism (out of scope). Only shown when help text is
     // enabled (`showHelpText: true`); does NOT interfere with code-freeze
     // banners (those render above the list).
     const isSprintComplete = sprintComplete ?? false;
     const completedCount = sprintCompletedCount ?? 0;
     const helpEnabled = showHelpText ?? true;
     if (isSprintComplete && helpEnabled) {
-      const countDisplay = browseItemCount !== undefined ? ` ${completedCount} of ${browseItemCount} items done` : '';
-      const bannerText = `Sprint Complete${countDisplay ? ` — ${countDisplay}` : ''}, hit S to ship`;
+      const countDisplay = browseItemCount !== undefined ? ` (${completedCount} of ${browseItemCount} completed/in_review)` : '';
+      const bannerText = `Review queue deep${countDisplay} — audits will drain it`;
       const bannerLine = `${ANSI.bg(40)}${ANSI.fg(255)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
     } else if (hoverTooltip && hoverTooltip.length > 0) {
@@ -4182,36 +4186,32 @@ export async function runWorklistTui(
   // Initial Code Freeze state read (fail-open: no marker => not frozen).
   refreshFreezeState();
 
-  // ── Sprint Complete state (parent WL-0MTHSHN5V008R5L0) ────────────
-  // When completed + in_review item count >= browseItemCount, the sprint
-  // is considered complete: auto-disable the downtime worker and show a
-  // green banner. The check runs on each refresh; auto-disable writes the
-  // existing `.herdr-downtime-disabled` marker (reuse, never new persistence).
+  // ── Review-queue depth indicator (display-only — parent
+  // WL-0MTHSHN5V008R5L0's "sprint complete" banner reconciled by
+  // WL-0MTTSWC1X005P4VD) ───────────────────────────────────────
+  // A completed + in_review ROOT-ITEM count >= browseItemCount is a
+  // REVIEW-QUEUE DEPTH signal, NOT a sprint completion: queue depth must
+  // never auto-disable the downtime worker (RCA root cause A — the
+  // auto-disable halted coordination check-ins/audits/plan/intake and
+  // caused the 21:53Z silence). The banner is display-only; the
+  // `.herdr-downtime-disabled` marker is written ONLY by the manual `d`
+  // toggle in the downtime worker.
   let sprintComplete = false;
   let sprintCompletedCount = 0;
 
   /**
-   * Refresh the sprint-complete state by counting completed/in_review items.
-   * Fail-closed: a query failure leaves `sprintComplete` unchanged (conservative).
-   * When the sprint becomes complete, auto-disable dispatch by writing the
-   * existing marker; when it clears, remove the marker (re-enable dispatch).
+   * Refresh the review-queue-depth indicator by counting completed/
+   * in_review ROOT items. Fail-closed: a query failure leaves
+   * `sprintComplete` unchanged (conservative). Display-only — NEVER
+   * writes/removes the disable marker (WL-0MTTSWC1X005P4VD).
    */
   const refreshSprintState = async (): Promise<void> => {
     const count = await fetchCompletedItemCount();
     if (count === undefined) return; // fail-closed: unknown count → no state change
     sprintCompletedCount = count;
-    const wasComplete = sprintComplete;
     // Re-read browseItemCount live so a settings change applies without a plugin restart.
     const liveBrowseCount = loadSettings().browseItemCount ?? opts.browseItemCount;
     sprintComplete = count >= liveBrowseCount;
-    // Auto-disable: sprint just completed → write marker, suppress help text
-    if (sprintComplete && !wasComplete) {
-      writeDisableMarker(opts.cwd ?? process.cwd());
-    }
-    // Re-enable: sprint just cleared → remove marker
-    if (!sprintComplete && wasComplete) {
-      removeDisableMarker(opts.cwd ?? process.cwd());
-    }
   };
 
   // Pane-visibility gating (pause-when-hidden). When the pane's tab is not
@@ -4516,8 +4516,10 @@ export async function runWorklistTui(
         // Re-read the Code Freeze marker so a freeze that started (or ended)
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
-        // Check sprint completeness: completed+in_review count vs browseItemCount.
-        // Fail-closed: query failure leaves state unchanged.
+        // Refresh the review-queue-depth banner indicator (display-only;
+        // completed+in_review root count vs browseItemCount). Fail-closed:
+        // query failure leaves state unchanged. Queue depth never writes the
+        // disable marker (WL-0MTTSWC1X005P4VD).
         await refreshSprintState();
         // Merge agent-status state into the refreshed items (top-level +
         // expanded children) so the agent icons reflect the latest tracker

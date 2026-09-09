@@ -116,6 +116,7 @@ import {
   type ScheduledPrompt,
   type DowntimeActiveAuditResult,
   type DowntimeItemInfo,
+  type DowntimeHerdrItem,
   isTransientDowntimeError,
   withTransientRetry,
   MIN_BROWSE_ITEM_COUNT,
@@ -6521,7 +6522,7 @@ describe('needsProducerReview exclusion', () => {
 // queue: when root items >= browseItemCount, only critical-priority
 // implement candidates remain eligible. The gate is re-read live on every
 // dispatch (no plugin restart needed), fail-closed on wl error (gate active),
-// and uses a neutral reason ('queue-deep') when plan/intake are also empty
+// and uses a neutral reason ('review-queue-hold') when plan/intake are also empty
 // — never 'no-candidate', so the worker's cooldown is not triggered.
 
 
@@ -6530,7 +6531,7 @@ describe('needsProducerReview exclusion', () => {
 // queue: when root items >= browseItemCount, only critical-priority
 // implement candidates remain eligible. The gate is re-read live on every
 // dispatch (no plugin restart needed), fail-closed on wl error (gate active),
-// and uses a neutral reason ('queue-deep') when plan/intake are also empty
+// and uses a neutral reason ('review-queue-hold') when plan/intake are also empty
 // — never 'no-candidate', so the worker's cooldown is not triggered.
 
 describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
@@ -6665,9 +6666,9 @@ describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
 
-    // Non-critical gated, no plan/intake → queue-deep
+    // Non-critical gated, no plan/intake → review-queue-hold
     expect(outcome.dispatched).toBe(false);
-    expect(outcome.reason).toBe('queue-deep');
+    expect(outcome.reason).toBe('review-queue-hold');
   });
 
   // ── AC4: gate applies ONLY to implement tier ───────────────────────
@@ -6714,9 +6715,9 @@ describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
 
-    // Non-critical gated by error → queue-deep (no-candidate not triggered)
+    // Non-critical gated by error → review-queue-hold (no-candidate not triggered)
     expect(outcome.dispatched).toBe(false);
-    expect(outcome.reason).toBe('queue-deep');
+    expect(outcome.reason).toBe('review-queue-hold');
   });
 
   it('AC5: fail-closed — queue error + critical candidate: critical still dispatches', async () => {
@@ -6734,21 +6735,21 @@ describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
   });
 
   // ── AC6: neutral reason (never 'no-candidate') ─────────────────────
-  it('AC6: gate skip with empty plan AND intake reports queue-deep, never no-candidate', async () => {
+  it('AC6: gate skip with empty plan AND intake reports review-queue-hold, never no-candidate', async () => {
     const deps = makeDeps({
       getNextImplementCandidate: vi.fn().mockResolvedValue(
         implementCandidate({ id: 'IMP-GATED', priority: 'high' }),
       ),
       getReviewQueueCount: vi.fn().mockResolvedValue(25),
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }), // plan empty
-      // intake (idea tier) is attempted but the queue-deep check short-circuits
+      // intake (idea tier) is attempted but the review-queue-hold check short-circuits
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
 
-    // Gate skip with empty plan/intake → queue-deep, NOT no-candidate
+    // Gate skip with empty plan/intake → review-queue-hold, NOT no-candidate
     expect(outcome.dispatched).toBe(false);
-    expect(outcome.reason).toBe('queue-deep');
+    expect(outcome.reason).toBe('review-queue-hold');
     // No cooldown triggered — polling continues
   });
 
@@ -6779,7 +6780,7 @@ describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
 
     // Gate active at default threshold → non-critical excluded
     expect(outcome.dispatched).toBe(false);
-    expect(outcome.reason).toBe('queue-deep');
+    expect(outcome.reason).toBe('review-queue-hold');
   });
 
   it('default browseItemCount — count 19 still dispatches non-critical', async () => {
@@ -6814,6 +6815,263 @@ describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
     // Under threshold → gate not active → implement dispatches
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('implement');
+  });
+});
+
+// ── Review-queue depth gate on the LIVE Herdr-head path (WL-0MTTSWC1X005P4VD) ──
+// Root cause B2: the original gate lived ONLY in the legacy tier chain, which
+// is unreachable while the Herdr head is non-empty (the production state), so
+// non-critical implements kept dispatching into a deep review queue. These
+// tests pin the gate on the LIVE `dispatchFromHerdrList` path (exercised via
+// `dispatchDowntimeWork` with a populated `getHerdrListHead`): audits (the
+// queue drain), plan, intake and critical implements flow unconditionally;
+// only NON-CRITICAL implement candidates are held; a deep queue with nothing
+// audit-needed reports 'review-queue-hold' (never 'no-candidate').
+
+describe('review-queue depth gate — live Herdr-head path (WL-0MTTSWC1X005P4VD)', () => {
+  const now = Date.now();
+  const fresh = new Date(now - 60_000).toISOString();
+  const auditHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Audit ${id}`,
+    status: 'completed',
+    stage: 'in_review',
+    updatedAt: fresh,
+    sortIndex: 10,
+  });
+  const implementHead = (id: string, priority = 'high'): DowntimeHerdrItem => ({
+    id,
+    title: `Implement ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    risk: 'Low',
+    effort: 'S',
+    priority,
+    sortIndex: 20,
+  });
+  const planHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'intake_complete',
+    sortIndex: 30,
+  });
+  const intakeHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Intake ${id}`,
+    status: 'open',
+    stage: 'idea',
+    sortIndex: 40,
+  });
+
+  it('AC1: with a deep queue an AUDIT candidate still dispatches even behind a held non-critical implement', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1'), auditHead('AUD-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('AUD-1');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit AUD-1'),
+      expect.anything(),
+    );
+  });
+
+  it('AC1: an audit-first deep queue dispatches the audit (the gate is implement-only)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditHead('AUD-1'), implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+  });
+
+  it('AC2: a deep queue HOLDS a non-critical implement — nothing audit-needed left → review-queue-hold (never no-candidate)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+    expect(outcome.reason).not.toBe('no-candidate');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a CRITICAL implement dispatches even when the queue is deep', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-CRIT', 'critical')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('IMP-CRIT');
+  });
+
+  it('AC2: PLAN and INTAKE candidates flow while the queue is deep', async () => {
+    // Plan candidate deeper than a held implement → plan dispatches.
+    const planDeps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1'), planHead('PLN-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const planOutcome = await dispatchDowntimeWork(planDeps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(planOutcome.dispatched).toBe(true);
+    expect(planOutcome.kind).toBe('plan');
+    expect(planOutcome.candidate?.id).toBe('PLN-1');
+
+    // Intake candidate behind a held implement → intake dispatches.
+    const intakeDeps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1'), intakeHead('IDE-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(999),
+    });
+    const intakeOutcome = await dispatchDowntimeWork(intakeDeps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(intakeOutcome.dispatched).toBe(true);
+    expect(intakeOutcome.kind).toBe('intake');
+    expect(intakeOutcome.candidate?.id).toBe('IDE-1');
+  });
+
+  it('shallow queue: a non-critical implement dispatches unchanged (threshold not met)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(10),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  it('AC5 boundary: count == browseItemCount HOLDS; count == browseItemCount - 1 dispatches', async () => {
+    const atThreshold = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(20),
+    });
+    const held = await dispatchDowntimeWork(atThreshold, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(held.dispatched).toBe(false);
+    expect(held.reason).toBe('review-queue-hold');
+
+    const underThreshold = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(19),
+    });
+    const dispatched = await dispatchDowntimeWork(underThreshold, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(dispatched.dispatched).toBe(true);
+    expect(dispatched.kind).toBe('implement');
+  });
+
+  it('AC5 fail-closed: a count-query failure (null) activates the gate on the live path', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(null),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('review-queue-hold');
+  });
+
+  it('the review gate is never consulted while frozen (code-freeze already pauses implements)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1'), planHead('PLN-1')] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+    // Freeze skips the implement; plan still dispatches. The gate read is
+    // skipped entirely under a freeze (single shared read in the caller).
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+});
+
+// ── Worker keeps polling while the review queue is deep (WL-0MTTSWC1X005P4VD) ──
+// RCA root cause A regression: queue depth used to WRITE the disable marker
+// and early-return BEFORE leader-election/check-in (the 21:53Z silence). The
+// sprint-complete auto-disable is removed; a deep queue only ever yields the
+// neutral 'review-queue-hold' reason, which never triggers the no-candidate
+// cooldown — the worker keeps checking in and keeps polling.
+
+describe('worker keeps polling while the review queue is deep (WL-0MTTSWC1X005P4VD)', () => {
+  function makeDeepQueueWorker(overrides: Partial<DowntimeWorkerDeps> = {}) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+      requiredFreeSlots: 0,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+    };
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const deps = makeDeps({
+      // Deep queue + only a non-critical implement candidate remains.
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+      getReviewQueueCount: vi.fn().mockResolvedValue(25),
+      getNextImplementCandidate: vi.fn().mockResolvedValue({
+        id: 'IMP-HELD',
+        title: 'Held implement',
+        stage: 'implement',
+        status: 'open',
+        priority: 'high',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }), // plan+intake empty
+      ...overrides,
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      config: () => ({ ...cfg }),
+    });
+    return { worker, deps, cfg };
+  }
+
+  it('a deep queue never triggers the no-candidate cooldown (review-queue-hold is neutral)', async () => {
+    vi.useFakeTimers();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    const { worker, deps } = makeDeepQueueWorker();
+    await worker.tick(); // idle run starts
+    expect(worker.idleSince).toBe(start);
+
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+    const at = await worker.tick();
+    // Held: no dispatch, but NOT no-candidate → the worker must NOT pause.
+    expect(at.dispatched).toBe(false);
+    expect(at.polled).toBe(true);
+    expect(worker.paused).toBe(false);
+    expect(worker.errorStrikes).toBe(0);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    // Queue thins below the threshold → dispatch resumes on the very next
+    // idle tick (no stale cooldown blocking it — the neutral hold never
+    // reset the idle run, so the warm run is immediately dispatchable).
+    (deps.getReviewQueueCount as ReturnType<typeof vi.fn>).mockResolvedValue(5);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
+    const resumed = await worker.tick();
+    expect(resumed.dispatched).toBe(true);
+    expect(worker.paused).toBe(false);
+    // The implement pane actually spawned (tick results carry no kind field).
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement IMP-HELD'),
+      expect.anything(),
+    );
+  });
+
+  it('queue depth alone never short-circuits a tick (no disable marker write)', async () => {
+    vi.useFakeTimers();
+    const start = 2_000_000;
+    vi.setSystemTime(start);
+    const { worker } = makeDeepQueueWorker({ getReviewQueueCount: vi.fn().mockResolvedValue(999) });
+    // Previously the sprint-complete auto-disable returned BEFORE the poll
+    // ({polled:false}) when the count crossed browseItemCount. Now the worker
+    // always polls — the deep queue only gates implement dispatch inside the
+    // dispatch call (which returns the neutral review-queue-hold).
+    const result = await worker.tick();
+    expect(result.polled).toBe(true);
+    expect(worker.paused).toBe(false);
   });
 });
 

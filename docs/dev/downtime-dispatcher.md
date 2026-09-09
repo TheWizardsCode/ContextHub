@@ -238,6 +238,51 @@ leader path equally skips review-gated entries (retaining them for later re-offe
 flag is cleared). The filter report is "no candidate" (not a `wl-error` strike) and the
 no-candidate cooldown is not triggered while review-gated work exists.
 
+### Review-queue depth gate — producer review policy (WL-0MT2UQWOR007CYY9; live-path rewire WL-0MTTSWC1X005P4VD)
+
+The **producer review policy**: while the root-only `completed`/`in_review` queue is deep
+(at/over `browseItemCount`, default 20), new NON-CRITICAL `implement` work is held back so
+the review bottleneck can drain; audits (the queue drain), `plan`, `intake`, scheduled
+prompts and **critical** implements flow unconditionally. A deep queue with nothing
+audit-needed reports the neutral reason **`review-queue-hold`** (never `no-candidate`), so
+the no-candidate cooldown is never entered while the queue drains and polling resumes the
+moment the queue thins.
+
+- **Counting:** root-only `wl list --status completed --stage in_review --root-only --json`
+  per worklog root; `browseItemCount` is re-read live from settings each dispatch
+  (`DEFAULT_BROWSE_ITEM_COUNT = 20`). **Fail-closed:** a count-query failure activates the
+  gate (only critical implements remain eligible) — same convention as the code-freeze
+  "ambiguous ⇒ frozen" rule.
+- **Shared gate implementation** (`readReviewQueueGate` / `isImplementHeldByReviewGate` in
+  `downtime-worker.ts`): ONE bounded `wl list` per dispatch/offer computation, applied
+  identically on every dispatch path — `dispatchFromHerdrList` (direct Herdr-head
+dispatch), `computeMostImportantItem` (coordination check-in offer) and
+  `dispatchFromCoordination` (leader dispatch, gated per **offer's own root** via the
+  per-root count — `createDowntimeDeps.getReviewQueueCount` targets the passed root with
+  `buildWlArgsForRoot`). The legacy tier chain (test-compat fallback) consumes the same
+  shared read rather than a second call site. A held implement entry is KEPT (never
+  removed/dropped like a freeze or stale offer) so dispatch resumes the moment the queue
+  thins.
+- **Neutral reason semantics:** `review-queue-hold` is treated by the worker exactly like
+  the code-freeze skip — no strike, no cooldown, keep polling. In coordination mode the
+  no-candidate probe (WL-0MTEZ4XZJ006Y9U7) treats a `reviewQueueHold` result as
+  "not an empty backlog" (no pause); `runCoordinationCheckIn` removes the own entry when
+  only held implements remain (nothing offerable) and re-offers on the periodic cadence.
+
+#### Sprint-complete auto-disable REMOVED (RCA root cause A, WL-0MTTSWC1X005P4VD)
+
+Sep 8→9 the sprint-complete auto-disable (parent WL-0MTHSHN5V008R5L0) wrote the
+`.herdr-downtime-disabled` marker and **early-returned before leader-election/check-in**
+when root-only `completed/in_review` reached `browseItemCount`, halting ALL dispatch AND
+check-ins — ContextHub went silent ~21:53Z→07:11Z with zero log lines. That auto-disable is
+**removed** from the worker tick; queue depth must never stop audits, plan, intake, critical
+implements or coordination check-ins. The `.herdr-downtime-disabled` marker is now written
+ONLY by the manual `d` toggle (per-instance durable disable, WL-0MT5SFP990001FNW) and is
+honoured live and across restarts — it is never derived from queue depth. The worklist
+header's "sprint complete" banner is display-only (a review-queue-depth indicator); it no
+longer writes/clears the marker. If a genuinely distinct sprint-complete signal is ever
+desired it must be a separate, explicit mechanism (follow-up, out of scope here).
+
 ### Critical-first tier & freeze split-by-skill
 
 > **Scope note (WL-0MTK1ILM2009QYB2):** "critical first" now lives INSIDE the
@@ -542,6 +587,10 @@ fields and continue to work — they simply ignore them.
 - Work item: **WL-0MT3FM8VA005XBHE** *Downtime dispatcher: critical items
   always progress first regardless of stage* (critical-first tier + freeze
   split-by-skill + caps retention + dependency-frontier dispatch)
+- Work item: **WL-0MTTSWC1X005P4VD** *P2 (CRITICAL): Replace sprint-complete
+  auto-disable with review policy on live path* (RCA root cause A/B2 fix —
+  review-queue depth gate rewired onto the live Herdr path, sprint-complete
+  auto-disable removed, marker manual-only)
 - Package README: `packages/herdr/README.md` → *Downtime worker (local-LLM
   idle dispatch)*
 - Docs work item: **WL-0MT76H3Z900908TV** (this page)
