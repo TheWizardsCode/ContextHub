@@ -72,6 +72,28 @@ import {
   type NoteEditResult,
 } from './md-note-edit.js';
 
+// ── Input-active predicate (WL-0MTV67MZU003H7SH) ──────────────────────
+
+/**
+ * Whether any text-input overlay is currently active.
+ *
+ * Returns `true` when `formState` or `shipItDialog` is non-null — meaning
+ * the user is actively typing into a form (unknown-identifier input),
+ * the Ship It confirmation dialog, or note-edit (which opens a FormState).
+ * When `true`, the scheduler should skip auto-refresh and auto-sync ticks
+ * so keypresses are not dropped by a concurrent re-render.
+ *
+ * Design decision — skip, don't coalesce: ticks while typing are silently
+ * dropped; the next regular tick after close fires normally. No queued
+ * immediate refresh is emitted on close (avoids infinite-refresh loops).
+ */
+export function isInputActive(
+  formState: FormState | null,
+  shipItDialog: ShipItDialogState | null,
+): boolean {
+  return formState !== null || shipItDialog !== null;
+}
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 /**
@@ -5598,12 +5620,20 @@ export async function runWorklistTui(
   // amplified the wl sync lock storm (WL-0MSAB7ZUC004SK7E).
   // Visibility-gated: when the pane is hidden (not focused), ticks are
   // skipped so hidden panes spawn zero wl processes (pause-when-hidden).
+  // Typing-gated (WL-0MTV67MZU003H7SH): while any text-input overlay is open
+  // (`isInputActive()`), the tick is skipped so keypresses aren't dropped by
+  // a concurrent re-render. md-note-edit is already covered — it opens a
+  // FormState, so `formState !== null` suffices for every current input site.
+  // Resume contract: skip silently, don't coalesce; the next regular tick
+  // after the overlay closes fires normally (no queued immediate refresh).
   if (opts.autoRefresh) {
     scheduler.addTask({
       id: 'refresh',
       intervalMs: opts.refreshIntervalMs,
       singleFlight: true,
       run: async () => {
+        // Typing gate — skip while the user is typing into a form/ship-it dialog.
+        if (isInputActive(formState, shipItDialog)) return;
         if (!(await paneGate.visible())) {
           panePaused = true;
           if (resumePollEnabled()) startResumePoll();
@@ -5625,7 +5655,10 @@ export async function runWorklistTui(
   // panes/TUI instances skip instead of piling up under lock contention,
   // and the cross-instance heartbeat (F3) so only the first pane per window
   // spawns `wl sync` at all. Visibility-gated like the refresh task: hidden
-  // panes skip the sync (and its follow-up refresh) entirely. Fires once
+  // panes skip the sync (and its follow-up refresh) entirely. Typing-gated
+  // (WL-0MTV67MZU003H7SH): ticks are skipped while any text-input overlay is
+  // open — `isInputActive()` covers FormState, ShipItDialog, and md-note-edit
+  // (via FormState). See resume contract on the refresh task above. Fires once
   // immediately on start (as the previous SyncTimer did) so the first sync
   // cycle is not delayed.
   if (opts.autoSync && opts.syncIntervalMs !== 0) {
@@ -5638,6 +5671,8 @@ export async function runWorklistTui(
       intervalMs: opts.syncIntervalMs,
       fireImmediately: true,
       run: async () => {
+        // Typing gate — skip while the user is typing into a form/ship-it dialog.
+        if (isInputActive(formState, shipItDialog)) return;
         if (!(await paneGate.visible())) {
           panePaused = true;
           if (resumePollEnabled()) startResumePoll();
@@ -5691,8 +5726,12 @@ export async function runWorklistTui(
 
   // Downtime-worker task — polls the llama-proxy for idle state and, after
   // the configured idle threshold, dispatches a pi agent pane (parent
-  // WL-0MSF49FMW009M06K). Unlike refresh/sync it is NOT visibility-gated:
-  // the worker runs while the worklist pane is open (parent Assumptions).
+  // WL-0MSF49FMW009M06K). Unlike refresh/sync it is NOT visibility-gated or
+  // typing-gated (WL-0MTV67MZU003H7SH audit): the worker only probes the
+  // proxy for idle state and, when idle long enough, dispatches a new pane
+  // — it never triggers a worklist list refresh or re-render while the
+  // typing overlay stays visible, so gating would only delay the (low
+  // urgency) dispatch with no keypress-loss benefit.
   // Single-flight: the poller and dispatch guards inside the worker prevent
   // overlapping work; the scheduler task itself is also single-flight.
   // Scheduler-level watchdog (WL-0MSJIPHD0001L1J9): a tick run that hangs
@@ -5723,7 +5762,10 @@ export async function runWorklistTui(
 
   // Mode-switch worker task — polls the llama-proxy for idle state and,
   // after the configured idle threshold, switches from fast (cloud) to
-  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). Pattern-matched on the
+  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). WL-0MTV67MZU003H7SH audit —
+  // same as downtime: NOT visibility-gated or typing-gated — the worker only
+  // switches inference mode via the proxy; it never re-renders the list while
+  // a form/ship-it dialog is open. Pattern-matched on the
   // downtime task: single-flight + runTimeoutMs watchdog (a hung tick can
   // never wedge the task), visibility-independent (runs while the worklist
   // pane is open). The task is only registered when the feature is enabled

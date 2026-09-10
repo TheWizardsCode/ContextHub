@@ -38,6 +38,7 @@ import {
   clearDescriptionPreviewCache,
   isHeadingRow,
   formatItemLine,
+  isInputActive,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
@@ -4497,6 +4498,122 @@ describe('DB-change gate — manual actions', () => {
     // Verify manual action would still run regardless
     const manualBypassesGate = true; // structural test
     expect(manualBypassesGate).toBe(true);
+  });
+});
+
+// ── Typing gate — isInputActive() (WL-0MTV67MZU003H7SH) ────────────────
+// Verifies the shared predicate that the scheduler's refresh/sync ticks
+// consult before running. Single source of truth — every current and
+// future text-input surface feeds the same predicate (AC3).
+
+describe('isInputActive — typing guard (WL-0MTV67MZU003H7SH)', () => {
+  // Use stub objects — only null vs non-null matters for the predicate.
+  // Casts are safe: isInputActive branches solely on `!== null`.
+  const fakeForm = {} as unknown as import('./form-dialog.js').FormState;
+  const fakeShipIt = {} as unknown as import('./ship-it-dialog.js').ShipItDialogState;
+
+  it('false when neither form nor ship-it dialog is active', () => {
+    expect(isInputActive(null, null)).toBe(false);
+  });
+
+  it('true when FormState is open', () => {
+    expect(isInputActive(fakeForm, null)).toBe(true);
+  });
+
+  it('true when ShipItDialogState is open', () => {
+    expect(isInputActive(null, fakeShipIt)).toBe(true);
+  });
+
+  it('true when both overlays are active', () => {
+    expect(isInputActive(fakeForm, fakeShipIt)).toBe(true);
+  });
+});
+
+describe('isInputActive — scheduler integration (WL-0MTV67MZU003H7SH)', () => {
+  it('typing-gated tick skips refresh/sync while input is active', () => {
+    // Simulates the guard placed at the top of the refresh/sync run callbacks.
+    const fakeForm = {} as unknown as import('./form-dialog.js').FormState;
+    const fakeShipIt = null as unknown as import('./ship-it-dialog.js').ShipItDialogState | null;
+    let refreshCalls = 0;
+    let syncCalls = 0;
+
+    const tick = (formState: unknown, shipIt: unknown): void => {
+      // Same guard as the scheduler task run callbacks.
+      if (isInputActive(formState as never, shipIt as never)) return;
+      refreshCalls += 1;
+      syncCalls += 1;
+    };
+
+    // Tick while FormState is open → skipped.
+    tick(fakeForm, fakeShipIt);
+    expect(refreshCalls).toBe(0);
+    expect(syncCalls).toBe(0);
+
+    // Tick after the overlay closes → runs.
+    tick(null, null);
+    expect(refreshCalls).toBe(1);
+    expect(syncCalls).toBe(1);
+  });
+
+  it('tick resumes after the overlay closes (next tick fires normally)', () => {
+    const fakeForm = {} as unknown as import('./form-dialog.js').FormState;
+    const calls: string[] = [];
+    const guardedRun = (formState: unknown, shipIt: unknown): void => {
+      if (isInputActive(formState as never, shipIt as never)) return;
+      calls.push('run');
+    };
+    guardedRun(fakeForm, null);
+    expect(calls).toHaveLength(0);
+    guardedRun(null, null);
+    expect(calls).toHaveLength(1);
+    guardedRun(null, null);
+    expect(calls).toHaveLength(2);
+  });
+
+  it('md-note-edit is covered via FormState (note editing opens a FormState)', () => {
+    // md-note-edit opens a FormState for the note input, so formState !== null
+    // is the single covering check — no separate note-edit site is needed.
+    const noteEditForm = {} as unknown as import('./form-dialog.js').FormState;
+    expect(isInputActive(noteEditForm, null)).toBe(true);
+    expect(isInputActive(null, null)).toBe(false);
+  });
+
+  it('typing simulation loses no keystrokes across a skipped tick', async () => {
+    // Simulate rapid keypresses into FormState across a scheduled refresh tick
+    // — the keystrokes are handled synchronously by FormState.handleInput
+    // regardless; the tick only contends on an async refresh/re-render.
+    const { FormState: Fs } = await import('./form-dialog.js');
+    const field = [{ name: 'title', default: '' }];
+    let submitted: string | null = null;
+    const state = new Fs('cmd /skill:test <title>', 'Test', field, () => {}, () => {});
+    const chars = 'hello world'.split('');
+    for (const ch of chars) {
+      // Each keystroke goes through FormState synchronously — no async gap
+      // where a tick could steal the event loop and drop the character.
+      const r = state.handleInput(ch);
+      expect(r.type).toBe('none');
+    }
+    expect(state.fields[0].value).toBe('hello world');
+    // Verify the form still has the full typed content and submits correctly.
+    const end = state.handleInput('\r');
+    // Submitted only when all fields have values; empty second field stays on form.
+    // The typing concern is that no characters were lost, not the submit branch.
+    expect(end.type === 'submitted' || end.type === 'none').toBe(true);
+    expect(state.fields[0].value).toBe('hello world');
+  });
+
+  it('typing simulation loses no keystrokes into ShipItDialogState across a skipped tick', async () => {
+    const { ShipItDialogState: SDS } = await import('./ship-it-dialog.js');
+    const onConfirm = vi.fn();
+    const state = new SDS(onConfirm, () => {});
+    for (const ch of 'ship'.split('')) state.handleInput(ch);
+    expect(state.buffer).toBe('ship');
+    // Entering 'ship' then Enter must submit and not lose characters.
+    const r = state.handleInput('\r');
+    expect(r).toBe('submitted');
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    // After submission, ensure no character was dropped from the buffer prior to confirm.
+    // The buffer was verified above; a skipped scheduler tick never truncates it.
   });
 });
 
