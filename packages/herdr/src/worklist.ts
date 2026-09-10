@@ -1244,8 +1244,37 @@ export function formatItemLine(
  * Ensure a line (possibly with ANSI codes) fits within the given width
  * by truncating and appending an ellipsis if necessary.
  */
+/**
+ * Compute the visual (terminal) width of a string, accounting for
+ * multi-width characters (emoji, wide symbols) that render as 2 cells.
+ *
+ * Characters in these Unicode ranges are known to be double-width
+ * in most terminals: U+2300–U+23FF (misc technical, includes ⏳),
+ * U+2600–U+26FF (miscellaneous symbols, includes ⚠, ⛔),
+ * U+1F000–U+1FFFF (emoji).
+ */
+function visibleLength(s: string): number {
+  let width = 0;
+  for (let i = 0; i < s.length; i++) {
+    // Handle surrogate pairs
+    let cp: number;
+    if (s.charCodeAt(i) >= 0xd800 && s.charCodeAt(i) < 0xdc00 && i + 1 < s.length) {
+      cp = 0x10000 + ((s.charCodeAt(i) - 0xd800) << 10) + (s.charCodeAt(i + 1) - 0xdc00);
+      i += 1;
+    } else {
+      cp = s.charCodeAt(i);
+    }
+    // Multi-width ranges: emoji, dingbats, misc symbols
+    if (cp >= 0x2300 && cp < 0x2400) width += 2; // ⏳
+    else if (cp >= 0x2600 && cp < 0x2700) width += 2; // ⚠, ⛔
+    else if (cp >= 0x1f000) width += 2; // emoji
+    else width += 1;
+  }
+  return width;
+}
+
 function truncateLine(line: string, maxWidth: number): string {
-  const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+  const visibleLen = visibleLength(line.replace(/\x1b\[[0-9;]*m/g, ''));
   if (visibleLen <= maxWidth) return line;
 
   let result = '';
@@ -1260,8 +1289,24 @@ function truncateLine(line: string, maxWidth: number): string {
         continue;
       }
     }
+    // Count visual width (multi-width chars add 2)
+    let cp: number;
+    if (line.charCodeAt(i) >= 0xd800 && line.charCodeAt(i) < 0xdc00 && i + 1 < line.length) {
+      cp = 0x10000 + ((line.charCodeAt(i) - 0xd800) << 10) + (line.charCodeAt(i + 1) - 0xdc00);
+      i += 1;
+    } else {
+      cp = line.charCodeAt(i);
+    }
+    if (cp >= 0x2300 && cp < 0x2400) {
+      visLen += 2; // ⏳ etc.
+    } else if (cp >= 0x2600 && cp < 0x2700) {
+      visLen += 2; // ⚠, ⛔
+    } else if (cp >= 0x1f000) {
+      visLen += 2; // emoji
+    } else {
+      visLen += 1;
+    }
     result += line[i];
-    visLen += 1;
     i += 1;
   }
   // Close open ANSI and append ellipsis

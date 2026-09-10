@@ -4892,6 +4892,124 @@ describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () =>
     // The downtime segment may be cut at the truncation boundary.
     expect(visible).toContain('[downtime');
   });
+
+  // ── AC1b: Multi-width emoji characters (WL-0MSNI6TQ5003JY1Z follow-up)
+  // Emoji like ⏳ render as 2 cells in terminals but JavaScript .length
+  // counts them as 1. The header must still fit within cols even when
+  // the idle timer emoji is present (the original "still disappears"
+  // issue: visibleLength was character-count, not visual-width).
+
+  it('header with ⏳ emoji fits at exactly cols (visual width ≤ cols)', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    // Build a header that is 39 chars but ~40 visual cells (⏳ = 2 cells)
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      10,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [⏳ downtime idle 1:23]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    // Visual width must be <= cols (emoji ⏳ counts as 2)
+    let visWidth = 0;
+    for (let i = 0; i < visible.length; i++) {
+      const cp = visible.charCodeAt(i);
+      if (cp >= 0x2300 && cp < 0x2400) visWidth += 2;
+      else if (cp >= 0x2600 && cp < 0x2700) visWidth += 2;
+      else if (cp >= 0x1f000) visWidth += 2;
+      else visWidth += 1;
+    }
+    expect(visWidth).toBeLessThanOrEqual(cols);
+  });
+
+  it('header with ⏳ emoji truncated to fit at 30 cols', () => {
+    const cols = 30;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [⏳ downtime idle 12:34]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    let visWidth = 0;
+    for (let i = 0; i < visible.length; i++) {
+      const cp = visible.charCodeAt(i);
+      if (cp >= 0x2300 && cp < 0x2400) visWidth += 2;
+      else if (cp >= 0x2600 && cp < 0x2700) visWidth += 2;
+      else if (cp >= 0x1f000) visWidth += 2;
+      else visWidth += 1;
+    }
+    expect(visWidth).toBeLessThanOrEqual(cols);
+  });
+
+  it('rows - 1 invariant holds with ⏳ emoji at 40×24', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [⏳ downtime idle 1:23]',
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
 });
 
 // ── Header item count excludes heading rows (WL-0MT26TE72002FLKX) ──────
