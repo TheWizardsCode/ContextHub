@@ -100,6 +100,47 @@ export function isInputActive(
   return formState !== null || shipItDialog !== null;
 }
 
+/**
+ * Build the standard scheduler-tick runner used by the worklist's periodic
+ * tasks (the 30s auto-refresh and the 60s auto-sync).
+ *
+ * Gate ordering:
+ *   1. Typing gate — skip while any text-input overlay is open so a
+ *      background re-render never steals focus or drops a keypress
+ *      (WL-0MTV67MZU003H7SH).
+ *   2. Visibility gate — skip while the pane's tab is hidden
+ *      (pause-when-hidden); the hidden/visible side effects are delegated to
+ *      the caller so it can drive the resume-poll and `panePaused` state.
+ *   3. DB-change gate — skip when the worklog DB is unchanged and the last
+ *      sync is still fresh (zero `wl` spawns for an idle pane).
+ *
+ * Skips are silent and NOT coalesced: the task stays scheduled, so the next
+ * regular tick after the reason clears fires normally.
+ *
+ * Exported so the scheduler-integration tests exercise the REAL guard
+ * ordering with a real `TaskScheduler`, instead of re-implementing the guard
+ * inline in the test body.
+ */
+export function createGatedTick(deps: {
+  isInputActive: () => boolean;
+  isVisible: () => Promise<boolean>;
+  onHidden: () => void;
+  onVisible: () => void;
+  isDbUnchanged: () => boolean;
+  action: () => void;
+}): () => Promise<void> {
+  return async () => {
+    if (deps.isInputActive()) return;
+    if (!(await deps.isVisible())) {
+      deps.onHidden();
+      return;
+    }
+    deps.onVisible();
+    if (deps.isDbUnchanged()) return;
+    deps.action();
+  };
+}
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 /**
@@ -5695,22 +5736,20 @@ export async function runWorklistTui(
       id: 'refresh',
       intervalMs: opts.refreshIntervalMs,
       singleFlight: true,
-      run: async () => {
-        // Typing gate — skip while the user is typing into a form/ship-it dialog.
-        if (isInputActive(formState, shipItDialog)) return;
-        if (!(await paneGate.visible())) {
+      run: createGatedTick({
+        isInputActive: () => isInputActive(formState, shipItDialog),
+        isVisible: () => paneGate.visible(),
+        onHidden: () => {
           panePaused = true;
           if (resumePollEnabled()) startResumePoll();
-          return;
-        }
-        stopResumePoll();
-        panePaused = false;
-        // DB-change gate: skip when DB unchanged since last cycle
-        if (tracker && !tracker.dbChanged()) {
-          return; // DB unchanged — zero wl spawns for this tick
-        }
-        doRefresh(false);
-      },
+        },
+        onVisible: () => {
+          stopResumePoll();
+          panePaused = false;
+        },
+        isDbUnchanged: () => tracker !== null && !tracker.dbChanged(),
+        action: () => doRefresh(false),
+      }),
     });
   }
 
@@ -5734,29 +5773,33 @@ export async function runWorklistTui(
       id: 'sync',
       intervalMs: opts.syncIntervalMs,
       fireImmediately: true,
-      run: async () => {
-        // Typing gate — skip while the user is typing into a form/ship-it dialog.
-        if (isInputActive(formState, shipItDialog)) return;
-        if (!(await paneGate.visible())) {
+      run: createGatedTick({
+        isInputActive: () => isInputActive(formState, shipItDialog),
+        isVisible: () => paneGate.visible(),
+        onHidden: () => {
           panePaused = true;
           if (resumePollEnabled()) startResumePoll();
-          return;
-        }
-        stopResumePoll();
-        panePaused = false;
+        },
+        onVisible: () => {
+          stopResumePoll();
+          panePaused = false;
+        },
         // DB-change gate: skip when DB unchanged AND last sync fresh within cap.
         // Subject to existing heartbeat / single-flight / --if-idle guards in doSync.
-        if (tracker && opts.maxSyncStalenessMs > 0) {
-          const dbChanged = tracker.dbChanged();
-          const syncDir = worklogDir ?? join(process.cwd(), '.worklog');
-          const heartbeatFresh = isSyncHeartbeatFresh(syncDir, opts.maxSyncStalenessMs);
-          if (!dbChanged && heartbeatFresh) {
-            return; // DB unchanged, last sync recent — skip
+        isDbUnchanged: () => {
+          if (tracker && opts.maxSyncStalenessMs > 0) {
+            const dbChanged = tracker.dbChanged();
+            const syncDir = worklogDir ?? join(process.cwd(), '.worklog');
+            const heartbeatFresh = isSyncHeartbeatFresh(syncDir, opts.maxSyncStalenessMs);
+            if (!dbChanged && heartbeatFresh) return true;
           }
-        }
-        doSync(true, heartbeatTtlMs); // ifIdle + heartbeat: skip when another sync is in-flight / fresh
-        doRefresh(false);
-      },
+          return false;
+        },
+        action: () => {
+          doSync(true, heartbeatTtlMs); // ifIdle + heartbeat: skip when another sync is in-flight / fresh
+          doRefresh(false);
+        },
+      }),
     });
   }
 

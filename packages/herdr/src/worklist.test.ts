@@ -39,12 +39,14 @@ import {
   isHeadingRow,
   formatItemLine,
   isInputActive,
+  createGatedTick,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { createDowntimeWorker, createDowntimePoller } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
+import { TaskScheduler } from './scheduler.js';
 import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
 import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
@@ -4529,46 +4531,119 @@ describe('isInputActive — typing guard (WL-0MTV67MZU003H7SH)', () => {
   });
 });
 
-describe('isInputActive — scheduler integration (WL-0MTV67MZU003H7SH)', () => {
-  it('typing-gated tick skips refresh/sync while input is active', () => {
-    // Simulates the guard placed at the top of the refresh/sync run callbacks.
-    const fakeForm = {} as unknown as import('./form-dialog.js').FormState;
-    const fakeShipIt = null as unknown as import('./ship-it-dialog.js').ShipItDialogState | null;
-    let refreshCalls = 0;
-    let syncCalls = 0;
+describe('createGatedTick — scheduler integration (WL-0MTV67MZU003H7SH)', () => {
+  // Exercise the REAL production gated-tick runner (`createGatedTick`) — the
+  // exact runner the refresh/sync scheduler tasks delegate to — via a REAL
+  // `TaskScheduler`. No inline re-implementation of the guard.
 
-    const tick = (formState: unknown, shipIt: unknown): void => {
-      // Same guard as the scheduler task run callbacks.
-      if (isInputActive(formState as never, shipIt as never)) return;
-      refreshCalls += 1;
-      syncCalls += 1;
-    };
+  /** Drain microtasks so a fire-immediately scheduler run settles. */
+  const flush = async (): Promise<void> => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  };
 
-    // Tick while FormState is open → skipped.
-    tick(fakeForm, fakeShipIt);
-    expect(refreshCalls).toBe(0);
-    expect(syncCalls).toBe(0);
+  /** Run a gated tick through the real scheduler (fireImmediately). */
+  const runViaScheduler = async (tick: () => Promise<void>): Promise<void> => {
+    const scheduler = new TaskScheduler(1000);
+    scheduler.addTask({ id: 'tick', intervalMs: 60_000, fireImmediately: true, run: tick });
+    scheduler.start();
+    await flush();
+    scheduler.stop();
+  };
 
-    // Tick after the overlay closes → runs.
-    tick(null, null);
-    expect(refreshCalls).toBe(1);
-    expect(syncCalls).toBe(1);
+  const makeTick = (opts: {
+    inputActive?: () => boolean;
+    visible?: () => Promise<boolean>;
+    dbUnchanged?: () => boolean;
+    action: () => void;
+    onHidden?: () => void;
+    onVisible?: () => void;
+  }): (() => Promise<void>) =>
+    createGatedTick({
+      isInputActive: opts.inputActive ?? (() => false),
+      isVisible: opts.visible ?? (async () => true),
+      onHidden: opts.onHidden ?? (() => {}),
+      onVisible: opts.onVisible ?? (() => {}),
+      isDbUnchanged: opts.dbUnchanged ?? (() => false),
+      action: opts.action,
+    });
+
+  it('skips the tick while input is active — action never runs', async () => {
+    let actionCalls = 0;
+    let visibilityCalls = 0;
+    const tick = makeTick({
+      inputActive: () => true,
+      visible: async () => {
+        visibilityCalls += 1;
+        return true;
+      },
+      action: () => {
+        actionCalls += 1;
+      },
+    });
+    await runViaScheduler(tick);
+    expect(actionCalls).toBe(0);
+    // Typing gate short-circuits before the visibility probe.
+    expect(visibilityCalls).toBe(0);
   });
 
-  it('tick resumes after the overlay closes (next tick fires normally)', () => {
-    const fakeForm = {} as unknown as import('./form-dialog.js').FormState;
-    const calls: string[] = [];
-    const guardedRun = (formState: unknown, shipIt: unknown): void => {
-      if (isInputActive(formState as never, shipIt as never)) return;
-      calls.push('run');
-    };
-    guardedRun(fakeForm, null);
-    expect(calls).toHaveLength(0);
-    guardedRun(null, null);
-    expect(calls).toHaveLength(1);
-    guardedRun(null, null);
-    expect(calls).toHaveLength(2);
+  it('runs the action when input is inactive (no regression when not typing)', async () => {
+    let actionCalls = 0;
+    const tick = makeTick({
+      action: () => {
+        actionCalls += 1;
+      },
+    });
+    await runViaScheduler(tick);
+    expect(actionCalls).toBe(1);
   });
+
+  it('resumes on the next tick after the overlay closes', async () => {
+    let inputActive = true;
+    let actionCalls = 0;
+    const tick = makeTick({
+      inputActive: () => inputActive,
+      action: () => {
+        actionCalls += 1;
+      },
+    });
+    await tick(); // forced tick while typing → skipped
+    expect(actionCalls).toBe(0);
+    inputActive = false;
+    await tick(); // next tick after close → runs
+    expect(actionCalls).toBe(1);
+  });
+
+  it('still honours the visibility and DB-change gates when not typing', async () => {
+    let actionCalls = 0;
+    let hidden = true;
+    let dbUnchanged = false;
+    let hiddenCallbacks = 0;
+    const tick = makeTick({
+      visible: async () => !hidden,
+      dbUnchanged: () => dbUnchanged,
+      onHidden: () => {
+        hiddenCallbacks += 1;
+      },
+      action: () => {
+        actionCalls += 1;
+      },
+    });
+    await tick(); // hidden → hidden callback, no action
+    expect(hiddenCallbacks).toBe(1);
+    expect(actionCalls).toBe(0);
+    hidden = false;
+    dbUnchanged = true;
+    await tick(); // visible but DB unchanged → no action
+    expect(actionCalls).toBe(0);
+    dbUnchanged = false;
+    await tick(); // visible + DB changed → action
+    expect(actionCalls).toBe(1);
+  });
+});
+
+describe('isInputActive — note-edit coverage and keystroke preservation (WL-0MTV67MZU003H7SH)', () => {
 
   it('md-note-edit is covered via FormState (note editing opens a FormState)', () => {
     // md-note-edit opens a FormState for the note input, so formState !== null
