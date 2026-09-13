@@ -19,10 +19,10 @@ import {
   MAX_BROWSE_ITEM_COUNT,
 } from './settings.js';
 import {
-  clampDowntimeMaxConcurrentDispatches,
-  DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
-  DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR,
-  DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING,
+  clampDowntimeMaxRunningPanes,
+  DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
+  DOWNTIME_MAX_RUNNING_PANES_FLOOR,
+  DOWNTIME_MAX_RUNNING_PANES_CEILING,
 } from './downtime-worker.js';
 
 function tempSettingsPath(): string {
@@ -265,74 +265,88 @@ describe('maxSyncStalenessMs', () => {
 });
 
 // ---------------------------------------------------------------------------
-// downtimeMaxConcurrentDispatches (F2 WL-0MTSAB0QU003KTLA)
+// downtimeMaxRunningPanes (renamed from downtimeMaxConcurrentDispatches,
+// parent WL-0MTYZXSLN008HZOW)
 // ---------------------------------------------------------------------------
 
-describe('downtimeMaxConcurrentDispatches', () => {
-  it('defaults to 1 (single-flight, unchanged from before F2)', () => {
-    expect(DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES).toBe(1);
-    expect(defaultSettings.downtimeMaxConcurrentDispatches).toBe(1);
+describe('downtimeMaxRunningPanes', () => {
+  it('defaults to 1 (single-flight)', () => {
+    expect(DEFAULT_DOWNTIME_MAX_RUNNING_PANES).toBe(1);
+    expect(defaultSettings.downtimeMaxRunningPanes).toBe(1);
   });
 
   it('loads a persisted value', () => {
     const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 2 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(2);
+    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 2 });
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(2);
   });
 
   it('clamps values below the floor to 1', () => {
     const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 0 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: -5 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 0 });
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
+    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: -5 });
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
   });
 
   it('clamps values above the ceiling to 4', () => {
     const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 10 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(4);
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 99 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(4);
+    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 10 });
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(4);
+    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 99 });
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(4);
   });
 
   it('falls back to the default when not a number', () => {
     const path = tempSettingsPath();
-    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxConcurrentDispatches: 'many' }), 'utf-8');
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxRunningPanes: 'many' }), 'utf-8');
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
   });
 
   it('existing config without the key behaves as single-flight', () => {
     const path = tempSettingsPath();
-    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxConcurrentDispatches: undefined }), 'utf-8');
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxRunningPanes: undefined }), 'utf-8');
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
+  });
+
+  it('migrates the legacy downtimeMaxConcurrentDispatches key (WL-0MTYZXSLN008HZOW)', () => {
+    const path = tempSettingsPath();
+    // An existing config predates the rename: it carries the OLD key and no
+    // `downtimeMaxRunningPanes` key at all.
+    writeFileSync(path, JSON.stringify({ downtimeMaxConcurrentDispatches: 3 }), 'utf-8');
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(3);
   });
 });
 
-describe('clampDowntimeMaxConcurrentDispatches', () => {
+describe('clampDowntimeMaxRunningPanes', () => {
   it('keeps in-range values', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(1)).toBe(1);
-    expect(clampDowntimeMaxConcurrentDispatches(2)).toBe(2);
-    expect(clampDowntimeMaxConcurrentDispatches(4)).toBe(4);
+    expect(clampDowntimeMaxRunningPanes(1)).toBe(1);
+    expect(clampDowntimeMaxRunningPanes(2)).toBe(2);
+    expect(clampDowntimeMaxRunningPanes(4)).toBe(4);
   });
 
   it('clamps below floor to 1', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(0)).toBe(1);
-    expect(clampDowntimeMaxConcurrentDispatches(-1)).toBe(1);
+    expect(clampDowntimeMaxRunningPanes(0)).toBe(1);
+    expect(clampDowntimeMaxRunningPanes(-1)).toBe(1);
   });
 
   it('clamps above ceiling to 4', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(5)).toBe(4);
-    expect(clampDowntimeMaxConcurrentDispatches(99)).toBe(4);
+    expect(clampDowntimeMaxRunningPanes(5)).toBe(4);
+    expect(clampDowntimeMaxRunningPanes(99)).toBe(4);
   });
 
   it('rounds fractional values', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(2.6)).toBe(3);
-    expect(clampDowntimeMaxConcurrentDispatches(2.4)).toBe(2);
+    expect(clampDowntimeMaxRunningPanes(2.6)).toBe(3);
+    expect(clampDowntimeMaxRunningPanes(2.4)).toBe(2);
   });
 
   it('returns the default (1) for non-finite input', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(NaN)).toBe(1);
-    expect(clampDowntimeMaxConcurrentDispatches(Infinity)).toBe(1);
+    expect(clampDowntimeMaxRunningPanes(NaN)).toBe(1);
+    expect(clampDowntimeMaxRunningPanes(Infinity)).toBe(1);
+  });
+
+  it('exposes the renamed floor/ceiling constants', () => {
+    expect(DOWNTIME_MAX_RUNNING_PANES_FLOOR).toBe(1);
+    expect(DOWNTIME_MAX_RUNNING_PANES_CEILING).toBe(4);
   });
 });

@@ -104,6 +104,102 @@ export const perSlotOneOfThreeFree: LlamaStatus = {
   ],
 };
 
+// ── Owner-lease / contention fixtures (WL-0MTYZXSLN008HZOW) ───────────
+
+/**
+ * A single-slot status that is IDLE but OWNED: the slot is not processing
+ * yet a live Local Proxy lease is held (`owner_session_id`), so the slot
+ * must NEVER be considered free for a new dispatch (AC2/AC5,
+ * WL-0MTYZXSLN008HZOW).
+ */
+export const singleSlotIdleOwned: LlamaStatus = {
+  ...idleAllSlotsFree,
+  available_slots: 1,
+  total_slots: 1,
+  local_lease_active: true,
+  local_owner_session_id: 'session-live-pane',
+  local_owner_lease_remaining_seconds: 120,
+  slots: [{ slot_id: 'slot-1', is_processing: false, owner_session_id: 'session-live-pane' }],
+};
+
+/**
+ * Multi-slot status with an idle-but-owned slot: slot-1 is free by
+ * `is_processing` but owned by a live lease, so only 2 of 3 slots are
+ * genuinely free for dispatch.
+ */
+export const perSlotIdleOwned: LlamaStatus = {
+  ...idleAllSlotsFree,
+  available_slots: 3,
+  total_slots: 3,
+  local_lease_active: true,
+  local_owner_session_id: 'session-live-pane',
+  local_owner_lease_remaining_seconds: 120,
+  slots: [
+    { slot_id: 'slot-1', is_processing: false, owner_session_id: 'session-live-pane' },
+    { slot_id: 'slot-2', is_processing: false },
+    { slot_id: 'slot-3', is_processing: false },
+  ],
+};
+
+/**
+ * Multi-slot status where only ONE unowned slot is free: slot-1 is owned
+ * (idle), slot-2 is processing, slot-3 is unowned-free. Per-slot mode with
+ * N=2 must NOT be idle (only 1 genuinely free slot).
+ */
+export const perSlotOwnedOneUnowned: LlamaStatus = {
+  ...idleAllSlotsFree,
+  available_slots: 1,
+  total_slots: 3,
+  local_lease_active: true,
+  local_owner_session_id: 'session-live-pane',
+  local_owner_lease_remaining_seconds: 120,
+  slots: [
+    { slot_id: 'slot-1', is_processing: false, owner_session_id: 'session-live-pane' },
+    { slot_id: 'slot-2', is_processing: true },
+    { slot_id: 'slot-3', is_processing: false },
+  ],
+};
+
+/** Idle status where the proxy reports queued (contending) local requests. */
+export const idleWithContention: LlamaStatus = {
+  ...idleAllSlotsFree,
+  contention_queued_count: 3,
+};
+
+/** Raw `herdr pane list` output with two live downtime panes + noise. */
+export const herdrPaneListRaw: string = JSON.stringify({
+  id: 'cli:pane:list',
+  result: {
+    panes: [
+      {
+        pane_id: 'w1:p1',
+        label: 'Downtime triggered implement Some item - WL-ABC',
+        agent: 'pi',
+        agent_status: 'working',
+      },
+      {
+        pane_id: 'w1:p2',
+        label: 'Downtime triggered audit Another item - WL-DEF',
+        agent: 'pi',
+        agent_status: 'idle',
+      },
+      {
+        pane_id: 'w1:p3',
+        label: 'Manually triggered implement Foo - WL-XYZ',
+        agent: 'pi',
+        agent_status: 'working',
+      },
+      { pane_id: 'w1:p4', label: 'Work Items', agent_status: 'unknown' },
+      {
+        pane_id: 'w1:p5',
+        label: 'Downtime triggered plan Finished - WL-GHI',
+        agent: 'pi',
+        agent_status: 'done',
+      },
+    ],
+  },
+});
+
 /** Raw (unparsed) response missing the numeric slot fields → ambiguous. */
 export const ambiguousMissingFieldsRaw: Record<string, unknown> = {
   llama_server_running: true,

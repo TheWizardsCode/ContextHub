@@ -406,6 +406,54 @@ dispatch call — no per-worklog duplication (F5 WL-0MTII48OV008P2QU;
 WL-0MT50LKAK001EF5Q single cap source). v1 scope is single-machine; a
 multi-machine (real flock/NFS) extension is future work.
 
+### Running-pane bound, owner lease & contention feedback (WL-0MTYZXSLN008HZOW)
+
+**Problem:** with a single-slot local LLM the worker over-dispatched agent
+panes because the old `downtimeMaxConcurrentDispatches` cap only bounded
+in-flight dispatch *pipelines* (~1–2 s) and the free-slot gate used the
+instantaneous per-tick proxy poll — an agent on a tool call (wl, bash,
+tests) left the slot "free", so multiple `Downtime triggered` panes queued
+on one slot (`contention_queued_count` 6, ~78 s cumulative queue time).
+
+**Fix (five directions, all implemented):**
+
+1. **Renamed setting, new semantics** — `downtimeMaxConcurrentDispatches`
+   is now **`downtimeMaxRunningPanes`** (`settings.ts`, clamped [1, 4], default
+   1). It bounds **running panes** — dispatched agents that are still alive —
+   not in-flight dispatch pipelines. Existing configs carrying the old key
+   are migrated on load (deprecation: the new key wins when both are
+   present).
+2. **Running-pane bound (AC1/AC3)** — `deps.getRunningDowntimePanes(cwd)`
+   counts live dispatched downtime panes from `herdr pane list` (panes whose
+   label starts with `Downtime` and that still host a live pi agent —
+   status not `done`/`exited`). The worker refuses a new dispatch when
+   running-panes ≥ the cap. The query is machine-wide and survives
+   leader/instance restarts and spans roots. Fail-closed: a failed liveness
+   query means *no dispatch* (never over-dispatch on unknown state).
+   Dispatch outcome reason: `running-pane-cap`.
+3. **Owner-lease gate (AC2)** — a non-null Local Proxy owner lease
+   (`local_owner_session_id` / `local_owner_lease_remaining_seconds`, the
+   lease held by `run-pi-agent.sh` until `release-lease-on-exit.mjs`
+   releases it) counts as "slot busy" for the dispatch decision when the
+   worker has a live dispatch pane; only a truly unowned slot is
+   dispatchable. An OPERATOR lease on a multi-slot setup with no running
+   dispatch pane does not block spare-capacity dispatch (unchanged).
+   Dispatch outcome reason: `slot-owned`.
+4. **Per-slot owner tracking (AC5)** — `LlamaSlot` carries an optional
+   `owner_session_id`; `countFreeUnownedSlots` excludes owned slots from the
+   free count and the per-slot idle tracker resets an owned slot's timer, so
+   a slot with a live lease is never considered available for a new pane.
+   A single idle-but-owned slot (count-based path) fails closed via the
+   derived `local_lease_active`.
+5. **Contention feedback (AC6)** — the proxy's `contention_queued_count` is
+   parsed; while > 0 the dispatcher backs off with outcome reason
+   `proxy-contention` until the queue drains.
+
+All five gates are neutral refusals — never a strike, never a cooldown — and
+apply to BOTH dispatch paths (coordination leader and legacy direct chain).
+The in-flight pipeline guard (`dispatch-in-flight`) remains as a secondary
+same-process safeguard.
+
 ### Migration & legacy retirement (F6 WL-0MTII4CWT00452HU, parent AC5)
 
 The machine dir `~/.herdr/downtime/` (or `HERDR_COORDINATION_DIR`) is
@@ -440,6 +488,7 @@ status refresh unchanged at 30s.**
 | Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.ts`, `leader-election.ts` |
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
+| Max running downtime panes | **1** (`downtimeMaxRunningPanes`; renamed from `downtimeMaxConcurrentDispatches`, WL-0MTYZXSLN008HZOW) | `DEFAULT_DOWNTIME_MAX_RUNNING_PANES`, clamped [1, 4] (`downtime-worker.ts`) |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin
 settings file (`~/.config/herdr/worklog-plugin.json`,

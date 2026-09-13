@@ -95,7 +95,7 @@
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
  *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs`
- *    / `clampDowntimeMaxConcurrentDispatches`
+ *    / `clampDowntimeMaxRunningPanes`
  *    — settings clamps, wired into `settings.ts`.
  *  - `selectWithRotation` (WL-0MSSRED76008LGB6) — rotation-aware selection:
  *    within each tier, candidates sharing the same priority level are
@@ -201,8 +201,17 @@ export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
 /** Default pause after a genuine empty backlog: 60 minutes. */
 export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
 
-/** Default bounded concurrency cap: 1 (single-flight, current behavior). */
-export const DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES = 1;
+/**
+ * Default maximum running panes: 1 (single-flight, current behavior).
+ *
+ * Renamed from `DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES` (parent
+ * WL-0MTYZXSLN008HZOW): the old constant bounded in-flight dispatch
+ * *pipelines* (1–2 s). The new constant bounds *running panes* — dispatched
+ * agents that are still alive. Backward compat alias provided.
+ */
+export const DEFAULT_DOWNTIME_MAX_RUNNING_PANES = 1;
+/** @deprecated Renamed to DEFAULT_DOWNTIME_MAX_RUNNING_PANES (WL-0MTYZXSLN008HZOW). */
+export const DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES = DEFAULT_DOWNTIME_MAX_RUNNING_PANES;
 
 /**
  * Default review-queue depth threshold (`browseItemCount`, parent
@@ -213,10 +222,14 @@ export const DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES = 1;
  * via `wl list --status completed --stage in_review --root-only --json`.
  */
 export const DEFAULT_BROWSE_ITEM_COUNT = 20;
-/** Clamp floor for the concurrency cap. */
-export const DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR = 1;
-/** Clamp ceiling for the concurrency cap. */
-export const DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING = 4;
+/** Clamp floor for the running panes cap. */
+export const DOWNTIME_MAX_RUNNING_PANES_FLOOR = 1;
+/** @deprecated Renamed to DOWNTIME_MAX_RUNNING_PANES_FLOOR (WL-0MTYZXSLN008HZOW). */
+export const DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR = DOWNTIME_MAX_RUNNING_PANES_FLOOR;
+/** Clamp ceiling for the running panes cap. */
+export const DOWNTIME_MAX_RUNNING_PANES_CEILING = 4;
+/** @deprecated Renamed to DOWNTIME_MAX_RUNNING_PANES_CEILING (WL-0MTYZXSLN008HZOW). */
+export const DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING = DOWNTIME_MAX_RUNNING_PANES_CEILING;
 
 /**
  * Audit-tier recency window: a completed/in_review candidate is only
@@ -371,6 +384,14 @@ export interface LlamaStatus {
   local_owner_session_id?: string | null;
   local_owner_lease_remaining_seconds?: number | null;
   /**
+   * Proxy-reported contention queue depth (AC6, parent WL-0MTYZXSLN008HZOW):
+   * the number of requests currently queued behind a busy local slot. A
+   * positive value means dispatched panes are already contending for the
+   * slot — the dispatcher backs off until the queue drains. ABSENT on
+   * pre-feature proxies (treated as 0 — no contention evidence).
+   */
+  contention_queued_count?: number;
+  /**
    * Per-slot identity (LP-0MSG5TA7Y002GN39): served by proxies that expose
    * slot-level detail. ABSENT on pre-feature proxies — the worker then
    * falls back to the count-based all-slots-free logic. When present, the
@@ -391,6 +412,14 @@ export interface LlamaStatus {
 export interface LlamaSlot {
   slot_id: string;
   is_processing: boolean;
+  /**
+   * Per-slot Local Proxy owner session id (AC5, parent WL-0MTYZXSLN008HZOW):
+   * the pi session currently holding this slot's lease, or undefined/null
+   * when the slot is unowned. ABSENT on pre-feature proxies. A slot with a
+   * non-null owner is NEVER considered free for a new dispatch (the owner
+   * holds the lease until `release-lease-on-exit.mjs` releases it).
+   */
+  owner_session_id?: string | null;
 }
 
 // ── Idle detection (implemented) ──────────────────────────────────────
@@ -432,6 +461,32 @@ function perSlotGlobalIdleChecks(status: LlamaStatus): boolean {
   if (!status.llama_server_running) return false;
   if (status.model_switch_in_progress) return false;
   return true;
+}
+
+/**
+ * True when a slot carries a live Local Proxy owner lease (AC5, parent
+ * WL-0MTYZXSLN008HZOW): a non-empty `owner_session_id` means the slot is
+ * owned by a live pane and must NEVER be considered free for a new
+ * dispatch until `release-lease-on-exit.mjs` releases it.
+ */
+export function isSlotOwned(slot: LlamaSlot): boolean {
+  return typeof slot.owner_session_id === 'string' && slot.owner_session_id.length > 0;
+}
+
+/**
+ * Count slots that are BOTH not processing AND unowned — the only slots
+ * eligible for a new dispatch (AC5). Fail-closed: a slot without an
+ * explicit boolean `is_processing` is treated as processing (busy); an
+ * owned slot is treated as busy regardless of `is_processing`.
+ */
+export function countFreeUnownedSlots(slots: LlamaSlot[]): number {
+  let count = 0;
+  for (const slot of slots) {
+    if (typeof slot.is_processing !== 'boolean' || slot.is_processing) continue;
+    if (isSlotOwned(slot)) continue;
+    count += 1;
+  }
+  return count;
 }
 
 /**
@@ -493,10 +548,9 @@ export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): bo
   ) {
     if (!perSlotGlobalIdleChecks(status)) return false;
     // Fail-closed counting: an entry without an explicit boolean
-    // `is_processing` is treated as processing (busy), never free.
-    const free = status.slots.filter(
-      (s) => typeof s.is_processing === 'boolean' && !s.is_processing,
-    ).length;
+    // `is_processing` is treated as processing (busy), never free. Owned
+    // slots (live lease) are excluded (AC5, WL-0MTYZXSLN008HZOW).
+    const free = countFreeUnownedSlots(status.slots);
     return free >= requiredFreeSlots;
   }
 
@@ -585,8 +639,8 @@ export function createPerSlotIdleTracker(): PerSlotIdleTracker {
       const reported = new Set<string>();
       for (const slot of slots) {
         reported.add(slot.slot_id);
-        if (slot.is_processing) {
-          idleSince.set(slot.slot_id, null); // own timer reset only
+        if (slot.is_processing || isSlotOwned(slot)) {
+          idleSince.set(slot.slot_id, null); // processing or owned → own timer reset only
         } else {
           idleSince.set(slot.slot_id, idleSince.get(slot.slot_id) ?? now);
         }
@@ -699,9 +753,42 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
       if (typeof slot.is_processing !== 'boolean') return null;
       if (seen.has(slotId)) return null; // duplicate identity → ambiguous
       seen.add(slotId);
-      parsed.push({ slot_id: slotId, is_processing: slot.is_processing });
+      // Per-slot owner (AC5, WL-0MTYZXSLN008HZOW): OPTIONAL — absent on
+      // pre-feature proxies. A non-empty string or finite positive lease
+      // means the slot is owned; null/undefined/empty means unowned.
+      // Malformed owner values are treated as absent (fail-safe: an
+      // unreadable owner must not spuriously mark a free slot busy).
+      let ownerSessionId: string | null = null;
+      if (typeof slot.owner_session_id === 'string' && slot.owner_session_id.length > 0) {
+        ownerSessionId = slot.owner_session_id;
+      }
+      parsed.push(
+        ownerSessionId !== null
+          ? {
+              slot_id: slotId,
+              is_processing: slot.is_processing,
+              owner_session_id: ownerSessionId,
+            }
+          : { slot_id: slotId, is_processing: slot.is_processing },
+      );
     }
     slots = parsed;
+  }
+
+  // Optional contention queue depth (AC6, WL-0MTYZXSLN008HZOW): ABSENT on
+  // pre-feature proxies → undefined (treated as 0, no contention evidence).
+  // A malformed (non-finite / negative) value is ambiguous → null (busy,
+  // fail-closed): contention must never be silently under-reported.
+  let contentionQueuedCount: number | undefined;
+  if (o.contention_queued_count !== undefined) {
+    if (
+      typeof o.contention_queued_count !== 'number' ||
+      !Number.isFinite(o.contention_queued_count) ||
+      o.contention_queued_count < 0
+    ) {
+      return null;
+    }
+    contentionQueuedCount = o.contention_queued_count;
   }
 
   return {
@@ -719,6 +806,7 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
       typeof o.local_owner_lease_remaining_seconds === 'number'
         ? o.local_owner_lease_remaining_seconds
         : undefined,
+    contention_queued_count: contentionQueuedCount,
     slots,
   };
 }
@@ -1020,6 +1108,107 @@ export type DowntimeActiveAuditResult =
   | { ok: true; active: boolean }
   | { ok: false; error?: string };
 
+/**
+ * Result of the running-downtime-panes liveness query (AC1/AC3, parent
+ * WL-0MTYZXSLN008HZOW). `count` is the number of dispatched downtime panes
+ * that are STILL ALIVE (their pi agent session is live in a Herdr pane),
+ * machine-wide and therefore across roots and leader/instance restarts.
+ *
+ *  - `{ok:true, count}` — the query succeeded; `count` is authoritative.
+ *  - `{ok:false}` — the query could not complete (herdr unavailable):
+ *    fail-closed — the dispatcher treats the running-pane bound as reached
+ *    (no dispatch) rather than risk over-dispatch on unknown state.
+ */
+export type RunningPanesResult =
+  | { ok: true; count: number; paneIds?: string[] }
+  | { ok: false; error?: string };
+
+/** One parsed `herdr pane list` record (only the fields liveness needs). */
+export interface HerdrPaneRecord {
+  paneId: string;
+  label?: string;
+  agent?: string;
+  agentStatus?: string;
+}
+
+/**
+ * Prefix of every downtime dispatched pane label (`buildDowntimePaneTitle`
+ * produces `Downtime triggered <kind> …` / `Downtime <kind>`). Pane labels
+ * are set by send-to-pi.sh via `herdr pane rename`.
+ */
+export const DOWNTIME_PANE_LABEL_PREFIX = 'Downtime';
+
+/**
+ * Parse `herdr pane list` JSON output into records. Tolerates log lines
+ * prefixed before the JSON envelope (scan for the first `{`, like
+ * `parseAgentListOutput`), the `{result:{panes:[…]}}` envelope, and a bare
+ * array. Returns `null` when no pane array can be found (the caller treats
+ * this as a failed liveness query → fail-closed).
+ */
+export function parseHerdrPaneListOutput(raw: string): HerdrPaneRecord[] | null {
+  const start = raw.indexOf('{');
+  if (start < 0) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw.slice(start));
+  } catch {
+    return null;
+  }
+
+  let panes: unknown = null;
+  if (payload && typeof payload === 'object') {
+    const obj = payload as Record<string, unknown>;
+    const result = obj.result;
+    const resultObj =
+      result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
+    if (Array.isArray(resultObj?.panes)) {
+      panes = resultObj.panes;
+    } else if (Array.isArray(obj.panes)) {
+      panes = obj.panes;
+    }
+  }
+  if (!Array.isArray(panes)) return null;
+
+  const records: HerdrPaneRecord[] = [];
+  for (const entry of panes) {
+    if (!entry || typeof entry !== 'object') continue;
+    const rec = entry as Record<string, unknown>;
+    const paneId = rec.pane_id ?? rec.paneId;
+    if (typeof paneId !== 'string' || paneId === '') continue;
+    const label = typeof rec.label === 'string' ? rec.label : undefined;
+    const agent = typeof rec.agent === 'string' ? rec.agent : undefined;
+    const agentStatus =
+      typeof rec.agent_status === 'string'
+        ? rec.agent_status
+        : typeof rec.agentStatus === 'string'
+          ? rec.agentStatus
+          : undefined;
+    records.push({ paneId, label, agent, agentStatus });
+  }
+  return records;
+}
+
+/**
+ * Count LIVE downtime dispatched panes in a `herdr pane list` record set
+ * (AC1, parent WL-0MTYZXSLN008HZOW): a pane is a running downtime pane when
+ * its label starts with the downtime prefix AND it currently hosts a live
+ * agent (`agent` present, status not terminal). Terminal agent statuses
+ * (`done` / `exited`) and panes whose agent has already left are NOT
+ * counted as running — a finished pane does not hold a slot.
+ */
+export function countRunningDowntimePanes(panes: HerdrPaneRecord[]): string[] {
+  const running: string[] = [];
+  for (const pane of panes) {
+    if (typeof pane.label !== 'string') continue;
+    if (!pane.label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) continue;
+    if (typeof pane.agent !== 'string' || pane.agent.length === 0) continue;
+    const status = (pane.agentStatus ?? '').toLowerCase();
+    if (status === 'done' || status === 'exited') continue;
+    running.push(pane.paneId);
+  }
+  return running;
+}
+
 /** External boundaries injected so the dispatch logic is testable. */
 export interface DowntimeWorkerDeps {
   /**
@@ -1076,6 +1265,26 @@ export interface DowntimeWorkerDeps {
    * worklog root the dispatch log lives under.
    */
   getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult>;
+  /**
+   * Running-downtime-panes liveness query (AC1/AC3, parent
+   * WL-0MTYZXSLN008HZOW): count dispatched downtime panes that are STILL
+   * ALIVE (a live pi agent in a `Downtime …`-labelled Herdr pane),
+   * machine-wide. The dispatcher refuses a new dispatch when the count is
+   * at/over `maxRunningPanes`, so the cap bounds RUNNING PANES (not
+   * in-flight dispatch pipelines) and survives leader/instance restarts
+   * and multiple roots.
+   *
+   * Production wires this to `herdr pane list` (the same machine-wide
+   * source as the worklist's agent tracker). Fail-closed: `{ok:false}` on
+   * a herdr failure — the dispatcher treats the bound as reached (no
+   * dispatch) rather than over-dispatch on unknown state.
+   *
+   * Optional for backward compatibility: when ABSENT, running-pane
+   * tracking is disabled (legacy behavior — the in-flight pipeline guard
+   * still applies), so existing non-coordination callers/tests are
+   * unchanged.
+   */
+  getRunningDowntimePanes?(cwd: string): Promise<RunningPanesResult>;
   /**
    * Count completed/in_review root items for the review-queue depth gate
    * (WL-0MT2UQWOR007CYY9): `wl list --status completed --stage in_review
@@ -2476,8 +2685,37 @@ export async function dispatchDowntimeWork(
     cwd: string;
     freeSlots?: number;
     browseItemCount?: number;
-    /** Bounded concurrency cap (F2/F3 WL-0MT50LKAK001EF5Q). Optional — defaults to 1 (single-flight). */
+    /**
+     * Maximum number of RUNNING downtime panes (AC1, parent
+     * WL-0MTYZXSLN008HZOW). Renamed from `maxConcurrentDispatches` (the old
+     * name bounded in-flight dispatch *pipelines*). Optional — defaults to 1
+     * (single-flight). `maxConcurrentDispatches` is still accepted as a
+     * backward-compatible alias.
+     */
+    maxRunningPanes?: number;
+    /** @deprecated Use `maxRunningPanes` (WL-0MTYZXSLN008HZOW). */
     maxConcurrentDispatches?: number;
+    /**
+     * Number of downtime panes that are currently ALIVE (from the worker's
+     * `deps.getRunningDowntimePanes` liveness query). Optional — absent
+     * disables the running-pane bound (legacy). When present and at/over
+     * `maxRunningPanes`, dispatch is refused with reason `running-pane-cap`.
+     */
+    runningPanes?: number;
+    /**
+     * True when the polled status reports the target slot is OWNED by a
+     * live Local Proxy lease (AC2, WL-0MTYZXSLN008HZOW). Optional — absent
+     * disables the gate. When true, dispatch is refused with reason
+     * `slot-owned`: a slot is only dispatchable when truly unowned.
+     */
+    slotOwned?: boolean;
+    /**
+     * Proxy-contention queue depth (AC6, WL-0MTYZXSLN008HZOW): when > 0,
+     * dispatched panes are already queued behind a busy local slot, so
+     * dispatch backs off with reason `proxy-contention` until the queue
+     * drains. Optional — absent/0 disables the gate.
+     */
+    contentionQueued?: number;
   },
 ): Promise<DowntimeDispatchOutcome> {
   // Bounded in-flight gate (F3): the cap is re-read per call and clamped to
@@ -2487,11 +2725,40 @@ export async function dispatchDowntimeWork(
   // cap=1 reproduces the pre-F3 behavior exactly. The count decrements in
   // the finally below — a failed spawn / marker failure / claim loss ends
   // the pipeline and never leaks an in-flight slot.
-  const maxConcurrent = clampDowntimeMaxConcurrentDispatches(
-    opts.maxConcurrentDispatches ?? DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
+  const maxConcurrent = clampDowntimeMaxRunningPanes(
+    opts.maxRunningPanes
+      ?? opts.maxConcurrentDispatches
+      ?? DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
   );
   if (dispatchInFlightCount >= maxConcurrent) {
     return { dispatched: false, reason: 'dispatch-in-flight' };
+  }
+  // ── Running-pane bound (AC1, WL-0MTYZXSLN008HZOW) ──
+  // The in-flight guard above bounds same-process PIPELINES (1–2 s). This
+  // guard bounds RUNNING PANES: when the worker has counted
+  // `runningPanes >= maxRunningPanes` alive dispatched agents, a new
+  // dispatch is refused regardless of how many pipelines are in flight.
+  // A slot with a live pane must never be double-occupied just because the
+  // proxy briefly reported it free (e.g. the lease expired during a tool
+  // call). Neutral reason — never a strike, never a cooldown.
+  const runningPanes = opts.runningPanes;
+  if (typeof runningPanes === 'number' && runningPanes >= maxConcurrent) {
+    return { dispatched: false, reason: 'running-pane-cap' };
+  }
+  // ── Owner-lease gate (AC2/AC5, WL-0MTYZXSLN008HZOW) ──
+  // A non-null Local Proxy owner lease means the slot is owned by a live
+  // pane (`run-pi-agent.sh` holds it until `release-lease-on-exit.mjs`
+  // releases it). Only a truly unowned slot is dispatchable. Neutral
+  // reason — never a strike.
+  if (opts.slotOwned === true) {
+    return { dispatched: false, reason: 'slot-owned' };
+  }
+  // ── Contention feedback (AC6, WL-0MTYZXSLN008HZOW) ──
+  // While the proxy reports queued local requests, dispatched panes are
+  // already contending for the slot: back off until the queue drains.
+  // Neutral reason — never a strike, never a cooldown.
+  if (typeof opts.contentionQueued === 'number' && opts.contentionQueued > 0) {
+    return { dispatched: false, reason: 'proxy-contention' };
   }
   dispatchInFlightCount += 1;
   try {
@@ -3103,7 +3370,15 @@ export interface DowntimeWorkerConfig {
     noCandidateCooldownMs: number;
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
     browseItemCount?: number;
-    /** Bounded concurrency cap (F2 WL-0MTSAB0QU003KTLA). Optional — defaults to 1 (single-flight). */
+    /**
+     * Maximum number of RUNNING downtime panes (AC1, parent
+     * WL-0MTYZXSLN008HZOW). Renamed from `maxConcurrentDispatches` (the old
+     * name bounded in-flight dispatch pipelines). Optional — defaults to 1
+     * (single-flight). `maxConcurrentDispatches` is still accepted as a
+     * backward-compatible alias.
+     */
+    maxRunningPanes?: number;
+    /** @deprecated Use `maxRunningPanes` (WL-0MTYZXSLN008HZOW). */
     maxConcurrentDispatches?: number;
   };
   /**
@@ -3678,10 +3953,72 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // is unchanged and shared.
       const freeSlots =
         Array.isArray(status.slots)
-          ? status.slots.filter(
-              (s) => typeof s.is_processing === 'boolean' && !s.is_processing,
-            ).length
+          ? countFreeUnownedSlots(status.slots)
           : status.available_slots;
+
+      // ── Running-pane liveness (AC1/AC3, WL-0MTYZXSLN008HZOW) ──
+      // Count dispatched downtime panes that are STILL ALIVE (machine-wide,
+      // so the bound holds across roots and leader/instance restarts). The
+      // query is optional for backward compatibility; when present it is
+      // consulted in addition to the in-flight pipeline guard, so a pane
+      // left running between agent generations (e.g. the proxy lease
+      // expired during a long tool call) still counts against the bound.
+      // Fail-closed: a failed query yields `null`, which the dispatcher
+      // treats as the bound being reached (no dispatch) rather than
+      // over-dispatching on unknown state.
+      let runningPanes: number | null = null;
+      if (typeof opts.deps.getRunningDowntimePanes === 'function') {
+        try {
+          const running = await opts.deps.getRunningDowntimePanes(cfg.cwd);
+          runningPanes = running.ok ? running.count : null;
+        } catch {
+          runningPanes = null; // fail-closed — never dispatch on unknown pane state
+        }
+      }
+      const maxRunningPanes = clampDowntimeMaxRunningPanes(
+        cfg.maxRunningPanes ?? cfg.maxConcurrentDispatches ?? DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
+      );
+
+      // ── Owner-lease + contention gates (AC2/AC5/AC6) ──
+      // `slotOwned`: a non-null global Local Proxy owner lease means the
+      // target slot is owned by a live pane — only dispatch into a truly
+      // unowned slot. When per-slot identity is served, ownership is
+      // already excluded from `freeSlots` above; the global owner is the
+      // fallback signal for count-based (single-slot) setups. `slotOwned`
+      // is gated on a known running-pane count > 0 so an OPERATOR lease on a
+      // spare-capacity multi-slot setup does not block dispatch into the
+      // free slots when the worker has no running pane of its own.
+      const ownerLeaseHeld =
+        (typeof status.local_owner_session_id === 'string' &&
+          status.local_owner_session_id.length > 0) ||
+        (typeof status.local_owner_lease_remaining_seconds === 'number' &&
+          Number.isFinite(status.local_owner_lease_remaining_seconds) &&
+          status.local_owner_lease_remaining_seconds > 0);
+      const slotOwned = ownerLeaseHeld && (runningPanes ?? 0) > 0;
+      const contentionQueued =
+        typeof status.contention_queued_count === 'number' ? status.contention_queued_count : 0;
+
+      // Single machine-wide dispatch gate applied to BOTH coordination and
+      // legacy modes (WL-0MTYZXSLN008HZOW): a new pane must never be
+      // dispatched while the bound is reached, the slot is owned, the
+      // proxy reports contention, or liveness is unknown. Each refusal is
+      // neutral (never a strike, never a cooldown) — the next idle tick
+      // re-evaluates. Returning here (before `dispatching = true`) also
+      // covers the coordination path (`dispatchFromCoordination`), which
+      // does not route through `dispatchDowntimeWork`.
+      if (runningPanes === null && typeof opts.deps.getRunningDowntimePanes === 'function') {
+        // Liveness query failed → fail-closed (no dispatch on unknown state).
+        return { polled: true, dispatched: false, idle: true };
+      }
+      if (typeof runningPanes === 'number' && runningPanes >= maxRunningPanes) {
+        return { polled: true, dispatched: false, idle: true };
+      }
+      if (slotOwned) {
+        return { polled: true, dispatched: false, idle: true };
+      }
+      if (contentionQueued > 0) {
+        return { polled: true, dispatched: false, idle: true };
+      }
 
       // Coordination mode: the elected leader reads the shared coordination
       // list, re-fetches and classifies each entry's item (tier priority:
@@ -3718,11 +4055,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 cwd: cfg.cwd,
                 freeSlots,
                 browseItemCount: cfg.browseItemCount,
-                // Bounded concurrency cap (F3): thread the operator setting
-                // so same-process concurrent workers honor the raised bound;
-                // absent config → 1 (exact single-flight default).
-                maxConcurrentDispatches:
-                  cfg.maxConcurrentDispatches ?? DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
+                // Running-pane bound (AC1) + owner-lease (AC2) + contention
+                // (AC6) gates (WL-0MTYZXSLN008HZOW).
+                maxRunningPanes,
+                ...(runningPanes !== null ? { runningPanes } : {}),
+                slotOwned,
+                contentionQueued,
               });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
@@ -4787,17 +5125,20 @@ export function clampDowntimeNoCandidateCooldownMs(value: number): number {
 }
 
 /**
- * Clamp the bounded concurrency cap to [1, 4] (WL-0MT50LKAK001EF5Q F2):
- * 1 = single-flight (default), 4 = operator-requested ceiling. Non-finite
- * input falls back to the default (1, the safe single-flight default).
+ * Clamp the running panes cap to [1, 4] (renamed from concurrency cap,
+ * parent WL-0MTYZXSLN008HZOW): 1 = single-flight (default), 4 =
+ * operator-requested ceiling. Non-finite input falls back to the default
+ * (1, the safe single-flight default).
  */
-export function clampDowntimeMaxConcurrentDispatches(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES;
+export function clampDowntimeMaxRunningPanes(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_MAX_RUNNING_PANES;
   return Math.min(
-    Math.max(Math.round(value), DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR),
-    DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING,
+    Math.max(Math.round(value), DOWNTIME_MAX_RUNNING_PANES_FLOOR),
+    DOWNTIME_MAX_RUNNING_PANES_CEILING,
   );
 }
+/** @deprecated Renamed to clampDowntimeMaxRunningPanes (WL-0MTYZXSLN008HZOW). */
+export const clampDowntimeMaxConcurrentDispatches = clampDowntimeMaxRunningPanes;
 
 // ── Round-robin helpers (WL-0MTJE0FXC006WAOX) ──────────────────────────
 

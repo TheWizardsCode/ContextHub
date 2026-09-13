@@ -97,12 +97,19 @@ import {
   clampDowntimeIdleThresholdMs,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeNoCandidateCooldownMs,
+  clampDowntimeMaxRunningPanes,
+  countFreeUnownedSlots,
+  isSlotOwned,
+  parseHerdrPaneListOutput,
+  countRunningDowntimePanes,
   DOWNTIME_POLL_INTERVAL_FLOOR_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
+  DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
+  DOWNTIME_PANE_LABEL_PREFIX,
   type LlamaStatus,
   type LlamaSlot,
   type LlamaStatusFetcher,
@@ -152,6 +159,11 @@ import {
   perSlotOneProcessing,
   perSlotThreeOfFourFree,
   perSlotOneOfThreeFree,
+  singleSlotIdleOwned,
+  perSlotIdleOwned,
+  perSlotOwnedOneUnowned,
+  idleWithContention,
+  herdrPaneListRaw,
   networkErrorFixture,
   timeoutErrorFixture,
   httpErrorResponseFixture,
@@ -7324,30 +7336,30 @@ describe('bounded concurrent dispatch — claim safety regression', () => {
   });
 });
 
-describe('bounded concurrent dispatch — config wire (F2)', () => {
-  it('downtimeMaxConcurrentDispatches defaults to 1 (single-flight preserved)', () => {
-    expect(defaultSettings.downtimeMaxConcurrentDispatches).toBe(1);
+describe('bounded concurrent dispatch — config wire (F2, renamed WL-0MTYZXSLN008HZOW)', () => {
+  it('downtimeMaxRunningPanes defaults to 1 (single-flight preserved)', () => {
+    expect(defaultSettings.downtimeMaxRunningPanes).toBe(1);
   });
 
   it('a persisted value is loaded and clamped into [1, 4]', () => {
     const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 3 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(3);
+    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 3 });
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(3);
 
     // Clamp below minimum
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 0 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
+    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 0 });
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
 
-    // Clamp above maximum (F2 delivered ceiling is 4, not 10)
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 99 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(4);
+    // Clamp above maximum (delivered ceiling is 4, not 10)
+    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 99 });
+    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(4);
   });
 });
 
 describe('bounded concurrent dispatch — worker config propagation', () => {
-  it('DowntimeWorkerConfig includes a maxConcurrentDispatches field', () => {
-    // After F2/F3, the config interface should include maxConcurrentDispatches
-    // This test checks the interface contract.
+  it('DowntimeWorkerConfig includes a maxRunningPanes field', () => {
+    // The config interface includes maxRunningPanes (renamed from
+    // maxConcurrentDispatches); it is optional (defaults to 1 from settings).
     const config = {
       enabled: true,
       thresholdMs: 300000,
@@ -7356,11 +7368,380 @@ describe('bounded concurrent dispatch — worker config propagation', () => {
       cwd: '/repo',
       noCandidateCooldownMs: 3600000,
       browseItemCount: 20,
+      maxRunningPanes: 2,
     } as const;
 
-    // maxConcurrentDispatches should be optional (defaults to 1 from settings)
-    expect(config).toBeDefined();
+    expect(config.maxRunningPanes).toBe(2);
   });
 });
 
 // ── End of bounded concurrent dispatch tests ──────────────────────────
+
+// ── Running-pane bound + owner lease + contention (AC1–AC6, parent
+//    WL-0MTYZXSLN008HZOW) ─────────────────────────────────────────────
+//
+// Regression suite for single-slot over-dispatch: the dispatcher must track
+// RUNNING panes (not just in-flight pipelines), honour the Local Proxy owner
+// lease, exclude owned slots from the free count, and back off on proxy
+// contention.
+
+describe('running-pane bound: renamed setting + defaults', () => {
+  it('DEFAULT_DOWNTIME_MAX_RUNNING_PANES is 1 and the renamed constant is exported', () => {
+    expect(DEFAULT_DOWNTIME_MAX_RUNNING_PANES).toBe(1);
+    expect(clampDowntimeMaxRunningPanes(0)).toBe(1);
+    expect(clampDowntimeMaxRunningPanes(99)).toBe(4);
+  });
+});
+
+describe('parseLlamaStatus: contention + per-slot owner (AC5/AC6)', () => {
+  const base = {
+    llama_server_running: true,
+    active_query: false,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: false,
+    available_slots: 1,
+    total_slots: 1,
+  };
+
+  it('parses contention_queued_count when served', () => {
+    const status = parseLlamaStatus({ ...base, contention_queued_count: 4 });
+    expect(status).not.toBeNull();
+    expect(status!.contention_queued_count).toBe(4);
+  });
+
+  it('leaves contention_queued_count undefined when absent (backward compatible)', () => {
+    const status = parseLlamaStatus(base);
+    expect(status).not.toBeNull();
+    expect(status!.contention_queued_count).toBeUndefined();
+  });
+
+  it('treats a negative or non-finite contention_queued_count as ambiguous → busy', () => {
+    expect(parseLlamaStatus({ ...base, contention_queued_count: -1 })).toBeNull();
+    expect(parseLlamaStatus({ ...base, contention_queued_count: Number.NaN })).toBeNull();
+    expect(parseLlamaStatus({ ...base, contention_queued_count: 'many' })).toBeNull();
+  });
+
+  it('parses a per-slot owner_session_id', () => {
+    const status = parseLlamaStatus({
+      ...base,
+      slots: [{ slot_id: 'slot-1', is_processing: false, owner_session_id: 'sess-1' }],
+    });
+    expect(status).not.toBeNull();
+    expect(status!.slots![0].owner_session_id).toBe('sess-1');
+  });
+
+  it('omits owner_session_id from the slot shape when absent (backward compatible)', () => {
+    const status = parseLlamaStatus({
+      ...base,
+      slots: [{ slot_id: 'slot-1', is_processing: false }],
+    });
+    expect(status).not.toBeNull();
+    expect(status!.slots![0]).toEqual({ slot_id: 'slot-1', is_processing: false });
+  });
+});
+
+describe('slot ownership helpers (AC5)', () => {
+  it('isSlotOwned is true only for a non-empty owner_session_id', () => {
+    expect(isSlotOwned({ slot_id: 's', is_processing: false, owner_session_id: 'abc' })).toBe(true);
+    expect(isSlotOwned({ slot_id: 's', is_processing: false, owner_session_id: null })).toBe(false);
+    expect(isSlotOwned({ slot_id: 's', is_processing: false })).toBe(false);
+    expect(isSlotOwned({ slot_id: 's', is_processing: false, owner_session_id: '' })).toBe(false);
+  });
+
+  it('countFreeUnownedSlots excludes processing AND owned slots', () => {
+    expect(
+      countFreeUnownedSlots([
+        { slot_id: 'a', is_processing: false },
+        { slot_id: 'b', is_processing: true },
+        { slot_id: 'c', is_processing: false, owner_session_id: 'live' },
+        { slot_id: 'd', is_processing: false },
+      ]),
+    ).toBe(2);
+  });
+
+  it('countFreeUnownedSlots is fail-closed for a missing is_processing', () => {
+    expect(
+      countFreeUnownedSlots([{ slot_id: 'a' } as unknown as LlamaSlot]),
+    ).toBe(0);
+  });
+});
+
+describe('evaluateIdle: idle-but-owned slot is not dispatchable (AC3/AC5)', () => {
+  it('per-slot mode treats an owned free slot as busy', () => {
+    // 3 slots reported: slot-1 owned (idle), slot-2/slot-3 unowned-free →
+    // only 2 genuinely free, so N=2 is idle but N=3 would exceed the total.
+    expect(evaluateIdle(perSlotIdleOwned, 2)).toBe(true);
+    // Only 1 unowned slot free (slot-1 owned, slot-2 processing) → N=2 busy.
+    expect(evaluateIdle(perSlotOwnedOneUnowned, 2)).toBe(false);
+  });
+
+  it('a single idle-but-owned slot reports busy (count-based path)', () => {
+    // The global owner lease derives local_lease_active → the count-based
+    // path fails closed.
+    expect(evaluateIdle(singleSlotIdleOwned, 0)).toBe(false);
+    expect(evaluateIdle(singleSlotIdleOwned, 1)).toBe(false);
+  });
+});
+
+describe('createPerSlotIdleTracker: owned slot timer resets (AC5)', () => {
+  it('an owned slot never accumulates idle time', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+    tracker.record(
+      [
+        { slot_id: 'slot-1', is_processing: false, owner_session_id: 'live' },
+        { slot_id: 'slot-2', is_processing: false },
+      ],
+      start,
+    );
+    expect(tracker.thresholdMetCount(1_000, start + 5_000)).toBe(1);
+  });
+});
+
+describe('parseHerdrPaneListOutput / countRunningDowntimePanes (AC1)', () => {
+  it('parses the herdr pane list envelope', () => {
+    const panes = parseHerdrPaneListOutput(herdrPaneListRaw);
+    expect(panes).not.toBeNull();
+    expect(panes!.length).toBe(5);
+    expect(panes![0].paneId).toBe('w1:p1');
+    expect(panes![0].label).toContain('Downtime triggered');
+  });
+
+  it('counts only live downtime panes (excludes manual panes and done agents)', () => {
+    const panes = parseHerdrPaneListOutput(herdrPaneListRaw)!;
+    const running = countRunningDowntimePanes(panes);
+    expect(running).toEqual(['w1:p1', 'w1:p2']);
+    expect(DOWNTIME_PANE_LABEL_PREFIX).toBe('Downtime');
+  });
+
+  it('returns null for unparseable output (fail-closed → caller refuses dispatch)', () => {
+    expect(parseHerdrPaneListOutput('not json at all')).toBeNull();
+  });
+
+  it('tolerates log lines before the JSON envelope', () => {
+    const panes = parseHerdrPaneListOutput(`[herdr] starting\n${herdrPaneListRaw}`);
+    expect(panes).not.toBeNull();
+    expect(countRunningDowntimePanes(panes!)).toHaveLength(2);
+  });
+});
+
+describe('dispatchDowntimeWork: running-pane / owner / contention gates', () => {
+  function dispatchableDeps() {
+    return makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+    });
+  }
+
+  it('refuses when running panes reach the cap (running-pane-cap)', async () => {
+    const deps = dispatchableDeps();
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      maxRunningPanes: 1,
+      runningPanes: 1,
+    });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('running-pane-cap');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('dispatches when running panes are below the cap', async () => {
+    const deps = dispatchableDeps();
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      maxRunningPanes: 2,
+      runningPanes: 1,
+    });
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an owned slot (slot-owned)', async () => {
+    const deps = dispatchableDeps();
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      slotOwned: true,
+    });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('slot-owned');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('backs off while the proxy reports contention (proxy-contention)', async () => {
+    const deps = dispatchableDeps();
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      contentionQueued: 3,
+    });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('proxy-contention');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('accepts the legacy maxConcurrentDispatches name as an alias', async () => {
+    const deps = dispatchableDeps();
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      maxConcurrentDispatches: 1,
+      runningPanes: 1,
+    });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('running-pane-cap');
+  });
+});
+
+describe('worker tick: single-slot running-pane bound across generations (AC1/AC3)', () => {
+  function makeSingleSlotWorker(opts: {
+    status: LlamaStatus;
+    runningPanes: () => { ok: true; count: number } | { ok: false; error?: string };
+    requiredFreeSlots?: number;
+  }) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: 1_000,
+      requiredFreeSlots: opts.requiredFreeSlots ?? 0,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+      maxRunningPanes: 1,
+    };
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
+    );
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      getRunningDowntimePanes: vi.fn().mockImplementation(async () => opts.runningPanes()),
+    });
+    const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+    return { worker, deps };
+  }
+
+  it('with 1 slot and a live dispatch pane, no new dispatch until the pane exits', async () => {
+    vi.useFakeTimers();
+    try {
+      // The proxy reports the single slot free (lease expired during a tool
+      // call) but the worker sees an old dispatch pane STILL RUNNING.
+      let running = 1;
+      const { worker, deps } = makeSingleSlotWorker({
+        status: idleAllSlotsFree,
+        runningPanes: () => ({ ok: true, count: running }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const blocked = await worker.tick();
+      expect(blocked.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+      // The pane exits → the slot frees → the next tick dispatches (the
+      // idle credit earned while the pane was alive persists).
+      running = 0;
+      const ok = await worker.tick();
+      expect(ok.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('fails closed when the liveness query fails (never over-dispatch)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { worker, deps } = makeSingleSlotWorker({
+        status: idleAllSlotsFree,
+        runningPanes: () => ({ ok: false, error: 'herdr down' }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const blocked = await worker.tick();
+      expect(blocked.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an idle-but-owned slot prevents dispatch (AC2/AC3)', async () => {
+    vi.useFakeTimers();
+    try {
+      // Single slot, idle by is_processing, but a live lease is held AND the
+      // worker has a running pane → the owner gate refuses the dispatch.
+      const { worker, deps } = makeSingleSlotWorker({
+        status: {
+          ...idleAllSlotsFree,
+          available_slots: 1,
+          total_slots: 1,
+          local_owner_session_id: 'session-live',
+          local_owner_lease_remaining_seconds: 120,
+        },
+        runningPanes: () => ({ ok: true, count: 1 }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const blocked = await worker.tick();
+      expect(blocked.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('backs off while the proxy reports contention (AC6)', async () => {
+    vi.useFakeTimers();
+    try {
+      const { worker, deps } = makeSingleSlotWorker({
+        status: idleWithContention,
+        runningPanes: () => ({ ok: true, count: 0 }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const blocked = await worker.tick();
+      expect(blocked.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not block operator spare-capacity dispatch when no dispatch pane is running', async () => {
+    vi.useFakeTimers();
+    try {
+      // Operator holds a lease on a 3-slot setup (one slot processing) while
+      // the worker has NO running pane → spare-capacity dispatch still fires
+      // into the free slots.
+      const { worker, deps } = makeSingleSlotWorker({
+        status: perSlotThreeOfFourFree,
+        runningPanes: () => ({ ok: true, count: 0 }),
+        requiredFreeSlots: 2,
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const result = await worker.tick();
+      expect(result.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

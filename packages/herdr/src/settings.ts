@@ -9,12 +9,12 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
   clampDowntimeIdleThresholdMs,
-  clampDowntimeMaxConcurrentDispatches,
+  clampDowntimeMaxRunningPanes,
   clampDowntimeNoCandidateCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
-  DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
+  DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
@@ -88,11 +88,17 @@ export interface PluginSettings {
    */
   maxSyncStalenessMs: number;
   /**
-   * Bounded concurrency cap (WL-0MT50LKAK001EF5Q F2). Default 1 = single-flight
-   * (current behavior); clamped to [1, 4] on load; manually configured per
-   * operator. Cheap mode uses extra slots only when the operator raises this.
+   * Maximum number of running (alive) downtime panes permitted across all
+   * roots and slots. Default 1 = single-flight (current behavior); clamped
+   * to [1, 4] on load; manually configured per operator.
+   *
+   * Replaces `downtimeMaxConcurrentDispatches` (renamed, parent
+   * WL-0MTYZXSLN008HZOW): the old name bounded in-flight dispatch *pipelines*
+   * (1–2 s), not running panes. The new name tracks panes that are still
+   * alive (via `herdr pane list` / proxy owner lease). Existing configs with
+   * the old key are migrated automatically.
    */
-  downtimeMaxConcurrentDispatches: number;
+  downtimeMaxRunningPanes: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -116,7 +122,7 @@ export const defaultSettings: PluginSettings = {
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
   maxSyncStalenessMs: 60_000,
-  downtimeMaxConcurrentDispatches: DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
+  downtimeMaxRunningPanes: DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
 };
 
 /** Minimum allowed browseItemCount. */
@@ -228,9 +234,13 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       maxSyncStalenessMs: typeof parsed.maxSyncStalenessMs === 'number'
         ? clampMaxSyncStalenessMs(parsed.maxSyncStalenessMs)
         : defaultSettings.maxSyncStalenessMs,
-      downtimeMaxConcurrentDispatches: typeof parsed.downtimeMaxConcurrentDispatches === 'number'
-        ? clampDowntimeMaxConcurrentDispatches(parsed.downtimeMaxConcurrentDispatches)
-        : defaultSettings.downtimeMaxConcurrentDispatches,
+      // Backward compat: old config key `downtimeMaxConcurrentDispatches`
+      // is migrated to `downtimeMaxRunningPanes` (parent WL-0MTYZXSLN008HZOW).
+      downtimeMaxRunningPanes: typeof parsed.downtimeMaxRunningPanes === 'number'
+        ? clampDowntimeMaxRunningPanes(parsed.downtimeMaxRunningPanes)
+        : typeof parsed.downtimeMaxConcurrentDispatches === 'number'
+          ? clampDowntimeMaxRunningPanes(parsed.downtimeMaxConcurrentDispatches)
+          : defaultSettings.downtimeMaxRunningPanes,
     };
   } catch {
     return { ...defaultSettings };

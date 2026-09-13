@@ -95,6 +95,9 @@ import {
   parseInProgressOutput,
   type DowntimeActiveAuditResult,
   withTransientRetry,
+  parseHerdrPaneListOutput,
+  countRunningDowntimePanes,
+  type RunningPanesResult,
 } from './downtime-worker.js';
 import {
   createModeSwitchWorker,
@@ -594,6 +597,38 @@ async function defaultDispatcherAnchorResolver(
 }
 
 /**
+ * Default running-downtime-panes liveness resolver (AC1/AC3, parent
+ * WL-0MTYZXSLN008HZOW): counts live dispatched downtime panes from
+ * `herdr pane list` — the machine-wide pane inventory — so the running-pane
+ * bound holds across roots and leader/instance restarts. A pane counts as a
+ * running downtime pane when its label starts with `Downtime` (set by
+ * send-to-pi.sh via `herdr pane rename`) and it hosts a live pi agent
+ * (status not `done`/`exited`).
+ *
+ * Fail-closed: any herdr failure (missing binary, timeout, unparseable
+ * output) resolves `{ok:false}`, which the worker treats as the bound being
+ * reached (no dispatch) rather than over-dispatching on unknown state.
+ */
+export async function defaultRunningDowntimePanesResolver(
+  _cwd: string,
+): Promise<RunningPanesResult> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const { stdout } = await getExecFileAsync()(
+      herdrBin,
+      ['pane', 'list'],
+      { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+    );
+    const panes = parseHerdrPaneListOutput(stdout);
+    if (panes === null) return { ok: false, error: 'herdr pane list parse failure' };
+    const paneIds = countRunningDowntimePanes(panes);
+    return { ok: true, count: paneIds.length, paneIds };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
  * `wl next --stage <stage> --json` for dispatch selection, `wl update
  * <id> --status in_progress` for the pre-dispatch claim, and
@@ -610,6 +645,8 @@ export function createDowntimeDeps(
   assignee: string,
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
   anchorResolver: DowntimeWorkerDeps['getDispatcherAnchor'] = defaultDispatcherAnchorResolver,
+  runningPanesResolver: NonNullable<DowntimeWorkerDeps['getRunningDowntimePanes']> =
+    defaultRunningDowntimePanesResolver,
 ): DowntimeWorkerDeps {
   // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
   // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
@@ -674,6 +711,12 @@ export function createDowntimeDeps(
     // dispatch this cycle". Injected (default = real herdr CLI) so tests that
     // build real deps without a live herdr session can stub it.
     getDispatcherAnchor: anchorResolver,
+    // Running-downtime-panes liveness (AC1/AC3, WL-0MTYZXSLN008HZOW): counts
+    // live dispatched downtime panes from `herdr pane list` so the
+    // running-pane bound is enforced machine-wide (across roots and
+    // leader/instance restarts). Injected (default = real herdr CLI) so tests
+    // can stub it without a live herdr session.
+    getRunningDowntimePanes: runningPanesResolver,
     // Herdr list head (WL-0MTK1ILM2009QYB2): canonical ranking via fetcher → smart-selection → grouping.
     // The dispatcher treats this as the single ranking source; remaining safety gates are filters.
     // Batch size 30: enough to filter through (code-freeze, dispatched-marker, single-flight)
@@ -1312,7 +1355,7 @@ async function main(): Promise<void> {
         enabled: s.downtimeEnabled,
         thresholdMs: s.downtimeIdleThresholdMs,
         requiredFreeSlots: s.downtimeRequiredFreeSlots,
-        maxConcurrentDispatches: s.downtimeMaxConcurrentDispatches,
+        maxRunningPanes: s.downtimeMaxRunningPanes,
         model: s.downtimeModel,
         cwd: targetCwd,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
