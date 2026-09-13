@@ -966,6 +966,43 @@ process churn and memory pressure (WL-0MSB1N0HB0007N6N).
   the visibility gate (approved plan, WL-0MSJNJPRM009RM35).
 - **No settings toggle** — pause-when-hidden is always on.
 
+### Typing gate (pause background work while a form is open)
+
+While any text-input overlay is open, the auto-refresh and auto-sync timer
+ticks are skipped so a background re-render cannot steal focus or drop
+keypresses mid-keystroke (WL-0MTV67MZU003H7SH). There is no user value in
+syncing or refreshing the list while a form is active, so the work is
+deferred until typing finishes.
+
+- **Shared predicate** — `isInputActive(formState, shipItDialog)` in
+  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null`.
+  Both scheduler ticks (the 30s `refresh` and the 60s `sync`) check it
+  alongside the existing `paneGate.visible()` check and return early when it
+  is true. The guard is defined once and shared — future text-input overlays
+  are covered by extending the single predicate, not per-screen copies.
+- **All text-input sites covered** — the command-parameter form
+  (`FormState`), the Ship It confirmation dialog (`ShipItDialogState`), and
+  `md-note-edit` (which opens a `FormState`) are all covered. There is no
+  separate note-edit state to gate.
+- **Resume contract: skip, don't coalesce** — ticks are silently dropped
+  while typing; the next regular tick after the overlay closes fires
+  normally. No queued or immediate post-close refresh is emitted (this
+  avoids refresh loops and matches the existing single-flight semantics).
+  If a future requirement needs an instant refresh on close it can be added
+  without changing the gating contract.
+- **Existing gates intact** — visibility (pause-when-hidden), single-flight,
+  cross-instance heartbeat dedup, and the DB-change skip are unchanged and
+  still apply when no input is active.
+- **No settings toggle** — the typing gate is always on. Manual actions
+  (navigation, shortcut chords, `S` sync, the initial data load) are never
+  gated.
+- **Downtime / mode-switch workers are not gated (audited)** — the
+  `downtime` and `mode-switch` scheduler tasks only probe idle state and
+  dispatch/switch inference mode; they never trigger a worklist list
+  re-render while a modal is open, so gating them would only delay
+  low-urgency background work with no keypress-loss benefit. See the audit
+  comments next to each task registration in `worklist.ts`.
+
 ### Selection List Behaviour
 
 The default (unfiltered) worklist always shows **all** critical-priority
