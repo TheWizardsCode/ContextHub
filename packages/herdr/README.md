@@ -16,6 +16,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
+- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items, matches each against live agent panes in the current workspace (the pane title carries the work-item ID), and releases any claim with no matching pane so it re-enters the dispatchable pool: `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). See [Hydrator](#hydrator-self-healing-in_progress-claims).
 - **Mode-switch worker (activity-gated proxy mode switching)** — Automatically switches the llama-proxy between fast (cloud) and cheap (local) modes: agent-route commands fire an immediate fast switch (fail-open), while a full operator-idle window plus a proxy-idle check triggers the cheap switch (fail-closed). The proxy URL reuses `downtimeProxyUrl` and the plugin's switches are manual overrides that the proxy's own time schedule reclaims. See [Mode-switch worker](#mode-switch-worker-activity-gated-proxy-mode-switching-wl-0msn3fwv5008kqe9).
 - **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes. The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. Hovering a pane-associated row shows a tooltip with the work-item metadata (including the recorded command and pane start time). See [Agent status icons](#agent-status-icons).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
@@ -214,6 +215,33 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 - `browseItemCount` — Max number of non-mandatory items to show in the list (default: `20`, range `1`–`50`; critical and completed/in_review items are always shown regardless)
 - `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`). When `false`, **all** shortcut hint lines are hidden — including the chord-in-progress footer (`chord: <keys> _ <hints>`) — consistent with the pi browse widget (WL-0MSGJDSMJ004128E). Chord key *handling* still works while hints are hidden; only rendering is affected. Changes apply on the next render without a plugin restart
 - `showIcons` — Toggle icons in the list and metadata (default: `true`); changes apply on the next render without a plugin restart. When disabled, list rows use text fallbacks (`[OPEN]`, `[IDEA]`, …) and metadata values fall back to plain text (no emoji)
+
+### Hydrator (self-healing `in_progress` claims, WL-0MSOJLZD9004P8PI)
+
+**Self-heals the work queue.** Work items claimed as `in_progress` are
+correctly excluded from downtime dispatch (single-flight — an active pane
+owns them), but a claim with no live pane (pane closed, session died,
+claim abandoned) lingers at the top of the queue and is never re-selected.
+The hydrator detects those claims and releases them:
+
+- **Cadence** — every 30 s (scheduler task `hydrate`, single-flight +
+  watchdog `HYDRATOR_RUN_TIMEOUT_MS`); the check also runs **immediately**
+  when the worklog tab regains focus (same runner as the tick).
+- **Signal** — fetch `wl list --status in-progress`, fetch `herdr pane list`,
+  and match each item against a live pane in the **current workspace** whose
+  title contains the work-item ID (the `pane-title.ts` builders preserve the
+  ID under truncation). No matching pane → the claim is stale.
+- **Release semantics** — `in_review` items → `completed`; items with an
+  active outbound dependency blocker → `blocked`; otherwise → `open` at the
+  claimed stage (folded-in no-activity/claim-age timeout, WL-0MTTSWE0G008M1VA;
+  a no-pane claim is released regardless of activity age). Stage is repaired
+  to a status-compatible value when needed.
+- **Safety** — the cycle is fail-open: an unavailable/unparseable
+  `wl`/`herdr` call aborts WITHOUT demoting; a live-pane item is never
+  touched; a hidden tab spawns zero processes.
+
+See [`docs/dev/herdr-hydrator.md`](../../docs/dev/herdr-hydrator.md) for the
+design and test map.
 
 ### Downtime worker (local-LLM idle dispatch)
 

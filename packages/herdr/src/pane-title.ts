@@ -18,6 +18,28 @@ export function truncatePaneTitle(title: string): string {
 }
 
 /**
+ * Truncate a pane title while keeping a trailing `suffix` (e.g. the
+ * work-item ID ` - WL-…`) intact, truncating the `prefix` instead.
+ *
+ * Why: the Herdr hydrator (WL-0MSOJLZD9004P8PI) matches an `in_progress`
+ * work item to a live pane by the work-item ID embedded in the pane title.
+ * Plain {@link truncatePaneTitle} cuts the ID off long titles, so an
+ * actively-worked item whose pane title truncated before the ID would look
+ * pane-less and be wrongly demoted. Preserving the suffix guarantees every
+ * spawned pane carries its work-item ID.
+ *
+ * When the suffix alone does not fit the bound, this falls back to plain
+ * truncation (never exceeds {@link MAX_PANE_TITLE_LENGTH}).
+ */
+export function truncatePaneTitlePreservingSuffix(prefix: string, suffix: string): string {
+  const combined = prefix + suffix;
+  if (combined.length <= MAX_PANE_TITLE_LENGTH) return combined;
+  const budget = MAX_PANE_TITLE_LENGTH - suffix.length - 1; // -1 for the ellipsis
+  if (budget <= 0) return truncatePaneTitle(combined);
+  return prefix.substring(0, budget) + '…' + suffix;
+}
+
+/**
  * Check if a command is an agent command that opens a pi agent pane
  * (`/skill:*`, `/intake`, `/plan`, `/prompt:`).
  */
@@ -111,14 +133,11 @@ export function buildManuallyTriggeredPaneTitle(
     }
   }
 
-  // Append work-item context when available.
-  if (workItemTitle || workItemId) {
-    const titlePart = workItemTitle ? ` ${workItemTitle}` : '';
-    const idPart = workItemId ? ` - ${workItemId}` : '';
-    base = `${base}${titlePart}${idPart}`;
-  }
-
-  return truncatePaneTitle(base);
+  // Append work-item context when available. The ID suffix is preserved
+  // under truncation so the hydrator can match live panes to items.
+  const titlePart = workItemTitle ? ` ${workItemTitle}` : '';
+  const idPart = workItemId ? ` - ${workItemId}` : '';
+  return truncatePaneTitlePreservingSuffix(`${base}${titlePart}`, idPart);
 }
 
 /**
@@ -138,15 +157,10 @@ export function buildShellPaneTitle(
   workItemId?: string,
 ): string {
   const cmdSnippet = command.length > 30 ? command.substring(0, 30) + '…' : command;
-  let base = `Shell: ${cmdSnippet}`;
-
-  if (workItemTitle || workItemId) {
-    const titlePart = workItemTitle ? ` (${workItemTitle})` : '';
-    const idPart = workItemId ? ` ${workItemId}` : '';
-    base = `${base}${titlePart}${idPart}`;
-  }
-
-  return truncatePaneTitle(base);
+  const head = `Shell: ${cmdSnippet}`;
+  const titlePart = workItemTitle ? ` (${workItemTitle})` : '';
+  const idPart = workItemId ? ` ${workItemId}` : '';
+  return truncatePaneTitlePreservingSuffix(`${head}${titlePart}`, idPart);
 }
 
 /**
@@ -162,7 +176,7 @@ export function buildDowntimePaneTitle(
   if (itemTitle || itemId) {
     const titlePart = itemTitle ? ` ${itemTitle}` : '';
     const idPart = itemId ? ` - ${itemId}` : '';
-    return truncatePaneTitle(`Downtime triggered ${kind}${titlePart}${idPart}`);
+    return truncatePaneTitlePreservingSuffix(`Downtime triggered ${kind}${titlePart}`, idPart);
   }
   return truncatePaneTitle(`Downtime ${kind}`);
 }

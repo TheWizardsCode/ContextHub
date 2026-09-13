@@ -46,6 +46,12 @@ import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
 import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
+import {
+  createHydratorRunner,
+  createProductionHydratorDeps,
+  HYDRATOR_INTERVAL_MS,
+  HYDRATOR_RUN_TIMEOUT_MS,
+} from './hydrator.js';
 import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
@@ -5632,6 +5638,19 @@ export async function runWorklistTui(
   // pause-when-hidden gating, and shutdown cleanup live in one place.
   const scheduler = new TaskScheduler(DEFAULT_SCHEDULER_TICK_MS);
 
+  // ── Hydrator (WL-0MSOJLZD9004P8PI) ──────────────────────────────────
+  // Self-heals the queue: periodically re-checks `in_progress` items against
+  // live agent panes in the current workspace and releases (demotes) any
+  // item claimed with no running pane. Visibility-gated via
+  // createHydratorRunner, so a hidden tab spawns zero `wl`/`herdr`
+  // processes (AC5). The SAME runner is invoked immediately on the
+  // hidden→visible resume below, so regaining focus re-checks without
+  // waiting for the next 30 s tick (AC4).
+  const runHydrator = createHydratorRunner(createProductionHydratorDeps(), {
+    workspaceId: process.env.HERDR_WORKSPACE_ID ?? undefined,
+    isVisible: () => paneGate.visible(),
+  });
+
   // DB-change tracker: detects whether the worklog DB has changed since the
   // last cycle. Used to gate auto-refresh/sync ticks so idle panes spawn
   // zero wl processes (WL-0MSJ1OLTL009N4IQ). Created only when we can
@@ -5765,7 +5784,32 @@ export async function runWorklistTui(
         stopResumePoll();
         panePaused = false;
         doRefresh(true);
+        // Hydrator focus-resume (AC4): the hidden→visible transition also
+        // re-checks `in_progress` claims immediately — the same runner the
+        // 30 s hydrate task uses — so a claim whose pane died while the tab
+        // was hidden is released as soon as the tab regains focus (no wait
+        // for the next hydrate tick). `paneGate.visible()` is already cached
+        // true here, so the runner proceeds without a new visibility probe.
+        void runHydrator();
       }
+    },
+  });
+
+  // Hydrator task — self-healing `in_progress` claims (WL-0MSOJLZD9004P8PI):
+  // every 30 s it fetches `in_progress` items, matches each against live
+  // pane titles (the work-item ID embedded by pane-title.ts) in the current
+  // workspace, and demotes any item with no matching pane so the claim
+  // re-enters the dispatchable pool. Visibility-gated via the runner
+  // (AC5 — a hidden tab spawns zero wl/herdr processes); single-flight +
+  // scheduler-level watchdog so a hung `wl`/`herdr` run is abandoned after
+  // HYDRATOR_RUN_TIMEOUT_MS and retried on the next tick.
+  scheduler.addTask({
+    id: 'hydrate',
+    intervalMs: HYDRATOR_INTERVAL_MS,
+    singleFlight: true,
+    runTimeoutMs: HYDRATOR_RUN_TIMEOUT_MS,
+    run: async () => {
+      await runHydrator();
     },
   });
 
