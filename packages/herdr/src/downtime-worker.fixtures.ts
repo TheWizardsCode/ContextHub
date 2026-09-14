@@ -160,10 +160,27 @@ export const perSlotOwnedOneUnowned: LlamaStatus = {
   ],
 };
 
-/** Idle status where the proxy reports queued (contending) local requests. */
+/**
+ * Idle status where the proxy reports queued (contending) local requests:
+ * the CURRENT queue depth (`contention_queue_depth`) is > 0, so the
+ * dispatcher must back off (AC6, WL-0MTYZXSLN008HZOW).
+ */
 export const idleWithContention: LlamaStatus = {
   ...idleAllSlotsFree,
-  contention_queued_count: 3,
+  contention_queue_depth: 3,
+};
+
+/**
+ * The wedge regression fixture (WL-0MU1DWXO600153OI): the proxy's
+ * CUMULATIVE `contention_queued_count` is > 0 (left over from past queue
+ * events) while the LIVE `contention_queue_depth` is 0 (nothing queued
+ * now) and the slot is free. The dispatcher must treat this as idle and
+ * dispatch — the cumulative counter is telemetry only, never a gate.
+ */
+export const idleWithCumulativeContention: LlamaStatus = {
+  ...idleAllSlotsFree,
+  contention_queue_depth: 0,
+  contention_queued_count: 13,
 };
 
 /** Raw `herdr pane list` output with two live downtime panes + noise. */

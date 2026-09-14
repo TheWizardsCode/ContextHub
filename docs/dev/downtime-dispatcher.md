@@ -470,9 +470,13 @@ on one slot (`contention_queued_count` 6, ~78 s cumulative queue time).
    a slot with a live lease is never considered available for a new pane.
    A single idle-but-owned slot (count-based path) fails closed via the
    derived `local_lease_active`.
-5. **Contention feedback (AC6)** — the proxy's `contention_queued_count` is
-   parsed; while > 0 the dispatcher backs off with outcome reason
-   `proxy-contention` until the queue drains.
+5. **Contention feedback (AC6)** — the proxy's LIVE `contention_queue_depth`
+   is parsed; while > 0 the dispatcher backs off with outcome reason
+   `proxy-contention` until the queue drains. The sibling
+   `contention_queued_count` is a CUMULATIVE counter (never decremented;
+   resets only on a proxy restart) and is telemetry only — it must never
+   gate dispatch (WL-0MU1DWXO600153OI: using it wedged dispatch permanently
+   after the first queue event, even with depth 0).
 
 All five gates are neutral refusals — never a strike, never a cooldown — and
 apply to BOTH dispatch paths (coordination leader and legacy direct chain).

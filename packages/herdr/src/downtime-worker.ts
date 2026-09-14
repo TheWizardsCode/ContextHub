@@ -384,11 +384,22 @@ export interface LlamaStatus {
   local_owner_session_id?: string | null;
   local_owner_lease_remaining_seconds?: number | null;
   /**
-   * Proxy-reported contention queue depth (AC6, parent WL-0MTYZXSLN008HZOW):
-   * the number of requests currently queued behind a busy local slot. A
-   * positive value means dispatched panes are already contending for the
-   * slot — the dispatcher backs off until the queue drains. ABSENT on
-   * pre-feature proxies (treated as 0 — no contention evidence).
+   * Proxy-reported LIVE contention queue depth (AC6, parent
+   * WL-0MTYZXSLN008HZOW): the number of requests CURRENTLY queued behind a
+   * busy local slot. A positive value means dispatched panes are already
+   * contending for the slot — the dispatcher backs off until the queue
+   * drains. ABSENT on pre-feature proxies (treated as 0 — no contention
+   * evidence). This is the SOLE contention gate signal
+   * (WL-0MU1DWXO600153OI).
+   */
+  contention_queue_depth?: number;
+  /**
+   * Proxy-reported CUMULATIVE queue metric: the number of requests that have
+   * EVER queued on this proxy process (never decremented; resets only on a
+   * proxy restart). Telemetry only — it MUST NOT gate dispatch
+   * (WL-0MU1DWXO600153OI): a past queue event leaves this > 0 forever, which
+   * would keep the dispatcher backed off even with an empty queue. ABSENT on
+   * pre-feature proxies.
    */
   contention_queued_count?: number;
   /**
@@ -678,6 +689,17 @@ export type LlamaStatusFetcher = (
 export const DEFAULT_DOWNTIME_POLL_TIMEOUT_MS = 5_000;
 
 /**
+ * Parse an optional non-negative finite count from a proxy payload.
+ * Returns `undefined` when absent (backward compatible), and `null` when
+ * malformed/negative (ambiguous → the caller fails closed to busy).
+ */
+function parseOptionalCount(value: unknown): number | undefined | null {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
+  return value;
+}
+
+/**
  * Fail-closed parse of a `GET /llama/local/status` payload. Returns null
  * (treated as busy by the caller) when required fields are missing or
  * malformed. `local_lease_active` is derived from the lease fields the
@@ -775,21 +797,18 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     slots = parsed;
   }
 
-  // Optional contention queue depth (AC6, WL-0MTYZXSLN008HZOW): ABSENT on
+  // Optional contention metrics (AC6, WL-0MTYZXSLN008HZOW): ABSENT on
   // pre-feature proxies → undefined (treated as 0, no contention evidence).
   // A malformed (non-finite / negative) value is ambiguous → null (busy,
   // fail-closed): contention must never be silently under-reported.
-  let contentionQueuedCount: number | undefined;
-  if (o.contention_queued_count !== undefined) {
-    if (
-      typeof o.contention_queued_count !== 'number' ||
-      !Number.isFinite(o.contention_queued_count) ||
-      o.contention_queued_count < 0
-    ) {
-      return null;
-    }
-    contentionQueuedCount = o.contention_queued_count;
-  }
+  //
+  // `contention_queue_depth` is the LIVE depth and the SOLE gate signal;
+  // `contention_queued_count` is the CUMULATIVE counter (telemetry only —
+  // it must never gate dispatch, WL-0MU1DWXO600153OI).
+  const contentionQueueDepth = parseOptionalCount(o.contention_queue_depth);
+  if (contentionQueueDepth === null) return null;
+  const contentionQueuedCount = parseOptionalCount(o.contention_queued_count);
+  if (contentionQueuedCount === null) return null;
 
   return {
     llama_server_running: o.llama_server_running,
@@ -806,6 +825,7 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
       typeof o.local_owner_lease_remaining_seconds === 'number'
         ? o.local_owner_lease_remaining_seconds
         : undefined,
+    contention_queue_depth: contentionQueueDepth,
     contention_queued_count: contentionQueuedCount,
     slots,
   };
@@ -2735,12 +2755,14 @@ export async function dispatchDowntimeWork(
      */
     slotOwned?: boolean;
     /**
-     * Proxy-contention queue depth (AC6, WL-0MTYZXSLN008HZOW): when > 0,
+     * Proxy-contention LIVE queue depth (AC6, WL-0MTYZXSLN008HZOW): when > 0,
      * dispatched panes are already queued behind a busy local slot, so
      * dispatch backs off with reason `proxy-contention` until the queue
-     * drains. Optional — absent/0 disables the gate.
+     * drains. MUST be sourced from `contention_queue_depth` (the live depth),
+     * never `contention_queued_count` (cumulative, WL-0MU1DWXO600153OI).
+     * Optional — absent/0 disables the gate.
      */
-    contentionQueued?: number;
+    contentionQueueDepth?: number;
   },
 ): Promise<DowntimeDispatchOutcome> {
   // Bounded in-flight gate (F3): the cap is re-read per call and clamped to
@@ -2782,7 +2804,7 @@ export async function dispatchDowntimeWork(
   // While the proxy reports queued local requests, dispatched panes are
   // already contending for the slot: back off until the queue drains.
   // Neutral reason — never a strike, never a cooldown.
-  if (typeof opts.contentionQueued === 'number' && opts.contentionQueued > 0) {
+  if (typeof opts.contentionQueueDepth === 'number' && opts.contentionQueueDepth > 0) {
     return { dispatched: false, reason: 'proxy-contention' };
   }
   dispatchInFlightCount += 1;
@@ -4020,8 +4042,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           Number.isFinite(status.local_owner_lease_remaining_seconds) &&
           status.local_owner_lease_remaining_seconds > 0);
       const slotOwned = ownerLeaseHeld && (runningPanes ?? 0) > 0;
-      const contentionQueued =
-        typeof status.contention_queued_count === 'number' ? status.contention_queued_count : 0;
+      // LIVE depth only (WL-0MU1DWXO600153OI): `contention_queued_count` is
+      // cumulative telemetry and must never gate dispatch.
+      const contentionQueueDepth =
+        typeof status.contention_queue_depth === 'number' ? status.contention_queue_depth : 0;
 
       // Single machine-wide dispatch gate applied to BOTH coordination and
       // legacy modes (WL-0MTYZXSLN008HZOW): a new pane must never be
@@ -4041,7 +4065,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (slotOwned) {
         return { polled: true, dispatched: false, idle: true };
       }
-      if (contentionQueued > 0) {
+      if (contentionQueueDepth > 0) {
         return { polled: true, dispatched: false, idle: true };
       }
 
@@ -4085,7 +4109,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 maxRunningPanes,
                 ...(runningPanes !== null ? { runningPanes } : {}),
                 slotOwned,
-                contentionQueued,
+                contentionQueueDepth,
               });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();

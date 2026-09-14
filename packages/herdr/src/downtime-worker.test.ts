@@ -163,6 +163,7 @@ import {
   perSlotIdleOwned,
   perSlotOwnedOneUnowned,
   idleWithContention,
+  idleWithCumulativeContention,
   herdrPaneListRaw,
   networkErrorFixture,
   timeoutErrorFixture,
@@ -7404,10 +7405,28 @@ describe('parseLlamaStatus: contention + per-slot owner (AC5/AC6)', () => {
     total_slots: 1,
   };
 
-  it('parses contention_queued_count when served', () => {
-    const status = parseLlamaStatus({ ...base, contention_queued_count: 4 });
+  it('parses contention_queue_depth (the live gate signal) when served', () => {
+    const status = parseLlamaStatus({ ...base, contention_queue_depth: 4 });
     expect(status).not.toBeNull();
-    expect(status!.contention_queued_count).toBe(4);
+    expect(status!.contention_queue_depth).toBe(4);
+  });
+
+  it('leaves contention_queue_depth undefined when absent (backward compatible)', () => {
+    const status = parseLlamaStatus(base);
+    expect(status).not.toBeNull();
+    expect(status!.contention_queue_depth).toBeUndefined();
+  });
+
+  it('treats a negative or non-finite contention_queue_depth as ambiguous → busy', () => {
+    expect(parseLlamaStatus({ ...base, contention_queue_depth: -1 })).toBeNull();
+    expect(parseLlamaStatus({ ...base, contention_queue_depth: Number.NaN })).toBeNull();
+    expect(parseLlamaStatus({ ...base, contention_queue_depth: 'many' })).toBeNull();
+  });
+
+  it('parses the cumulative contention_queued_count as telemetry (not a gate)', () => {
+    const status = parseLlamaStatus({ ...base, contention_queued_count: 13 });
+    expect(status).not.toBeNull();
+    expect(status!.contention_queued_count).toBe(13);
   });
 
   it('leaves contention_queued_count undefined when absent (backward compatible)', () => {
@@ -7420,6 +7439,17 @@ describe('parseLlamaStatus: contention + per-slot owner (AC5/AC6)', () => {
     expect(parseLlamaStatus({ ...base, contention_queued_count: -1 })).toBeNull();
     expect(parseLlamaStatus({ ...base, contention_queued_count: Number.NaN })).toBeNull();
     expect(parseLlamaStatus({ ...base, contention_queued_count: 'many' })).toBeNull();
+  });
+
+  it('keeps the live depth distinct from the cumulative count', () => {
+    const status = parseLlamaStatus({
+      ...base,
+      contention_queue_depth: 0,
+      contention_queued_count: 13,
+    });
+    expect(status).not.toBeNull();
+    expect(status!.contention_queue_depth).toBe(0);
+    expect(status!.contention_queued_count).toBe(13);
   });
 
   it('parses a per-slot owner_session_id', () => {
@@ -7578,7 +7608,7 @@ describe('dispatchDowntimeWork: running-pane / owner / contention gates', () => 
     const outcome = await dispatchDowntimeWork(deps, {
       model: 'plan',
       cwd: '/repo',
-      contentionQueued: 3,
+      contentionQueueDepth: 3,
     });
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('proxy-contention');
@@ -7717,6 +7747,28 @@ describe('worker tick: single-slot running-pane bound across generations (AC1/AC
       const blocked = await worker.tick();
       expect(blocked.dispatched).toBe(false);
       expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('dispatches when only the cumulative contention counter is non-zero (depth 0, WL-0MU1DWXO600153OI)', async () => {
+    vi.useFakeTimers();
+    try {
+      // Regression: `contention_queued_count` is cumulative and stays > 0
+      // after any past queue event; it must never gate dispatch. With the
+      // live depth at 0 the worker dispatches.
+      const { worker, deps } = makeSingleSlotWorker({
+        status: idleWithCumulativeContention,
+        runningPanes: () => ({ ok: true, count: 0 }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const result = await worker.tick();
+      expect(result.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
