@@ -1341,7 +1341,8 @@ export interface DowntimeWorkerDeps {
    * Called in the audit-tier dispatch path BETWEEN candidate selection and
    * dispatch to detect whether a valid audit was recorded in the interim
    * (e.g. by a human or another process). Resolves true when the item has
-   * a fresh audit (auditedAt within 60s of updatedAt), false otherwise.
+   * a fresh audit (auditedAt within AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS of
+   * updatedAt, via isAuditFresh), false otherwise.
    * Fail-closed: `{ok:false}` on a wl/CLI failure → treated as "not fresh"
    * (the dispatch proceeds — conservative default, never blocks dispatch).
    *

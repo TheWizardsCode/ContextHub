@@ -368,7 +368,7 @@ export function inReviewBucket(item: {
   // Per AC4 stale buckets require auditedAt present; absence is the no-audit bucket.
   if (item.auditResult === null || item.auditResult === undefined || !item.auditedAt) return 4;
 
-  // Determine freshness via the shared predicate (isAuditFresh handles 60 s buffer)
+  // Determine freshness via the shared predicate (isAuditFresh/AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS)
   const fresh = Boolean(
     item.auditedAt && item.updatedAt && isAuditFresh(item.auditedAt, item.updatedAt),
   );

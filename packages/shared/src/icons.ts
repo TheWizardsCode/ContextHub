@@ -257,8 +257,21 @@ export function needsProducerReviewIcon(
 // ── Audit freshness ───────────────────────────────────────────────────
 
 /**
+ * Named tolerance (ms) for treating an audit as fresh when `auditedAt` and
+ * `updatedAt` are within the same atomic persistence window.  Covers the
+ * just-persisted case where `auditedAt ≈ updatedAt` (delta well under 1 s)
+ * as well as brief comment-only bumps that stay within the 60 s window.
+ *
+ * Single source of truth: the icon path (`stageDisplayIcon` / `auditIcon`) and
+ * the audit-dispatch path (`selectAuditCandidate` / `classifyItemForDispatch`)
+ * both import this predicate — no competing comparison is added anywhere.
+ * (WL-0MSIAOFI70075REE)
+ */
+export const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 60000;
+
+/**
  * Determine whether an audit result is fresh (not stale) based on the
- * 60-second staleness buffer.
+ * at-or-near tolerance (`AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS`).
  *
  * Guarantees: `updatedAt` is only bumped on content changes (title, description,
  * status, stage, priority, etc.). Flag-only flips of `needsProducerReview` do
@@ -271,10 +284,11 @@ export function needsProducerReviewIcon(
  * `updatedAt = auditedAt` in the same transaction that writes the
  * `audit_results` row, so `isAuditFresh(auditedAt, updatedAt)` is true
  * immediately after an audit. Subsequent comments do bump `updatedAt`, but the
- * 60 s grace window (`auditedAt > updatedAt - 60s`) keeps the audit fresh until
- * real content changes advance `updatedAt` beyond that window. The audit record
- * in `audit_results` is the canonical source of truth; audit-content comments
- * are deprecated and not consumed by any flow (ship/heartbeat/TUI/implement).
+ * at-or-near tolerance (`AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS`) keeps the audit
+ * fresh until real content changes advance `updatedAt` beyond that window.
+ * The audit record in `audit_results` is the canonical source of truth;
+ * audit-content comments are deprecated and not consumed by any flow
+ * (ship/heartbeat/TUI/implement).
  */
 export function isAuditFresh(
   auditedAt: string | null | undefined,
@@ -284,7 +298,7 @@ export function isAuditFresh(
   const auditTime = new Date(auditedAt).getTime();
   const updateTime = new Date(updatedAt).getTime();
   if (isNaN(auditTime) || isNaN(updateTime)) return false;
-  return auditTime > updateTime - 60000;
+  return auditTime > updateTime - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
 }
 
 /**

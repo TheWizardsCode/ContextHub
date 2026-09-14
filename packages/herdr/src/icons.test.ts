@@ -176,7 +176,7 @@ describe('isAuditFresh — flag-only updates must not make a valid audit stale (
   it('shows the passed icon (not the stale hourglass) after a flag-only flip', () => {
     // Audit at 10:00:30, item updated at 10:00:00 — with the worklog
     // guarantee the updatedAt is unchanged by a flag flip, so the audit
-    // remains within the 60 s buffer and the passed icon is shown.
+    // remains within the at-or-near tolerance and the passed icon is shown.
     expect(
       stageDisplayIcon({
         stage: 'in_review',
@@ -194,8 +194,37 @@ describe('isAuditFresh — flag-only updates must not make a valid audit stale (
   });
 });
 
+describe('isAuditFresh — at-or-near tolerance (WL-0MSIAOFI70075REE)', () => {
+  it('treats a just-persisted audit as fresh when auditedAt and updatedAt differ by milliseconds', () => {
+    const auditedAt = '2026-08-02T10:00:30.000Z';
+    // Persistence writes may add a few milliseconds of delta.
+    const updatedAt = '2026-08-02T10:00:30.042Z'; // 42 ms after
+    expect(isAuditFresh(auditedAt, updatedAt)).toBe(true);
+  });
+
+  it('treats a just-persisted audit as fresh with zero delta (identical timestamps)', () => {
+    const auditedAt = '2026-08-02T10:00:30.000Z';
+    const updatedAt = auditedAt;
+    expect(isAuditFresh(auditedAt, updatedAt)).toBe(true);
+  });
+});
+
+describe('isAuditFresh — genuinely stale (WL-0MSIAOFI70075REE)', () => {
+  it('returns false when updatedAt is well past auditedAt (120 s gap)', () => {
+    const auditedAt = '2026-08-02T10:00:00.000Z';
+    const updatedAt = '2026-08-02T10:02:00.000Z'; // 2 minutes after
+    expect(isAuditFresh(auditedAt, updatedAt)).toBe(false);
+  });
+
+  it('returns false when updatedAt is just beyond the tolerance boundary (60.1 s gap)', () => {
+    const auditedAt = '2026-08-02T10:00:00.000Z';
+    const updatedAt = '2026-08-02T10:01:00.100Z'; // 60.1 s after
+    expect(isAuditFresh(auditedAt, updatedAt)).toBe(false);
+  });
+});
+
 describe('isAuditFresh — atomic audit persistence (WL-0MT8KTE3E001Q1D9)', () => {
-  it('stays fresh when a comment bumps updatedAt within 60 s of the audit', () => {
+  it('stays fresh when a comment bumps updatedAt within the tolerance of the audit', () => {
     const auditedAt = '2026-08-02T10:00:30.000Z';
     const updatedAtAfterComment = '2026-08-02T10:00:40.000Z';
     expect(isAuditFresh(auditedAt, updatedAtAfterComment)).toBe(true);
@@ -207,7 +236,7 @@ describe('isAuditFresh — atomic audit persistence (WL-0MT8KTE3E001Q1D9)', () =
     expect(isAuditFresh(auditedAt, updatedAt)).toBe(true);
   });
 
-  it('becomes stale when comment bumps updatedAt beyond 60 s', () => {
+  it('becomes stale when comment bumps updatedAt beyond the tolerance', () => {
     const auditedAt = '2026-08-02T10:00:30.000Z';
     const updatedAtAfterComment = '2026-08-02T10:01:35.000Z';
     expect(isAuditFresh(auditedAt, updatedAtAfterComment)).toBe(false);
