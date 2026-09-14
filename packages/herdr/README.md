@@ -687,10 +687,10 @@ redundant `set-mode` calls.
 **Scheduled prompts (WL-0MSS1Q5ER007QDKX)** — the FIRST dispatch stage: a
 project-local config file `.worklog/scheduled-prompts.json` (provisioned by
 `wl init` from `templates/scheduled-prompts.json`, create-if-absent) carries
-periodic maintenance prompts with a best-effort frequency. The base set is a
-single `/skill:refactor` entry (`intervalDays: 3`, `lastTriggeredAt: null`),
-so refactoring runs automatically at most every three days during idle time
-without manual triggering. Each entry has:
+periodic maintenance prompts with a best-effort frequency. The base set includes a `/skill:refactor` entry (`intervalDays: 3`,
+`lastTriggeredAt: null`) for routine maintenance, and a `/skill:standup`
+entry (`intervalDays: 1`, `time: "06:05"`, `lastTriggeredAt: null`) that
+fires daily at or after 06:05 local — the canonical daily standup prompt. Each entry has:
 
 - `id` — stable entry id (pane name `Downtime <id>` and rolling-log marker
   `itemId`); set it to the command itself (e.g. `/skill:refactor`) so the
@@ -698,13 +698,36 @@ without manual triggering. Each entry has:
 - `prompt` — any text the pi agent pane can run (e.g. `/skill:refactor`),
 - `intervalDays` — best-effort frequency in whole days,
 - `lastTriggeredAt` — ISO-8601 UTC datetime of the last dispatch
-  (`null` = never run; a missing field is treated as due).
+  (`null` = never run; a missing field is treated as due),
+- `time` — *(optional)* wall-clock `HH:MM` in 24-hour format (e.g. `06:05`);
+  when present the entry is due only when **both** the interval gate has
+  elapsed **and** the current local time is at or after this time on the
+  calendar day of `now`.  A daily entry with `time: "06:05"` fires at most
+  once per calendar day at or after 06:05 local, even if the prior dispatch
+  was late (e.g. a 08:00 late dispatch makes the next due time tomorrow at
+  06:05, not immediately). When absent the behaviour is identical to today
+  (backward-compatible; the existing interval-only due check applies).
+  Invalid `time` values cause the entry to be skipped (fail-closed, never
+  a crash).
 
 While the proxy is idle long enough, the dispatcher checks scheduled prompts
-FIRST (before the audit/implement/plan/intake tiers). An entry is **due** iff
-`lastTriggeredAt` is `null` or `now - lastTriggeredAt >= intervalDays` — best
+FIRST (before the audit/implement/plan/intake tiers). An entry's **due**
+status depends on whether it carries a `time` field:
+
+- **No `time`** (backward-compatible): due iff `lastTriggeredAt` is `null`
+  or `now - lastTriggeredAt >= intervalDays * DAY_MS` (the existing interval
+  gate only).
+- **With `time`**: due only when **both** (a) the interval gate has elapsed
+  (using **calendar-day** difference for interval counting, so a daily entry
+  dispatched late at 08:00 is still due the next calendar day at 06:05 and
+  does not drift) **and** (b) the current local wall-clock time is at or
+  after the `time` value on the calendar day of `now`.
+
+A dispatched entry is **not** due again until the next calendar day's `time`
+has been reached and the interval gate has again elapsed — so a daily 06:05
+entry dispatched at 07:00 today is not due again at 08:00 today. Best
 effort: a dispatch may be delayed (no idle slot, cooldown, freeze) but never
-happens more often than the frequency. A due prompt dispatches a pi agent
+happens more often than once per interval. A due prompt dispatches a pi agent
 pane named `Downtime <id>` via the same send-to-pi.sh path as the tiers
 (`--no-focus`, `--cwd <worklog root>`, `--model <downtimeModel>`) running the
 prompt text. Multiple due entries dispatch one per idle slot in config order
