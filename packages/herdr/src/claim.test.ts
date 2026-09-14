@@ -108,6 +108,34 @@ describe('claimWorkItem (fetcher)', () => {
     expect(callArgs[callArgs.indexOf('--if-stage') + 1]).toBe('idea');
   });
 
+  it('appends --stage when a migration stage is given (retired-stage recovery, WL-0MTYL7DX9000MZOH)', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: '{"success":true}',
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    // Retired-stage claim: CAS matches the item's ACTUAL (retired) stage
+    // while --stage advances the stored value to a valid stage atomically.
+    const result = await claimWorkItem(
+      'WL-ABC',
+      'Map',
+      { status: 'open', stage: 'in_progress' },
+      undefined,
+      'plan_complete',
+    );
+
+    expect(result.success).toBe(true);
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('--if-status');
+    expect(callArgs[callArgs.indexOf('--if-status') + 1]).toBe('open');
+    // CAS uses the item's actual stage; the write migrates it.
+    expect(callArgs).toContain('--if-stage');
+    expect(callArgs[callArgs.indexOf('--if-stage') + 1]).toBe('in_progress');
+    expect(callArgs).toContain('--stage');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('plan_complete');
+  });
+
   it('marks a lost CAS race as stale (another pane won)', async () => {
     const mockFn = vi
       .fn()

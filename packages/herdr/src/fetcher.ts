@@ -764,6 +764,7 @@ export async function claimWorkItem(
   assignee: string,
   expected?: { status?: string; stage?: string },
   worklogRoot?: string,
+  migrateStage?: string,
 ): Promise<ClaimResult> {
   try {
     const args = ['update', id, '--status', 'in_progress', '--assignee', assignee];
@@ -772,6 +773,17 @@ export async function claimWorkItem(
     }
     if (expected?.stage) {
       args.push('--if-stage', expected.stage);
+    }
+    // Retired-stage recovery (WL-0MTYL7DX9000MZOH): an item stuck on a stage
+    // that is no longer valid (e.g. the removed `in_progress` stage) cannot
+    // satisfy the tier's normalised stage CAS. In that case the caller passes
+    // the tier's target stage as an atomic MIGRATION — the CAS guard still
+    // matches the item's ACTUAL (retired) stage for race safety, while
+    // `--stage` advances the stored value to a valid stage in the same write.
+    // Without this, the claim is rejected by the status/stage validator and
+    // counted as a hard wl-error strike.
+    if (migrateStage !== undefined) {
+      args.push('--stage', migrateStage);
     }
     // Per-call --worklog-dir targeting (WL-0MTQ14W7L003II5A): the downtime
     // leader claims coordination offers in the OFFER's own worklog root,

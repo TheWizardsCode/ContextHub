@@ -1372,11 +1372,17 @@ export interface DowntimeWorkerDeps {
    * lives in — the coordination leader claims offers in the offering
    * instance's OWN root, which may differ from the leader pane's module
    * override. Absent/undefined → legacy behavior (module override / cwd).
+   *
+   * `migrateStage` (optional, WL-0MTYL7DX9000MZOH) advances the stored
+   * stage to a valid value in the same atomic claim — used to recover an
+   * item stuck on the retired `in_progress` stage, whose actual stage can
+   * be used as the CAS guard but can never equal the tier's target stage.
    */
   claimItem(
     itemId: string,
     expected: DowntimeClaimExpected,
     cwd?: string,
+    migrateStage?: string,
   ): Promise<DowntimeClaimResult>;
   /**
    * Open a visible pi agent pane running the prompt (via send-to-pi.sh).
@@ -1814,7 +1820,23 @@ async function dispatchClaimedTier(
   // Cross-root claim (WL-0MTQ14W7L003II5A): opts.cwd is the item's worklog
   // root — the coordination leader passes the OFFER's root so the CAS claim
   // lands in the item's own database (never the leader's module override).
-  const claim = await deps.claimItem(candidate.id, expected, opts.cwd);
+  //
+  // Retired-stage recovery (WL-0MTYL7DX9000MZOH): when the candidate is
+  // stuck on the removed `in_progress` stage, the tier's normalised stage
+  // CAS can never match. Claim it using the item's ACTUAL stage as the CAS
+  // guard (race-safe) while atomically migrating the stored stage to the
+  // tier's target — without this the `wl update` status/stage validator
+  // rejects the claim and the dispatcher records a hard wl-error strike.
+  const retiredStage = candidate.stage === 'in_progress';
+  const claimExpected: DowntimeClaimExpected = retiredStage
+    ? { status: expected.status, stage: candidate.stage }
+    : expected;
+  // Keep the normal-path arity unchanged (3 args) so existing callers /
+  // assertions see the historical shape; only the retired-stage recovery
+  // passes the migration stage.
+  const claim = retiredStage
+    ? await deps.claimItem(candidate.id, claimExpected, opts.cwd, expected.stage)
+    : await deps.claimItem(candidate.id, claimExpected, opts.cwd);
   if (!claim.ok) {
     return claim.reason === 'stale'
       ? { dispatched: false, reason: 'claim-failed' }
@@ -2102,13 +2124,15 @@ export function classifyItemForDispatch(
     if (effort > 3) return null;
     return 'implement';
   }
-  // Retired `in_progress` stage (WL-0MTTSWCJR003OMN7 — OSL dead zones):
-  // items stuck on the retired stage are invisible to all dispatch tiers.
-  // Map them into the pipeline by dispatching a skill evaluation that
-  // will advance them to the correct stage:
-  //   - items missing risk/effort → risk-effort evaluation (populates both)
-  //   - items with risk/effort → risk-effort evaluation (confirms fields)
-  //   - items with only one → plan evaluation (advances to the right stage)
+  // Retired `in_progress` stage (WL-0MTTSWCJR003OMN7 — OSL dead zones;
+  // WL-0MTYL7DX9000MZOH — claim must not hard-strike): items stuck on the
+  // retired stage are invisible to all dispatch tiers. Map them into the
+  // pipeline by dispatching a skill evaluation that will advance them to
+  // the correct stage. The CLAIM for such an item CASes on the item's
+  // ACTUAL retired stage and atomically migrates it to the tier's target
+  // stage (`claimWorkItem` migrateStage) — without that, `wl update`'s
+  // status/stage validation rejects the claim and the dispatcher records a
+  // hard wl-error strike (three strikes → 60-min pause loop).
   if (stage === 'in_progress') {
     // Always dispatch risk-effort for retired-stage items: it evaluates
     // both fields AND confirms the stage is correct, producing a single

@@ -179,6 +179,11 @@ describe('classifyItemForDispatch', () => {
   it('rejects in_progress items (already claimed)', () => {
     expect(classifyItemForDispatch(itemInfo({ id: 'WL-1', status: 'in_progress', stage: 'in_progress' }))).toBeNull();
   });
+  it('maps an OPEN item stuck on the retired in_progress stage to risk-effort (WL-0MTTSWCJR003OMN7 / WL-0MTYL7DX9000MZOH)', () => {
+    // Retired-stage recovery: the item is dispatchable via the risk-effort
+    // evaluation, whose claim migrates the stage to a valid value.
+    expect(classifyItemForDispatch(itemInfo({ id: 'WL-1', status: 'open', stage: 'in_progress' }))).toBe('risk-effort');
+  });
   it('rejects unknown states (fail-closed)', () => {
     expect(classifyItemForDispatch(itemInfo({ id: 'WL-1', status: 'weird', stage: 'idea' }))).toBeNull();
     expect(classifyItemForDispatch({ id: 'WL-1' })).toBeNull(); // no status at all
@@ -229,6 +234,63 @@ describe('dispatchFromCoordination', () => {
     const outcome = await dispatchFromCoordination(deps, [entry], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
     expect(outcome.dispatched).toBe(true);
     expect(getEntry(testDir, 'inst-1')).toBe(null);
+  });
+
+  it('dispatches a retired-stage offer via risk-effort with an atomic stage-migrating claim (WL-0MTYL7DX9000MZOH AC2/AC3)', async () => {
+    // An OPEN item stuck on the retired `in_progress` stage is dispatchable:
+    // the claim CASes on the item's ACTUAL stage and migrates the stored
+    // stage to plan_complete in the same atomic update — never a hard
+    // wl-error strike, never a 60-min pause.
+    const entry = makeEntry('inst-retired', 'WL-RETIRED', '/worklog/root');
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+    const claimItem = vi.fn().mockResolvedValue({ ok: true });
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-RETIRED', status: 'open', stage: 'in_progress' }) }),
+      claimItem,
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('risk-effort');
+    // CAS guard = the item's actual retired stage (race-safe) + migration.
+    const claimArgs = claimItem.mock.calls[0];
+    expect(claimArgs[0]).toBe('WL-RETIRED');
+    expect(claimArgs[1]).toEqual({ status: 'open', stage: 'in_progress' });
+    expect(claimArgs[3]).toBe('plan_complete');
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('/skill:effort-and-risk WL-RETIRED');
+    // Dispatched entry removed so the owner re-queues its next head.
+    expect(getEntry(testDir, 'inst-retired')).toBe(null);
+  });
+
+  it('a retired-stage offer never blocks a healthy offer behind it (containment, WL-0MTYL7DX9000MZOH AC4)', async () => {
+    // File order: the poisoned (retired-stage) offer first, a healthy
+    // implement offer second. If the poisoned offer hard-struck, the healthy
+    // offer would never dispatch and the leader would 60-min pause. After the
+    // fix, the retired-stage offer DISPATCHES (or at worst skips) and the
+    // healthy offers are still served.
+    const entries = [
+      makeEntry('inst-poison', 'WL-POISON', '/root/a'),
+      makeEntry('inst-healthy', 'WL-HEALTHY', '/root/b'),
+    ];
+    const claimItem = vi.fn()
+      .mockResolvedValueOnce({ ok: true }); // poison dispatched (recovery)
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn()
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-POISON', status: 'open', stage: 'in_progress' }) })
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-HEALTHY', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }) }),
+      claimItem,
+    });
+
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    // ONE dispatch per cycle: the poison offer recovered and dispatched,
+    // with NO wl-error outcome (no strike, no 60-min pause for the leader).
+    expect(outcome.reason).not.toBe('wl-error');
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('risk-effort');
+    const claimArgs = claimItem.mock.calls[0];
+    expect(claimArgs[3]).toBe('plan_complete');
   });
 
   it('skips entries whose item is not currently dispatchable (stale/in_progress)', async () => {

@@ -1006,6 +1006,35 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
           }
         }
 
+        // Retired `in_progress` stage (WL-0MTYL7DX9000MZOH AC5): once the
+        // stage is REMOVED from the config (WL-0MTOHS5B4001Y9FX) the checker
+        // above reports the row as `invalid-stage` (not a compatibility
+        // finding), so the rule above never fires and the row would be left
+        // for manual review. Migrate the stored stage to plan_complete — the
+        // same target the downtime dispatcher's risk-effort recovery uses —
+        // when plan_complete is compatible with the item's status (open /
+        // in-progress / blocked / input_needed / deleted). A status that does
+        // not admit plan_complete (completed — only in_review/done) is left
+        // for manual review.
+        for (const f of findings) {
+          try {
+            const ctx = (f && (f as any).context) || {};
+            if (f.type === 'invalid-stage' && ctx.stage === 'in_progress') {
+              const planCompatibleStatuses =
+                (rules.stageStatusCompatibility['plan_complete'] as readonly string[] | undefined) ?? [];
+              const compatible =
+                typeof ctx.status === 'string' && planCompatibleStatuses.includes(ctx.status);
+              if (compatible) {
+                const current = (f.proposedFix && typeof f.proposedFix === 'object') ? (f.proposedFix as Record<string, unknown>) : {};
+                (f as any).proposedFix = Object.assign({}, current, { stage: 'plan_complete' });
+                (f as any).safe = true;
+              }
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+
         // Normalize certain findings: if an invalid/empty stage can be safely defaulted, mark safe
         for (const f of findings) {
           try {

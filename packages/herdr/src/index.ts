@@ -1072,6 +1072,7 @@ export function createDowntimeDeps(
       itemId: string,
       expected: DowntimeClaimExpected,
       cwd?: string,
+      migrateStage?: string,
     ): Promise<DowntimeClaimResult> {
       // CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1): the transition
       // only applies while the item is still in the state the tier selected
@@ -1087,7 +1088,10 @@ export function createDowntimeDeps(
       // OWN database. Without it the update fired at the leader's database
       // and a dispatchable foreign offer struck at claim time (the same
       // wrong-root failure as the fetch). Undefined → legacy behavior.
-      const result = await claimWorkItem(itemId, assignee, expected, cwd);
+      // Retired-stage migration (WL-0MTYL7DX9000MZOH): `migrateStage`
+      // advances a retired `in_progress`-stage item to the tier's target
+      // stage atomically with the claim (see claimWorkItem).
+      const result = await claimWorkItem(itemId, assignee, expected, cwd, migrateStage);
       if (result.success) return { ok: true };
       process.stderr.write(
         `[worklog-plugin] Downtime claim failed for ${itemId}: ` +

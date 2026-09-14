@@ -10,7 +10,7 @@ import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
-import { normalizeStatusValue } from '../status-stage-rules.js';
+import { loadStatusStageRules, normalizeStatusValue } from '../status-stage-rules.js';
 import { submitToOpenBrain } from '../openbrain.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 
@@ -319,10 +319,29 @@ export default function register(ctx: PluginContext): void {
           let normalizedStage = current.stage;
           let warnings: string[] = [];
           try {
+            // Validate only the fields this update writes (WL-0MTYL7DX9000MZOH):
+            // a pre-existing stage the caller is NOT changing must never abort
+            // the update. The removed `in_progress` stage is still present on
+            // legacy rows; re-validating it on a status-only claim made
+            // `wl update` fail with `Invalid stage "in_progress"`, which the
+            // downtime dispatcher counted as a hard wl-error strike and
+            // cascaded into a 60-minute pause. When the stage is unchanged we
+            // validate the stored value only if it is a recognised stage
+            // (so genuine status/stage compatibility is still enforced for
+            // known data); an unrecognised stored stage is left untouched.
+            const stageRules = loadStatusStageRules(config);
+            const stageBeingWritten = stageCandidate !== undefined;
+            const storedStageRecognised =
+              typeof current.stage === 'string' &&
+              stageRules.stageValues.includes(current.stage);
             const validation = validateStatusStageInput(
               {
                 status: statusCandidate ?? current.status,
-                stage: stageCandidate ?? current.stage,
+                stage: stageBeingWritten
+                  ? stageCandidate
+                  : storedStageRecognised
+                    ? current.stage
+                    : '',
               },
               config
             );

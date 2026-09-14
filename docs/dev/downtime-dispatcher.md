@@ -143,6 +143,31 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    refresh their lease check (a cheap local file read) and their
    coordination entry.
 
+### Retired-stage recovery (WL-0MTYL7DX9000MZOH)
+
+The `in_progress` **stage** was removed from the valid stage set
+(WL-0MTOHS5B4001Y9FX) but legacy rows still carry it. Such an **open** row is
+dispatchable via the `risk-effort` recovery tier
+(`classifyItemForDispatch` maps `stage === 'in_progress'` → `risk-effort`,
+WL-0MTTSWCJR003OMN7). The recovery claim is race-safe and self-migrating:
+
+- `claimItem` (→ `claimWorkItem`) CASes on the item's **actual** retired
+  stage (`--if-status open --if-stage in_progress`) and atomically advances
+  the stored stage to the tier's target (`--stage plan_complete`).
+- `wl update` validates **only the fields the update writes**: an unchanged
+  legacy stage no longer aborts a status-only update (`Invalid stage
+  \"in_progress\"`), so the claim can never be mistaken for a hard
+  `wl-error` strike.
+- Recovery is **contained**: a retired-stage offer that dispatches (or loses
+  its CAS race → neutral `claim-failed`) never blocks the offers behind it —
+  the leader continues to the next entry (never a 60-min pause for one bad
+  row).
+- `wl doctor --fix` migrates leftover retired-stage rows to `plan_complete`
+  automatically when `plan_complete` is compatible with the row's status
+  (open / in-progress / blocked / deleted). A status that does not admit
+  `plan_complete` (e.g. `completed`) is left for manual review rather than
+  migrated into another invalid combination.
+
 ### Dispatcher workspace anchor (C0 WL-0MTR01EU7005SYZG — anchor-by-ID)
 
 Automated downtime dispatches always spawn in a **dedicated Dispatcher workspace**
