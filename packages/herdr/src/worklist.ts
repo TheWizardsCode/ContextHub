@@ -1258,14 +1258,20 @@ export function formatItemLine(
 
   let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}`;
 
-  // Truncate to fit terminal width, accounting for ANSI codes
-  const visibleLength = line.replace(/\x1b\[[0-9;]*m/g, '').length;
-  if (visibleLength > maxCols - 1) {
-    // Truncate before ANSI codes, preserving them
+  // Truncate to fit terminal width, accounting for ANSI codes and
+  // multi-width characters (CJK, emoji, fullwidth forms). Reuses the
+  // visibleLength() helper so characters like Chinese/Japanese/Korean
+  // ideographs are counted as 2 terminal cells, preventing line-wrap
+  // that would push the total rendered line count past rows-1
+  // (WL-0MSNI6TQ5003JY1Z, WL-0MSAAON63003N6LO).
+  const visLen = visibleLength(line.replace(/\x1b\[[0-9;]*m/g, ''));
+  if (visLen > maxCols - 1) {
+    // Truncate before ANSI codes, preserving them and counting
+    // multi-width chars as 2 cells (truncateLine-compatible).
     let truncated = '';
-    let visLen = 0;
+    let charVisLen = 0;
     let i = 0;
-    while (visLen < maxCols - 4 && i < line.length) {
+    while (charVisLen < maxCols - 4 && i < line.length) {
       if (line[i] === '\x1b' && line[i + 1] === '[') {
         // Copy ANSI escape sequence
         const end = line.indexOf('m', i);
@@ -1275,8 +1281,32 @@ export function formatItemLine(
           continue;
         }
       }
+      // Count visual width for multi-width characters
+      let cp: number;
+      if (line.charCodeAt(i) >= 0xd800 && line.charCodeAt(i) < 0xdc00 && i + 1 < line.length) {
+        cp = 0x10000 + ((line.charCodeAt(i) - 0xd800) << 10) + (line.charCodeAt(i + 1) - 0xdc00);
+        i += 1;
+      } else {
+        cp = line.charCodeAt(i);
+      }
+      if (cp >= 0x2300 && cp < 0x2400) charVisLen += 2;
+      else if (cp >= 0x2600 && cp < 0x2700) charVisLen += 2;
+      else if (cp >= 0x1f000) charVisLen += 2;
+      else if (cp >= 0x3000 && cp < 0x3040) charVisLen += 2;
+      else if (cp >= 0x3400 && cp < 0x4DC0) charVisLen += 2;
+      else if (cp >= 0x4E00 && cp < 0xA000) charVisLen += 2;
+      else if (cp >= 0x20000) charVisLen += 2;
+      else if (cp >= 0xAC00 && cp < 0xD800) charVisLen += 2;
+      else if (cp >= 0x1100 && cp < 0x1200) charVisLen += 2;
+      else if (cp >= 0x3130 && cp < 0x3190) charVisLen += 2;
+      else if (cp >= 0x3100 && cp < 0x3130) charVisLen += 2;
+      else if (cp >= 0x31A0 && cp < 0x31C0) charVisLen += 2;
+      else if (cp >= 0xFF01 && cp < 0xFF5F) charVisLen += 2;
+      else if (cp >= 0xFFA0 && cp < 0xFFDD) charVisLen += 2;
+      else if (cp >= 0x3200 && cp < 0x3300) charVisLen += 2;
+      else if (cp >= 0x2460 && cp < 0x2500) charVisLen += 2;
+      else charVisLen += 1;
       truncated += line[i];
-      visLen += 1;
       i += 1;
     }
     // Close any open ANSI codes before ellipsis
@@ -1293,12 +1323,26 @@ export function formatItemLine(
  */
 /**
  * Compute the visual (terminal) width of a string, accounting for
- * multi-width characters (emoji, wide symbols) that render as 2 cells.
+ * multi-width characters that render as 2 cells.
  *
  * Characters in these Unicode ranges are known to be double-width
- * in most terminals: U+2300–U+23FF (misc technical, includes ⏳),
- * U+2600–U+26FF (miscellaneous symbols, includes ⚠, ⛔),
- * U+1F000–U+1FFFF (emoji).
+ * in most terminals:
+ *   • U+2300–U+23FF  misc technical (⏳ etc.)
+ *   • U+2600–U+26FF  miscellaneous symbols (⚠, ⛔)
+ *   • U+1F000+       emoji (including supplementary-plane emoji)
+ *   • U+3000–U+303F  CJK punctuation (ideographic space U+3000)
+ *   • U+3400–U+4DBF  CJK Unified Ideographs Extension A
+ *   • U+4E00–U+9FFF  CJK Unified Ideographs (core)
+ *   • U+20000+       CJK Extension B+ (supplementary-plane)
+ *   • U+AC00–U+D7AF  Hangul Syllables (Korean)
+ *   • U+1100–U+11FF  Hangul Jamo
+ *   • U+3130–U+318F  Hangul Compatibility Jamo
+ *   • U+3100–U+312F  Bopomofo
+ *   • U+31A0–U+31BF  Bopomofo Extended
+ *   • U+FF01–U+FF5E  Fullwidth ASCII variants
+ *   • U+FFA0–U+FFDC  Fullwidth Hangul
+ *   • U+3200–U+32FF  Enclosed CJK
+ *   • U+2460–U+24FF  Enclosed Alphanumeric
  */
 function visibleLength(s: string): number {
   let width = 0;
@@ -1311,10 +1355,23 @@ function visibleLength(s: string): number {
     } else {
       cp = s.charCodeAt(i);
     }
-    // Multi-width ranges: emoji, dingbats, misc symbols
-    if (cp >= 0x2300 && cp < 0x2400) width += 2; // ⏳
-    else if (cp >= 0x2600 && cp < 0x2700) width += 2; // ⚠, ⛔
-    else if (cp >= 0x1f000) width += 2; // emoji
+    // Double-width ranges: emoji, CJK, Hangul, fullwidth forms
+    if (cp >= 0x2300 && cp < 0x2400) width += 2;            // ⏳ misc technical
+    else if (cp >= 0x2600 && cp < 0x2700) width += 2;       // ⚠, ⛔ symbols
+    else if (cp >= 0x1f000) width += 2;                      // emoji (incl. supplementary)
+    else if (cp >= 0x3000 && cp < 0x3040) width += 2;       // CJK punctuation (ideographic space)
+    else if (cp >= 0x3400 && cp < 0x4DC0) width += 2;       // CJK Extension A
+    else if (cp >= 0x4E00 && cp < 0xA000) width += 2;       // CJK Unified Ideographs
+    else if (cp >= 0x20000) width += 2;                      // CJK Extension B+
+    else if (cp >= 0xAC00 && cp < 0xD800) width += 2;       // Hangul Syllables
+    else if (cp >= 0x1100 && cp < 0x1200) width += 2;       // Hangul Jamo
+    else if (cp >= 0x3130 && cp < 0x3190) width += 2;       // Hangul Compatibility Jamo
+    else if (cp >= 0x3100 && cp < 0x3130) width += 2;       // Bopomofo
+    else if (cp >= 0x31A0 && cp < 0x31C0) width += 2;       // Bopomofo Extended
+    else if (cp >= 0xFF01 && cp < 0xFF5F) width += 2;       // Fullwidth ASCII
+    else if (cp >= 0xFFA0 && cp < 0xFFDD) width += 2;       // Fullwidth Hangul
+    else if (cp >= 0x3200 && cp < 0x3300) width += 2;       // Enclosed CJK
+    else if (cp >= 0x2460 && cp < 0x2500) width += 2;       // Enclosed Alphanumeric
     else width += 1;
   }
   return width;
@@ -1480,12 +1537,12 @@ export function formatTooltipOverlay(cols: number, lines: string[]): string[] {
   if (lines.length === 0) return [];
   let maxWidth = 0;
   for (const line of lines) {
-    const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const visibleLen = visibleLength(line.replace(/\x1b\[[0-9;]*m/g, ''));
     if (visibleLen > maxWidth) maxWidth = visibleLen;
   }
   const boxWidth = Math.min(Math.max(maxWidth + 2, 20), cols - 2);
   return lines.map((line) => {
-    const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const visibleLen = visibleLength(line.replace(/\x1b\[[0-9;]*m/g, ''));
     const padding = Math.max(0, boxWidth - visibleLen);
     const bg = ANSI.bg(238);
     const fg = ANSI.fg(252);
@@ -3757,7 +3814,7 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
   const leftPad = Math.max(0, Math.floor((maxCols - effectiveWidth) / 2));
 
   const padLine = (content: string): string => {
-    const visibleLen = content.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const visibleLen = visibleLength(content.replace(/\x1b\[[0-9;]*m/g, ''));
     const rightPad = Math.max(0, effectiveWidth - visibleLen - 2);
     return ' '.repeat(leftPad) + `│ ${content}${' '.repeat(rightPad)} │`;
   };

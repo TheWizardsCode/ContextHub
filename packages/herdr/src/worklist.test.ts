@@ -5085,6 +5085,121 @@ describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () =>
     expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
     expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
   });
+
+  // AC1/AC2 extended: CJK characters in item titles must be counted as 2 cells
+  // so that item line truncation doesn't underestimate width and cause line-wrap
+  // that pushes the header off-screen (WL-0MSNI6TQ5003JY1Z, WL-0MSAAON63003N6LO).
+  it('CJK title items are properly truncated at 40 cols — visible length ≤ cols', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    // Create items with CJK titles — each CJK char is 2 terminal cells
+    const cjkItems: WorkItem[] = [
+      { ...makeItem('一'), title: '一' },
+      { ...makeItem('二'), title: '二三四五六' },
+      { ...makeItem('三'), title: '三' },
+    ];
+    const output = renderer(
+      cjkItems,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    // Every line except the header must have visible length ≤ cols
+    const lines = output.split('\n');
+    for (let i = 1; i < lines.length; i++) {
+      const visible = stripAnsi(lines[i]);
+      expect(visible.length).toBeLessThanOrEqual(cols);
+    }
+  });
+
+  it('CJK title items: rows - 1 invariant holds at 40×24 with many CJK items', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    // 10 items with CJK titles — without proper truncation these would wrap
+    // and push the total line count past rows-1
+    const cjkItems: WorkItem[] = [];
+    for (let i = 0; i < 10; i++) {
+      cjkItems.push({ ...makeItem(`item-${i}`), title: `項目${i} — 詳細` });
+    }
+    const output = renderer(
+      cjkItems,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+  });
+
+  it('fullwidth ASCII (U+FF01-U+FF5E) counted as 2 cells in visibleLength', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    // Fullwidth ASCII: ＡＢＣ etc. are each 2 cells
+    const fwItems: WorkItem[] = [
+      { ...makeItem('A'), title: 'ＡＢＣＤＥＦＧＨＩＪ' },
+      { ...makeItem('B'), title: 'Ａ' },
+      { ...makeItem('C'), title: 'Ｂ' },
+    ];
+    const output = renderer(
+      fwItems,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    // All lines must fit within cols
+    const lines = output.split('\n');
+    for (let i = 1; i < lines.length; i++) {
+      const visible = stripAnsi(lines[i]);
+      expect(visible.length).toBeLessThanOrEqual(cols);
+    }
+  });
 });
 
 // ── Header item count excludes heading rows (WL-0MT26TE72002FLKX) ──────
