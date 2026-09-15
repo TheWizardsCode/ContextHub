@@ -606,6 +606,117 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
   });
 });
 
+// ── Per-prefix Dispatcher tab wiring (C1, parent WL-0MTRQT482001SNXC; TC3 WL-0MU2LFC1Y0077U1U) ──
+
+describe('per-prefix dispatcher tab wiring (C1)', () => {
+  const candidate = {
+    id: 'WL-ABC',
+    title: 'Some task',
+    stage: 'intake_complete' as const,
+    status: 'open',
+  };
+
+  it('AC2: dispatchDowntimeWork resolves the per-prefix tab anchor and forwards its paneId', async () => {
+    const getDispatcherTabAnchor = vi
+      .fn()
+      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-ABC'),
+      expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
+    );
+  });
+
+  it('AC2: the per-prefix resolver REPLACES the legacy anchor (legacy never called)', async () => {
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:LEGACY', workspaceId: 'wD' });
+    const getDispatcherTabAnchor = vi
+      .fn()
+      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    const deps = makeDeps({
+      getDispatcherAnchor,
+      getDispatcherTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(getDispatcherAnchor).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
+    );
+  });
+
+  it('AC4 fail-safe: a null per-prefix anchor aborts with anchor-unavailable and NO legacy fallback', async () => {
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:LEGACY', workspaceId: 'wD' });
+    const deps = makeDeps({
+      getDispatcherAnchor,
+      getDispatcherTabAnchor: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(getDispatcherAnchor).not.toHaveBeenCalled();
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC4 fail-safe: a throwing per-prefix resolver aborts with anchor-unavailable', async () => {
+    const deps = makeDeps({
+      getDispatcherTabAnchor: vi.fn().mockRejectedValue(new Error('herdr down')),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+  });
+
+  it('scheduled-prompt spawns keep the legacy single anchor (no work-item prefix)', async () => {
+    const getDispatcherTabAnchor = vi
+      .fn()
+      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    const deps = makeDeps({
+      getDispatcherAnchor: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wD:pSCHED', workspaceId: 'wD' }),
+      getDispatcherTabAnchor,
+      getDueScheduledPrompt: vi
+        .fn()
+        .mockResolvedValue({ id: 'prompt-1', prompt: 'Run the nightly sweep', frequencyMinutes: 60 }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('scheduled');
+    expect(getDispatcherTabAnchor).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      'Run the nightly sweep',
+      expect.objectContaining({ anchorId: 'wD:pSCHED' }),
+    );
+  });
+});
+
 // ── Audit-tier dispatch (WL-0MSI8H3HP000K0RG) ─────────────────────────
 
 describe('dispatch audit tier', () => {

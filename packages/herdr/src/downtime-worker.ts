@@ -70,7 +70,14 @@
  *    panes always land in the Dispatcher workspace regardless of which
  *    instance holds the leader lease. Anchor provisioning failure degrades
  *    to reason 'anchor-unavailable' (neutral "no dispatch this cycle", never
- *    a fallback to the leader's pane).
+ *    a fallback to the leader's pane). Per-prefix tabs (C1, parent
+ *    WL-0MTRQT482001SNXC): the worklog dispatch path resolves the candidate's
+ *    prefix (`candidate.id.split('-', 1)[0]` → `WL`/`TCE`/`CG`) via
+ *    `deps.getDispatcherTabAnchor` instead of the legacy single anchor, so
+ *    each project's panes land in their own tab inside the Dispatcher
+ *    workspace; the per-prefix resolver replaces the legacy anchor (null →
+ *    'anchor-unavailable', never a fallback). Scheduled-prompt spawns keep
+ *    the legacy single anchor (no work-item prefix).
  *  - `createDowntimeWorker` — per-tick orchestrator (poll → evaluate →
  *    track → dispatch) with settings re-read each tick, plus the
  *    no-candidate cooldown (WL-0MSI7DQL10016QYX): a genuine empty backlog
@@ -142,7 +149,7 @@ import {
   dispatchedItemStages as _dispatchedStages,
 } from './downtime-log.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
-import type { DispatcherAnchor } from './dispatcher-anchor.js';
+import type { DispatcherAnchor, DispatcherTabAnchorEntry } from './dispatcher-anchor.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 export type { CoordinationEntry } from './coordination.js';
@@ -1448,6 +1455,21 @@ export interface DowntimeWorkerDeps {
    */
   getDispatcherAnchor?(cwd: string): Promise<DispatcherAnchor | null>;
   /**
+   * Resolve the per-prefix tab anchor pane inside the single Dispatcher
+   * workspace (C1, parent WL-0MTRQT482001SNXC): routes `<PREFIX>` (the
+   * work-item id before the first `-`) to its own tab, creating the tab on
+   * first use and persisting the mapping. When supplied it REPLACES
+   * {@link getDispatcherAnchor} on the worklog dispatch path
+   * (audit/implement/plan/intake/risk-effort): a null result degrades to
+   * 'anchor-unavailable' — never a legacy single-anchor or leader-pane
+   * fallback. Optional for backward compatibility with pre-C1 callers/tests;
+   * production wiring (`createDowntimeDeps`) always provides it.
+   */
+  getDispatcherTabAnchor?(
+    cwd: string,
+    prefix: string,
+  ): Promise<(DispatcherTabAnchorEntry & { workspaceId: string }) | null>;
+  /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
    * MARKER was written (the dispatched-marker source); a comment failure is
@@ -1827,8 +1849,27 @@ async function dispatchClaimedTier(
   // degrades to "no dispatch this cycle" (F1 AC6 — caller fail-safe) without
   // claiming/marking an item that can never spawn a pane. Absent dep
   // (legacy/test callers) → no anchor, legacy current-pane behavior.
+  //
+  // Per-prefix tab anchor (C1, parent WL-0MTRQT482001SNXC): the primary path
+  // routes the candidate's work-item prefix (`<PREFIX>` before the first `-`)
+  // to its own tab inside the single Dispatcher workspace. When wired, the
+  // per-prefix resolver REPLACES the legacy single anchor — a null result is
+  // 'anchor-unavailable' and NEVER falls back to the legacy anchor or the
+  // leader's pane.
   let anchorId: string | undefined;
-  if (typeof deps.getDispatcherAnchor === 'function') {
+  if (typeof deps.getDispatcherTabAnchor === 'function') {
+    const prefix = candidate.id.split('-', 1)[0];
+    let tabAnchor: (DispatcherTabAnchorEntry & { workspaceId: string }) | null = null;
+    try {
+      tabAnchor = await deps.getDispatcherTabAnchor(opts.cwd, prefix);
+    } catch {
+      tabAnchor = null; // fail-closed on any anchor error
+    }
+    if (tabAnchor === null) {
+      return { dispatched: false, reason: 'anchor-unavailable' };
+    }
+    anchorId = tabAnchor.paneId;
+  } else if (typeof deps.getDispatcherAnchor === 'function') {
     let anchor: DispatcherAnchor | null = null;
     try {
       anchor = await deps.getDispatcherAnchor(opts.cwd);

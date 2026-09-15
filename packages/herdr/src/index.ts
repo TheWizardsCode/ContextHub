@@ -121,8 +121,10 @@ import {
 } from './scheduled-prompts.js';
 import {
   getDispatcherAnchor as resolveDispatcherAnchor,
+  getDispatcherTabAnchor as resolveDispatcherTabAnchor,
   createDispatcherAnchorDeps,
   type DispatcherAnchor,
+  type DispatcherTabAnchorEntry,
 } from './dispatcher-anchor.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
@@ -597,6 +599,31 @@ async function defaultDispatcherAnchorResolver(
 }
 
 /**
+ * Default per-prefix Dispatcher tab-anchor resolver used by
+ * {@link createDowntimeDeps} (C1, parent WL-0MTRQT482001SNXC): resolves (or
+ * creates) the tab labelled with the work-item prefix inside the single
+ * machine-wide Dispatcher workspace, via the herdr CLI. Null on any failure —
+ * dispatch degrades to "no dispatch this cycle" (never a legacy/leader
+ * fallback). Injectable for tests that build real deps without a live herdr
+ * session.
+ */
+async function defaultDispatcherTabAnchorResolver(
+  cwd: string,
+  prefix: string,
+): Promise<(DispatcherTabAnchorEntry & { workspaceId: string }) | null> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    return await resolveDispatcherTabAnchor(
+      cwd,
+      createDispatcherAnchorDeps(cwd, herdrBin),
+      prefix,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Default running-downtime-panes liveness resolver (AC1/AC3, parent
  * WL-0MTYZXSLN008HZOW): counts live dispatched downtime panes from
  * `herdr pane list` — the machine-wide pane inventory — so the running-pane
@@ -647,6 +674,8 @@ export function createDowntimeDeps(
   anchorResolver: DowntimeWorkerDeps['getDispatcherAnchor'] = defaultDispatcherAnchorResolver,
   runningPanesResolver: NonNullable<DowntimeWorkerDeps['getRunningDowntimePanes']> =
     defaultRunningDowntimePanesResolver,
+  tabAnchorResolver: DowntimeWorkerDeps['getDispatcherTabAnchor'] =
+    defaultDispatcherTabAnchorResolver,
 ): DowntimeWorkerDeps {
   // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
   // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
@@ -709,8 +738,15 @@ export function createDowntimeDeps(
     // downtime pane spawn resolves this anchor so panes land in the Dispatcher
     // workspace regardless of leadership. Null → dispatch degrades to "no
     // dispatch this cycle". Injected (default = real herdr CLI) so tests that
-    // build real deps without a live herdr session can stub it.
+    // build real deps without a live herdr session can stub it. Retained for
+    // scheduled-prompt spawns (no work-item prefix) and legacy callers.
     getDispatcherAnchor: anchorResolver,
+    // Per-prefix Dispatcher tab anchor (C1, parent WL-0MTRQT482001SNXC): the
+    // worklog dispatch path routes each candidate's prefix (`WL`/`TCE`/…) to
+    // its own tab inside the single Dispatcher workspace. When wired it
+    // replaces `getDispatcherAnchor` on that path; null → 'anchor-unavailable'
+    // (never a legacy/leader fallback). Injected (default = real herdr CLI).
+    getDispatcherTabAnchor: tabAnchorResolver,
     // Running-downtime-panes liveness (AC1/AC3, WL-0MTYZXSLN008HZOW): counts
     // live dispatched downtime panes from `herdr pane list` so the
     // running-pane bound is enforced machine-wide (across roots and
