@@ -1818,8 +1818,17 @@ async function dispatchFromHerdrList(
 
 /**
  * Dispatch one already-selected candidate through the fixed pipeline:
- * CAS claim → marker write (before spawn) → spawn.
+ * per-prefix anchor resolution → CAS claim → marker write (before spawn) → spawn.
  *
+ *  - Per-prefix tab anchor (C1, parent WL-0MTRQT482001SNXC): BEFORE the claim,
+ *    resolve the candidate's prefix (`candidate.id.split('-', 1)[0]` →
+ *    `WL`/`TCE`/`CG`) to its own tab anchor inside the single Dispatcher
+ *    workspace via `deps.getDispatcherTabAnchor`, forwarding the tab's anchor
+ *    pane id as `anchorId` so the pane lands in that tab. When that dep is
+ *    wired it REPLACES the legacy `deps.getDispatcherAnchor` path (retained
+ *    for scheduled-prompt spawns and pre-C1 callers); a null/failed
+ *    resolution aborts with reason 'anchor-unavailable' — never a legacy
+ *    anchor, another tab, or the leader's pane.
  *  - Claim (compare-and-swap): exactly one concurrent pane wins; a loser
  *    (or a wl claim failure) ABORTS the dispatch — no pane, no marker, no
  *    success record. A lost race resolves reason 'claim-failed' (neutral,

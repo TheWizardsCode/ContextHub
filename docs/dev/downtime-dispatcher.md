@@ -216,6 +216,68 @@ idle `Dispatcher` workspaces can be closed when their panes finish
 (`herdr workspace close <id>` one at a time); do not disturb active dispatch
 panes.
 
+### Per-project tabs in the Dispatcher workspace (C1 WL-0MTRQT482001SNXC)
+
+Within the single `Dispatcher` workspace, each **work-item prefix** gets its
+own tab so overnight runs for different projects never intermix in one grid.
+For a candidate whose id is `<PREFIX>-<hash>`, `<PREFIX>` is the substring
+before the first `-` (case preserved, no normalisation): `WL-…` → tab `WL`,
+`TCE-…` → tab `TCE`, `CG-…` → tab `CG`. Automated downtime dispatches only —
+manual `open-worklist` / `open-pi-agent` flows keep their current-pane/tab
+behaviour, and scheduled-prompt panes (no work item) keep the C0 single
+anchor.
+
+Invariant: every `dispatchClaimedTier` spawn for a worklog item resolves the
+per-prefix tab anchor and forwards its anchor pane id via `spawnAgentPane` →
+`buildDowntimePaneArgs` → `--anchor <paneId>` → `send-to-pi.sh`, so the pane
+lands in `<PREFIX>`'s tab. Verified with `herdr tab list` (the tab's label is
+exactly the prefix) and `herdr pane list` (each `Downtime triggered …` pane's
+`tab_id` equals the prefix tab's `tab_id`, `cwd` equals the item's worklog
+root).
+
+Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`, C1):
+
+- **Resolver:** `getDispatcherTabAnchor(cwd, deps, prefix)` — fast-path reuse
+  of a persisted live entry, else ensure the `Dispatcher` workspace (via
+  `getDispatcherAnchor`, reused not duplicated), then under the coordination
+  lock double-check the persisted map, adopt an existing matching tab, or
+  create one. Returns `{ workspaceId, tabId, paneId }` or `null` (fail-closed).
+- **Persistence:** machine coordination dir file
+  `downtime-dispatch-tab-anchors.json` —
+  `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }` (atomic
+  tmp+rename). This map is the authority for reuse. Missing file → empty map
+  (inheriting the legacy anchor's `workspaceId` when present); corrupt JSON →
+  `null` (re-provision).
+- **Provisioning:** `herdr tab create --workspace <id> --label <PREFIX>
+  --no-focus`; the returned `tab_id` + `root_pane.pane_id` are the tab anchor.
+  Runs **under the coordination lock** (`tryAcquireCoordLock` on
+  `~/.herdr/downtime/downtime-coordination.lock`) with a double-check inside
+  the lock, so concurrent first-dispatches for the same new prefix create the
+  tab exactly once.
+- **Validation:** the tab's anchor pane is checked with `isPaneAlive`
+  (`herdr pane get <id>`). A stale persisted entry (dead/missing pane) is
+  re-provisioned on the next dispatch for that prefix; a matching tab that
+  still hosts a live pane is adopted and re-persisted (e.g. after the anchor
+  file was lost).
+- **Resolution (wiring, C1):** `createDowntimeDeps` wires
+  `defaultDispatcherTabAnchorResolver` (`src/index.ts` —
+  `resolveDispatcherTabAnchor` with `createDispatcherAnchorDeps(cwd, herdrBin)`
+  inside a `try/catch` → `null`). `dispatchClaimedTier` derives
+  `candidate.id.split('-', 1)[0]` and, when the resolver is present, uses it
+  **instead of** the legacy single anchor; a `null` result → neutral
+  `{ dispatched: false, reason: 'anchor-unavailable' }` — **never a fallback
+  to the legacy single anchor, another tab, or the leader's pane**.
+- **CLI shape tolerance:** `tab list` / `tab create` / `pane list` parsers
+  accept `tab_id`/`tabId`/`id`, `pane_id`/`paneId`/`id`, `label`/`title`, a
+  nested `result` envelope, and log lines before the JSON. A parse failure is
+  **fail-closed** (`null` → `anchor-unavailable`) and logs the raw output — it
+  is never silently read as "no tab exists", which would duplicate tabs.
+
+Duplicate tabs: the persisted `byPrefix` map is the authority. If a prefix tab
+must be reset, close it (`herdr tab close <tabId>`) and delete or edit its
+entry in `downtime-dispatch-tab-anchors.json`; the next dispatch for that
+prefix re-creates the tab under the lock.
+
 ### No-candidate cooldown & the empty offer file
 
 The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
@@ -540,7 +602,7 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 
 | Path | Purpose |
 |---|---|
-| `packages/herdr/src/dispatcher-anchor.ts` | Dispatcher anchor provisioning (C0) — `getDispatcherAnchor`, persistence + lock + aliveness |
+| `packages/herdr/src/dispatcher-anchor.ts` | Dispatcher anchor provisioning (C0) — `getDispatcherAnchor` + per-prefix `getDispatcherTabAnchor` (C1), persistence + lock + aliveness |
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
@@ -549,6 +611,7 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 | `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` |
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |
 | `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher anchor `{ paneId, workspaceId }` (machine dir, C0) |
+| `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` | Persisted per-prefix tab map `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }` (machine dir, C1) |
 | `~/.herdr/downtime/downtime-leader.lock` | Leader lock file (machine dir, `O_CREAT\|O_EXCL`) |
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) |
@@ -560,7 +623,8 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 ## Troubleshooting / operations
 
 - **Pane landed in project workspace (e.g. Podcast `wR`) instead of Dispatcher:** the dispatcher invariant is anchor-by-ID — every automated pane must split the persisted anchor pane. Check (a) `~/.herdr/downtime/downtime-dispatch-anchor.json` exists and `herdr pane get <paneId>` is alive and `herdr workspace list` shows its `workspaceId` labelled `Dispatcher` (stale/missing → delete the file and let the next dispatch re-provision under the coordination lock); (b) the running herdr plugin loads this repo's code — `herdr plugin list` must show `worklog-selection-list` → `local:/…/packages/herdr` (stale `dist/` or a worktree link dangles the plugin; rebuild with `npm run build` in `packages/herdr` / re-link with `herdr plugin link <main-checkout>/packages/herdr/herdr-plugin.toml`); (c) duplicate `Dispatcher` workspaces are harmless — the anchor file is the authority, not the label count — close surplus idle ones with `herdr workspace close <id>` (one at a time) without disturbing active `Downtime triggered …` panes. Incident RCA 2026-09-07: the two Podcast `wR` dispatches (`wR:p1X` CG-0MTR7DLMY 13:03:57, `wR:p1Y` WL-0MTOHS5B4001Y9FX 13:10:14) pre-dated the anchor wiring commit `69ae52f2` (14:45) and the local `packages/herdr/dist/` rebuild (15:17) — the live code at incident time had no anchor resolution path (F1 `893d6d22` added the module only, F2 wired it), so the leader fell back to the legacy `pane current` split. After the rebuild the anchor persisted at `~/.herdr/downtime/downtime-dispatch-anchor.json` (observed 15:57 `wZ:p1` → later `w0:p1`) and all subsequent downtime panes landed in `Dispatcher` (`wZ`/`w0`, including this work item's own dispatch in `wZ:p4`).
-- **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** the Dispatcher anchor could not be provisioned — `getDispatcherAnchor()` returned `null` (fail-closed, never a project-workspace fallback). Check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock` held by another dispatch), `herdr workspace create --label Dispatcher` JSON parse (shape drift across herdr versions), and `herdr pane get <anchor>` RPC health. The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty `downtime-dispatch-anchor.json` or unreadable machine dir is treated as missing (never a crash).
+- **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** the Dispatcher anchor could not be provisioned — `getDispatcherAnchor()` / `getDispatcherTabAnchor()` returned `null` (fail-closed, never a project-workspace fallback). Check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock` held by another dispatch), the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <PREFIX> --no-focus` JSON parse (shape drift across herdr versions), and `herdr pane get <anchor>` RPC health. The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty/missing anchor file or unreadable machine dir is treated as missing (never a crash).
+- **Pane landed in the wrong tab/workspace (e.g. a `TCE-…` pane in the `WL` tab, or default `1` instead of `<PREFIX>`):** the per-prefix tab invariant is anchor-by-ID. Check (a) `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` has an entry for the item's prefix whose `paneId` is alive (`herdr pane get <paneId>`) and whose `tabId` still exists (`herdr tab get <tabId>`); (b) `herdr tab list --workspace <Dispatcher id>` shows a tab labelled exactly `<PREFIX>` (prefix is the id substring before the first `-`, case preserved — a `CG-…` item routes to `CG`, not `TCE`); (c) the running plugin loads this repo's code (`herdr plugin list` → `worklog-selection-list` → `local:/…/packages/herdr`; rebuild with `npm run build` in `packages/herdr` after pulling). To re-provision a prefix, close its tab (`herdr tab close <tabId>`) and delete/edit its `byPrefix` entry — the next dispatch re-creates it under the coordination lock. Duplicate tabs are harmless but stale: the persisted map is the authority.
 - **No dispatches happening:** confirm a leader is elected (lease file
   present + recent `lastUpdated` refresh), the proxy reports idle for ≥ 60 s
   continuously, and the coordination list has offers. Check

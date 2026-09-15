@@ -717,6 +717,114 @@ describe('per-prefix dispatcher tab wiring (C1)', () => {
   });
 });
 
+// ── Per-prefix tab routing integration (C1 TC4 WL-0MU2LFHBH004VF48) ────
+
+describe('per-prefix tab routing integration (C1)', () => {
+  it.each([
+    ['WL-0MTRQT482001SNXC', 'WL'],
+    ['TCE-0MTR0001', 'TCE'],
+    ['CG-0MTR0002', 'CG'],
+    ['NODASH', 'NODASH'],
+  ])('AC3: candidate %s routes to tab prefix %s', async (id, expectedPrefix) => {
+    const getDispatcherTabAnchor = vi
+      .fn()
+      .mockResolvedValue({
+        workspaceId: 'wD',
+        tabId: `wD:t${expectedPrefix}`,
+        paneId: `wD:t${expectedPrefix}:p1`,
+      });
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id, title: id, stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', expectedPrefix);
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining(id),
+      expect.objectContaining({
+        anchorId: `wD:t${expectedPrefix}:p1`,
+        cwd: '/repo',
+      }),
+    );
+  });
+
+  it('AC1/AC2 per-project separation: WL and TCE candidates resolve their own tab anchors and cwd', async () => {
+    const makeScenario = (id: string, prefix: string, cwd: string) => {
+      const getDispatcherTabAnchor = vi.fn().mockResolvedValue({
+        workspaceId: 'wD',
+        tabId: `wD:t${prefix}`,
+        paneId: `wD:t${prefix}:p1`,
+      });
+      const deps = makeDeps({
+        getDispatcherTabAnchor,
+        getNextItem: vi.fn().mockResolvedValue({
+          ok: true,
+          candidate: { id, title: id, stage: 'intake_complete', status: 'open' },
+        }),
+      });
+      return { deps, getDispatcherTabAnchor, cwd };
+    };
+
+    const wl = makeScenario('WL-1', 'WL', '/repo-wl');
+    const tce = makeScenario('TCE-2', 'TCE', '/repo-tce');
+
+    const first = await dispatchDowntimeWork(wl.deps, { model: 'plan', cwd: wl.cwd });
+    const second = await dispatchDowntimeWork(tce.deps, { model: 'plan', cwd: tce.cwd });
+
+    expect(first.dispatched).toBe(true);
+    expect(second.dispatched).toBe(true);
+    // Each prefix resolves its own tab anchor and never the other's.
+    expect(wl.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-wl', 'WL');
+    expect(tce.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-tce', 'TCE');
+    expect(wl.deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:tWL:p1', cwd: '/repo-wl' }),
+    );
+    expect(tce.deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:tTCE:p1', cwd: '/repo-tce' }),
+    );
+  });
+
+  it('AC2 audit-log context: the dispatch marker records the item and its project root before the spawn', async () => {
+    const getDispatcherTabAnchor = vi
+      .fn()
+      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tTCE', paneId: 'wD:tTCE:p1' });
+    const recordDispatch = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      recordDispatch,
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'TCE-9', title: 'Engine task', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo-tce' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ itemId: 'TCE-9', kind: 'plan', cwd: '/repo-tce' }),
+    );
+    // The same project root is forwarded to the pane, so it lands in the TCE
+    // tab's grid with the correct cwd.
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ cwd: '/repo-tce', anchorId: 'wD:tTCE:p1' }),
+    );
+    // Marker is written before the spawn (fail-closed ordering).
+    const markerOrder = recordDispatch.mock.invocationCallOrder[0];
+    const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
+    expect(markerOrder).toBeLessThan(spawnOrder);
+  });
+});
+
 // ── Audit-tier dispatch (WL-0MSI8H3HP000K0RG) ─────────────────────────
 
 describe('dispatch audit tier', () => {
