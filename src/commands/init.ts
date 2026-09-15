@@ -18,6 +18,7 @@ import { execSync } from 'child_process';
 import * as readline from 'readline';
 import { fileURLToPath } from 'url';
 import { theme } from '../theme.js';
+import * as os from 'os';
 
 const WORKLOG_PRE_PUSH_HOOK_MARKER = 'worklog:pre-push-hook:v2';
 const WORKLOG_POST_PULL_HOOK_MARKER = 'worklog:post-pull-hook:v1';
@@ -37,6 +38,37 @@ const WORKLOG_GITIGNORE_TEMPLATE_RELATIVE_PATH = 'templates/GITIGNORE_WORKLOG.tx
  */
 const CANONICAL_GLOBAL_REFERENCE_MARKER = '## Global agent guidance';
 const CANONICAL_GLOBAL_REFERENCE_LINE = 'Read the global agent instructions at `~/.pi/agent/AGENTS.md`';
+
+/**
+ * Detect whether the SorraAgents global install is present.  The canonical
+ * indicator is `~/.pi/agent/AGENTS.md` being a symlink whose resolved
+ * target file name is `AGENTS_GLOBAL.md` (regardless of the symlink
+ * target path).  This is the same convention used by
+ * `scripts/install_pi.sh`.
+ *
+ * Environment variable `WL_SORRA_AGENTS_OVERRIDE` can be set to `0` or `1`
+ * to force the result for testing purposes.  Any other value (including
+ * unset) falls through to filesystem detection.
+ */
+export function isSorraAgentsInstalled(): boolean {
+  const envOverride = process.env.WL_SORRA_AGENTS_OVERRIDE;
+  if (envOverride === '1') return true;
+  if (envOverride === '0') return false;
+  const homeDir = os.homedir();
+  const agentsMdPath = path.join(homeDir, '.pi', 'agent', 'AGENTS.md');
+  try {
+    const stat = fs.lstatSync(agentsMdPath);
+    if (!stat.isSymbolicLink()) return false;
+    const target = fs.readlinkSync(agentsMdPath);
+    // Resolve relative symlinks against the directory containing the link.
+    const resolved = path.isAbsolute(target)
+      ? target
+      : path.resolve(path.dirname(agentsMdPath), target);
+    return path.basename(resolved) === 'AGENTS_GLOBAL.md';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Scheduled-prompts provisioning (WL-0MSS1Q5ER007QDKX AC1): `wl init` copies
@@ -914,19 +946,20 @@ export default function register(ctx: PluginContext): void {
   
   program
     .command('init')
-    .description('Initialize worklog configuration')
+    .description('Initialize worklog configuration (delegates agent-guidance/workflow setup to the SorraAgents global install when detected)')
     .option('--project-name <name>', 'Project name')
     .option('--prefix <prefix>', 'Issue ID prefix (e.g., WI, PROJ, TASK)')
     .option('--auto-export <yes|no>', 'Auto-export data to JSONL after changes')
     .option('--auto-sync <yes|no>', 'Auto-sync data to git after changes')
     .option('--agents-template <overwrite|append|skip>', 'What to do when AGENTS.md exists (append inserts the global-agents reference above existing content; omit to prompt)')
-    .option('--workflow-inline <yes|no>', 'Inline workflow into AGENTS.md when prompted (omit to prompt interactively)')
+    .option('--workflow-inline <yes|no>', 'Inline workflow into AGENTS.md when prompted (omit to prompt interactively; no-op when SorraAgents global install is detected)')
     .option('--stats-plugin-overwrite <yes|no>', 'Overwrite existing stats plugin if present (default: no)')
     .action(async (_options: InitOptions) => {
       const argv = process.argv;
       const isJsonMode = program.opts().json || argv.includes('--json');
       const isVerbose = program.opts().verbose === true || argv.includes('--verbose');
       const workflowInlineProvided = argv.includes('--workflow-inline');
+      const sorraAgentsDetected = isSorraAgentsInstalled();
       let normalizedOptions: NormalizedInitOptions;
       try {
         normalizedOptions = normalizeInitOptions(_options);
@@ -964,7 +997,7 @@ export default function register(ctx: PluginContext): void {
           if (!workflowTemplatePath && isVerbose && !isJsonMode) {
             console.log('Verbose: workflow template not found, skipping workflow integration.');
           }
-          if (workflowTemplatePath) {
+          if (workflowTemplatePath && !sorraAgentsDetected) {
             const projectRoot = resolveProjectRoot();
             const agentDestination = resolveAgentDestination(projectRoot);
             if (fs.existsSync(agentDestination)) {
@@ -981,6 +1014,7 @@ export default function register(ctx: PluginContext): void {
           output.json({
             success: true,
             message: 'Configuration already exists',
+            sorraAgentsDetected,
             config: {
               projectName: config?.projectName,
               prefix: config?.prefix
@@ -1089,59 +1123,66 @@ export default function register(ctx: PluginContext): void {
               console.log('Verbose: workflow template not found, skipping workflow integration.');
             }
             if (workflowTemplatePath) {
-              const projectRoot = resolveProjectRoot();
-              const agentDestination = resolveAgentDestination(projectRoot);
-                
+              if (sorraAgentsDetected) {
+                // When SorraAgents is installed, workflow setup is delegated to
+                // the canonical global install.  Report that fact and skip all
+                // workflow-inline prompts.  The --workflow-inline flag is a
+                // no-op in this path.
+                console.log('Workflow setup is delegated to the SorraAgents global install (global AGENTS.md is managed externally).');
+              } else {
+                const projectRoot = resolveProjectRoot();
+                const agentDestination = resolveAgentDestination(projectRoot);
 
-              if (fs.existsSync(agentDestination)) {
-                const agentContent = fs.readFileSync(agentDestination, 'utf-8');
-                // If loader already present, note it and still offer to install WORKFLOW.md
-                if (agentContent.includes('<!-- WORKFLOW: start -->')) {
-                  // If loader present, report and do not prompt.
-                  console.log('Workflow already inlined in AGENTS.md.');
-                  // Report status of WORKFLOW.md (installed / exists but differs / missing) without prompting
-                  try {
-                    const projectRootCheck = resolveProjectRoot();
-                    const wfDest = path.join(projectRootCheck, WORKFLOW_DESTINATION_FILENAME);
-                    if (fs.existsSync(wfDest)) {
-                      const existingWf = normalizeContent(fs.readFileSync(wfDest, 'utf-8'));
-                      const templateWf = normalizeContent(fs.readFileSync(workflowTemplatePath, 'utf-8'));
-                      if (existingWf.includes(templateWf)) {
-                        // WORKFLOW.md already matches template — loader presence already communicates this intent, skip duplicate line
+                if (fs.existsSync(agentDestination)) {
+                  const agentContent = fs.readFileSync(agentDestination, 'utf-8');
+                  // If loader already present, note it and still offer to install WORKFLOW.md
+                  if (agentContent.includes('<!-- WORKFLOW: start -->')) {
+                    // If loader present, report and do not prompt.
+                    console.log('Workflow already inlined in AGENTS.md.');
+                    // Report status of WORKFLOW.md (installed / exists but differs / missing) without prompting
+                    try {
+                      const projectRootCheck = resolveProjectRoot();
+                      const wfDest = path.join(projectRootCheck, WORKFLOW_DESTINATION_FILENAME);
+                      if (fs.existsSync(wfDest)) {
+                        const existingWf = normalizeContent(fs.readFileSync(wfDest, 'utf-8'));
+                        const templateWf = normalizeContent(fs.readFileSync(workflowTemplatePath, 'utf-8'));
+                        if (existingWf.includes(templateWf)) {
+                          // WORKFLOW.md already matches template — loader presence already communicates this intent, skip duplicate line
+                        } else {
+
+                        }
                       } else {
-                        
+
                       }
-                    } else {
-                      
+                    } catch (e) {
+
                     }
-                  } catch (e) {
-                    
+                  } else {
+                    // Loader missing: offer to insert loader and install WORKFLOW.md
+                    const choice = await promptWorkflowChoice(
+                      workflowInlineProvided ? normalizedOptions.workflowInline : undefined
+                    );
+                    if (choice === 'basic') {
+                      await ensureWorkflowTemplateInstalled({ silent: false, agentDestinationPath: agentDestination });
+                      insertWorkflowLoaderIntoAgents(agentDestination);
+                    } else {
+                      // user skipped — do not add summary lines
+                    }
                   }
                 } else {
-                  // Loader missing: offer to insert loader and install WORKFLOW.md
+                  // No AGENTS.md present: offer to install only WORKFLOW.md
                   const choice = await promptWorkflowChoice(
                     workflowInlineProvided ? normalizedOptions.workflowInline : undefined
                   );
                   if (choice === 'basic') {
                     await ensureWorkflowTemplateInstalled({ silent: false, agentDestinationPath: agentDestination });
-                    insertWorkflowLoaderIntoAgents(agentDestination);
                   } else {
-                    // user skipped — do not add summary lines
+                    // user skipped — no summary
                   }
                 }
-              } else {
-                // No AGENTS.md present: offer to install only WORKFLOW.md
-                const choice = await promptWorkflowChoice(
-                  workflowInlineProvided ? normalizedOptions.workflowInline : undefined
-                );
-                if (choice === 'basic') {
-                  await ensureWorkflowTemplateInstalled({ silent: false, agentDestinationPath: agentDestination });
-                } else {
-                  // user skipped — no summary
-                }
-              }
 
-               // We no longer print a workflowReport summary; helpers print output
+                // We no longer print a workflowReport summary; helpers print output
+              }
             }
             // (note: reporting already emitted above)
             // Offer to install example stats plugin
@@ -1251,7 +1292,7 @@ export default function register(ctx: PluginContext): void {
           if (!workflowTemplatePath && isVerbose && !isJsonMode) {
             console.log('Verbose: workflow template not found, skipping workflow integration.');
           }
-          if (workflowTemplatePath) {
+          if (workflowTemplatePath && !sorraAgentsDetected) {
             const projectRoot = resolveProjectRoot();
             const agentDestination = resolveAgentDestination(projectRoot);
             if (fs.existsSync(agentDestination)) {
@@ -1268,6 +1309,7 @@ export default function register(ctx: PluginContext): void {
           output.json({
             success: true,
             message: 'Configuration initialized',
+            sorraAgentsDetected,
             config: {
               projectName: config?.projectName,
               prefix: config?.prefix
@@ -1296,6 +1338,7 @@ export default function register(ctx: PluginContext): void {
             const outputData: any = {
               success: true,
               message: 'Configuration initialized',
+              sorraAgentsDetected,
               config: {
                 projectName: config?.projectName,
                 prefix: config?.prefix
@@ -1366,13 +1409,19 @@ export default function register(ctx: PluginContext): void {
             console.log('Verbose: workflow template not found, skipping workflow integration.');
           }
           if (workflowTemplatePath) {
-            const projectRoot = resolveProjectRoot();
-            const agentDestination = resolveAgentDestination(projectRoot);
-            
+            if (sorraAgentsDetected) {
+              // When SorraAgents is installed, workflow setup is delegated to
+              // the canonical global install.  Report that fact and skip all
+              // workflow-inline prompts.  The --workflow-inline flag is a
+              // no-op in this path.
+              console.log('Workflow setup is delegated to the SorraAgents global install (global AGENTS.md is managed externally).');
+            } else {
+              const projectRoot = resolveProjectRoot();
+              const agentDestination = resolveAgentDestination(projectRoot);
 
-            if (fs.existsSync(agentDestination)) {
-              const agentContent = fs.readFileSync(agentDestination, 'utf-8');
-              // If loader already present, note it and still offer to install WORKFLOW.md
+              if (fs.existsSync(agentDestination)) {
+                const agentContent = fs.readFileSync(agentDestination, 'utf-8');
+                // If loader already present, note it and still offer to install WORKFLOW.md
                 if (agentContent.includes('<!-- WORKFLOW: start -->')) {
                   // If loader present, report and do not prompt.
                   console.log('Workflow already inlined in AGENTS.md.');
@@ -1386,16 +1435,16 @@ export default function register(ctx: PluginContext): void {
                       if (existingWf.includes(templateWf)) {
                         // WORKFLOW.md already matches template — loader presence already communicates this intent, skip duplicate line
                       } else {
-                        
+
                       }
                     } else {
-                      
+
                     }
                   } catch (e) {
-                    
+
                   }
                 } else {
-                // Loader missing: offer to insert loader and install WORKFLOW.md
+                  // Loader missing: offer to insert loader and install WORKFLOW.md
                   const choice = await promptWorkflowChoice(
                     workflowInlineProvided ? normalizedOptions.workflowInline : undefined
                   );
@@ -1405,9 +1454,9 @@ export default function register(ctx: PluginContext): void {
                   } else {
                     // user skipped — no summary output
                   }
-              }
-            } else {
-              // No AGENTS.md present: offer to install only WORKFLOW.md
+                }
+              } else {
+                // No AGENTS.md present: offer to install only WORKFLOW.md
                 const choice = await promptWorkflowChoice(
                   workflowInlineProvided ? normalizedOptions.workflowInline : undefined
                 );
@@ -1416,9 +1465,10 @@ export default function register(ctx: PluginContext): void {
                 } else {
                   // user skipped — no summary output
                 }
-            }
+              }
 
-            // We no longer print a workflowReport summary; helpers print output
+              // We no longer print a workflowReport summary; helpers print output
+            }
           }
 
           if (!agentTemplateResult.installed && agentTemplateResult.reason === 'global reference already present') {

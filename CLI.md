@@ -1107,7 +1107,9 @@ Other commands cover repository bootstrap and local system status. Use these to 
 
 ### `init`
 
-Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root with the canonical global-reference structure (`## Global agent guidance` pointing at `~/.pi/agent/AGENTS.md` plus a `## Project-specific guidance` placeholder). If `AGENTS.md` already contains the global reference, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the reference, it prompts O/A/M — **O**verwrite (destructive), **A**dd reference above existing content, **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
+Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root with the canonical global-reference structure (`## Global agent guidance` pointing at `~/.pi/agent/AGENTS.md` plus a `## Project-specific guidance` placeholder). If `AGENTS.md` already contains the global reference, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the reference, it prompts O/A/M — **O**verwrite (destructive), **A**dd reference above existing content, **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs).
+
+When the **SorraAgents global install** is detected — `~/.pi/agent/AGENTS.md` is a symlink to `AGENTS_GLOBAL.md`, as installed by the canonical SorraAgents `scripts/install_pi.sh` — workflow setup is delegated to that install: `wl init` keeps the canonical global-reference structure in the project `AGENTS.md` and never inlines WORKFLOW content. In that path `--workflow-inline` is a no-op. Set `WL_SORRA_AGENTS_OVERRIDE=0` to force the standalone path or `=1` to force delegation (useful for automation and testing). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
 
 Options:
 
@@ -1116,7 +1118,7 @@ Options:
 - `--auto-export <yes|no>` — Auto-export data to JSONL after changes (optional).
 - `--auto-sync <yes|no>` — Auto-sync data to git after changes (optional).
 - `--agents-template <overwrite|append|skip>` — What to do when AGENTS.md exists (optional). Append inserts the global-agents reference at the top while keeping existing content below.
-- `--workflow-inline <yes|no>` — Answer the workflow prompt (yes chooses the basic workflow option; no chooses no formal workflow). Omit to prompt interactively.
+- `--workflow-inline <yes|no>` — Answer the workflow prompt (yes chooses the basic workflow option; no chooses no formal workflow). Omit to prompt interactively. No-op when the SorraAgents global install is detected (workflow setup is then delegated to `~/.pi/agent/AGENTS.md`).
 - `--stats-plugin-overwrite <yes|no>` — Overwrite existing stats plugin if present (optional).
 
 Example:
