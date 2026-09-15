@@ -182,7 +182,13 @@ export async function execAsync(command: string, options?: childProcess.ExecOpti
   const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
   const cliPath = path.join(projectRoot, 'src', 'cli.ts');
   const isLocalCli = command.trim().startsWith('tsx') && command.includes(cliPath);
-  const isInitCommand = /\binit\b/.test(command);
+  // Detect the `init` subcommand as a standalone argument token, NOT as a
+  // substring of the whole command: worktree paths often contain "init"
+  // (e.g. wl-WL-...-align-wl-init-with-...-d), which previously made the
+  // naive /\binit\b/ test classify every CLI invocation in such a worktree
+  // as `init` and spawn a subprocess instead of running in-process. Removing
+  // the cliPath first isolates the argument list.
+  const isInitCommand = /(^|\s)init(\s|$)/.test(command.replace(cliPath, ''));
   if (isLocalCli) {
     // Avoid in-process for init to preserve interactive behavior in tests.
     if (isInitCommand) {
