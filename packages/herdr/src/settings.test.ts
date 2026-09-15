@@ -18,12 +18,6 @@ import {
   MIN_BROWSE_ITEM_COUNT,
   MAX_BROWSE_ITEM_COUNT,
 } from './settings.js';
-import {
-  clampDowntimeMaxRunningPanes,
-  DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
-  DOWNTIME_MAX_RUNNING_PANES_FLOOR,
-  DOWNTIME_MAX_RUNNING_PANES_CEILING,
-} from './downtime-worker.js';
 
 function tempSettingsPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'herdr-settings-test-'));
@@ -265,88 +259,43 @@ describe('maxSyncStalenessMs', () => {
 });
 
 // ---------------------------------------------------------------------------
-// downtimeMaxRunningPanes (renamed from downtimeMaxConcurrentDispatches,
-// parent WL-0MTYZXSLN008HZOW)
+// Removed downtime pane limit (WL-0MU2EP6JL006A1U3)
+//
+// `downtimeMaxRunningPanes` and its legacy alias
+// `downtimeMaxConcurrentDispatches` (both introduced by WL-0MTYZXSLN008HZOW)
+// are gone: the downtime dispatcher imposes NO client-side limit on the number
+// of live panes — dispatched panes stay open until an operator closes them, so
+// a pane count can never be the limiter. The local LLM idle check is the sole
+// concurrency authority. Old config files must still load cleanly, and the
+// removed keys must have no effect.
 // ---------------------------------------------------------------------------
 
-describe('downtimeMaxRunningPanes', () => {
-  it('defaults to 1 (single-flight)', () => {
-    expect(DEFAULT_DOWNTIME_MAX_RUNNING_PANES).toBe(1);
-    expect(defaultSettings.downtimeMaxRunningPanes).toBe(1);
+describe('removed downtime pane limit (WL-0MU2EP6JL006A1U3)', () => {
+  it('is absent from the default settings', () => {
+    expect('downtimeMaxRunningPanes' in defaultSettings).toBe(false);
+    expect('downtimeMaxConcurrentDispatches' in defaultSettings).toBe(false);
   });
 
-  it('loads a persisted value', () => {
+  it('loads cleanly and ignores a persisted downtimeMaxRunningPanes key', () => {
     const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 2 });
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(2);
+    writeFileSync(
+      path,
+      JSON.stringify({ ...defaultSettings, downtimeMaxRunningPanes: 2 }),
+      'utf-8',
+    );
+    const loaded = loadSettings(path);
+    expect('downtimeMaxRunningPanes' in loaded).toBe(false);
+    // The rest of the settings are unaffected — the key is merely ignored.
+    expect(loaded.downtimeIdleThresholdMs).toBe(defaultSettings.downtimeIdleThresholdMs);
+    expect(loaded.downtimeRequiredFreeSlots).toBe(defaultSettings.downtimeRequiredFreeSlots);
   });
 
-  it('clamps values below the floor to 1', () => {
+  it('loads cleanly and ignores the legacy downtimeMaxConcurrentDispatches key', () => {
     const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 0 });
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
-    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: -5 });
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
-  });
-
-  it('clamps values above the ceiling to 4', () => {
-    const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 10 });
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(4);
-    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 99 });
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(4);
-  });
-
-  it('falls back to the default when not a number', () => {
-    const path = tempSettingsPath();
-    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxRunningPanes: 'many' }), 'utf-8');
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
-  });
-
-  it('existing config without the key behaves as single-flight', () => {
-    const path = tempSettingsPath();
-    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxRunningPanes: undefined }), 'utf-8');
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
-  });
-
-  it('migrates the legacy downtimeMaxConcurrentDispatches key (WL-0MTYZXSLN008HZOW)', () => {
-    const path = tempSettingsPath();
-    // An existing config predates the rename: it carries the OLD key and no
-    // `downtimeMaxRunningPanes` key at all.
     writeFileSync(path, JSON.stringify({ downtimeMaxConcurrentDispatches: 3 }), 'utf-8');
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(3);
-  });
-});
-
-describe('clampDowntimeMaxRunningPanes', () => {
-  it('keeps in-range values', () => {
-    expect(clampDowntimeMaxRunningPanes(1)).toBe(1);
-    expect(clampDowntimeMaxRunningPanes(2)).toBe(2);
-    expect(clampDowntimeMaxRunningPanes(4)).toBe(4);
-  });
-
-  it('clamps below floor to 1', () => {
-    expect(clampDowntimeMaxRunningPanes(0)).toBe(1);
-    expect(clampDowntimeMaxRunningPanes(-1)).toBe(1);
-  });
-
-  it('clamps above ceiling to 4', () => {
-    expect(clampDowntimeMaxRunningPanes(5)).toBe(4);
-    expect(clampDowntimeMaxRunningPanes(99)).toBe(4);
-  });
-
-  it('rounds fractional values', () => {
-    expect(clampDowntimeMaxRunningPanes(2.6)).toBe(3);
-    expect(clampDowntimeMaxRunningPanes(2.4)).toBe(2);
-  });
-
-  it('returns the default (1) for non-finite input', () => {
-    expect(clampDowntimeMaxRunningPanes(NaN)).toBe(1);
-    expect(clampDowntimeMaxRunningPanes(Infinity)).toBe(1);
-  });
-
-  it('exposes the renamed floor/ceiling constants', () => {
-    expect(DOWNTIME_MAX_RUNNING_PANES_FLOOR).toBe(1);
-    expect(DOWNTIME_MAX_RUNNING_PANES_CEILING).toBe(4);
+    const loaded = loadSettings(path);
+    expect('downtimeMaxConcurrentDispatches' in loaded).toBe(false);
+    expect(loaded.downtimeEnabled).toBe(defaultSettings.downtimeEnabled);
+    expect(loaded.downtimeIdleThresholdMs).toBe(defaultSettings.downtimeIdleThresholdMs);
   });
 });

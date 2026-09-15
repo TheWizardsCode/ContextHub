@@ -1359,7 +1359,10 @@ async function main(): Promise<void> {
         enabled: s.downtimeEnabled,
         thresholdMs: s.downtimeIdleThresholdMs,
         requiredFreeSlots: s.downtimeRequiredFreeSlots,
-        maxRunningPanes: s.downtimeMaxRunningPanes,
+        // NOTE (WL-0MU2EP6JL006A1U3): no `maxRunningPanes` — there is no
+        // client-side cap on dispatched panes. Panes stay open until an
+        // operator closes them and the local LLM idle / free-slot check is
+        // the concurrency limiter.
         model: s.downtimeModel,
         cwd: targetCwd,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,

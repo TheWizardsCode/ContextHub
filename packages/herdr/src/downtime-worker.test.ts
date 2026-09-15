@@ -97,7 +97,6 @@ import {
   clampDowntimeIdleThresholdMs,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeNoCandidateCooldownMs,
-  clampDowntimeMaxRunningPanes,
   countFreeUnownedSlots,
   isSlotOwned,
   parseHerdrPaneListOutput,
@@ -108,7 +107,6 @@ import {
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
-  DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
   DOWNTIME_PANE_LABEL_PREFIX,
   type LlamaStatus,
   type LlamaSlot,
@@ -130,9 +128,6 @@ import {
   MAX_BROWSE_ITEM_COUNT,
 } from './downtime-worker.js';
 import {
-  defaultSettings,
-  loadSettings,
-  saveSettings,
   clampBrowseItemCount,
   clampDowntimeRequiredFreeSlots as clampDowntimeRequiredFreeSlotsSetting,
 } from './settings.js';
@@ -172,12 +167,6 @@ import {
   type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
 
-
-/** Create a temporary settings path for integration tests. */
-function tempSettingsPath(): string {
-  const dir = mkdtempSync(join(tmpdir(), 'herdr-settings-test-'));
-  return join(dir, 'worklog-plugin.json');
-}
 
 /** Shared deps mock for dispatch tests. */
 function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
@@ -7204,8 +7193,8 @@ describe('worker keeps polling while the review queue is deep (WL-0MTTSWC1X005P4
 
 // ── Bounded concurrent dispatch (F1, parent WL-0MT50LKAK001EF5Q) ──────
 
-describe('bounded concurrent dispatch — cap honored at 1', () => {
-  it('with cap=1, dispatchInFlight guard is preserved: second concurrent dispatch refuses', async () => {
+describe('pipeline single-flight — one in-flight dispatch pipeline at a time', () => {
+  it('a second concurrent same-process dispatch is refused (dispatch-in-flight)', async () => {
     let release!: () => void;
     const gate = new Promise<{ ok: true }>((resolve) => {
       release = () => resolve({ ok: true });
@@ -7230,57 +7219,7 @@ describe('bounded concurrent dispatch — cap honored at 1', () => {
   });
 });
 
-describe('bounded concurrent dispatch — cap honored at 2', () => {
-  it('with cap=2, two concurrent dispatches may proceed when idle for threshold', async () => {
-    // This test will initially FAIL because the current single-flight guard
-    // blocks the second dispatch. After F3 implementation, both should proceed.
-    let releaseFirst!: () => void;
-    let releaseSecond!: () => void;
-    const firstGate = new Promise<{ ok: true }>((resolve) => {
-      releaseFirst = () => resolve({ ok: true });
-    });
-    const secondGate = new Promise<{ ok: true }>((resolve) => {
-      releaseSecond = () => resolve({ ok: true });
-    });
-
-    let callCount = 0;
-    const fakeSpawn = vi.fn().mockImplementation(() => {
-      const idx = callCount++;
-      if (idx === 0) {
-        return firstGate;
-      }
-      return secondGate;
-    });
-
-    const deps = makeDeps({
-      getNextItem: vi.fn().mockResolvedValue({
-        ok: true,
-        candidate: { id: `WL-${callCount}`, title: `Task ${callCount}`, stage: 'intake_complete' },
-      }),
-      spawnAgentPane: fakeSpawn as unknown as ReturnType<typeof vi.fn>,
-    });
-
-    // Start both dispatches concurrently. Both callers carry the SAME
-    // raised cap (each worker re-reads the shared setting), so the module
-    // gate admits both up to the bound.
-    const first = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', maxConcurrentDispatches: 2 });
-    const second = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', maxConcurrentDispatches: 2 });
-
-    // Release both panes
-    releaseFirst();
-    releaseSecond();
-
-    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
-
-    // After F3: expect both to dispatch
-    // Before F3: second will be blocked by dispatch-in-flight
-    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
-    expect(firstOutcome.dispatched).toBe(true);
-    expect(secondOutcome.dispatched).toBe(true);
-  });
-});
-
-describe('bounded concurrent dispatch — cap at 2 respects idle-gate', () => {
+describe('idle gate — no dispatch with zero free slots', () => {
   it('second dispatch only fires when requiredFreeSlots continuously idle for threshold', async () => {
     // This test verifies the per-slot idle tracker contract.
     // With cap=2, we need 2 slots continuously idle for the threshold.
@@ -7301,7 +7240,7 @@ describe('bounded concurrent dispatch — cap at 2 respects idle-gate', () => {
   });
 });
 
-describe('bounded concurrent dispatch — fast-mode operator priority', () => {
+describe('idle gate — no dispatch with zero free slots (fast-mode operator priority)', () => {
   it('with 3 total slots and 1 free, only 1 dispatch fires even if cap=2', async () => {
     // Fast-mode / operator priority preserved: freeSlots check is the hard limit
     // With 0 free slots, no dispatch can occur regardless of cap
@@ -7337,62 +7276,15 @@ describe('bounded concurrent dispatch — claim safety regression', () => {
   });
 });
 
-describe('bounded concurrent dispatch — config wire (F2, renamed WL-0MTYZXSLN008HZOW)', () => {
-  it('downtimeMaxRunningPanes defaults to 1 (single-flight preserved)', () => {
-    expect(defaultSettings.downtimeMaxRunningPanes).toBe(1);
-  });
-
-  it('a persisted value is loaded and clamped into [1, 4]', () => {
-    const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 3 });
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(3);
-
-    // Clamp below minimum
-    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 0 });
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(1);
-
-    // Clamp above maximum (delivered ceiling is 4, not 10)
-    saveSettings(path, { ...defaultSettings, downtimeMaxRunningPanes: 99 });
-    expect(loadSettings(path).downtimeMaxRunningPanes).toBe(4);
-  });
-});
-
-describe('bounded concurrent dispatch — worker config propagation', () => {
-  it('DowntimeWorkerConfig includes a maxRunningPanes field', () => {
-    // The config interface includes maxRunningPanes (renamed from
-    // maxConcurrentDispatches); it is optional (defaults to 1 from settings).
-    const config = {
-      enabled: true,
-      thresholdMs: 300000,
-      requiredFreeSlots: 2,
-      model: 'plan',
-      cwd: '/repo',
-      noCandidateCooldownMs: 3600000,
-      browseItemCount: 20,
-      maxRunningPanes: 2,
-    } as const;
-
-    expect(config.maxRunningPanes).toBe(2);
-  });
-});
-
-// ── End of bounded concurrent dispatch tests ──────────────────────────
-
-// ── Running-pane bound + owner lease + contention (AC1–AC6, parent
-//    WL-0MTYZXSLN008HZOW) ─────────────────────────────────────────────
+// ── Owner lease + contention + pane liveness (parent WL-0MTYZXSLN008HZOW,
+//    pane bound removed by WL-0MU2EP6JL006A1U3) ──────────────────────
 //
-// Regression suite for single-slot over-dispatch: the dispatcher must track
-// RUNNING panes (not just in-flight pipelines), honour the Local Proxy owner
-// lease, exclude owned slots from the free count, and back off on proxy
-// contention.
-
-describe('running-pane bound: renamed setting + defaults', () => {
-  it('DEFAULT_DOWNTIME_MAX_RUNNING_PANES is 1 and the renamed constant is exported', () => {
-    expect(DEFAULT_DOWNTIME_MAX_RUNNING_PANES).toBe(1);
-    expect(clampDowntimeMaxRunningPanes(0)).toBe(1);
-    expect(clampDowntimeMaxRunningPanes(99)).toBe(4);
-  });
-});
+// Regression suite for single-slot over-dispatch. The dispatcher must honour
+// the Local Proxy owner lease, exclude owned slots from the free count, and
+// back off on proxy contention. The RUNNING-PANE BOUND that was added
+// alongside these is deliberately GONE (WL-0MU2EP6JL006A1U3): dispatched
+// panes stay open until an operator closes them, so a live-pane count can
+// never be the concurrency limiter — the LLM idle check is.
 
 describe('parseLlamaStatus: contention + per-slot owner (AC5/AC6)', () => {
   const base = {
@@ -7545,7 +7437,7 @@ describe('parseHerdrPaneListOutput / countRunningDowntimePanes (AC1)', () => {
     expect(DOWNTIME_PANE_LABEL_PREFIX).toBe('Downtime');
   });
 
-  it('returns null for unparseable output (fail-closed → caller refuses dispatch)', () => {
+  it('returns null for unparseable output (an unparseable probe is no longer a dispatch gate)', () => {
     expect(parseHerdrPaneListOutput('not json at all')).toBeNull();
   });
 
@@ -7566,26 +7458,13 @@ describe('dispatchDowntimeWork: running-pane / owner / contention gates', () => 
     });
   }
 
-  it('refuses when running panes reach the cap (running-pane-cap)', async () => {
+  it('dispatches without consulting any live-pane count (WL-0MU2EP6JL006A1U3)', async () => {
+    // Regression: panes deliberately stay open until an operator closes them,
+    // so the number of live panes must never gate dispatch.
     const deps = dispatchableDeps();
     const outcome = await dispatchDowntimeWork(deps, {
       model: 'plan',
       cwd: '/repo',
-      maxRunningPanes: 1,
-      runningPanes: 1,
-    });
-    expect(outcome.dispatched).toBe(false);
-    expect(outcome.reason).toBe('running-pane-cap');
-    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-  });
-
-  it('dispatches when running panes are below the cap', async () => {
-    const deps = dispatchableDeps();
-    const outcome = await dispatchDowntimeWork(deps, {
-      model: 'plan',
-      cwd: '/repo',
-      maxRunningPanes: 2,
-      runningPanes: 1,
     });
     expect(outcome.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
@@ -7615,20 +7494,9 @@ describe('dispatchDowntimeWork: running-pane / owner / contention gates', () => 
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 
-  it('accepts the legacy maxConcurrentDispatches name as an alias', async () => {
-    const deps = dispatchableDeps();
-    const outcome = await dispatchDowntimeWork(deps, {
-      model: 'plan',
-      cwd: '/repo',
-      maxConcurrentDispatches: 1,
-      runningPanes: 1,
-    });
-    expect(outcome.dispatched).toBe(false);
-    expect(outcome.reason).toBe('running-pane-cap');
-  });
 });
 
-describe('worker tick: single-slot running-pane bound across generations (AC1/AC3)', () => {
+describe('worker tick: the LLM idle check is the sole concurrency limiter (WL-0MU2EP6JL006A1U3)', () => {
   function makeSingleSlotWorker(opts: {
     status: LlamaStatus;
     runningPanes: () => { ok: true; count: number } | { ok: false; error?: string };
@@ -7641,7 +7509,6 @@ describe('worker tick: single-slot running-pane bound across generations (AC1/AC
       model: 'plan',
       cwd: '/repo',
       noCandidateCooldownMs: 3_600_000,
-      maxRunningPanes: 1,
     };
     const poller = createDowntimePoller(
       'http://proxy:8000',
@@ -7658,38 +7525,35 @@ describe('worker tick: single-slot running-pane bound across generations (AC1/AC
     return { worker, deps };
   }
 
-  it('with 1 slot and a live dispatch pane, no new dispatch until the pane exits', async () => {
+  it('live dispatch panes do not block dispatch while the LLM is idle (WL-0MU2EP6JL006A1U3)', async () => {
     vi.useFakeTimers();
     try {
-      // The proxy reports the single slot free (lease expired during a tool
-      // call) but the worker sees an old dispatch pane STILL RUNNING.
-      let running = 1;
+      // Regression for the overnight stall: previously dispatched panes stay
+      // OPEN until an operator closes them, so a live-pane count must never be
+      // a dispatch gate. The LLM is idle and several panes are open → the next
+      // item still dispatches.
       const { worker, deps } = makeSingleSlotWorker({
         status: idleAllSlotsFree,
-        runningPanes: () => ({ ok: true, count: running }),
+        runningPanes: () => ({ ok: true, count: 3 }),
       });
       const start = 1_000_000;
       vi.setSystemTime(start);
       await worker.tick();
       vi.setSystemTime(start + 5_000);
-      const blocked = await worker.tick();
-      expect(blocked.dispatched).toBe(false);
-      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-
-      // The pane exits → the slot frees → the next tick dispatches (the
-      // idle credit earned while the pane was alive persists).
-      running = 0;
-      const ok = await worker.tick();
-      expect(ok.dispatched).toBe(true);
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(true);
       expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('fails closed when the liveness query fails (never over-dispatch)', async () => {
+  it('a failed liveness query does not stall dispatch (WL-0MU2EP6JL006A1U3)', async () => {
     vi.useFakeTimers();
     try {
+      // The pane-liveness probe now only feeds the owner-lease qualifier, so a
+      // `herdr pane list` failure must not silently stop the dispatcher. The
+      // proxy's own lease signal still gates slot capacity.
       const { worker, deps } = makeSingleSlotWorker({
         status: idleAllSlotsFree,
         runningPanes: () => ({ ok: false, error: 'herdr down' }),
@@ -7698,9 +7562,9 @@ describe('worker tick: single-slot running-pane bound across generations (AC1/AC
       vi.setSystemTime(start);
       await worker.tick();
       vi.setSystemTime(start + 5_000);
-      const blocked = await worker.tick();
-      expect(blocked.dispatched).toBe(false);
-      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
     }

@@ -9,12 +9,10 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
   clampDowntimeIdleThresholdMs,
-  clampDowntimeMaxRunningPanes,
   clampDowntimeNoCandidateCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
-  DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
@@ -87,18 +85,6 @@ export interface PluginSettings {
    * Default 60000 (60 s), clamped to [1000, 300000] (1 s – 5 min).
    */
   maxSyncStalenessMs: number;
-  /**
-   * Maximum number of running (alive) downtime panes permitted across all
-   * roots and slots. Default 1 = single-flight (current behavior); clamped
-   * to [1, 4] on load; manually configured per operator.
-   *
-   * Replaces `downtimeMaxConcurrentDispatches` (renamed, parent
-   * WL-0MTYZXSLN008HZOW): the old name bounded in-flight dispatch *pipelines*
-   * (1–2 s), not running panes. The new name tracks panes that are still
-   * alive (via `herdr pane list` / proxy owner lease). Existing configs with
-   * the old key are migrated automatically.
-   */
-  downtimeMaxRunningPanes: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -122,7 +108,6 @@ export const defaultSettings: PluginSettings = {
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
   maxSyncStalenessMs: 60_000,
-  downtimeMaxRunningPanes: DEFAULT_DOWNTIME_MAX_RUNNING_PANES,
 };
 
 /** Minimum allowed browseItemCount. */
@@ -234,13 +219,12 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       maxSyncStalenessMs: typeof parsed.maxSyncStalenessMs === 'number'
         ? clampMaxSyncStalenessMs(parsed.maxSyncStalenessMs)
         : defaultSettings.maxSyncStalenessMs,
-      // Backward compat: old config key `downtimeMaxConcurrentDispatches`
-      // is migrated to `downtimeMaxRunningPanes` (parent WL-0MTYZXSLN008HZOW).
-      downtimeMaxRunningPanes: typeof parsed.downtimeMaxRunningPanes === 'number'
-        ? clampDowntimeMaxRunningPanes(parsed.downtimeMaxRunningPanes)
-        : typeof parsed.downtimeMaxConcurrentDispatches === 'number'
-          ? clampDowntimeMaxRunningPanes(parsed.downtimeMaxConcurrentDispatches)
-          : defaultSettings.downtimeMaxRunningPanes,
+      // NOTE (WL-0MU2EP6JL006A1U3): `downtimeMaxRunningPanes` and its legacy
+      // alias `downtimeMaxConcurrentDispatches` are deliberately NOT read.
+      // Dispatched panes stay open until an operator closes them, so a
+      // client-side pane count can never be the concurrency limiter — the
+      // local LLM idle check is (see downtime-worker.ts). A config file still
+      // carrying either key loads cleanly and the key is simply ignored.
     };
   } catch {
     return { ...defaultSettings };
