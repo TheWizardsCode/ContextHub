@@ -3,6 +3,8 @@
  *
  * ACs: persistence / idempotent provisioning / concurrent safety / stale-pane
  * re-provision / no-op when valid / fail-safe null.
+ *
+ * Parent: WL-0MTRQT482001SNXC (per-prefix tabs). TC1: types + persistence helpers.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -12,9 +14,14 @@ import * as path from 'node:path';
 import {
   getDispatcherAnchor,
   DISPATCHER_ANCHOR_FILE,
+  DISPATCHER_TAB_ANCHOR_FILE,
   DISPATCHER_WORKSPACE_LABEL,
   type DispatcherAnchor,
   type DispatcherAnchorDeps,
+  type DispatcherTabAnchor,
+  type DispatcherTabAnchorEntry,
+  readTabAnchors,
+  writeTabAnchors,
 } from './dispatcher-anchor.js';
 
 function mkTmp(): string {
@@ -51,6 +58,17 @@ function writePersisted(a: DispatcherAnchor): void {
   fs.writeFileSync(path.join(tmpDir, DISPATCHER_ANCHOR_FILE), JSON.stringify(a), 'utf-8');
 }
 
+function readTabAnchorPersisted(): DispatcherTabAnchor | null {
+  try {
+    const raw = fs.readFileSync(path.join(tmpDir, DISPATCHER_TAB_ANCHOR_FILE), 'utf-8');
+    return JSON.parse(raw) as DispatcherTabAnchor;
+  } catch { return null; }
+}
+
+function writeTabAnchorPersisted(a: DispatcherTabAnchor): void {
+  fs.writeFileSync(path.join(tmpDir, DISPATCHER_TAB_ANCHOR_FILE), JSON.stringify(a), 'utf-8');
+}
+
 describe('getDispatcherAnchor ACs', () => {
   it('AC2 idempotent provisioning: first call creates workspace and persists', async () => {
     const deps: DispatcherAnchorDeps = {
@@ -76,7 +94,7 @@ describe('getDispatcherAnchor ACs', () => {
   });
 
   it('AC4 closed-pane auto-reprovision: stale pane is replaced', async () => {
-    writePersisted({ paneId: 'wD:pOLD', workspaceId: 'wD' });
+    writePersisted({ paneId: 'wD:OLD', workspaceId: 'wD' });
     const deps: DispatcherAnchorDeps = {
       createWorkspace: vi.fn(async () => ({ workspaceId: 'wD2', paneId: 'wD2:p1' })),
       isPaneAlive: vi.fn(async () => false),
@@ -132,5 +150,121 @@ describe('getDispatcherAnchor ACs', () => {
     };
     const got = await getDispatcherAnchor(tmpDir, deps);
     expect(got).toBeNull();
+  });
+});
+
+// ── Per-prefix tab anchor tests (TC1: WL-0MU2LC5S00024LL6) ──────────────
+
+describe('readTabAnchors / writeTabAnchors TC1', () => {
+  it('TC1-1 readTabAnchors returns empty map when file absent', () => {
+    const result = readTabAnchors(tmpDir);
+    expect(result).toEqual({ workspaceId: '', byPrefix: {} });
+  });
+
+  it('TC1-2 writeTabAnchors creates a valid JSON file', () => {
+    const anchors: DispatcherTabAnchor = {
+      workspaceId: 'wT',
+      byPrefix: {
+        WL: { tabId: 'wT:t1', paneId: 'wT:t1:p1' },
+      },
+    };
+    const success = writeTabAnchors(tmpDir, anchors);
+    expect(success).toBe(true);
+    const persisted = readTabAnchorPersisted();
+    expect(persisted).toEqual(anchors);
+  });
+
+  it('TC1-3 readTabAnchors returns null on corrupt JSON', () => {
+    fs.writeFileSync(path.join(tmpDir, DISPATCHER_TAB_ANCHOR_FILE), 'not json{{{');
+    const result = readTabAnchors(tmpDir);
+    expect(result).toBeNull();
+  });
+
+  it('TC1-4 persistence round-trip: write then read returns same data', () => {
+    const anchors: DispatcherTabAnchor = {
+      workspaceId: 'wRound',
+      byPrefix: {
+        WL: { tabId: 'wRound:t1', paneId: 'wRound:t1:p1' },
+        TCE: { tabId: 'wRound:t2', paneId: 'wRound:t2:p1' },
+      },
+    };
+    writeTabAnchors(tmpDir, anchors);
+    const result = readTabAnchors(tmpDir);
+    expect(result).toEqual(anchors);
+  });
+
+  it('TC1-5 backward-compat: legacy anchor file yields workspaceId with empty byPrefix', () => {
+    // Write only the legacy anchor file (no tab anchor file)
+    writePersisted({ paneId: 'wLegacy:p1', workspaceId: 'wLegacy' });
+    // Tab anchor file does NOT exist
+    const result = readTabAnchors(tmpDir);
+    expect(result).toEqual({ workspaceId: 'wLegacy', byPrefix: {} });
+  });
+
+  it('TC1-6 backward-compat: corrupt legacy file + no tab file yields empty workspaceId', () => {
+    // Write corrupt legacy file
+    fs.writeFileSync(path.join(tmpDir, DISPATCHER_ANCHOR_FILE), '{ corrupt');
+    const result = readTabAnchors(tmpDir);
+    expect(result).toEqual({ workspaceId: '', byPrefix: {} });
+  });
+
+  it('handles variant key shapes: tab_id vs tabId, pane_id vs paneId', () => {
+    // Write with variant key shapes (simulating older herdr CLI output)
+    const variantAnchors: DispatcherTabAnchor = {
+      workspaceId: 'wVariant',
+      byPrefix: {
+        WL: { tabId: 'wVariant:t1', paneId: 'wVariant:t1:p1' },
+      },
+    };
+    writeTabAnchors(tmpDir, variantAnchors);
+    // Overwrite with variant shapes
+    const raw = JSON.stringify({
+      workspace_id: 'wVariant',
+      byPrefix: {
+        WL: { tab_id: 'wVariant:t1', pane_id: 'wVariant:t1:p1' },
+      },
+    });
+    fs.writeFileSync(path.join(tmpDir, DISPATCHER_TAB_ANCHOR_FILE), raw);
+    const result = readTabAnchors(tmpDir);
+    expect(result).toEqual({
+      workspaceId: 'wVariant',
+      byPrefix: {
+        WL: { tabId: 'wVariant:t1', paneId: 'wVariant:t1:p1' },
+      },
+    });
+  });
+
+  it('handles empty byPrefix but valid workspaceId', () => {
+    const raw = JSON.stringify({ workspaceId: 'wEmpty', byPrefix: {} });
+    fs.writeFileSync(path.join(tmpDir, DISPATCHER_TAB_ANCHOR_FILE), raw);
+    const result = readTabAnchors(tmpDir);
+    expect(result).toEqual({ workspaceId: 'wEmpty', byPrefix: {} });
+  });
+
+  it('handles empty file returns null', () => {
+    fs.writeFileSync(path.join(tmpDir, DISPATCHER_TAB_ANCHOR_FILE), '');
+    const result = readTabAnchors(tmpDir);
+    expect(result).toBeNull();
+  });
+
+  it('handles whitespace-only file returns null', () => {
+    fs.writeFileSync(path.join(tmpDir, DISPATCHER_TAB_ANCHOR_FILE), '   \n  ');
+    const result = readTabAnchors(tmpDir);
+    expect(result).toBeNull();
+  });
+
+  it('writeTabAnchors returns false on I/O error (read-only dir)', () => {
+    const anchors: DispatcherTabAnchor = {
+      workspaceId: 'w',
+      byPrefix: { X: { tabId: 't', paneId: 'p' } },
+    };
+    // Make the dir read-only so write fails
+    fs.chmodSync(tmpDir, 0o444);
+    try {
+      const success = writeTabAnchors(tmpDir, anchors);
+      expect(success).toBe(false);
+    } finally {
+      fs.chmodSync(tmpDir, 0o755); // restore for cleanup
+    }
   });
 });

@@ -26,6 +26,7 @@ const execFile = promisify(_execFile);
 // ── Constants ──────────────────────────────────────────────────────────
 
 export const DISPATCHER_ANCHOR_FILE = 'downtime-dispatch-anchor.json';
+export const DISPATCHER_TAB_ANCHOR_FILE = 'downtime-dispatch-tab-anchors.json';
 export const DISPATCHER_WORKSPACE_LABEL = 'Dispatcher';
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -40,6 +41,18 @@ export interface DispatcherAnchorDeps {
   createWorkspace(label: string): Promise<{ workspaceId: string; paneId: string }>;
   /** True when the pane for `paneId` is alive (RPC pane.get succeeds). */
   isPaneAlive(paneId: string): Promise<boolean>;
+}
+
+/** Per-prefix tab anchor entry — one prefix maps to a tab + anchor pane. */
+export interface DispatcherTabAnchorEntry {
+  tabId: string;
+  paneId: string;
+}
+
+/** Full per-prefix tab anchor map: workspaceId + map of prefix → tab/pane. */
+export interface DispatcherTabAnchor {
+  workspaceId: string;
+  byPrefix: Record<string, DispatcherTabAnchorEntry>;
 }
 
 /** Build real deps exec'd against the herdr CLI (used in production). */
@@ -95,6 +108,89 @@ function readAnchor(dir: string): DispatcherAnchor | null {
     return { paneId, workspaceId };
   } catch {
     return null;
+  }
+}
+
+// ── Per-prefix tab anchor persistence ─────────────────────────────────
+
+function tabAnchorFilePath(dir: string): string {
+  return path.join(dir, DISPATCHER_TAB_ANCHOR_FILE);
+}
+
+/**
+ * Read the per-prefix tab anchor map.
+ *
+ * - Missing file → an empty map (`{ workspaceId, byPrefix: {} }`), inheriting
+ *   the `workspaceId` from the legacy single-anchor file when present so a
+ *   pre-tab deployment upgrades in place; the caller provisions as needed.
+ * - Corrupt/unreadable JSON → null (the caller handles re-provisioning).
+ * - Tolerates herdr key-shape variants (`tabId`/`tab_id`/`id`,
+ *   `paneId`/`pane_id`/`id`) so parser drift never silently drops entries.
+ */
+export function readTabAnchors(dir: string): DispatcherTabAnchor | null {
+  const fp = tabAnchorFilePath(dir);
+  if (!fs.existsSync(fp)) {
+    // Missing file: backward-compatible upgrade. The legacy single-anchor
+    // file (when present) supplies the workspaceId; otherwise the caller
+    // resolves the workspace on first provisioning.
+    const legacy = readAnchor(dir);
+    return { workspaceId: legacy?.workspaceId ?? '', byPrefix: {} };
+  }
+
+  let raw: string;
+  try {
+    raw = fs.readFileSync(fp, 'utf-8');
+  } catch {
+    return null;
+  }
+  if (!raw.trim()) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    return null; // corrupt JSON → caller re-provisions
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const o = parsed as Record<string, unknown>;
+
+  const workspaceId = o.workspaceId ?? o.workspace_id;
+  if (typeof workspaceId !== 'string') return null;
+
+  const byPrefixRaw = o.byPrefix;
+  const byPrefix: Record<string, DispatcherTabAnchorEntry> = {};
+  if (byPrefixRaw !== undefined) {
+    if (typeof byPrefixRaw !== 'object' || byPrefixRaw === null || Array.isArray(byPrefixRaw)) {
+      return null;
+    }
+    for (const [prefix, entry] of Object.entries(byPrefixRaw as Record<string, unknown>)) {
+      if (typeof entry !== 'object' || entry === null) continue;
+      const e = entry as Record<string, unknown>;
+      const tabId = e.tabId ?? e.tab_id ?? e.id ?? '';
+      const paneId = e.paneId ?? e.pane_id ?? e.id ?? '';
+      if (typeof tabId === 'string' && tabId && typeof paneId === 'string' && paneId) {
+        byPrefix[prefix] = { tabId, paneId };
+      }
+    }
+  }
+
+  return { workspaceId, byPrefix };
+}
+
+/**
+ * Write the per-prefix tab anchor map. Uses atomic tmp+rename for safety.
+ * Returns true on success, false on I/O error.
+ */
+export function writeTabAnchors(dir: string, anchors: DispatcherTabAnchor): boolean {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const fp = tabAnchorFilePath(dir);
+    const tmp = `${fp}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(anchors), 'utf-8');
+    fs.renameSync(tmp, fp);
+    return true;
+  } catch {
+    return false;
   }
 }
 
