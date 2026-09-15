@@ -264,4 +264,117 @@ describe('install-herdr script', () => {
     expect(log).toContain(expectedManifest);
     expect(log).not.toContain(wtDir);
   });
+
+  it('calls `herdr server reload-config` after inserting a new keybinding', () => {
+    // WL-0MSHND11O007FKOU: after inserting the keybinding, the running herdr
+    // server must be told to reload its config so the new binding is active
+    // without a manual restart.
+    const tempBase = makeTempDir('worklog-herdr-reload-');
+    const fakeBinDir = path.join(tempBase, 'bin');
+    fs.mkdirSync(fakeBinDir);
+    const herdrLog = path.join(tempBase, 'herdr-log.txt');
+    fs.writeFileSync(
+      path.join(fakeBinDir, 'herdr'),
+      `#!/usr/bin/env bash\necho "$@" >> "${herdrLog}"\nexit 0\n`,
+    );
+    fs.chmodSync(path.join(fakeBinDir, 'herdr'), 0o755);
+
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    const configPath = path.join(tempBase, 'herdr', 'config.toml');
+    const result = spawnSync('bash', [
+      path.join(repoRoot, 'scripts', 'install-herdr.sh'),
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}/usr/bin:/bin`,
+        HERDR_CONFIG_PATH: configPath,
+      },
+    });
+    expect(result.status, `script failed: ${result.stderr}`).toBe(0);
+    expect(fs.existsSync(configPath)).toBe(true);
+
+    // Verify the script called `herdr server reload-config` after insertion.
+    const log = fs.readFileSync(herdrLog, 'utf8').trim();
+    expect(log).toContain('plugin');
+    expect(log).toContain('link');
+    expect(log).toContain('server reload-config');
+
+    // The stdout should mention the reload.
+    expect(result.stdout).toContain('reload');
+  });
+
+  it('reloads config even when the keybinding already exists', () => {
+    // AC: re-running the installer makes the binding active. A previous
+    // installer run may have written the binding without activating it (the
+    // running server keeps startup keybindings in memory), so the already
+    // present path must also request a reload.
+    const tempBase = makeTempDir('worklog-herdr-already-reload-');
+    const fakeBinDir = path.join(tempBase, 'bin');
+    fs.mkdirSync(fakeBinDir);
+    const herdrLog = path.join(tempBase, 'herdr-log.txt');
+    fs.writeFileSync(
+      path.join(fakeBinDir, 'herdr'),
+      `#!/usr/bin/env bash\necho "$@" >> "${herdrLog}"\nexit 0\n`,
+    );
+    fs.chmodSync(path.join(fakeBinDir, 'herdr'), 0o755);
+
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    const configPath = path.join(tempBase, 'herdr', 'config.toml');
+    // Pre-populate with the binding so the script skips insertion.
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, KEYBINDING_BLOCK);
+
+    const result = spawnSync('bash', [
+      path.join(repoRoot, 'scripts', 'install-herdr.sh'),
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}/usr/bin:/bin`,
+        HERDR_CONFIG_PATH: configPath,
+      },
+    });
+    expect(result.status).toBe(0);
+
+    // The script did not modify the config, but it must still have asked
+    // the running server to reload so the binding is active.
+    expect(fs.readFileSync(configPath, 'utf8')).toBe(KEYBINDING_BLOCK);
+    const log = fs.readFileSync(herdrLog, 'utf8');
+    expect(log).toContain('server reload-config');
+  });
+
+  it('exits 0 even when `herdr server reload-config` fails', () => {
+    // Best-effort reload: if the herdr server is not running or reload
+    // fails for any reason, the script must still succeed.
+    const tempBase = makeTempDir('worklog-herdr-reload-fail-');
+    const fakeBinDir = path.join(tempBase, 'bin');
+    fs.mkdirSync(fakeBinDir);
+    // Fake herdr that fails on the reload-config subcommand but succeeds on plugin link.
+    fs.writeFileSync(
+      path.join(fakeBinDir, 'herdr'),
+      `#!/usr/bin/env bash\nif [ "$1" = "server" ] && [ "$2" = "reload-config" ]; then\n  exit 1\nfi\nexit 0\n`,
+    );
+    fs.chmodSync(path.join(fakeBinDir, 'herdr'), 0o755);
+
+    const repoRoot = path.resolve(__dirname, '..', '..');
+    const configPath = path.join(tempBase, 'herdr', 'config.toml');
+    const result = spawnSync('bash', [
+      path.join(repoRoot, 'scripts', 'install-herdr.sh'),
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBinDir}${path.delimiter}/usr/bin:/bin`,
+        HERDR_CONFIG_PATH: configPath,
+      },
+    });
+    // Script must exit 0 despite reload failure.
+    expect(result.status).toBe(0);
+    expect(fs.existsSync(configPath)).toBe(true);
+  });
+
 });
