@@ -98,10 +98,12 @@ import {
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
   type RunningPanesResult,
+  type LlamaStatus,
 } from './downtime-worker.js';
 import {
   createModeSwitchWorker,
   type ModeSwitchWorker,
+  DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
 } from './mode-switch-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
@@ -1376,6 +1378,31 @@ async function main(): Promise<void> {
   // `config()` so changes apply without a plugin restart. The dispatch panes
   // open in the resolved worklog root (--cwd).
   const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
+
+  // Mode-switch worker: automatically switches the llama-proxy between fast
+  // (cloud) and cheap (local) modes based on operator activity and proxy
+  // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
+  // key). Passes `enabled` via the settings flag (modeSwitchEnabled).
+  // Created BEFORE the downtime worker so we can wire the idle callback.
+  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker();
+
+  // Callback: when the downtime dispatcher finds the proxy idle, trigger a
+  // mode-switch tick immediately with the fresh status — avoids the 10 s
+  // poll delay of the independent scheduler task.
+  const onProxyIdle = async (proxyStatus: LlamaStatus): Promise<void> => {
+    try {
+      const s = loadSettings();
+      await modeSwitchWorker.tick({
+        enabled: s.modeSwitchEnabled ?? true,
+        idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
+        proxyUrl: s.downtimeProxyUrl,
+        proxyStatus,
+      });
+    } catch {
+      // Fail-closed: a broken tick never crashes the downtime dispatcher.
+    }
+  };
+
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),
     deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
@@ -1405,13 +1432,8 @@ async function main(): Promise<void> {
         browseItemCount: s.browseItemCount,
       };
     },
+    onProxyIdle,
   });
-
-  // Mode-switch worker: automatically switches the llama-proxy between fast
-  // (cloud) and cheap (local) modes based on operator activity and proxy
-  // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
-  // key). Passes `enabled` via the settings flag (modeSwitchEnabled).
-  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker();
 
   const selectedItem = await runWorklistTui(
     fetcher,

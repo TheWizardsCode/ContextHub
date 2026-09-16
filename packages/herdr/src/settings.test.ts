@@ -117,10 +117,10 @@ describe('downtimeNoCandidateCooldownMs', () => {
 });
 
 describe('modeSwitchEnabled', () => {
-  it('defaults to false (activity-gated mode switching is opt-in)', () => {
-    expect(defaultSettings.modeSwitchEnabled).toBe(false);
+  it('defaults to true (activity-gated mode switching is opt-out)', () => {
+    expect(defaultSettings.modeSwitchEnabled).toBe(true);
     const path = tempSettingsPath();
-    expect(loadSettings(path).modeSwitchEnabled).toBe(false);
+    expect(loadSettings(path).modeSwitchEnabled).toBe(true);
   });
 
   it('accepts a persisted boolean true', () => {
@@ -135,7 +135,7 @@ describe('modeSwitchEnabled', () => {
   it('falls back to the default when the persisted value is not a boolean', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, modeSwitchEnabled: 'yes' }), 'utf-8');
-    expect(loadSettings(path).modeSwitchEnabled).toBe(false);
+    expect(loadSettings(path).modeSwitchEnabled).toBe(true);
   });
 });
 

@@ -7879,4 +7879,208 @@ describe('worker tick: the LLM idle check is the sole concurrency limiter (WL-0M
       vi.useRealTimers();
     }
   });
+
+  // ── onProxyIdle callback (WL-0MU4MKVR4005WPBJ) ────────────────────────
+
+  describe('onProxyIdle callback', () => {
+    it('calls the callback with the proxy status when the proxy is idle', async () => {
+      vi.useFakeTimers();
+      try {
+        const callback = vi.fn().mockResolvedValue(undefined);
+        const poller = createDowntimePoller(
+          'http://proxy:8000',
+          async () => ({
+            ok: true,
+            status: 200,
+            json: async () => idleAllSlotsFree,
+          }),
+        );
+        const worker = createDowntimeWorker({
+          poller,
+          deps: makeDeps(),
+          config: () => ({
+            enabled: true,
+            thresholdMs: 0, // instant dispatch
+            requiredFreeSlots: 0,
+            model: 'plan',
+            cwd: '/repo',
+            noCandidateCooldownMs: 3_600_000,
+            browseItemCount: 20,
+          }),
+          onProxyIdle: callback,
+        });
+        vi.setSystemTime(1_000_000);
+        const result = await worker.tick();
+        expect(result.idle).toBe(true);
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback).toHaveBeenCalledWith(idleAllSlotsFree);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not call the callback when the proxy is busy', async () => {
+      vi.useFakeTimers();
+      try {
+        const callback = vi.fn().mockResolvedValue(undefined);
+        const poller = createDowntimePoller(
+          'http://proxy:8000',
+          async () => ({
+            ok: true,
+            status: 200,
+            json: async () => busyActiveQuery,
+          }),
+        );
+        const worker = createDowntimeWorker({
+          poller,
+          deps: makeDeps(),
+          config: () => ({
+            enabled: true,
+            thresholdMs: 0,
+            requiredFreeSlots: 0,
+            model: 'plan',
+            cwd: '/repo',
+            noCandidateCooldownMs: 3_600_000,
+            browseItemCount: 20,
+          }),
+          onProxyIdle: callback,
+        });
+        vi.setSystemTime(1_000_000);
+        const result = await worker.tick();
+        expect(result.dispatched).toBe(false);
+        expect(result.idle).toBe(false);
+        expect(callback).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('calls the callback when the proxy is idle but threshold not met', async () => {
+      vi.useFakeTimers();
+      try {
+        const callback = vi.fn().mockResolvedValue(undefined);
+        const poller = createDowntimePoller(
+          'http://proxy:8000',
+          async () => ({
+            ok: true,
+            status: 200,
+            json: async () => idleAllSlotsFree,
+          }),
+        );
+        const worker = createDowntimeWorker({
+          poller,
+          deps: makeDeps(),
+          config: () => ({
+            enabled: true,
+            thresholdMs: 60_000, // 60 s threshold — not yet met
+            requiredFreeSlots: 0,
+            model: 'plan',
+            cwd: '/repo',
+            noCandidateCooldownMs: 3_600_000,
+            browseItemCount: 20,
+          }),
+          onProxyIdle: callback,
+        });
+        vi.setSystemTime(1_000_000);
+        const result = await worker.tick();
+        expect(result.dispatched).toBe(false);
+        expect(result.idle).toBe(true); // proxy is idle, just threshold not met
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback).toHaveBeenCalledWith(idleAllSlotsFree);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('fires the callback BEFORE dispatching the next item (ordering)', async () => {
+      vi.useFakeTimers();
+      try {
+        // The operator requirement (WL-0MU4MKVR4005WPBJ): the mode-switch
+        // check must run before a new item is sent, so the item is served by
+        // the (possibly newly) cheap pool. Record the invocation order.
+        const order: string[] = [];
+        const callback = vi.fn().mockImplementation(async () => {
+          order.push('onProxyIdle');
+        });
+        const deps = makeDeps({
+          getNextItem: vi.fn().mockResolvedValue({
+            ok: true,
+            candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+          }),
+          spawnAgentPane: vi.fn().mockImplementation(async () => {
+            order.push('spawn');
+            return { ok: true };
+          }),
+          getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0 }),
+        });
+        const poller = createDowntimePoller(
+          'http://proxy:8000',
+          vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree)),
+        );
+        const worker = createDowntimeWorker({
+          poller,
+          deps,
+          config: () => ({
+            enabled: true,
+            thresholdMs: 1_000,
+            requiredFreeSlots: 0,
+            model: 'plan',
+            cwd: '/repo',
+            noCandidateCooldownMs: 3_600_000,
+            browseItemCount: 20,
+          }),
+          onProxyIdle: callback,
+        });
+        const start = 1_000_000;
+        vi.setSystemTime(start);
+        await worker.tick(); // starts the idle run
+        vi.setSystemTime(start + 5_000);
+        const outcome = await worker.tick(); // idle + ready → dispatch
+        expect(outcome.dispatched).toBe(true);
+        // The callback fires on EVERY idle poll (the mode-switch worker has
+        // its own operator-idle window), so both ticks trigger it.
+        expect(callback).toHaveBeenCalledTimes(2);
+        // The check fires before the item is dispatched.
+        expect(order).toEqual(['onProxyIdle', 'onProxyIdle', 'spawn']);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not crash when the callback throws', async () => {
+      vi.useFakeTimers();
+      try {
+        const callback = vi.fn().mockRejectedValue(new Error('callback failed'));
+        const poller = createDowntimePoller(
+          'http://proxy:8000',
+          async () => ({
+            ok: true,
+            status: 200,
+            json: async () => idleAllSlotsFree,
+          }),
+        );
+        const worker = createDowntimeWorker({
+          poller,
+          deps: makeDeps(),
+          config: () => ({
+            enabled: true,
+            thresholdMs: 0,
+            requiredFreeSlots: 0,
+            model: 'plan',
+            cwd: '/repo',
+            noCandidateCooldownMs: 3_600_000,
+            browseItemCount: 20,
+          }),
+          onProxyIdle: callback,
+        });
+        vi.setSystemTime(1_000_000);
+        const result = await worker.tick();
+        // Callback rejected but the worker did not crash or block
+        expect(result.idle).toBe(true);
+        expect(callback).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

@@ -10,7 +10,8 @@
  *    timestamp and fire-and-forget POSTs `/admin/set-mode {"mode":"fast"}`.
  *    A failed switch never blocks or delays the command dispatch (fail-open:
  *    the pane opens regardless).
- *  - **Cheap switch on idle:** on each tick, when the operator has been idle
+ *  - **Cheap switch on idle:** on each tick (scheduler task, or the downtime
+ *    dispatcher's `onProxyIdle` callback), when the operator has been idle
  *    (no agent-route commands) for ≥ `modeSwitchIdleThresholdMs` **AND** the
  *    proxy reports idle (reusing `evaluateIdle` from downtime-worker.ts), the
  *    worker POSTs `/admin/set-mode {"mode":"cheap"}`.
@@ -46,6 +47,16 @@
  * The proxy URL is shared with the downtime worker (`downtimeProxyUrl` — no
  * separate URL key), and the existing `/llama/local/status` idle evaluation
  * from downtime-worker.ts is reused.
+ *
+ * **Idle-trigger sources (WL-0MU4MKVR4005WPBJ):** the cheap check runs from
+ * two triggers — (1) the independent `mode-switch` scheduler task on
+ * `modeSwitchPollIntervalMs`, and (2) the downtime dispatcher's
+ * `onProxyIdle` callback, fired with the fresh proxy status whenever the
+ * dispatcher's own poll observes the proxy idle (before it dispatches the
+ * next item). Trigger (2) removes the up-to-one-poll-interval delay so a
+ * downtime item is served by the cheap pool; trigger (1) remains the
+ * fallback when the downtime worker is not polling (disabled, non-leader,
+ * paused). Both call the same fail-closed `tick()`.
  */
 
 import {

@@ -3485,6 +3485,15 @@ export interface DowntimeWorkerConfig {
    * ms.
    */
   leaderCheckInIntervalMs?: number;
+  /**
+   * Called whenever the proxy reports idle (after poll, before the dispatch
+   * decision). Passes the latest parsed `LlamaStatus` so the caller (e.g.
+   * the mode-switch worker) can evaluate immediately instead of waiting for
+   * its own poll cycle. Never called on a busy/ambiguous poll (the worker
+   * only invokes it when `idle` is true). Fire-and-forget: a rejected
+   * promise is swallowed so a broken hook cannot crash the dispatcher.
+   */
+  onProxyIdle?: (proxyStatus: LlamaStatus) => Promise<void>;
 }
 
 export interface DowntimeWorkerTickResult {
@@ -3997,6 +4006,19 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         tracker.record(idle);
         ready = idle && tracker.isThresholdMet(cfg.thresholdMs);
       }
+
+      // Notify idle callback (if present — e.g. mode-switch worker) so it
+      // can evaluate the proxy state immediately, without waiting for its
+      // own poll cycle. Pass the latest status so the caller avoids a
+      // redundant fetch. Fire-and-forget: a rejected callback is swallowed
+      // (fail-closed — a broken hook must never crash or block the
+      // dispatcher).
+      if (opts.onProxyIdle && idle) {
+        void opts.onProxyIdle(status).catch(() => {
+          /* fail-closed: idle hook failure is non-fatal */
+        });
+      }
+
       if (!idle) return { polled: true, dispatched: false, idle: false };
       if (!ready) return { polled: true, dispatched: false, idle: true };
       if (dispatching) return { polled: true, dispatched: false, idle: true };

@@ -663,6 +663,13 @@ proxy idle state:
 - **Restart resets to active now** — on plugin/pane restart the idle clock
   starts from the worker's construction time, so a fresh pane begins with a
   full idle window before any cheap switch is eligible.
+- **Downtime-dispatcher idle trigger (WL-0MU4MKVR4005WPBJ)** — the downtime
+  dispatcher triggers a mode-switch check with the fresh proxy status whenever
+  its own poll observes the proxy idle, *before* it dispatches the next item.
+  This eliminates the up-to-`modeSwitchPollIntervalMs` delay of the
+  independent scheduler task, so an item dispatched during downtime is served
+  by the cheap pool. The scheduler task remains as the fallback when the
+  downtime worker is not polling (disabled, non-leader, or paused).
 
 New settings (all optional):
 

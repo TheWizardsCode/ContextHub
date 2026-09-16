@@ -68,7 +68,12 @@ export interface PluginSettings {
    * Floor 60s; default 3_600_000 ms (60 min).
    */
   downtimeNoCandidateCooldownMs: number;
-  /** Enable activity-gated mode-switching (fast on agent command, cheap on idle). */
+  /**
+   * Enable activity-gated mode-switching (fast on agent command, cheap on
+   * idle). Default `true` (WL-0MU4MKVR4005WPBJ — was `false`, which silently
+   * disabled the shipped feature); when `false` no scheduler task is
+   * registered and the agent-route hook is a no-op.
+   */
   modeSwitchEnabled: boolean;
   /**
    * Idle window before switching to cheap mode (ms). Default 900_000 (15 min).
@@ -104,7 +109,7 @@ export const defaultSettings: PluginSettings = {
   downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
-  modeSwitchEnabled: false,
+  modeSwitchEnabled: true,
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
   maxSyncStalenessMs: 60_000,

@@ -33,7 +33,9 @@ describe('settings → worker creation integration', () => {
     expect(defaultSettings).toHaveProperty('modeSwitchEnabled');
     expect(defaultSettings).toHaveProperty('modeSwitchIdleThresholdMs');
     expect(defaultSettings).toHaveProperty('modeSwitchPollIntervalMs');
-    expect(typeof defaultSettings.modeSwitchEnabled).toBe('boolean');
+    // The feature is enabled out of the box (WL-0MU4MKVR4005WPBJ): the
+    // previous `false` default silently disabled the shipped worker.
+    expect(defaultSettings.modeSwitchEnabled).toBe(true);
     expect(typeof defaultSettings.modeSwitchIdleThresholdMs).toBe('number');
     expect(typeof defaultSettings.modeSwitchPollIntervalMs).toBe('number');
   });
