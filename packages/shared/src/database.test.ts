@@ -519,6 +519,88 @@ function makeFactoryItem(overrides: Partial<WorkItem> = {}): WorkItem {
 
 // ── WL-0MT2KYCNB000CYWV: delta pull persists COMMENTS non-destructively ──
 
+// ── WL-0MU38HN2J008WWTB: update() persists deletedBy and deleteReason ──
+
+describe('update() persists deletedBy and deleteReason (WL-0MU38HN2J008WWTB)', () => {
+  function seed(status: string = 'open'): WorkItem {
+    const item = makeItem({ id: 'WI-DEL1', status: status as WorkItem['status'] });
+    db.import([item]);
+    return item;
+  }
+
+  it('persists deletedBy and deleteReason when updating a deleted item', () => {
+    const seeded = seed('completed');
+    const updated = db.update(seeded.id, {
+      status: 'closed' as WorkItem['status'],
+      deletedBy: 'alice@example.com',
+      deleteReason: 'Duplicated work item',
+    });
+    expect(updated?.deletedBy).toBe('alice@example.com');
+    expect(updated?.deleteReason).toBe('Duplicated work item');
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    // Verify persistence in the database.
+    const stored = db.get(seeded.id);
+    expect(stored?.deletedBy).toBe('alice@example.com');
+    expect(stored?.deleteReason).toBe('Duplicated work item');
+  });
+
+  it('persists updated deleteReason on a deleted item and bumps updatedAt', () => {
+    const seeded = seed('closed');
+    // First set deleteReason
+    db.update(seeded.id, { deletedBy: 'bob', deleteReason: 'initial reason' });
+    // Now update just the reason
+    const updated = db.update(seeded.id, { deleteReason: 'updated reason' });
+    expect(updated?.deleteReason).toBe('updated reason');
+    expect(updated?.deletedBy).toBe('bob'); // preserved
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.deleteReason).toBe('updated reason');
+  });
+
+  it('persists updated deletedBy on a deleted item and bumps updatedAt', () => {
+    const seeded = seed('closed');
+    db.update(seeded.id, { deleteReason: 'some reason' });
+    const updated = db.update(seeded.id, { deletedBy: 'charlie' });
+    expect(updated?.deletedBy).toBe('charlie');
+    expect(updated?.deleteReason).toBe('some reason'); // preserved
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.deletedBy).toBe('charlie');
+  });
+
+  it('persists deletedBy and deleteReason on a NON-deleted item', () => {
+    const seeded = seed('open');
+    const updated = db.update(seeded.id, {
+      deletedBy: 'dave',
+      deleteReason: 'preemptive note',
+    });
+    expect(updated?.deletedBy).toBe('dave');
+    expect(updated?.deleteReason).toBe('preemptive note');
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.deletedBy).toBe('dave');
+    expect(db.get(seeded.id)?.deleteReason).toBe('preemptive note');
+  });
+
+  it('detects deletedBy change as a semantic update', () => {
+    const seeded = seed('open');
+    db.update(seeded.id, { deletedBy: 'user1' });
+    expect(db.get(seeded.id)?.deletedBy).toBe('user1');
+
+    // Changing from empty to a value should be detected
+    const seeded2 = seed('open');
+    const updated2 = db.update(seeded2.id, { deletedBy: 'user2' });
+    expect(updated2?.updatedAt).not.toBe(FIXED_TS);
+  });
+
+  it('detects deleteReason change as a semantic update', () => {
+    const seeded = seed('open');
+    const updated = db.update(seeded.id, { deleteReason: 'test reason' });
+    expect(updated?.deleteReason).toBe('test reason');
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.deleteReason).toBe('test reason');
+  });
+});
+
+// ── WL-0MT2KYCNB000CYWV: delta pull persists COMMENTS non-destructively ──
+
 describe('upsertComments() non-destructive merge (WL-0MT2KYCNB000CYWV)', () => {
   function makeComment(id: string, itemId: string, text: string): Comment {
     return {

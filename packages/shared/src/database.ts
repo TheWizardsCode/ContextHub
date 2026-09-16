@@ -1311,7 +1311,8 @@ export class WorklogDatabase {
     // overwriting GitHub metadata). Only hasWorkItemChanged() checks them.
     const contentFieldsToCompare: (keyof WorkItem)[] = [
       'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
-      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort'
+      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
+      'deletedBy', 'deleteReason'
     ];
     const fieldsToCompare: (keyof WorkItem)[] = [
       ...contentFieldsToCompare,
