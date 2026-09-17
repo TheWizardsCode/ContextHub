@@ -1281,13 +1281,21 @@ export function formatItemLine(
           continue;
         }
       }
-      // Count visual width for multi-width characters
+      // Count visual width for multi-width characters. Appends the FULL
+      // character (both surrogate halves for supplementary-plane emoji) so a
+      // truncation point never leaves a lone surrogate — a lone surrogate
+      // written to stdout encodes as U+FFFD (�) and renders as an "error"
+      // glyph (WL-0MU3U1AMP0044WUX).
+      let ch: string;
       let cp: number;
       if (line.charCodeAt(i) >= 0xd800 && line.charCodeAt(i) < 0xdc00 && i + 1 < line.length) {
+        ch = line.slice(i, i + 2); // both halves of the surrogate pair
         cp = 0x10000 + ((line.charCodeAt(i) - 0xd800) << 10) + (line.charCodeAt(i + 1) - 0xdc00);
-        i += 1;
+        i += 2;
       } else {
+        ch = line[i];
         cp = line.charCodeAt(i);
+        i += 1;
       }
       if (cp >= 0x2300 && cp < 0x2400) charVisLen += 2;
       else if (cp >= 0x2600 && cp < 0x2700) charVisLen += 2;
@@ -1306,8 +1314,7 @@ export function formatItemLine(
       else if (cp >= 0x3200 && cp < 0x3300) charVisLen += 2;
       else if (cp >= 0x2460 && cp < 0x2500) charVisLen += 2;
       else charVisLen += 1;
-      truncated += line[i];
-      i += 1;
+      truncated += ch;
     }
     // Close any open ANSI codes before ellipsis
     truncated += `${ANSI.reset}…`;
@@ -1393,13 +1400,19 @@ function truncateLine(line: string, maxWidth: number): string {
         continue;
       }
     }
-    // Count visual width (multi-width chars add 2)
+    // Count visual width (multi-width chars add 2). Append the FULL
+    // character (both surrogate halves) so truncation never leaves a lone
+    // surrogate that would encode to U+FFFD (�) on write (WL-0MU3U1AMP0044WUX).
+    let ch: string;
     let cp: number;
     if (line.charCodeAt(i) >= 0xd800 && line.charCodeAt(i) < 0xdc00 && i + 1 < line.length) {
+      ch = line.slice(i, i + 2); // both halves of the surrogate pair
       cp = 0x10000 + ((line.charCodeAt(i) - 0xd800) << 10) + (line.charCodeAt(i + 1) - 0xdc00);
-      i += 1;
+      i += 2;
     } else {
+      ch = line[i];
       cp = line.charCodeAt(i);
+      i += 1;
     }
     if (cp >= 0x2300 && cp < 0x2400) {
       visLen += 2; // ⏳ etc.
@@ -1410,8 +1423,7 @@ function truncateLine(line: string, maxWidth: number): string {
     } else {
       visLen += 1;
     }
-    result += line[i];
-    i += 1;
+    result += ch;
   }
   // Close open ANSI and append ellipsis
   result += `${ANSI.reset}…`;
