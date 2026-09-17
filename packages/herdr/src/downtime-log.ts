@@ -148,12 +148,17 @@ export async function readDowntimeLogEntries(cwd: string): Promise<DowntimeLogEn
 /**
  * Build the set of itemIds the downtime worker has already dispatched for
  * the given kind (kind-scoped). Entries without an itemId (e.g.
- * persistent-error events) are ignored. Shared by the audit/implement/plan/
- * intake marker readers so every tier's scope guard stays identical.
+ * persistent-error events) are ignored. Entries with `outcome: 'spawn-failed'
+ * are excluded (WL-0MT32F908002YFFA AC2): a spawn-failed dispatch is NOT
+ * a success — the item should be re-eligible for selection on the next idle
+ * period. Shared by the audit/implement/plan/intake marker readers so every
+ * tier's scope guard stays identical.
  */
 function dispatchedItemIds(entries: DowntimeLogEntry[], kind: string): Set<string> {
   const ids = new Set<string>();
   for (const e of entries) {
+    // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2).
+    if (e.outcome === 'spawn-failed') continue;
     if (e.kind === kind && typeof e.itemId === 'string' && e.itemId.length > 0) {
       ids.add(e.itemId);
     }
@@ -249,6 +254,8 @@ export function riskEffortDispatchedItemIds(entries: DowntimeLogEntry[]): Set<st
 export function dispatchedItemStages(entries: DowntimeLogEntry[], kind: string): Map<string, string> {
   const stages = new Map<string, string>();
   for (const e of entries) {
+    // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2).
+    if (e.outcome === 'spawn-failed') continue;
     if (e.kind === kind && typeof e.itemId === 'string' && e.itemId.length > 0) {
       stages.set(e.itemId, typeof e.stage === 'string' ? e.stage : '');
     }
