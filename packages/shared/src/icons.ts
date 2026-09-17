@@ -53,6 +53,7 @@ const STAGE_ICONS: Record<string, string> = {
   in_progress:      '\u{1F6E0}\u{FE0F}',  // 🛠️
   in_review:        '\u{1F50D}',           // 🔍
   completed:        '\u{2714}\u{FE0F}',   // ✔️
+  done:             '\u{2714}\u{FE0F}',   // ✔️ (legacy alias for completed, WL-0MU3U1AMP0044WUX)
 };
 
 const STAGE_FALLBACK: Record<string, string> = {
@@ -62,6 +63,7 @@ const STAGE_FALLBACK: Record<string, string> = {
   in_progress:      '[IN PR]',
   in_review:        '[REVIEW]',
   completed:        '[DONE]',
+  done:             '[DONE]',             // legacy alias for completed (WL-0MU3U1AMP0044WUX)
 };
 
 const PRIORITY_ICONS: Record<string, string> = {
@@ -341,6 +343,7 @@ export function stageColor(stage: string | undefined): number {
     in_progress: 76,       // green-ish
     in_review: 220,        // yellow-ish
     completed: 33,         // cyan-ish
+    done: 33,              // cyan-ish (legacy alias for completed, WL-0MU3U1AMP0044WUX)
   };
   return colors[stage || ''] ?? 241;
 }

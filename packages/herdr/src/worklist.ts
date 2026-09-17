@@ -158,6 +158,7 @@ export const STAGES = [
   'in_progress',
   'in_review',
   'completed',
+  'done',  // legacy stage alias for completed (WL-0MU3U1AMP0044WUX)
 ] as const;
 
 export type Stage = (typeof STAGES)[number];
@@ -177,6 +178,7 @@ export const STAGE_MAP: Record<string, string> = {
   plan_complete: 'plan_complete',
   in_progress: 'in_progress',
   in_review: 'in_review',
+  done: 'done',  // legacy stage alias for completed (WL-0MU3U1AMP0044WUX)
 };
 
 // ── /wl --priority <priority> map (WL-0MSKC8T46006999S) ────────────────
@@ -198,6 +200,7 @@ export const STAGE_COLORS: Record<string, number> = {
   in_progress: 76,
   in_review: 220,
   completed: 33,
+  done: 33,  // legacy stage alias for completed (WL-0MU3U1AMP0044WUX)
 };
 
 // ── Metadata panel sizing ───────────────────────────────────────────────

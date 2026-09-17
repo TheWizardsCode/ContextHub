@@ -16,7 +16,9 @@ import {
   getIconPrefix,
   iconsEnabled,
   isAuditFresh,
+  stageColor,
   stageDisplayIcon,
+  stageIcon,
   stringDisplayWidth,
 } from '@worklog/shared/icons';
 import { formatItemLine } from './worklist.js';
@@ -240,5 +242,45 @@ describe('isAuditFresh — atomic audit persistence (WL-0MT8KTE3E001Q1D9)', () =
     const auditedAt = '2026-08-02T10:00:30.000Z';
     const updatedAtAfterComment = '2026-08-02T10:01:35.000Z';
     expect(isAuditFresh(auditedAt, updatedAtAfterComment)).toBe(false);
+  });
+});
+
+// ── Legacy "done" stage (WL-0MU3U1AMP0044WUX) ────────────────────────────
+
+describe('legacy "done" stage renders identically to "completed" (WL-0MU3U1AMP0044WUX)', () => {
+  it('stageIcon returns ✔️ for "done" (not ❓)', () => {
+    expect(stageIcon('done')).toBe('\u{2714}\u{FE0F}'); // ✔️
+    expect(stageIcon('done')).toBe(stageIcon('completed'));
+  });
+
+  it('stageIcon text fallback returns [DONE] for "done"', () => {
+    expect(stageIcon('done', { noIcons: true })).toBe('[DONE]');
+    expect(stageIcon('done', { noIcons: true })).toBe(stageIcon('completed', { noIcons: true }));
+  });
+
+  it('stageColor returns same ANSI code for "done" as "completed" (33 = cyan-ish)', () => {
+    expect(stageColor('done')).toBe(33);
+    expect(stageColor('done')).toBe(stageColor('completed'));
+  });
+
+  it('getIconPrefix renders ✔️ for the stage column when stage=done', () => {
+    const item = { status: 'open', stage: 'done' } as const;
+    const prefix = getIconPrefix(item);
+    // The second icon in the prefix should be ✔️ (stage icon), not ❓
+    expect(prefix).toContain('\u{2714}\u{FE0F}'); // ✔️
+    expect(prefix).not.toContain('\u{2753}');   // ❓
+  });
+
+  it('formatItemLine renders ✔️ for stage column when stage=done', () => {
+    const item = {
+      id: 'WL-0TEST0000000000',
+      title: 'Test item',
+      status: 'open',
+      stage: 'done',
+    } as any;
+    const line = formatItemLine(item, 120);
+    // Should contain ✔️ (stage icon) and [DONE] (text stage tag), not ❓
+    expect(line).toContain('\u{2714}\u{FE0F}'); // ✔️ icon in prefix
+    expect(line).not.toContain('\u{2753}');     // no ❓ question mark
   });
 });
