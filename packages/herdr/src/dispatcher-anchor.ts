@@ -613,6 +613,7 @@ export async function getDispatcherTabAnchor(
 
   // 1. Fast path: persisted entry whose anchor pane is still alive.
   const initial = readTabAnchors(dir);
+  if (!initial) return null;
   const fastEntry = initial?.byPrefix?.[prefix];
   if (fastEntry !== undefined) {
     try {

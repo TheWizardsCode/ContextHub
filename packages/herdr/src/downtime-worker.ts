@@ -1900,7 +1900,7 @@ async function dispatchClaimedTier(
   // guard (race-safe) while atomically migrating the stored stage to the
   // tier's target — without this the `wl update` status/stage validator
   // rejects the claim and the dispatcher records a hard wl-error strike.
-  const retiredStage = candidate.stage === 'in_progress';
+  const retiredStage = (candidate.stage as string) === 'in_progress';
   const claimExpected: DowntimeClaimExpected = retiredStage
     ? { status: expected.status, stage: candidate.stage }
     : expected;
