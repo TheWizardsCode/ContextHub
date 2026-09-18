@@ -1767,6 +1767,58 @@ export function isImplementHeldByReviewGate(
 }
 
 // ── Herdr list-head filter dispatcher (WL-0MTK1ILM2009QYB2 AC1–2) ────
+
+/** A critical Herdr-head item paired with the stage-appropriate dispatch kind. */
+export interface CriticalFirstCandidate {
+  item: DowntimeHerdrItem;
+  kind: DowntimeSkillKind;
+}
+
+/**
+ * Critical-first selection for the Herdr-head paths (WL-0MU6UL3XY001M3VT).
+ *
+ * Returns the OPEN critical items of a Herdr head that pass the
+ * NON-BYPASSABLE safety gates, in deterministic order (lowest `sortIndex`
+ * first — the historical critical-tier ordering):
+ *
+ *  - `needsProducerReview === true` excludes that candidate;
+ *  - `classifyItemForDispatch` excludes non-dispatchable shapes (retired
+ *    stage, missing fields, above-caps `plan_complete`);
+ *  - while the code-freeze marker is frozen OR ambiguous, the
+ *    split-by-skill rule pauses audit/implement candidates while
+ *    plan/intake/risk-effort prep still passes — matching the direct
+ *    dispatch path's freeze filter (Q1).
+ *
+ * The NON-SAFETY filters that the HERDR paths deliberately bypass for
+ * critical work — the dispatched-marker exclusion and the review-queue
+ * depth hold — are NOT applied here, so a blocked critical item is escalated
+ * rather than starved by lower-priority work (AC1/AC4a). Free-slot minimums
+ * and the active-audit single-flight check are dispatch-time gates: the
+ * direct dispatcher applies them after selection; the offer computation
+ * intentionally does not (they are not offer gates).
+ *
+ * No second ranking is introduced (AC3): candidates always come from the
+ * passed Herdr head, never a separate `wl list` lookup.
+ */
+export function selectCriticalFirstCandidates(
+  items: DowntimeHerdrItem[],
+  now: number = Date.now(),
+  frozen: boolean = false,
+): CriticalFirstCandidate[] {
+  const sorted = items
+    .filter((i) => i.priority === 'critical' && i.status === 'open' && i.needsProducerReview !== true)
+    .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
+  const out: CriticalFirstCandidate[] = [];
+  for (const item of sorted) {
+    const kind = classifyItemForDispatch(item, now);
+    if (kind === null) continue;
+    // Safety gate: code-freeze/ambiguous split-by-skill (Q1).
+    if (frozen && (kind === 'audit' || kind === 'implement')) continue;
+    out.push({ item, kind });
+  }
+  return out;
+}
+
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
@@ -1781,6 +1833,42 @@ async function dispatchFromHerdrList(
   const planStages = _dispatchedStages(entries, 'plan');
   const intakeStages = _dispatchedStages(entries, 'intake');
   const riskEffortStages = _dispatchedStages(entries, 'risk-effort');
+
+  // ── Critical-first scan (WL-0MU6UL3XY001M3VT) ──────────────────────
+  // A critical item blocked by a NON-SAFETY filter (e.g. a stale dispatched
+  // marker or the review-queue depth gate) must be escalated within one idle
+  // cycle. The legacy critical-first tier (`dispatchDowntimeWork`) is dead
+  // whenever the Herdr head is non-empty — which is always, since critical
+  // items are mandatory-always in the head — so a blocked critical item is
+  // otherwise skipped while lower-priority work consumes the window.
+  //
+  // `selectCriticalFirstCandidates` yields the eligible open critical items
+  // (Herdr head, safety gates only); this loop bypasses the non-safety
+  // filters (dispatched-marker exclusion, review-queue depth hold) and adds
+  // the dispatch-time free-slot minimum. The CAS claim inside
+  // `dispatchClaimedTier` still serialises concurrent panes (AC2).
+  for (const { item: candidate, kind } of selectCriticalFirstCandidates(items, Date.now(), ctx.frozen)) {
+    // Safety gate: per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3).
+    if (kind === 'audit' && !ctx.auditEligible) continue;
+    if (kind !== 'audit' && !ctx.panesEligible) continue;
+    const cand: DowntimeCandidate = {
+      id: candidate.id,
+      title: candidate.title,
+      stage: kind === 'audit' ? 'audit' : (String(candidate.stage) as DowntimeStage),
+      status: candidate.status,
+      priority: candidate.priority,
+      sortIndex: candidate.sortIndex,
+    };
+    const outcome = await dispatchClaimedTier(deps, kind, cand, { model: ctx.model, cwd: ctx.cwd });
+    if (outcome.dispatched) return outcome;
+    // A lost CAS race / marker-recovery rollback applies to one candidate:
+    // try the next critical candidate, then fall through to the normal loop.
+    if (outcome.reason === 'claim-failed' || outcome.reason === 'claim-rolled-back') continue;
+    // Any other terminal outcome (wl-error, spawn-failed, anchor-unavailable)
+    // is returned unchanged so the caller's strike/skip semantics are kept.
+    return outcome;
+  }
+
   for (const item of items) {
     // Classify solely by list-provided fields — `classifyItemForDispatch`
     // already enforces risk/effort/audit-freshness gates (WL-0MTK1ILM2009QYB2).
@@ -1797,6 +1885,7 @@ async function dispatchFromHerdrList(
       updatedAt: item.updatedAt,
       sortIndex: item.sortIndex,
       parentId: item.parentId,
+      needsProducerReview: item.needsProducerReview,
     };
     const k = classifyItemForDispatch(info, now);
     if (k === null) continue;
@@ -2387,6 +2476,28 @@ export async function computeMostImportantItem(
     return reviewGate;
   };
   let heldByReviewQueue = false;
+
+  // Critical-first scan (WL-0MU6UL3XY001M3VT): a critical item blocked by a
+  // NON-SAFETY filter (stale dispatched marker, review-queue depth hold) must
+  // still be OFFERED — otherwise the check-in floats a lower-priority head
+  // item and the leader never dispatches the critical work. Safety gates
+  // (`needsProducerReview`, code-freeze split-by-skill) still apply inside the
+  // helper; free-slot minimums and active-audit single-flight remain
+  // dispatch-time gates and are intentionally not applied to an offer.
+  const [criticalFirst] = selectCriticalFirstCandidates(head.items, now, frozen);
+  if (criticalFirst !== undefined) {
+    const candidate: DowntimeCandidate = {
+      id: criticalFirst.item.id,
+      title: criticalFirst.item.title,
+      stage: criticalFirst.kind === 'audit'
+        ? 'audit'
+        : ((criticalFirst.item.stage as DowntimeStage) ?? 'idea'),
+      status: criticalFirst.item.status,
+      priority: criticalFirst.item.priority,
+      sortIndex: criticalFirst.item.sortIndex,
+    };
+    return { ok: true, kind: criticalFirst.kind, candidate };
+  }
 
   for (const item of head.items) {
     const k = classifyItemForDispatch(item, now);

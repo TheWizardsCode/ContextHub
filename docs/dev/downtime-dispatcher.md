@@ -24,8 +24,13 @@ and the coordination leader path `dispatchFromCoordination`) derives
 its candidate from the **Herdr list head** (first ordered item) and applies every remaining
 safety gate as a **sequential filter** on that ordered sequence (scheduled-prompt → code-freeze
 → producer-review gate (WL-0MTIAL65N004T22F) → dispatched-marker → free-slot minimums →
-active-audit single-flight → freshness/recency → CAS claim → spawn). If no head item passes
-the filters, the dispatcher reports "no candidate" rather than falling back to a second ranking.
+active-audit single-flight → freshness/recency → CAS claim → spawn). **Critical escalation
+(WL-0MU6UL3XY001M3VT):** before the normal sequence walk, open critical items in the head are
+escalated by `selectCriticalFirstCandidates` — a blocked critical item bypasses the NON-safety
+filters (dispatched-marker, review-queue hold) while the safety gates above still apply — so
+critical work is never starved by lower-priority items occupying the window (see the
+*Critical-first tier* section). If no head item passes the filters, the dispatcher reports
+"no candidate" rather than falling back to a second ranking.
 No `wl next`/database scoring change is required; the observable contract is
 "dispatcher == Herdr list head".
 
@@ -411,6 +416,50 @@ desired it must be a separate, explicit mechanism (follow-up, out of scope here)
 > coordination tier ordering; the freeze split-by-skill rule below still
 > applies verbatim as a sequential filter (frozen → audit/implement offers
 > and candidates are skipped, plan/intake still dispatch).
+
+**Critical escalation in the Herdr-head contract (WL-0MU6UL3XY001M3VT).**
+Critical items are mandatory-always in the Herdr head, but a *non-safety*
+filter can still exclude one from dispatch — most notoriously a **stale
+dispatched marker** (a previous dispatch was rolled back / the implementing
+agent aborted and reset the item to `open` while the standing marker
+remained). Before Herdr-head migration (WL-0MTK1ILM2009QYB2) the legacy
+critical-first tier re-looked-up the highest-priority open critical item
+from outside the head; that tier is unreachable today because the head is
+never empty. The result was silent starvation: a critical item blocked by a
+stale marker (or the review-queue hold) sat indefinitely while
+lower-priority work consumed each idle window (2026-09-18 RCA: three open
+critical items undispatched for 30+ hours).
+
+What the contract now guarantees:
+
+1. **Non-safety filters are bypassed for critical work.** Within one idle
+   cycle, the direct dispatcher (`dispatchFromHerdrList`) and the
+   coordination offer computation (`computeMostImportantItem`) both run a
+   **critical-first scan** over the Herdr head's open critical items
+   (`selectCriticalFirstCandidates`) — deterministic lowest-`sortIndex`
+   first, matching the historical critical-tier ordering — and dispatch /
+   offer the first one that passes. The dispatched-marker exclusion and the
+   review-queue depth hold are deliberately **not** applied to it (they are
+   the non-safety filters named in AC1); the pre-dispatch CAS claim still
+   serialises concurrent panes.
+2. **Safety gates still block.** The scan applies ONLY the safety gates:
+   `needsProducerReview === true` excludes the candidate; the code-freeze /
+   ambiguous split-by-skill rule pauses audit/implement-kind candidates
+   while plan/intake/risk-effort prep still dispatches (Q1); per-tier
+   free-slot minimums gate the dispatch path; the CAS claim and
+   per-process single-flight guards are unchanged. The active-audit
+   single-flight gate remains audit-tier scoped (an open critical item is
+   never audit-kind, so matching the legacy tier ordering it escalates even
+   while an audit is in flight).
+3. **No second ranking is introduced (AC3).** Scanning never re-ranks
+   against a separate `wl list` lookup — candidates come only from the
+   Herdr head, and only the critical group is re-ordered (by `sortIndex`).
+   `computeMostImportantItem` returns the critical item as the instance's
+   offer, so the coordination leader (which validates offers at
+   dispatch-time without a marker check) dispatches it.
+4. **A critical `completed`/`in_review` (audit-kind) item is out of the
+   scan's scope** — it is handled by the normal audit tier, so the
+   audit-freshness and active-audit gates keep acting on it unchanged.
 
 **Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
 implement/plan/intake tiers, the leader looks up the highest-priority open

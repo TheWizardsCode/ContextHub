@@ -8250,3 +8250,248 @@ describe('worker tick: the LLM idle check is the sole concurrency limiter (WL-0M
     });
   });
 });
+
+// ── Critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT) ──────
+// Regression tests for the critical-first scan that bypasses non-safety
+// filters (dispatched-marker, review-queue gate) for critical items on
+// the Herdr-head dispatch path.
+
+describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
+  const now = Date.now();
+  const fresh = new Date(now - 60_000).toISOString();
+
+  const criticalPlanned = (id: string): DowntimeHerdrItem => ({
+    id, title: `Critical plan ${id}`, status: 'open', stage: 'plan_complete',
+    risk: 'Low', effort: 'S', priority: 'critical',
+    sortIndex: 10,
+  });
+  const criticalIdea = (id: string): DowntimeHerdrItem => ({
+    id, title: `Critical idea ${id}`, status: 'open', stage: 'idea',
+    priority: 'critical',
+    sortIndex: 20,
+  });
+  const criticalIntake = (id: string): DowntimeHerdrItem => ({
+    id, title: `Critical intake ${id}`, status: 'open', stage: 'intake_complete',
+    priority: 'critical',
+    sortIndex: 30,
+  });
+  const nonCriticalImplement = (id: string): DowntimeHerdrItem => ({
+    id, title: `Implement ${id}`, status: 'open', stage: 'plan_complete',
+    risk: 'Low', effort: 'S', priority: 'medium',
+    sortIndex: 100,
+  });
+
+  describe('AC4(a) — critical item bypasses non-safety filters', () => {
+    it('a critical item with a stale dispatched marker dispatches ahead of a non-critical item', async () => {
+      // End-to-end incident simulation: a critical plan item carries a
+      // STANDING implement dispatch marker in the rolling log (its
+      // implementation aborted → status reset to open, marker never
+      // cleared). The normal loop would skip it forever; the critical-first
+      // scan must bypass the marker and escalate it ahead of the
+      // non-critical item.
+      const root = mkdtempSync(join(tmpdir(), 'herdr-crit-scan-marker-'));
+      mkdirSync(join(root, '.worklog'), { recursive: true });
+      writeFileSync(
+        join(root, '.worklog', 'downtime-dispatches.log'),
+        JSON.stringify({
+          at: new Date(now - 3_600_000).toISOString(),
+          cwd: root,
+          kind: 'implement',
+          itemId: 'CR-1',
+          stage: 'plan_complete',
+          dispatchedAt: new Date(now - 3_600_000).toISOString(),
+          message: 'Dispatched CR-1',
+        }) + '\n',
+      );
+      try {
+        const deps = makeDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+            criticalPlanned('CR-1'),
+            nonCriticalImplement('IMP-1'),
+          ]}),
+          claimItem: vi.fn().mockResolvedValue({ ok: true }),
+          spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+          recordDispatch: vi.fn().mockResolvedValue(true),
+        });
+
+        const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
+
+        expect(outcome.dispatched).toBe(true);
+        expect(outcome.kind).toBe('implement');
+        expect(outcome.candidate?.id).toBe('CR-1');
+        expect(deps.claimItem).toHaveBeenCalledWith(
+          'CR-1', { status: 'open', stage: 'plan_complete' }, root,
+        );
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+
+    it('critical item dispatches via risk-effort tier when stage is in_progress', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+          {
+            id: 'CR-2', title: 'Critical retired stage', status: 'open',
+            stage: 'in_progress', priority: 'critical',
+            risk: 'Low', effort: 'S', sortIndex: 10,
+          },
+          nonCriticalImplement('IMP-1'),
+        ]}),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('risk-effort');
+      expect(outcome.candidate?.id).toBe('CR-2');
+    });
+
+    it('a critical plan item dispatches via the plan tier (intake_complete stage)', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+          criticalIntake('CR-PLAN'),
+          nonCriticalImplement('IMP-1'),
+        ]}),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+      expect(outcome.candidate?.id).toBe('CR-PLAN');
+    });
+
+    it('a critical idea item dispatches via the intake tier', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+          criticalIdea('CR-INTAKE'),
+          nonCriticalImplement('IMP-1'),
+        ]}),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('intake');
+      expect(outcome.candidate?.id).toBe('CR-INTAKE');
+    });
+  });
+
+  describe('AC4(b) — safety gates block critical escalation', () => {
+    it('needsProducerReview === true blocks a critical item from critical-first scan', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+          {
+            ...criticalPlanned('CR-PR'),
+            needsProducerReview: true,
+          },
+          nonCriticalImplement('IMP-1'),
+        ]}),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      // Safety gate blocks critical → falls through to non-critical.
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      expect(outcome.candidate?.id).toBe('IMP-1');
+    });
+
+    it('code-freeze blocks critical implement but allows critical plan/intake', async () => {
+      const freezeDeps = makeDeps({
+        readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+          criticalPlanned('CR-FREEZE-IMP'),
+          criticalIntake('CR-FREEZE-PLAN'),
+          nonCriticalImplement('IMP-1'),
+        ]}),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchDowntimeWork(freezeDeps, { model: 'plan', cwd: '/repo' });
+
+      // Critical implement is freeze-blocked; critical plan dispatches.
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+      expect(outcome.candidate?.id).toBe('CR-FREEZE-PLAN');
+    });
+
+    it('active-audit single-flight is audit-tier scoped: an in-flight audit does not block open critical escalation', async () => {
+      // The active-audit single-flight gate filters AUDIT-kind candidates
+      // (a second audit pane must not start). An OPEN critical item is never
+      // audit-kind, so — matching the legacy critical-tier ordering — it is
+      // escalated even while an audit is in flight.
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+          criticalPlanned('CR-AUDIT'),
+          nonCriticalImplement('IMP-1'),
+        ]}),
+        getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: true }),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      expect(outcome.candidate?.id).toBe('CR-AUDIT');
+    });
+  });
+
+  describe('lowest sortIndex wins when multiple critical items exist', () => {
+    it('dispatches the lowest-sortIndex critical item first', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+          criticalPlanned('CR-2'),  // sortIndex: 10
+          criticalIdea('CR-1'),    // sortIndex: 20
+          nonCriticalImplement('IMP-1'),
+        ]}),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      // CR-2 has lower sortIndex (10) than CR-1 (20).
+      expect(outcome.candidate?.id).toBe('CR-2');
+    });
+  });
+
+  describe('no critical items — normal processing unchanged', () => {
+    it('non-critical items dispatch as usual when no critical items exist', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+          nonCriticalImplement('IMP-1'),
+        ]}),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      expect(outcome.candidate?.id).toBe('IMP-1');
+    });
+  });
+});

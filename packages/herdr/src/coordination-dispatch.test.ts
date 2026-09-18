@@ -1458,3 +1458,83 @@ describe('review-queue depth gate — coordination leader path (WL-0MTTSWC1X005P
     }
   });
 });
+
+// ── Critical-first offer on the coordination path (WL-0MU6UL3XY001M3VT) ──
+// A critical item blocked by a NON-SAFETY filter (stale dispatched marker,
+// review-queue depth hold) must still be OFFERED — otherwise the check-in
+// floats a lower-priority head item and the leader never dispatches the
+// critical work. Safety gates (needsProducerReview, code-freeze split-by-
+// skill) still apply to the offer.
+
+describe('critical-first offer on coordination path (WL-0MU6UL3XY001M3VT)', () => {
+  const criticalHead = (id: string, sortIndex = 10): DowntimeHerdrItem =>
+    headItem({ id, title: `Crit ${id}`, status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S', sortIndex });
+  const nonCriticalHead = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Impl ${id}`, status: 'open', stage: 'plan_complete', priority: 'high', risk: 'Low', effort: 'S', sortIndex });
+
+  it('computeMostImportantItem: a critical implement with a stale marker is still offered ahead of a non-critical head item', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [criticalHead('CR-1'), nonCriticalHead('IMP-1')],
+      }),
+    });
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    expect(result.candidate.id).toBe('CR-1');
+    expect(result.kind).toBe('implement');
+  });
+
+  it('computeMostImportantItem: the lowest sortIndex critical item is offered first', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [
+          criticalHead('CR-2', 20),
+          criticalHead('CR-1', 10), // lower sortIndex → wins
+        ],
+      }),
+    });
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    expect(result.candidate.id).toBe('CR-1');
+  });
+
+  it('computeMostImportantItem: needsProducerReview critical item is NOT offered (safety gate)', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [
+          { ...criticalHead('CR-PR'), needsProducerReview: true },
+          nonCriticalHead('IMP-1'),
+        ],
+      }),
+    });
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    // Safety gate blocks the critical item; the non-critical head is offered.
+    expect(result.candidate.id).toBe('IMP-1');
+  });
+
+  it('computeMostImportantItem: a frozen critical IMPLEMENT is not offered (split-by-skill), critical plan still is', async () => {
+    const frozenDeps = makeCoordinationDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [
+          criticalHead('CR-FREEZE-IMP'),
+          headItem({ id: 'CR-FREEZE-PLAN', title: 'Crit plan', status: 'open', stage: 'intake_complete', priority: 'critical', sortIndex: 20 }),
+        ],
+      }),
+    });
+    const result = await computeMostImportantItem(frozenDeps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    // Implement-kind critical paused by the freeze; plan-kind critical still offers.
+    expect(result.candidate.id).toBe('CR-FREEZE-PLAN');
+    expect(result.kind).toBe('plan');
+  });
+});
