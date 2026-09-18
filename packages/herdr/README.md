@@ -325,6 +325,15 @@ critical items at the Herdr head, so a critical item dispatches as soon as it is
 first classifyable list item (WL-0MSI8H3HP000K0RG audit, WL-0MSMAYPQP001FLR6 implement,
 WL-0MT3FM8VA005XBHE critical).
 
+**Extended dispatch window (WL-0MU6UL3GQ0015AA5):** the Herdr head is windowed
+(mandatory items always included, remaining slots filled from "other" items), so a large
+mandatory set can push the only dispatchable candidate past the window. When the head
+yields no candidate the dispatcher re-reads the **same ranking path** with a bounded
+larger count (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional items) and skips the items
+already seen — a window extension, never a second ranking. The TUI worklist still renders
+exactly `browseItemCount` items; the extension is dispatch-only. A `no-candidate` outcome
+therefore means the whole bounded dispatch backlog held nothing dispatchable.
+
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)
 **nor** the magnifying glass `🔍` (no audit / stale failed). Concretely,

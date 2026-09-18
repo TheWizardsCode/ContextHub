@@ -68,6 +68,8 @@ import {
   createIdleTracker,
   createPerSlotIdleTracker,
   dispatchDowntimeWork,
+  computeMostImportantItem,
+  fetchExtendedHerdrItems,
   createDowntimeWorker,
   buildDowntimePrompt,
   buildDowntimePaneArgs,
@@ -126,6 +128,7 @@ import {
   withTransientRetry,
   MIN_BROWSE_ITEM_COUNT,
   MAX_BROWSE_ITEM_COUNT,
+  DOWNTIME_DISPATCH_EXTEND_MAX,
 } from './downtime-worker.js';
 import {
   clampBrowseItemCount,
@@ -8492,6 +8495,244 @@ describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
       expect(outcome.dispatched).toBe(true);
       expect(outcome.kind).toBe('implement');
       expect(outcome.candidate?.id).toBe('IMP-1');
+    });
+  });
+});
+// ── Dispatch-window extension — Herdr head-cap starvation (WL-0MU6UL3GQ0015AA5) ──
+// The dispatcher iterates the Herdr list head, which is windowed: mandatory
+// items (critical + completed/in_review) are always included and consume
+// slots, so when they are numerous the first genuinely dispatchable candidate
+// can fall beyond the window. These tests reproduce the 2026-09-18 starvation
+// (a 30-item head, all blocked; the only dispatchable item was the 22nd
+// "other", cut off by the cap) and assert the bounded window extension finds
+// it in the SAME ranking order.
+//
+// Blocking is done by CLASSIFICATION SHAPE (above-caps risk for open items,
+// out-of-recency for completed/in_review) rather than by the
+// `needsProducerReview` flag: on the current `dev` the live Herdr-head
+// dispatcher builds its `classifyItemForDispatch` input WITHOUT threading
+// `needsProducerReview`, so that flag does not block on this path yet (a
+// separate defect tracked as a discovered-from work item).
+
+describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5)', () => {
+  const OLD = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+
+  /** An open item above the implement risk cap (never dispatchable). */
+  const blockedImplement = (id: string, overrides: Partial<DowntimeHerdrItem> = {}): DowntimeHerdrItem => ({
+    id,
+    title: `Blocked ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'medium',
+    risk: 'High',
+    effort: 'S',
+    sortIndex: 100,
+    ...overrides,
+  });
+
+  /** A completed/in_review item outside the audit recency window (never dispatchable). */
+  const blockedReview = (id: string, overrides: Partial<DowntimeHerdrItem> = {}): DowntimeHerdrItem => ({
+    id,
+    title: `Blocked review ${id}`,
+    status: 'completed',
+    stage: 'in_review',
+    priority: 'medium',
+    updatedAt: OLD,
+    sortIndex: 2,
+    ...overrides,
+  });
+
+  /** 1 blocked critical + 8 blocked completed/in_review = the 9 mandatory slots. */
+  const mandatorySet = (): DowntimeHerdrItem[] => [
+    blockedImplement('CG-CRIT', { priority: 'critical', sortIndex: 1 }),
+    ...Array.from({ length: 8 }, (_, i) => blockedReview(`CG-REV${i + 1}`, { sortIndex: 2 + i })),
+  ];
+
+  /** 21 blocked "other" items fill the remaining window slots (total head = 30). */
+  const blockedOthers = (): DowntimeHerdrItem[] =>
+    Array.from({ length: 21 }, (_, i) => blockedImplement(`CG-BLK${i + 1}`, { sortIndex: 20 + i }));
+
+  /** The only genuinely dispatchable item (high, idea, no markers, not review-gated). */
+  const dispatchableIntake = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Dispatchable ${id}`,
+    status: 'open',
+    stage: 'idea',
+    priority: 'high',
+    sortIndex: 999,
+  });
+
+  const fullHead = (): DowntimeHerdrItem[] => [...mandatorySet(), ...blockedOthers()];
+
+  describe('AC3 — regression: the dispatchable item beyond the window cap is found', () => {
+    it('direct dispatch (dispatchDowntimeWork) dispatches the out-of-window candidate', async () => {
+      const initialHead = fullHead();
+      const target = dispatchableIntake('CG-0MTZO0YIM000VAIQ');
+      const getHerdrListHead = vi.fn()
+        .mockResolvedValueOnce({ ok: true, items: initialHead })
+        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('intake');
+      expect(outcome.candidate?.id).toBe('CG-0MTZO0YIM000VAIQ');
+      // The extension re-read the SAME ranking path with a bounded larger
+      // window (never a second ranking).
+      expect(getHerdrListHead).toHaveBeenCalledTimes(2);
+      expect(getHerdrListHead).toHaveBeenNthCalledWith(
+        2,
+        '/repo',
+        initialHead.length + DOWNTIME_DISPATCH_EXTEND_MAX,
+      );
+      expect(deps.claimItem).toHaveBeenCalledWith(
+        'CG-0MTZO0YIM000VAIQ',
+        { status: 'open', stage: 'idea' },
+        '/repo',
+      );
+    });
+
+    it('the coordination check-in offer (computeMostImportantItem) also uses the extended window', async () => {
+      const initialHead = fullHead();
+      const target = dispatchableIntake('CG-OFFER');
+      const getHerdrListHead = vi.fn()
+        .mockResolvedValueOnce({ ok: true, items: initialHead })
+        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      const result = await computeMostImportantItem(deps, '/repo');
+
+      expect(result).toMatchObject({
+        ok: true,
+        kind: 'intake',
+        candidate: { id: 'CG-OFFER' },
+      });
+      expect(getHerdrListHead).toHaveBeenCalledTimes(2);
+    });
+
+    it('prefers an in-window candidate over the extended window (no extra lookup when the head suffices)', async () => {
+      const inWindow = dispatchableIntake('CG-INWINDOW');
+      const getHerdrListHead = vi.fn().mockResolvedValue({ ok: true, items: [inWindow, ...blockedOthers()] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('CG-INWINDOW');
+      // The head already yielded a candidate — the extension never runs.
+      expect(getHerdrListHead).toHaveBeenCalledTimes(1);
+    });
+
+    it('extends even under a code freeze to reach plan/intake work beyond the window', async () => {
+      // Under a freeze, audit/implement candidates are paused, but plan/intake
+      // prep work still dispatches. A dispatchable intake item beyond the
+      // window must therefore still be reachable.
+      const initialHead = fullHead();
+      const target = dispatchableIntake('CG-FROZEN-OUT-OF-WINDOW');
+      const getHerdrListHead = vi.fn()
+        .mockResolvedValueOnce({ ok: true, items: initialHead })
+        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] });
+      const deps = makeDeps({
+        readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+        getHerdrListHead,
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('intake');
+      expect(outcome.candidate?.id).toBe('CG-FROZEN-OUT-OF-WINDOW');
+      expect(getHerdrListHead).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('AC2 — bounded extension, no worklist regression, terminal reasons preserved', () => {
+    it('stays no-candidate when the extended window adds nothing (mock ignores the limit)', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: fullHead() }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      expect(deps.claimItem).not.toHaveBeenCalled();
+    });
+
+    it('reports code-freeze when a frozen head plus extension still yields no candidate', async () => {
+      const deps = makeDeps({
+        readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+        // Both the head and the extension return the same blocked items.
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: fullHead() }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('code-freeze');
+    });
+
+    it('the extension never invents a new failure: a failed extended lookup degrades to no-candidate', async () => {
+      const getHerdrListHead = vi.fn()
+        .mockResolvedValueOnce({ ok: true, items: fullHead() })
+        .mockResolvedValueOnce({ ok: false, error: 'boom' });
+      const deps = makeDeps({ getHerdrListHead });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+      expect(getHerdrListHead).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('fetchExtendedHerdrItems — window extension primitive', () => {
+    const item = (id: string): DowntimeHerdrItem => ({
+      id,
+      title: `Item ${id}`,
+      status: 'open',
+      stage: 'idea',
+    });
+
+    it('returns only the newly visible items, preserving the canonical order', async () => {
+      const current = [item('A'), item('B')];
+      const dep = vi.fn().mockResolvedValue({
+        ok: true,
+        items: [item('A'), item('B'), item('C'), item('D')],
+      });
+      const deps = makeDeps({ getHerdrListHead: dep });
+
+      const extended = await fetchExtendedHerdrItems(deps, '/repo', current);
+
+      expect(extended.map((i) => i.id)).toEqual(['C', 'D']);
+      expect(dep).toHaveBeenCalledWith('/repo', 2 + DOWNTIME_DISPATCH_EXTEND_MAX);
+    });
+
+    it('returns [] when the extended head adds nothing (limit-ignoring dep)', async () => {
+      const current = [item('A')];
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [item('A')] }),
+      });
+
+      expect(await fetchExtendedHerdrItems(deps, '/repo', current)).toEqual([]);
+    });
+
+    it('fails open to [] on a {ok:false} extended lookup', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: false, error: 'boom' }),
+      });
+
+      expect(await fetchExtendedHerdrItems(deps, '/repo', [item('A')])).toEqual([]);
+    });
+
+    it('fails open to [] when the extended lookup throws', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockRejectedValue(new Error('boom')),
+      });
+
+      expect(await fetchExtendedHerdrItems(deps, '/repo', [item('A')])).toEqual([]);
     });
   });
 });

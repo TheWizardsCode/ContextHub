@@ -229,6 +229,25 @@ export const DISPATCH_PIPELINE_SINGLE_FLIGHT = 1;
 export const DEFAULT_BROWSE_ITEM_COUNT = 20;
 
 /**
+ * Maximum number of additional items to fetch when extending the dispatch
+ * window (WL-0MU6UL3GQ0015AA5).
+ *
+ * When the Herdr list head contains no dispatchable candidate but the
+ * broader backlog does, the dispatcher re-reads the SAME ranking path with a
+ * window of `head length + DOWNTIME_DISPATCH_EXTEND_MAX` items and iterates
+ * the newly visible ones in the same Herdr priority order. This prevents
+ * starvation when mandatory items (critical + completed/in_review) consume
+ * most of the head slots and the only dispatchable item falls outside the
+ * window.
+ *
+ * The extension is bounded: a default 30-item head plus an extension of 30
+ * means at most 60 items are ever scanned per dispatch cycle. The TUI
+ * worklist continues to show exactly `browseItemCount` items (clamped
+ * 1–50).
+ */
+export const DOWNTIME_DISPATCH_EXTEND_MAX = 30;
+
+/**
  * Audit-tier recency window: a completed/in_review candidate is only
  * dispatched for audit when it was modified within the last 7 days.
  */
@@ -1242,7 +1261,7 @@ export interface DowntimeWorkerDeps {
    * Fail-closed `{ok:false}` on a wl/parse failure (a strike), otherwise
    * `{ok:true, items:[…]}` (empty when genuinely empty).
    */
-  getHerdrListHead(cwd: string): Promise<DowntimeHerdrListResult>;
+  getHerdrListHead(cwd: string, limit?: number): Promise<DowntimeHerdrListResult>;
   /**
    * Runs `wl next --stage <stage> -n 10 --json` and reports the first
    * selectable candidate (or a wl failure). `cwd` is the worklog root whose
@@ -1764,6 +1783,50 @@ export function isImplementHeldByReviewGate(
   if (kind !== 'implement') return false;
   if (gate === null || !gate.deep) return false;
   return candidate.priority !== 'critical';
+}
+
+// ── Dispatch-window extension (WL-0MU6UL3GQ0015AA5) ─────────────────
+/**
+ * Fetch the EXTENDED Herdr head for dispatch (WL-0MU6UL3GQ0015AA5).
+ *
+ * The dispatcher consumes the Herdr list head produced by the canonical
+ * ranking path (fetcher → smart-selection → grouping). Mandatory items
+ * (critical + `completed`/`in_review`) are always included and consume
+ * window slots, so when they are numerous the first genuinely dispatchable
+ * candidate can fall beyond the initial window — the dispatcher then sees
+ * no candidate even though the broader backlog holds one (the 2026-09-18
+ * 31-hour starvation incident).
+ *
+ * This helper re-reads the SAME ranking path with a larger window
+ * (`current.length + DOWNTIME_DISPATCH_EXTEND_MAX`) and returns only the
+ * items NOT already present in `current`, preserving the canonical order.
+ * It is a WINDOW EXTENSION, never a second ranking: the same
+ * `selectWorkItems` / `regroupWorkItems` contract decides the order, just
+ * with more "other" items included.
+ *
+ * Fail-open: an absent optional `limit` support (test mocks ignoring the
+ * argument), a `{ok:false}` CLI failure, a thrown error, or an extended head
+ * that adds nothing all resolve `[]` — the caller's terminal reason is then
+ * unchanged, so the extension can never convert a defined outcome into a
+ * new failure. Returning `[]` also makes the extension idempotent for mocks
+ * that ignore the limit (the extended head equals the current head).
+ */
+export async function fetchExtendedHerdrItems(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+  current: DowntimeHerdrItem[],
+): Promise<DowntimeHerdrItem[]> {
+  try {
+    const extended = await deps.getHerdrListHead(
+      cwd,
+      current.length + DOWNTIME_DISPATCH_EXTEND_MAX,
+    );
+    if (!extended.ok) return [];
+    const seen = new Set(current.map((i) => i.id));
+    return extended.items.filter((i) => !seen.has(i.id));
+  } catch {
+    return []; // fail-open: the extension never breaks a defined outcome
+  }
 }
 
 // ── Herdr list-head filter dispatcher (WL-0MTK1ILM2009QYB2 AC1–2) ────
@@ -2499,38 +2562,66 @@ export async function computeMostImportantItem(
     return { ok: true, kind: criticalFirst.kind, candidate };
   }
 
-  for (const item of head.items) {
-    const k = classifyItemForDispatch(item, now);
-    if (k === null) continue; // review-gate + freshness/recency + caps
-    // Dispatched-marker exclusion per kind.
-    if (k === 'audit' && auditIds.has(item.id)) continue;
-    if (k === 'implement' && implementIds.has(item.id)) continue;
-    if (k === 'risk-effort' && riskEffortStages.get(item.id) === (item.stage ?? '')) continue;
-    if (k === 'plan' && planStages.get(item.id) === (item.stage ?? '')) continue;
-    if (k === 'intake' && intakeStages.get(item.id) === (item.stage ?? '')) continue;
-    // Code-freeze split-by-skill: audit+implement+risk-effort offers pause
-    // during a freeze/ambiguous marker (plan/intake still offer).
-    if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) continue;
-    // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
-    // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while the
-    // queue is deep — the instance then offers its next dispatchable head
-    // item (audit/plan/intake) instead of floating a held implement.
-    if (k === 'implement') {
-      const gate = await reviewGateForQueue();
-      if (isImplementHeldByReviewGate(k, item, gate)) {
-        heldByReviewQueue = true;
-        continue;
+  /**
+   * Scan one ordered candidate window for the first offerable item (the
+   * sequential filters mirror `dispatchFromHerdrList`). Returns null when
+   * nothing in the window is offerable; `heldByReviewQueue` records whether
+   * the only reason was the deep-queue hold of a non-critical implement.
+   */
+  const findOfferIn = async (
+    items: DowntimeHerdrItem[],
+  ): Promise<{ ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate } | null> => {
+    for (const item of items) {
+      const k = classifyItemForDispatch(item, now);
+      if (k === null) continue; // review-gate + freshness/recency + caps
+      // Dispatched-marker exclusion per kind.
+      if (k === 'audit' && auditIds.has(item.id)) continue;
+      if (k === 'implement' && implementIds.has(item.id)) continue;
+      if (k === 'risk-effort' && riskEffortStages.get(item.id) === (item.stage ?? '')) continue;
+      if (k === 'plan' && planStages.get(item.id) === (item.stage ?? '')) continue;
+      if (k === 'intake' && intakeStages.get(item.id) === (item.stage ?? '')) continue;
+      // Code-freeze split-by-skill: audit+implement+risk-effort offers pause
+      // during a freeze/ambiguous marker (plan/intake still offer).
+      if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) continue;
+      // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
+      // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while the
+      // queue is deep — the instance then offers its next dispatchable head
+      // item (audit/plan/intake) instead of floating a held implement.
+      if (k === 'implement') {
+        const gate = await reviewGateForQueue();
+        if (isImplementHeldByReviewGate(k, item, gate)) {
+          heldByReviewQueue = true;
+          continue;
+        }
       }
+      const candidate: DowntimeCandidate = {
+        id: item.id,
+        title: item.title,
+        stage: k === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
+        status: item.status,
+        priority: item.priority,
+        sortIndex: item.sortIndex,
+      };
+      return { ok: true, kind: k, candidate };
     }
-    const candidate: DowntimeCandidate = {
-      id: item.id,
-      title: item.title,
-      stage: k === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
-      status: item.status,
-      priority: item.priority,
-      sortIndex: item.sortIndex,
-    };
-    return { ok: true, kind: k, candidate };
+    return null;
+  };
+
+  const offer = await findOfferIn(head.items);
+  if (offer !== null) return offer;
+
+  // ── Extended dispatch window (WL-0MU6UL3GQ0015AA5) ──
+  // Mandatory items (critical + completed/in_review) always occupy the head
+  // and consume its slots, so the only offerable item can lie beyond the
+  // window. Re-read the SAME ranking path with a bounded larger window and
+  // scan only the newly visible items; a window extension, never a second
+  // ranking. Runs for every filtered-exhaustion reason (plan/intake offers
+  // remain valid under a code-freeze); the terminal result below is
+  // unchanged when the extension adds nothing.
+  const extendedItems = await fetchExtendedHerdrItems(deps, cwd, head.items);
+  if (extendedItems.length > 0) {
+    const extendedOffer = await findOfferIn(extendedItems);
+    if (extendedOffer !== null) return extendedOffer;
   }
 
   // Herdr list was non-empty but every item was filtered by a safety gate
@@ -3083,13 +3174,33 @@ export async function dispatchDowntimeWork(
       const head = await deps.getHerdrListHead(opts.cwd);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
-        const herdrOutcome = await dispatchFromHerdrList(deps, head.items, { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate }, flags);
+        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate };
+        const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
+        if (herdrOutcome !== null) return herdrOutcome;
+
+        // ── Extended dispatch window (WL-0MU6UL3GQ0015AA5) ──
+        // The initial head is windowed (mandatory items always included, the
+        // remaining slots filled from "other" items), so when the mandatory
+        // set is large the first genuinely dispatchable candidate can fall
+        // outside it and the dispatcher would report 'no-candidate' despite a
+        // healthy backlog (the 2026-09-18 31-hour starvation). Re-read the
+        // SAME ranking path with a bounded larger window and filter ONLY the
+        // newly visible items — a window extension, never a second ranking.
+        // Runs for every filtered-exhaustion reason (including a code-freeze,
+        // where plan/intake work can still lie beyond the window); the
+        // terminal reason below is unchanged when the extension adds nothing,
+        // so no defined outcome is ever converted into a new failure.
+        const extendedItems = await fetchExtendedHerdrItems(deps, opts.cwd, head.items);
+        if (extendedItems.length > 0) {
+          const extendedOutcome = await dispatchFromHerdrList(deps, extendedItems, ctx, flags);
+          if (extendedOutcome !== null) return extendedOutcome;
+        }
+
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
-        if (herdrOutcome !== null) return herdrOutcome;
         // Herdr list had items but every one was filtered by a safety gate:
         // compose the terminal reason and DO NOT fall through to the legacy
         // chain (AC2 — gates are filters, not a fallback ranking).

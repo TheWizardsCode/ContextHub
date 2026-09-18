@@ -761,9 +761,9 @@ export function createDowntimeDeps(
     // Batch size 30: enough to filter through (code-freeze, dispatched-marker, single-flight)
     // without excessive overhead; fetchNextItems applies mandatory-always, browseItemCount
     // windowing, and regroupWorkItems grouping — the sole ranking path.
-    getHerdrListHead: async (_cwd: string): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
+    getHerdrListHead: async (_cwd: string, limit?: number): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
       try {
-        const items = await fetchNextItems(30);
+        const items = await fetchNextItems(limit ?? 30);
         return { ok: true, items };
       } catch (err) {
         return { ok: false, error: String(err) };
