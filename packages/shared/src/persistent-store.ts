@@ -746,10 +746,9 @@ export class SqlitePersistentStore {
    */
   batchUpdateSortIndices(orderedItems: WorkItem[], gap: number): number {
     const updateStmt = this.db.prepare(`
-      UPDATE workitems SET sortIndex = ?, updatedAt = ? WHERE id = ?
+      UPDATE workitems SET sortIndex = ? WHERE id = ?
     `);
 
-    const now = new Date().toISOString();
     let updated = 0;
 
     const doUpdates = this.db.transaction(() => {
@@ -757,7 +756,7 @@ export class SqlitePersistentStore {
         const item = orderedItems[index];
         const nextSortIndex = (index + 1) * gap;
         if (item.sortIndex !== nextSortIndex) {
-          updateStmt.run(nextSortIndex, now, item.id);
+          updateStmt.run(nextSortIndex, item.id);
           updated += 1;
         }
       }

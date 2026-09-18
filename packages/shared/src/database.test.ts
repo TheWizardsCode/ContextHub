@@ -517,6 +517,67 @@ function makeFactoryItem(overrides: Partial<WorkItem> = {}): WorkItem {
   };
 }
 
+
+// ── WL-0MU2QKB98007BKYT: re-sort does NOT invalidate fresh audits via updatedAt churn ──
+
+describe('reSort does NOT bump updatedAt on audit-fresh items (WL-0MU2QKB98007BKYT)', () => {
+  it('reSort preserves updatedAt so a passing audit remains fresh after re-sort', () => {
+    const item1 = makeItem({ id: 'WI-A', sortIndex: 500 });
+    const item2 = makeItem({ id: 'WI-B', sortIndex: 600 });
+
+    db.import([item1, item2]);
+    expect(db.get('WI-A')?.updatedAt).toBe(FIXED_TS);
+
+    // Save an audit result that passes (readyToClose=true).
+    db.saveAuditResult({
+      workItemId: 'WI-A',
+      readyToClose: true,
+      auditedAt: FIXED_TS,
+      summary: 'ready to close',
+      rawOutput: null,
+      author: 'test',
+    });
+
+    const updatedAtBefore = db.get('WI-A')?.updatedAt!;
+
+    // Trigger re-sort — both items will likely get new sortIndex values.
+    db.reSort('ignore', 100);
+
+    // The updatedAt must NOT have changed — audit freshness is preserved.
+    const storedA = db.get('WI-A');
+    expect(storedA?.updatedAt).toBe(updatedAtBefore);
+
+    // The audit should still be considered fresh (auditedAt >= updatedAt).
+    const audit = db.getAuditResult('WI-A');
+    expect(audit?.readyToClose).toBe(true);
+  });
+
+  it('batchUpdateSortIndices does NOT update updatedAt on sort-only changes', () => {
+    const item1 = makeItem({ id: 'WI-C', sortIndex: 500 });
+    const item2 = makeItem({ id: 'WI-D', sortIndex: 1500 });
+
+    db.import([item1, item2]);
+
+    const updatedAtBefore = db.get('WI-C')?.updatedAt!;
+
+    // Assign sort indices — WI-C will move from 500 to 100 (index 1 * 100).
+    db.reSort('ignore', 100);
+
+    expect(db.get('WI-C')?.updatedAt).toBe(updatedAtBefore);
+    expect(db.get('WI-D')?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('genuine semantic edits still bump updatedAt — freshness invariant intact', () => {
+    const item = makeItem({ id: 'WI-E', sortIndex: 100 });
+    db.import([item]);
+    const originalUpdatedAt = db.get('WI-E')?.updatedAt!;
+
+    // Genuine status change bumps updatedAt.
+    db.import([{ ...item, status: 'in_progress' as any }]);
+    expect(db.get('WI-E')?.updatedAt).not.toBe(originalUpdatedAt);
+  });
+});
+
 // ── WL-0MT2KYCNB000CYWV: delta pull persists COMMENTS non-destructively ──
 
 // ── WL-0MU38HN2J008WWTB: update() persists deletedBy and deleteReason ──
