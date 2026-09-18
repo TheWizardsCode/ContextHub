@@ -101,7 +101,8 @@
  *  - `buildDowntimePrompt` / `BLOCKED_QUESTIONS_INSTRUCTION` — dispatched
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
- *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs`
+ *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs` /
+ *    `clampDowntimeMarkerStaleWindowMs` (WL-0MU6UL0RJ008IHGT)
  *    — settings clamps, wired into `settings.ts`.
  *  - `selectWithRotation` (WL-0MSSRED76008LGB6) — rotation-aware selection:
  *    within each tier, candidates sharing the same priority level are
@@ -143,10 +144,9 @@ import {
 import { appendCoordinationLogEntry } from './downtime-log.js';
 import {
   readDowntimeLogEntries as _readDowntimeEntries,
-  auditDispatchedItemIds as _auditIds,
-  implementDispatchedItemIds as _implIds,
-  riskEffortDispatchedItemIds as _riskEffortIds,
-  dispatchedItemStages as _dispatchedStages,
+  dispatchedItemMarkers as _dispatchedMarkers,
+  markerStillExcludes as _markerStillExcludes,
+  type DispatchMarker,
 } from './downtime-log.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 import type { DispatcherAnchor, DispatcherTabAnchorEntry } from './dispatcher-anchor.js';
@@ -261,6 +261,29 @@ export const DOWNTIME_AUDIT_RECENCY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
  * time during downtime dispatch.
  */
 export const DOWNTIME_AUDIT_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+/**
+ * Default dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT):
+ * a SUCCESS dispatch marker whose item is STILL at the marker's dispatched-at
+ * stage is released once its age exceeds this window — a pane that spawned
+ * but whose agent never advanced the item (crash, manual close, silent
+ * failure) must not strand the item permanently. Default 24 hours.
+ */
+export const DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Hard floor for the success-marker staleness window (1 h): below this the
+ * age release would fire while a dispatched pane is plausibly still running,
+ * weakening duplicate-dispatch protection for genuinely in-flight work.
+ */
+export const DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS = 60 * 60 * 1000;
+
+/**
+ * Hard ceiling for the success-marker staleness window (7 days): above this
+ * a stranded item could be excluded for a week, reintroducing the original
+ * permanent-stranding failure mode at a large but bounded scale.
+ */
+export const DOWNTIME_MARKER_STALE_WINDOW_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Three-strike rule: this many consecutive CLI-error dispatch outcomes
@@ -1885,17 +1908,21 @@ export function selectCriticalFirstCandidates(
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null },
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number },
   flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
-  const auditIds = _auditIds(entries);
-  const implementIds = _implIds(entries);
-  const riskEffortIds = _riskEffortIds(entries);
-  const planStages = _dispatchedStages(entries, 'plan');
-  const intakeStages = _dispatchedStages(entries, 'intake');
-  const riskEffortStages = _dispatchedStages(entries, 'risk-effort');
+  // Staleness-aware success-marker maps (WL-0MU6UL0RJ008IHGT): id → the
+  // dispatched-at stage + timestamp, read once per dispatch and consulted
+  // below through `markerStillExcludes`.
+  const markerMaps: Record<DowntimeSkillKind, Map<string, DispatchMarker>> = {
+    audit: _dispatchedMarkers(entries, 'audit'),
+    implement: _dispatchedMarkers(entries, 'implement'),
+    plan: _dispatchedMarkers(entries, 'plan'),
+    intake: _dispatchedMarkers(entries, 'intake'),
+    'risk-effort': _dispatchedMarkers(entries, 'risk-effort'),
+  };
 
   // ── Critical-first scan (WL-0MU6UL3XY001M3VT) ──────────────────────
   // A critical item blocked by a NON-SAFETY filter (e.g. a stale dispatched
@@ -1963,12 +1990,29 @@ async function dispatchFromHerdrList(
       try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
     }
     // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion
-    // (WL-0MSLIY8ZR004QUSY/AC6) but applied as a filter on the Herdr head.
-    if (k === 'audit' && auditIds.has(item.id)) continue;
-    if (k === 'implement' && implementIds.has(item.id)) continue;
-    if (k === 'risk-effort' && riskEffortStages.get(item.id) === (item.stage ?? '')) continue;
-    if (k === 'plan' && planStages.get(item.id) === (item.stage ?? '')) continue;
-    if (k === 'intake' && intakeStages.get(item.id) === (item.stage ?? '')) continue;
+    // (WL-0MSLIY8ZR004QUSY/AC6) but applied as a filter on the Herdr head,
+    // and staleness-aware (WL-0MU6UL0RJ008IHGT): a success marker excludes
+    // ONLY while the item is STILL at the marker's dispatched-at stage AND
+    // the marker is fresh (age ≤ ctx.markerStaleWindowMs). A stale marker at
+    // an unchanged stage is released, so a pane that spawned but never
+    // advanced the item can no longer strand it permanently (AC1); an
+    // advanced item releases exactly as before (AC2). Audit/implement use
+    // the id-guard mode (legacy stage-less markers stay protected while
+    // fresh — duplicate-dispatch protection is never weakened); the
+    // plan/intake/risk-effort stage-guard tiers release a legacy marker.
+    const marker = markerMaps[k]?.get(item.id);
+    if (
+      marker !== undefined &&
+      _markerStillExcludes(
+        marker,
+        item.stage,
+        now,
+        ctx.markerStaleWindowMs,
+        k === 'audit' || k === 'implement' ? 'id-guard' : 'stage-guard',
+      )
+    ) {
+      continue;
+    }
     // Code-freeze split-by-skill: audit+implement dispatch pauses during
     // a freeze/ambiguous marker (plan/intake still dispatch).
     if (ctx.frozen && (k === 'audit' || k === 'implement')) continue;
@@ -2501,6 +2545,7 @@ export async function computeMostImportantItem(
   cwd: string,
   now: number = Date.now(),
   browseItemCount: number = DEFAULT_BROWSE_ITEM_COUNT,
+  markerStaleWindowMs: number = DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
 ): Promise<MostImportantItemResult> {
   // The check-in (and the worker's no-candidate probe) requires the Herdr
   // head lookup: without it there is no canonical ranking to offer from —
@@ -2519,12 +2564,19 @@ export async function computeMostImportantItem(
   // shared rolling dispatch log for THIS worklog root so an item already
   // dispatched by this worker is never offered to the coordinator again.
   const entries = await _readDowntimeEntries(cwd);
-  const auditIds = _auditIds(entries);
-  const implementIds = _implIds(entries);
-  const riskEffortIds = _riskEffortIds(entries);
-  const planStages = _dispatchedStages(entries, 'plan');
-  const intakeStages = _dispatchedStages(entries, 'intake');
-  const riskEffortStages = _dispatchedStages(entries, 'risk-effort');
+  // Staleness-aware success-marker maps (WL-0MU6UL0RJ008IHGT): id → the
+  // dispatched-at stage + timestamp, read once per offer computation and
+  // consulted through `markerStillExcludes` below. A SUCCESS marker excludes
+  // only while the item is STILL at the marker's dispatched-at stage AND the
+  // marker is fresh (age ≤ markerStaleWindowMs); a stale marker at an
+  // unchanged stage is released so a stranded item is re-offered (AC4).
+  const markerMaps: Record<DowntimeSkillKind, Map<string, DispatchMarker>> = {
+    audit: _dispatchedMarkers(entries, 'audit'),
+    implement: _dispatchedMarkers(entries, 'implement'),
+    plan: _dispatchedMarkers(entries, 'plan'),
+    intake: _dispatchedMarkers(entries, 'intake'),
+    'risk-effort': _dispatchedMarkers(entries, 'risk-effort'),
+  };
 
   // Review-queue depth gate: read lazily (memoized) only when an
   // implement-kind candidate is actually the would-be offer — one bounded
@@ -2574,12 +2626,25 @@ export async function computeMostImportantItem(
     for (const item of items) {
       const k = classifyItemForDispatch(item, now);
       if (k === null) continue; // review-gate + freshness/recency + caps
-      // Dispatched-marker exclusion per kind.
-      if (k === 'audit' && auditIds.has(item.id)) continue;
-      if (k === 'implement' && implementIds.has(item.id)) continue;
-      if (k === 'risk-effort' && riskEffortStages.get(item.id) === (item.stage ?? '')) continue;
-      if (k === 'plan' && planStages.get(item.id) === (item.stage ?? '')) continue;
-      if (k === 'intake' && intakeStages.get(item.id) === (item.stage ?? '')) continue;
+      // Dispatched-marker exclusion per kind, staleness-aware
+      // (WL-0MU6UL0RJ008IHGT): exclude only while the item is STILL at the
+      // marker's dispatched-at stage AND the marker is fresh; a stale marker
+      // at an unchanged stage releases. Audit/implement use the id-guard mode
+      // (legacy stage-less markers stay protected while fresh); the stage-
+      // guard tiers release a legacy marker.
+      const marker = markerMaps[k]?.get(item.id);
+      if (
+        marker !== undefined &&
+        _markerStillExcludes(
+          marker,
+          item.stage,
+          now,
+          markerStaleWindowMs,
+          k === 'audit' || k === 'implement' ? 'id-guard' : 'stage-guard',
+        )
+      ) {
+        continue;
+      }
       // Code-freeze split-by-skill: audit+implement+risk-effort offers pause
       // during a freeze/ambiguous marker (plan/intake still offer).
       if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) continue;
@@ -2915,11 +2980,13 @@ export async function runCoordinationCheckIn(
     instanceId: string;
     /** browseItemCount threshold for the review-queue depth gate (defaults to DEFAULT_BROWSE_ITEM_COUNT). */
     browseItemCount?: number;
+    /** Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT); defaults to DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS. */
+    markerStaleWindowMs?: number;
   },
   now: number = Date.now(),
 ): Promise<{ offered: string | null; updated: boolean }> {
   const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
-  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount);
+  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs);
   if (!result.ok) {
     // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
     return { offered: current?.workItemId ?? null, updated: false };
@@ -3080,6 +3147,15 @@ export async function dispatchDowntimeWork(
      * Optional — absent/0 disables the gate.
      */
     contentionQueueDepth?: number;
+    /**
+     * Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT): a
+     * SUCCESS marker whose item is still at the marker's dispatched-at stage
+     * is released once its age exceeds this window, so a pane that spawned
+     * but never advanced the item cannot strand it forever. Optional for
+     * backward compatibility — absent falls back to
+     * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`.
+     */
+    markerStaleWindowMs?: number;
   },
 ): Promise<DowntimeDispatchOutcome> {
   // Per-process PIPELINE single-flight gate (F3, WL-0MT50LKAK001EF5Q): at
@@ -3174,7 +3250,7 @@ export async function dispatchDowntimeWork(
       const head = await deps.getHerdrListHead(opts.cwd);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
-        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate };
+        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return herdrOutcome;
 
@@ -3195,7 +3271,6 @@ export async function dispatchDowntimeWork(
           const extendedOutcome = await dispatchFromHerdrList(deps, extendedItems, ctx, flags);
           if (extendedOutcome !== null) return extendedOutcome;
         }
-
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
         const auditCheckError = flags.auditCheckError;
@@ -3741,6 +3816,12 @@ export interface DowntimeWorkerConfig {
     noCandidateCooldownMs: number;
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
     browseItemCount?: number;
+    /**
+     * Dispatched success-marker staleness window, ms (WL-0MU6UL0RJ008IHGT).
+     * Optional for backward compat — defaults to
+     * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h).
+     */
+    markerStaleWindowMs?: number;
   };
   /**
    * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
@@ -4191,6 +4272,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
               coordinationDir: opts.coordinationDir!,
               instanceId,
               browseItemCount: cfg.browseItemCount,
+              markerStaleWindowMs: cfg.markerStaleWindowMs,
             }, tickNow);
             lastOfferEmpty = checkIn.offered === null;
             // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
@@ -4447,6 +4529,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 // (WL-0MU2EP6JL006A1U3).
                 slotOwned,
                 contentionQueueDepth,
+                // Success-marker staleness window (WL-0MU6UL0RJ008IHGT).
+                markerStaleWindowMs: cfg.markerStaleWindowMs,
               });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
@@ -4476,7 +4560,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           //    and reset the idle tracker (fresh full idle period required
           //    after the pause).
           if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
-            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount);
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs);
             if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
               errorStrikes = 0; // the CLI answered — it is healthy
               cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
@@ -5508,6 +5592,23 @@ export function clampDowntimeRequiredFreeSlots(value: number): number {
 export function clampDowntimeNoCandidateCooldownMs(value: number): number {
   if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS;
   return Math.max(Math.round(value), DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS);
+}
+
+/**
+ * Clamp the dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT):
+ * reject negative/non-finite (fall back to the 24 h default) and clamp to
+ * [DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS, DOWNTIME_MARKER_STALE_WINDOW_MAX_MS]
+ * (1 h – 7 days) so the age release can neither fire while a freshly
+ * dispatched pane is plausibly still running (double-dispatch risk) nor be
+ * set so large that a stranded item is excluded for weeks (the original
+ * permanent-stranding failure mode at a large but bounded scale).
+ */
+export function clampDowntimeMarkerStaleWindowMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS),
+    DOWNTIME_MARKER_STALE_WINDOW_MAX_MS,
+  );
 }
 
 // ── Round-robin helpers (WL-0MTJE0FXC006WAOX) ──────────────────────────

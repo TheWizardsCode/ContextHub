@@ -29,6 +29,8 @@ import {
   planDispatchedItemStages,
   intakeDispatchedItemStages,
   dispatchedItemStages,
+  dispatchedItemMarkers,
+  markerStillExcludes,
   readDowntimeLogEntries,
   DOWNTIME_LOG_FILE,
   COORDINATION_LOG_FILE,
@@ -471,5 +473,133 @@ describe('spawn-failed markers are non-excluding (WL-0MT32F908002YFFA AC2)', () 
 
     const entries = await readDowntimeLogEntries(cwd);
     expect([...implementDispatchedItemIds(entries)]).toEqual(['WL-DONE']);
+  });
+});
+
+// ── Dispatched success-marker staleness (WL-0MU6UL0RJ008IHGT) ────────
+//
+// A SUCCESS marker (no `outcome`) historically excluded its item forever, so
+// a pane that spawned but whose agent never advanced the item stranded it
+// permanently. These tests pin the marker-lifecycle contract: a marker
+// excludes only while the item is STILL at the marker's dispatched-at stage
+// AND the marker is fresh (age ≤ the configurable staleness window). An
+// advanced item releases the marker, and a missing/unparseable
+// `dispatchedAt` fails closed (keeps excluding).
+describe('dispatched success-marker staleness (WL-0MU6UL0RJ008IHGT)', () => {
+  const NOW = new Date('2026-01-02T12:00:00.000Z').getTime();
+  const WINDOW_MS = 24 * 60 * 60 * 1000; // 24h default
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+
+  it('dispatchedItemMarkers maps id → {stage, dispatchedAt}, kind-scoped, spawn-failed excluded', () => {
+    const markers = dispatchedItemMarkers(
+      [
+        { itemId: 'WL-A', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(1000) },
+        { itemId: 'WL-B', kind: 'intake', stage: 'idea', dispatchedAt: ago(1000) },
+        { itemId: 'WL-C', kind: 'plan', stage: 'intake_complete', outcome: 'spawn-failed' },
+        { kind: 'plan' }, // error-style/scheduled entry without itemId
+      ],
+      'plan',
+    );
+    expect(markers.get('WL-A')).toEqual({
+      stage: 'intake_complete',
+      dispatchedAt: ago(1000),
+    });
+    expect(markers.has('WL-B')).toBe(false); // other kind → scoped out
+    expect(markers.has('WL-C')).toBe(false); // spawn-failed is not a success marker
+    expect(markers.size).toBe(1);
+  });
+
+  it('dispatchedItemMarkers tolerates a missing stage/timestamp and keeps the last entry', () => {
+    const markers = dispatchedItemMarkers(
+      [
+        { itemId: 'WL-A', kind: 'implement', stage: 'plan_complete', dispatchedAt: ago(9999) },
+        { itemId: 'WL-A', kind: 'implement', stage: 'plan_complete', dispatchedAt: ago(1000) },
+        { itemId: 'WL-LEGACY', kind: 'implement' }, // legacy: no stage, no timestamp
+      ],
+      'implement',
+    );
+    expect(markers.get('WL-A')?.dispatchedAt).toBe(ago(1000)); // most recent wins
+    expect(markers.get('WL-LEGACY')).toEqual({ stage: '', dispatchedAt: undefined });
+  });
+
+  it('a fresh marker at the unchanged stage still excludes', () => {
+    expect(
+      markerStillExcludes(
+        { stage: 'intake_complete', dispatchedAt: ago(60 * 1000) },
+        'intake_complete',
+        NOW,
+        WINDOW_MS,
+      ),
+    ).toBe(true);
+  });
+
+  it('a stale marker at the unchanged stage no longer excludes', () => {
+    expect(
+      markerStillExcludes(
+        { stage: 'intake_complete', dispatchedAt: ago(WINDOW_MS + 1) },
+        'intake_complete',
+        NOW,
+        WINDOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it('boundary: exactly at the window still excludes; one ms past releases', () => {
+    expect(
+      markerStillExcludes({ stage: 'idea', dispatchedAt: ago(WINDOW_MS) }, 'idea', NOW, WINDOW_MS),
+    ).toBe(true);
+    expect(
+      markerStillExcludes({ stage: 'idea', dispatchedAt: ago(WINDOW_MS + 1) }, 'idea', NOW, WINDOW_MS),
+    ).toBe(false);
+  });
+
+  it('a stage-advanced marker does not exclude (no behaviour change for healthy flow)', () => {
+    expect(
+      markerStillExcludes(
+        { stage: 'intake_complete', dispatchedAt: ago(60 * 1000) },
+        'plan_complete',
+        NOW,
+        WINDOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it('unparseable/missing dispatchedAt fails closed (keeps excluding)', () => {
+    expect(markerStillExcludes({ stage: 'idea' }, 'idea', NOW, WINDOW_MS)).toBe(true);
+    expect(
+      markerStillExcludes({ stage: 'idea', dispatchedAt: 'not-a-date' }, 'idea', NOW, WINDOW_MS),
+    ).toBe(true);
+  });
+
+  it('a legacy marker without a recorded stage releases under the stage-guard mode', () => {
+    // The historical plan/intake/risk-effort change-guard: a missing
+    // dispatched-at stage never suppressed selection.
+    expect(
+      markerStillExcludes({ stage: '' }, 'intake_complete', NOW, WINDOW_MS, 'stage-guard'),
+    ).toBe(false);
+  });
+
+  it('a legacy marker without a recorded stage keeps excluding while fresh under id-guard mode, then releases when stale', () => {
+    // Audit/implement tiers historically excluded on the id set alone; an
+    // unknown stage must not weaken that protection for a possibly-in-flight
+    // marker — the age TTL is the only release.
+    expect(
+      markerStillExcludes(
+        { stage: '', dispatchedAt: ago(60 * 1000) },
+        'in_review',
+        NOW,
+        WINDOW_MS,
+        'id-guard',
+      ),
+    ).toBe(true);
+    expect(
+      markerStillExcludes(
+        { stage: '', dispatchedAt: ago(WINDOW_MS + 1) },
+        'in_review',
+        NOW,
+        WINDOW_MS,
+        'id-guard',
+      ),
+    ).toBe(false);
   });
 });

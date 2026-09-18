@@ -99,6 +99,7 @@ import {
   clampDowntimeIdleThresholdMs,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeNoCandidateCooldownMs,
+  clampDowntimeMarkerStaleWindowMs,
   countFreeUnownedSlots,
   isSlotOwned,
   parseHerdrPaneListOutput,
@@ -107,6 +108,7 @@ import {
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+  DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
   DOWNTIME_PANE_LABEL_PREFIX,
@@ -140,6 +142,7 @@ import {
   writeDisableMarker,
 } from './downtime-disable-marker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
+import { DOWNTIME_LOG_FILE } from './downtime-log.js';
 import {
   LEASE_FILE,
   LEADER_LOCK_FILE,
@@ -8734,5 +8737,213 @@ describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5
 
       expect(await fetchExtendedHerdrItems(deps, '/repo', [item('A')])).toEqual([]);
     });
+  });
+});
+
+// ── Dispatched success-marker staleness — live Herdr-head path
+//    (WL-0MU6UL0RJ008IHGT AC1/AC2/AC4) ─────────────────────────────
+//
+// A SUCCESS dispatch marker (no `outcome`) historically excluded its item
+// forever: a pane that spawned but whose agent never advanced the item
+// (crash, manual close, silent failure) stranded it permanently — the item
+// was invisible to the tier that would retry it. These tests pin the live
+// `dispatchFromHerdrList`/`computeMostImportantItem` marker filter: a marker
+// excludes ONLY while the item is STILL at the marker's dispatched-at stage
+// AND the marker is fresh (age <= the configured staleness window). The
+// times are relative to REAL `Date.now()` because the dispatch path reads
+// the clock itself. Items here are NON-critical so they exercise the normal
+// (non-critical-first) filter path.
+describe('dispatched success-marker staleness on the live path (WL-0MU6UL0RJ008IHGT)', () => {
+  const WINDOW_MS = 24 * 60 * 60 * 1000; // default 24h
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const tempCwds: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempCwds.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeCwd(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'dt-stale-marker-'));
+    tempCwds.push(dir);
+    return dir;
+  }
+
+  function writeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      'utf8',
+    );
+  }
+
+  const planHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'intake_complete',
+    priority: 'medium',
+    sortIndex: 30,
+  });
+  const implementHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Implement ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    risk: 'Low',
+    effort: 'S',
+    priority: 'medium',
+    sortIndex: 20,
+  });
+
+  it('AC1: a stale success marker at the unchanged stage no longer excludes — the item is re-dispatched', async () => {
+    const cwd = makeCwd();
+    // Plan marker written >24h ago for an item STILL at intake_complete — the
+    // pane spawned but never advanced it. Must be released on the live path.
+    writeLog(cwd, [
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(WINDOW_MS + 60_000) },
+    ]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, markerStaleWindowMs: WINDOW_MS });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('PLN-1');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan PLN-1'),
+      expect.anything(),
+    );
+  });
+
+  it('a FRESH success marker at the unchanged stage still excludes (no double dispatch)', async () => {
+    const cwd = makeCwd();
+    // Plan marker 1h ago for an item still at intake_complete → genuinely
+    // in-flight; the tier must skip it and report the neutral no-candidate.
+    writeLog(cwd, [
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(60 * 60 * 1000) },
+    ]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, markerStaleWindowMs: WINDOW_MS });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC2: an item that ADVANCED past the marker stage is released regardless of age', async () => {
+    const cwd = makeCwd();
+    // Marker says intake_complete but the item is now at plan_complete — the
+    // history released it via the change-guard; it must still release today.
+    writeLog(cwd, [
+      { itemId: 'IMP-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(60 * 1000) },
+    ]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, markerStaleWindowMs: WINDOW_MS });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('IMP-1');
+  });
+
+  it('id-guard tier: a stale IMPLEMENT marker at the unchanged stage is released', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [
+      { itemId: 'IMP-1', kind: 'implement', stage: 'plan_complete', dispatchedAt: ago(WINDOW_MS + 60_000) },
+    ]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, markerStaleWindowMs: WINDOW_MS });
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('IMP-1');
+  });
+
+  it('id-guard tier: a fresh IMPLEMENT marker still excludes (duplicate-dispatch protection)', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [
+      { itemId: 'IMP-1', kind: 'implement', stage: 'plan_complete', dispatchedAt: ago(60 * 60 * 1000) },
+    ]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+    });
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, markerStaleWindowMs: WINDOW_MS });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('id-guard tier: a legacy implement marker WITHOUT a stage keeps excluding while fresh, releases when stale', async () => {
+    const cwd = makeCwd();
+    // Fresh legacy marker (no stage field — pre-change-guard entry): the
+    // id-guard must NOT weaken protection → still excluded.
+    writeLog(cwd, [{ itemId: 'IMP-1', kind: 'implement', dispatchedAt: ago(60 * 60 * 1000) }]);
+    const freshDeps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+    });
+    const freshOutcome = await dispatchDowntimeWork(freshDeps, { model: 'plan', cwd, markerStaleWindowMs: WINDOW_MS });
+    expect(freshOutcome.dispatched).toBe(false);
+    expect(freshOutcome.reason).toBe('no-candidate');
+
+    // Same legacy marker but stale → the age TTL releases it.
+    writeLog(cwd, [{ itemId: 'IMP-1', kind: 'implement', dispatchedAt: ago(WINDOW_MS + 60_000) }]);
+    const staleDeps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('IMP-1')] }),
+    });
+    const staleOutcome = await dispatchDowntimeWork(staleDeps, { model: 'plan', cwd, markerStaleWindowMs: WINDOW_MS });
+    expect(staleOutcome.dispatched).toBe(true);
+    expect(staleOutcome.kind).toBe('implement');
+  });
+
+  it('computeMostImportantItem releases a stale marker at the unchanged stage (offers re-triable item)', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(WINDOW_MS + 60_000) },
+    ]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, WINDOW_MS);
+    expect(result.ok).toBe(true);
+    if (result.ok && 'candidate' in result) {
+      expect(result.candidate.id).toBe('PLN-1');
+      expect(result.kind).toBe('plan');
+    } else {
+      throw new Error(`expected a candidate offer, got ${JSON.stringify(result)}`);
+    }
+  });
+
+  it('computeMostImportantItem keeps excluding a FRESH marker at the unchanged stage (no offer)', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(60 * 60 * 1000) },
+    ]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, WINDOW_MS);
+    expect(result.ok).toBe(true);
+    if (result.ok) expect('noCandidate' in result).toBe(true);
+  });
+});
+
+// ── clampDowntimeMarkerStaleWindowMs (WL-0MU6UL0RJ008IHGT AC3) ────────
+
+describe('clampDowntimeMarkerStaleWindowMs', () => {
+  it('defaults on non-finite/negative input', () => {
+    expect(clampDowntimeMarkerStaleWindowMs(NaN)).toBe(DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS);
+    expect(clampDowntimeMarkerStaleWindowMs(-1)).toBe(DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS);
+    expect(clampDowntimeMarkerStaleWindowMs(0)).toBe(60 * 60 * 1000); // clamped to 1h floor
+  });
+
+  it('clamps into the documented [1h, 7d] range', () => {
+    expect(clampDowntimeMarkerStaleWindowMs(30 * 60 * 1000)).toBe(60 * 60 * 1000); // below floor
+    expect(clampDowntimeMarkerStaleWindowMs(8 * 24 * 60 * 60 * 1000)).toBe(7 * 24 * 60 * 60 * 1000); // above ceiling
+    const mid = 6 * 60 * 60 * 1000;
+    expect(clampDowntimeMarkerStaleWindowMs(mid)).toBe(mid);
   });
 });

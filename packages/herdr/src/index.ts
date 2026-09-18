@@ -1443,6 +1443,8 @@ async function main(): Promise<void> {
         model: s.downtimeModel,
         cwd: targetCwd,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
+        // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
+        markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
         browseItemCount: s.browseItemCount,
       };
     },

@@ -224,14 +224,46 @@ are now recovered automatically:
   the failure trace (`outcome: 'spawn-failed'`) is appended to the rolling
   log, the claim is rolled back the same way, and the spawn-failed entry is
   **excluded from every dispatched-marker reader** (`dispatchedItemIds`,
-  `dispatchedItemStages`, `recentDispatchedItemIds`) — a failed spawn is not
+  `dispatchedItemMarkers`, `dispatchedItemStages`, `recentDispatchedItemIds`) — a failed spawn is not
   a success, so it never permanently excludes the item. The outcome remains
   `spawn-failed` (not success); the item is re-selectable on the next idle
   period (immediate re-dispatch — the CAS claim still serializes concurrent
   panes).
 
-A STANDING success marker (no `outcome`) is unchanged: it still excludes
-the item for its tier, so a dispatched item is never double-dispatched.
+A STANDING success marker (no `outcome`) excludes the item for its tier **for a bounded lifetime**, so a dispatched item is never double-dispatched while its pane may still be running — and never stranded forever if it is not (see below).
+
+### Success-marker lifetime (WL-0MU6UL0RJ008IHGT)
+
+A marker is written **before** the pane spawns to prevent duplicate dispatch, and its readers exclude the item **while the item remains at the marker's dispatched-at stage**. That is correct for a healthy run (the agent advances the item and the stage change releases the marker), but a pane that spawns successfully and never advances the item — a crash, a manual close, a silent failure, or an agent that exits without progressing — left the marker standing **forever**. The item became permanently invisible to the tier that would retry it and could only leave the stage by completing the very step that would never be scheduled: a deadlock.
+
+`markerStillExcludes` (`packages/herdr/src/downtime-log.ts`) now applies a **staleness window** in addition to the stage change-guard. A success marker excludes its item only while BOTH hold:
+
+1. the item is **still at the marker's dispatched-at stage** (`itemStage === marker.stage`), and
+2. the marker is **fresh** — its age (`now − dispatchedAt`) is **≤** `downtimeMarkerStaleWindowMs`.
+
+Otherwise the marker is released and the item becomes re-selectable:
+
+- **Stage advanced** → released exactly as before (no behaviour change for healthy flow).
+- **Stage unchanged, marker stale** (age **exceeds** the window) → released, so a stranded item is re-dispatched within one idle cycle with no manual intervention.
+- **`dispatchedAt` missing or unparseable** → **fail-closed** (keeps excluding): freshness cannot be proven, so duplicate-dispatch protection is never weakened.
+
+| Tier(s) | Reader / mode | Missing-stage (legacy) marker |
+|---|---|---|
+| plan / intake / risk-effort | `dispatchedItemMarkers` + `stage-guard` | Released (historical change-guard semantics) |
+| audit / implement | `dispatchedItemMarkers` + `id-guard` | Keeps excluding while fresh, released by the age TTL |
+
+**Configuration.** `downtimeMarkerStaleWindowMs` is a plugin setting (default **24 h**, `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`), clamped by `clampDowntimeMarkerStaleWindowMs` to **[1 h, 7 days]**: the floor prevents the release firing while a freshly dispatched pane is plausibly still running; the ceiling bounds how long a stranded item can be excluded. It is re-read from settings every tick (live), wired through `DowntimeWorkerConfig.config().markerStaleWindowMs` into `dispatchDowntimeWork`, `computeMostImportantItem` and the coordination check-in.
+
+Spawn-failed entries (`outcome: 'spawn-failed'`) remain **non-excluding unconditionally** (a failed spawn is not a success), as before.
+
+**Scope note.** The staleness release is implemented in the marker reader
+(`dispatchedItemMarkers` / `markerStillExcludes`) and applied on the live
+production dispatch paths — `dispatchFromHerdrList` (direct Herdr-head
+dispatch), `computeMostImportantItem` (coordination offers) and the
+coordination check-in. The legacy per-tier lookup chain in
+`dispatchDowntimeWork` (retained for test compatibility, reached only when
+the Herdr head is genuinely empty — production-unreachable, see
+downtime-worker.ts) keeps the historical change-guard semantics unchanged.
 
 ### Dispatcher workspace anchor (C0 WL-0MTR01EU7005SYZG — anchor-by-ID)
 
@@ -705,13 +737,16 @@ status refresh unchanged at 30s.**
 | Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.ts`, `leader-election.ts` |
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
+| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
 | (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin
 settings file (`~/.config/herdr/worklog-plugin.json`,
 `downtimePollIntervalMs` / `downtimeIdleThresholdMs`) and are clamped on
 load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
-`downtime-worker.ts`).
+`downtime-worker.ts`). The success-marker staleness window
+(`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped on load
+(`clampDowntimeMarkerStaleWindowMs`).
 
 ## Files & runtime artifacts
 

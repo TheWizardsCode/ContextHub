@@ -9,10 +9,12 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
   clampDowntimeIdleThresholdMs,
+  clampDowntimeMarkerStaleWindowMs,
   clampDowntimeNoCandidateCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
@@ -69,6 +71,15 @@ export interface PluginSettings {
    */
   downtimeNoCandidateCooldownMs: number;
   /**
+   * Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT): a
+   * SUCCESS dispatch marker whose item is still at the marker's dispatched-at
+   * stage is released once its age exceeds this window, so a pane that
+   * spawned but whose agent never advanced the item (crash, manual close,
+   * silent failure) cannot strand the item permanently. Default 24 h;
+   * clamped to [1 h, 7 days].
+   */
+  downtimeMarkerStaleWindowMs: number;
+  /**
    * Enable activity-gated mode-switching (fast on agent command, cheap on
    * idle). Default `true` (WL-0MU4MKVR4005WPBJ — was `false`, which silently
    * disabled the shipped feature); when `false` no scheduler task is
@@ -109,6 +120,7 @@ export const defaultSettings: PluginSettings = {
   downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+  downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   modeSwitchEnabled: true,
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
@@ -213,6 +225,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeNoCandidateCooldownMs: typeof parsed.downtimeNoCandidateCooldownMs === 'number'
         ? clampDowntimeNoCandidateCooldownMs(parsed.downtimeNoCandidateCooldownMs)
         : defaultSettings.downtimeNoCandidateCooldownMs,
+      downtimeMarkerStaleWindowMs: typeof parsed.downtimeMarkerStaleWindowMs === 'number'
+        ? clampDowntimeMarkerStaleWindowMs(parsed.downtimeMarkerStaleWindowMs)
+        : defaultSettings.downtimeMarkerStaleWindowMs,
       modeSwitchEnabled: typeof parsed.modeSwitchEnabled === 'boolean'
         ? parsed.modeSwitchEnabled : defaultSettings.modeSwitchEnabled,
       modeSwitchIdleThresholdMs: typeof parsed.modeSwitchIdleThresholdMs === 'number'
