@@ -406,3 +406,70 @@ describe('plan/intake dispatched-item stages (change-guard maps)', () => {
     expect(stages.has('WL-X')).toBe(false);
   });
 });
+
+describe('spawn-failed markers are non-excluding (WL-0MT32F908002YFFA AC2)', () => {
+  it('excludes spawn-failed entries from the dispatched-id readers, while standing success markers still exclude', () => {
+    const entries = [
+      { itemId: 'WL-IMP-OK', kind: 'implement' },
+      { itemId: 'WL-IMP-FAIL', kind: 'implement', outcome: 'spawn-failed' },
+      { itemId: 'WL-AUD-OK', kind: 'audit' },
+      { itemId: 'WL-AUD-FAIL', kind: 'audit', outcome: 'spawn-failed' },
+      { itemId: 'WL-RE-FAIL', kind: 'risk-effort', outcome: 'spawn-failed' },
+    ];
+
+    // AC3 regression: a STANDING success marker (no outcome) is unchanged and
+    // still excludes the item — never a double dispatch.
+    expect([...implementDispatchedItemIds(entries)]).toEqual(['WL-IMP-OK']);
+    expect([...auditDispatchedItemIds(entries)]).toEqual(['WL-AUD-OK']);
+    // AC2: a failed spawn never blocks the tier again.
+    expect([...riskEffortDispatchedItemIds(entries)]).toEqual([]);
+  });
+
+  it('excludes spawn-failed entries from the plan/intake stage change-guard maps', () => {
+    const entries = [
+      { itemId: 'WL-PLAN-OK', kind: 'plan', stage: 'intake_complete' },
+      { itemId: 'WL-PLAN-FAIL', kind: 'plan', stage: 'intake_complete', outcome: 'spawn-failed' },
+      { itemId: 'WL-INT-FAIL', kind: 'intake', stage: 'idea', outcome: 'spawn-failed' },
+    ];
+
+    expect([...planDispatchedItemStages(entries).keys()]).toEqual(['WL-PLAN-OK']);
+    expect([...intakeDispatchedItemStages(entries).keys()]).toEqual([]);
+  });
+
+  it('does not treat a spawn-failed audit marker as an active audit', () => {
+    const now = Date.now();
+    const windowMs = 2 * 60 * 60 * 1000;
+    const entries = [
+      {
+        itemId: 'WL-AUD-FAIL',
+        kind: 'audit',
+        outcome: 'spawn-failed',
+        dispatchedAt: new Date(now - 1000).toISOString(),
+      },
+      { itemId: 'WL-AUD-OK', kind: 'audit', dispatchedAt: new Date(now - 1000).toISOString() },
+    ];
+
+    expect([...recentAuditDispatchedItemIds(entries, windowMs, now)]).toEqual(['WL-AUD-OK']);
+  });
+
+  it('round-trips a real spawn-failed log entry into a non-excluding reader result', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({
+        itemId: 'WL-FAILED',
+        kind: 'implement',
+        stage: 'plan_complete',
+        outcome: 'spawn-failed',
+        error: 'ENOENT',
+      }),
+    );
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({ itemId: 'WL-DONE', kind: 'implement', stage: 'plan_complete' }),
+    );
+
+    const entries = await readDowntimeLogEntries(cwd);
+    expect([...implementDispatchedItemIds(entries)]).toEqual(['WL-DONE']);
+  });
+});

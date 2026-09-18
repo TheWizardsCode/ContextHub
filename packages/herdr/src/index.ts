@@ -33,6 +33,7 @@ import {
   fetchItemsByStage,
   setWorklogDir,
   claimWorkItem,
+  rollbackClaimWorkItem,
   getExecFileAsync,
   buildWlArgs,
   buildWlArgsForRoot,
@@ -1218,9 +1219,11 @@ export function createDowntimeDeps(
       // outcome:'spawn-failed' entry with the error/exit details to the
       // rolling dispatch log, so the log distinguishes "attempted" (failed
       // spawn) from "opened" (success marker) and never claims success for
-      // a pane that never appeared. Mirrors the marker's fields (itemId,
-      // kind, stage) so the marker readers keep excluding the item exactly
-      // as the standing marker does. Fail-closed: never crash the worker.
+      // a pane that never appeared. The trace is a durable record but NOT an
+      // exclusion marker: the dispatched-marker readers skip spawn-failed
+      // entries (WL-0MT32F908002YFFA AC2), so the item becomes re-eligible
+      // once its rolled-back claim lands it back in a selectable state.
+      // Fail-closed: never crash the worker.
       try {
         await appendDowntimeLogEntry(
           event.cwd,
@@ -1229,6 +1232,17 @@ export function createDowntimeDeps(
       } catch {
         // fail-closed: audit logging must never crash the worker
       }
+    },
+    async rollbackClaim(
+      itemId: string,
+      original: DowntimeClaimExpected,
+      cwd: string,
+    ): Promise<boolean> {
+      // Marker-write / spawn recovery (WL-0MT32F908002YFFA AC1/AC2): reverse
+      // a CAS claim whose dispatch never completed — restore the item to its
+      // pre-claim status+stage so a future idle period can re-select it.
+      // Race-safe (--if-status in_progress) and fail-closed (never throws).
+      return rollbackClaimWorkItem(itemId, original, cwd);
     },
   };
 }

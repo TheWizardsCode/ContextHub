@@ -805,3 +805,59 @@ export async function claimWorkItem(
     return { success: false, stale, error: message };
   }
 }
+
+/**
+ * Roll back a pre-dispatch CAS claim that succeeded but never completed
+ * dispatch (WL-0MT32F908002YFFA AC1/AC2): restore the item to its
+ * pre-claim status + stage so a future idle period can re-select it. Used
+ * when the dispatch marker cannot be written (`marker-write-failed`) or the
+ * pane spawn fails (`spawn-failed`) — in both cases the CAS claimed the item
+ * (`in_progress`) but no agent is working it, so leaving it claimed strands
+ * it in a state no tier selects.
+ *
+ * The reverse transition is guarded by the SAME race-safe CAS shape as the
+ * claim: `--if-status in_progress` (plus `--if-stage <original.stage>` when
+ * known) ensures only THIS claim's state is reverted. A concurrent
+ * human/agent that already moved the item makes the update stale → resolves
+ * `false` (nothing to roll back) and never clobbers their change.
+ *
+ * `original.status` defaults to `open` (the plan/intake/implement/risk-effort
+ * tiers); the audit tier passes `completed` so a failed audit dispatch
+ * returns to the audit queue rather than the open backlog. `worklogRoot`
+ * targets that root's database via per-call `--worklog-dir` (the same
+ * cross-root convention as `claimWorkItem`).
+ *
+ * Never throws — a failure resolves `false` so the caller can fall back to
+ * the fail-closed abort outcome.
+ */
+export async function rollbackClaimWorkItem(
+  id: string,
+  original?: { status?: string; stage?: string },
+  worklogRoot?: string,
+): Promise<boolean> {
+  try {
+    const args = [
+      'update',
+      id,
+      '--status',
+      original?.status ?? 'open',
+      '--if-status',
+      'in_progress',
+    ];
+    // Restore the stage the tier claimed at. The claim itself does not change
+    // the stage (except the retired-stage migration, which advances it to the
+    // tier's target); passing the tier's expectation is therefore a no-op in
+    // the migration path and the correct restore everywhere else.
+    if (original?.stage) {
+      args.push('--if-stage', original.stage);
+      args.push('--stage', original.stage);
+    }
+    const dirOverride = worklogRoot !== undefined ? join(worklogRoot, '.worklog') : undefined;
+    await runWl(args, true, CLAIM_TIMEOUT_MS, dirOverride);
+    return true;
+  } catch {
+    // Fail-closed: a failed/stale rollback resolves false (the caller reports
+    // the failure and leaves the item as-is — no worse than before recovery).
+    return false;
+  }
+}

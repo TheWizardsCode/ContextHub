@@ -12,6 +12,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { extractWorkItemId, claimItemForAgentCommand } from './index.js';
 import {
   claimWorkItem,
+  rollbackClaimWorkItem,
   setWorklogDir,
   resetWorklogDir,
   setExecFileAsync,
@@ -175,6 +176,108 @@ describe('claimWorkItem (fetcher)', () => {
     expect(result.error).toBeDefined();
     // A non-stale failure is NOT a lost race.
     expect(result.stale).toBeFalsy();
+  });
+});
+
+describe('rollbackClaimWorkItem (fetcher, WL-0MT32F908002YFFA)', () => {
+  beforeEach(() => {
+    resetExecFileAsync();
+    resetWorklogDir();
+  });
+
+  afterEach(() => {
+    resetExecFileAsync();
+    resetWorklogDir();
+  });
+
+  it('reverses the CAS claim: --status open guarded by --if-status in_progress, restoring the stage', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: '{"success":true}',
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const ok = await rollbackClaimWorkItem('WL-ABC', {
+      status: 'open',
+      stage: 'intake_complete',
+    });
+
+    expect(ok).toBe(true);
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('update');
+    expect(callArgs).toContain('WL-ABC');
+    expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('open');
+    expect(callArgs[callArgs.indexOf('--if-status') + 1]).toBe('in_progress');
+    expect(callArgs[callArgs.indexOf('--if-stage') + 1]).toBe('intake_complete');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('intake_complete');
+    expect(callArgs).toContain('--json');
+  });
+
+  it('restores the AUDIT tier to completed/in_review, not open', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: '{"success":true}',
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const ok = await rollbackClaimWorkItem('WL-AUD', {
+      status: 'completed',
+      stage: 'in_review',
+    });
+
+    expect(ok).toBe(true);
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('completed');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('in_review');
+  });
+
+  it('defaults to status open and omits the stage guard when no original state is given', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: '{"success":true}',
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    await rollbackClaimWorkItem('WL-ABC');
+
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('open');
+    expect(callArgs).not.toContain('--if-stage');
+    expect(callArgs).not.toContain('--stage');
+  });
+
+  it('targets the given worklog root with --worklog-dir (cross-root rollback)', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: '{"success":true}',
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    await rollbackClaimWorkItem('AH-ABC', { status: 'open', stage: 'idea' }, '/foreign/root');
+
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs).toContain('--worklog-dir');
+    expect(callArgs[callArgs.indexOf('--worklog-dir') + 1]).toBe('/foreign/root/.worklog');
+  });
+
+  it('returns false (never throws) when the item was already moved (stale CAS)', async () => {
+    const mockFn = vi
+      .fn()
+      .mockRejectedValue(
+        new Error('{"success":false,"error":"stale","message":"Conditional update skipped"}'),
+      );
+    setExecFileAsync(mockFn as any);
+
+    await expect(
+      rollbackClaimWorkItem('WL-ABC', { status: 'open', stage: 'idea' }),
+    ).resolves.toBe(false);
+  });
+
+  it('returns false (never throws) when wl update errors', async () => {
+    const mockFn = vi.fn().mockRejectedValue(new Error('worklog: no such item'));
+    setExecFileAsync(mockFn as any);
+
+    await expect(rollbackClaimWorkItem('WL-NOTREAL')).resolves.toBe(false);
   });
 });
 

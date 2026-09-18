@@ -168,6 +168,36 @@ WL-0MTTSWCJR003OMN7). The recovery claim is race-safe and self-migrating:
   `plan_complete` (e.g. `completed`) is left for manual review rather than
   migrated into another invalid combination.
 
+### Failed-dispatch claim recovery (WL-0MT32F908002YFFA)
+
+The dispatch pipeline is CAS claim → marker write → spawn. Two failure
+points can leave the claim stranded with no agent working the item; both
+are now recovered automatically:
+
+- **`marker-write-failed`** (the marker write failed AFTER the successful
+  claim): `dispatchClaimedTier` calls `rollbackClaim` (→
+  `rollbackClaimWorkItem`) to reverse the CAS transition —
+  `--status <pre-claim status> --if-status in_progress [--if-stage
+  <pre-claim stage> --stage <pre-claim stage>]`. Plan/intake/implement/
+  risk-effort roll back to `open` at the original stage; the audit tier
+  rolls back to `completed`/`in_review` so the item stays in the audit
+  queue. A successful rollback reports the neutral outcome
+  `claim-rolled-back`; a stale/failed rollback (a concurrent human/agent
+  already moved the item) reports `marker-write-failed` and leaves the item
+  untouched (fail-closed).
+- **`spawn-failed`** (the pane never appeared after the marker was written):
+  the failure trace (`outcome: 'spawn-failed'`) is appended to the rolling
+  log, the claim is rolled back the same way, and the spawn-failed entry is
+  **excluded from every dispatched-marker reader** (`dispatchedItemIds`,
+  `dispatchedItemStages`, `recentDispatchedItemIds`) — a failed spawn is not
+  a success, so it never permanently excludes the item. The outcome remains
+  `spawn-failed` (not success); the item is re-selectable on the next idle
+  period (immediate re-dispatch — the CAS claim still serializes concurrent
+  panes).
+
+A STANDING success marker (no `outcome`) is unchanged: it still excludes
+the item for its tier, so a dispatched item is never double-dispatched.
+
 ### Dispatcher workspace anchor (C0 WL-0MTR01EU7005SYZG — anchor-by-ID)
 
 Automated downtime dispatches always spawn in a **dedicated Dispatcher workspace**

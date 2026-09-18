@@ -1509,19 +1509,26 @@ export interface DowntimeWorkerDeps {
   recordDispatchFailure(event: DowntimeDispatchFailureEvent): Promise<void>;
   /**
    * Roll back a CAS claim that succeeded but never completed dispatch
-   * (WL-0MT32F908002YFFA): restore the item to `open` + its original stage
-   * so the next idle period can re-select it. Only called when the marker
-   * write fails AFTER the claim — the item is stranded in `in_progress`
-   * with no marker and no pane. Resolves `true` when the rollback
-   * succeeded, `false` when the item was already moved (race-safe: a
-   * concurrent human or another agent already fixed it — nothing to roll
-   * back). Must never throw (fail-closed: a rolling rollback failure must
-   * not crash the worker; the item remains stranded, which is no worse
-   * than the pre-fix state).
+   * (WL-0MT32F908002YFFA AC1/AC2): restore the item to its pre-claim
+   * status + stage so a future idle period can re-select it. Called when
+   * the marker write fails AFTER the claim (marker-write-failed — the item
+   * is stranded in `in_progress` with no marker and no pane) and when the
+   * pane spawn fails (spawn-failed — the item is claimed + marked but no
+   * agent is working it). Resolves `true` when the rollback succeeded,
+   * `false` when the item was already moved (race-safe: a concurrent human
+   * or another agent already fixed it — nothing to roll back). Must never
+   * throw (fail-closed: a rollback failure must not crash the worker; the
+   * item remains claimed, which is no worse than the pre-fix state).
    *
-   * `cwd` is the worklog root for the rollback `wl update`.
+   * `original` is the tier's pre-claim expectation (`status`+`stage`); the
+   * audit tier passes `completed`, every other tier `open`. `cwd` is the
+   * worklog root for the rollback `wl update`.
    */
-  rollbackClaim(itemId: string, originalStage: string, cwd: string): Promise<boolean>;
+  rollbackClaim(
+    itemId: string,
+    original: DowntimeClaimExpected,
+    cwd: string,
+  ): Promise<boolean>;
   /**
    * Record a persistent CLI-error event (three consecutive wl failures).
    * Must never throw (fail-closed): logging must not crash the worker.
@@ -1614,11 +1621,14 @@ export interface DowntimeDispatchOutcome {
    * another pane won; neutral) | 'marker-write-failed' (fail-closed abort
    * BEFORE spawn — includes the scheduled-prompt persist failure) |
    * 'claim-rolled-back' (WL-0MT32F908002YFFA: the marker write failed
-   * AFTER a successful claim and the claim was rolled back to
-   * open+original stage — the item is re-selectable next idle period;
+   * AFTER a successful claim and the claim was rolled back to its
+   * pre-claim status+stage — the item is re-selectable next idle period;
    * neutral) |
-   * 'spawn-failed' (handled spawn error or non-zero script exit; outcome is
-   * not success) | 'anchor-unavailable' (C0 WL-0MTR01EU7005SYZG: the
+   * 'spawn-failed' (handled spawn error or non-zero script exit; the
+   * failure trace is appended to the rolling log, the claim is rolled back
+   * to its pre-claim status+stage and the spawn-failed marker is
+   * non-excluding (WL-0MT32F908002YFFA AC2/AC4) so the item is re-selectable
+   * next idle period — the outcome is still NOT success) | 'anchor-unavailable' (C0 WL-0MTR01EU7005SYZG: the
    * machine-wide Dispatcher anchor pane could not be provisioned — neutral
    * "no dispatch this cycle", never a fallback to the leader's pane) |
    * 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
@@ -1837,6 +1847,25 @@ async function dispatchFromHerdrList(
 
 
 /**
+ * Roll back a failed dispatch's CAS claim (WL-0MT32F908002YFFA) without ever
+ * crashing the worker: `deps.rollbackClaim` is contracted never to throw, but
+ * a throwing stub/regression must be swallowed here too (fail-closed — the
+ * item simply stays claimed, no worse than the pre-fix state).
+ */
+async function rollbackClaimForFailure(
+  deps: DowntimeWorkerDeps,
+  itemId: string,
+  original: DowntimeClaimExpected,
+  cwd: string,
+): Promise<boolean> {
+  try {
+    return await deps.rollbackClaim(itemId, original, cwd);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Dispatch one already-selected candidate through the fixed pipeline:
  * per-prefix anchor resolution → CAS claim → marker write (before spawn) → spawn.
  *
@@ -1857,16 +1886,19 @@ async function dispatchFromHerdrList(
  *    silently discarded (WL-0MSLWJ310000ND0X absorbed).
  *  - Marker write BEFORE the pane spawns: if the marker cannot be written
  *    the dispatch aborts BEFORE spawning (fail-closed — an unmarked item is
- *    never dispatched). The item stays claimed (in_progress), so no other
- *    pane can select it (RCA design point 2).
+ *    never dispatched). The claim is then rolled back to its pre-claim
+ *    status+stage (WL-0MT32F908002YFFA AC1) so the item is re-selectable on
+ *    the next idle period instead of being stranded in `in_progress` with no
+ *    marker and no pane.
  *  - Spawn: a handled spawn `error` or non-zero script exit resolves reason
  *    'spawn-failed' — the outcome is NOT success, and a failure trace
  *    (`outcome: 'spawn-failed'` entry with the error/exit details) is
  *    appended to the rolling audit log so the log never claims success for
- *    a pane that never appeared (WL-0MSLWJ3I70031Z8U absorbed); the marker
- *    stands BUT spawn-failed entries are excluded from the dispatched-
- *    marker readers (AC2, WL-0MT32F908002YFFA) so the item is re-eligible
- *    for selection on the next idle period.
+ *    a pane that never appeared (WL-0MSLWJ3I70031Z8U absorbed). Spawn-failed
+ *    entries are excluded from the dispatched-marker readers (AC2,
+ *    WL-0MT32F908002YFFA) AND the claim is rolled back, so the item is
+ *    re-eligible for selection on the next idle period (AC2/AC4) rather
+ *    than permanently removed from the queue.
  */
 async function dispatchClaimedTier(
   deps: DowntimeWorkerDeps,
@@ -1960,11 +1992,7 @@ async function dispatchClaimedTier(
     // succeeded but the marker write failed — the item is stranded in
     // `in_progress` with no marker, invisible to all future tiers.
     // Roll back the claim so the next idle period can re-select it.
-    const rollbackOk = await deps.rollbackClaim(
-      candidate.id,
-      expected.stage,
-      opts.cwd,
-    );
+    const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
     if (!rollbackOk) {
       // The item was already moved by a concurrent agent/human — nothing
       // to roll back; report marker-write-failed so the caller can fall
@@ -2037,6 +2065,16 @@ async function dispatchClaimedTier(
     } catch {
       // fail-closed: audit logging must never crash the worker
     }
+    // Spawn-failure recovery (WL-0MT32F908002YFFA AC2/AC4): the pane never
+    // appeared, so the claim left the item in `in_progress` with no agent.
+    // Roll the claim back to its pre-claim status+stage (audit → completed/
+    // in_review, every other tier → open at the same stage). Combined with
+    // the non-excluding spawn-failed marker, the item is re-selectable on the
+    // next idle period (immediate re-dispatch, the documented decision); the
+    // failure trace stays in the rolling log and the outcome is not success.
+    // Fail-closed: a rollback failure leaves the item claimed (no worse than
+    // the pre-fix state).
+    await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
     return {
       dispatched: false,
       reason: 'spawn-failed',

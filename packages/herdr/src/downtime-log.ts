@@ -186,7 +186,8 @@ export function auditDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string>
  * work item — and ignored, so a NEW audit dispatch can proceed. Entries
  * without an itemId, without a parseable `dispatchedAt`, or of another
  * kind are ignored (fail-closed: missing evidence never claims an active
- * audit).
+ * audit). Spawn-failed entries are ignored too (WL-0MT32F908002YFFA AC2):
+ * a failed spawn is not an active run.
  */
 export function recentDispatchedItemIds(
   entries: DowntimeLogEntry[],
@@ -197,6 +198,10 @@ export function recentDispatchedItemIds(
   const cutoff = now - windowMs;
   const ids = new Set<string>();
   for (const e of entries) {
+    // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2): a
+    // failed spawn is NOT an active run — the pane never appeared, so a new
+    // dispatch must not be blocked by it.
+    if (e.outcome === 'spawn-failed') continue;
     if (e.kind !== kind || typeof e.itemId !== 'string' || e.itemId.length === 0) continue;
     if (typeof e.dispatchedAt !== 'string') continue; // unrecognized timestamp → no active evidence
     const t = Date.parse(e.dispatchedAt);

@@ -189,6 +189,9 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
     recordDispatch: vi.fn().mockResolvedValue(true),
     recordDispatchFailure: vi.fn().mockResolvedValue(undefined),
+    // Claim rollback (WL-0MT32F908002YFFA): default success so the recovery
+    // paths report 'claim-rolled-back' unless a test forces a failed rollback.
+    rollbackClaim: vi.fn().mockResolvedValue(true),
     recordError: vi.fn().mockResolvedValue(undefined),
     // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): no due prompt by
     // default, so existing tier tests exercise the unchanged backlog tiers.
@@ -2550,7 +2553,7 @@ describe('dispatch audit trail', () => {
     expect(deps.recordDispatch).not.toHaveBeenCalled();
   });
 
-  it('aborts the dispatch (marker-write-failed) when recordDispatch fails — fail-closed', async () => {
+  it('rolls the claim back (claim-rolled-back) when recordDispatch fails — AC1', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
         ok: true,
@@ -2559,7 +2562,53 @@ describe('dispatch audit trail', () => {
       // A rejecting marker write (or a stub that throws) must abort BEFORE
       // the pane spawns: an unmarked item is never dispatched (RCA
       // WL-0MSRBFFLN005W3VT design point 2 — marker-before-spawn fail-closed).
+      // WL-0MT32F908002YFFA AC1: the successful CAS claim is then rolled
+      // back so the next idle period can re-select the item.
       recordDispatch: vi.fn().mockRejectedValue(new Error('audit boom')),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('claim-rolled-back');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalledWith(
+      'WL-ABC',
+      { status: 'open', stage: 'intake_complete' },
+      '/repo',
+    );
+  });
+
+  it('rolls the claim back (claim-rolled-back) when recordDispatch resolves false — AC1', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      recordDispatch: vi.fn().mockResolvedValue(false),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('claim-rolled-back');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.rollbackClaim).toHaveBeenCalledWith(
+      'WL-ABC',
+      { status: 'open', stage: 'intake_complete' },
+      '/repo',
+    );
+  });
+
+  it('falls back to marker-write-failed when the claim rollback itself fails (fail-closed)', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      recordDispatch: vi.fn().mockRejectedValue(new Error('audit boom')),
+      // Concurrent agent already moved the item — nothing to roll back.
+      rollbackClaim: vi.fn().mockResolvedValue(false),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -2569,13 +2618,14 @@ describe('dispatch audit trail', () => {
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 
-  it('aborts the dispatch (marker-write-failed) when recordDispatch resolves false', async () => {
+  it('never crashes when the claim rollback throws (fail-closed)', async () => {
     const deps = makeDeps({
       getNextItem: vi.fn().mockResolvedValue({
         ok: true,
         candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
       }),
       recordDispatch: vi.fn().mockResolvedValue(false),
+      rollbackClaim: vi.fn().mockRejectedValue(new Error('wl update boom')),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -2725,6 +2775,122 @@ describe('dispatch CAS claim race', () => {
     expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
       expect.objectContaining({ itemId: 'WL-ABC', kind: 'plan', exitCode: 1 }),
     );
+  });
+
+  it('rolls the plan claim back on spawn-failed so the item is re-selectable — AC2/AC4', async () => {
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+      }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'ENOENT: send-to-pi.sh' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('spawn-failed');
+    // The failure trace is preserved AND the claim is rolled back to the
+    // tier's pre-claim state — the item returns to the selectable backlog.
+    expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
+      expect.objectContaining({ itemId: 'WL-ABC', kind: 'plan', error: 'ENOENT: send-to-pi.sh' }),
+    );
+    expect(deps.rollbackClaim).toHaveBeenCalledWith(
+      'WL-ABC',
+      { status: 'open', stage: 'intake_complete' },
+      '/repo',
+    );
+  });
+
+  it('rolls an audit claim back to completed/in_review on spawn-failed (audit tier)', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-AUD', title: 'Audit me', stage: 'audit', status: 'completed' },
+      }),
+      spawnAgentPane: vi.fn().mockResolvedValue({ ok: false, error: 'ENOENT' }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('spawn-failed');
+    // The audit tier's pre-claim state is completed/in_review, NOT open —
+    // rolling back to `open` would silently move the item out of the audit
+    // queue (WL-0MT32F908002YFFA AC1/AC2).
+    expect(deps.rollbackClaim).toHaveBeenCalledWith(
+      'WL-AUD',
+      { status: 'completed', stage: 'in_review' },
+      '/repo',
+    );
+  });
+
+  it('marker-write-failed recovery: claim → failure → rollback → re-selection next idle period (AC1/AC4)', async () => {
+    // A tiny in-memory item store: the claim flips it to in_progress, the
+    // rollback flips it back to open, and getNextItem only offers the item
+    // while it is open — so the SECOND idle window selects it again.
+    let status: 'open' | 'in_progress' = 'open';
+    const recordDispatch = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true);
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockImplementation(async () =>
+        status === 'open'
+          ? {
+              ok: true,
+              candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+            }
+          : { ok: true, candidate: null },
+      ),
+      claimItem: vi.fn().mockImplementation(async () => {
+        status = 'in_progress';
+        return { ok: true };
+      }),
+      recordDispatch,
+      rollbackClaim: vi.fn().mockImplementation(async () => {
+        status = 'open';
+        return true;
+      }),
+    });
+
+    const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    expect(first.reason).toBe('claim-rolled-back');
+    expect(status).toBe('open');
+
+    const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    expect(second.dispatched).toBe(true);
+  });
+
+  it('spawn-failed recovery: claim → failure → rollback → re-selection next idle period (AC2/AC4)', async () => {
+    let status: 'open' | 'in_progress' = 'open';
+    const spawnAgentPane = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, error: 'ENOENT: send-to-pi.sh' })
+      .mockResolvedValue({ ok: true });
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockImplementation(async () =>
+        status === 'open'
+          ? {
+              ok: true,
+              candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete', status: 'open' },
+            }
+          : { ok: true, candidate: null },
+      ),
+      claimItem: vi.fn().mockImplementation(async () => {
+        status = 'in_progress';
+        return { ok: true };
+      }),
+      spawnAgentPane,
+      rollbackClaim: vi.fn().mockImplementation(async () => {
+        status = 'open';
+        return true;
+      }),
+    });
+
+    const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    expect(first.reason).toBe('spawn-failed');
+    expect(status).toBe('open');
+
+    const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    expect(second.dispatched).toBe(true);
   });
 
   it('a throwing recordDispatchFailure never crashes the dispatch (fail-closed)', async () => {

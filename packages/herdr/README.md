@@ -866,7 +866,14 @@ non-zero script exit) additionally appends a **failure trace** entry
 (`outcome: 'spawn-failed'`, mirroring the marker's `itemId`/`kind`/`stage`
 fields plus the `error`/`exitCode` details) so the log distinguishes
 **attempted** from **opened** — it never claims success for a pane that
-never appeared (WL-0MSLWJ3I70031Z8U). The `kind:audit` entries double as
+never appeared (WL-0MSLWJ3I70031Z8U). Spawn-failed entries are
+**non-excluding** (WL-0MT32F908002YFFA AC2): the marker readers skip them,
+so a failed spawn never permanently removes the item from its tier. A
+marker-write failure or a spawn failure additionally rolls the successful
+CAS claim back to its pre-claim status + stage (audit tier:
+`completed`/`in_review`; every other tier: `open`), so no item is left
+stranded in `in_progress` with no agent (AC1/AC4) — the next idle period
+re-selects it. The `kind:audit` entries double as
 the dispatched-marker exclusion source for the audit tier (WL-0MSLIY8ZR004QUSY);
 `kind:implement` entries for the implement tier; and `kind:plan` /
 `kind:intake` entries (which also record the item's `stage` at dispatch)
@@ -894,8 +901,8 @@ leaves behind (documented for WL-0MSKUG2WW0058A7W, audit gap AC2):
 | Audit-tier wl/parse failure | `recordError` JSONL entry **on every strike** | `getNextAuditCandidate` resolves `{ok:false}` (never a `null` that looks like an empty tier, WL-0MSLWJ2KP0002SV0); the dispatch fails closed to busy — no fall-through to the implement/plan tiers — and each failure now logs per-strike, pausing after 3 consecutive failures |
 | Lost CAS claim race (`--if-status`/`--if-stage` stale) | **none** — and **no marker, no pane, no success record** | the dispatch ABORTS with reason `claim-failed` (neutral — another pane won); the failure is observable via the outcome and a stderr line, never silently discarded (WL-0MSLWJ310000ND0X absorbed) |
 | Claim wl CLI failure (non-stale) | **none** — counts as a `wl-error` strike | dispatch aborts; three consecutive such failures pause the worker |
-| Marker write failure | **none** — the item stays claimed (`in_progress`) | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched; the claim still removes it from `wl next`, so no other pane selects it) |
-| Pane spawn failure / non-zero script exit (`send-to-pi.sh`) | marker already written (pre-spawn) + a `recordDispatchFailure` JSONL entry (`outcome: 'spawn-failed'` with the `error`/`exitCode` trace) | a spawn `error` (ENOENT/EACCES) or a non-zero script exit within the 500 ms probe window is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`, carrying the error/exit trace); the log distinguishes **attempted** from **opened**, and the marker stands so the item is not re-dispatched (WL-0MSLWJ3I70031Z8U absorbed) |
+| Marker write failure | **none** — and the claim is rolled back | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched). WL-0MT32F908002YFFA AC1 then rolls the successful CAS claim back to `open` + the original stage (audit tier: `completed`/`in_review`) so the next idle period re-selects the item — it is never stranded in `in_progress`. If the rollback is stale/fails (a concurrent agent already moved the item) the outcome stays `marker-write-failed` and the item is left as-is (fail-closed) |
+| Pane spawn failure / non-zero script exit (`send-to-pi.sh`) | marker already written (pre-spawn) + a `recordDispatchFailure` JSONL entry (`outcome: 'spawn-failed'` with the `error`/`exitCode` trace) | a spawn `error` (ENOENT/EACCES) or a non-zero script exit within the 500 ms probe window is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`, carrying the error/exit trace); the log distinguishes **attempted** from **opened**. The `spawn-failed` entry is **non-excluding** and the CAS claim is rolled back to its pre-claim status + stage (WL-0MT32F908002YFFA AC2/AC4), so the item is re-eligible on the next idle period rather than permanently removed (WL-0MSLWJ3I70031Z8U absorbed) |
 | `recordError` write failure | **none** | fail-closed by design: logging must never crash or block the worker |
 
 Consequence: the log's *absence* of an entry is still ambiguous (it cannot
