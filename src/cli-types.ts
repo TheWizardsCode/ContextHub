@@ -180,6 +180,8 @@ export interface DeleteOptions { prefix?: string; recursive?: boolean; sync?: bo
 
 export interface ReviewedOptions { prefix?: string }
 
+export interface InterviewOptions { prefix?: string }
+
 export interface DepOptions {
   prefix?: string;
   incoming?: boolean;
@@ -208,3 +210,5 @@ export interface SearchOptions {
 }
 
 export interface UnlockOptions { force?: boolean }
+
+export interface InterviewOptions { prefix?: string }
