@@ -210,5 +210,3 @@ export interface SearchOptions {
 }
 
 export interface UnlockOptions { force?: boolean }
-
-export interface InterviewOptions { prefix?: string }
