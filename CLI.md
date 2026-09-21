@@ -131,7 +131,9 @@ gains uncompleted work (WL-0MSJL00P5004Y0L6). **Automation-authored telemetry
 children are exempt**: items tagged `test-failure`, titles prefixed
 `[test-failure]`, or created by a known bot identity (e.g. `triage-bot`) stay
 attached so the failure remains discoverable, but they do **not** rewind the
-parent's lifecycle (WL-0MTWU4XUD0001ALR).
+parent's lifecycle (WL-0MTWU4XUD0001ALR). Every demotion writes an audit-trail
+comment on the parent naming the attached child, the actor, and the transition
+(WL-0MTWU4Y82001B3UH).
 
 Dedup guard:
 
@@ -162,7 +164,7 @@ Update fields on one or more existing work items. Accepts multiple IDs. Options 
 
 > **Auto-revert:** when `--audit-text`/`--audit-file` carries a `Ready to close: No` verdict for an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
 
-> **Reparenting demotion:** when `--parent <id>` attaches an item to a `completed`/`in_review` parent, the parent is demoted to `open`/`plan_complete` so a finished parent never silently gains uncompleted work. Automation-authored telemetry children (tagged `test-failure`, titled `[test-failure]…`, or created by a known bot identity) are exempt and do not rewind the parent (WL-0MTWU4XUD0001ALR).
+> **Reparenting demotion:** when `--parent <id>` attaches an item to a `completed`/`in_review` parent, the parent is demoted to `open`/`plan_complete` so a finished parent never silently gains uncompleted work. Automation-authored telemetry children (tagged `test-failure`, titled `[test-failure]…`, or created by a known bot identity) are exempt and do not rewind the parent (WL-0MTWU4XUD0001ALR). A demotion records an audit-trail comment on the parent naming the attached child, the actor, and the transition (WL-0MTWU4Y82001B3UH).
 
 Automatic re-sort:
 

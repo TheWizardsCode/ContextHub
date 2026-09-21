@@ -12,6 +12,7 @@ import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 import { isAutomationAuthoredChild } from '../automation.js';
+import { recordDemotionAuditTrail } from '../demotion-audit.js';
 
 /**
  * Default dedup match window for `wl create` (WL-0MSTNG2QF0049B97): retried
@@ -263,6 +264,11 @@ export default function register(ctx: PluginContext): void {
         } catch (err) {
           // Best-effort: a demotion failure must not abort the create.
           console.error(`Warning: failed to demote parent ${parentId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        // Record why the parent was reopened so a revival is explicable
+        // (WL-0MTWU4Y82001B3UH). Best-effort, never aborts the create.
+        if (demotedParent) {
+          recordDemotionAuditTrail(db, demotedParent, item);
         }
       }
 

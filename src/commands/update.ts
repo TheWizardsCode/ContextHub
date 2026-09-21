@@ -6,6 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { UpdateOptions } from '../cli-types.js';
 import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent, RevertedItem } from '../types.js';
 import { isAutomationAuthoredChild } from '../automation.js';
+import { recordDemotionAuditTrail } from '../demotion-audit.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
@@ -519,6 +520,11 @@ export default function register(ctx: PluginContext): void {
           } catch (err) {
             // Best-effort: a demotion failure must not abort the update.
             console.error(`Warning: failed to demote parent ${updates.parentId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          // Record why the parent was reopened so a revival is explicable
+          // (WL-0MTWU4Y82001B3UH). Best-effort, never aborts the update.
+          if (demotedParent) {
+            recordDemotionAuditTrail(db, demotedParent, item);
           }
         }
 

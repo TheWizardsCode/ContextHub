@@ -44,6 +44,11 @@ describe('parent demotion on child add', () => {
     return JSON.parse(stdout).workItem;
   }
 
+  async function showComments(id: string): Promise<any[]> {
+    const { stdout } = await execAsync(`tsx ${cliPath} --json show ${id}`);
+    return JSON.parse(stdout).comments ?? [];
+  }
+
   // =======================================================================
   // wl create --parent
   // =======================================================================
@@ -231,6 +236,54 @@ describe('parent demotion on child add', () => {
       const parent = await showItem(parentId);
       expect(parent.status).toBe('open');
       expect(parent.stage).toBe('plan_complete');
+    });
+  });
+
+  // =======================================================================
+  // Demotion audit-trail comment (WL-0MTWU4Y82001B3UH)
+  // =======================================================================
+  describe('demotion audit-trail comment', () => {
+    it('records the attached child, actor, and transition on a create demotion', async () => {
+      const parentId = await createItem('--status completed --stage in_review');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "Missed subtask" --parent ${parentId} --created-by alice`
+      );
+      const childId = JSON.parse(stdout).workItem.id;
+
+      const comments = await showComments(parentId);
+      const comment = comments.find(c => c.comment.includes(childId));
+      expect(comment).toBeDefined();
+      expect(comment!.author).toBe('alice');
+      expect(comment!.comment).toContain('completed/in_review');
+      expect(comment!.comment).toContain('open/plan_complete');
+      expect(comment!.references).toContain(childId);
+    });
+
+    it('records a demotion comment on the reparenting path', async () => {
+      const parentId = await createItem('--status completed --stage in_review');
+      const childId = await createItem('--status open --stage idea --created-by bob');
+
+      await execAsync(`tsx ${cliPath} --json update ${childId} --parent ${parentId}`);
+
+      const comments = await showComments(parentId);
+      const comment = comments.find(c => c.comment.includes(childId));
+      expect(comment).toBeDefined();
+      expect(comment!.author).toBe('bob');
+    });
+
+    it('does not write a demotion comment for an exempt bot child', async () => {
+      const parentId = await createItem('--status completed --stage in_review');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "[test-failure] suite exited 1" ` +
+          `--parent ${parentId} --tags test-failure`
+      );
+      const childId = JSON.parse(stdout).workItem.id;
+
+      const comments = await showComments(parentId);
+      expect(comments.some(c => c.comment.includes(childId))).toBe(false);
+      expect(comments.some(c => c.comment.includes('Parent reopened'))).toBe(false);
     });
   });
 });
