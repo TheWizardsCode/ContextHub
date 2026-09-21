@@ -11,6 +11,7 @@ import { promises as fs } from 'fs';
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
+import { isAutomationAuthoredChild } from '../automation.js';
 
 /**
  * Default dedup match window for `wl create` (WL-0MSTNG2QF0049B97): retried
@@ -251,8 +252,12 @@ export default function register(ctx: PluginContext): void {
       // A parent cannot stay `completed`/`in_review` while it gains a new,
       // uncompleted child: demote it to `open`/`plan_complete` so its
       // lifecycle state reflects that its subtree is not finished.
+      //
+      // Exception: automation-authored telemetry children (test-failure /
+      // triage-bot) stay attached so the failure remains discoverable, but they
+      // must NOT rewind a finished parent's lifecycle (WL-0MTWU4XUD0001ALR).
       let demotedParent: DemotedParent | null = null;
-      if (parentId) {
+      if (parentId && !isAutomationAuthoredChild(item)) {
         try {
           demotedParent = db.demoteParentOnChildAdded(parentId);
         } catch (err) {

@@ -125,6 +125,14 @@ Options:
 - `--dedup-window <duration>` — Dedup match window, e.g. `30s`, `5m`, `1h` or raw milliseconds (optional; default: `5m`).
 - `--json` — Output JSON (optional).
 
+When `--parent <id>` attaches a child to a `completed`/`in_review` parent, the
+parent is demoted to `open`/`plan_complete` so a finished parent never silently
+gains uncompleted work (WL-0MSJL00P5004Y0L6). **Automation-authored telemetry
+children are exempt**: items tagged `test-failure`, titles prefixed
+`[test-failure]`, or created by a known bot identity (e.g. `triage-bot`) stay
+attached so the failure remains discoverable, but they do **not** rewind the
+parent's lifecycle (WL-0MTWU4XUD0001ALR).
+
 Dedup guard:
 
 - Retrying an identical `wl create` (common when agents lose the tool result to output trimming) returns the existing recent non-terminal item with a `duplicateOf` marker instead of creating a byte-identical twin. Only items created within the `--dedup-window` (default 5 minutes) whose title matches case- and whitespace-insensitively are reused; completed/deleted items are never matched. Pass `--allow-duplicate` when a genuinely new item is needed. In JSON mode the response carries a top-level `id` field first and a `duplicateOf` field on a dedup hit; human mode prints an `ID: <id>` line first.
@@ -153,6 +161,8 @@ Automatic re-sort:
 Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
 
 > **Auto-revert:** when `--audit-text`/`--audit-file` carries a `Ready to close: No` verdict for an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
+
+> **Reparenting demotion:** when `--parent <id>` attaches an item to a `completed`/`in_review` parent, the parent is demoted to `open`/`plan_complete` so a finished parent never silently gains uncompleted work. Automation-authored telemetry children (tagged `test-failure`, titled `[test-failure]…`, or created by a known bot identity) are exempt and do not rewind the parent (WL-0MTWU4XUD0001ALR).
 
 Automatic re-sort:
 

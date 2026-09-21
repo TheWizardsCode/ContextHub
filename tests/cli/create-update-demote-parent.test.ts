@@ -173,4 +173,64 @@ describe('parent demotion on child add', () => {
       );
     });
   });
+
+  // =======================================================================
+  // Automation-authored children (WL-0MTWU4XUD0001ALR)
+  // =======================================================================
+  describe('automation-authored children', () => {
+    it('does not demote a completed parent when a test-failure bot child is attached via create', async () => {
+      const parentId = await createItem('--status completed --stage in_review');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "[test-failure] suite exited 1" ` +
+          `--parent ${parentId} --tags test-failure --priority critical --stage idea`
+      );
+      const result = JSON.parse(stdout);
+
+      expect(result.success).toBe(true);
+      expect(result.demotedParent).toBeUndefined();
+
+      // Child is attached (telemetry stays discoverable) but the parent is
+      // untouched: a finished parent is not silently rewound.
+      const child = await showItem(result.workItem.id);
+      expect(child.parentId).toBe(parentId);
+      const parent = await showItem(parentId);
+      expect(parent.status).toBe('completed');
+      expect(parent.stage).toBe('in_review');
+    });
+
+    it('does not demote a completed parent when a bot child is attached via reparenting', async () => {
+      const parentId = await createItem('--status completed --stage in_review');
+      const botChildId = await createItem('--tags test-failure --stage idea');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json update ${botChildId} --parent ${parentId}`
+      );
+      const result = JSON.parse(stdout);
+
+      expect(result.success).toBe(true);
+      expect(result.demotedParent).toBeUndefined();
+
+      const child = await showItem(botChildId);
+      expect(child.parentId).toBe(parentId);
+      const parent = await showItem(parentId);
+      expect(parent.status).toBe('completed');
+      expect(parent.stage).toBe('in_review');
+    });
+
+    it('still demotes for a human-authored child (original demotion intent preserved)', async () => {
+      const parentId = await createItem('--status completed --stage in_review');
+
+      const { stdout } = await execAsync(
+        `tsx ${cliPath} --json create -t "Missed subtask" --parent ${parentId}`
+      );
+      const result = JSON.parse(stdout);
+
+      expect(result.demotedParent).toBeDefined();
+      expect(result.demotedParent.parent.id).toBe(parentId);
+      const parent = await showItem(parentId);
+      expect(parent.status).toBe('open');
+      expect(parent.stage).toBe('plan_complete');
+    });
+  });
 });

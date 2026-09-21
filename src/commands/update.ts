@@ -5,6 +5,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { UpdateOptions } from '../cli-types.js';
 import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent, RevertedItem } from '../types.js';
+import { isAutomationAuthoredChild } from '../automation.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
@@ -507,8 +508,12 @@ export default function register(ctx: PluginContext): void {
         // Reparenting: a parent cannot stay `completed`/`in_review` while a
         // new, uncompleted child is attached to it. Demote the target parent
         // to `open`/`plan_complete` so its lifecycle state stays consistent.
+        //
+        // Exception: automation-authored telemetry children (test-failure /
+        // triage-bot) may be attached for visibility, but they must NOT rewind
+        // a finished parent's lifecycle (WL-0MTWU4XUD0001ALR).
         let demotedParent: DemotedParent | null = null;
-        if (updates.parentId) {
+        if (updates.parentId && !isAutomationAuthoredChild(item)) {
           try {
             demotedParent = db.demoteParentOnChildAdded(updates.parentId);
           } catch (err) {
