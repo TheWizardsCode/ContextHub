@@ -23,32 +23,183 @@ export interface BackoffConfig {
   maxDelayMs: number;
   /** Multiplier applied to delay on each subsequent attempt */
   multiplier: number;
+  /**
+   * Upward-only jitter ratio applied to delays derived from a
+   * server-requested retry delay (`Retry-After` / `retry_after`).
+   * Defaults to {@link DEFAULT_SERVER_HINT_JITTER_RATIO}. Set to 0 to
+   * disable jitter.
+   */
+  serverHintJitterRatio?: number;
 }
+
+/**
+ * Default upward jitter ratio for server-hint-derived delays. Concurrent
+ * clients that were told the same `Retry-After` desynchronise instead of
+ * retrying in lockstep.
+ */
+export const DEFAULT_SERVER_HINT_JITTER_RATIO = 0.25;
 
 export const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
   baseDelayMs: 2000,
   maxDelayMs: 60000,
   multiplier: 2,
+  serverHintJitterRatio: DEFAULT_SERVER_HINT_JITTER_RATIO,
 };
 
 /**
- * Calculate delay for a given attempt number using exponential backoff.
+ * Parse a server-requested retry delay from an error message.
  *
- * delay = baseDelayMs * multiplier^(attempt-1)
- * result is capped at maxDelayMs.
+ * The llm-proxy startup-ramp gate returns HTTP 503 with a `Retry-After`
+ * header and a machine-readable body containing `retry_after` (seconds):
+ * `{"error":{"type":"startup_ramp",...},"status":503,"retry_after":N}`.
+ * Whatever pi folds into the assistant error message is parsed here.
+ *
+ * Supported forms (in precedence order):
+ * - `retry-after-ms` / `retry_after_ms`: milliseconds
+ * - `retry-after` / `retry_after`: delta-seconds (fractional allowed)
+ * - `retry-after` / `retry_after`: HTTP-date ("Wed, 21 Oct 2026 07:28:00 GMT")
+ *
+ * Escaped JSON (`\"retry_after\": 9`) is handled because some SDKs fold the
+ * raw body into `error.message`.
+ *
+ * @param errorMessage - The assistant error message (may be undefined/null)
+ * @returns Delay in milliseconds, or `undefined` when absent or malformed
+ */
+export function parseServerRetryDelayMs(errorMessage: string | undefined | null): number | undefined {
+  if (typeof errorMessage !== 'string' || errorMessage.length === 0) return undefined;
+
+  const keyword = '(?:^|[^\\w-])retry["\\\\]*[-_]?after';
+
+  // 1. Milliseconds form (checked first so `retry-after-ms` is not read as
+  //    delta-seconds).
+  const msMatch = errorMessage.match(
+    new RegExp(`${keyword}["\\\\]*[-_]?ms["\\\\]*\\s*[:=]\\s*["\\\\]*(\\d+(?:\\.\\d+)?)`, 'i'),
+  );
+  if (msMatch) {
+    return normaliseDelayMs(Number.parseFloat(msMatch[1]), 1);
+  }
+
+  // 2. Delta-seconds form (includes the `retry_after` JSON body field).
+  const secondsMatch = errorMessage.match(
+    new RegExp(`${keyword}["\\\\]*\\s*[:=]\\s*["\\\\]*(\\d+(?:\\.\\d+)?)`, 'i'),
+  );
+  if (secondsMatch) {
+    return normaliseDelayMs(Number.parseFloat(secondsMatch[1]), 1000);
+  }
+
+  // 3. HTTP-date form.
+  const dateMatch = errorMessage.match(
+    new RegExp(
+      `${keyword}["\\\\]*\\s*[:=]\\s*["\\\\]*([A-Za-z]{3},\\s*\\d{1,2}\\s+[A-Za-z]{3}\\s+\\d{4}\\s+\\d{2}:\\d{2}:\\d{2}\\s+GMT)`,
+      'i',
+    ),
+  );
+  if (dateMatch) {
+    const target = Date.parse(dateMatch[1]);
+    if (!Number.isNaN(target)) {
+      // A past date means "retry now" (0ms) rather than an invalid hint.
+      return Math.max(0, Math.round(target - Date.now()));
+    }
+  }
+
+  return undefined;
+}
+
+/** Convert a parsed value to a non-negative integer millisecond delay. */
+function normaliseDelayMs(value: number, factor: number): number | undefined {
+  if (!Number.isFinite(value)) return undefined;
+  const ms = value * factor;
+  if (ms < 0) return undefined;
+  return Math.round(ms);
+}
+
+/**
+ * Calculate delay for a given attempt number.
+ *
+ * Without a server hint: `delay = baseDelayMs * multiplier^(attempt-1)`,
+ * capped at `maxDelayMs` (existing exponential backoff, unchanged).
+ *
+ * With a usable server hint (from `Retry-After` / `retry_after`): the delay
+ * is the larger of the exponential backoff and the server-requested delay,
+ * plus upward-only jitter, capped at `maxDelayMs`. This guarantees the client
+ * never retries sooner than the server asked (unless the configured cap is
+ * below the hint).
  *
  * @param attempt - The attempt number (1-based)
  * @param config - Backoff configuration (defaults if not provided)
+ * @param serverHintMs - Server-requested delay in ms (see
+ *   {@link parseServerRetryDelayMs}); absent/malformed values fall back to the
+ *   plain exponential backoff
+ * @param random - Random source in [0, 1) used for jitter (injectable for tests)
  * @returns Delay in milliseconds
  */
 export function calculateDelay(
   attempt: number,
   config: BackoffConfig = DEFAULT_BACKOFF_CONFIG,
+  serverHintMs?: number,
+  random: () => number = Math.random,
 ): number {
   // Guard against non-positive attempt numbers; treat attempt 1 as minimum
   const safeAttempt = Math.max(attempt, 1);
-  const delay = config.baseDelayMs * Math.pow(config.multiplier, safeAttempt - 1);
-  return Math.min(delay, config.maxDelayMs);
+  const raw = config.baseDelayMs * Math.pow(config.multiplier, safeAttempt - 1);
+  const safeRaw = Number.isSafeInteger(raw) ? raw : Number.MAX_SAFE_INTEGER;
+  const exponential = Math.min(safeRaw, config.maxDelayMs);
+
+  // Missing/malformed hint: the existing exponential backoff, unchanged.
+  if (serverHintMs === undefined || !Number.isFinite(serverHintMs) || serverHintMs < 0) {
+    return exponential;
+  }
+
+  const floor = Math.max(exponential, serverHintMs);
+  const jitterRatio = Math.max(0, config.serverHintJitterRatio ?? DEFAULT_SERVER_HINT_JITTER_RATIO);
+  const jittered = floor * (1 + jitterRatio * random());
+  return Math.min(Math.round(jittered), config.maxDelayMs);
+}
+
+/**
+ * Resolve the retry delay for an attempt from its error message, returning
+ * both the delay and the server hint that produced it (if any).
+ *
+ * This is the single decision point used by the recovery retry loop: it
+ * parses a server-requested retry delay from the error text and feeds it to
+ * {@link calculateDelay}.
+ *
+ * @param attempt - The attempt number (1-based)
+ * @param errorMessage - The assistant error message
+ * @param config - Backoff configuration (defaults if not provided)
+ * @param random - Random source in [0, 1) used for jitter (injectable for tests)
+ * @returns The delay in milliseconds and the parsed server hint, if present
+ */
+export function resolveRetryDelay(
+  attempt: number,
+  errorMessage: string | undefined | null,
+  config: BackoffConfig = DEFAULT_BACKOFF_CONFIG,
+  random: () => number = Math.random,
+): { delayMs: number; serverHintMs?: number } {
+  const serverHintMs = parseServerRetryDelayMs(errorMessage);
+  const delayMs = calculateDelay(attempt, config, serverHintMs, random);
+  return serverHintMs === undefined ? { delayMs } : { delayMs, serverHintMs };
+}
+
+/**
+ * Compute the retry delay for an attempt from its error message.
+ *
+ * Convenience wrapper around {@link resolveRetryDelay} for callers that only
+ * need the numeric delay.
+ *
+ * @param attempt - The attempt number (1-based)
+ * @param errorMessage - The assistant error message
+ * @param config - Backoff configuration (defaults if not provided)
+ * @param random - Random source in [0, 1) used for jitter (injectable for tests)
+ * @returns Delay in milliseconds
+ */
+export function computeRetryDelay(
+  attempt: number,
+  errorMessage: string | undefined | null,
+  config: BackoffConfig = DEFAULT_BACKOFF_CONFIG,
+  random: () => number = Math.random,
+): number {
+  return resolveRetryDelay(attempt, errorMessage, config, random).delayMs;
 }
 
 /**

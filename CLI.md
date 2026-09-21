@@ -1153,6 +1153,26 @@ Example (JSON):
 wl --json status
 ```
 
+### `interview` [options] <id>
+
+Walk through outstanding interview questions on a work item interactively, capturing
+answers and clearing the `needsProducerReview` flag. Interview questions are set by
+producers when reviewing work items to request clarification or changes. This command
+presents each question in sequence, allowing you to provide answers or dismiss questions
+that are no longer relevant.
+
+Options:
+
+- `--prefix <prefix>` — Operate on a specific prefix (optional).
+- `--json` — Output machine-readable JSON (optional).
+
+Examples:
+
+```sh
+wl interview WL-ABC123
+wl interview WL-ABC123 --json
+```
+
 ### `help` [command]
 
 Show help for a specific command.
