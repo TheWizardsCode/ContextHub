@@ -986,12 +986,13 @@ export interface DowntimeCandidate {
   title: string;
   stage: DowntimeStage;
   /**
-   * Worklog status of the candidate (`open` for selectable plan/intake/
-   * implement items; `completed` for audit candidates). The plan/intake tiers
-   * filter client-side to `status === 'open'` (RCA WL-0MSRBFFLN005W3VT
-   * amplifier fix): `wl next --stage X` keeps completed items under a stage
-   * filter, so without this guard a completed/in_review item whose stage
-   * matches could be dispatched for /skill:plan or /skill:intake.
+   * Worklog status of the candidate (`open` or `blocked` for selectable
+   * plan/intake/implement items; `completed` for audit candidates). The
+   * plan/intake/implement selection filters client-side to `status` being
+   * `open` or `blocked` (RCA WL-0MSRBFFLN005W3VT amplifier fix): `wl next
+   * --stage X` keeps completed items under a stage filter, so without this
+   * guard a completed/in_review item whose stage matches could be dispatched
+   * for /skill:plan or /skill:intake.
    */
   status?: string;
   /** wl next priority order preserved for deterministic selection. */
@@ -1863,13 +1864,13 @@ export interface CriticalFirstCandidate {
 /**
  * Critical-first selection for the Herdr-head paths (WL-0MU6UL3XY001M3VT).
  *
- * Returns the OPEN critical items of a Herdr head that pass the
+ * Returns the open OR blocked critical items of a Herdr head that pass the
  * NON-BYPASSABLE safety gates, in deterministic order (lowest `sortIndex`
  * first — the historical critical-tier ordering):
  *
  *  - `needsProducerReview === true` excludes that candidate;
  *  - `classifyItemForDispatch` excludes non-dispatchable shapes (retired
- *    stage, missing fields, above-caps `plan_complete`);
+ *    stage, missing fields, above-effort-cap `plan_complete`);
  *  - while the code-freeze marker is frozen OR ambiguous, the
  *    split-by-skill rule pauses audit/implement candidates while
  *    plan/intake/risk-effort prep still passes — matching the direct
@@ -1877,11 +1878,11 @@ export interface CriticalFirstCandidate {
  *
  * The NON-SAFETY filters that the HERDR paths deliberately bypass for
  * critical work — the dispatched-marker exclusion and the review-queue
- * depth hold — are NOT applied here, so a blocked critical item is escalated
- * rather than starved by lower-priority work (AC1/AC4a). Free-slot minimums
- * and the active-audit single-flight check are dispatch-time gates: the
- * direct dispatcher applies them after selection; the offer computation
- * intentionally does not (they are not offer gates).
+ * depth hold — are NOT applied here, so a critical item held by a non-safety
+ * filter is escalated rather than starved by lower-priority work (AC1/AC4a).
+ * Free-slot minimums and the active-audit single-flight check are
+ * dispatch-time gates: the direct dispatcher applies them after selection;
+ * the offer computation intentionally does not (they are not offer gates).
  *
  * No second ranking is introduced (AC3): candidates always come from the
  * passed Herdr head, never a separate `wl list` lookup.
@@ -1892,7 +1893,7 @@ export function selectCriticalFirstCandidates(
   frozen: boolean = false,
 ): CriticalFirstCandidate[] {
   const sorted = items
-    .filter((i) => i.priority === 'critical' && i.status === 'open' && i.needsProducerReview !== true)
+    .filter((i) => i.priority === 'critical' && (i.status === 'open' || i.status === 'blocked') && i.needsProducerReview !== true)
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
   const out: CriticalFirstCandidate[] = [];
   for (const item of sorted) {
@@ -2151,9 +2152,14 @@ async function dispatchClaimedTier(
   // tier's target — without this the `wl update` status/stage validator
   // rejects the claim and the dispatcher records a hard wl-error strike.
   const retiredStage = (candidate.stage as string) === 'in_progress';
+  // Blocked-status claim (operator change: 'blocked' is an allowable dispatch
+  // status). The tier's nominal CAS expects `open`, but a blocked item is
+  // selected while `blocked` — the guard must match its ACTUAL status or the
+  // claim aborts as stale (`claim-failed`) and the item is never dispatched.
+  const claimStatus = candidate.status === 'blocked' ? 'blocked' : expected.status;
   const claimExpected: DowntimeClaimExpected = retiredStage
-    ? { status: expected.status, stage: candidate.stage }
-    : expected;
+    ? { status: claimStatus, stage: candidate.stage }
+    : { ...expected, status: claimStatus };
   // Keep the normal-path arity unchanged (3 args) so existing callers /
   // assertions see the historical shape; only the retired-stage recovery
   // passes the migration stage.
@@ -2416,13 +2422,12 @@ export function coordinationTierRank(kind: DowntimeSkillKind | null): number {
  *    recency window → `audit` (same freshness/recency semantics as the
  *    audit tier's `selectAuditCandidate`; `auditedAt` enriched by the
  *    fetchItem dep — absent auditedAt means not fresh → audit-eligible).
- *  - `open` + `plan_complete` + risk ≤ Medium + effort ≤ Medium →
- *    `implement` (the implement tier's caps, belt-and-suspenders
- *    client-side).
- *  - `open` + `intake_complete` → `plan`.
- *  - `open` + `idea` → `intake`.
+ *  - `open`/`blocked` + `plan_complete` + effort ≤ Medium (risk cap removed)
+ *    → `implement` (the effort cap is belt-and-suspenders client-side).
+ *  - `open`/`blocked` + `intake_complete` → `plan`.
+ *  - `open`/`blocked` + `idea` → `intake`.
  *  - Every other state (in_progress already claimed, completed with a
- *    fresh audit, past the recency window, above the implement caps,
+ *    fresh audit, past the recency window, above the effort cap,
  *    unknown status/stage) → null (never dispatched).
  *
  * `now` is injectable for deterministic tests.
@@ -2452,7 +2457,7 @@ export function classifyItemForDispatch(
     }
     return 'audit';
   }
-  if (status !== 'open') return null;
+  if (status !== 'open' && status !== 'blocked') return null;
   if (stage === 'idea') return 'intake';
   if (stage === 'intake_complete') return 'plan';
   if (stage === 'plan_complete') {
@@ -2462,9 +2467,9 @@ export function classifyItemForDispatch(
     const risk = riskOrdinal(info.risk);
     const effort = effortOrdinal(info.effort);
     if (risk === null || effort === null) return 'risk-effort';
-    // Implement caps (risk ≤ Medium, effort ≤ Medium) — same ordinal
-    // semantics as selectImplementCandidate.
-    if (risk > 2) return null;
+    // Effort cap (≤ Medium) — the risk cap was removed so high-risk items
+    // reach implement dispatch instead of being stranded (an open/blocked
+    // item with populated risk/effort otherwise has no dispatch kind).
     if (effort > 3) return null;
     return 'implement';
   }

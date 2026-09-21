@@ -93,6 +93,7 @@ import {
   selectWithRotation,
   toDowntimeCandidate,
   classifyItemForDispatch,
+  selectCriticalFirstCandidates,
   skillKindFromPrompt,
   buildDowntimeDispatchComment,
   clampDowntimePollInterval,
@@ -6860,11 +6861,27 @@ describe('needsProducerReview exclusion', () => {
       expect(classifyItemForDispatch({ id: 'RE6', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'small' } as DowntimeItemInfo)).toBe('implement');
       expect(classifyItemForDispatch({ id: 'RE7', status: 'open', stage: 'plan_complete', risk: 'medium', effort: 'medium' } as DowntimeItemInfo)).toBe('implement');
     });
-    it('returns null when plan_complete has valid risk but ABOVE cap (high)', () => {
-      expect(classifyItemForDispatch({ id: 'RE8', status: 'open', stage: 'plan_complete', risk: 'high', effort: 'small' } as DowntimeItemInfo)).toBeNull();
+    it('classifies ABOVE-cap risk as implement (risk cap removed — high/severe no longer excluded)', () => {
+      expect(classifyItemForDispatch({ id: 'RE8', status: 'open', stage: 'plan_complete', risk: 'high', effort: 'small' } as DowntimeItemInfo)).toBe('implement');
+      expect(classifyItemForDispatch({ id: 'RE8b', status: 'open', stage: 'plan_complete', risk: 'critical', effort: 'small' } as DowntimeItemInfo)).toBe('implement');
+      expect(classifyItemForDispatch({ id: 'RE8c', status: 'open', stage: 'plan_complete', risk: 'severe', effort: 'medium' } as DowntimeItemInfo)).toBe('implement');
     });
     it('returns null when plan_complete has valid effort but ABOVE cap (extra large)', () => {
       expect(classifyItemForDispatch({ id: 'RE9', status: 'open', stage: 'plan_complete', risk: 'low', effort: 'extra large' } as DowntimeItemInfo)).toBeNull();
+    });
+
+    // ── blocked status is dispatchable (WL-0MUBUA9C8009N0K5 AC1) ──
+    it('classifies blocked items to their stage-appropriate kind', () => {
+      expect(classifyItemForDispatch({ id: 'B1', status: 'blocked', stage: 'idea' } as DowntimeItemInfo)).toBe('intake');
+      expect(classifyItemForDispatch({ id: 'B2', status: 'blocked', stage: 'intake_complete' } as DowntimeItemInfo)).toBe('plan');
+      expect(classifyItemForDispatch({ id: 'B3', status: 'blocked', stage: 'plan_complete', risk: 'high', effort: 'small' } as DowntimeItemInfo)).toBe('implement');
+    });
+    it('still excludes blocked items needing producer review', () => {
+      expect(classifyItemForDispatch({ id: 'B4', status: 'blocked', stage: 'idea', needsProducerReview: true } as DowntimeItemInfo)).toBeNull();
+    });
+    it('does not classify a blocked item with a non-dispatchable stage', () => {
+      expect(classifyItemForDispatch({ id: 'B5', status: 'blocked', stage: 'in_review' } as DowntimeItemInfo)).toBeNull();
+      expect(classifyItemForDispatch({ id: 'B6', status: 'blocked', stage: 'done' } as DowntimeItemInfo)).toBeNull();
     });
 
     // ── retired in_progress stage (WL-0MTTSWCJR003OMN7 — OSL dead zones) ──
@@ -6875,6 +6892,74 @@ describe('needsProducerReview exclusion', () => {
     });
     it('still blocks npr items on in_progress stage', () => {
       expect(classifyItemForDispatch({ id: 'IP4', status: 'open', stage: 'in_progress', needsProducerReview: true } as DowntimeItemInfo)).toBeNull();
+    });
+  });
+
+  describe('selectCriticalFirstCandidates — blocked critical items (AC2)', () => {
+    const crit = (over: Partial<DowntimeHerdrItem>): DowntimeHerdrItem => ({
+      id: 'C',
+      title: 'Crit',
+      status: 'open',
+      stage: 'idea',
+      priority: 'critical',
+      sortIndex: 1,
+      ...over,
+    });
+
+    it('includes a blocked critical item at its stage-appropriate kind', () => {
+      const out = selectCriticalFirstCandidates([
+        crit({ id: 'C-BLOCKED-PLAN', status: 'blocked', stage: 'intake_complete' }),
+        crit({ id: 'C-BLOCKED-IMPL', status: 'blocked', stage: 'plan_complete', risk: 'High', effort: 'S' }),
+      ]);
+      expect(out.map((c) => [c.item.id, c.kind])).toEqual([
+        ['C-BLOCKED-PLAN', 'plan'],
+        ['C-BLOCKED-IMPL', 'implement'],
+      ]);
+    });
+
+    it('includes open and blocked critical items ordered by sortIndex', () => {
+      const out = selectCriticalFirstCandidates([
+        crit({ id: 'C-OPEN', status: 'open', stage: 'idea', sortIndex: 20 }),
+        crit({ id: 'C-BLOCKED', status: 'blocked', stage: 'idea', sortIndex: 10 }),
+      ]);
+      expect(out.map((c) => c.item.id)).toEqual(['C-BLOCKED', 'C-OPEN']);
+    });
+
+    it('still excludes blocked critical items needing producer review', () => {
+      const out = selectCriticalFirstCandidates([
+        crit({ id: 'C-NPR', status: 'blocked', stage: 'idea', needsProducerReview: true }),
+      ]);
+      expect(out).toEqual([]);
+    });
+
+    it('does not select a non-critical blocked item', () => {
+      const out = selectCriticalFirstCandidates([
+        crit({ id: 'C-OTHER', status: 'blocked', stage: 'idea', priority: 'high' }),
+      ]);
+      expect(out).toEqual([]);
+    });
+  });
+
+  describe('blocked candidate claim CAS (AC3)', () => {
+    it('claims a blocked candidate with its actual blocked status as the CAS guard', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
+          { id: 'B-PLAN', title: 'Blocked plan', status: 'blocked', stage: 'intake_complete', priority: 'critical', sortIndex: 1 },
+        ]}),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+      expect(outcome.candidate?.id).toBe('B-PLAN');
+      // The CAS guard must match the item's ACTUAL status, not the tier's
+      // nominal `open` — otherwise the claim aborts as stale.
+      expect(deps.claimItem).toHaveBeenCalledWith(
+        'B-PLAN',
+        { status: 'blocked', stage: 'intake_complete' },
+        '/repo',
+      );
     });
   });
 
@@ -8510,8 +8595,8 @@ describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
 // "other", cut off by the cap) and assert the bounded window extension finds
 // it in the SAME ranking order.
 //
-// Blocking is done by CLASSIFICATION SHAPE (above-caps risk for open items,
-// out-of-recency for completed/in_review) rather than by the
+// Blocking is done by CLASSIFICATION SHAPE (a non-dispatchable stage for
+// open items, out-of-recency for completed/in_review) rather than by the
 // `needsProducerReview` flag: on the current `dev` the live Herdr-head
 // dispatcher builds its `classifyItemForDispatch` input WITHOUT threading
 // `needsProducerReview`, so that flag does not block on this path yet (a
@@ -8520,12 +8605,18 @@ describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
 describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5)', () => {
   const OLD = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
-  /** An open item above the implement risk cap (never dispatchable). */
+  /**
+   * A non-dispatchable filler item: `open` status but a stage with no dispatch
+   * kind (`in_review`). Previously these filler items were made
+   * non-dispatchable by an above-cap risk, but the implement risk cap was
+   * removed (WL-0MUBUA9C8009N0K5); the non-dispatchable stage is now the
+   * stable filler shape.
+   */
   const blockedImplement = (id: string, overrides: Partial<DowntimeHerdrItem> = {}): DowntimeHerdrItem => ({
     id,
     title: `Blocked ${id}`,
     status: 'open',
-    stage: 'plan_complete',
+    stage: 'in_review',
     priority: 'medium',
     risk: 'High',
     effort: 'S',
