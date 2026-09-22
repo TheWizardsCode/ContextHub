@@ -149,7 +149,11 @@ import {
   writeDisableMarker,
 } from './downtime-disable-marker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
-import { DOWNTIME_LOG_FILE } from './downtime-log.js';
+import {
+  DOWNTIME_LOG_FILE,
+  appendDowntimeLogEntry,
+  readDowntimeLogEntries,
+} from './downtime-log.js';
 import {
   LEASE_FILE,
   LEADER_LOCK_FILE,
@@ -7874,6 +7878,21 @@ describe('slot ownership helpers (AC5)', () => {
       countFreeUnownedSlots([{ slot_id: 'a' } as unknown as LlamaSlot]),
     ).toBe(0);
   });
+
+  it('countFreeUnownedSlots is 0 when every slot is owned (AC3 all-owned condition)', () => {
+    // The literal all-owned case for the per-slot owner-lease gate
+    // (WL-0MU8807BI008C9ME AC3): every slot carries a live owner lease, so
+    // the per-slot free-unowned count — the gate signal in per-slot mode —
+    // is exactly zero. A slot that is idle by `is_processing` but owned is
+    // still NOT free.
+    expect(
+      countFreeUnownedSlots([
+        { slot_id: 'a', is_processing: true, owner_session_id: 'owner-a' },
+        { slot_id: 'b', is_processing: true, owner_session_id: 'owner-b' },
+        { slot_id: 'c', is_processing: false, owner_session_id: 'owner-c' },
+      ]),
+    ).toBe(0);
+  });
 });
 
 describe('evaluateIdle: idle-but-owned slot is not dispatchable (AC3/AC5)', () => {
@@ -9824,6 +9843,7 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
     try {
       const ownerA = 'http://localhost:8080';
       const ownerB = 'http://localhost:8081';
+      const ownerC = 'http://localhost:8082';
       const status: LlamaStatus = {
         llama_server_running: true,
         active_query: false,
@@ -9834,10 +9854,13 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
         total_slots: 3,
         local_owner_session_id: ownerA,
         local_owner_lease_remaining_seconds: 60,
+        // AC3: EVERY slot carries a live owner lease, including slot-3 which
+        // is idle by `is_processing` but owned. countFreeUnownedSlots === 0
+        // is the per-slot gate signal — the worker must refuse.
         slots: [
           { slot_id: 'slot-1', is_processing: true, owner_session_id: ownerA },
           { slot_id: 'slot-2', is_processing: true, owner_session_id: ownerB },
-          { slot_id: 'slot-3', is_processing: false }, // free but no free unowned: countFreeUnownedSlots = 0
+          { slot_id: 'slot-3', is_processing: false, owner_session_id: ownerC },
         ],
         contention_queue_depth: 0,
         contention_queued_count: 0,
@@ -9935,6 +9958,81 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     } finally {
       vi.useRealTimers();
+    }
+  });
+
+  it('AC5: cheap-mode dispatch is recorded in downtime-dispatches.log while a previously dispatched agent is still working', async () => {
+    // Integration evidence for the RCA (WL-0MU8807BI008C9ME): with a
+    // previously dispatched agent STILL alive (`runningPanes > 0`) and
+    // holding the shared owner lease, the per-slot gate must still dispatch
+    // into the 2 free unowned slots AND record the dispatch in the rolling
+    // log at <cwd>/.worklog/downtime-dispatches.log — the observable
+    // behaviour the RCA said never happened.
+    const root = mkdtempSync(join(tmpdir(), 'herdr-perslot-log-'));
+    vi.useFakeTimers();
+    try {
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 2,
+        total_slots: 3,
+        // Array form served by the live proxy: [url, session].
+        local_owner_session_id: ['http://localhost:8080', 'dispatched-pane-session'],
+        local_owner_lease_remaining_seconds: 90,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true, owner_session_id: 'dispatched-pane-session' },
+          { slot_id: 'slot-2', is_processing: false },
+          { slot_id: 'slot-3', is_processing: false },
+        ],
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const cfg = {
+        enabled: true,
+        thresholdMs: 1_000,
+        requiredFreeSlots: 2,
+        model: 'plan',
+        cwd: root,
+        noCandidateCooldownMs: 3_600_000,
+        browseItemCount: 20,
+      };
+      const poller = createDowntimePoller(
+        'http://proxy:8000',
+        vi.fn().mockResolvedValue(jsonResponseFixture(status)),
+      );
+      const deps = makeDeps({
+        getNextItem: vi.fn().mockResolvedValue({
+          ok: true,
+          candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+        }),
+        // A previously dispatched agent is STILL working.
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1 }),
+        // Real rolling-log write (the plugin's recordDispatch contract):
+        // the dispatch marker must land in downtime-dispatches.log.
+        recordDispatch: vi.fn(async (event) => {
+          await appendDowntimeLogEntry(event.cwd, JSON.stringify(event));
+          return true;
+        }),
+      });
+      const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick(); // baseline poll — start the per-slot timer
+      vi.setSystemTime(start + 5_000);
+      const outcome = await worker.tick();
+
+      expect(outcome.dispatched).toBe(true);
+      const entries = await readDowntimeLogEntries(root);
+      const marker = entries.find((e) => e.kind === 'plan' && e.itemId === 'WL-ABC');
+      expect(marker).toBeDefined();
+      expect(marker!.dispatchedAt).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
