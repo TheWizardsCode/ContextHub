@@ -8685,6 +8685,227 @@ describe('RCA: critical in-flight re-dispatch with a live pane (WL-0MUBEZ6PE002W
     },
   );
 });
+
+// ── Regression: one dispatch per in-flight critical item (F2) ──────────
+// Parent WL-0MUBEZ6PE002WLP4 / F2 WL-0MUBVKS5I007LSWB (AC5.1, AC5.3,
+// AC5.4, AC5.6). Promotes F1's RED witness
+// (WL-0MUBVKPLP006RRDJ) into the permanent, path-covering suite.
+//
+// The critical-first scan bypasses the dispatched-marker exclusion
+// UNCONDITIONALLY and the CAS claim succeeds when the item's status has
+// reverted to `open` at its marker's stage (H5), so a live pane does not
+// currently prevent a second dispatch. These cases are RED for the in-flight
+// variants before F3 (WL-0MUBVKXQJ000L8EO) lands and GREEN after.
+
+describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)', () => {
+  const criticalPlannedInFlight = (id: string): DowntimeHerdrItem => ({
+    id, title: `Critical in-flight ${id}`, status: 'open', stage: 'plan_complete',
+    risk: 'Low', effort: 'S', priority: 'critical', sortIndex: 10,
+  });
+  const nonCriticalStale = (id: string): DowntimeHerdrItem => ({
+    id, title: `Stale ${id}`, status: 'open', stage: 'plan_complete',
+    risk: 'Low', effort: 'S', priority: 'medium', sortIndex: 100,
+  });
+
+  /** A `herdr pane list` record set with one pane for *itemId* at *status*. */
+  const paneRecord = (itemId: string, agentStatus: string) => ({
+    paneId: 'w1:p1',
+    label: `Downtime triggered implement Critical in-flight ${itemId} - ${itemId}`,
+    agent: 'pi',
+    agentStatus,
+  });
+
+  /**
+   * A live working pane result. `records` is the item-scoped signal F3
+   * consumes (additive on RunningPanesResult); `count` stays the owner-lease
+   * qualifier only — never a dispatch limit (WL-0MU2EP6JL006A1U3).
+   */
+  const liveWorkingPane = (itemId: string) => ({
+    ok: true as const,
+    count: 1,
+    paneIds: ['w1:p1'],
+    records: [paneRecord(itemId, 'working')],
+  });
+
+  describe('AC5.1 — Herdr-head path: two cycles, exactly one dispatch', () => {
+    it.fails('two idle cycles over a critical item open at its marker stage with a live working pane dispatch once (RED pre-fix)', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'herdr-head-inflight-'));
+      mkdirSync(join(root, '.worklog'), { recursive: true });
+      writeFileSync(
+        join(root, '.worklog', 'downtime-dispatches.log'),
+        JSON.stringify({
+          at: new Date().toISOString(), cwd: root, kind: 'implement', itemId: 'CR-INFLIGHT',
+          stage: 'plan_complete', dispatchedAt: new Date().toISOString(), message: 'Dispatched CR-INFLIGHT',
+        }) + '\n',
+      );
+      try {
+        const deps = makeDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [criticalPlannedInFlight('CR-INFLIGHT')] }),
+          claimItem: vi.fn().mockResolvedValue({ ok: true }),
+          spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+          recordDispatch: vi.fn().mockResolvedValue(true),
+          getRunningDowntimePanes: vi.fn().mockResolvedValue(liveWorkingPane('CR-INFLIGHT')),
+        });
+
+        const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
+        const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
+
+        expect(first.dispatched).toBe(true);
+        expect(second.dispatched).toBe(false);
+        expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('AC5.4 — live-pane variants', () => {
+    it.fails('a live `working` pane blocks the second cycle (stage advancement irrelevant while open)', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [criticalPlannedInFlight('CR-W')] }),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue(liveWorkingPane('CR-W')),
+      });
+
+      const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+      const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(first.dispatched).toBe(true);
+      expect(second.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    });
+
+    it('a `done` pane does NOT block dispatch (no idle-pane deadlock, AC2.3)', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [criticalPlannedInFlight('CR-DONE')] }),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true, count: 0, paneIds: [], records: [paneRecord('CR-DONE', 'done')],
+        }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('CR-DONE');
+    });
+
+    it('an `exited` pane does NOT block dispatch (no idle-pane deadlock, AC2.3)', async () => {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [criticalPlannedInFlight('CR-EXIT')] }),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true, count: 0, paneIds: [], records: [paneRecord('CR-EXIT', 'exited')],
+        }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('CR-EXIT');
+    });
+
+    it.fails('a failed/unparseable pane query never duplicating: the fresh marker still holds the second cycle (AC2.2/AC3.3)', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'herdr-head-panefail-'));
+      mkdirSync(join(root, '.worklog'), { recursive: true });
+      writeFileSync(
+        join(root, '.worklog', 'downtime-dispatches.log'),
+        JSON.stringify({
+          at: new Date().toISOString(), cwd: root, kind: 'implement', itemId: 'CR-PANEFAIL',
+          stage: 'plan_complete', dispatchedAt: new Date().toISOString(), message: 'Dispatched CR-PANEFAIL',
+        }) + '\n',
+      );
+      try {
+        const deps = makeDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [criticalPlannedInFlight('CR-PANEFAIL')] }),
+          claimItem: vi.fn().mockResolvedValue({ ok: true }),
+          spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+          recordDispatch: vi.fn().mockResolvedValue(true),
+          // herdr unavailable: the in-flight state cannot be proven.
+          getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: false, error: 'herdr down' }),
+        });
+
+        const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
+        const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
+
+        expect(first.dispatched).toBe(true);
+        expect(second.dispatched).toBe(false);
+        expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('AC5.3 — stale-marker coverage beyond the critical tier', () => {
+    it('a non-critical item at the same stage with a fresh marker and a live pane is not re-dispatched', async () => {
+      const root = mkdtempSync(join(tmpdir(), 'herdr-head-noncrit-'));
+      mkdirSync(join(root, '.worklog'), { recursive: true });
+      writeFileSync(
+        join(root, '.worklog', 'downtime-dispatches.log'),
+        JSON.stringify({
+          at: new Date().toISOString(), cwd: root, kind: 'implement', itemId: 'IMP-STALE',
+          stage: 'plan_complete', dispatchedAt: new Date().toISOString(), message: 'Dispatched IMP-STALE',
+        }) + '\n',
+      );
+      try {
+        const deps = makeDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [nonCriticalStale('IMP-STALE')] }),
+          claimItem: vi.fn().mockResolvedValue({ ok: true }),
+          spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+          recordDispatch: vi.fn().mockResolvedValue(true),
+          getRunningDowntimePanes: vi.fn().mockResolvedValue({
+            ok: true, count: 1, paneIds: ['w1:p1'],
+            records: [{ paneId: 'w1:p1', label: 'Downtime triggered implement Stale IMP-STALE - IMP-STALE', agent: 'pi', agentStatus: 'working' }],
+          }),
+        });
+
+        const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
+        const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
+
+        expect(first.dispatched).toBe(false);
+        expect(second.dispatched).toBe(false);
+        expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('AC5.6 — no idle-pane deadlock: a completed skill still advances to its next tier', () => {
+    it('an item whose previous skill completed (pane present, agent not working) still dispatches its next tier', async () => {
+      // The pane for the item is still OPEN but its agent is `done`: the item
+      // is at intake_complete with a completed intake pane. It must dispatch
+      // the plan tier, not deadlock on the stale pane.
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [{ id: 'WL-NEXT', title: 'Next tier', status: 'open', stage: 'intake_complete', priority: 'high', risk: 'Low', effort: 'S', sortIndex: 10 }],
+        }),
+        claimItem: vi.fn().mockResolvedValue({ ok: true }),
+        spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+        recordDispatch: vi.fn().mockResolvedValue(true),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true, count: 0, paneIds: [],
+          records: [{ paneId: 'w1:p1', label: 'Downtime triggered intake Next tier - WL-NEXT', agent: 'pi', agentStatus: 'done' }],
+        }),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+      expect(outcome.candidate?.id).toBe('WL-NEXT');
+    });
+  });
+});
+
 // ── Dispatch-window extension — Herdr head-cap starvation (WL-0MU6UL3GQ0015AA5) ──
 // The dispatcher iterates the Herdr list head, which is windowed: mandatory
 // items (critical + completed/in_review) are always included and consume
