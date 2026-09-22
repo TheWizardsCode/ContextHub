@@ -1123,6 +1123,8 @@ export type MostImportantItemResult =
   | { ok: true; noCandidate: true }
   /** Deep review queue + only held non-critical implements remain: nothing offerable NOW, but the backlog is NOT empty — the caller must not pause (WL-0MTTSWC1X005P4VD AC2). */
   | { ok: true; reviewQueueHold: true }
+  /** Every remaining offerable candidate is a critical item already in flight (live working pane): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry (WL-0MUBVKYH5009CGBI / F4). */
+  | { ok: true; inFlightHold: true }
   | { ok: false; error?: string };
 
 
@@ -2795,6 +2797,14 @@ export async function computeMostImportantItem(
   };
   let heldByReviewQueue = false;
 
+  // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F4
+  // WL-0MUBVKYH5009CGBI): resolved for THIS instance's OWN root (`cwd`) —
+  // never the leader's root (WL-0MTQ14W7L003II5A cross-root invariant).
+  // Resolved lazily via the shared F3 resolver; unavailable resolves to the
+  // marker-TTL fallback inside the decision table.
+  const inFlight = await resolveInFlightPanes(deps, cwd);
+  let heldByInFlight = false;
+
   // Critical-first scan (WL-0MU6UL3XY001M3VT): a critical item blocked by a
   // NON-SAFETY filter (stale dispatched marker, review-queue depth hold) must
   // still be OFFERED — otherwise the check-in floats a lower-priority head
@@ -2802,8 +2812,24 @@ export async function computeMostImportantItem(
   // (`needsProducerReview`, code-freeze split-by-skill) still apply inside the
   // helper; free-slot minimums and active-audit single-flight remain
   // dispatch-time gates and are intentionally not applied to an offer.
-  const [criticalFirst] = selectCriticalFirstCandidates(head.items, now, frozen);
-  if (criticalFirst !== undefined) {
+  //
+  // In-flight guard (F4): a critical item with a live working pane is NOT
+  // offered — the scan continues to the next critical candidate, then to the
+  // normal window, so the instance offers its next dispatchable head item
+  // instead of floating an in-flight duplicate (AC2.7).
+  for (const criticalFirst of selectCriticalFirstCandidates(head.items, now, frozen)) {
+    const marker = markerMaps[criticalFirst.kind]?.get(criticalFirst.item.id);
+    const guard = evaluateCriticalFirstGuard(
+      criticalFirst.item.id,
+      inFlight,
+      marker?.dispatchedAt,
+      now,
+      markerStaleWindowMs,
+    );
+    if (!guard.escalate) {
+      heldByInFlight = true;
+      continue;
+    }
     const candidate: DowntimeCandidate = {
       id: criticalFirst.item.id,
       title: criticalFirst.item.title,
@@ -2851,6 +2877,15 @@ export async function computeMostImportantItem(
       // Code-freeze split-by-skill: audit+implement+risk-effort offers pause
       // during a freeze/ambiguous marker (plan/intake still offer).
       if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) continue;
+      // In-flight guard (F4): never offer a CRITICAL item with a live working
+      // pane — the same item-scoped decision table as the dispatch path.
+      if (item.priority === 'critical') {
+        const guard = evaluateCriticalFirstGuard(item.id, inFlight, marker?.dispatchedAt, now, markerStaleWindowMs);
+        if (!guard.escalate) {
+          heldByInFlight = true;
+          continue;
+        }
+      }
       // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
       // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while the
       // queue is deep — the instance then offers its next dispatchable head
@@ -2900,7 +2935,9 @@ export async function computeMostImportantItem(
   // resumes immediately when the queue drains below the threshold).
   return heldByReviewQueue
     ? { ok: true, reviewQueueHold: true }
-    : { ok: true, noCandidate: true };
+    : heldByInFlight
+      ? { ok: true, inFlightHold: true }
+      : { ok: true, noCandidate: true };
 }
 
 /**
@@ -2991,6 +3028,20 @@ export async function dispatchFromCoordination(
     }
     return reviewGateCache.get(root) ?? null;
   };
+
+  // Item-scoped in-flight cache (WL-0MUBEZ6PE002WLP4 / F4
+  // WL-0MUBVKYH5009CGBI): resolved per OFFER root (never the leader's own
+  // root — the WL-0MTQ14W7L003II5A cross-root invariant), so a leader-side
+  // TOCTOU re-check rejects an offer whose pane appeared after the owner
+  // computed it (AC2.10). Cached so each root is queried at most once.
+  const inFlightCache = new Map<string, InFlightPanes>();
+  const inFlightForRoot = async (root: string): Promise<InFlightPanes> => {
+    if (!inFlightCache.has(root)) {
+      inFlightCache.set(root, await resolveInFlightPanes(deps, root));
+    }
+    return inFlightCache.get(root) ?? { available: false, itemIds: new Set() };
+  };
+  let inFlightHold = false;
 
   // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
   // gated by the SAME fresh-read code-freeze marker as the audit/implement
@@ -3093,6 +3144,18 @@ export async function dispatchFromCoordination(
         continue;
       }
     }
+    // Leader-side in-flight re-check (AC2.10): an offer computed BEFORE the
+    // pane appeared must not dispatch now. Only a PROVEN live working pane
+    // blocks (an unavailable query must not stall all coordination dispatch);
+    // the owner's offer computation already applied the marker-TTL fallback.
+    // The entry is KEPT — the offer is still valid once the pane finishes.
+    if (result.info.priority === 'critical') {
+      const inFlight = await inFlightForRoot(worklogRoot);
+      if (inFlight.available && inFlight.itemIds.has(result.info.id)) {
+        inFlightHold = true;
+        continue;
+      }
+    }
     // Dispatch attempt (CAS claim → marker → spawn).
     const outcome = await dispatchClaimedTier(
       deps,
@@ -3161,7 +3224,9 @@ export async function dispatchFromCoordination(
     ? { dispatched: false, reason: 'code-freeze' }
     : reviewHold
       ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
-      : { dispatched: false, reason: 'no-candidate' };
+      : inFlightHold
+        ? { dispatched: false, reason: 'in-flight-pane' }
+        : { dispatched: false, reason: 'no-candidate' };
 }
 
 /**
@@ -4786,9 +4851,11 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
               );
             }
             // probe.ok with a candidate (or `reviewQueueHold` — the deep-queue
-            // gate left only held implements, WL-0MTTSWC1X005P4VD): no pause —
-            // the empty file is a transient gap / the gate may lift at any
-            // moment; the check-in re-offers the candidate.
+            // gate left only held implements, WL-0MTTSWC1X005P4VD — or
+            // `inFlightHold` — only in-flight criticals remain,
+            // WL-0MUBVKYH5009CGBI): no pause — the empty file is a transient
+            // gap / the hold may lift at any moment; the check-in re-offers
+            // the candidate.
           } else {
             // Legacy mode — original semantics: no-candidate means a genuine
             // empty backlog; pause entirely for the cooldown.

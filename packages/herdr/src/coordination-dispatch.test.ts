@@ -110,6 +110,9 @@ function makeCoordinationDeps(overrides: Partial<DowntimeWorkerDeps> = {}): Down
     // shallow (empty) queue by default so the gate is INACTIVE and existing
     // tests dispatch implement offers unchanged.
     getReviewQueueCount: vi.fn().mockResolvedValue(0),
+    // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F4): available query,
+    // no live panes by default → the guard is inert for existing tests.
+    getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
     ...overrides,
   } as DowntimeWorkerDeps;
 }
@@ -1574,7 +1577,7 @@ describe('in-flight guard on the coordination offer path (WL-0MUBVKS5I007LSWB / 
     ],
   });
 
-  it.fails(
+  it(
     'AC5.2: an in-flight critical item is not offered by computeMostImportantItem; the non-critical fallback is chosen (RED pre-fix)',
     async () => {
       const deps = makeCoordinationDeps({
@@ -1596,7 +1599,7 @@ describe('in-flight guard on the coordination offer path (WL-0MUBVKS5I007LSWB / 
     },
   );
 
-  it.fails(
+  it(
     'AC5.2/AC2.10: the leader re-checks at dispatch time — an offer computed before the pane appeared is rejected (RED pre-fix)',
     async () => {
       const deps = makeCoordinationDeps({
@@ -1623,14 +1626,18 @@ describe('in-flight guard on the coordination offer path (WL-0MUBVKS5I007LSWB / 
   );
 
   it(
-    'AC5.2: two consecutive idle cycles over an in-flight critical offer dispatch exactly once (RED pre-fix, GREEN after F4)',
+    'AC5.2: two consecutive owner/leader cycles over a critical item re-offered after dispatch dispatch exactly once',
     async () => {
-      // Two real dispatch cycles over the same offer entry. Cycle 1 dispatches
-      // and writes a marker; the item is MODELLED as still `open` at its
-      // marker's stage (the H5 status revert), so pre-fix cycle 2 re-dispatches.
+      // Faithful two-cycle simulation of the H5 status revert: the owner
+      // offers its critical head, the leader dispatches it, then the item's
+      // status is observed `open` again at the same stage so the owner
+      // RE-OFFERS it at the next check-in while the spawned pane is still
+      // working. Pre-fix the leader re-dispatches; post-fix the in-flight
+      // guard withholds the offer and the leader rejects the stale entry.
       const root = mkdtempSync(join(tmpdir(), 'herdr-coord-inflight-'));
       mkdirSync(join(root, '.worklog'), { recursive: true });
       try {
+        // Cycle 1: no pane yet → the owner offers, the leader dispatches.
         writeCoordinationFile(testDir, {
           version: 1,
           entries: [makeEntry('inst-lead', 'CR-DUP', root)],
@@ -1640,21 +1647,47 @@ describe('in-flight guard on the coordination offer path (WL-0MUBVKS5I007LSWB / 
             ok: true,
             info: itemInfo({ id: 'CR-DUP', status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S' }),
           }),
-          getRunningDowntimePanes: vi.fn().mockResolvedValue(livePaneFor('CR-DUP')),
+          getHerdrListHead: vi
+            .fn()
+            .mockResolvedValueOnce({ ok: true, items: [inFlightCritical('CR-DUP')] })
+            .mockResolvedValue({ ok: true, items: [inFlightCritical('CR-DUP')] }),
+          // Cycle 1: no pane yet for BOTH the owner's offer and the leader's
+          // re-check. Cycle 2+: the spawned pane is live and working.
+          getRunningDowntimePanes: vi
+            .fn()
+            .mockResolvedValueOnce({ ok: true, count: 0, paneIds: [], records: [] })
+            .mockResolvedValueOnce({ ok: true, count: 0, paneIds: [], records: [] })
+            .mockResolvedValue(livePaneFor('CR-DUP')),
         });
 
+        // Cycle 1 — owner offers, leader dispatches.
+        const offer1 = await computeMostImportantItem(deps, root, Date.now(), 20);
+        expect('candidate' in offer1 && offer1.candidate.id).toBe('CR-DUP');
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-lead', 'CR-DUP', root)],
+        });
         const first = await dispatchFromCoordination(
           deps,
           readCoordinationFile(testDir)?.entries ?? [],
           { model: 'plan', cwd: root, coordinationDir: testDir },
         );
+        expect(first.dispatched).toBe(true);
+
+        // Cycle 2 — the item is observed `open` again (H5): the owner
+        // re-offers it, and the leader must reject the in-flight offer.
+        const offer2 = await computeMostImportantItem(deps, root, Date.now(), 20);
+        expect('candidate' in offer2).toBe(false); // withheld as in-flight
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-lead', 'CR-DUP', root)],
+        });
         const second = await dispatchFromCoordination(
           deps,
           readCoordinationFile(testDir)?.entries ?? [],
           { model: 'plan', cwd: root, coordinationDir: testDir },
         );
 
-        expect(first.dispatched).toBe(true);
         expect(second.dispatched).toBe(false);
         expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
       } finally {
@@ -1662,6 +1695,52 @@ describe('in-flight guard on the coordination offer path (WL-0MUBVKS5I007LSWB / 
       }
     },
   );
+
+  it('AC2.7: only in-flight criticals remain → inFlightHold (not noCandidate, so the worker never pauses)', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [inFlightCritical('CR-ONLY')] }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue(livePaneFor('CR-ONLY')),
+    });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+
+    expect(result.ok).toBe(true);
+    expect('candidate' in result).toBe(false);
+    expect('noCandidate' in result && result.noCandidate).toBe(false);
+    expect('inFlightHold' in result && result.inFlightHold).toBe(true);
+  });
+
+  it('AC2.8: the pane query uses the OFFER\'s own root, never the leader root (cross-root invariant)', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [inFlightCritical('CR-CROSS')] }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+    });
+
+    await computeMostImportantItem(deps, '/offer-root', Date.now(), 20);
+
+    // The in-flight query must target the offer's OWN worklog root.
+    expect(deps.getRunningDowntimePanes).toHaveBeenCalledWith('/offer-root');
+    expect(deps.getRunningDowntimePanes).not.toHaveBeenCalledWith('/leader-root');
+  });
+
+  it('AC2.10: the leader re-check queries the OFFER root (cross-root), not the leader root', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({ id: 'CR-CROSS', status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S' }),
+      }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+    });
+
+    await dispatchFromCoordination(
+      deps,
+      [makeEntry('inst-x', 'CR-CROSS', '/offer-root')],
+      { model: 'plan', cwd: '/leader-root', coordinationDir: testDir },
+    );
+
+    expect(deps.getRunningDowntimePanes).toHaveBeenCalledWith('/offer-root');
+    expect(deps.getRunningDowntimePanes).not.toHaveBeenCalledWith('/leader-root');
+  });
 
   it('AC2.3: a terminal (`done`) pane for the item does NOT block the offer (no idle-pane deadlock)', async () => {
     const deps = makeCoordinationDeps({

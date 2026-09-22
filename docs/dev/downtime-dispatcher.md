@@ -570,6 +570,26 @@ list` read already used for the owner-lease qualifier
 or an unwired dep resolves `{available:false}` and the decision table falls
 back to the marker TTL — the resolver never throws into the dispatch loop.
 
+The guard covers **both dispatch paths** (AC5 names both): the direct
+Herdr-head dispatcher above, and the **coordination path** (WL-0MUBVKYH5009CGBI
+/ F4). On the coordination path the item-scoped signal is resolved **per offer
+root** — never the leader's root — preserving the cross-root invariant
+(WL-0MTQ14W7L003II5A):
+
+- `computeMostImportantItem` (the owner's check-in offer) skips an in-flight
+  critical item and offers its next dispatchable head item instead, returning
+  `{ok:true, inFlightHold:true}` when ONLY in-flight criticals remain (a
+  non-empty backlog — never `noCandidate`, so no cooldown);
+- `dispatchFromCoordination` (the leader) **re-checks at dispatch time** and
+  rejects an offer whose pane appeared after the offer was computed (the
+  TOCTOU gap), keeping the entry — the offer is still valid once the pane
+  finishes. When every surviving offer is in-flight the terminal reason is the
+  neutral `in-flight-pane` (never a strike/cooldown).
+
+The leader-side re-check blocks only a **proven** live working pane; an
+unavailable query does not stall all coordination dispatch (the owner's offer
+computation already applied the marker-TTL fallback).
+
 **Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
 implement/plan/intake tiers, the leader looks up the highest-priority open
 **critical** item at ANY stage via `wl list --priority critical --status open
