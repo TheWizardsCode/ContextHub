@@ -9600,3 +9600,341 @@ describe('dispatch log: selection path/reason + pane id enrichment (WL-0MUBVL251
     expect(outcome.dispatched).toBe(true);
   });
 });
+// ── AC Tests: per-slot owner-lease gate (WL-0MU8807BI008C9ME) ──────────
+
+// ── parseLlamaStatus: array local_owner_session_id (blocking dep fix) ──
+
+describe('parseLlamaStatus: array local_owner_session_id (WL-0MU88086A0089US4)', () => {
+  function makeBase(): Record<string, unknown> {
+    return {
+      llama_server_running: true,
+      active_query: false,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 3,
+      total_slots: 3,
+      contention_queue_depth: 0,
+      contention_queued_count: 0,
+    };
+  }
+
+  it('AC1: legacy string payload preserves the owner (WL-0MU88086A0089US4)', () => {
+    const raw = {
+      ...makeBase(),
+      local_owner_session_id: 'herdr-1789775322-722064-10708',
+    };
+    const result = parseLlamaStatus(raw);
+    expect(result).not.toBeNull();
+    expect(result!.local_owner_session_id).toBe('herdr-1789775322-722064-10708');
+  });
+
+  it('AC2: current 2-element array payload parses; URL element ignored, session recovered', () => {
+    const raw = {
+      ...makeBase(),
+      local_lease_active: undefined, // omit so it derives from array/lease_seconds
+      local_owner_session_id: ['http://localhost:8080', 'herdr-1789775322-722064-10708'],
+      local_owner_lease_remaining_seconds: 30,
+    };
+    const result = parseLlamaStatus(raw);
+    expect(result).not.toBeNull();
+    // The session ID (2nd element) is extracted; the URL (1st element) is dropped.
+    expect(result!.local_owner_session_id).toBe('herdr-1789775322-722064-10708');
+    // local_lease_active derives from lease_seconds > 0.
+    expect(result!.local_lease_active).toBe(true);
+  });
+
+  it('AC3: malformed owner (number) → fail-closed (busy / undefined), no throw', () => {
+    const raw = {
+      ...makeBase(),
+      local_owner_session_id: 42,
+    };
+    const result = parseLlamaStatus(raw);
+    // A non-string, non-array number is ambiguous → undefined for this field.
+    expect(result).not.toBeNull();
+    expect(result!.local_owner_session_id).toBeUndefined();
+  });
+
+  it('AC3b: malformed owner (object) → fail-closed', () => {
+    const raw = {
+      ...makeBase(),
+      local_owner_session_id: { id: 'bad' },
+    };
+    const result = parseLlamaStatus(raw);
+    expect(result).not.toBeNull();
+    expect(result!.local_owner_session_id).toBeUndefined();
+  });
+
+  it('AC3c: malformed owner (empty array) → fail-closed', () => {
+    const raw = {
+      ...makeBase(),
+      local_owner_session_id: [],
+    };
+    const result = parseLlamaStatus(raw);
+    expect(result).not.toBeNull();
+    expect(result!.local_owner_session_id).toBeUndefined();
+  });
+
+  it('AC4: contract test pins exact array shape [url, session]', () => {
+    // Reproduces the exact live-proxy shape observed on 2026-09-19.
+    const raw = {
+      ...makeBase(),
+      local_owner_session_id: ['http://localhost:8080', 'herdr-1789776793-744802-10480'],
+      local_owner_lease_remaining_seconds: 29.99,
+    };
+    const result = parseLlamaStatus(raw);
+    expect(result).not.toBeNull();
+    expect(result!.local_owner_session_id).toBe('herdr-1789776793-744802-10480');
+  });
+
+  it('AC5: fetchLocalStatus never throws on array shape', async () => {
+    const arrayPayload = {
+      ...makeBase(),
+      local_owner_session_id: ['http://localhost:8080', 'herdr-test'],
+    };
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(arrayPayload)),
+    );
+    const worker = createDowntimeWorker({
+      poller,
+      deps: makeDeps(),
+      config: () => ({
+        enabled: true,
+        thresholdMs: 0,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd: '/repo',
+        noCandidateCooldownMs: 3_600_000,
+      }),
+    });
+    // Should not throw — poller must handle the array shape.
+    const result = await worker.tick();
+    expect(result).toBeDefined();
+  });
+});
+
+// ── Per-slot owner-lease gate in tick() (WL-0MU8807BI008C9ME AC1-AC4) ──
+
+describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () => {
+  function makePerSlotWorker(opts: {
+    status: LlamaStatus;
+    runningPanes: () => { ok: true; count: number } | { ok: false; error?: string };
+    requiredFreeSlots?: number;
+  }) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: 1_000,
+      requiredFreeSlots: opts.requiredFreeSlots ?? 2,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+      browseItemCount: 20,
+    };
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
+    );
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      getRunningDowntimePanes: vi.fn().mockImplementation(async () => opts.runningPanes()),
+    });
+    const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+    return { worker, deps };
+  }
+
+  it('AC1: per-slot 3-slots: 1 owned+busy, 2 free unowned, held lease + runningPanes → dispatch proceeds (RCA regression)', async () => {
+    // Regression for the overnight stall: cheap mode (3 slots), one slot
+    // owned by a dispatched agent, 2 free unowned → dispatch MUST fire.
+    vi.useFakeTimers();
+    try {
+      const ownedSlot = 'http://localhost:8080';
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 2,
+        total_slots: 3,
+        local_owner_session_id: ownedSlot,
+        local_owner_lease_remaining_seconds: 120,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true, owner_session_id: ownedSlot },
+          { slot_id: 'slot-2', is_processing: false },
+          { slot_id: 'slot-3', is_processing: false },
+        ],
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker, deps } = makePerSlotWorker({
+        status,
+        runningPanes: () => ({ ok: true, count: 1 }),
+        requiredFreeSlots: 2,
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick(); // first tick — establish idle baseline
+      vi.setSystemTime(start + 5_000);
+      const outcome = await worker.tick();
+      // THE FIX: dispatch MUST proceed because 2 free unowned slots exist.
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC2: count-based status (no slots), owner lease held, runningPanes > 0 → dispatch refused (single-slot protection preserved)', async () => {
+    vi.useFakeTimers();
+    try {
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 1,
+        total_slots: 1,
+        local_owner_session_id: 'session-live',
+        local_owner_lease_remaining_seconds: 120,
+      };
+      // No `slots` array → count-based mode.
+      const { worker, deps } = makePerSlotWorker({
+        status,
+        runningPanes: () => ({ ok: true, count: 1 }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const blocked = await worker.tick();
+      expect(blocked.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC3: per-slot status where every slot is owned → dispatch refused', async () => {
+    vi.useFakeTimers();
+    try {
+      const ownerA = 'http://localhost:8080';
+      const ownerB = 'http://localhost:8081';
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 0,
+        total_slots: 3,
+        local_owner_session_id: ownerA,
+        local_owner_lease_remaining_seconds: 60,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true, owner_session_id: ownerA },
+          { slot_id: 'slot-2', is_processing: true, owner_session_id: ownerB },
+          { slot_id: 'slot-3', is_processing: false }, // free but no free unowned: countFreeUnownedSlots = 0
+        ],
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker, deps } = makePerSlotWorker({
+        status,
+        runningPanes: () => ({ ok: true, count: 1 }),
+        requiredFreeSlots: 2,
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const blocked = await worker.tick();
+      expect(blocked.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC4: audit-tier minimum (DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2) evaluated against per-slot unowned-free count', async () => {
+    vi.useFakeTimers();
+    try {
+      // Only 1 free unowned slot — below audit-tier minimum of 2.
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 1,
+        total_slots: 3,
+        local_owner_session_id: 'http://localhost:8080',
+        local_owner_lease_remaining_seconds: 60,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true, owner_session_id: 'http://localhost:8080' },
+          { slot_id: 'slot-2', is_processing: true }, // processing, not free
+          { slot_id: 'slot-3', is_processing: false }, // free unowned
+        ],
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker, deps } = makePerSlotWorker({
+        status,
+        runningPanes: () => ({ ok: true, count: 0 }),
+        requiredFreeSlots: 2, // audit minimum
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const blocked = await worker.tick();
+      // 1 free unowned < requiredFreeSlots=2 → blocked.
+      expect(blocked.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC1b: per-slot with 0 runningPanes but lease held → dispatch proceeds (operator lease on spare slots)', async () => {
+    // When the worker has NO running panes, even a held lease doesn't block.
+    vi.useFakeTimers();
+    try {
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 2,
+        total_slots: 3,
+        local_owner_session_id: 'http://localhost:8080',
+        local_owner_lease_remaining_seconds: 60,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true, owner_session_id: 'http://localhost:8080' },
+          { slot_id: 'slot-2', is_processing: false },
+          { slot_id: 'slot-3', is_processing: false },
+        ],
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker, deps } = makePerSlotWorker({
+        status,
+        runningPanes: () => ({ ok: true, count: 0 }),
+        requiredFreeSlots: 2,
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const result = await worker.tick();
+      expect(result.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

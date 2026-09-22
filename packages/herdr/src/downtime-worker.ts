@@ -732,6 +732,26 @@ export const DEFAULT_DOWNTIME_POLL_TIMEOUT_MS = 5_000;
  * Returns `undefined` when absent (backward compatible), and `null` when
  * malformed/negative (ambiguous → the caller fails closed to busy).
  */
+/**
+ * Extract the owner session ID from `local_owner_session_id`, accepting both
+ * the legacy string form and the current array form
+ * `["http://localhost:8080", "herdr-<session>"]`.
+ *
+ * Returns the session string (2nd element of the array) for array inputs,
+ * the string itself for string inputs, and `undefined` for any malformed
+ * input (number, object, empty array, etc.) — fail-closed.
+ *
+ * (WL-0MU88086A0089US4 — parse array local_owner_session_id from llama-proxy)
+ */
+function parseLocalOwnerSessionId(value: unknown): string | undefined {
+  if (typeof value === 'string' && value.length > 0) return value;
+  if (Array.isArray(value) && value.length >= 2) {
+    const session = value[1];
+    if (typeof session === 'string' && session.length > 0) return session;
+  }
+  return undefined;
+}
+
 function parseOptionalCount(value: unknown): number | undefined | null {
   if (value === undefined) return undefined;
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
@@ -771,10 +791,10 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     localLeaseActive = o.local_lease_active;
   } else {
     // Derived from the lease fields served by the llama-proxy.
-    const ownerSession = o.local_owner_session_id;
+    const ownerSession = parseLocalOwnerSessionId(o.local_owner_session_id);
     const leaseSeconds = o.local_owner_lease_remaining_seconds;
     localLeaseActive =
-      (typeof ownerSession === 'string' && ownerSession.length > 0) ||
+      (ownerSession !== undefined) ||
       (typeof leaseSeconds === 'number' && Number.isFinite(leaseSeconds) && leaseSeconds > 0);
   }
 
@@ -859,7 +879,7 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     total_slots: total,
     current_model: typeof o.current_model === 'string' ? o.current_model : undefined,
     local_owner_session_id:
-      typeof o.local_owner_session_id === 'string' ? o.local_owner_session_id : undefined,
+      parseLocalOwnerSessionId(o.local_owner_session_id),
     local_owner_lease_remaining_seconds:
       typeof o.local_owner_lease_remaining_seconds === 'number'
         ? o.local_owner_lease_remaining_seconds
@@ -4849,20 +4869,29 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // target slot is owned by a live pane — only dispatch into a truly
       // unowned slot. When per-slot identity is served, ownership is
       // already excluded from `freeSlots` above; the global owner is the
-      // fallback signal for count-based (single-slot) setups. `slotOwned`
-      // is qualified on a known running-pane count > 0 so an OPERATOR lease
-      // on a spare-capacity multi-slot setup does not block dispatch into
-      // the free slots when the worker has no running pane of its own.
-      // (The lease signal self-heals: proxy leases expire ~180 s after
-      // activity stops — router_helpers.py `_get_lease_timeout_seconds` —
-      // so an idle-but-open pane does not block dispatch indefinitely.)
+      // fallback signal for count-based (single-slot) setups.
+      //
+      // Per-slot gate (WL-0MU8807BI008C9ME): in per-slot mode, the owner
+      // lease must NOT block dispatch into free unowned slots. The gate
+      // fires only when countFreeUnownedSlots === 0 (all slots owned or
+      // busy). In count-based mode the original conservative gate is
+      // preserved: an owned sole slot blocks dispatch when runningPanes > 0.
+      //
+      // `slotOwned` is qualified on a known running-pane count > 0 so an
+      // OPERATOR lease on a spare-capacity multi-slot setup does not block
+      // dispatch into the free slots when the worker has no running pane
+      // of its own. (The lease signal self-heals: proxy leases expire ~180 s
+      // after activity stops — router_helpers.py `_get_lease_timeout_seconds`
+      // — so an idle-but-open pane does not block dispatch indefinitely.)
       const ownerLeaseHeld =
-        (typeof status.local_owner_session_id === 'string' &&
-          status.local_owner_session_id.length > 0) ||
+        (parseLocalOwnerSessionId(status.local_owner_session_id) !== undefined) ||
         (typeof status.local_owner_lease_remaining_seconds === 'number' &&
           Number.isFinite(status.local_owner_lease_remaining_seconds) &&
           status.local_owner_lease_remaining_seconds > 0);
-      const slotOwned = ownerLeaseHeld && (runningPanes ?? 0) > 0;
+      const hasPerSlotIdentity = Array.isArray(status.slots) && status.slots.length > 0;
+      const slotOwned = hasPerSlotIdentity
+        ? countFreeUnownedSlots(status.slots) === 0
+        : ownerLeaseHeld && (runningPanes ?? 0) > 0;
       // LIVE depth only (WL-0MU1DWXO600153OI): `contention_queued_count` is
       // cumulative telemetry and must never gate dispatch.
       const contentionQueueDepth =
