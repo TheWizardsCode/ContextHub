@@ -590,6 +590,11 @@ The leader-side re-check blocks only a **proven** live working pane; an
 unavailable query does not stall all coordination dispatch (the owner's offer
 computation already applied the marker-TTL fallback).
 
+> **Post-fix verification:** the repeatable duplicate-dispatch scan and its
+> results are recorded in
+> [downtime-dispatcher-post-fix-verification.md](downtime-dispatcher-post-fix-verification.md)
+> (WL-0MUBVL5770009DO9 / F7).
+
 **Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
 implement/plan/intake tiers, the leader looks up the highest-priority open
 **critical** item at ANY stage via `wl list --priority critical --status open
