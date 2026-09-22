@@ -8586,6 +8586,105 @@ describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
     });
   });
 });
+
+// ── RCA: duplicate re-dispatch of a critical in-flight item ─────────────
+// Parent WL-0MUBEZ6PE002WLP4 / F1 WL-0MUBVKPLP006RRDJ (AC1.1).
+//
+// RED WITNESS (pre-fix). The critical-first scan
+// (`dispatchFromHerdrList` → `selectCriticalFirstCandidates`) bypasses the
+// dispatched-marker exclusion UNCONDITIONALLY, so the only thing preventing a
+// second dispatch is the CAS claim inside `dispatchClaimedTier`. When the
+// item's status has reverted to `open` at its marker's stage (H5 — e.g. an
+// aborted `implement.py start` reset it, or `wl reviewed <id> true` released
+// it) while the first dispatch's pane is still live, the CAS succeeds and a
+// SECOND pane is spawned for the same in-flight item. H1 (marker bypass)
+// therefore cannot duplicate on its own; H1+H5 is the confirmed pair.
+//
+// The item is modelled as `open` at `plan_complete` on BOTH cycles (the
+// status revert) with a live `working` downtime pane whose label suffix is
+// the item id (the in-flight signal F3 consumes) and a fresh marker in the
+// rolling log (written by cycle 1's dispatch). The claim is stubbed to
+// succeed on both cycles, matching the genuine DB `open` state.
+//
+// `it.fails` keeps the suite green while the defect is open: the test body
+// asserts the FIXED behaviour and therefore fails pre-fix. F3
+// (WL-0MUBVKXQJ000L8EO) flips it to `it` once the item-scoped in-flight
+// guard lands; the RED→GREEN transition is the AC5.5 dependency evidence.
+describe('RCA: critical in-flight re-dispatch with a live pane (WL-0MUBEZ6PE002WLP4 / AC1.1)', () => {
+  const criticalInFlight = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Critical in-flight ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    risk: 'Low',
+    effort: 'S',
+    priority: 'critical',
+    sortIndex: 10,
+  });
+
+  it.fails(
+    'two idle cycles over a critical item open at its marker stage with a live pane dispatch exactly once (RED pre-fix)',
+    async () => {
+      const root = mkdtempSync(join(tmpdir(), 'herdr-crit-inflight-'));
+      mkdirSync(join(root, '.worklog'), { recursive: true });
+      // A fresh implement marker written by cycle 1's dispatch — the item is
+      // STILL at the marker's dispatched-at stage (`plan_complete`) on cycle 2.
+      writeFileSync(
+        join(root, '.worklog', 'downtime-dispatches.log'),
+        JSON.stringify({
+          at: new Date().toISOString(),
+          cwd: root,
+          kind: 'implement',
+          itemId: 'CR-DUP',
+          stage: 'plan_complete',
+          dispatchedAt: new Date().toISOString(),
+          message: 'Dispatched CR-DUP',
+        }) + '\n',
+      );
+      try {
+        const deps = makeDeps({
+          // The item is re-observed OPEN at its marker's stage on every cycle
+          // (the status revert, H5). The critical-first scan re-selects it.
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [criticalInFlight('CR-DUP')] }),
+          // The CAS claim succeeds on both cycles because the DB genuinely
+          // says `open` at `plan_complete` (H5 is the necessary partner of H1).
+          claimItem: vi.fn().mockResolvedValue({ ok: true }),
+          spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+          recordDispatch: vi.fn().mockResolvedValue(true),
+          // A live `working` downtime pane for the item: the in-flight signal
+          // F3 resolves and consults. Pre-fix `dispatchFromHerdrList` never
+          // reads it, so cycle 2 duplicates.
+          getRunningDowntimePanes: vi.fn().mockResolvedValue({
+            ok: true,
+            count: 1,
+            paneIds: ['w1:p1'],
+            records: [
+              {
+                paneId: 'w1:p1',
+                label: 'Downtime triggered implement Critical in-flight CR-DUP - CR-DUP',
+                agent: 'pi',
+                agentStatus: 'working',
+              },
+            ],
+          }),
+        });
+
+        const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
+        const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
+
+        // Cycle 1 dispatches the critical item.
+        expect(first.dispatched).toBe(true);
+        expect(first.candidate?.id).toBe('CR-DUP');
+        // Cycle 2 must NOT dispatch: a live working pane for the item exists.
+        // Pre-fix this observes 2 spawns (the duplicate); post-fix exactly 1.
+        expect(second.dispatched).toBe(false);
+        expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
 // ── Dispatch-window extension — Herdr head-cap starvation (WL-0MU6UL3GQ0015AA5) ──
 // The dispatcher iterates the Herdr list head, which is windowed: mandatory
 // items (critical + completed/in_review) are always included and consume
