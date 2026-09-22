@@ -453,8 +453,10 @@ describe('Sync Operations', () => {
       const result = mergeWorkItems([localItem], [remoteItem]);
 
       expect(result.merged).toHaveLength(1);
-      // Should bump updatedAt
-      expect(result.merged[0].updatedAt).not.toBe('2024-01-01T10:00:00.000Z');
+      // Same-timestamp merges are quiescent: updatedAt must never advance.
+      // WL-0MSKZ36MT0089UOS: removed the wall-clock bump that previously
+      // re-timestamped audit-fresh items on every merge.
+      expect(result.merged[0].updatedAt).toBe('2024-01-01T10:00:00.000Z');
       expect(result.conflicts.length).toBeGreaterThan(0);
       expect(result.conflicts.some(c => c.includes('Same updatedAt'))).toBe(true);
     });
@@ -923,6 +925,76 @@ describe('Sync Operations', () => {
       }
     });
 
+    it('should not re-timestamp audit-fresh items during same-timestamp merge (AC3)', () => {
+      // WL-0MSKZ36MT0089UOS: a same-timestamp conflict resolved to remote content
+      // must leave updatedAt unchanged so a prior valid audit remains fresh.
+      // (isAuditFresh(auditedAt, updatedAt) stays true when updatedAt is stable.)
+
+      const sameTimestamp = '2024-06-01T12:00:00.000Z';
+      const auditedAt = '2024-08-15T10:00:00.000Z'; // audit done well after the item was last edited
+
+      const localItem: WorkItem = {
+        id: 'WI-006',
+        title: 'Audit-fresh item',
+        description: 'Local version',
+        status: 'completed',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: sameTimestamp,
+        tags: [],
+        assignee: '',
+        stage: 'done',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+        auditedAt,
+      };
+
+      const remoteItem: WorkItem = {
+        id: 'WI-006',
+        title: 'Audit-fresh item',
+        description: 'Remote version',
+        status: 'completed',
+        priority: 'medium',
+        sortIndex: 0,
+        parentId: null,
+        createdAt: '2024-01-01T00:00:00.000Z',
+        updatedAt: sameTimestamp,
+        tags: [],
+        assignee: '',
+        stage: 'done',
+        issueType: '',
+        createdBy: '',
+        deletedBy: '',
+        deleteReason: '',
+        risk: '' as const,
+        effort: '' as const,
+        auditedAt,
+      };
+
+      // Inline isAuditFresh check: auditedAt > updatedAt - tolerance
+      const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+      const isAuditFresh = (a: string, u: string) =>
+        new Date(a).getTime() > new Date(u).getTime() - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
+      expect(isAuditFresh(auditedAt, sameTimestamp)).toBe(true);
+
+      // Merge: same-timestamp conflict resolved deterministically
+      const result = mergeWorkItems([localItem], [remoteItem]);
+      const merged = result.merged[0];
+
+      // updatedAt must be unchanged (no wall-clock bump)
+      expect(merged.updatedAt).toBe(sameTimestamp);
+      // The prior audit must still be fresh
+      expect(isAuditFresh(auditedAt, merged.updatedAt)).toBe(true);
+      // auditedAt survives the merge
+      expect(merged.auditedAt).toBe(auditedAt);
+    });
+
     it('should preserve close when remote is newer with non-close field change', () => {
       // AC 3: When Client A closes an item and Client B modifies a different
       // field (e.g., description), the close must NOT be reverted even though
@@ -1210,6 +1282,40 @@ describe('Sync Operations', () => {
           expect(result.merged[0].stage).toBe('idea');
           expect(result.merged[0].updatedAt).toBe('2024-06-02T12:00:00.000Z');
         });
+
+        it('(d) inherits the winning side updatedAt, never a wall-clock stamp (AC4)', () => {
+          // WL-0MSKZ36MT0089UOS: mergeDifferentTimestampItems must pick the
+          // winner's timestamp, never introduce new Date().toISOString().
+          const localOlder = baseItem({
+            status: 'open',
+            updatedAt: '2024-01-01T00:00:00.000Z', // older
+          });
+          const remoteNewer = baseItem({
+            status: 'in-progress',
+            updatedAt: '2024-07-01T00:00:00.000Z', // newer wins
+          });
+
+          const result = mergeWorkItems([localOlder], [remoteNewer]);
+          const merged = result.merged[0];
+
+          // Winning side is remote, so merged updatedAt must equal remote's.
+          expect(merged.updatedAt).toBe('2024-07-01T00:00:00.000Z');
+
+          // Reverse: local newer wins.
+          const localNewer2 = baseItem({
+            status: 'in-progress',
+            updatedAt: '2024-08-01T00:00:00.000Z', // newer
+          });
+          const remoteOlder2 = baseItem({
+            status: 'open',
+            updatedAt: '2024-01-01T00:00:00.000Z', // older
+          });
+
+          const result2 = mergeWorkItems([localNewer2], [remoteOlder2]);
+          const merged2 = result2.merged[0];
+
+          expect(merged2.updatedAt).toBe('2024-08-01T00:00:00.000Z');
+        });
       });
 
       describe('same-timestamp merge', () => {
@@ -1476,21 +1582,23 @@ describe('Sync Operations', () => {
       }
     });
 
-    // AC2: a real user-visible change (e.g. priority) bumps at most ONCE, then converges.
-    it('AC2: metadata-field same-timestamp conflict bumps updatedAt at most once then stabilises', () => {
+    // AC2 (revised): same-timestamp merges are always quiescent — no bump
+    // at all. WL-0MSKZ36MT0089UOS removed the wall-clock stamp that previously
+    // bumped once and then stabilised. Content still converges.
+    it('AC2: same-timestamp conflict is always quiescent — updatedAt never advances', () => {
       const local = convItem('WI-C2', { priority: 'high' });
       const remote = convItem('WI-C2', { priority: 'low' });
       const originalUpdatedAt = local.updatedAt;
 
       const first = mergeWorkItems([local], [remote]).merged[0];
-      expect(first.updatedAt).not.toBe(originalUpdatedAt); // first merge resolves the divergence
+      expect(first.updatedAt).toBe(originalUpdatedAt); // always quiescent now
+      expect(first.priority).not.toBeUndefined(); // content converged
 
-      // Once both sides hold the merged item, further syncs must not keep advancing.
+      // Repeated merges stay quiescent.
       let current = first;
-      const afterFirstBump = current.updatedAt;
       for (let i = 0; i < 10; i++) {
         current = mergeWorkItems([current], [current]).merged[0];
-        expect(current.updatedAt).toBe(afterFirstBump);
+        expect(current.updatedAt).toBe(originalUpdatedAt);
         expect(current.priority).toBe(first.priority);
       }
     });
