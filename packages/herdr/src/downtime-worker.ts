@@ -4877,6 +4877,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // busy). In count-based mode the original conservative gate is
       // preserved: an owned sole slot blocks dispatch when runningPanes > 0.
       //
+      // Per-slot mode reuses the SAME predicate as the idle-capacity gate
+      // above and `evaluateIdle` (`slots` served AND 0 < N < total). Sharing
+      // one definition keeps the ownership gate from ever being stricter
+      // than the capacity gate that admitted the tick — a divergent check
+      // would re-introduce exactly the stall this RCA fixes.
+      //
       // `slotOwned` is qualified on a known running-pane count > 0 so an
       // OPERATOR lease on a spare-capacity multi-slot setup does not block
       // dispatch into the free slots when the worker has no running pane
@@ -4888,10 +4894,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         (typeof status.local_owner_lease_remaining_seconds === 'number' &&
           Number.isFinite(status.local_owner_lease_remaining_seconds) &&
           status.local_owner_lease_remaining_seconds > 0);
-      const hasPerSlotIdentity = Array.isArray(status.slots) && status.slots.length > 0;
-      const slotOwned = hasPerSlotIdentity
-        ? countFreeUnownedSlots(status.slots) === 0
-        : ownerLeaseHeld && (runningPanes ?? 0) > 0;
+      const slotOwned =
+        perSlotMode && Array.isArray(status.slots)
+          ? countFreeUnownedSlots(status.slots) === 0
+          : ownerLeaseHeld && (runningPanes ?? 0) > 0;
       // LIVE depth only (WL-0MU1DWXO600153OI): `contention_queued_count` is
       // cumulative telemetry and must never gate dispatch.
       const contentionQueueDepth =
