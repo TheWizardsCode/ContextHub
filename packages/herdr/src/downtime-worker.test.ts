@@ -105,6 +105,10 @@ import {
   isSlotOwned,
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
+  paneLabelItemId,
+  runningDowntimePaneItemIds,
+  evaluateCriticalFirstGuard,
+  resolveInFlightPanes,
   DOWNTIME_POLL_INTERVAL_FLOOR_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
@@ -127,6 +131,8 @@ import {
   type DowntimeActiveAuditResult,
   type DowntimeItemInfo,
   type DowntimeHerdrItem,
+  type HerdrPaneRecord,
+  type InFlightPanes,
   isTransientDowntimeError,
   withTransientRetry,
   MIN_BROWSE_ITEM_COUNT,
@@ -219,6 +225,11 @@ function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDe
     // Review-queue depth gate (WL-0MT2UQWOR007CYY9): empty queue by default
     // so the gate is inactive and existing tests exercise the unchanged path.
     getReviewQueueCount: vi.fn().mockResolvedValue(0),
+    // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F3): an available
+    // query reporting NO live panes by default, so the guard is inert and
+    // existing tests escalate critical items unchanged. Tests that exercise
+    // the guard override this with `records` carrying a live working pane.
+    getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
     ...overrides,
   };
 }
@@ -7924,6 +7935,105 @@ describe('parseHerdrPaneListOutput / countRunningDowntimePanes (AC1)', () => {
   });
 });
 
+// ── Item-scoped in-flight guard helpers (F3 WL-0MUBVKXQJ000L8EO) ────────
+// The guard must be ITEM-SCOPED (never a global running-pane count, which
+// would reintroduce the WL-0MU2EP6JL006A1U3 stall) and must only treat a
+// `working` agent as in-flight (terminal/idle panes must not deadlock the
+// item's next tier).
+
+describe('paneLabelItemId / runningDowntimePaneItemIds / evaluateCriticalFirstGuard (WL-0MUBEZ6PE002WLP4)', () => {
+  const pane = (overrides: Partial<HerdrPaneRecord> & { paneId: string }): HerdrPaneRecord => ({
+    label: 'Downtime triggered implement Some item - WL-ABC',
+    agent: 'pi',
+    agentStatus: 'working',
+    ...overrides,
+  });
+
+  it('paneLabelItemId extracts the trailing work-item id (buildDowntimePaneTitle suffix contract)', () => {
+    expect(paneLabelItemId('Downtime triggered implement Some item - WL-ABC')).toBe('WL-ABC');
+    // A title containing ` - ` earlier still yields the LAST segment.
+    expect(paneLabelItemId('Downtime triggered plan A - B - WL-XYZ')).toBe('WL-XYZ');
+    // No suffix → null (manual pane).
+    expect(paneLabelItemId('Downtime intake')).toBeNull();
+    expect(paneLabelItemId(undefined)).toBeNull();
+  });
+
+  it('runningDowntimePaneItemIds returns only WORKING downtime panes, keyed by item id', () => {
+    const ids = runningDowntimePaneItemIds([
+      pane({ paneId: 'w1:p1', label: 'Downtime triggered implement A - WL-A', agentStatus: 'working' }),
+      // terminal → excluded
+      pane({ paneId: 'w1:p2', label: 'Downtime triggered implement B - WL-B', agentStatus: 'done' }),
+      pane({ paneId: 'w1:p3', label: 'Downtime triggered implement C - WL-C', agentStatus: 'exited' }),
+      // idle/unknown → NOT working → excluded (no deadlock)
+      pane({ paneId: 'w1:p4', label: 'Downtime triggered implement D - WL-D', agentStatus: 'idle' }),
+      // manual pane (no downtime prefix) → excluded
+      pane({ paneId: 'w1:p5', label: 'Work Items', agentStatus: 'working' }),
+      // downtime pane with no agent → excluded
+      pane({ paneId: 'w1:p6', label: 'Downtime plan E - WL-E', agent: undefined, agentStatus: 'working' }),
+    ]);
+    expect([...ids]).toEqual(['WL-A']);
+  });
+
+  it('evaluateCriticalFirstGuard: live working pane → skip (in-flight-pane), regardless of marker freshness', () => {
+    const inFlight: InFlightPanes = { available: true, itemIds: new Set(['WL-ABC']) };
+    const d = evaluateCriticalFirstGuard('WL-ABC', inFlight, new Date().toISOString(), Date.now(), 3_600_000);
+    expect(d).toEqual({ escalate: false, reason: 'in-flight-pane' });
+  });
+
+  it('evaluateCriticalFirstGuard: query succeeded and found no pane → escalate (no-live-pane), even with a fresh marker', () => {
+    const inFlight: InFlightPanes = { available: true, itemIds: new Set() };
+    const d = evaluateCriticalFirstGuard('WL-ABC', inFlight, new Date().toISOString(), Date.now(), 3_600_000);
+    expect(d).toEqual({ escalate: true, reason: 'no-live-pane' });
+  });
+
+  it('evaluateCriticalFirstGuard: query unavailable + fresh marker → skip (in-flight-unverified)', () => {
+    const inFlight: InFlightPanes = { available: false, itemIds: new Set() };
+    const d = evaluateCriticalFirstGuard('WL-ABC', inFlight, new Date().toISOString(), Date.now(), 3_600_000);
+    expect(d).toEqual({ escalate: false, reason: 'in-flight-unverified' });
+  });
+
+  it('evaluateCriticalFirstGuard: query unavailable + stale/absent marker → escalate (bounded, never starved)', () => {
+    const inFlight: InFlightPanes = { available: false, itemIds: new Set() };
+    const now = Date.now();
+    expect(evaluateCriticalFirstGuard('WL-ABC', inFlight, new Date(now - 2 * 3_600_000).toISOString(), now, 3_600_000))
+      .toEqual({ escalate: true, reason: 'marker-stale-escalation' });
+    expect(evaluateCriticalFirstGuard('WL-ABC', inFlight, undefined, now, 3_600_000))
+      .toEqual({ escalate: true, reason: 'marker-stale-escalation' });
+  });
+
+  it('resolveInFlightPanes: unavailable dep / thrown resolver / no records all resolve unavailable (never throws)', async () => {
+    expect(await resolveInFlightPanes({}, '/repo')).toEqual({ available: false, itemIds: new Set() });
+    expect(await resolveInFlightPanes(
+      { getRunningDowntimePanes: vi.fn().mockRejectedValue(new Error('boom')) },
+      '/repo',
+    )).toEqual({ available: false, itemIds: new Set() });
+    expect(await resolveInFlightPanes(
+      { getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: false, error: 'down' }) },
+      '/repo',
+    )).toEqual({ available: false, itemIds: new Set() });
+    // Legacy result with only count/paneIds → unavailable (a bare count must
+    // never be used as an item-scoped signal).
+    expect(await resolveInFlightPanes(
+      { getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 2, paneIds: ['a', 'b'] }) },
+      '/repo',
+    )).toEqual({ available: false, itemIds: new Set() });
+  });
+
+  it('resolveInFlightPanes: an available query with records resolves the working item ids', async () => {
+    const result = await resolveInFlightPanes(
+      {
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true, count: 1, paneIds: ['w1:p1'],
+          records: [pane({ paneId: 'w1:p1', label: 'Downtime triggered implement A - WL-A', agentStatus: 'working' })],
+        }),
+      },
+      '/repo',
+    );
+    expect(result.available).toBe(true);
+    expect([...result.itemIds]).toEqual(['WL-A']);
+  });
+});
+
 describe('dispatchDowntimeWork: running-pane / owner / contention gates', () => {
   function dispatchableDeps() {
     return makeDeps({
@@ -8622,7 +8732,7 @@ describe('RCA: critical in-flight re-dispatch with a live pane (WL-0MUBEZ6PE002W
     sortIndex: 10,
   });
 
-  it.fails(
+  it(
     'two idle cycles over a critical item open at its marker stage with a live pane dispatch exactly once (RED pre-fix)',
     async () => {
       const root = mkdtempSync(join(tmpdir(), 'herdr-crit-inflight-'));
@@ -8651,22 +8761,25 @@ describe('RCA: critical in-flight re-dispatch with a live pane (WL-0MUBEZ6PE002W
           claimItem: vi.fn().mockResolvedValue({ ok: true }),
           spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
           recordDispatch: vi.fn().mockResolvedValue(true),
-          // A live `working` downtime pane for the item: the in-flight signal
-          // F3 resolves and consults. Pre-fix `dispatchFromHerdrList` never
-          // reads it, so cycle 2 duplicates.
-          getRunningDowntimePanes: vi.fn().mockResolvedValue({
-            ok: true,
-            count: 1,
-            paneIds: ['w1:p1'],
-            records: [
-              {
-                paneId: 'w1:p1',
-                label: 'Downtime triggered implement Critical in-flight CR-DUP - CR-DUP',
-                agent: 'pi',
-                agentStatus: 'working',
-              },
-            ],
-          }),
+          // Cycle 1 sees NO pane (the dispatch has not happened yet); by cycle
+          // 2 the spawned pane is live and `working`. Pre-fix
+          // `dispatchFromHerdrList` never consults this, so cycle 2 duplicates.
+          getRunningDowntimePanes: vi
+            .fn()
+            .mockResolvedValueOnce({ ok: true, count: 0, paneIds: [], records: [] })
+            .mockResolvedValue({
+              ok: true,
+              count: 1,
+              paneIds: ['w1:p1'],
+              records: [
+                {
+                  paneId: 'w1:p1',
+                  label: 'Downtime triggered implement Critical in-flight CR-DUP - CR-DUP',
+                  agent: 'pi',
+                  agentStatus: 'working',
+                },
+              ],
+            }),
         });
 
         const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
@@ -8728,7 +8841,7 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
   });
 
   describe('AC5.1 — Herdr-head path: two cycles, exactly one dispatch', () => {
-    it.fails('two idle cycles over a critical item open at its marker stage with a live working pane dispatch once (RED pre-fix)', async () => {
+    it('two idle cycles over a critical item open at its marker stage with a live working pane dispatch once (RED pre-fix)', async () => {
       const root = mkdtempSync(join(tmpdir(), 'herdr-head-inflight-'));
       mkdirSync(join(root, '.worklog'), { recursive: true });
       writeFileSync(
@@ -8744,7 +8857,11 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
           claimItem: vi.fn().mockResolvedValue({ ok: true }),
           spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
           recordDispatch: vi.fn().mockResolvedValue(true),
-          getRunningDowntimePanes: vi.fn().mockResolvedValue(liveWorkingPane('CR-INFLIGHT')),
+          // Cycle 1: no pane yet. Cycle 2: the spawned pane is live and working.
+          getRunningDowntimePanes: vi
+            .fn()
+            .mockResolvedValueOnce({ ok: true, count: 0, paneIds: [], records: [] })
+            .mockResolvedValue(liveWorkingPane('CR-INFLIGHT')),
         });
 
         const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });
@@ -8760,13 +8877,17 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
   });
 
   describe('AC5.4 — live-pane variants', () => {
-    it.fails('a live `working` pane blocks the second cycle (stage advancement irrelevant while open)', async () => {
+    it('a live `working` pane blocks the second cycle (stage advancement irrelevant while open)', async () => {
       const deps = makeDeps({
         getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [criticalPlannedInFlight('CR-W')] }),
         claimItem: vi.fn().mockResolvedValue({ ok: true }),
         spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
         recordDispatch: vi.fn().mockResolvedValue(true),
-        getRunningDowntimePanes: vi.fn().mockResolvedValue(liveWorkingPane('CR-W')),
+        // Cycle 1: no pane yet. Cycle 2: the spawned pane is live and working.
+        getRunningDowntimePanes: vi
+          .fn()
+          .mockResolvedValueOnce({ ok: true, count: 0, paneIds: [], records: [] })
+          .mockResolvedValue(liveWorkingPane('CR-W')),
       });
 
       const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -8811,7 +8932,7 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
       expect(outcome.candidate?.id).toBe('CR-EXIT');
     });
 
-    it.fails('a failed/unparseable pane query never duplicating: the fresh marker still holds the second cycle (AC2.2/AC3.3)', async () => {
+    it('a failed/unparseable pane query never duplicating: the fresh marker still holds the second cycle (AC2.2/AC3.3)', async () => {
       const root = mkdtempSync(join(tmpdir(), 'herdr-head-panefail-'));
       mkdirSync(join(root, '.worklog'), { recursive: true });
       writeFileSync(
@@ -8827,8 +8948,13 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
           claimItem: vi.fn().mockResolvedValue({ ok: true }),
           spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
           recordDispatch: vi.fn().mockResolvedValue(true),
-          // herdr unavailable: the in-flight state cannot be proven.
-          getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: false, error: 'herdr down' }),
+          // Cycle 1: pane query succeeds (none) so the dispatch proceeds.
+          // Cycle 2: herdr is unavailable — the in-flight state cannot be
+          // proven, so the fresh marker must hold the second dispatch.
+          getRunningDowntimePanes: vi
+            .fn()
+            .mockResolvedValueOnce({ ok: true, count: 0, paneIds: [], records: [] })
+            .mockResolvedValue({ ok: false, error: 'herdr down' }),
         });
 
         const first = await dispatchDowntimeWork(deps, { model: 'plan', cwd: root });

@@ -652,7 +652,11 @@ export async function defaultRunningDowntimePanesResolver(
     const panes = parseHerdrPaneListOutput(stdout);
     if (panes === null) return { ok: false, error: 'herdr pane list parse failure' };
     const paneIds = countRunningDowntimePanes(panes);
-    return { ok: true, count: paneIds.length, paneIds };
+    // `records` carries the full parsed pane set so the item-scoped in-flight
+    // guard (WL-0MUBEZ6PE002WLP4 / F3) can resolve label suffixes without a
+    // second `herdr pane list` call. `count`/`paneIds` keep their existing
+    // meaning (owner-lease qualifier ONLY, never a dispatch limit).
+    return { ok: true, count: paneIds.length, paneIds, records: panes };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }

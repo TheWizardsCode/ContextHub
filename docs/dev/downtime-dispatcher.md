@@ -529,6 +529,47 @@ What the contract now guarantees:
    scan's scope** — it is handled by the normal audit tier, so the
    audit-freshness and active-audit gates keep acting on it unchanged.
 
+**In-flight guard — the marker bypass is bounded, not unconditional
+(WL-0MUBEZ6PE002WLP4 / F3 WL-0MUBVKXQJ000L8EO).** The unconditional bypass
+above traded starvation for a *duplicate-dispatch window*: a critical item
+whose `status` reverted to `open` at its marker's stage (H5 — an aborted
+`implement.py start` reset, a `wl reviewed <id> true` release, a rolled-back
+dispatch) while its dispatch pane was still live was re-selected by the
+critical-first scan, the CAS claim succeeded (the DB genuinely said `open`),
+and a **second pane spawned for the same in-flight item** (H1+H5, confirmed by
+the F1 RCA). The critical-first loop (and the normal loop for critical
+candidates) now consults an **item-scoped** in-flight signal before
+escalating, via `evaluateCriticalFirstGuard`:
+
+| # | Condition | Decision | Reason |
+| --- | --- | --- | --- |
+| 1 | a live `working` downtime pane whose label suffix is the item id | **skip** | `in-flight-pane` |
+| 2 | pane query succeeded and found no such pane | **escalate** | `no-live-pane` |
+| 3 | pane query failed/unparseable, marker fresh (age ≤ `markerStaleWindowMs`) | **skip** | `in-flight-unverified` |
+| 3b | pane query failed/unparseable, marker stale/absent | **escalate** | `marker-stale-escalation` |
+
+This is deliberately **neither blind fail-closed nor blind fail-open**: a
+duplicate is impossible while a pane is proven in-flight, and escalation is
+never permanently starved (a pane-query outage only defers it until the
+marker goes stale — bounded by `markerStaleWindowMs`, default 24 h, clamped
+1 h – 7 d; the same bound documented under "Rolling log trimming"). It is
+benign in practice because pane spawn itself needs herdr, so a persistent
+pane-query outage also prevents dispatch.
+
+The guard is **item-scoped and gated on a non-terminal (`working`) agent** —
+it never uses the global running-pane count as a dispatch limit (the
+WL-0MU2EP6JL006A1U3 invariant is preserved: `count` remains the owner-lease
+qualifier only). Panes whose agent is absent, `done`, or `exited`, and idle
+or not-yet-started agents, do **not** block dispatch (no idle-pane
+deadlock).
+
+The signal is resolved **once per idle cycle** from the same `herdr pane
+list` read already used for the owner-lease qualifier
+(`getRunningDowntimePanes`, now returning the parsed `records` alongside
+`count`/`paneIds`) and threaded into both dispatch loops. A resolver failure
+or an unwired dep resolves `{available:false}` and the decision table falls
+back to the marker TTL — the resolver never throws into the dispatch loop.
+
 **Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
 implement/plan/intake tiers, the leader looks up the highest-priority open
 **critical** item at ANY stage via `wl list --priority critical --status open

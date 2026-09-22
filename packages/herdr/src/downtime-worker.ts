@@ -1180,7 +1180,7 @@ export type DowntimeActiveAuditResult =
  *    (no dispatch) rather than risk over-dispatch on unknown state.
  */
 export type RunningPanesResult =
-  | { ok: true; count: number; paneIds?: string[] }
+  | { ok: true; count: number; paneIds?: string[]; records?: HerdrPaneRecord[] }
   | { ok: false; error?: string };
 
 /** One parsed `herdr pane list` record (only the fields liveness needs). */
@@ -1274,6 +1274,171 @@ export function countRunningDowntimePanes(panes: HerdrPaneRecord[]): string[] {
     running.push(pane.paneId);
   }
   return running;
+}
+
+/**
+ * Trailing work-item id in a downtime pane label (WL-0MUBEZ6PE002WLP4).
+ *
+ * `buildDowntimePaneTitle` preserves the item id as a SUFFIX
+ * (`Downtime triggered <kind> <title> - <ITEM-ID>`, via
+ * `truncatePaneTitlePreservingSuffix`), so the id is the token after the last
+ * ` - `. A manually-named pane (`Downtime <kind>`) has no id → `null`.
+ *
+ * Exported (not module-private) so the coordination offer path (F4,
+ * WL-0MUBVKYH5009CGBI) reuses exactly this parse — no logic duplication.
+ */
+export function paneLabelItemId(label: string | undefined): string | null {
+  if (typeof label !== 'string' || label === '') return null;
+  const idx = label.lastIndexOf(' - ');
+  if (idx < 0) return null;
+  const id = label.slice(idx + 3).trim();
+  return id === '' ? null : id;
+}
+
+/**
+ * Item ids that currently have a LIVE `working` downtime pane
+ * (WL-0MUBEZ6PE002WLP4, the in-flight guard).
+ *
+ * This is the ITEM-SCOPED counterpart of {@link countRunningDowntimePanes},
+ * which answers a different question ("does THIS worker own a pane?" for the
+ * owner-lease qualifier) and is explicitly NOT a dispatch limit
+ * (WL-0MU2EP6JL006A1U3). A pane counts as in-flight for an item when:
+ *
+ *  - its label starts with the downtime prefix (`Downtime`),
+ *  - it hosts a live agent (agent present, status not `done`/`exited`),
+ *  - its agent status is `working` — the agent is actively running the
+ *    dispatch. Idle/blank/unknown statuses are NOT treated as working: a
+ *    pane that spawned but whose agent has not yet started (or has finished
+ *    but not exited) must never deadlock the item's next tier,
+ *  - and its label suffix parses to a work-item id.
+ *
+ * Consumed ONLY by the critical-first in-flight guard: it prevents a duplicate
+ * dispatch for an item whose pane is already working — never a capacity gate.
+ */
+export function runningDowntimePaneItemIds(panes: HerdrPaneRecord[]): Set<string> {
+  const inFlight = new Set<string>();
+  for (const pane of panes) {
+    if (typeof pane.label !== 'string') continue;
+    if (!pane.label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) continue;
+    if (typeof pane.agent !== 'string' || pane.agent.length === 0) continue;
+    const status = (pane.agentStatus ?? '').toLowerCase();
+    if (status !== 'working') continue;
+    const itemId = paneLabelItemId(pane.label);
+    if (itemId !== null) inFlight.add(itemId);
+  }
+  return inFlight;
+}
+
+/**
+ * Item-scoped in-flight state, resolved ONCE per idle cycle and threaded into
+ * the dispatch loops (WL-0MUBEZ6PE002WLP4 / F3 WL-0MUBVKXQJ000L8EO).
+ *
+ * Tri-state, not a boolean, because the correct behaviour differs between
+ * "no live pane" and "could not find out":
+ *
+ *  - `available: true`  — the pane query succeeded; `itemIds` is authoritatively
+ *    the set of items with a live working pane. A candidate in the set is
+ *    skipped; a candidate outside it is escalated.
+ *  - `available: false` — the query failed/was unparseable, OR the dep is not
+ *    wired. The caller falls back to the dispatched-marker TTL so escalation
+ *    is never permanently starved and a duplicate is never permitted while an
+ *    item is proven in-flight.
+ */
+export interface InFlightPanes {
+  available: boolean;
+  itemIds: Set<string>;
+}
+
+/** The shared "nothing is provably in flight" value (also the fail-open fallback). */
+export const NO_IN_FLIGHT_PANES: InFlightPanes = { available: true, itemIds: new Set() };
+
+/** Why the critical-first guard reached its escalate/skip decision (WL-0MUBEZ6PE002WLP4). */
+export type CriticalFirstGuardReason =
+  | 'in-flight-pane'
+  | 'no-live-pane'
+  | 'in-flight-unverified'
+  | 'marker-stale-escalation';
+
+/** The critical-first guard's verdict for one candidate. */
+export interface CriticalFirstGuardDecision {
+  /** True when the candidate may be escalated; false when a live/unverified pane holds it. */
+  escalate: boolean;
+  /** Machine-readable reason (also the AC6 selectionReason vocabulary). */
+  reason: CriticalFirstGuardReason;
+}
+
+/**
+ * Decide whether a critical-first candidate may be escalated, given the
+ * item-scoped in-flight state and the dispatched-marker age.
+ *
+ * Replaces the previously UNCONDITIONAL marker bypass (WL-0MU6UL3XY001M3VT)
+ * with a layered bound that is neither blind fail-closed nor blind fail-open
+ * (parent WL-0MUBEZ6PE002WLP4, approved plan Q4):
+ *
+ *  1. a live `working` pane for the item        → SKIP  (`in-flight-pane`)
+ *  2. query succeeded and found no live pane    → ESCALATE (`no-live-pane`)
+ *  3. query failed/unparseable                  → fall back to the marker TTL:
+ *       fresh marker (age <= staleWindow)       → SKIP  (`in-flight-unverified`)
+ *       stale/absent marker                     → ESCALATE (`marker-stale-escalation`)
+ *
+ * This keeps the critical escalation path able to progress a genuinely stuck
+ * item (AC3.1/AC3.2 — the 2026-09-18 starvation fix is preserved) while
+ * making a duplicate impossible whenever a pane is PROVEN in-flight. A pane
+ * query outage cannot starve escalation permanently: it only defers it until
+ * the marker goes stale (bounded by `markerStaleWindowMs`).
+ */
+export function evaluateCriticalFirstGuard(
+  itemId: string,
+  inFlight: InFlightPanes,
+  markerDispatchedAt: string | undefined,
+  now: number,
+  markerStaleWindowMs: number,
+): CriticalFirstGuardDecision {
+  if (inFlight.itemIds.has(itemId)) {
+    return { escalate: false, reason: 'in-flight-pane' };
+  }
+  if (inFlight.available) {
+    return { escalate: true, reason: 'no-live-pane' };
+  }
+  // The pane query could not prove in-flight state — defer to the marker TTL.
+  let fresh = false;
+  if (typeof markerDispatchedAt === 'string' && markerDispatchedAt !== '') {
+    const dispatchedAt = Date.parse(markerDispatchedAt);
+    fresh =
+      Number.isFinite(dispatchedAt) &&
+      now - dispatchedAt <= markerStaleWindowMs;
+  }
+  return fresh
+    ? { escalate: false, reason: 'in-flight-unverified' }
+    : { escalate: true, reason: 'marker-stale-escalation' };
+}
+
+/**
+ * Resolve the item-scoped in-flight set for one dispatch cycle.
+ *
+ * Never throws: any failure (missing dep, thrown resolver, `{ok:false}` from
+ * `herdr pane list`) resolves `{available:false}` so the dispatch loop's
+ * decision table degrades to the marker-TTL fallback rather than crashing or
+ * over-dispatching. A resolved result WITHOUT `records` (legacy callers that
+ * only supply `count`) is treated as unavailable — the records are the
+ * item-scoped signal, and guessing from a bare count would be a global limit
+ * (the WL-0MU2EP6JL006A1U3 anti-pattern).
+ */
+export async function resolveInFlightPanes(
+  deps: Pick<DowntimeWorkerDeps, 'getRunningDowntimePanes'>,
+  cwd: string,
+): Promise<InFlightPanes> {
+  if (typeof deps.getRunningDowntimePanes !== 'function') {
+    return { available: false, itemIds: new Set() };
+  }
+  try {
+    const result = await deps.getRunningDowntimePanes(cwd);
+    if (!result.ok) return { available: false, itemIds: new Set() };
+    if (!Array.isArray(result.records)) return { available: false, itemIds: new Set() };
+    return { available: true, itemIds: runningDowntimePaneItemIds(result.records) };
+  } catch {
+    return { available: false, itemIds: new Set() };
+  }
 }
 
 /** External boundaries injected so the dispatch logic is testable. */
@@ -1909,7 +2074,7 @@ export function selectCriticalFirstCandidates(
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number },
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; inFlight: InFlightPanes },
   flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
@@ -1938,10 +2103,27 @@ async function dispatchFromHerdrList(
   // filters (dispatched-marker exclusion, review-queue depth hold) and adds
   // the dispatch-time free-slot minimum. The CAS claim inside
   // `dispatchClaimedTier` still serialises concurrent panes (AC2).
+  //
+  // In-flight guard (WL-0MUBEZ6PE002WLP4 / F3 WL-0MUBVKXQJ000L8EO): the
+  // marker bypass is NO LONGER unconditional. A critical item whose status has
+  // reverted to `open` at its marker's stage while a dispatch pane is still
+  // live (the confirmed H1+H5 duplicate mechanism) is skipped by the
+  // item-scoped guard below — see `evaluateCriticalFirstGuard` for the full
+  // decision table. Escalation of a genuinely stuck item is preserved (AC3).
   for (const { item: candidate, kind } of selectCriticalFirstCandidates(items, Date.now(), ctx.frozen)) {
-    // Safety gate: per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3).
+    // Safety gate: per-tier free-slot minimums (parent WL-0MT32F90UAD2 AC3).
     if (kind === 'audit' && !ctx.auditEligible) continue;
     if (kind !== 'audit' && !ctx.panesEligible) continue;
+    // In-flight guard: never re-dispatch an item with a live working pane.
+    const inFlightMarker = markerMaps[kind]?.get(candidate.id);
+    const guard = evaluateCriticalFirstGuard(
+      candidate.id,
+      ctx.inFlight,
+      inFlightMarker?.dispatchedAt,
+      Date.now(),
+      ctx.markerStaleWindowMs,
+    );
+    if (!guard.escalate) continue;
     const cand: DowntimeCandidate = {
       id: candidate.id,
       title: candidate.title,
@@ -2017,6 +2199,22 @@ async function dispatchFromHerdrList(
     // Code-freeze split-by-skill: audit+implement dispatch pauses during
     // a freeze/ambiguous marker (plan/intake still dispatch).
     if (ctx.frozen && (k === 'audit' || k === 'implement')) continue;
+    // In-flight guard for CRITICAL candidates on the normal loop (AC2.5):
+    // the same item-scoped decision table as the critical-first scan, so AC2
+    // holds "regardless of selection path". Non-critical candidates keep the
+    // marker/TTL behaviour unchanged (the marker already guards them; the
+    // guard is scoped to critical items to avoid changing established
+    // non-critical semantics — WL-0MUBEZ6PE002WLP4).
+    if (item.priority === 'critical') {
+      const guard = evaluateCriticalFirstGuard(
+        item.id,
+        ctx.inFlight,
+        marker?.dispatchedAt,
+        now,
+        ctx.markerStaleWindowMs,
+      );
+      if (!guard.escalate) continue;
+    }
     // Per-tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3).
     if (k === 'audit' && !ctx.auditEligible) continue;
     if (k !== 'audit' && !ctx.panesEligible) continue;
@@ -3255,7 +3453,13 @@ export async function dispatchDowntimeWork(
       const head = await deps.getHerdrListHead(opts.cwd);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
-        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS };
+        // Item-scoped in-flight state (WL-0MUBEZ6PE002WLP4 / F3): resolved
+        // ONCE per idle cycle (a single `herdr pane list` read shared by both
+        // dispatch loops) so the guard never adds a per-candidate process
+        // spawn. `resolveInFlightPanes` never throws — an unavailable query
+        // degrades to the marker-TTL fallback inside the decision table.
+        const inFlight = await resolveInFlightPanes(deps, opts.cwd);
+        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, inFlight };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return herdrOutcome;
 
