@@ -21,7 +21,8 @@
  * audit.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 /** File name of the downtime dispatch audit log inside `.worklog/`. */
@@ -409,6 +410,15 @@ export async function appendDowntimeLogEntry(cwd: string, entry: string): Promis
  * write `line` to `<cwd>/.worklog/<file>`, creating `.worklog` if needed
  * and trimming to the most recent DOWNTIME_LOG_MAX_ENTRIES lines. Throws
  * on I/O failure — callers must catch (fail-closed).
+ *
+ * ATOMIC (WL-0MUBVL1FI0071WN3 / F5): the new content is written to a
+ * temporary sibling file and `rename`d over the target, so a concurrent
+ * reader (e.g. the dispatched-marker readers) can never observe a truncated,
+ * empty, or partially written log — it sees either the whole previous file or
+ * the whole new one. `rename(2)` is atomic within a filesystem, so the temp
+ * file is created in the SAME directory as the target. The temp file is
+ * removed on failure before the error is rethrown (and the target is left
+ * untouched).
  */
 async function appendRollingJsonl(cwd: string, file: string, line: string): Promise<void> {
   const dir = join(cwd, '.worklog');
@@ -427,5 +437,20 @@ async function appendRollingJsonl(cwd: string, file: string, line: string): Prom
   if (lines.length > DOWNTIME_LOG_MAX_ENTRIES) {
     lines = lines.slice(lines.length - DOWNTIME_LOG_MAX_ENTRIES);
   }
-  await writeFile(filePath, lines.join('\n') + '\n', 'utf8');
+
+  // Temp name carries pid + a random suffix so two concurrent writers never
+  // collide on the same temp path. Same directory → same filesystem → the
+  // rename is atomic.
+  const tmpPath = join(
+    dir,
+    `.${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`,
+  );
+  try {
+    await writeFile(tmpPath, lines.join('\n') + '\n', 'utf8');
+    await rename(tmpPath, filePath);
+  } catch (err) {
+    // Clean up the temp file (best-effort) and leave the target untouched.
+    await rm(tmpPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
 }

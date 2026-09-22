@@ -901,6 +901,23 @@ The log file is bounded to the most recent 100 entries
 100 lines the first lines are truncated. All new schema fields are
 preserved during trimming.
 
+**Atomic replacement (WL-0MUBVL1FI0071WN3 / F5).** Both the dispatch log
+(`downtime-dispatches.log`) and the coordination log
+(`downtime-coordination.log`) are written **atomically**: `appendRollingJsonl`
+writes the full new content to a temporary sibling file
+(`.<file>.<pid>.<random>.tmp` in the same directory, so the rename stays on one
+filesystem) and `rename`s it over the target. A concurrent reader — in
+particular the dispatched-marker readers that scan the log by kind — therefore
+sees either the whole previous file or the whole new one, **never** a
+truncated, empty, or partially written log. Previously the writer did
+`readFile → push → trim → writeFile` directly on the target, so a reader could
+momentarily observe an empty file and lose a marker (a contributing factor in
+the duplicate-dispatch RCA, WL-0MUBEZ6PE002WLP4 / H3). The temp file is removed
+on failure before the error is rethrown and the target is left untouched;
+trimming to `DOWNTIME_LOG_MAX_ENTRIES` and the throw-on-I/O-failure
+(fail-closed) contract are unchanged, and the JSONL format stays
+human-readable.
+
 ### Backward compatibility
 
 The `DowntimeLogEntry` interface treats all new fields as optional:

@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -179,6 +179,78 @@ describe('downtime rolling log', () => {
     // The newest entries are retained (last 100 of 105)
     const lastEntry = JSON.parse(lines[lines.length - 1]);
     expect(lastEntry.attempt).toBe(3);
+  });
+});
+
+// ── Atomic rolling-log writes (F5 WL-0MUBVL1FI0071WN3) ─────────────────
+// `appendRollingJsonl` previously did readFile → push → trim → writeFile
+// directly on the target, so a concurrent reader could observe a truncated or
+// empty file and momentarily lose the dispatched marker (RCA H3,
+// WL-0MUBEZ6PE002WLP4). The writer is now temp-file + rename (atomic within a
+// filesystem).
+
+describe('atomic rolling-log writes (WL-0MUBVL1FI0071WN3 / F5)', () => {
+  const tmpFilesIn = (cwd: string): string[] =>
+    readdirSync(join(cwd, '.worklog')).filter((f) => f.endsWith('.tmp'));
+
+  it('AC4.1: replaces the target atomically and leaves no temp file behind on success', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ n: 1 }));
+    const inoBefore = statSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE)).ino;
+
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ n: 2 }));
+
+    const inoAfter = statSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE)).ino;
+    // The target was REPLACED (rename), never written in place.
+    expect(inoAfter).not.toBe(inoBefore);
+    expect(tmpFilesIn(cwd)).toEqual([]);
+    expect(readLog(cwd)).toHaveLength(2);
+  });
+
+  it('AC4.1: a write failure leaves the target untouched and cleans up the temp file', async () => {
+    const cwd = makeTempCwd();
+    // Make the TARGET a directory so the final rename fails (EISDIR/ENOTDIR).
+    mkdirSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), { recursive: true });
+
+    await expect(
+      appendDowntimeLogEntry(cwd, JSON.stringify({ n: 1 })),
+    ).rejects.toThrow();
+
+    // No temp file leaked, and the target (directory) is untouched.
+    expect(tmpFilesIn(cwd)).toEqual([]);
+    expect(statSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE)).isDirectory()).toBe(true);
+  });
+
+  it('AC4.2: concurrent appends and reads never observe an empty or partial line', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ n: -1 }));
+
+    const appends = Array.from({ length: 40 }, (_, i) =>
+      appendDowntimeLogEntry(cwd, JSON.stringify({ n: i })),
+    );
+    const reads = Array.from({ length: 60 }, async () => {
+      // Each read must resolve (never throw) and see a consistent snapshot.
+      await readDowntimeLogEntries(cwd);
+    });
+    await Promise.all([...appends, ...reads]);
+
+    // After settling, the raw file is a sequence of complete JSONL lines.
+    const raw = readFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim() !== '');
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+    // No temp files leaked under concurrency.
+    expect(tmpFilesIn(cwd)).toEqual([]);
+  });
+
+  it('AC4.4: the coordination log uses the same atomic writer (no temp files leak)', async () => {
+    const cwd = makeTempCwd();
+    await appendCoordinationLogEntry(cwd, { kind: 'coordination', operation: 'checkin', instanceId: 'i1' });
+    expect(tmpFilesIn(cwd)).toEqual([]);
+    const raw = readFileSync(join(cwd, '.worklog', COORDINATION_LOG_FILE), 'utf8');
+    expect(() => JSON.parse(raw.trim())).not.toThrow();
   });
 });
 
