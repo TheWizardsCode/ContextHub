@@ -9484,3 +9484,119 @@ describe('clampDowntimeMarkerStaleWindowMs', () => {
     expect(clampDowntimeMarkerStaleWindowMs(mid)).toBe(mid);
   });
 });
+
+// ── Dispatch-log selection provenance + pane enrichment (F6) ───────────
+// WL-0MUBVL251006JAQ0 (parent WL-0MUBEZ6PE002WLP4, AC6.1–AC6.3).
+
+describe('dispatch log: selection path/reason + pane id enrichment (WL-0MUBVL251006JAQ0 / F6)', () => {
+  const critical = (): DowntimeHerdrItem => ({
+    id: 'CR-SEL', title: 'Crit sel', status: 'open', stage: 'plan_complete',
+    risk: 'Low', effort: 'S', priority: 'critical', sortIndex: 10,
+  });
+  const nonCritical = (): DowntimeHerdrItem => ({
+    id: 'IMP-SEL', title: 'Impl sel', status: 'open', stage: 'plan_complete',
+    risk: 'Low', effort: 'S', priority: 'high', sortIndex: 100,
+  });
+
+  it('AC6.1: a critical-first dispatch records selectionPath/selectionReason', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [critical()] }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'CR-SEL',
+        selectionPath: 'critical-first',
+        selectionReason: 'no-live-pane',
+      }),
+    );
+  });
+
+  it('AC6.1: a normal-scan dispatch records selectionPath/selectionReason', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [nonCritical()] }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'IMP-SEL',
+        selectionPath: 'normal-scan',
+        selectionReason: 'non-critical',
+      }),
+    );
+  });
+
+  it('AC6.2/AC6.3: a successful dispatch appends an enrichment entry with the resolved paneId, preserving marker fields', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [critical()] }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+      recordDispatchEnrichment: vi.fn().mockResolvedValue(undefined),
+      // 1st call (pre-spawn in-flight guard): no pane. 2nd call (post-spawn
+      // enrichment resolver): the pane is live.
+      getRunningDowntimePanes: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, count: 0, paneIds: [], records: [] })
+        .mockResolvedValue({
+          ok: true, count: 1, paneIds: ['w1:p1'],
+          records: [{ paneId: 'w1:p1', label: 'Downtime triggered implement Crit sel - CR-SEL', agent: 'pi', agentStatus: 'working' }],
+        }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    const markerCall = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    const enrichCall = (deps.recordDispatchEnrichment as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(enrichCall).toMatchObject({
+      itemId: markerCall.itemId,
+      kind: markerCall.kind,
+      stage: markerCall.stage,
+      dispatchedAt: markerCall.dispatchedAt,
+      paneId: 'w1:p1',
+      enrichment: true,
+      noItemComment: true,
+    });
+  });
+
+  it('AC6.3: an unresolved pane id is recorded as null, and the dispatch still succeeds', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [critical()] }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+      recordDispatchEnrichment: vi.fn().mockResolvedValue(undefined),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect((deps.recordDispatchEnrichment as ReturnType<typeof vi.fn>).mock.calls[0][0].paneId).toBeNull();
+  });
+
+  it('AC6.3: a throwing enrichment dep never affects the dispatch outcome (fail-open)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [critical()] }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+      recordDispatchEnrichment: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC6.3: an absent enrichment dep is a no-op (legacy callers unchanged)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [critical()] }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+    });
+    // makeDeps omits recordDispatchEnrichment by default.
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+    expect(outcome.dispatched).toBe(true);
+  });
+});

@@ -675,3 +675,27 @@ describe('dispatched success-marker staleness (WL-0MU6UL0RJ008IHGT)', () => {
     ).toBe(false);
   });
 });
+
+// ── Enrichment marker round-trip (F6 WL-0MUBVL251006JAQ0 AC6.2) ─────────
+
+describe('post-spawn enrichment preserves marker semantics (WL-0MUBVL251006JAQ0 / F6)', () => {
+  it('AC6.2: an enrichment entry with the same marker fields does not change the dispatched marker', async () => {
+    const cwd = makeTempCwd();
+    const dispatchedAt = new Date().toISOString();
+    const marker = { itemId: 'WL-ENR', kind: 'implement', dispatchedAt, cwd, title: 'Enr', stage: 'plan_complete',
+      selectionPath: 'critical-first', selectionReason: 'no-live-pane' };
+    const enrichment = { ...marker, paneId: 'w1:p1', enrichment: true };
+
+    await appendDowntimeLogEntry(cwd, JSON.stringify(marker));
+    const before = dispatchedItemMarkers(await readDowntimeLogEntries(cwd), 'implement');
+    await appendDowntimeLogEntry(cwd, JSON.stringify(enrichment));
+    const after = dispatchedItemMarkers(await readDowntimeLogEntries(cwd), 'implement');
+
+    // Last-entry-wins: the enrichment is the last entry, but it copies the
+    // marker's stage/dispatchedAt, so the marker state is UNCHANGED.
+    expect(after.get('WL-ENR')).toEqual(before.get('WL-ENR'));
+    expect(after.get('WL-ENR')?.stage).toBe('plan_complete');
+    // And the marker still excludes while fresh at the same stage.
+    expect(markerStillExcludes(after.get('WL-ENR')!, 'plan_complete', Date.now(), 24 * 60 * 60 * 1000, 'id-guard')).toBe(true);
+  });
+});

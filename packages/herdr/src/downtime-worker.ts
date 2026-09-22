@@ -1718,6 +1718,14 @@ export interface DowntimeWorkerDeps {
    */
   recordDispatchFailure(event: DowntimeDispatchFailureEvent): Promise<void>;
   /**
+   * Best-effort post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6): append a
+   * second log entry carrying the resolved pane id, preserving the marker
+   * fields. OPTIONAL — when absent the enrichment is skipped. Must never
+   * throw and must never block/un-mark the dispatch (fail-open): the
+   * dispatcher swallows any rejection.
+   */
+  recordDispatchEnrichment?(event: DowntimeDispatchEnrichmentEvent): Promise<void>;
+  /**
    * Roll back a CAS claim that succeeded but never completed dispatch
    * (WL-0MT32F908002YFFA AC1/AC2): restore the item to its pre-claim
    * status + stage so a future idle period can re-select it. Called when
@@ -1769,6 +1777,37 @@ export interface DowntimeDispatchEvent {
    * Backward compatible — absent on legacy entries.
    */
   stage?: string;
+  /**
+   * Which selection loop produced this dispatch (WL-0MUBVL251006JAQ0 / F6):
+   * `critical-first` | `normal-scan` | `coordination-offer` |
+   * `scheduled-prompt`. Makes the next RCA answerable from the log alone.
+   * Backward compatible — absent on legacy entries.
+   */
+  selectionPath?: string;
+  /**
+   * Machine-readable reason the candidate was selected (WL-0MUBVL251006JAQ0
+   * / F6): e.g. `no-live-pane`, `marker-stale-escalation`, `non-critical`,
+   * `scheduled-due`. Paired with `selectionPath`. Backward compatible —
+   * absent on legacy entries.
+   */
+  selectionReason?: string;
+}
+
+/**
+ * Post-spawn enrichment entry (WL-0MUBVL251006JAQ0 / F6 AC6.2/AC6.3): a
+ * best-effort SECOND log entry recording the resolved pane/session id for a
+ * successful dispatch. It copies `itemId`/`kind`/`stage`/`dispatchedAt` from
+ * the success marker verbatim so the marker readers (last-entry-wins,
+ * stale-release, fail-closed staleness) see the SAME marker state — the extra
+ * fields are additive. `paneId` is `null` when it could not be resolved
+ * (never a guess), and appending this entry is fail-open: a failure never
+ * blocks or un-marks the dispatch.
+ */
+export interface DowntimeDispatchEnrichmentEvent extends DowntimeDispatchEvent {
+  /** Resolved pane id, or null when it could not be resolved. */
+  paneId: string | null;
+  /** Discriminator so readers can tell an enrichment from a fresh dispatch. */
+  enrichment: true;
 }
 
 /**
@@ -2134,7 +2173,12 @@ async function dispatchFromHerdrList(
       priority: candidate.priority,
       sortIndex: candidate.sortIndex,
     };
-    const outcome = await dispatchClaimedTier(deps, kind, cand, { model: ctx.model, cwd: ctx.cwd });
+    const outcome = await dispatchClaimedTier(deps, kind, cand, {
+      model: ctx.model,
+      cwd: ctx.cwd,
+      selectionPath: 'critical-first',
+      selectionReason: guard.reason,
+    });
     if (outcome.dispatched) return outcome;
     // A lost CAS race / marker-recovery rollback applies to one candidate:
     // try the next critical candidate, then fall through to the normal loop.
@@ -2233,7 +2277,12 @@ async function dispatchFromHerdrList(
       continue;
     }
     const cand: DowntimeCandidate = { id: item.id, title: item.title, stage: k === 'audit' ? 'audit' : (String(item.stage) as DowntimeStage), status: item.status, priority: item.priority, sortIndex: item.sortIndex };
-    const outcome = await dispatchClaimedTier(deps, k, cand, { model: ctx.model, cwd: ctx.cwd });
+    const outcome = await dispatchClaimedTier(deps, k, cand, {
+      model: ctx.model,
+      cwd: ctx.cwd,
+      selectionPath: 'normal-scan',
+      selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
+    });
     if (outcome.dispatched) return outcome;
     if (outcome.reason === 'claim-failed') continue;
     if (outcome.reason === 'claim-rolled-back') continue; // marker-write recovery (WL-0MT32F908002YFFA)
@@ -2301,7 +2350,7 @@ async function dispatchClaimedTier(
   deps: DowntimeWorkerDeps,
   kind: DowntimeSkillKind,
   candidate: DowntimeCandidate,
-  opts: { model: string; cwd: string },
+  opts: { model: string; cwd: string; selectionPath?: string; selectionReason?: string },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
   // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): resolve the dedicated
@@ -2373,16 +2422,24 @@ async function dispatchClaimedTier(
   }
 
   let marked = false;
+  // Capture ONE timestamp shared by the success marker and its post-spawn
+  // enrichment entry (WL-0MUBVL251006JAQ0 / F6 AC6.2) so the marker readers
+  // (last-entry-wins) see an unchanged `dispatchedAt`.
+  const dispatchedAt = new Date().toISOString();
   try {
     marked = await deps.recordDispatch({
       itemId: candidate.id,
       kind,
-      dispatchedAt: new Date().toISOString(),
+      dispatchedAt,
       cwd: opts.cwd,
       title: candidate.title,
       // The worklog stage at dispatch powers the plan/intake change-guard
       // (exclude while the item is still at this stage; release on advancement).
       stage: expected.stage,
+      // Selection provenance (WL-0MUBVL251006JAQ0 / F6 AC6.1): which loop
+      // selected this candidate and why — makes the log self-explanatory.
+      ...(opts.selectionPath !== undefined ? { selectionPath: opts.selectionPath } : {}),
+      ...(opts.selectionReason !== undefined ? { selectionReason: opts.selectionReason } : {}),
     });
   } catch {
     // Fail-closed: a throwing recordDispatch (stub or regression) is a marker
@@ -2485,7 +2542,72 @@ async function dispatchClaimedTier(
     };
   }
 
+  // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6 AC6.2/AC6.3): best-effort
+  // resolve the spawned pane's id and append a second log entry that copies
+  // the marker fields (`itemId`/`kind`/`stage`/`dispatchedAt`) so the marker
+  // readers see the SAME marker state. Fail-open: ANY failure (missing dep,
+  // thrown resolver, unresolved pane) never blocks or un-marks the dispatch —
+  // an unresolved pane is recorded as `paneId: null` rather than omitted or
+  // guessed.
+  await recordDispatchEnrichmentBestEffort(deps, {
+    itemId: candidate.id,
+    kind,
+    dispatchedAt,
+    cwd: opts.cwd,
+    title: candidate.title,
+    stage: expected.stage,
+    ...(opts.selectionPath !== undefined ? { selectionPath: opts.selectionPath } : {}),
+    ...(opts.selectionReason !== undefined ? { selectionReason: opts.selectionReason } : {}),
+  });
+
   return { dispatched: true, candidate, kind };
+}
+
+/**
+ * Best-effort pane-id resolution + enrichment append (WL-0MUBVL251006JAQ0 /
+ * F6). Never throws and never affects the dispatch outcome. Resolves the pane
+ * by matching a live downtime pane's label suffix to the item id; a missing
+ * dep or any failure records `paneId: null`.
+ */
+async function recordDispatchEnrichmentBestEffort(
+  deps: DowntimeWorkerDeps,
+  base: {
+    itemId: string;
+    kind: DowntimeSkillKind;
+    dispatchedAt: string;
+    cwd: string;
+    title?: string;
+    stage?: string;
+    selectionPath?: string;
+    selectionReason?: string;
+  },
+): Promise<void> {
+  if (typeof deps.recordDispatchEnrichment !== 'function') return; // legacy callers
+  let paneId: string | null = null;
+  try {
+    if (typeof deps.getRunningDowntimePanes === 'function') {
+      const panes = await deps.getRunningDowntimePanes(base.cwd);
+      if (panes.ok && Array.isArray(panes.records)) {
+        const match = panes.records.find(
+          (rec) => rec.label?.startsWith(DOWNTIME_PANE_LABEL_PREFIX) && paneLabelItemId(rec.label) === base.itemId,
+        );
+        paneId = match?.paneId ?? null;
+      }
+    }
+  } catch {
+    paneId = null; // fail-open — never block the dispatch on a pane lookup
+  }
+  try {
+    await deps.recordDispatchEnrichment({
+      ...base,
+      paneId,
+      enrichment: true,
+      // Never comment twice for one dispatch (the success marker already did).
+      noItemComment: true,
+    });
+  } catch {
+    // fail-open: enrichment logging must never crash the worker
+  }
 }
 
 /**
@@ -2553,6 +2675,8 @@ async function dispatchScheduledPrompt(
       cwd: opts.cwd,
       title: `Scheduled prompt: ${prompt.prompt}`,
       noItemComment: true,
+      selectionPath: 'scheduled-prompt',
+      selectionReason: 'scheduled-due',
     });
   } catch {
     // Fail-closed: a throwing recordDispatch (stub or regression) is a
@@ -3161,7 +3285,7 @@ export async function dispatchFromCoordination(
       deps,
       kind,
       toCoordinationCandidate(result.info),
-      { model: opts.model, cwd: worklogRoot },
+      { model: opts.model, cwd: worklogRoot, selectionPath: 'coordination-offer', selectionReason: 'leader-offer' },
     );
     if (outcome.dispatched) {
       // Dispatched — remove the entry so the owner re-queues its next
@@ -3643,13 +3767,13 @@ export async function dispatchDowntimeWork(
                     );
                     // Fall through to the next tier (implement/plan/intake).
                   } else {
-                    return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+                    return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
                   }
                 } catch {
                   // Fail-open: the freshness check could not complete (e.g.
                   // wl/CLI error) — proceed with the dispatch (conservative
                   // default). The item is treated as "not fresh" for this tick.
-                  return await dispatchClaimedTier(deps, 'audit', audit.candidate, opts);
+                  return await dispatchClaimedTier(deps, 'audit', audit.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'normal-scan' });
                 }
               }
             } else {
@@ -3695,7 +3819,7 @@ export async function dispatchDowntimeWork(
         if (critical.candidate !== null && critical.candidate.needsProducerReview !== true) {
           const kind = criticalSkillKind(critical.candidate.stage);
           if (kind !== null && !(frozen && kind === 'implement')) {
-            return await dispatchClaimedTier(deps, kind, critical.candidate, opts);
+            return await dispatchClaimedTier(deps, kind, critical.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'critical-tier' });
           }
           // Frozen implement-kind critical (or a non-dispatchable stage):
           // skip this candidate (fail-closed pause) and fall through to
@@ -3743,7 +3867,7 @@ export async function dispatchDowntimeWork(
         // depth throttle (shared `isImplementHeldByReviewGate` semantics).
         // Non-critical candidates are excluded when the gate is active.
         if (!gateActive || implementCandidate.priority === 'critical') {
-          return await dispatchClaimedTier(deps, 'implement', implementCandidate, opts);
+          return await dispatchClaimedTier(deps, 'implement', implementCandidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'non-critical' });
         }
         // Non-critical candidate gated by review-queue depth — skip to
         // plan/intake tiers.
@@ -3779,7 +3903,7 @@ export async function dispatchDowntimeWork(
       const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
       if (intakeComplete.ok) {
         if (intakeComplete.candidate !== null && intakeComplete.candidate.needsProducerReview !== true) {
-          return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, opts);
+          return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'non-critical' });
         }
       } else {
         tier2Error = true;
@@ -3796,7 +3920,7 @@ export async function dispatchDowntimeWork(
     const idea = await deps.getNextItem('idea', opts.cwd);
     if (idea.ok) {
       if (idea.candidate !== null && idea.candidate.needsProducerReview !== true) {
-        return await dispatchClaimedTier(deps, 'intake', idea.candidate, opts);
+        return await dispatchClaimedTier(deps, 'intake', idea.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'non-critical' });
       }
       if (tier2Error) {
         // Tier 2 errored and tier 3 answered empty: the backlog is NOT

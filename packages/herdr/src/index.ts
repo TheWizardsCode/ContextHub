@@ -80,6 +80,7 @@ import {
   type DowntimeCandidate,
   type DowntimeDispatchEvent,
   type DowntimeDispatchFailureEvent,
+  type DowntimeDispatchEnrichmentEvent,
   type DowntimeErrorEvent,
   type DowntimeNextResult,
   type DowntimeClaimExpected,
@@ -1235,6 +1236,19 @@ export function createDowntimeDeps(
         );
       } catch {
         // fail-closed: audit logging must never crash the worker
+      }
+    },
+    async recordDispatchEnrichment(event: DowntimeDispatchEnrichmentEvent): Promise<void> {
+      // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6): append a second
+      // rolling-log entry recording the resolved pane id, copying the marker
+      // fields so the dispatched-marker readers see an unchanged marker. A
+      // write failure is swallowed (fail-open) — the success marker already
+      // stands; enrichment must never block or un-mark a dispatch.
+      try {
+        const { noItemComment: _omit, ...rest } = event;
+        await appendDowntimeLogEntry(event.cwd, JSON.stringify(rest));
+      } catch {
+        // fail-open: enrichment logging must never crash the worker
       }
     },
     async rollbackClaim(

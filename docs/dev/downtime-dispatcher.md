@@ -894,6 +894,32 @@ optional — only fields with actual data are serialized.
 | `command` | string | The CLI command that failed (e.g. `wl next <stage>`, `wl list --priority critical`) |
 | `probeContext` | string | One of `"coordination-probe"` (shared coordination file probe) or `"dispatch-cli"` (dispatch-tier `wl` call) |
 
+### Dispatch marker fields: selection provenance + pane id (F6)
+
+Successful dispatch marker entries (and their post-spawn enrichment entry)
+carry two additional provenance fields (WL-0MUBVL251006JAQ0 / F6), so the next
+duplicate-dispatch RCA is answerable from the log alone:
+
+| Field | Type | Description |
+|---|---|---|
+| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `scheduled-prompt`, or `legacy-tier` |
+| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `scheduled-due`, `critical-tier` |
+| `paneId` | string \| null | (Enrichment entry only) the resolved dispatch pane/session id, or `null` when it could not be resolved — never a guess |
+| `enrichment` | `true` | (Enrichment entry only) discriminator marking a post-spawn enrichment rather than a fresh dispatch |
+
+**Post-spawn enrichment (AC6.2/AC6.3).** The pane id is not available before
+the pane spawns (the marker is written BEFORE the spawn, fail-closed), so a
+second **best-effort** entry is appended after a successful spawn. It copies
+`itemId`/`kind`/`stage`/`dispatchedAt` verbatim from the success marker, so the
+dispatched-marker readers (last-entry-wins, stale-release, fail-closed
+staleness) see an **unchanged** marker state. Appending is fail-open: a missing
+dep, a thrown resolver, or an unresolved pane never blocks, rolls back, or
+un-marks the dispatch (an unresolved pane is recorded as `paneId: null`).
+Legacy entries without the new fields parse and behave exactly as before, and
+`scan_duplicate_dispatches.py` excludes `enrichment: true` entries from its
+dispatch count (they are not a second dispatch) while reporting
+`selectionPaths` / `selectionReasons` / `paneIds` for post-fix evidence.
+
 ### Rolling log trimming
 
 The log file is bounded to the most recent 100 entries
@@ -937,6 +963,11 @@ export interface DowntimeLogEntry {
   command?: string;
   probeContext?: string;
   attempt?: number;
+  // Enriched (WL-0MUBVL251006JAQ0 / F6) — selection provenance + enrichment
+  selectionPath?: string;
+  selectionReason?: string;
+  paneId?: string | null;
+  enrichment?: true;
 }
 ```
 

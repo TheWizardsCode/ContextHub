@@ -1742,6 +1742,27 @@ describe('in-flight guard on the coordination offer path (WL-0MUBVKS5I007LSWB / 
     expect(deps.getRunningDowntimePanes).not.toHaveBeenCalledWith('/leader-root');
   });
 
+  it('AC6.1: a leader coordination dispatch records selectionPath=coordination-offer', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({ id: 'WL-COORD', status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S' }),
+      }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+    });
+
+    const outcome = await dispatchFromCoordination(
+      deps,
+      [makeEntry('inst-lead', 'WL-COORD', '/offer-root')],
+      { model: 'plan', cwd: '/leader-root', coordinationDir: testDir },
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ selectionPath: 'coordination-offer', selectionReason: 'leader-offer' }),
+    );
+  });
+
   it('AC2.3: a terminal (`done`) pane for the item does NOT block the offer (no idle-pane deadlock)', async () => {
     const deps = makeCoordinationDeps({
       getHerdrListHead: vi.fn().mockResolvedValue({
