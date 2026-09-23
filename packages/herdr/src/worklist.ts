@@ -13,12 +13,13 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchCompletedItemCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchCompletedItemCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
 import { AgentTracker, mergeAgentStatesCached } from './agent-tracker.js';
-import { readCodeFreezeState, readCodeFreezeStatus } from './code-freeze.js';
+import { readCodeFreezeState, readCodeFreezeStatus, writeCodeFreezeMarker, clearCodeFreezeMarker } from './code-freeze.js';
+import { runShipGuard, formatBlockedNotice } from './ship-guard.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -96,8 +97,9 @@ import {
 export function isInputActive(
   formState: FormState | null,
   shipItDialog: ShipItDialogState | null,
+  blockedNoticeActive = false,
 ): boolean {
-  return formState !== null || shipItDialog !== null;
+  return formState !== null || shipItDialog !== null || blockedNoticeActive;
 }
 
 /**
@@ -3874,6 +3876,91 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
 }
 
 /**
+ * Full-pane "Ship mode blocked" notice (WL-0MUD6DDZC007ZSIW). Renders the
+ * guard's plain-text blocked notice inside the same box style as the Code
+ * Freeze dialog, so the blocked state reuses the established in-pane modal
+ * pattern (esc/enter/q dismiss). Shown INSTEAD of the Ship It dialog when
+ * live agent panes are working on project items — the dialog never opens.
+ */
+export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: string): string {
+  const lines: string[] = [];
+  const dialogWidth = Math.min(maxCols - 4, 76);
+  const effectiveWidth = Math.max(52, dialogWidth);
+  const leftPad = Math.max(0, Math.floor((maxCols - effectiveWidth) / 2));
+
+  const padLine = (content: string): string => {
+    const visibleLen = visibleLength(content.replace(/\x1b\[[0-9;]*m/g, ''));
+    const rightPad = Math.max(0, effectiveWidth - visibleLen - 2);
+    return ' '.repeat(leftPad) + `│ ${content}${' '.repeat(rightPad)} │`;
+  };
+
+  const borderLine = (left: string, right: string): string =>
+    ' '.repeat(leftPad) + `${left}${'─'.repeat(effectiveWidth - 2)}${right}`;
+
+  lines.push('');
+  lines.push(borderLine('┌', '┐'));
+  lines.push(padLine(`${ANSI.bold}${ANSI.fg(196)}⛔ SHIP MODE BLOCKED${ANSI.reset}`));
+  lines.push(padLine(''));
+  for (const raw of body.split('\n')) {
+    lines.push(padLine(raw));
+  }
+  lines.push(padLine(''));
+  lines.push(borderLine('├', '┤'));
+  lines.push(padLine(`${ANSI.dim}[Esc] dismiss  [Enter] dismiss  [q] dismiss${ANSI.reset}`));
+  lines.push(borderLine('└', '┘'));
+  lines.push('');
+
+  const remaining = Math.max(0, maxRows - lines.length);
+  for (let i = 0; i < remaining; i++) {
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Build the production Ship Guard query seam (WL-0MUD6DDZC007ZSIW): runs
+ * `wl list --json` and `herdr pane list` and returns their raw stdout, or
+ * null for whichever query failed. A null output makes the guard fail safe
+ * (the dialog is not opened). The command-output-string shape keeps the
+ * guard pure and unit-testable without spawning processes.
+ *
+ * @param cwd - Project root (contains `.worklog/`); when provided the wl
+ *   query targets that root explicitly. When omitted the module-configured
+ *   worklog dir is used.
+ */
+export function createProductionShipGuardQuery(
+  cwd?: string,
+): () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> {
+  return async () => {
+    const exec = getExecFileAsync();
+    let worklogOutput: string | null = null;
+    let paneOutput: string | null = null;
+    try {
+      const wlArgs = cwd ? buildWlArgsForRoot(cwd, ['list', '--json']) : buildWlArgs(['list', '--json']);
+      const { stdout } = await exec('wl', wlArgs, {
+        encoding: 'utf8',
+        timeout: DEFAULT_WL_TIMEOUT_MS,
+        maxBuffer: 8 * 1024 * 1024,
+      });
+      worklogOutput = stdout;
+    } catch {
+      worklogOutput = null;
+    }
+    try {
+      const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+      const { stdout } = await exec(herdrBin, ['pane', 'list'], {
+        encoding: 'utf8',
+        maxBuffer: 8 * 1024 * 1024,
+      });
+      paneOutput = stdout;
+    } catch {
+      paneOutput = null;
+    }
+    return { worklogOutput, paneOutput };
+  };
+}
+
+/**
  * Fetch the items for the current view.
  *
  * When a stage filter is active, the worklist shows every root item in that
@@ -4320,7 +4407,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -4345,6 +4432,7 @@ export async function runWorklistTui(
     maxSyncStalenessMs: options?.maxSyncStalenessMs ?? 60_000,
     onRefresh: options?.onRefresh,
     cwd: options?.cwd,
+    shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd),
   };
 
   let termSize = getTermSize();
@@ -4396,6 +4484,13 @@ export async function runWorklistTui(
   let codeFreezeActive = false;
   let codeFreezeAmbiguous = false;
   let codeFreezeNotice = false;
+  /**
+   * Ship-mode blocked notice (WL-0MUD6DDZC007ZSIW). Non-null while the guard
+   * has refused to open the Ship It dialog: holds the formatted plain-text
+   * notice listing the blocking panes/work items. Modal — Esc/Enter/q dismiss
+   * it; no command is ever dispatched while it is showing.
+   */
+  let blockedNotice: string | null = null;
 
   /**
    * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
@@ -4871,8 +4966,21 @@ export async function runWorklistTui(
    */
   const openShipItDialog = (model?: string): void => {
     shipItDialog = new ShipItDialogState(
-      // onConfirm — typed 'ship' + Enter: dispatch via the standard path.
+      // onConfirm — typed 'ship' + Enter: freeze, then dispatch.
       () => {
+        // Write the Code Freeze marker BEFORE dispatching `/skill:ship
+        // release` so the freeze applies from the moment of confirmation
+        // (WL-0MUD6DDZC007ZSIW AC4). When a freeze is ALREADY active the
+        // ship skill owns that marker — do not overwrite it, and do not
+        // clear it on dispatch failure (the release may already be running).
+        const alreadyFrozen = readCodeFreezeState().active;
+        const wroteMarker = alreadyFrozen
+          ? null
+          : writeCodeFreezeMarker({ reason: 'Ship It confirmed in herdr worklist' });
+        if (wroteMarker !== null) {
+          codeFreezeActive = true;
+          refreshFreezeState();
+        }
         try {
           // Fresh marker read at dispatch time (fail-safe client-side).
           const frozen = readCodeFreezeState().active;
@@ -4880,12 +4988,25 @@ export async function runWorklistTui(
             codeFreezeActive = true;
           }
           const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle, undefined, opts.onRefresh);
-          if (result === 'noop') {
+          if (result === 'noop' || result === 'blocked') {
+            // Dispatch was a no-op: best-effort clear the marker WE wrote so
+            // a release that never started cannot leave a stale freeze
+            // (WL-0MUD6DDZC007ZSIW AC5).
+            if (wroteMarker !== null) {
+              clearCodeFreezeMarker();
+              refreshFreezeState();
+            }
             showToast('Skipped', { body: `${SHIP_IT_COMMAND} (no item)` });
           } else {
             showToast('Sent', { body: SHIP_IT_COMMAND });
           }
         } catch (e) {
+          // onCommand threw (e.g. no agent pane available): clear the marker
+          // WE wrote and surface the error (WL-0MUD6DDZC007ZSIW AC5).
+          if (wroteMarker !== null) {
+            clearCodeFreezeMarker();
+            refreshFreezeState();
+          }
           showToast('Error', { body: (e as Error).message });
           process.stderr.write(`[herdr] Command error: ${(e as Error).message}\n`);
         }
@@ -4896,6 +5017,31 @@ export async function runWorklistTui(
       },
     );
     render();
+  };
+
+  /**
+   * Run the Ship Guard, then open the confirmation dialog — or show the
+   * blocked notice (WL-0MUD6DDZC007ZSIW). A live agent pane carrying a
+   * project work-item ID blocks ship mode; an unavailable guard query fails
+   * safe (no dialog). The dialog is never rendered while blocking panes
+   * exist.
+   */
+  const openShipItDialogGuarded = async (model?: string): Promise<void> => {
+    let query: { worklogOutput: string | null; paneOutput: string | null };
+    try {
+      query = await opts.shipGuardQuery();
+    } catch {
+      query = { worklogOutput: null, paneOutput: null };
+    }
+    const queryFailed = query.worklogOutput === null || query.paneOutput === null;
+    const result = runShipGuard(query.worklogOutput ?? '', query.paneOutput ?? '');
+    if (queryFailed || !result.ok || result.blockingPanes.length > 0) {
+      blockedNotice = formatBlockedNotice(result.blockingPanes, queryFailed || !result.ok);
+      shipItDialog = null;
+      render();
+      return;
+    }
+    openShipItDialog(model);
   };
 
   // Double-click state tracker — persists across onData calls for the TUI
@@ -4928,7 +5074,7 @@ export async function runWorklistTui(
     // Try mouse event dispatch first — only runs when the pane is not in a
     // modal state (code-freeze notice, form, ship-it dialog), matching the
     // keyboard path. Mouse input is ignored during those modal states.
-    if (!codeFreezeNotice && formState === null && shipItDialog === null) {
+    if (!codeFreezeNotice && blockedNotice === null && formState === null && shipItDialog === null) {
       if (dispatchMouse(key)) {
         render();
         return;
@@ -4942,6 +5088,19 @@ export async function runWorklistTui(
     if (codeFreezeNotice) {
       if (key === '\x1b' || key === '\r' || key === '\n' || key === 'q') {
         codeFreezeNotice = false;
+      }
+      render();
+      return;
+    }
+
+    // ── Ship-mode blocked notice handling (WL-0MUD6DDZC007ZSIW) ──
+    // Shown when `S` was pressed while live agent panes carry project
+    // work-item IDs. Modal — Esc/Enter/q dismiss it; no command is
+    // dispatched, and the Ship It dialog is never opened while blocking
+    // panes exist.
+    if (blockedNotice !== null) {
+      if (key === '\x1b' || key === '\r' || key === '\n' || key === 'q') {
+        blockedNotice = null;
       }
       render();
       return;
@@ -5063,7 +5222,7 @@ export async function runWorklistTui(
           // 'ship' confirmation before dispatch. Esc cancels, the dialog
           // stays bottom-anchored over the list.
           if (command === SHIP_IT_COMMAND) {
-            openShipItDialog(model ?? undefined);
+            await openShipItDialogGuarded(model ?? undefined);
             return;
           }
           // Inline note-edit chords (WL-0MSKV6SKK008MMXR): add/edit/delete
@@ -5342,7 +5501,7 @@ export async function runWorklistTui(
         // selection list visible; the user must type `ship` + Enter to
         // dispatch, Esc to cancel.
         if (singleCmd === SHIP_IT_COMMAND) {
-          openShipItDialog(singleModel);
+          await openShipItDialogGuarded(singleModel);
           return;
         }
         // Single-key shortcut — check for unknown identifiers first
@@ -5552,6 +5711,18 @@ export async function runWorklistTui(
     if (codeFreezeNotice) {
       const freezeReason = readCodeFreezeState().reason;
       const dialogOutput = formatCodeFreezeDialog(termSize.cols, termSize.rows, freezeReason);
+      process.stdout.write(ANSI.clear);
+      process.stdout.write(ANSI.cursorHome);
+      process.stdout.write(dialogOutput);
+      return;
+    }
+
+    // ── Ship-mode blocked notice overlay rendering ─────────────
+    // Shown when `S` was pressed while live agent panes carry project
+    // work-item IDs (WL-0MUD6DDZC007ZSIW). Full-pane modal — the Ship It
+    // dialog is never rendered while this notice is showing.
+    if (blockedNotice !== null) {
+      const dialogOutput = formatBlockedShipDialog(termSize.cols, termSize.rows, blockedNotice);
       process.stdout.write(ANSI.clear);
       process.stdout.write(ANSI.cursorHome);
       process.stdout.write(dialogOutput);
@@ -5809,7 +5980,7 @@ export async function runWorklistTui(
       intervalMs: opts.refreshIntervalMs,
       singleFlight: true,
       run: createGatedTick({
-        isInputActive: () => isInputActive(formState, shipItDialog),
+        isInputActive: () => isInputActive(formState, shipItDialog, blockedNotice !== null),
         isVisible: () => paneGate.visible(),
         onHidden: () => {
           panePaused = true;
@@ -5846,7 +6017,7 @@ export async function runWorklistTui(
       intervalMs: opts.syncIntervalMs,
       fireImmediately: true,
       run: createGatedTick({
-        isInputActive: () => isInputActive(formState, shipItDialog),
+        isInputActive: () => isInputActive(formState, shipItDialog, blockedNotice !== null),
         isVisible: () => paneGate.visible(),
         onHidden: () => {
           panePaused = true;

@@ -39,6 +39,7 @@ import {
   isHeadingRow,
   formatItemLine,
   isInputActive,
+  formatBlockedShipDialog,
   createGatedTick,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
@@ -4528,6 +4529,39 @@ describe('isInputActive — typing guard (WL-0MTV67MZU003H7SH)', () => {
 
   it('true when both overlays are active', () => {
     expect(isInputActive(fakeForm, fakeShipIt)).toBe(true);
+  });
+
+  it('true when the Ship-mode blocked notice is active (WL-0MUD6DDZC007ZSIW)', () => {
+    expect(isInputActive(null, null, true)).toBe(true);
+    expect(isInputActive(null, null, false)).toBe(false);
+  });
+});
+
+// ── Ship-mode blocked dialog formatter (WL-0MUD6DDZC007ZSIW) ─────
+
+describe('formatBlockedShipDialog', () => {
+  const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+  it('renders the notice body inside a bordered modal', () => {
+    const out = stripAnsi(
+      formatBlockedShipDialog(100, 30, 'Ship mode is blocked\n  • WL-0MUDEGBGO00609RV'),
+    );
+    expect(out).toContain('SHIP MODE BLOCKED');
+    expect(out).toContain('Ship mode is blocked');
+    expect(out).toContain('WL-0MUDEGBGO00609RV');
+    expect(out).toContain('┌');
+    expect(out).toContain('└');
+  });
+
+  it('includes the dismissal hint', () => {
+    const out = stripAnsi(formatBlockedShipDialog(100, 30, 'body'));
+    expect(out).toContain('[Esc] dismiss');
+    expect(out).toContain('[q] dismiss');
+  });
+
+  it('renders the query-failed notice too', () => {
+    const out = stripAnsi(formatBlockedShipDialog(100, 30, 'Cannot verify pane state'));
+    expect(out).toContain('Cannot verify pane state');
   });
 });
 
