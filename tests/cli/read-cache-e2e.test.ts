@@ -67,7 +67,12 @@ function createItem(tempDir: string, env: Record<string, string>, title: string,
   expect(res.status).toBe(0);
 }
 
-describe('wl CLI read cache (e2e)', () => {
+// Explicit suite timeout: every test below spawns the real CLI (tsx) as a
+// subprocess, and subprocess startup is markedly slower under concurrent
+// machine load. The 30s global default caused intermittent timeouts for the
+// heavier cases (see vitest.config.ts); 60s matches the documented 45-60s
+// guidance for tsx-spawning tests.
+describe('wl CLI read cache (e2e)', { timeout: 60_000 }, () => {
   let tempDir: string;
   let cacheDir: string;
   let spawnFile: string;
