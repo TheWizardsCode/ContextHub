@@ -338,8 +338,13 @@ therefore means the whole bounded dispatch backlog held nothing dispatchable.
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)
 **nor** the magnifying glass `🔍` (no audit / stale failed). Concretely,
-`isAuditFresh(auditedAt, updatedAt)` returns `true` (auditedAt within the 60s
-staleness buffer of updatedAt); missing audit timestamps are treated as
+`isAuditFresh(auditedAt, updatedAt, storedFingerprint, currentFingerprint)`
+returns `true`. Since WL-0MUBVH5S0008NQ9K freshness is **content-based**: when
+both fingerprints are available a match is fresh regardless of `updatedAt`
+churn (comment, sync-merge re-timestamp, re-sort), and a mismatch is stale. When
+no fingerprint is available (legacy audits, or a TUI render that cannot compute
+the current fingerprint) the legacy rule applies — `auditedAt` within the 60 s
+staleness buffer of `updatedAt`. Missing audit timestamps are treated as
 not-fresh and therefore selected.
 
 Guarantee (WL-0MSN6ZCTN0027U2R): `updatedAt` is bumped only on **content**

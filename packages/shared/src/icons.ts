@@ -272,22 +272,33 @@ export function needsProducerReviewIcon(
 export const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 60000;
 
 /**
- * Determine whether an audit result is fresh (not stale) based on the
- * at-or-near tolerance (`AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS`).
+ * Determine whether an audit result is fresh (not stale).
  *
- * Guarantees: `updatedAt` is only bumped on content changes (title, description,
- * status, stage, priority, etc.). Flag-only flips of `needsProducerReview` do
- * not move `updatedAt`, so a previously valid audit remains fresh — the TUI
- * continues showing the passed icon and the downtime dispatcher does not
- * re-dispatch a redundant audit. (WL-0MSN6ZCTN0027U2R)
+ * Primary gate (content-fingerprint, SA-0MSKB6US1009CNHT / WL-0MUBVH5S0008NQ9K):
+ * When a stored fingerprint is present, freshness is decided by content match
+ * — the audit is fresh iff the stored fingerprint equals the current fingerprint,
+ * regardless of `updatedAt` movement caused by comments, sync merges, or
+ * lifecycle transitions.
+ *
+ * Fallback (legacy time gate): When the stored fingerprint is absent, the
+ * existing 60 s floor (`AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS`) is used.
+ *
+ * Guarantees:
+ *   • `updatedAt` churn alone (post-audit comment, sync merge re-timestamp,
+ *     sortIndex re-sort) does **not** mark a fingerprinted audit stale (AC4).
+ *   • A change to the description/ACs, Key Files, HEAD sha, or working-tree
+ *     state marks the audit stale (AC5).
+ *   • Legacy audits with no stored fingerprint fall back to the time gate
+ *     (unchanged behaviour, AC6). The fallback also applies when the caller
+ *     cannot supply a current fingerprint (e.g. a TUI render) so existing
+ *     two-argument callers are never regressed.
  *
  * Atomic freshness (WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51): `saveAuditResult`
  * (and therefore `wl audit-set` and `wl update --audit-text`) atomically sets
  * `updatedAt = auditedAt` in the same transaction that writes the
- * `audit_results` row, so `isAuditFresh(auditedAt, updatedAt)` is true
- * immediately after an audit. Subsequent comments do bump `updatedAt`, but the
- * at-or-near tolerance (`AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS`) keeps the audit
- * fresh until real content changes advance `updatedAt` beyond that window.
+ * `audit_results` row. Subsequent comments do bump `updatedAt`, but the
+ * fingerprint gate keeps fingerprinted audits fresh, and the legacy time gate
+ * keeps non-fingerprinted audits fresh within the 60 s window.
  * The audit record in `audit_results` is the canonical source of truth;
  * audit-content comments are deprecated and not consumed by any flow
  * (ship/heartbeat/TUI/implement).
@@ -295,8 +306,21 @@ export const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 60000;
 export function isAuditFresh(
   auditedAt: string | null | undefined,
   updatedAt: string | undefined,
+  storedFingerprint: string | null | undefined = undefined,
+  currentFingerprint: string | null | undefined = undefined,
 ): boolean {
   if (!auditedAt || !updatedAt) return false;
+
+  // ── Primary gate: content-fingerprint match ───────────────────────────
+  // Only usable when BOTH fingerprints are present. A match → fresh
+  // regardless of updatedAt; a mismatch → stale (content changed). When
+  // either side is unavailable the gate degrades to the legacy time floor
+  // (fail-safe: never claim fresh on incomplete fingerprint data).
+  if (storedFingerprint && currentFingerprint) {
+    return storedFingerprint === currentFingerprint;
+  }
+
+  // ── Fallback: legacy 60 s time gate ───────────────────────────────────
   const auditTime = new Date(auditedAt).getTime();
   const updateTime = new Date(updatedAt).getTime();
   if (isNaN(auditTime) || isNaN(updateTime)) return false;
@@ -314,12 +338,21 @@ export function isAuditFresh(
  * row so the two sections can never diverge (WL-0MSGIXHHI009KFW9 AC2).
  */
 export function stageDisplayIcon(
-  item: { stage?: string; auditResult?: boolean | null; auditedAt?: string | null; updatedAt?: string },
+  item: {
+    stage?: string;
+    auditResult?: boolean | null;
+    auditedAt?: string | null;
+    updatedAt?: string;
+    /** Stored content fingerprint from the audit result (optional). */
+    fingerprint?: string | null;
+    /** Current content fingerprint for the item, when the caller can compute it. */
+    currentFingerprint?: string | null;
+  },
   opts?: IconOptions,
 ): string {
   const noIcons = opts?.noIcons ?? false;
   if (item.stage === 'in_review') {
-    const fresh = isAuditFresh(item.auditedAt, item.updatedAt);
+    const fresh = isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint);
     if (fresh) {
       return auditIcon(item.auditResult, { noIcons });
     }

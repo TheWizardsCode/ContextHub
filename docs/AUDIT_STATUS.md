@@ -171,9 +171,43 @@ Fields:
 
 ## Audit Freshness
 
-- `isAuditFresh(auditedAt, updatedAt)` (`packages/shared/src/icons.ts`, used by the herdr TUI) returns `auditedAt > updatedAt - 60s`.
-- Freshness is **atomic**: `saveAuditResult` — the path behind both `wl audit-set` and `wl update --audit-text` (see `packages/shared/src/persistent-store.ts`) — writes the `audit_results` row and sets `workitems.updatedAt = auditedAt` in the same transaction, so `isAuditFresh` is true immediately after an audit (WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51).
-- Flag-only flips of `needsProducerReview` do not bump `updatedAt` (WL-0MSN6ZCTN0027U2R); comments do bump `updatedAt`, but the 60 s grace keeps the audit fresh until real content changes advance `updatedAt` beyond the window.
+`isAuditFresh(auditedAt, updatedAt, storedFingerprint, currentFingerprint)` in
+`packages/shared/src/icons.ts` is the **single freshness definition** consumed by
+the TUI icon path (`stageDisplayIcon`), the `in_review` ordering predicate
+(`inReviewBucket` / `compareInReviewItems`), and the downtime dispatcher
+(`classifyItemForDispatch` / `selectAuditCandidate`). It evaluates two gates:
+
+1. **Content-fingerprint gate (primary, WL-0MUBVH5S0008NQ9K).** When both a
+   stored fingerprint (persisted on the `audit_results` row) and a current
+   fingerprint are supplied, the audit is fresh iff they are equal. This makes
+   freshness content-based: a metadata-only write that moves `updatedAt` — a
+   post-audit comment, a sync-merge re-timestamp, or a `sortIndex` re-sort —
+   leaves a fingerprinted audit fresh. A change to the auditable content
+   (description/ACs, Key Files, git HEAD sha, or working-tree state) changes the
+   fingerprint and marks the audit stale. The fingerprint is the canonical
+   algorithm from the audit skill (`HEAD sha + description hash + Key Files +
+   working-tree state`).
+2. **Time gate (legacy fallback).** When no stored fingerprint is present
+   (legacy audits) or the caller cannot supply a current fingerprint (e.g. a TUI
+   render), the original `auditedAt > updatedAt - 60s` floor applies unchanged.
+
+Freshness is **atomic**: `saveAuditResult` — the path behind `wl audit-set`,
+`wl update --audit-text`, and the audit runner's `persist_audit.py` (see
+`packages/shared/src/persistent-store.ts`) — writes the `audit_results` row
+(including the optional `fingerprint`) and sets `workitems.updatedAt = auditedAt`
+in the same transaction, so `isAuditFresh` is true immediately after an audit
+(WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51).
+
+Fingerprint sources: `wl audit-set --fingerprint <hex>`, or an
+`Audit content fingerprint: <hex>` line embedded in `--summary`/`--raw-output`
+(the audit skill's report format), or `wl update --audit-text` carrying the same
+line. An explicit `--fingerprint`/`--audit-fingerprint` flag wins over an
+embedded line.
+
+Flag-only flips of `needsProducerReview` do not bump `updatedAt`
+(WL-0MSN6ZCTN0027U2R); comments do bump `updatedAt`, but a fingerprinted audit
+stays fresh on a content match and a fingerprint-less audit stays fresh within
+the 60 s window.
 
 ## Canonical Source of Truth
 

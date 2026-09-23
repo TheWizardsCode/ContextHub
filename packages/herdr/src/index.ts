@@ -734,6 +734,8 @@ export function createDowntimeDeps(
         if (audits === null) return { ok: false, error: 'audit list parse error' };
         const found = audits.find((a) => a.id === itemId);
         info.auditedAt = found?.auditedAt ?? null;
+        info.fingerprint = found?.fingerprint ?? null;
+        info.currentFingerprint = found?.currentFingerprint ?? null;
       }
       return { ok: true, info };
     } catch (err) {

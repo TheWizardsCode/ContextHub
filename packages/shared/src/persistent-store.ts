@@ -354,6 +354,9 @@ export class SqlitePersistentStore {
     // Create audit_results table for storing the latest audit per work item
     // This table is the sole source of truth for audit state (see WL-0MPZNJVWT000IKG7).
     // Only one row per work item is kept (latest-only, upsert via INSERT OR REPLACE).
+    // fingerprint: optional content-fingerprint for content-based freshness gate
+    // (WL-0MUBVH5S0008NQ9K). Existing rows without a fingerprint fall back to the
+    // legacy 60 s time gate.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS audit_results (
         work_item_id TEXT PRIMARY KEY,
@@ -362,6 +365,7 @@ export class SqlitePersistentStore {
         summary TEXT,
         raw_output TEXT,
         author TEXT,
+        fingerprint TEXT,
         FOREIGN KEY (work_item_id) REFERENCES workitems(id) ON DELETE CASCADE
       )
     `);
@@ -1234,16 +1238,17 @@ export class SqlitePersistentStore {
    * Save or update an audit result for a work item (upsert).
    * Only the latest audit per work item is kept.
    */
-  saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }): void {
+  saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }): void {
     const stmt = this.db.prepare(`
-      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author, fingerprint)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(work_item_id) DO UPDATE SET
         ready_to_close = excluded.ready_to_close,
         audited_at = excluded.audited_at,
         summary = excluded.summary,
         raw_output = excluded.raw_output,
-        author = excluded.author
+        author = excluded.author,
+        fingerprint = excluded.fingerprint
     `);
     const values: unknown[] = [
       audit.workItemId,
@@ -1252,6 +1257,7 @@ export class SqlitePersistentStore {
       audit.summary ?? null,
       audit.rawOutput ?? null,
       audit.author ?? null,
+      audit.fingerprint ?? null,
     ];
     const normalized = normalizeSqliteBindings(values);
     const updateWorkItemUpdatedAt = this.db.prepare(`UPDATE workitems SET updatedAt = ? WHERE id = ?`);
@@ -1279,7 +1285,7 @@ export class SqlitePersistentStore {
    * Get the audit result for a work item.
    * Returns null if no audit result exists.
    */
-  getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null {
+  getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint: string | null } | null {
     const stmt = this.db.prepare('SELECT * FROM audit_results WHERE work_item_id = ?');
     const row = stmt.get(workItemId) as any;
     if (!row) return null;
@@ -1290,6 +1296,7 @@ export class SqlitePersistentStore {
       summary: row.summary ?? null,
       rawOutput: row.raw_output ?? null,
       author: row.author ?? null,
+      fingerprint: row.fingerprint ?? null,
     };
   }
 
@@ -1315,22 +1322,24 @@ export class SqlitePersistentStore {
       summary: row.summary ?? null,
       rawOutput: row.raw_output ?? null,
       author: row.author ?? null,
+      fingerprint: row.fingerprint ?? null,
     }));
   }
 
   /**
    * Save or update audit results (upsert, bulk).
    */
-  saveAuditResults(audits: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }[]): void {
+  saveAuditResults(audits: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }[]): void {
     const stmt = this.db.prepare(`
-      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author, fingerprint)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(work_item_id) DO UPDATE SET
         ready_to_close = excluded.ready_to_close,
         audited_at = excluded.audited_at,
         summary = excluded.summary,
         raw_output = excluded.raw_output,
-        author = excluded.author
+        author = excluded.author,
+        fingerprint = excluded.fingerprint
     `);
     const normalized = audits.map(audit => {
       const values: unknown[] = [
@@ -1340,6 +1349,7 @@ export class SqlitePersistentStore {
         audit.summary ?? null,
         audit.rawOutput ?? null,
         audit.author ?? null,
+        audit.fingerprint ?? null,
       ];
       return normalizeSqliteBindings(values);
     });

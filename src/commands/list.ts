@@ -147,11 +147,11 @@ export default function register(ctx: PluginContext): void {
       const positions = new Map(orderedItems.map((item, index) => [item.id, index]));
       const stageFilter = (options.stage || '').toLowerCase().trim().replace(/-/g, '_');
       const isInReviewList = stageFilter === 'in_review';
-      let auditMapForSort: Map<string, { readyToClose: boolean; auditedAt: string | null }> | null = null;
+      let auditMapForSort: Map<string, { readyToClose: boolean; auditedAt: string | null; fingerprint: string | null }> | null = null;
       if (isInReviewList) {
         auditMapForSort = new Map();
         for (const ar of db.getAllAuditResults()) {
-          auditMapForSort.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null });
+          auditMapForSort.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null, fingerprint: ar.fingerprint ?? null });
         }
       }
       const sortedAll = items.slice().sort((a, b) => {
@@ -164,12 +164,14 @@ export default function register(ctx: PluginContext): void {
               needsProducerReview: a.needsProducerReview,
               auditResult: arA ? arA.readyToClose : null,
               auditedAt: arA ? arA.auditedAt : null,
+              fingerprint: arA ? arA.fingerprint : null,
               updatedAt: a.updatedAt,
             },
             { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
               needsProducerReview: b.needsProducerReview,
               auditResult: arB ? arB.readyToClose : null,
               auditedAt: arB ? arB.auditedAt : null,
+              fingerprint: arB ? arB.fingerprint : null,
               updatedAt: b.updatedAt,
             },
           );
@@ -200,10 +202,10 @@ export default function register(ctx: PluginContext): void {
         // This is needed so consumers (e.g. Pi TUI extension) can show the
         // correct audit icon (✅/❌/❓) without an extra round-trip per item.
         // Build a lookup map from all audit results for efficiency with large lists.
-        const auditMap = new Map<string, { readyToClose: boolean; auditedAt: string | null }>();
+        const auditMap = new Map<string, { readyToClose: boolean; auditedAt: string | null; fingerprint: string | null }>();
         const allAudits = db.getAllAuditResults();
         for (const ar of allAudits) {
-          auditMap.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null });
+          auditMap.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null, fingerprint: ar.fingerprint ?? null });
         }
         const enrichedItems = limited.map(item => {
           const audit = auditMap.get(item.id);
@@ -211,6 +213,7 @@ export default function register(ctx: PluginContext): void {
             ...item,
             auditResult: audit ? audit.readyToClose : null,
             auditedAt: audit ? audit.auditedAt : null,
+            fingerprint: audit ? audit.fingerprint : null,
             childCount: childCounts.get(item.id) ?? 0,
           };
         });

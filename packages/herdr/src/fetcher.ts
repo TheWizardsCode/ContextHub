@@ -168,6 +168,10 @@ export interface WorkItem {
   needsProducerReview?: boolean;
   auditResult?: boolean | null;
   auditedAt?: string | null;
+  /** Stored content fingerprint from the audit result (WL-0MUBVH5S0008NQ9K). */
+  fingerprint?: string | null;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
   /** Child work items (populated on expand). */
   children?: WorkItem[];
   /** Depth in hierarchy (0 = top-level, 1 = child, etc.). Used by renderer. */
@@ -258,6 +262,8 @@ function normalizeItem(raw: any): WorkItem {
     needsProducerReview: raw?.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
     auditResult: raw?.auditResult !== undefined ? raw.auditResult : null,
     auditedAt: raw?.auditedAt == null ? (raw?.auditedAt as null | undefined) : String(raw.auditedAt),
+    fingerprint: raw?.fingerprint == null ? (raw?.fingerprint as null | undefined) : String(raw.fingerprint),
+    currentFingerprint: raw?.currentFingerprint == null ? (raw?.currentFingerprint as null | undefined) : String(raw.currentFingerprint),
   };
 }
 

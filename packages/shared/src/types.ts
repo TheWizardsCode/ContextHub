@@ -11,6 +11,8 @@ export type WorkItemEffortLevel = 'XS' | 'S' | 'M' | 'L' | 'XL';
 /**
  * Structured audit result stored in the audit_results table.
  * This is the sole source of truth for audit state.
+ * fingerprint: optional content-fingerprint for the content-based freshness
+ * gate (WL-0MUBVH5S0008NQ9K). When absent, the legacy 60 s time gate applies.
  */
 export interface AuditResult {
   workItemId: string;
@@ -19,6 +21,7 @@ export interface AuditResult {
   summary: string | null;
   rawOutput: string | null;
   author: string | null;
+  fingerprint?: string | null;
 }
 
 /**

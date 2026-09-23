@@ -11,7 +11,7 @@ import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
-import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
+import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { loadStatusStageRules, normalizeStatusValue } from '../status-stage-rules.js';
 import { submitToOpenBrain } from '../openbrain.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
@@ -43,6 +43,7 @@ export default function register(ctx: PluginContext): void {
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--audit-file <file>', 'Read audit text from a file')
+    .option('--audit-fingerprint <fingerprint>', 'Content fingerprint for freshness gate when persisting audit (WL-0MUBVH5S0008NQ9K)')
     .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-re-sort', 'Skip automatic re-sort after the update')
@@ -52,14 +53,14 @@ export default function register(ctx: PluginContext): void {
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','doNotDelegate','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync']);
       // Robust detection of --no-re-sort that accepts multiple forms Commander
       // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
       const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync'
+        'title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync'
       ];
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
@@ -268,6 +269,14 @@ export default function register(ctx: PluginContext): void {
           // --audit-text doesn't clobber the machine-readable audit payload.
           const existingAudit = db.getAuditResult(normalizedId);
           const prevRawOutput = existingAudit?.rawOutput ?? null;
+          // Extract fingerprint: explicit flag takes priority, then embedded
+          // in the new audit text (from the audit skill's report line). A new
+          // audit without a fingerprint must NOT inherit the previous one —
+          // that would mark changed content as fresh.
+          const fingerprint =
+            options.auditFingerprint ??
+            extractAuditFingerprint(auditEntry.text) ??
+            null;
           try {
             db.saveAuditResult({
               workItemId: normalizedId,
@@ -276,6 +285,7 @@ export default function register(ctx: PluginContext): void {
               summary: auditEntry.text,
               rawOutput: prevRawOutput,
               author: auditEntry.author,
+              fingerprint,
             });
             auditWritten = true;
             auditEntryForOutput = auditEntry;

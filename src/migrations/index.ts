@@ -156,6 +156,26 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
         )
       `);
     }
+  },
+  {
+    id: '20260923-add-audit-fingerprint',
+    description: 'Add nullable fingerprint column to audit_results for content-based freshness gate (WL-0MUBVH5S0008NQ9K)',
+    safe: true,
+    requiredColumn: '__meta:audit_fingerprint_added',
+    apply: (db: Database.Database) => {
+      const cols = db.prepare(`PRAGMA table_info('audit_results')`).all() as any[];
+      const hasFingerprint = cols.some(c => String(c.name) === 'fingerprint');
+      if (!hasFingerprint) {
+        db.exec(`ALTER TABLE audit_results ADD COLUMN fingerprint TEXT`);
+      }
+      // Mark the migration complete so the runner treats it as idempotent even
+      // though the target column lives in audit_results, not workitems (the
+      // plain requiredColumn check only inspects workitems). Mirrors the
+      // `drop-audit-column` migration's metadata sentinel pattern.
+      try {
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_fingerprint_added', '1');
+      } catch (_e) { /* best-effort */ }
+    }
   }
 ];
 

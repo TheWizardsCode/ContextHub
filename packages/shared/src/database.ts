@@ -1035,7 +1035,7 @@ export class WorklogDatabase {
    * Save or update an audit result for a work item (upsert).
    * Only the latest audit per work item is kept.
    */
-  saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }): void {
+  saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }): void {
     this.store.saveAuditResult(audit);
   }
 
@@ -1043,7 +1043,7 @@ export class WorklogDatabase {
    * Get the audit result for a work item.
    * Returns null if no audit result exists.
    */
-  getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null {
+  getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint: string | null } | null {
     return this.store.getAuditResult(workItemId);
   }
 

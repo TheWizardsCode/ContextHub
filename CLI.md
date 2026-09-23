@@ -120,6 +120,7 @@ Options:
 - `--needs-producer-review <true|false>` — Set needsProducerReview flag (true|false|yes|no) (optional).
 - `--audit-text <text>` — Set structured audit text when creating an item. The audit result is stored in the `audit_results` table (the sole source of truth for audit state). Prefer `--audit-file` for file-based input to avoid shell-escaping issues (see docs/AUDIT_STATUS.md).
 - `--audit-file <file>` — Read audit text from a file (recommended for large or shell-sensitive content).
+- `--audit-fingerprint <fingerprint>` — Content fingerprint for the freshness gate (WL-0MUBVH5S0008NQ9K); an explicit value wins over an embedded `Audit content fingerprint: <hex>` line.
 - `--prefix <prefix>` — Override default ID prefix (repo-local scope) (optional).
 - `--allow-duplicate` — Bypass the dedup guard: create a new item even when a recent non-terminal item with the same title exists (optional).
 - `--dedup-window <duration>` — Dedup match window, e.g. `30s`, `5m`, `1h` or raw milliseconds (optional; default: `5m`).
@@ -160,7 +161,7 @@ Automatic re-sort:
 
 ### `update` [options] <id...>
 
-Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
 
 > **Auto-revert:** when `--audit-text`/`--audit-file` carries a `Ready to close: No` verdict for an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
 
@@ -284,6 +285,7 @@ Options:
 - `--raw-output <text>` — Machine-readable raw output from the audit tool.
 - `--audit-file <file>` — Read audit raw output from a file (takes precedence over `--raw-output`).
 - `--author <author>` — Author of the audit (defaults to current user).
+- `--fingerprint <fingerprint>` — Content fingerprint for the freshness gate (WL-0MUBVH5S0008NQ9K). When omitted, an `Audit content fingerprint: <hex>` line in `--summary` or `--raw-output` is used automatically.
 - `--prefix <prefix>` — Override default ID prefix (optional).
 - `--json` — Output in JSON format.
 
@@ -294,6 +296,7 @@ wl audit-set WL-ABC123 --ready-to-close yes --summary "All criteria met"
 wl audit-set WL-ABC123 --ready-to-close no --summary "Outstanding work items" --json
 wl audit-set WL-ABC123 --ready-to-close yes --author "bot" --raw-output "..."
 wl audit-set WL-ABC123 --ready-to-close yes --audit-file report.md --summary "From file"
+wl audit-set WL-ABC123 --ready-to-close yes --fingerprint sha256-abc123 --summary "Content unchanged"
 ```
 
 ### `delete` [options] <id>

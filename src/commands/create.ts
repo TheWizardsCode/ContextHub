@@ -9,7 +9,7 @@ import { humanFormatWorkItem, resolveFormat } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { promises as fs } from 'fs';
 import { normalizeActionArgs } from './cli-utils.js';
-import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
+import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 import { isAutomationAuthoredChild } from '../automation.js';
 import { recordDemotionAuditTrail } from '../demotion-audit.js';
@@ -71,6 +71,7 @@ export default function register(ctx: PluginContext): void {
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--audit-file <file>', 'Read audit text from a file')
+    .option('--audit-fingerprint <fingerprint>', 'Content fingerprint for freshness gate when persisting audit (WL-0MUBVH5S0008NQ9K)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-re-sort', 'Skip automatic re-sort after creating the item')
     .option('--re-sort-sync', 'Force a synchronous re-sort after creating the item', false)
@@ -155,7 +156,7 @@ export default function register(ctx: PluginContext): void {
       }
 
       let auditEntry;
-      let auditResultData: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null = null;
+      let auditResultData: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null } | null = null;
       if (auditTextInput !== undefined) {
         const redacted = redactAuditText(String(auditTextInput));
         const inspection = inspectAuditFirstLine(redacted);
@@ -177,6 +178,12 @@ export default function register(ctx: PluginContext): void {
 
         auditEntry = buildAuditEntry(String(auditTextInput));
         // Prepare audit result for the new audit_results table
+        // Extract fingerprint from the audit text (embedded report line)
+        // or from an explicit --audit-fingerprint flag.
+        const fingerprint =
+          options.auditFingerprint ??
+          extractAuditFingerprint(auditEntry.text) ??
+          null;
         auditResultData = {
           workItemId: '', // Will be set after item creation
           readyToClose: auditEntry.status === 'Complete',
@@ -184,6 +191,7 @@ export default function register(ctx: PluginContext): void {
           summary: auditEntry.text,
           rawOutput: null,
           author: auditEntry.author,
+          fingerprint,
         };
       }
 

@@ -1064,6 +1064,10 @@ export interface AuditCandidate {
   title: string;
   auditedAt?: string | null;
   updatedAt?: string;
+  /** Stored content fingerprint from the audit result (optional). */
+  fingerprint?: string | null;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
   sortIndex?: number;
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
@@ -1111,6 +1115,10 @@ export interface DowntimeItemInfo {
   auditedAt?: string | null;
   /** Item update timestamp (audit-tier recency window). */
   updatedAt?: string;
+  /** Stored content fingerprint from the audit result (optional). */
+  fingerprint?: string | null;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
   /** wl priority order preserved for deterministic ordering. */
   sortIndex?: number;
   /**
@@ -2789,8 +2797,9 @@ export function classifyItemForDispatch(
     if (stage !== 'in_review') return null;
     // Audit tier: no FRESH audit (auditedAt absent/older than updatedAt
     // semantics per isAuditFresh). A missing auditedAt means not fresh →
-    // audit-eligible (the audit tier's conservative default).
-    if (isAuditFresh(info.auditedAt, info.updatedAt)) return null;
+    // audit-eligible (the audit tier's conservative default). Fingerprints
+    // are used when both sides are available; otherwise the time gate applies.
+    if (isAuditFresh(info.auditedAt, info.updatedAt, info.fingerprint, info.currentFingerprint)) return null;
     // 7-day recency window (mirrors selectAuditCandidate): an item not
     // modified within the window is not a candidate; missing updatedAt is
     // included (absent data must not silently drop candidates).
@@ -5299,6 +5308,8 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       title: typeof o.title === 'string' ? o.title : '',
       auditedAt: typeof o.auditedAt === 'string' ? o.auditedAt : undefined,
       updatedAt: typeof o.updatedAt === 'string' ? o.updatedAt : undefined,
+      fingerprint: typeof o.fingerprint === 'string' ? o.fingerprint : undefined,
+      currentFingerprint: typeof o.currentFingerprint === 'string' ? o.currentFingerprint : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
       needsProducerReview:
@@ -5384,7 +5395,7 @@ export function selectAuditCandidate(
 ): AuditCandidate | null {
   const recencyCutoff = now - DOWNTIME_AUDIT_RECENCY_WINDOW_MS;
   const filtered = candidates
-    .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt))
+    .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt, c.fingerprint, c.currentFingerprint))
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
     .filter((c) => c.needsProducerReview !== true)

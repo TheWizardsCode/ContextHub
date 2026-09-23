@@ -272,6 +272,9 @@ export class SqlitePersistentStore {
     // Create audit_results table for storing the latest audit per work item
     // This table is the sole source of truth for audit state (see WL-0MPZNJVWT000IKG7).
     // Only one row per work item is kept (latest-only, upsert via INSERT OR REPLACE).
+    // fingerprint: optional content-fingerprint for content-based freshness gate
+    // (WL-0MUBVH5S0008NQ9K). Existing rows without a fingerprint fall back to the
+    // legacy 60 s time gate.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS audit_results (
         work_item_id TEXT PRIMARY KEY,
@@ -280,6 +283,7 @@ export class SqlitePersistentStore {
         summary TEXT,
         raw_output TEXT,
         author TEXT,
+        fingerprint TEXT,
         FOREIGN KEY (work_item_id) REFERENCES workitems(id) ON DELETE CASCADE
       )
     `);

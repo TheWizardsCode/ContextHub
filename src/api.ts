@@ -7,7 +7,7 @@ import { WorklogDatabase } from './database.js';
 import { CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, WorkItemStatus, WorkItemPriority, CreateCommentInput, UpdateCommentInput } from './types.js';
 import { exportToJsonlAsync, importFromJsonl, getDefaultDataPath } from './jsonl.js';
 import { loadConfig } from './config.js';
-import { buildAuditEntry, hasAcceptanceCriteria } from './audit.js';
+import { buildAuditEntry, extractAuditFingerprint, hasAcceptanceCriteria } from './audit.js';
 import { getConfiguredUserEmail } from './sync.js';
 
 function parseNeedsProducerReview(value: unknown): boolean | undefined {
@@ -18,13 +18,20 @@ function parseNeedsProducerReview(value: unknown): boolean | undefined {
   return undefined;
 }
 
-function normalizeCreateInputWithAudit(input: CreateWorkItemInput, db: WorklogDatabase): { input: CreateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null } {
+function normalizeCreateInputWithAudit(input: CreateWorkItemInput, db: WorklogDatabase): { input: CreateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null } | null } {
   const rawAudit = (input as any).audit;
   if (typeof rawAudit === 'string') {
     const entry = buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria(input.description) });
     // Return cleaned input without audit field, plus audit result for the new table
+    // Extract fingerprint from the audit text (embedded report line) or from
+    // an explicit fingerprint field in the audit object.
+    const fingerprint =
+      (input as any).auditFingerprint ??
+      extractAuditFingerprint(entry.text) ??
+      null;
     const cleanedInput = { ...input };
     delete (cleanedInput as any).audit;
+    delete (cleanedInput as any).auditFingerprint;
     return {
       input: cleanedInput,
       auditResult: {
@@ -34,18 +41,26 @@ function normalizeCreateInputWithAudit(input: CreateWorkItemInput, db: WorklogDa
         summary: entry.text,
         rawOutput: null,
         author: entry.author,
+        fingerprint,
       },
     };
   }
   return { input, auditResult: null };
 }
 
-function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput, itemId: string, db: WorklogDatabase): { input: UpdateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null } {
+function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput, itemId: string, db: WorklogDatabase): { input: UpdateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null } | null } {
   const rawAudit = (input as any).audit;
   if (typeof rawAudit === 'string') {
     const entry = buildAuditEntry(rawAudit, undefined, { hasAcceptanceCriteria: hasAcceptanceCriteria((input as any).description) });
+    // Extract fingerprint from the audit text (embedded report line) or from
+    // an explicit fingerprint field in the audit object.
+    const fingerprint =
+      (input as any).auditFingerprint ??
+      extractAuditFingerprint(entry.text) ??
+      null;
     const cleanedInput = { ...input };
     delete (cleanedInput as any).audit;
+    delete (cleanedInput as any).auditFingerprint;
     return {
       input: cleanedInput,
       auditResult: {
@@ -55,6 +70,7 @@ function normalizeUpdateInputWithAudit(input: UpdateWorkItemInput, itemId: strin
         summary: entry.text,
         rawOutput: null,
         author: entry.author,
+        fingerprint,
       },
     };
   }
@@ -70,7 +86,7 @@ function hasAuditField(input: unknown): boolean {
  * Write an audit result to the audit_results table.
  * This is the sole source of truth for audit state.
  */
-function writeAuditResult(db: WorklogDatabase, auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }): void {
+function writeAuditResult(db: WorklogDatabase, auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }): void {
   try {
     db.saveAuditResult(auditResult);
   } catch (_e) {

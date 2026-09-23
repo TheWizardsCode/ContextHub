@@ -36,6 +36,8 @@ export interface CreateOptions {
   auditText?: string;
   /** Read audit text from a file */
   auditFile?: string;
+  /** Content fingerprint for the freshness gate (WL-0MUBVH5S0008NQ9K) */
+  auditFingerprint?: string;
   prefix?: string;
   /** Skip automatic re-sort after the create action */
   noReSort?: boolean;
@@ -102,6 +104,8 @@ export interface UpdateOptions {
   auditText?: string;
   /** Read audit text from a file */
   auditFile?: string;
+  /** Content fingerprint for the freshness gate (WL-0MUBVH5S0008NQ9K) */
+  auditFingerprint?: string;
   prefix?: string;
   /** Skip automatic re-sort after the update action */
   noReSort?: boolean;
