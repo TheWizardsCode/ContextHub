@@ -303,6 +303,12 @@ describe('worklist TUI visibility gating', () => {
       autoSync: true,
       syncIntervalMs: 60_000,
       showHelpText: false,
+      // Clear Ship Guard: this test exercises the visibility gate on the
+      // manual S action, not the guard (which has its own tests).
+      shipGuardQuery: async () => ({
+        worklogOutput: JSON.stringify({ workItems: [] }),
+        paneOutput: JSON.stringify({ result: { panes: [] } }),
+      }),
     });
     await vi.advanceTimersByTimeAsync(0);
     fetcher.mockClear();
