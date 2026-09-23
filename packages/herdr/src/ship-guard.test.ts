@@ -174,6 +174,21 @@ describe('formatBlockedNotice', () => {
     expect(notice).toContain('Cannot verify pane state');
     expect(notice).toContain('herdr CLI or worklog');
   });
+
+  it('names the failing query when a query-failure reason is supplied (WL-0MUEK7H39008VVUF)', () => {
+    const worklogNotice = formatBlockedNotice(
+      [],
+      true,
+      'worklog list unavailable — cannot verify pane state',
+    );
+    expect(worklogNotice).toContain('Cannot verify pane state');
+    expect(worklogNotice).toContain('worklog list unavailable');
+    expect(worklogNotice).not.toContain('Unable to check whether other panes');
+
+    const paneNotice = formatBlockedNotice([], true, 'pane list unavailable — cannot verify pane state');
+    expect(paneNotice).toContain('pane list unavailable');
+    expect(paneNotice).not.toContain('worklog list unavailable');
+  });
 });
 
 // ── runShipGuard ──────────────────────────────────────────────────────────

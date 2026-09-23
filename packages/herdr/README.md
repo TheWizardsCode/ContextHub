@@ -1410,10 +1410,10 @@ The Ship It shortcut (`S`, Shift+s) triggers a **dev→main release** via the sh
 
 Before the confirmation dialog opens, the plugin runs a **Ship Guard** to make sure no other agent pane is still working on this project (WL-0MUD6DDZC007ZSIW):
 
-- The guard lists every **live** agent pane machine-wide (`herdr pane list`) and matches work-item IDs embedded in pane labels against the actual set of work-item IDs in the current project's worklog (`wl list --json`). A pane blocks when it carries a project work-item ID **and** its agent is live (present, status not `done`/`exited`).
+- The guard lists every **live** agent pane machine-wide (`herdr pane list`) and matches work-item IDs embedded in pane labels against the actual set of work-item IDs in the current project's worklog. The worklog query requests **only** the `id` field (`wl list --json --fields id`) — the guard needs the ID set alone, so the payload stays small (~100 KB for ~2.3 k items instead of the full ~8.5 MB worklog) and cannot overflow Node's process buffer as the worklog grows (WL-0MUEK7H39008VVUF). A pane blocks when it carries a project work-item ID **and** its agent is live (present, status not `done`/`exited`).
 - If any pane blocks, the dialog is **not** opened. A full-pane modal notice (`⛔ SHIP MODE BLOCKED`) lists the offending work-item IDs and pane labels, and tells the operator to close those panes and retry. The notice is dismissed with `Esc`, `Enter`, or `q`; nothing is dispatched.
 - A pane whose agent is absent, `done`, or `exited` does **not** block, even when its label carries a project work-item ID. Work-item IDs from a different project do not block (membership is by ID, not prefix).
-- **Fail safe:** if `wl list` or `herdr pane list` is unavailable, the guard cannot verify the pane state and the dialog is **not** opened — the notice reports that verification is unavailable rather than pretending the project is clear.
+- **Fail safe:** if `wl list` or `herdr pane list` is unavailable, the guard cannot verify the pane state and the dialog is **not** opened. The notice names **which** query failed (`worklog list unavailable` vs `pane list unavailable`) so the operator knows what to retry, rather than pretending the project is clear.
 
 ### Code Freeze on confirm
 

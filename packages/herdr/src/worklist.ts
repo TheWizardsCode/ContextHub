@@ -3919,10 +3919,16 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
 
 /**
  * Build the production Ship Guard query seam (WL-0MUD6DDZC007ZSIW): runs
- * `wl list --json` and `herdr pane list` and returns their raw stdout, or
- * null for whichever query failed. A null output makes the guard fail safe
- * (the dialog is not opened). The command-output-string shape keeps the
- * guard pure and unit-testable without spawning processes.
+ * `wl list --json --fields id` and `herdr pane list` and returns their raw
+ * stdout, or null for whichever query failed. A null output makes the guard
+ * fail safe (the dialog is not opened). The command-output-string shape keeps
+ * the guard pure and unit-testable without spawning processes.
+ *
+ * The worklog query requests ONLY the `id` field (`--fields id`): the guard
+ * needs the project's work-item ID set, nothing else. This keeps the payload
+ * tiny (~100 KB for ~2.3 k items vs ~8.5 MB for the full worklog) so it no
+ * longer risks Node's `maxBuffer` and will not re-break as the worklog grows
+ * (WL-0MUEK7H39008VVUF). The `maxBuffer` is raised as a defensive backstop.
  *
  * @param cwd - Project root (contains `.worklog/`); when provided the wl
  *   query targets that root explicitly. When omitted the module-configured
@@ -3931,16 +3937,20 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
 export function createProductionShipGuardQuery(
   cwd?: string,
 ): () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> {
+  // IDs-only worklog query: bounded payload, resilient as the worklog grows.
+  const worklogArgs = ['list', '--json', '--fields', 'id'];
+  // Generous backstop; the --fields id projection keeps the real payload tiny.
+  const SHIP_GUARD_MAX_BUFFER = 32 * 1024 * 1024;
   return async () => {
     const exec = getExecFileAsync();
     let worklogOutput: string | null = null;
     let paneOutput: string | null = null;
     try {
-      const wlArgs = cwd ? buildWlArgsForRoot(cwd, ['list', '--json']) : buildWlArgs(['list', '--json']);
+      const wlArgs = cwd ? buildWlArgsForRoot(cwd, worklogArgs) : buildWlArgs(worklogArgs);
       const { stdout } = await exec('wl', wlArgs, {
         encoding: 'utf8',
         timeout: DEFAULT_WL_TIMEOUT_MS,
-        maxBuffer: 8 * 1024 * 1024,
+        maxBuffer: SHIP_GUARD_MAX_BUFFER,
       });
       worklogOutput = stdout;
     } catch {
@@ -3950,7 +3960,7 @@ export function createProductionShipGuardQuery(
       const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
       const { stdout } = await exec(herdrBin, ['pane', 'list'], {
         encoding: 'utf8',
-        maxBuffer: 8 * 1024 * 1024,
+        maxBuffer: SHIP_GUARD_MAX_BUFFER,
       });
       paneOutput = stdout;
     } catch {
@@ -5036,7 +5046,14 @@ export async function runWorklistTui(
     const queryFailed = query.worklogOutput === null || query.paneOutput === null;
     const result = runShipGuard(query.worklogOutput ?? '', query.paneOutput ?? '');
     if (queryFailed || !result.ok || result.blockingPanes.length > 0) {
-      blockedNotice = formatBlockedNotice(result.blockingPanes, queryFailed || !result.ok);
+      // Pass the guard's reason so the notice names WHICH query failed
+      // (worklog vs pane list) rather than a generic message
+      // (WL-0MUEK7H39008VVUF AC3).
+      blockedNotice = formatBlockedNotice(
+        result.blockingPanes,
+        queryFailed || !result.ok,
+        result.reason,
+      );
       shipItDialog = null;
       render();
       return;

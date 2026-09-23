@@ -356,6 +356,48 @@ describe('Ship Guard — pre-dialog gate (WL-0MUDELHIH009O0AX)', () => {
     await p;
   });
 
+  it('names the worklog as the failing query when only wl is unavailable (WL-0MUEK7H39008VVUF)', async () => {
+    const onCommand = vi.fn();
+    // wl unavailable, pane list fine — the notice must blame the worklog.
+    const p = startTui(onCommand, [makeItem('WL-TEST-1')], guardQuery(null, paneList([])));
+    await tick();
+
+    dataHandler?.(Buffer.from('S'));
+    await tick();
+    await tick();
+
+    expect(blockedNoticeShowing()).toBe(true);
+    const out = stripAnsi(lastRender());
+    expect(out).toContain('worklog list unavailable');
+    expect(out).not.toContain('pane list unavailable');
+    expect(onCommand).not.toHaveBeenCalled();
+
+    await press('\x1b');
+    await press('q');
+    await p;
+  });
+
+  it('names the pane list as the failing query when only herdr is unavailable (WL-0MUEK7H39008VVUF)', async () => {
+    const onCommand = vi.fn();
+    // wl fine, pane list unavailable — the notice must blame the pane list.
+    const p = startTui(onCommand, [makeItem('WL-TEST-1')], guardQuery(worklog([TEST_ITEM]), null));
+    await tick();
+
+    dataHandler?.(Buffer.from('S'));
+    await tick();
+    await tick();
+
+    expect(blockedNoticeShowing()).toBe(true);
+    const out = stripAnsi(lastRender());
+    expect(out).toContain('pane list unavailable');
+    expect(out).not.toContain('worklog list unavailable');
+    expect(onCommand).not.toHaveBeenCalled();
+
+    await press('\x1b');
+    await press('q');
+    await p;
+  });
+
   it('does not dispatch while the blocked notice is showing', async () => {
     const onCommand = vi.fn();
     const p = startTui(onCommand, [makeItem('WL-TEST-1')], guardQuery(

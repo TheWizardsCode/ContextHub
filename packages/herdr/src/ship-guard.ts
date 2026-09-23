@@ -157,19 +157,31 @@ export function listBlockingPanes(
  *
  * @param blockingPanes - Array of `BlockingPane` from `listBlockingPanes`.
  * @param queryFailed   - When true the guard could not verify (queries failed).
+ * @param queryFailureReason - Optional machine reason from `runShipGuard`
+ *   naming WHICH query failed ("worklog list unavailable" vs "pane list
+ *   unavailable"). When supplied the notice names the failing query so the
+ *   operator knows what to retry (WL-0MUEK7H39008VVUF).
  * @returns Formatted notice text.
  */
 export function formatBlockedNotice(
   blockingPanes: BlockingPane[],
   queryFailed?: boolean,
+  queryFailureReason?: string,
 ): string {
   const lines: string[] = [];
 
   if (queryFailed) {
     lines.push('⚠ Cannot verify pane state — cannot enter ship mode.');
     lines.push('');
-    lines.push('Unable to check whether other panes are working on project items.');
-    lines.push('Please retry when the herdr CLI or worklog is available.');
+    if (queryFailureReason && queryFailureReason.trim().length > 0) {
+      // Name the failing query so the operator can tell whether the worklog
+      // or the herdr pane list is unavailable (WL-0MUEK7H39008VVUF AC3).
+      lines.push(`Reason: ${queryFailureReason}.`);
+      lines.push('Please retry once the failing query is available.');
+    } else {
+      lines.push('Unable to check whether other panes are working on project items.');
+      lines.push('Please retry when the herdr CLI or worklog is available.');
+    }
     return lines.join('\n');
   }
 
