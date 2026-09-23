@@ -165,10 +165,10 @@ describe('modeSwitchEnabled', () => {
 });
 
 describe('modeSwitchIdleThresholdMs', () => {
-  it('defaults to 900_000 ms (15 minutes)', () => {
-    expect(defaultSettings.modeSwitchIdleThresholdMs).toBe(900_000);
+  it('defaults to 1_800_000 ms (30 minutes)', () => {
+    expect(defaultSettings.modeSwitchIdleThresholdMs).toBe(1_800_000);
     const path = tempSettingsPath();
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(900_000);
+    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(1_800_000);
   });
 
   it('clamps a persisted value below the 60s floor up to the floor', () => {
@@ -183,7 +183,7 @@ describe('modeSwitchIdleThresholdMs', () => {
   it('falls back to the default when the persisted value is not a number', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, modeSwitchIdleThresholdMs: 'later' }), 'utf-8');
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(900_000);
+    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(1_800_000);
   });
 });
 
