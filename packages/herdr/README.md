@@ -29,6 +29,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. Any markdown document opened in the viewer can also be annotated in place (`n,e` add/edit, `n,d` delete); podcast scripts sync notes to the worklog as child work items (PRD §7.3). See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
+- **Ship-mode guard** — Pressing `S` runs a pre-dialog guard first: if any live agent pane (machine-wide) is working on a work item from this project, the confirmation dialog is not opened and a notice lists the blocking panes/work items. On `ship` confirmation the plugin writes the Code Freeze marker before dispatching the release, and clears it if the dispatch fails. See [Ship-mode guard](#ship-mode-guard-pre-dialog).
 
 ## Requirements
 
@@ -122,7 +123,7 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `n` — Run the intake workflow on the selected item (idea stage)
    - Press `p` — Run the plan workflow on the selected item (intake_complete stage)
    - Press `s` — Insert a search command
-   - Press `S` (Shift+s) — **Ship It**: run the dev→main release. A typed-confirmation dialog anchored to the bottom of the list (the list stays visible above it) asks you to type `ship` (case-insensitive) and press Enter to dispatch `/skill:ship release`; Esc cancels. The release is a global command — no work item id is involved. `S` is distinct from lowercase `s` (Search). See [Ship It confirmation dialog](#ship-it-confirmation-dialog).
+   - Press `S` (Shift+s) — **Ship It**: run the dev→main release. A pre-dialog guard first checks that no other live agent pane is working on a project work item; if one is, a blocked notice lists the offending panes and nothing is dispatched. Otherwise a typed-confirmation dialog anchored to the bottom of the list (the list stays visible above it) asks you to type `ship` (case-insensitive) and press Enter to dispatch `/skill:ship release`; Esc cancels. The release is a global command — no work item id is involved. `S` is distinct from lowercase `s` (Search). See [Ship It confirmation dialog](#ship-it-confirmation-dialog).
 
 5. Producer review shortcut:
    - Press `r` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
@@ -1400,7 +1401,20 @@ The Ship It shortcut (`S`, Shift+s) triggers a **dev→main release** via the sh
 - **Esc** dismisses the dialog and returns to the selection list without dispatching anything.
 - While the dialog is open all keys are consumed by it (modal input); navigation resumes after Esc.
 
-Implementation: `ship-it-dialog.ts` holds the dialog state (`ShipItDialogState`), renders the box (`formatShipItDialog`), and composes it over the list output (`overlayShipItDialog` — bottom-anchored, within the pane height budget). The `S` entry in `src/shortcuts.json` is a single-key chord with `code_freeze` omitted, so it stays available during a Code Freeze (the ship skill gates itself).
+### Ship-mode guard (pre-dialog)
+
+Before the confirmation dialog opens, the plugin runs a **Ship Guard** to make sure no other agent pane is still working on this project (WL-0MUD6DDZC007ZSIW):
+
+- The guard lists every **live** agent pane machine-wide (`herdr pane list`) and matches work-item IDs embedded in pane labels against the actual set of work-item IDs in the current project's worklog (`wl list --json`). A pane blocks when it carries a project work-item ID **and** its agent is live (present, status not `done`/`exited`).
+- If any pane blocks, the dialog is **not** opened. A full-pane modal notice (`⛔ SHIP MODE BLOCKED`) lists the offending work-item IDs and pane labels, and tells the operator to close those panes and retry. The notice is dismissed with `Esc`, `Enter`, or `q`; nothing is dispatched.
+- A pane whose agent is absent, `done`, or `exited` does **not** block, even when its label carries a project work-item ID. Work-item IDs from a different project do not block (membership is by ID, not prefix).
+- **Fail safe:** if `wl list` or `herdr pane list` is unavailable, the guard cannot verify the pane state and the dialog is **not** opened — the notice reports that verification is unavailable rather than pretending the project is clear.
+
+### Code Freeze on confirm
+
+Typing `ship` + Enter writes the Code Freeze marker **before** `/skill:ship release` is dispatched, so the freeze applies from the moment of confirmation (WL-0MUD6DDZC007ZSIW). The write is atomic (temp file + rename). If the dispatch fails — `onCommand` throws (e.g. no agent pane available) or the dispatch is a no-op — the plugin best-effort removes the marker **it wrote** and surfaces the error, so a release that never started cannot leave a stale freeze. A marker that was already active (written by the ship skill) is owned by the ship skill: the plugin neither overwrites nor clears it. The ship skill remains the authority that clears the marker on release exit.
+
+Implementation: `ship-it-dialog.ts` holds the dialog state (`ShipItDialogState`), renders the box (`formatShipItDialog`), and composes it over the list output (`overlayShipItDialog` — bottom-anchored, within the pane height budget). `ship-guard.ts` holds the pure guard (project-ID set, blocking-pane filter, blocked-notice formatter) and `worklist.ts` gates `openShipItDialog()` on it and writes/clears the marker on confirm. The `S` entry in `src/shortcuts.json` is a single-key chord with `code_freeze` omitted, so it stays available during a Code Freeze (the ship skill gates itself).
 
 > **Behavior change:** the former manual-sync `S` binding (immediate `wl sync` with a toast) was removed; background auto-sync on the timer is unchanged.
 
@@ -1417,7 +1431,8 @@ packages/herdr/
 │   ├── shortcut-config.ts  # Chord shortcut registry and config loader
 │   ├── shortcuts.json      # Shortcut/chord definitions
 │   ├── (icons)              # Icon & colour helpers via @worklog/shared/icons (packages/shared/src/icons.ts)
-│   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
+│   ├── code-freeze.ts      # Code Freeze marker detection + writer/clearer (fail-open reads)
+│   ├── ship-guard.ts       # Ship It pre-dialog guard (project IDs, blocking panes, notice)
 │   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>, paste/cut/newline)
 │   ├── clipboard.ts        # OS clipboard read/paste + write/copy helpers (no tmux branch)
 │   ├── ship-it-dialog.ts   # Ship It typed-confirmation dialog (bottom-anchored, S shortcut)
@@ -1472,7 +1487,7 @@ While a ship-it (dev → main release) process is running, the project is put in
 
 ### Marker contract (cross-repo)
 
-The freeze state is communicated via a marker file written by the ship release process (owned by the SorraAgents ship skill — see `SA-0MSBU4OBU005WJNB`) and read by this plugin:
+The freeze state is communicated via a marker file. The ship release process (owned by the SorraAgents ship skill — see `SA-0MSBU4OBU005WJNB`) is the authority that clears the marker on release exit; this plugin also **writes** the marker when the operator confirms Ship It (before dispatching the release), so the freeze applies immediately (WL-0MUD6DDZC007ZSIW). The file is read by this plugin:
 
 ```
 <worklog-dir>/code-freeze.json
@@ -1500,6 +1515,16 @@ Semantics:
 
 Fail-open is deliberate: a broken or missing marker must never block browsing the worklist. The module exposes two reads: `isCodeFreezeActive()` / `readCodeFreezeState()` keep the fail-open semantics for browsing and shortcut blocking, while `readCodeFreezeStatus()` adds a third **ambiguous** state for fail-closed consumers (the downtime dispatcher, the ambiguous-marker banner — WL-0MSQ0RPQP00636JY).
 
+### Marker ownership
+
+| Writer / clearer | When |
+|---|---|
+| Ship skill | Writes around the release; **clears** on release exit (authority) |
+| Herdr plugin (`writeCodeFreezeMarker`) | On Ship It confirmation, **before** dispatching `/skill:ship release` |
+| Herdr plugin (`clearCodeFreezeMarker`) | Best-effort, only when the plugin wrote the marker and the dispatch failed (throw or no-op) |
+
+The plugin never clears a marker it did not write — an already-active freeze (the ship skill's) is left untouched on dispatch failure, because the release may already be running. If the plugin process dies between writing the marker and dispatching the release, the marker can be removed manually with `rm <worklog-dir>/code-freeze.json`.
+
 ### Plugin behaviour while frozen
 
 - **Banner** — The selection list renders a prominent red `⛔ CODE FREEZE` banner above the header, warning that implementation is blocked. The banner respects the `rows - 1` pane-height budget (see WL-0MSAAON63003N6LO).
@@ -1513,7 +1538,9 @@ Fail-open is deliberate: a broken or missing marker must never block browsing th
   It shortcut (`S`) also stays available during a freeze: the release
   command is NOT `code_freeze: "block"` — the ship skill gates itself, so
   the confirmation dialog still opens and the user can consciously dispatch
-  the release even while a freeze is active.
+  the release even while a freeze is active. The Ship-mode guard still runs
+  first, so live agent panes carrying project work-item IDs continue to
+  block the dialog (see [Ship-mode guard](#ship-mode-guard-pre-dialog)).
 
 ### Shortcut filtering by work-item type
 
