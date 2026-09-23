@@ -64,7 +64,41 @@ export interface LastExportTimestamps {
   audit_results?: string; // ISO 8601 — audit results after this are dirty
 }
 
+// NOTE: `audit_results.fingerprint` (WL-0MUBVH5S0008NQ9K) was added within
+// schema version 8 without a version bump. Rather than bump the version — which
+// would also require changing the value `src/migrations` writes, across the
+// workspace build boundary — `initializeSchema` repairs the column additively
+// on open; see REQUIRED_COLUMNS below (WL-0MUEBQLRD00288VV).
 const SCHEMA_VERSION = 8;
+
+/**
+ * A column required by the current code that may be absent from databases
+ * created by an older release. `CREATE TABLE IF NOT EXISTS` never alters an
+ * existing table, so a column added to a CREATE statement in a later release
+ * is missing from those databases and any statement referencing it fails at
+ * runtime (e.g. `table audit_results has no column named fingerprint`). Each
+ * entry is additive-only DDL (nullable columns only) and is applied
+ * idempotently on open.
+ */
+interface RequiredColumn {
+  table: string;
+  column: string;
+  ddl: string;
+  /**
+   * Metadata key set once the column has been added — mirrors the sentinel
+   * used by the equivalent `src/migrations` entry so the two paths converge.
+   */
+  sentinel?: string;
+}
+
+const REQUIRED_COLUMNS: RequiredColumn[] = [
+  {
+    table: 'audit_results',
+    column: 'fingerprint',
+    ddl: 'ALTER TABLE audit_results ADD COLUMN fingerprint TEXT',
+    sentinel: 'audit_fingerprint_added',
+  },
+];
 
 // ── In-memory cache types (Phase 5) ────────────────────────────────
 
@@ -266,15 +300,16 @@ export class SqlitePersistentStore {
     // NOTE: Historically this method performed non-destructive schema migrations
     // (ALTER TABLE ADD COLUMN ...) when opening an existing database. That caused
     // silent schema changes on first-run after upgrading the CLI with no backup
-    // or audit trail. Migrations are now centralized in src/migrations and
-    // surfaced via `wl doctor upgrade` so operators may review and back up the
-    // database before applying changes. To preserve compatibility for new
-    // databases we still create the necessary tables; however, we no longer
-    // modify existing databases here.
+    // or audit trail, so migrations are centralized in src/migrations and
+    // surfaced via `wl doctor upgrade`. The one exception is the additive
+    // compatibility repair below: a column the current code requires but that is
+    // absent from an older database is added with idempotent, additive-only DDL,
+    // because leaving it missing breaks core writes (e.g. `table audit_results
+    // has no column named fingerprint`) and background commands swallow the error.
 
     // If the database is newly created (no schemaVersion metadata present) set
     // the current schema version so the migration runner can detect pending
-    // migrations on existing DBs. We avoid altering existing databases here.
+    // migrations on existing DBs.
     const schemaVersionRaw = this.getMetadata('schemaVersion');
     const isNewDb = !schemaVersionRaw;
     if (isNewDb) {
@@ -282,44 +317,8 @@ export class SqlitePersistentStore {
     }
 
     // Determine test environment early so we can suppress operator-facing
-    // warnings during automated test runs. Tests MUST create the expected
-    // schema via the migration runner (`src/migrations`) or test setup; the
-    // persistent store will not modify existing databases in any environment.
+    // warnings during automated test runs.
     const runningInTest = process.env.NODE_ENV === 'test' || Boolean(process.env.JEST_WORKER_ID);
-
-    // For all environments we avoid performing non-destructive ALTERs here.
-    // If the DB is older than the current schema, emit a non-fatal warning for
-    // interactive operators but do not change schema silently. In test runs we
-    // suppress the warning so test output remains clean — tests should run the
-    // migration runner or create schema as part of setup.
-    if (!isNewDb) {
-      const existingVersion = schemaVersionRaw ? parseInt(schemaVersionRaw, 10) : 1;
-      if (existingVersion < SCHEMA_VERSION) {
-        // Try to include the pending migration ids to help operators run the
-        // appropriate `wl doctor upgrade` command. We deliberately do not
-        // perform any schema changes here — migrations are centralized in
-        // src/migrations and must be applied via `wl doctor upgrade` so that
-        // operators can preview and back up their DB first.
-        if (!runningInTest) {
-          let pendingMsg = "see 'wl doctor upgrade' to list and apply pending migrations";
-          try {
-            const pending = this._listPendingMigrations?.(this.dbPath);
-            if (pending && pending.length > 0) {
-              const ids = pending.map(p => p.id).join(', ');
-              pendingMsg = `pending migrations: ${ids}. Run 'wl doctor upgrade --dry-run' to preview and '--confirm' to apply`;
-            }
-          } catch (err) {
-            // Best-effort: if listing migrations fails do not throw — emit the
-            // warning without the migration list so opening the DB still works.
-          }
-
-          console.warn(
-            `Worklog: database at ${this.dbPath} has schemaVersion=${existingVersion} but the application expects schemaVersion=${SCHEMA_VERSION}. ` +
-            `No automatic schema changes were performed. ${pendingMsg} (migrations live in src/migrations)`
-          );
-        }
-      }
-    }
 
     // Create comments table
     this.db.exec(`
@@ -393,10 +392,66 @@ export class SqlitePersistentStore {
       CREATE INDEX IF NOT EXISTS idx_dependency_edges_toId ON dependency_edges(toId);
     `);
 
-    // Existing databases retain their schemaVersion metadata. If an older
-    // schemaVersion is present we intentionally do not modify the DB here. The
-    // `wl doctor upgrade` workflow should be used to review and apply any
-    // required migrations (backups/pruning are handled there).
+    // ── Additive schema repair (WL-0MUEBQLRD00288VV) ───────────────────
+    // `CREATE TABLE IF NOT EXISTS` never alters an existing table, so a column
+    // added to a CREATE statement in a later release is absent from databases
+    // created by an older build. Ensure every column the current code requires
+    // exists, using additive-only, idempotent DDL, so all consumers (CLI,
+    // shared package, plugins) work without a manual migration step. A failure
+    // is surfaced with a clear remediation rather than a raw SQLite error.
+    if (!isNewDb) {
+      try {
+        this.repairRequiredColumns();
+      } catch (err) {
+        throw new Error(
+          `Database at ${this.dbPath} is missing a column required by this version of Worklog, and it could not be added automatically: ${(err as Error).message}. ` +
+          `Run 'wl doctor upgrade --confirm' to apply pending migrations, then retry.`
+        );
+      }
+      // The repair records the same sentinel the `20260923-add-audit-fingerprint`
+      // doctor migration uses, so the two paths converge and the migration
+      // becomes a no-op once repaired. Legacy databases older than the current
+      // schema still get the original advisory warning (unchanged behaviour);
+      // the additive repair above has already fixed the columns the current
+      // code needs.
+      const existingVersion = schemaVersionRaw ? parseInt(schemaVersionRaw, 10) : 1;
+      if (!runningInTest && existingVersion < SCHEMA_VERSION) {
+        let pendingMsg = "see 'wl doctor upgrade' to list and apply pending migrations";
+        try {
+          const pending = this._listPendingMigrations?.(this.dbPath);
+          if (pending && pending.length > 0) {
+            const ids = pending.map(p => p.id).join(', ');
+            pendingMsg = `pending migrations: ${ids}. Run 'wl doctor upgrade --dry-run' to preview and '--confirm' to apply`;
+          }
+        } catch (_err) {
+          // Best-effort: listing migrations must never prevent opening the DB.
+        }
+        console.warn(
+          `Worklog: database at ${this.dbPath} has schemaVersion=${existingVersion} but the application expects schemaVersion=${SCHEMA_VERSION}. ` +
+          `Required columns were repaired automatically. ${pendingMsg} (migrations live in src/migrations)`
+        );
+      }
+    }
+  }
+
+  /**
+   * Ensure every column required by the current code exists on existing tables,
+   * using additive-only, idempotent DDL. Returns the repairs actually applied.
+   * Throws when a required column is missing and cannot be added (e.g. a
+   * read-only database) — the caller wraps this in a clear, actionable error.
+   */
+  private repairRequiredColumns(): RequiredColumn[] {
+    const applied: RequiredColumn[] = [];
+    for (const req of REQUIRED_COLUMNS) {
+      const cols = this.db.prepare(`PRAGMA table_info('${req.table}')`).all() as Array<{ name: string }>;
+      if (cols.some((c) => String(c.name) === req.column)) continue;
+      this.db.exec(req.ddl);
+      if (req.sentinel) {
+        this.setMetadata(req.sentinel, '1');
+      }
+      applied.push(req);
+    }
+    return applied;
   }
 
   /**

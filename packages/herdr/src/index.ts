@@ -48,6 +48,7 @@ import {
   stripSkillName,
   stripAgentPromptPrefix,
 } from './pane-title.js';
+import { showToast } from './notify.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -313,6 +314,63 @@ export function buildBackgroundLogPath(command: string): string {
     command.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) ||
     'command';
   return join(tmpdir(), BACKGROUND_LOG_DIR, `herdr-${stamp}-${process.pid}-${slug}.log`);
+}
+
+/**
+ * Build the operator-facing toast content for a background (`open_pane: false`)
+ * dispatch that exited non-zero. Returns null for a clean (exit 0) run. Pure so
+ * it can be unit-tested without spawning a process (WL-0MUEBQLRD00288VV AC4).
+ *
+ * @param command - the dispatched command (shown so the operator knows what failed)
+ * @param code - process exit code (null when terminated by a signal)
+ * @param signal - termination signal (null when exited normally)
+ * @param logPath - the per-run log file holding the full output
+ * @param excerpt - optional short excerpt of the command's output (e.g. stderr tail)
+ */
+export function formatBackgroundFailure(
+  command: string,
+  code: number | null,
+  signal: string | null,
+  logPath: string,
+  excerpt?: string | null,
+): { title: string; body: string } | null {
+  if (code === 0) return null;
+  const reason =
+    code !== null ? `exit ${code}` : signal ? `signal ${signal}` : 'unknown failure';
+  const short = (excerpt ?? '').trim().replace(/\s+/g, ' ').slice(0, 200);
+  return {
+    title: 'Background command failed',
+    body: short
+      ? `${command} (${reason}) — ${short}`
+      : `${command} (${reason}) — see ${logPath}`,
+  };
+}
+
+/**
+ * Read a short tail of a background log file for inclusion in a failure toast
+ * (never throws; returns null when the file is unreadable).
+ */
+function readBackgroundLogExcerpt(logPath: string, maxChars = 400): string | null {
+  try {
+    if (!existsSync(logPath)) return null;
+    return readFileSync(logPath, 'utf8').slice(-maxChars);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Surface a non-zero background dispatch exit as a Herdr toast so failures are
+ * not visible only in a log file (WL-0MUEBQLRD00288VV AC4).
+ */
+function notifyBackgroundFailure(
+  command: string,
+  code: number | null,
+  signal: string | null,
+  logPath: string,
+): void {
+  const failure = formatBackgroundFailure(command, code, signal, logPath, readBackgroundLogExcerpt(logPath));
+  if (failure) showToast(failure.title, { body: failure.body });
 }
 
 /**
@@ -1567,7 +1625,12 @@ async function main(): Promise<void> {
               targetCwd,
               model,
               logPath,
-              { onExit: () => onRefresh?.() },
+              {
+                onExit: (code, signal) => {
+                  notifyBackgroundFailure(command, code, signal, logPath);
+                  onRefresh?.();
+                },
+              },
             );
             return;
           }
@@ -1626,7 +1689,12 @@ async function main(): Promise<void> {
               clean,
               targetCwd,
               logPath,
-              { onExit: () => onRefresh?.() },
+              {
+                onExit: (code, signal) => {
+                  notifyBackgroundFailure(clean, code, signal, logPath);
+                  onRefresh?.();
+                },
+              },
             );
             return;
           }
@@ -1664,7 +1732,12 @@ async function main(): Promise<void> {
               command,
               targetCwd,
               logPath,
-              { onExit: () => onRefresh?.() },
+              {
+                onExit: (code, signal) => {
+                  notifyBackgroundFailure(command, code, signal, logPath);
+                  onRefresh?.();
+                },
+              },
             );
             return;
           }

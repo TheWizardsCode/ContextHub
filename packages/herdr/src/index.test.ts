@@ -18,6 +18,7 @@ import {
   buildBackgroundLogPath,
   spawnBackgroundShell,
   spawnBackgroundPi,
+  formatBackgroundFailure,
   CAPTURE_TIMEOUT_MS,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
@@ -2516,6 +2517,50 @@ describe('spawnBackgroundShell', () => {
     });
     exitHandler?.(1, null);
     expect(onExit).toHaveBeenCalledWith(1, null);
+  });
+});
+
+describe('formatBackgroundFailure (WL-0MUEBQLRD00288VV AC4)', () => {
+  it('returns null for a clean (exit 0) run so no toast is shown', () => {
+    expect(formatBackgroundFailure('wl audit-set X', 0, null, '/tmp/log')).toBeNull();
+  });
+
+  it('surfaces the command, exit code and log path on failure', () => {
+    const failure = formatBackgroundFailure(
+      'wl reviewed WL-1 false && wl audit-set WL-1 --ready-to-close yes',
+      1,
+      null,
+      '/tmp/herdr-background-logs/x.log',
+    );
+    expect(failure).not.toBeNull();
+    expect(failure!.title).toBe('Background command failed');
+    expect(failure!.body).toContain('wl audit-set');
+    expect(failure!.body).toContain('exit 1');
+    expect(failure!.body).toContain('/tmp/herdr-background-logs/x.log');
+  });
+
+  it('includes a short output excerpt when one is available', () => {
+    const failure = formatBackgroundFailure(
+      'wl audit-set WL-1 --ready-to-close yes',
+      1,
+      null,
+      '/tmp/log',
+      'table audit_results has no column named fingerprint',
+    );
+    expect(failure!.body).toContain('no column named fingerprint');
+    expect(failure!.body).not.toContain('/tmp/log');
+  });
+
+  it('reports a termination signal when there is no exit code', () => {
+    const failure = formatBackgroundFailure('wl x', null, 'SIGTERM', '/tmp/log');
+    expect(failure!.body).toContain('signal SIGTERM');
+  });
+
+  it('collapses whitespace and bounds the excerpt length', () => {
+    const failure = formatBackgroundFailure('wl x', 2, null, '/tmp/log', 'a\n\n  b '.repeat(200));
+    expect(failure!.body).toContain('a b');
+    // command + reason + 200-char excerpt bound
+    expect(failure!.body.length).toBeLessThan(300);
   });
 });
 

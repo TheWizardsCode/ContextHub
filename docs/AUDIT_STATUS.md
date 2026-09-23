@@ -20,8 +20,11 @@ The `audit_results` table was introduced in schema version 8. A migration backfi
 1. **20260604-add-audit-results** — Creates the `audit_results` table
 2. **20260604-backfill-audit-results** — Reads `workitems.audit` JSON and inserts rows into `audit_results`
 3. **20260604-drop-audit-column** — Drops the `audit` column from `workitems`
+4. **20260923-add-audit-fingerprint** — Adds the nullable `fingerprint` column used by the content-fingerprint freshness gate (WL-0MUBVH5S0008NQ9K)
 
 The legacy `20260315-add-audit` migration is now a no-op since the audit column is no longer needed.
+
+> **Automatic repair (WL-0MUEBQLRD00288VV).** `CREATE TABLE IF NOT EXISTS` never alters an existing table, so a database created before migration `20260923-add-audit-fingerprint` lacks the `fingerprint` column and `wl audit-set` would fail with `table audit_results has no column named fingerprint` — silently, for the `a-y`/`a-r` background shortcuts. The store now repairs this additively on open (idempotent `ALTER TABLE audit_results ADD COLUMN fingerprint TEXT`) and records the same `audit_fingerprint_added` sentinel the doctor migration uses, so no manual `wl doctor upgrade` is required. `wl doctor upgrade` remains the path for any other pending migrations.
 
 ## CLI Commands
 
@@ -217,7 +220,7 @@ The `audit_results` row is the **sole consumer** of the audit verdict. No flow p
 
 - Config: `auditWriteEnabled` controls whether audit writes are allowed.
 - Storage: audit data is stored in the `audit_results` table with foreign key constraints and CASCADE DELETE semantics.
-- Migration: Use `wl doctor upgrade --confirm` to apply schema migrations on existing databases.
+- Migration: Use `wl doctor upgrade --confirm` to apply schema migrations on existing databases. Required columns such as `audit_results.fingerprint` are repaired automatically on open, so audit writes work even when doctor has not been run (WL-0MUEBQLRD00288VV).
 - Tests: Unit and integration tests cover valid first-line parsing, invalid first-line errors, redaction, whitespace handling, CRUD operations on the `audit_results` table, migration backfill, legacy column removal, and the atomic `updatedAt = auditedAt` freshness guarantee (`tests/database.test.ts` — audit-then-comment ordering and audit-text parity).
 
 ### Error Behavior
