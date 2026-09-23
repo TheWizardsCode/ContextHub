@@ -9,6 +9,20 @@ import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, W
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
+/**
+ * Return the later of two ISO-8601 timestamps (undefined/null-safe).
+ *
+ * Used to preserve comment activity stamps when a peer snapshot carries an
+ * older `activityAt` than the local database (comment-only writes do not move
+ * `updatedAt`, so sync cannot rely on it to carry activity —
+ * WL-0MUBVH6JM0093KVM).
+ */
+function laterTimestamp(a?: string | null, b?: string | null): string | undefined {
+  if (!a) return b ?? undefined;
+  if (!b) return a;
+  return a >= b ? a : b;
+}
+
 // ── Injectable service types ────────────────────────────────────────────
 
 /**
@@ -2212,16 +2226,19 @@ export class WorklogDatabase {
       if (effortVal > 0) score += (1 / (1 + effortVal)) * WEIGHTS.effort;
     }
 
-    // UpdatedAt recency policy
-    if (recencyPolicy !== 'ignore' && item.updatedAt) {
-      const updatedHours = (now - new Date(item.updatedAt).getTime()) / (1000 * 60 * 60);
+    // Activity recency policy. `activityAt` includes comment activity; it
+    // falls back to `updatedAt` for rows written before the column existed.
+    // Audit freshness deliberately does NOT use this field (WL-0MUBVH6JM0093KVM).
+    const lastActivity = item.activityAt ?? item.updatedAt;
+    if (recencyPolicy !== 'ignore' && lastActivity) {
+      const activityHours = (now - new Date(lastActivity).getTime()) / (1000 * 60 * 60);
       if (recencyPolicy === 'avoid') {
-        // Penalty stronger when updated very recently, decays to zero by 72 hours
-        const penaltyFactor = Math.max(0, (72 - updatedHours) / 72);
+        // Penalty stronger when active very recently, decays to zero by 72 hours
+        const penaltyFactor = Math.max(0, (72 - activityHours) / 72);
         score -= penaltyFactor * WEIGHTS.updated;
       } else if (recencyPolicy === 'prefer') {
-        // Boost for recent updates (peak within ~48 hours)
-        const boostFactor = Math.max(0, (48 - updatedHours) / 48);
+        // Boost for recent activity (peak within ~48 hours)
+        const boostFactor = Math.max(0, (48 - activityHours) / 48);
         score += boostFactor * WEIGHTS.updated;
       }
     }
@@ -3053,11 +3070,20 @@ export class WorklogDatabase {
       for (const item of items) {
         const existing = existingItems.get(item.id);
         if (existing && !this.hasWorkItemChanged(existing, item)) {
-          // No semantic change — preserve the existing updatedAt
-          this.store.saveWorkItem({ ...item, updatedAt: existing.updatedAt });
+          // No semantic change — preserve the existing updatedAt, and keep the
+          // later activityAt so locally recorded comment activity is not lost.
+          this.store.saveWorkItem({
+            ...item,
+            updatedAt: existing.updatedAt,
+            activityAt: laterTimestamp(item.activityAt, existing.activityAt),
+          });
         } else if (existing) {
           // Semantic change detected — bump the timestamp
-          this.store.saveWorkItem({ ...item, updatedAt: new Date().toISOString() });
+          this.store.saveWorkItem({
+            ...item,
+            updatedAt: new Date().toISOString(),
+            activityAt: laterTimestamp(item.activityAt, existing.activityAt),
+          });
         } else {
           // New item — use the incoming updatedAt as-is
           this.store.saveWorkItem(item);
@@ -3117,9 +3143,10 @@ export class WorklogDatabase {
         // No semantic change — skip the save entirely to preserve updatedAt
         continue;
       }
-      // Either a new item or a semantic change — bump the timestamp
+      // Either a new item or a semantic change — bump the timestamp, keeping
+      // the later activityAt (comment activity must not be lost on sync).
       const itemToSave = existing
-        ? { ...item, updatedAt: new Date().toISOString() }
+        ? { ...item, updatedAt: new Date().toISOString(), activityAt: laterTimestamp(item.activityAt, existing.activityAt) }
         : item;
       this.store.saveWorkItem(itemToSave);
       // Keep the FTS index fresh for the upserted item
@@ -3385,7 +3412,7 @@ export class WorklogDatabase {
      }
 
      this.store.saveComment(comment);
-     this.touchWorkItemUpdatedAt(input.workItemId);
+     this.touchWorkItemActivityAt(input.workItemId);
      // Re-index the parent work item in FTS to include the new comment text
      const parentItem = this.store.getWorkItem(input.workItemId);
      if (parentItem) this.store.upsertFtsEntry(parentItem);
@@ -3431,7 +3458,7 @@ export class WorklogDatabase {
     } as Comment;
 
      this.store.saveComment(updated);
-     this.touchWorkItemUpdatedAt(comment.workItemId);
+     this.touchWorkItemActivityAt(comment.workItemId);
      // Re-index the parent work item in FTS to reflect updated comment text
      const parentItem = this.store.getWorkItem(comment.workItemId);
      if (parentItem) this.store.upsertFtsEntry(parentItem);
@@ -3449,7 +3476,7 @@ export class WorklogDatabase {
      }
      const result = this.store.deleteComment(id);
       if (result) {
-        this.touchWorkItemUpdatedAt(comment.workItemId);
+        this.touchWorkItemActivityAt(comment.workItemId);
         // Re-index the parent work item in FTS to reflect removed comment
         const parentItem = this.store.getWorkItem(comment.workItemId);
         if (parentItem) this.store.upsertFtsEntry(parentItem);
@@ -3519,14 +3546,24 @@ export class WorklogDatabase {
     this.triggerAutoSync();
   }
 
-  private touchWorkItemUpdatedAt(workItemId: string): void {
+  /**
+   * Record comment activity without moving the audit-relevant `updatedAt`.
+   *
+   * Comment create/update/delete bump `activityAt` only, so ordering/recency
+   * features still observe the activity while audit freshness (computed
+   * against the content timestamp `updatedAt`) is unaffected
+   * (WL-0MUBVH6JM0093KVM). `saveWorkItem` keeps activityAt >= updatedAt.
+   */
+  private touchWorkItemActivityAt(workItemId: string): void {
     const item = this.store.getWorkItem(workItemId);
     if (!item) {
       return;
     }
     this.store.saveWorkItem({
       ...item,
-      updatedAt: new Date().toISOString(),
+      // updatedAt is intentionally preserved: comment activity must never
+      // invalidate a valid audit (see isAuditFresh).
+      activityAt: new Date().toISOString(),
     });
   }
 }

@@ -98,6 +98,15 @@ const REQUIRED_COLUMNS: RequiredColumn[] = [
     ddl: 'ALTER TABLE audit_results ADD COLUMN fingerprint TEXT',
     sentinel: 'audit_fingerprint_added',
   },
+  // activityAt (WL-0MUBVH6JM0093KVM): a separate last-activity stamp so comment
+  // writes no longer move the audit-relevant `updatedAt`. No sentinel here:
+  // the plain column check is sufficient (the column lives on workitems) and
+  // avoids leaving the doctor migration pending on freshly created databases.
+  {
+    table: 'workitems',
+    column: 'activityAt',
+    ddl: 'ALTER TABLE workitems ADD COLUMN activityAt TEXT',
+  },
 ];
 
 // ── In-memory cache types (Phase 5) ────────────────────────────────
@@ -281,6 +290,7 @@ export class SqlitePersistentStore {
         parentId TEXT,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL,
+        activityAt TEXT,
         tags TEXT NOT NULL,
         assignee TEXT NOT NULL,
         stage TEXT NOT NULL,
@@ -572,8 +582,8 @@ export class SqlitePersistentStore {
     // Use INSERT ... ON CONFLICT DO UPDATE to avoid triggering DELETE (which would cascade and remove comments)
     const stmt = this.db.prepare(`
       INSERT INTO workitems
-      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -583,6 +593,7 @@ export class SqlitePersistentStore {
         parentId = excluded.parentId,
         createdAt = excluded.createdAt,
         updatedAt = excluded.updatedAt,
+        activityAt = excluded.activityAt,
         tags = excluded.tags,
         assignee = excluded.assignee,
         stage = excluded.stage,
@@ -614,6 +625,13 @@ export class SqlitePersistentStore {
     // accepts numbers, strings, bigints, buffers and null). Normalize tags to
     // a JSON string and convert any undefined to null before running.
     const tagsVal = Array.isArray(item.tags) ? JSON.stringify(item.tags) : JSON.stringify([]);
+    // activityAt tracks last activity and is always >= updatedAt. Comment
+    // writes pass an explicit activityAt (>= updatedAt); every other write
+    // only moves updatedAt, so taking the later of the two here keeps the
+    // invariant without touching every write site (WL-0MUBVH6JM0093KVM).
+    const activityAtVal = item.activityAt && item.activityAt > item.updatedAt
+      ? item.activityAt
+      : item.updatedAt;
     const values: any[] = [
       item.id,
       titleVal,
@@ -624,6 +642,7 @@ export class SqlitePersistentStore {
       item.parentId ?? null,
       item.createdAt,
       item.updatedAt,
+      activityAtVal,
       tagsVal,
       item.assignee ?? '',
       item.stage ?? '',
@@ -1315,7 +1334,12 @@ export class SqlitePersistentStore {
       audit.fingerprint ?? null,
     ];
     const normalized = normalizeSqliteBindings(values);
-    const updateWorkItemUpdatedAt = this.db.prepare(`UPDATE workitems SET updatedAt = ? WHERE id = ?`);
+    // Align the content timestamp with the audit and keep activityAt >= it.
+    // MAX() is the scalar form (two arguments), so the earlier of the two
+    // never overwrites a more recent comment activity stamp.
+    const updateWorkItemUpdatedAt = this.db.prepare(
+      `UPDATE workitems SET updatedAt = ?, activityAt = MAX(COALESCE(activityAt, ''), ?) WHERE id = ?`
+    );
     // Both writes must be atomic so no intermediate read sees stale
     // auditedAt/updatedAt (AC2). A single better-sqlite3 transaction covers
     // this without exposing a window between the two UPDATEs.
@@ -1326,7 +1350,7 @@ export class SqlitePersistentStore {
       }
       const item = this.getWorkItem(audit.workItemId);
       if (item) {
-        updateWorkItemUpdatedAt.run(audit.auditedAt, audit.workItemId);
+        updateWorkItemUpdatedAt.run(audit.auditedAt, audit.auditedAt, audit.workItemId);
       }
     });
     saveTx();
@@ -2012,6 +2036,7 @@ export class SqlitePersistentStore {
         parentId: row.parentId,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
+        activityAt: row.activityAt || row.updatedAt,
         tags: JSON.parse(row.tags),
         assignee: row.assignee,
         stage: row.stage,
@@ -2040,6 +2065,7 @@ export class SqlitePersistentStore {
         parentId: row.parentId,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
+        activityAt: row.activityAt || row.updatedAt,
         tags: [],
         assignee: row.assignee,
         stage: row.stage,

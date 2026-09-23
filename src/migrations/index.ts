@@ -176,6 +176,18 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
         db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('audit_fingerprint_added', '1');
       } catch (_e) { /* best-effort */ }
     }
+  },
+  {
+    id: '20260923-add-activity-at',
+    description: 'Add nullable activityAt column to workitems so comment writes no longer bump updatedAt (WL-0MUBVH6JM0093KVM)',
+    safe: true,
+    requiredColumn: 'activityAt',
+    apply: (db: Database.Database) => {
+      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+      if (!cols.some(c => String(c.name) === 'activityAt')) {
+        db.exec(`ALTER TABLE workitems ADD COLUMN activityAt TEXT`);
+      }
+    }
   }
 ];
 

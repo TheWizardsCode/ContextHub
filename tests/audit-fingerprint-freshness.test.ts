@@ -113,11 +113,11 @@ describe('audit content-fingerprint freshness (WL-0MUBVH5S0008NQ9K)', () => {
   });
 
   describe('updatedAt churn stays fresh with a matching fingerprint (AC4)', () => {
-    it('a post-audit comment does NOT stale a fingerprinted audit', () => {
+    it('a post-audit comment moves activityAt but NOT updatedAt, so the audit stays fresh', () => {
       const item = db.create({ title: 'Comment churn item', description: 'unchanged' });
       const fingerprint = 'sha256-content-unchanged';
-      // Fixed past auditedAt so the comment's wall-clock bump is guaranteed to
-      // be later (avoids same-millisecond flakiness under load).
+      // Fixed past auditedAt so the comment's wall-clock activity stamp is
+      // guaranteed to be later (avoids same-millisecond flakiness under load).
       db.saveAuditResult({
         workItemId: item.id,
         readyToClose: true,
@@ -128,17 +128,43 @@ describe('audit content-fingerprint freshness (WL-0MUBVH5S0008NQ9K)', () => {
         fingerprint,
       });
 
-      // A comment unconditionally touches updatedAt (metadata-only write).
+      // A comment is activity: it moves activityAt only (WL-0MUBVH6JM0093KVM),
+      // never the audit-relevant content timestamp.
       db.createComment({ workItemId: item.id, author: 'tester', comment: 'Follow-up' });
 
       const audit = db.getAuditResult(item.id)!;
       const afterComment = db.get(item.id)!;
-      // updatedAt moved far past the 60 s window, but the content fingerprint
-      // is unchanged → fresh (the time gate alone would call this stale).
-      expect(new Date(afterComment.updatedAt).getTime()).toBeGreaterThan(
+      expect(afterComment.updatedAt).toBe(audit.auditedAt);
+      expect(afterComment.activityAt).toBeDefined();
+      // Fresh by the fingerprint gate AND by the legacy time gate — comments
+      // no longer create the churn that the fingerprint gate had to absorb.
+      expect(isAuditFresh(audit.auditedAt, afterComment.updatedAt, audit.fingerprint, fingerprint)).toBe(true);
+      expect(isAuditFresh(audit.auditedAt, afterComment.updatedAt)).toBe(true);
+    });
+
+    it('a post-audit status/stage transition does NOT stale a fingerprinted audit (WL-0MU6UL3XY001M3VT class)', () => {
+      const item = db.create({ title: 'Transition churn item', description: 'unchanged content' });
+      const fingerprint = 'sha256-content-unchanged';
+      db.saveAuditResult({
+        workItemId: item.id,
+        readyToClose: true,
+        auditedAt: '2026-08-02T10:00:00.000Z',
+        summary: null,
+        rawOutput: null,
+        author: 'tester',
+        fingerprint,
+      });
+
+      // The audit runner's own terminal transition (audit → completed/in_review)
+      // is a content edit that moves updatedAt, but status/stage are not part of
+      // the content fingerprint, so the audit stays fresh.
+      db.update(item.id, { status: 'completed', stage: 'in_review' });
+      const transitioned = db.get(item.id)!;
+      const audit = db.getAuditResult(item.id)!;
+      expect(new Date(transitioned.updatedAt).getTime()).toBeGreaterThan(
         new Date(audit.auditedAt).getTime() + 60_000,
       );
-      expect(isAuditFresh(audit.auditedAt, afterComment.updatedAt, audit.fingerprint, fingerprint)).toBe(true);
+      expect(isAuditFresh(audit.auditedAt, transitioned.updatedAt, audit.fingerprint, fingerprint)).toBe(true);
     });
 
     it('a sync-merge re-timestamp does NOT stale a fingerprinted audit', () => {
@@ -155,9 +181,14 @@ describe('audit content-fingerprint freshness (WL-0MUBVH5S0008NQ9K)', () => {
       });
 
       // Simulate a sync merge bumping updatedAt far past the 60 s window.
-      db.update(item.id, { title: db.get(item.id)!.title });
+      // (A merge that changes tracked content bumps the write clock; the
+      // content fingerprint supplied by the caller still matches.)
+      db.update(item.id, { description: 'merged content' });
       const merged = db.get(item.id)!;
       const audit = db.getAuditResult(item.id)!;
+      expect(new Date(merged.updatedAt).getTime()).toBeGreaterThan(
+        new Date(audit.auditedAt).getTime() + 60_000,
+      );
 
       // The current fingerprint still matches → fresh despite the write clock.
       expect(isAuditFresh(audit.auditedAt, merged.updatedAt, audit.fingerprint, fingerprint)).toBe(true);

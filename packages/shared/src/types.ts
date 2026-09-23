@@ -45,6 +45,20 @@ export interface WorkItem {
   parentId: string | null;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Last-activity timestamp — moves for any write that touches the item,
+   * including comment create/update/delete.
+   *
+   * Invariant: `activityAt >= updatedAt`. Semantic content edits bump both;
+   * comment writes bump only `activityAt`, so the audit-relevant content
+   * timestamp (`updatedAt`) is never moved by a comment and a valid audit
+   * cannot be invalidated by one (WL-0MUBVH6JM0093KVM). Ordering/recency
+   * features that want to include comment activity read `activityAt`.
+   *
+   * Optional for backward compatibility: rows written before this column
+   * existed (and callers that do not set it) fall back to `updatedAt`.
+   */
+  activityAt?: string;
   tags: string[];
   assignee: string;
   stage: string;

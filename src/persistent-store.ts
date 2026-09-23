@@ -165,6 +165,7 @@ export class SqlitePersistentStore {
         parentId TEXT,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL,
+        activityAt TEXT,
         tags TEXT NOT NULL,
         assignee TEXT NOT NULL,
         stage TEXT NOT NULL,
@@ -350,8 +351,8 @@ export class SqlitePersistentStore {
     // Use INSERT ... ON CONFLICT DO UPDATE to avoid triggering DELETE (which would cascade and remove comments)
     const stmt = this.db.prepare(`
       INSERT INTO workitems
-      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -361,6 +362,7 @@ export class SqlitePersistentStore {
         parentId = excluded.parentId,
         createdAt = excluded.createdAt,
         updatedAt = excluded.updatedAt,
+        activityAt = excluded.activityAt,
         tags = excluded.tags,
         assignee = excluded.assignee,
         stage = excluded.stage,
@@ -392,6 +394,11 @@ export class SqlitePersistentStore {
     // accepts numbers, strings, bigints, buffers and null). Normalize tags to
     // a JSON string and convert any undefined to null before running.
     const tagsVal = Array.isArray(item.tags) ? JSON.stringify(item.tags) : JSON.stringify([]);
+    // activityAt is always >= updatedAt; take the later of the two so comment
+    // activity is never lost (WL-0MUBVH6JM0093KVM).
+    const activityAtVal = item.activityAt && item.activityAt > item.updatedAt
+      ? item.activityAt
+      : item.updatedAt;
     const values: any[] = [
       item.id,
       titleVal,
@@ -402,6 +409,7 @@ export class SqlitePersistentStore {
       item.parentId ?? null,
       item.createdAt,
       item.updatedAt,
+      activityAtVal,
       tagsVal,
       item.assignee ?? '',
       item.stage ?? '',
@@ -1525,6 +1533,7 @@ export class SqlitePersistentStore {
         parentId: row.parentId,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
+        activityAt: row.activityAt || row.updatedAt,
         tags: JSON.parse(row.tags),
         assignee: row.assignee,
         stage: row.stage,
@@ -1553,6 +1562,7 @@ export class SqlitePersistentStore {
         parentId: row.parentId,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
+        activityAt: row.activityAt || row.updatedAt,
         tags: [],
         assignee: row.assignee,
         stage: row.stage,

@@ -66,4 +66,26 @@ describe('wl recent ignores mechanical re-sort churn', () => {
     await execAsync(`tsx ${cliPath} --json update ${alpha.id} -t "Alpha renamed"`);
     expect((await recent(1))[0].id).toBe(alpha.id);
   });
+
+  it('a post-create comment moves an item to the top of recent without bumping updatedAt', async () => {
+    const alpha = await createItem('Alpha comment target', '-p low --no-re-sort');
+    await createItem('Bravo newer content', '-p high --no-re-sort');
+
+    // Bravo is the newest by content before any comment activity.
+    expect((await recent(1))[0].id).not.toBe(alpha.id);
+
+    // Commenting on Alpha is activity: recency must surface it, but the
+    // audit-relevant updatedAt must stay put (WL-0MUBVH6JM0093KVM).
+    await execAsync(
+      `tsx ${cliPath} --json comment add ${alpha.id} -a tester -c "activity bump"`,
+    );
+
+    const top = (await recent(1))[0];
+    expect(top.id).toBe(alpha.id);
+    expect(top.updatedAt).toBe(alpha.updatedAt);
+    expect(top.activityAt).toBeDefined();
+    expect(new Date(top.activityAt).getTime()).toBeGreaterThanOrEqual(
+      new Date(top.updatedAt).getTime(),
+    );
+  });
 });

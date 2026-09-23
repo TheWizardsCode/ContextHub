@@ -123,9 +123,7 @@ describe('WorklogDatabase', () => {
       expect(updated?.updatedAt).toBe(auditedAt);
     });
 
-    it('audit-then-comment ordering: audit stays fresh after a comment (WL-0MTHRY9NP004R9MC)', () => {
-      // Use wall-clock times so touchWorkItemUpdatedAt (Date.now()) stays
-      // within the 60 s freshness window.
+    it('audit-then-comment ordering: comment moves activityAt only, audit stays fresh (WL-0MTHRY9NP004R9MC)', () => {
       const item = db.create({ title: 'Ordering test', description: 'audit then comment' });
       const auditedAt = new Date().toISOString();
       db.saveAuditResult({
@@ -136,11 +134,15 @@ describe('WorklogDatabase', () => {
         summary: 'Ready to close: Yes',
         rawOutput: null,
       });
+      const beforeComment = db.get(item.id)!;
       db.createComment({ workItemId: item.id, author: 'tester', comment: 'Follow-up note' });
       const itemAfterComment = db.get(item.id)!;
       const auditResult = db.getAuditResult(item.id)!;
-      // Post-audit comment bumps updatedAt; the 60 s grace window keeps the
-      // audit fresh (WL-0MT8KTE3E001Q1D9 / WL-0MTHRSZJK008ATDB).
+      // Post-audit comment activity bumps activityAt only; the audit-relevant
+      // content timestamp is unchanged, so the audit stays fresh
+      // (WL-0MUBVH6JM0093KVM).
+      expect(itemAfterComment.updatedAt).toBe(beforeComment.updatedAt);
+      expect(itemAfterComment.activityAt).toBeDefined();
       expect(isAuditFresh(auditResult.auditedAt, itemAfterComment.updatedAt)).toBe(true);
     });
 
@@ -155,12 +157,14 @@ describe('WorklogDatabase', () => {
         summary: 'Ready to close: Yes',
         rawOutput: null,
       });
+      const beforeComment = db.get(item.id)!;
       db.createComment({ workItemId: item.id, author: 'tester', comment: 'Just a comment after the audit' });
       const afterComment = db.get(item.id)!;
       const auditResult = db.getAuditResult(item.id)!;
       expect(auditResult.auditedAt).toBe(auditedAt);
-      // Comment bumps updatedAt but within the 60 s window the audit is still
-      // fresh and the TUI keeps the passed icon (not stale).
+      // The comment does not move updatedAt, so the audit is fresh and the TUI
+      // keeps the passed icon (not stale).
+      expect(afterComment.updatedAt).toBe(beforeComment.updatedAt);
       expect(isAuditFresh(auditResult.auditedAt, afterComment.updatedAt)).toBe(true);
     });
 
@@ -3086,11 +3090,13 @@ describe('WorklogDatabase', () => {
       const now = new Date();
       const fiveDaysAgo = new Date(now.getTime() - 5 * 24 * 60 * 60 * 1000);
 
-      // Manipulate updatedAt directly via the store:
-      // Task A: updated just now (very recent — within both 48h prefer and 72h avoid windows)
-      // Task B: updated 5 days ago (stale — beyond both windows, so no recency effect)
-      store.saveWorkItem({ ...db.get(itemA.id)!, updatedAt: now.toISOString() });
-      store.saveWorkItem({ ...db.get(itemB.id)!, updatedAt: fiveDaysAgo.toISOString() });
+      // Manipulate the activity stamp directly via the store (the recency
+      // policy keys on activityAt, which includes comment activity;
+      // WL-0MUBVH6JM0093KVM):
+      // Task A: active just now (very recent — within both 48h prefer and 72h avoid windows)
+      // Task B: active 5 days ago (stale — beyond both windows, so no recency effect)
+      store.saveWorkItem({ ...db.get(itemA.id)!, updatedAt: now.toISOString(), activityAt: now.toISOString() });
+      store.saveWorkItem({ ...db.get(itemB.id)!, updatedAt: fiveDaysAgo.toISOString(), activityAt: fiveDaysAgo.toISOString() });
 
       // With 'prefer' policy: recently-updated Task A gets a recency BOOST,
       // so it should have a better (lower) sortIndex after re-sort
@@ -3099,10 +3105,9 @@ describe('WorklogDatabase', () => {
       const afterPreferB = db.get(itemB.id)!;
       expect(afterPreferA.sortIndex).toBeLessThan(afterPreferB.sortIndex);
 
-      // Re-apply updatedAt manipulation because reSort() overwrites updatedAt
-      // for any item whose sortIndex changed
-      store.saveWorkItem({ ...db.get(itemA.id)!, updatedAt: now.toISOString() });
-      store.saveWorkItem({ ...db.get(itemB.id)!, updatedAt: fiveDaysAgo.toISOString() });
+      // Re-apply the activity-stamp manipulation before the second policy run.
+      store.saveWorkItem({ ...db.get(itemA.id)!, updatedAt: now.toISOString(), activityAt: now.toISOString() });
+      store.saveWorkItem({ ...db.get(itemB.id)!, updatedAt: fiveDaysAgo.toISOString(), activityAt: fiveDaysAgo.toISOString() });
 
       // With 'avoid' policy: recently-updated Task A gets a recency PENALTY,
       // so it should have a worse (higher) sortIndex after re-sort
