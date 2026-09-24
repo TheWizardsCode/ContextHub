@@ -9,12 +9,28 @@
  *    the plugin (WL-0MSN3FWV5008KQE9), the worker records the operator
  *    timestamp and fire-and-forget POSTs `/admin/set-mode {"mode":"fast"}`.
  *    A failed switch never blocks or delays the command dispatch (fail-open:
- *    the pane opens regardless).
+ *    the pane opens regardless). The fast switch fires on the instance that
+ *    received the command, whichever pane that is — see the leader note below.
+ *  - **Leader-only cheap switching (WL-0MU6MXCZZ007ZXT9, AC1):** only the
+ *    downtime leader (`DowntimeWorker.isLeader`, reused — no separate
+ *    election) runs the idle cheap-switch logic. Non-leader instances skip
+ *    `tick()` entirely, so idle panes can no longer flip the shared proxy to
+ *    cheap behind an active pane's back (the flip-flop fix). The leader probe
+ *    is read live each tick, so a leadership handover is honoured on the next
+ *    tick (AC5).
+ *  - **Shared activity broadcast (AC2):** every instance writes its latest
+ *    operator-command timestamp to `mode-activity.json` in the coordination
+ *    directory (`getMachineCoordinationDir()`, the same dir as the downtime
+ *    leader lease) and the leader reads it each tick. The idle clock is the
+ *    max of the local clock and the shared timestamp, so the proxy stays fast
+ *    while **any** pane has recent activity. A read/write failure falls back
+ *    to the local clock (AC6, fail-closed: never a premature cheap switch).
  *  - **Cheap switch on idle:** on each tick (scheduler task, or the downtime
- *    dispatcher's `onProxyIdle` callback), when the operator has been idle
- *    (no agent-route commands) for ≥ `modeSwitchIdleThresholdMs` **AND** the
- *    proxy reports idle (reusing `evaluateIdle` from downtime-worker.ts), the
- *    worker POSTs `/admin/set-mode {"mode":"cheap"}`.
+ *    dispatcher's `onProxyIdle` callback — the leader is the only pane that
+ *    runs that dispatcher), when the operator has been idle
+ *    (no agent-route commands on any pane) for ≥ `modeSwitchIdleThresholdMs`
+ *    **AND** the proxy reports idle (reusing `evaluateIdle` from
+ *    downtime-worker.ts), the worker POSTs `/admin/set-mode {"mode":"cheap"}`.
  *    **Per-slot operator gate (parent WL-0MT9F67Y3008S0PR, decision 1.a):**
  *    when the proxy serves per-slot identity (`slots[]` valid per
  *    `parseLlamaStatus`), the idle gate requires only ≥ 1 free slot
@@ -59,6 +75,8 @@
  * paused). Both call the same fail-closed `tick()`.
  */
 
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   evaluateIdle,
   parseLlamaStatus,
@@ -75,8 +93,8 @@ export const ADMIN_MODE_PATH = '/admin/mode';
 /** Proxy mode-switch endpoint path. */
 export const ADMIN_SET_MODE_PATH = '/admin/set-mode';
 
-/** Default idle window before switching to cheap mode: 30 minutes. */
-export const DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS = 1_800_000;
+/** Default idle window before switching to cheap mode: 60 minutes. */
+export const DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS = 3_600_000;
 
 /**
  * Defensive floor for the idle threshold (60s): a trivially small window
@@ -111,7 +129,7 @@ export const MODE_SWITCH_RUN_TIMEOUT_MS = 30_000;
 
 /**
  * Clamp the mode-switch idle threshold: reject negative/non-finite (fall
- * back to the 30-minute default) and floor at 60s so the operator cannot
+ * back to the 60-minute default) and floor at 60s so the operator cannot
  * configure an immediate cheap-switch.
  */
 export function clampModeSwitchIdleThresholdMs(value: number): number {
@@ -131,6 +149,76 @@ export function clampModeSwitchPollIntervalMs(value: number): number {
     Math.max(Math.round(value), MODE_SWITCH_POLL_INTERVAL_FLOOR_MS),
     MODE_SWITCH_POLL_INTERVAL_CAP_MS,
   );
+}
+
+// ── Shared activity (cross-pane arbitration) ─────────────────────────
+
+/**
+ * Name of the shared activity file written into the coordination directory.
+ * Every mode-switch worker instance (leader and non-leader alike) broadcasts
+ * its latest operator-command timestamp here so the downtime leader can
+ * evaluate idleness against activity from *any* pane (AC2). The file is a
+ * tiny JSON object (`{ "lastActivityAt": <epoch ms> }`) written atomically.
+ */
+export const MODE_ACTIVITY_FILE = 'mode-activity.json';
+
+/** Shared activity record shape (tolerant reader). */
+interface ModeActivityRecord {
+  lastActivityAt: number;
+}
+
+/**
+ * Read the shared operator-activity timestamp from the coordination
+ * directory. Returns the epoch-ms timestamp, or null when the coordination
+ * directory is unset, the file is absent/unreadable/malformed, or the value
+ * is not a finite number. A null result makes the caller fall back to its
+ * local clock (fail-closed, AC6) — never a premature cheap switch.
+ */
+export function readSharedActivity(coordinationDir: string | undefined): number | null {
+  if (!coordinationDir) return null;
+  try {
+    const path = join(coordinationDir, MODE_ACTIVITY_FILE);
+    if (!existsSync(path)) return null;
+    const raw: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    if (typeof raw !== 'object' || raw === null) return null;
+    const ts = (raw as Partial<ModeActivityRecord>).lastActivityAt;
+    return typeof ts === 'number' && Number.isFinite(ts) ? ts : null;
+  } catch {
+    return null; // unreadable / invalid JSON → fall back to the local clock
+  }
+}
+
+/**
+ * Broadcast an operator-activity timestamp to the shared activity file so
+ * every pane's mode-switch worker sees it (AC2). The write is atomic (temp
+ * file + rename) and monotonic (never regresses an existing newer value).
+ * Returns true on success and false when the coordination directory is unset
+ * or the write fails — the caller then relies on its local clock (AC6).
+ */
+export function writeSharedActivity(
+  coordinationDir: string | undefined,
+  timestamp: number,
+): boolean {
+  if (!coordinationDir) return false;
+  try {
+    mkdirSync(coordinationDir, { recursive: true });
+    const path = join(coordinationDir, MODE_ACTIVITY_FILE);
+    const existing = readSharedActivity(coordinationDir);
+    const value = existing !== null ? Math.max(existing, timestamp) : timestamp;
+    const payload = JSON.stringify({ lastActivityAt: value });
+    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(tmp, payload, 'utf8');
+    try {
+      renameSync(tmp, path);
+    } catch {
+      // rename-over-existing is not portable (Windows); fall back to a
+      // direct small synchronous write.
+      writeFileSync(path, payload, 'utf8');
+    }
+    return true;
+  } catch {
+    return false; // permission/IO error → local clock only (AC6)
+  }
 }
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -309,22 +397,60 @@ export interface ModeSwitchWorker {
 }
 
 /**
+ * Optional dependencies and coordination hooks for the mode-switch worker.
+ * All fields are injectable for tests; production (index.ts) passes only
+ * `isLeader` and `coordinationDir`.
+ */
+export interface ModeSwitchWorkerOptions {
+  /** Injectable HTTP fetcher (tests). */
+  fetcher?: AdminApiFetcher;
+  /** Injectable time source (tests). */
+  now?: Now;
+  /**
+   * Leadership probe reused from the downtime worker
+   * (`DowntimeWorker.isLeader` — constraint: reuse the existing election).
+   * Read live on every tick so a leadership handover is honoured without
+   * reconstructing the worker (AC1/AC5). Defaults to `() => true`: with no
+   * coordination there is exactly one instance and it is always the leader.
+   */
+  isLeader?: () => boolean;
+  /**
+   * Machine-wide coordination directory containing the shared activity file
+   * (AC2). When absent the worker keeps the original process-local idle
+   * clock (no shared state).
+   */
+  coordinationDir?: string;
+}
+
+/**
  * Create the mode-switch worker. Construction sets
  * `lastOperatorCommandAt = now()` — the idle clock resets to "active now",
  * so after a plugin restart the proxy stays fast until a fresh full idle
  * window passes (fail-safe, operator decision Q3: "a").
  *
- * @param deps - Injectable fetcher/time (tests).
+ * @param deps - Injectable fetcher/time plus the leader probe and shared
+ *   activity-coordination directory (tests / index.ts).
  */
-export function createModeSwitchWorker(deps?: {
-  fetcher?: AdminApiFetcher;
-  now?: Now;
-}): ModeSwitchWorker {
+export function createModeSwitchWorker(deps?: ModeSwitchWorkerOptions): ModeSwitchWorker {
   const fetcher = deps?.fetcher ?? (globalThis.fetch as unknown as AdminApiFetcher);
   const now = deps?.now ?? Date.now;
+  const isLeader = deps?.isLeader ?? (() => true);
+  const coordinationDir = deps?.coordinationDir;
 
   /** Last operator agent-route command timestamp; construction = "now" (restart reset). */
   let lastOperatorCommandAt: number = now();
+
+  /**
+   * Latest operator-activity timestamp across all panes: the max of this
+   * process's local clock and the shared activity file. Falls back to the
+   * local clock when the shared state is unreadable or unwritable (AC6,
+   * fail-closed: never a premature cheap switch off stale cross-pane state).
+   */
+  const effectiveLastActivityAt = (): number => {
+    const shared = readSharedActivity(coordinationDir);
+    if (shared === null) return lastOperatorCommandAt;
+    return Math.max(lastOperatorCommandAt, shared);
+  };
   /** Last known proxy mode (refreshed via GET /admin/mode on each poll). */
   let lastKnownMode: ProxyMode | null = null;
   /** True while a mode-switch POST is in flight (per-process single-flight). */
@@ -356,9 +482,19 @@ export function createModeSwitchWorker(deps?: {
 
   return {
     onOperatorCommand(proxyUrl: string): void {
-      // Record operator activity (agent-route command).
+      // Record operator activity (agent-route command) on the local clock.
       lastOperatorCommandAt = now();
-      // Fire-and-forget fast switch (fail-open: never blocks dispatch).
+      // Broadcast to every pane — leader and non-leader alike — so the
+      // downtime leader's idle evaluation sees activity from any pane (AC2).
+      // A failed broadcast leaves this process's local clock authoritative
+      // (AC6, fail-closed).
+      writeSharedActivity(coordinationDir, lastOperatorCommandAt);
+      // Fire-and-forget fast switch on the instance that received the
+      // command (fail-open: never blocks dispatch). Fast is always the safe
+      // direction, and the operator's active pane may not be the downtime
+      // leader — gating fast on leadership would leave the proxy in cheap
+      // while the operator is actively working (AC4). Only the *cheap* idle
+      // switch is leader-gated; see tick() (AC1).
       void fireSwitch(proxyUrl, 'fast');
     },
 
@@ -368,12 +504,19 @@ export function createModeSwitchWorker(deps?: {
 
     async tick(opts: ModeSwitchTickOptions): Promise<void> {
       if (!opts.enabled) return;
+      // Leader-only cheap switching (AC1): non-leader instances skip the
+      // entire idle cheap-switch logic (no proxy status fetch, no mode read,
+      // no POST). The probe is read live so a leadership handover is picked
+      // up on the next tick (AC5).
+      if (!isLeader()) return;
       if (switchInFlight) return; // single-flight: a switch is settling
 
-      // Idle window: has the operator issued no agent-route command for ≥
-      // the threshold? (lastOperatorCommandAt can never be null — restart
-      // resets to "active now", so a fresh full window is always required.)
-      const elapsed = now() - lastOperatorCommandAt;
+      // Idle window: has there been no operator agent-route command on ANY
+      // pane for ≥ the threshold? (local clock max shared activity, AC2; a
+      // shared read failure falls back to the local clock, AC6. The local
+      // clock can never be null — restart resets to "active now", so a fresh
+      // full window is always required.)
+      const elapsed = now() - effectiveLastActivityAt();
       if (elapsed < opts.idleThresholdMs) return;
 
       // Fetch proxy status when not provided (the worker fetches its own

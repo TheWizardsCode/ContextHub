@@ -6,18 +6,24 @@
  * Run: npx vitest run packages/herdr/src/mode-switch-worker.test.ts
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   createModeSwitchWorker,
   getAdminMode,
   setAdminMode,
   fetchProxyStatus,
+  readSharedActivity,
+  writeSharedActivity,
   clampModeSwitchIdleThresholdMs,
   clampModeSwitchPollIntervalMs,
   DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   MODE_SWITCH_IDLE_THRESHOLD_FLOOR_MS,
   MODE_SWITCH_POLL_INTERVAL_FLOOR_MS,
   MODE_SWITCH_POLL_INTERVAL_CAP_MS,
+  MODE_ACTIVITY_FILE,
   ADMIN_MODE_PATH,
   ADMIN_SET_MODE_PATH,
   PROXY_STATUS_PATH,
@@ -945,5 +951,281 @@ describe('per-slot operator gate', () => {
     expect(statusFetches).toHaveLength(1);
     // Malformed per-slot identity → proxy treated as busy → NO cheap switch.
     expect(setModePostsMade).toHaveLength(0);
+  });
+});
+
+// ── Leader-gated cheap switching + shared activity ────────────────────
+// (WL-0MU6MXCZZ007ZXT9: mode-switch flip-flop — leader election for proxy
+// mode changes.)
+
+describe('leader-gated cheap switching (AC1)', () => {
+  it('a non-leader skips the entire cheap-switch tick even when idle and proxy idle', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => false,
+    });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    // No cheap POST, and the tick was skipped before any proxy/mode read.
+    expect(setModePosts(api)).toHaveLength(0);
+    expect(api.calls.filter((c) => c.url.endsWith(ADMIN_MODE_PATH))).toHaveLength(0);
+    expect(worker.getLastKnownMode()).toBeNull();
+  });
+
+  it('the leader performs the cheap switch when idle and proxy idle', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => true,
+    });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'cheap' }));
+  });
+
+  it('a non-leader still fires the fast switch on an operator command (the active pane may not be the leader, AC4)', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => false,
+    });
+    worker.onOperatorCommand('http://proxy');
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'fast' }));
+  });
+
+  it('defaults to leader when no probe is supplied (legacy/no-coordination single instance)', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+  });
+});
+
+describe('shared activity broadcast (AC2/AC4/AC6)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'wl-mode-activity-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('an operator command broadcasts mode-activity.json into the coordination dir', async () => {
+    clock = 5_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => false,
+      coordinationDir: dir,
+    });
+    worker.onOperatorCommand('http://proxy');
+    await flushAsync();
+    expect(existsSync(join(dir, MODE_ACTIVITY_FILE))).toBe(true);
+    expect(readSharedActivity(dir)).toBe(5_000_000);
+  });
+
+  it('the idle leader reads the active pane\'s shared activity and does NOT cheap-switch (no flip-flop, AC2/AC4)', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    // Two panes on one machine, one coordination dir. The idle pane is the
+    // downtime leader; the active pane is a non-leader.
+    const idleLeader = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => true,
+      coordinationDir: dir,
+    });
+    const activeNonLeader = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => false,
+      coordinationDir: dir,
+    });
+    // Almost a full idle window passes; the active pane then receives a
+    // command and broadcasts its activity (local clock alone would switch).
+    advance(899_000);
+    activeNonLeader.onOperatorCommand('http://proxy');
+    await flushAsync();
+    api.reset();
+    await idleLeader.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    // Shared activity from the other pane keeps the leader in fast mode.
+    expect(setModePosts(api)).toHaveLength(0);
+  });
+
+  it('the leader cheap-switches once the shared activity ages past the threshold', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    writeSharedActivity(dir, clock); // activity recorded "now"
+    const leader = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => true,
+      coordinationDir: dir,
+    });
+    advance(900_000);
+    await leader.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'cheap' }));
+  });
+
+  it('falls back to the local clock when the shared file is unreadable (AC6, fail-closed)', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    writeFileSync(join(dir, MODE_ACTIVITY_FILE), '{ not valid json', 'utf8');
+    const worker = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => true,
+      coordinationDir: dir,
+    });
+    expect(readSharedActivity(dir)).toBeNull();
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    // Local clock is authoritative when the shared state is unreadable.
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'cheap' }));
+  });
+
+  it('writeSharedActivity is monotonic — a stale timestamp never regresses a newer one', () => {
+    expect(writeSharedActivity(dir, 5_000)).toBe(true);
+    expect(writeSharedActivity(dir, 3_000)).toBe(true);
+    expect(readSharedActivity(dir)).toBe(5_000);
+  });
+
+  it('readSharedActivity/writeSharedActivity are no-ops when no coordination dir is supplied', () => {
+    expect(writeSharedActivity(undefined, 1)).toBe(false);
+    expect(readSharedActivity(undefined)).toBeNull();
+  });
+
+  it('writeSharedActivity returns false when the coordination path is unwritable (AC6)', () => {
+    // A regular file used as a directory: mkdir/write cannot succeed.
+    const filePath = join(dir, 'not-a-dir');
+    writeFileSync(filePath, 'x', 'utf8');
+    expect(writeSharedActivity(join(filePath, 'sub'), 1)).toBe(false);
+    expect(readSharedActivity(join(filePath, 'sub'))).toBeNull();
+  });
+});
+
+describe('graceful leader transitions (AC5)', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'wl-mode-activity-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a new leader reads shared activity and continues from the correct state (no spurious switch during election)', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    let leader = false;
+    const worker = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => leader,
+      coordinationDir: dir,
+    });
+    advance(900_000);
+
+    // Before the handover the instance is a non-leader: it never switches.
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(0);
+
+    // Another pane was active 10s ago — recorded in the shared file.
+    writeSharedActivity(dir, clock - 10_000);
+
+    // Leadership handover. The new leader must honour the shared recent
+    // activity and NOT spuriously switch to cheap during the election.
+    leader = true;
+    api.reset();
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(0);
+
+    // Once the shared activity ages past the threshold the new leader
+    // resumes normal cheap switching.
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+  });
+});
+
+describe('60-minute default (AC3)', () => {
+  it('defaults the idle threshold to 3_600_000 ms and clamps invalid input to it', () => {
+    expect(DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS).toBe(3_600_000);
+    expect(clampModeSwitchIdleThresholdMs(NaN)).toBe(3_600_000);
+    expect(clampModeSwitchIdleThresholdMs(-1)).toBe(3_600_000);
+    // The 60s floor is unchanged.
+    expect(clampModeSwitchIdleThresholdMs(1_000)).toBe(MODE_SWITCH_IDLE_THRESHOLD_FLOOR_MS);
   });
 });

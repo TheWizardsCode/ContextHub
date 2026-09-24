@@ -1473,20 +1473,30 @@ async function main(): Promise<void> {
   // open in the resolved worklog root (--cwd).
   const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
 
+  // Machine-wide coordination directory shared by the downtime leader
+  // election and the mode-switch shared activity file (WL-0MU6MXCZZ007ZXT9,
+  // AC2). HERDR_COORDINATION_DIR override wins; default ~/.herdr/downtime/.
+  const coordinationDir = getMachineCoordinationDir() ?? join(targetCwd, '.worklog');
+
   // Mode-switch worker: automatically switches the llama-proxy between fast
   // (cloud) and cheap (local) modes based on operator activity and proxy
   // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
-  // key). Passes `enabled` via the settings flag (modeSwitchEnabled).
-  // Created BEFORE the downtime worker so we can wire the idle callback.
-  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker();
+  // key). Created AFTER the downtime worker because it needs
+  // `downtimeWorker.isLeader` for leader-only cheap switching (AC1) and the
+  // coordination directory for shared activity broadcast (AC2). The idle
+  // callback is wired through a holder because createDowntimeWorker needs
+  // `onProxyIdle` before the mode-switch worker exists.
+  const modeSwitchHolder: { worker?: ModeSwitchWorker } = {};
 
   // Callback: when the downtime dispatcher finds the proxy idle, trigger a
   // mode-switch tick immediately with the fresh status — avoids the 10 s
   // poll delay of the independent scheduler task.
   const onProxyIdle = async (proxyStatus: LlamaStatus): Promise<void> => {
+    const worker = modeSwitchHolder.worker;
+    if (!worker) return; // dispatcher cannot tick before the worker exists
     try {
       const s = loadSettings();
-      await modeSwitchWorker.tick({
+      await worker.tick({
         enabled: s.modeSwitchEnabled ?? true,
         idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
         proxyUrl: s.downtimeProxyUrl,
@@ -1509,7 +1519,7 @@ async function main(): Promise<void> {
     // ~/.herdr/downtime/. The per-worklog join(targetCwd, '.worklog')
     // coupling is retired (F6). The instance id is auto-generated at
     // worker construction (stable for the process lifetime).
-    coordinationDir: getMachineCoordinationDir() ?? join(targetCwd, '.worklog'),
+    coordinationDir,
     config: () => {
       const s = loadSettings();
       return {
@@ -1534,6 +1544,15 @@ async function main(): Promise<void> {
     },
     onProxyIdle,
   });
+
+  // Mode-switch worker (created AFTER the downtime worker so it can reuse the
+  // leader probe): only the downtime leader runs the idle cheap switch (AC1)
+  // and the shared activity file is read from the same coordination dir.
+  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker({
+    isLeader: () => downtimeWorker.isLeader,
+    coordinationDir,
+  });
+  modeSwitchHolder.worker = modeSwitchWorker;
 
   const selectedItem = await runWorklistTui(
     fetcher,

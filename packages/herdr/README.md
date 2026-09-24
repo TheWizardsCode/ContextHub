@@ -688,6 +688,20 @@ proxy idle state:
   is treated as busy (fail-closed) so the proxy is never switched cheap
   while real work might be in flight. The single-flight task means a hung
   tick can never wedge the task; the proxy URL reuses `downtimeProxyUrl`.
+- **Leader-only cheap switching + shared activity (WL-0MU6MXCZZ007ZXT9)** —
+  only the machine-wide downtime leader (`DowntimeWorker.isLeader`, the
+  existing election — no separate election) runs the idle cheap-switch logic;
+  non-leader panes skip it entirely. Every pane broadcasts its latest
+  operator-command timestamp to `mode-activity.json` in the machine
+  coordination directory (`getMachineCoordinationDir()` — the same directory
+  as the downtime leader lease), and the leader evaluates idleness against the
+  **max** of its local clock and that shared timestamp. The proxy therefore
+  stays fast while *any* pane has recent activity, and idle panes can no
+  longer flip the shared proxy to cheap behind an active pane's back (the
+  flip-flop this fixed). Fast switching still fires on whichever pane received
+  the command (fail-open, idempotent); only the cheap idle switch is
+  leader-gated. If the shared file cannot be read or written the worker falls
+  back to its local clock (fail-closed).
 - **Restart resets to active now** — on plugin/pane restart the idle clock
   starts from the worker's construction time, so a fresh pane begins with a
   full idle window before any cheap switch is eligible.
@@ -705,7 +719,7 @@ New settings (all optional):
   when `false` the scheduler registers no mode-switch task and the
   agent-route hook is a no-op)
 - `modeSwitchIdleThresholdMs` — Operator-inactivity window before a cheap
-  switch is considered (default: `1800000` = 30 minutes, hard floor `60000`)
+  switch is considered (default: `3600000` = 60 minutes, hard floor `60000`)
 - `modeSwitchPollIntervalMs` — Poll interval for the proxy idle check when
   evaluating the idle window (default: `10000`, clamped to `[5000, 60000]`)
 

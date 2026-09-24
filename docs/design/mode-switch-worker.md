@@ -49,12 +49,33 @@ On plugin/pane restart the idle clock resets to "active now" (construction
 time), so the proxy stays fast until a fresh full idle window passes
 (fail-safe).
 
+### Leader-only cheap switching + shared activity (WL-0MU6MXCZZ007ZXT9)
+
+The mode-switch worker reuses the machine-wide downtime leader
+(`DowntimeWorker.isLeader`) — there is no separate election:
+
+- Only the leader runs the `tick()` cheap-switch logic. Non-leaders skip the
+  tick entirely, so an idle pane can no longer flip the shared proxy to cheap
+  while another pane is active (the flip-flop this fixed).
+- Every instance (leader and non-leader alike) broadcasts its latest
+  operator-command timestamp to `mode-activity.json` in the coordination
+  directory (`getMachineCoordinationDir()`, the same dir as the leader lease).
+- The leader's idle evaluation uses `max(localClock, sharedTimestamp)`, so the
+  proxy stays fast while *any* pane has recent activity.
+- The fast switch still fires on the pane that received the command
+  (fail-open, idempotent) — the active pane may not be the leader.
+- The leader probe is read live each tick, so a leadership handover is honoured
+  on the next tick: the new leader reads the shared activity and continues
+  from the correct state (no spurious switch during the election).
+- **Fail-closed:** if the shared file cannot be read or written, the worker
+  falls back to its local clock (never a premature cheap switch).
+
 ## 3. Settings (re-read every tick — apply without plugin restart)
 
 | Setting | Default | Clamp |
 |---|---|---|
 | `modeSwitchEnabled` | `true` | — (disabled ⇒ no scheduler task, no-op hook) |
-| `modeSwitchIdleThresholdMs` | `1800000` (30 min) | floor `60000` |
+| `modeSwitchIdleThresholdMs` | `3600000` (60 min) | floor `60000` |
 | `modeSwitchPollIntervalMs` | `10000` | `[5000, 60000]` |
 
 The proxy URL is **not** a new setting — it reuses `downtimeProxyUrl`.
@@ -71,7 +92,8 @@ time-based plan.
 ## 5. Key files
 
 - `packages/herdr/src/mode-switch-worker.ts` — worker core (idle clock,
-  admin API client, tick logic, clamps)
+  leader-gated tick, shared `mode-activity.json` read/write, admin API
+  client, clamps)
 - `packages/herdr/src/mode-switch-worker.test.ts` — worker core tests
 - `packages/herdr/src/mode-switch-integration.test.ts` — wiring tests
   (settings → worker, route classification, scheduler interval constants)
