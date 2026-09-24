@@ -112,6 +112,7 @@ import {
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
   appendDowntimeLogEntry,
+  appendPaneCloseLogEntry,
   auditDispatchedItemIds,
   implementDispatchedItemIds,
   planDispatchedItemStages,
@@ -1312,6 +1313,54 @@ export function createDowntimeDeps(
       } catch {
         // fail-open: enrichment logging must never crash the worker
       }
+    },
+    // Pane-lifecycle item state (WL-0MU308WSF0002JWN): resolve the current
+    // state of a dispatched pane's item so the monitor can classify its
+    // lifecycle outcome. Reuses the enriched `wl show` fetch (which now also
+    // carries the top-level audit verdict). Fail-closed: a wl failure or an
+    // unparseable item resolves null (the monitor then takes no action for
+    // that pane). Never throws.
+    async getItemLifecycleState(itemId: string, cwd: string) {
+      try {
+        const result = await fetchAuditItemById(itemId, cwd);
+        if (!result.ok || !result.info) return null;
+        const info = result.info;
+        return {
+          id: info.id,
+          title: info.title,
+          status: info.status,
+          stage: info.stage,
+          risk: info.risk,
+          effort: info.effort,
+          auditedAt: info.auditedAt,
+          auditResult: info.auditResult,
+          needsProducerReview: info.needsProducerReview,
+        };
+      } catch {
+        return null; // fail-closed: an unreadable item is never acted upon
+      }
+    },
+    // Close a dispatched pane (WL-0MU308WSF0002JWN): `herdr pane close
+    // <paneId>`. Fail-closed: any herdr failure resolves false and the
+    // monitor still records the lifecycle outcome with `closed:false`.
+    async closePane(paneId: string, _cwd: string): Promise<boolean> {
+      try {
+        const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+        await getExecFileAsync()(
+          herdrBin,
+          ['pane', 'close', paneId],
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        return true;
+      } catch {
+        return false; // fail-closed: a failed close must never crash the worker
+      }
+    },
+    // Record a pane-close lifecycle entry in the rolling dispatch log
+    // (WL-0MU308WSF0002JWN). Fail-closed: `appendPaneCloseLogEntry` never
+    // throws.
+    async recordPaneClose(entry, cwd: string): Promise<void> {
+      await appendPaneCloseLogEntry(cwd, entry);
     },
     async rollbackClaim(
       itemId: string,

@@ -84,6 +84,7 @@ import {
   parseCriticalCandidatesOutput,
   parseDepListBlockersOutput,
   parseShownWorkItem,
+  parseShowItemOutput,
   selectCriticalCandidate,
   criticalSkillKind,
   resolveDependencyFrontier,
@@ -109,6 +110,8 @@ import {
   runningDowntimePaneItemIds,
   evaluateCriticalFirstGuard,
   resolveInFlightPanes,
+  monitorDispatchedPanes,
+  DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS,
   DOWNTIME_POLL_INTERVAL_FLOOR_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
@@ -152,6 +155,7 @@ import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import {
   DOWNTIME_LOG_FILE,
   appendDowntimeLogEntry,
+  appendPaneCloseLogEntry,
   readDowntimeLogEntries,
 } from './downtime-log.js';
 import {
@@ -6453,6 +6457,36 @@ describe('parseShownWorkItem', () => {
   });
 });
 
+describe('parseShowItemOutput audit verdict (WL-0MU308WSF0002JWN)', () => {
+  it('reads the TOP-LEVEL auditResult verdict and timestamp', () => {
+    const info = parseShowItemOutput(
+      JSON.stringify({
+        success: true,
+        workItem: { id: 'WL-AUD', status: 'completed', stage: 'in_review' },
+        auditResult: {
+          workItemId: 'WL-AUD',
+          readyToClose: false,
+          auditedAt: '2026-01-02T00:00:00.000Z',
+        },
+      }),
+    );
+    expect(info).toMatchObject({
+      id: 'WL-AUD',
+      status: 'completed',
+      stage: 'in_review',
+      auditedAt: '2026-01-02T00:00:00.000Z',
+      auditResult: false,
+    });
+  });
+
+  it('leaves the verdict absent when auditResult is null (no audit recorded)', () => {
+    const info = parseShowItemOutput(
+      JSON.stringify({ success: true, workItem: { id: 'WL-AUD2', stage: 'in_review' }, auditResult: null }),
+    );
+    expect(info!.auditResult).toBeUndefined();
+  });
+});
+
 // ── Critical-first: tier wiring (F4, decisions Q1/Q2/Q3) ─────────────
 
 describe('dispatch critical-first tier', () => {
@@ -10104,5 +10138,273 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       vi.useRealTimers();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN, child WL-0MU4URK4H006OFCE) ──
+//
+// The monitor inspects every dispatched pane recorded in the rolling log
+// (marker + post-spawn enrichment), classifies its lifecycle outcome, logs a
+// pane-close entry, and closes the pane — EXCEPT `implement` panes, which are
+// never auto-closed (AC6). Every boundary is fail-closed (AC7).
+describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
+  const roots: string[] = [];
+
+  function makeRoot(): string {
+    const root = mkdtempSync(join(tmpdir(), 'pane-lifecycle-'));
+    roots.push(root);
+    return root;
+  }
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  /** Seed a dispatch marker + its post-spawn enrichment (paneId) entry. */
+  async function seedDispatch(
+    root: string,
+    opts: { itemId: string; kind: string; paneId: string; stage?: string; title?: string },
+  ): Promise<void> {
+    const marker = {
+      itemId: opts.itemId,
+      kind: opts.kind,
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+      cwd: root,
+      title: opts.title ?? opts.itemId,
+      stage: opts.stage ?? 'idea',
+    };
+    await appendDowntimeLogEntry(root, JSON.stringify(marker));
+    await appendDowntimeLogEntry(root, JSON.stringify({ ...marker, paneId: opts.paneId, enrichment: true }));
+  }
+
+  /** Deps with a real (rolling-log-appending) recordPaneClose so idempotency works. */
+  function monitorDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
+    return makeDeps({
+      recordPaneClose: vi.fn(async (entry, cwd) => {
+        await appendPaneCloseLogEntry(cwd, entry);
+      }),
+      ...overrides,
+    });
+  }
+
+  async function paneCloseEntries(root: string) {
+    return (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
+  }
+
+  it('closes an intake pane and logs closed-as-intake-complete when the item reaches intake_complete', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-1', kind: 'intake', paneId: 'w1:p1', stage: 'idea', title: 'Intake me' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-1', title: 'Intake me', stage: 'intake_complete' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w1:p1' }] }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 1, logged: 1, closed: 1, errors: 0 });
+    expect(closePane).toHaveBeenCalledWith('w1:p1', root);
+    const pc = await paneCloseEntries(root);
+    expect(pc).toHaveLength(1);
+    expect(pc[0]).toMatchObject({
+      entryType: 'pane-close',
+      itemId: 'WL-1',
+      itemTitle: 'Intake me',
+      paneId: 'w1:p1',
+      kind: 'intake',
+      outcome: 'closed-as-intake-complete',
+      closed: true,
+    });
+  });
+
+  it('closes a plan pane and logs closed-as-plan-complete when the item reaches plan_complete', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-2', kind: 'plan', paneId: 'w1:p2', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-2', stage: 'plan_complete' }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ logged: 1, closed: 1 });
+    expect(closePane).toHaveBeenCalledWith('w1:p2', root);
+    expect((await paneCloseEntries(root))[0]).toMatchObject({ outcome: 'closed-as-plan-complete', closed: true });
+  });
+
+  it('closes an audit pane and records the pass/fail verdict (AC5)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-3', kind: 'audit', paneId: 'w1:p3', stage: 'in_review' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({
+        id: 'WL-3', stage: 'in_review', auditedAt: '2026-01-02T00:00:00.000Z', auditResult: false,
+      }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ logged: 1, closed: 1 });
+    expect(closePane).toHaveBeenCalledWith('w1:p3', root);
+    expect((await paneCloseEntries(root))[0]).toMatchObject({ outcome: 'audit-failed', closed: true });
+  });
+
+  it('NEVER closes an implement pane but still logs its in_review completion (AC4/AC6)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-4', kind: 'implement', paneId: 'w1:p4', stage: 'plan_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-4', stage: 'in_review' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w1:p4' }] }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ logged: 1, closed: 0 });
+    expect(closePane).not.toHaveBeenCalled();
+    expect((await paneCloseEntries(root))[0]).toMatchObject({
+      outcome: 'requires-attention',
+      reasonCode: 'reached-in-review',
+      closed: false,
+    });
+  });
+
+  it('is idempotent: a second pass with no state change writes no duplicate entry', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-5', kind: 'plan', paneId: 'w1:p5', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-5', stage: 'plan_complete' }),
+      closePane,
+    });
+
+    const first = await monitorDispatchedPanes(deps, root);
+    const second = await monitorDispatchedPanes(deps, root);
+
+    expect(first).toMatchObject({ logged: 1, closed: 1 });
+    expect(second).toMatchObject({ logged: 0, closed: 0 });
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(await paneCloseEntries(root)).toHaveLength(1);
+  });
+
+  it('logs a NEW entry when the item changes state again (agent-ended → plan_complete)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-6', kind: 'plan', paneId: 'w1:p6', stage: 'intake_complete' });
+    const noLivePanes = vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] });
+    // First pass: the agent session has ended but the item is NOT terminal.
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-6', stage: 'intake_complete' }),
+      getRunningDowntimePanes: noLivePanes,
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+    await monitorDispatchedPanes(deps, root);
+
+    // The item then advances — a second outcome must be recorded.
+    deps.getItemLifecycleState = vi.fn().mockResolvedValue({ id: 'WL-6', stage: 'plan_complete' });
+    await monitorDispatchedPanes(deps, root);
+
+    const outcomes = (await paneCloseEntries(root)).map((e) => e.outcome);
+    expect(outcomes).toEqual(['requires-attention', 'closed-as-plan-complete']);
+  });
+
+  it('does NOT act on unknown liveness when the item has not reached a terminal (fail-open)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-7', kind: 'plan', paneId: 'w1:p7', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-7', stage: 'intake_complete' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: false, error: 'herdr down' }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 1, logged: 0, closed: 0, errors: 0 });
+    expect(closePane).not.toHaveBeenCalled();
+    expect(await paneCloseEntries(root)).toEqual([]);
+  });
+
+  it('is fail-closed: a throwing closePane still logs the outcome (closed:false) and never throws (AC7)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-8', kind: 'intake', paneId: 'w1:p8', stage: 'idea' });
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-8', stage: 'intake_complete' }),
+      closePane: vi.fn().mockRejectedValue(new Error('herdr: pane not found')),
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 1, logged: 1, closed: 0, errors: 0 });
+    expect((await paneCloseEntries(root))[0]).toMatchObject({ closed: false });
+  });
+
+  it('is fail-closed: a throwing item lookup counts an error and never throws (AC7)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-9', kind: 'plan', paneId: 'w1:p9' });
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockRejectedValue(new Error('wl exploded')),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 1, logged: 0, errors: 1 });
+  });
+
+  it('continues past a bad pane so later panes still process (AC7)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-BAD', kind: 'plan', paneId: 'w1:pA' });
+    await seedDispatch(root, { itemId: 'WL-GOOD', kind: 'intake', paneId: 'w1:pB' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn(async (itemId: string) => {
+        if (itemId === 'WL-BAD') throw new Error('wl exploded');
+        return { id: itemId, stage: 'intake_complete' };
+      }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 2, logged: 1, closed: 1, errors: 1 });
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith('w1:pB', root);
+  });
+
+  it('is a no-op when the item-state dep is absent (legacy callers)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-10', kind: 'plan', paneId: 'w1:p10', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({ closePane });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 0, logged: 0, closed: 0, errors: 0 });
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('logs requires-attention for an item awaiting producer review (AC3)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-11', kind: 'plan', paneId: 'w1:p11', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({
+        id: 'WL-11', stage: 'intake_complete', needsProducerReview: true,
+      }),
+      closePane,
+    });
+
+    await monitorDispatchedPanes(deps, root);
+
+    expect(closePane).toHaveBeenCalledWith('w1:p11', root);
+    expect((await paneCloseEntries(root))[0]).toMatchObject({
+      outcome: 'requires-attention',
+      reasonCode: 'producer-review',
+      closed: true,
+    });
   });
 });

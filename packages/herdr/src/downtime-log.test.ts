@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import {
   appendDowntimeLogEntry,
   appendCoordinationLogEntry,
+  appendPaneCloseLogEntry,
   auditDispatchedItemIds,
   implementDispatchedItemIds,
   riskEffortDispatchedItemIds,
@@ -697,5 +698,86 @@ describe('post-spawn enrichment preserves marker semantics (WL-0MUBVL251006JAQ0 
     expect(after.get('WL-ENR')?.stage).toBe('plan_complete');
     // And the marker still excludes while fresh at the same stage.
     expect(markerStillExcludes(after.get('WL-ENR')!, 'plan_complete', Date.now(), 24 * 60 * 60 * 1000, 'id-guard')).toBe(true);
+  });
+});
+
+// ── Pane-close lifecycle entries (WL-0MU308WSF0002JWN) ────────────────
+//
+// The rolling log gains a `pane-close` entry type recording WHY a dispatched
+// pane was closed (intake complete / plan complete / audit passed / audit
+// failed / requires-attention). Pane-close entries must be ignored by every
+// dispatched-marker reader so the existing change-guard semantics are
+// unchanged (backward compatible).
+describe('pane-close lifecycle entries (WL-0MU308WSF0002JWN)', () => {
+  it('appends a pane-close entry with every AC1 field and round-trips it', async () => {
+    const cwd = makeTempCwd();
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:00.000Z',
+      itemId: 'WL-1',
+      itemTitle: 'Auto close me',
+      paneId: 'w1:p1',
+      kind: 'plan',
+      outcome: 'closed-as-plan-complete',
+      reason: 'item advanced to plan_complete',
+      closed: true,
+    });
+
+    const entries = await readDowntimeLogEntries(cwd);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:00.000Z',
+      itemId: 'WL-1',
+      itemTitle: 'Auto close me',
+      paneId: 'w1:p1',
+      kind: 'plan',
+      outcome: 'closed-as-plan-complete',
+      closed: true,
+    });
+  });
+
+  it('never throws when the worklog dir is unwritable (fail-closed, AC7)', async () => {
+    const cwd = '/nonexistent/path/' + Math.random().toString(36).slice(2);
+    await expect(
+      appendPaneCloseLogEntry(cwd, {
+        entryType: 'pane-close',
+        timestamp: '2026-01-02T00:00:00.000Z',
+        itemId: 'WL-1',
+        itemTitle: 'x',
+        paneId: 'w1:p1',
+        kind: 'plan',
+        outcome: 'requires-attention',
+        closed: true,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('a pane-close entry never contaminates the dispatched-marker readers', async () => {
+    const cwd = makeTempCwd();
+    // A standing implement discharge marker for WL-IMP + a pane-close entry
+    // that reuses the SAME itemId/kind — the marker readers must see only the
+    // standing marker (the pane-close entry carries entryType, not a marker).
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({ itemId: 'WL-IMP', kind: 'implement', stage: 'plan_complete', dispatchedAt: '2026-01-01T00:00:00.000Z' }),
+    );
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:00.000Z',
+      itemId: 'WL-IMP',
+      itemTitle: 'Implement me',
+      paneId: 'w1:p9',
+      kind: 'implement',
+      outcome: 'requires-attention',
+      closed: false,
+    });
+
+    const entries = await readDowntimeLogEntries(cwd);
+    expect([...implementDispatchedItemIds(entries)]).toEqual(['WL-IMP']);
+    expect(dispatchedItemMarkers(entries, 'implement').get('WL-IMP')?.stage).toBe('plan_complete');
+    // The enrichment-less pane-close entry must NOT be reconstructed as a
+    // dispatched pane (only dispatch/enrichment entries carry a paneId).
+    expect(entries.filter((e) => e.entryType === 'pane-close')).toHaveLength(1);
   });
 });

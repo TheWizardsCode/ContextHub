@@ -146,8 +146,18 @@ import {
   readDowntimeLogEntries as _readDowntimeEntries,
   dispatchedItemMarkers as _dispatchedMarkers,
   markerStillExcludes as _markerStillExcludes,
+  appendPaneCloseLogEntry as _appendPaneCloseLogEntry,
   type DispatchMarker,
+  type PaneCloseLogEntry,
 } from './downtime-log.js';
+import {
+  classifyPaneLifecycle,
+  collectDispatchedPanes,
+  loggedPaneLifecycleKeys,
+  paneLifecycleKey,
+  type DispatchedPane,
+  type PaneItemState,
+} from './pane-lifecycle.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 import type { DispatcherAnchor, DispatcherTabAnchorEntry } from './dispatcher-anchor.js';
 
@@ -270,6 +280,15 @@ export const DOWNTIME_AUDIT_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
  * failure) must not strand the item permanently. Default 24 hours.
  */
 export const DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Pane-lifecycle monitor cadence (WL-0MU308WSF0002JWN): the worker re-checks
+ * dispatched panes for terminal states at most once per this interval,
+ * bounding the per-tick worklog queries ("reasonable polling cadence" —
+ * parent Constraint) while still closing completed panes promptly. Overridable
+ * per tick via the optional `paneLifecycleIntervalMs` config field.
+ */
+export const DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS = 30_000;
 
 /**
  * Hard floor for the success-marker staleness window (1 h): below this the
@@ -1127,6 +1146,12 @@ export interface DowntimeItemInfo {
    * coordination leader path skips it (AC3).
    */
   needsProducerReview?: boolean;
+  /**
+   * Recorded audit verdict (`auditResult.readyToClose` from `wl show
+   * --json`, WL-0MU308WSF0002JWN): `false` means the audit FAILED; `true`
+   * means it passed. Absent when the item has no recorded audit result.
+   */
+  auditResult?: boolean | null;
 }
 
 /**
@@ -1761,6 +1786,31 @@ export interface DowntimeWorkerDeps {
    * dispatcher swallows any rejection.
    */
   recordDispatchEnrichment?(event: DowntimeDispatchEnrichmentEvent): Promise<void>;
+  /**
+   * Pane-lifecycle item state lookup (WL-0MU308WSF0002JWN): resolve the
+   * current work-item state (stage/status/risk/effort/auditedAt/auditResult/
+   * needsProducerReview) for a dispatched pane's item so the monitor can
+   * classify its lifecycle outcome. OPTIONAL — when absent the monitor
+   * cannot classify and takes no action (fail-open; production wiring always
+   * provides it). Must never throw; resolves null on a wl/CLI failure so a
+   * lookup failure never triggers a spurious close.
+   */
+  getItemLifecycleState?(itemId: string, cwd: string): Promise<PaneItemState | null>;
+  /**
+   * Close a dispatched pane (WL-0MU308WSF0002JWN): `herdr pane close
+   * <paneId>`. Resolves true on success, false on any failure. OPTIONAL —
+   * when absent the monitor logs the outcome but performs no close (used by
+   * legacy/test callers). Must never throw (fail-closed): a failed close is
+   * logged with `closed:false` and never blocks other panes.
+   */
+  closePane?(paneId: string, cwd: string): Promise<boolean>;
+  /**
+   * Record a pane-close lifecycle entry in the rolling dispatch log
+   * (WL-0MU308WSF0002JWN). OPTIONAL — when absent the monitor falls back to
+   * appending directly via `appendPaneCloseLogEntry`. Must never throw
+   * (fail-closed): logging must never crash the worker.
+   */
+  recordPaneClose?(entry: PaneCloseLogEntry, cwd: string): Promise<void>;
   /**
    * Roll back a CAS claim that succeeded but never completed dispatch
    * (WL-0MT32F908002YFFA AC1/AC2): restore the item to its pre-claim
@@ -4251,6 +4301,134 @@ export async function spawnDowntimePane(
   });
 }
 
+// ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) ──────────────────────
+
+/** Summary of one pane-lifecycle monitor pass. */
+export interface PaneLifecycleMonitorResult {
+  /** Number of dispatched panes inspected. */
+  checked: number;
+  /** Number of panes actually closed this pass. */
+  closed: number;
+  /** Number of lifecycle outcomes logged this pass. */
+  logged: number;
+  /** Number of per-pane failures swallowed (fail-closed). */
+  errors: number;
+}
+
+/**
+ * Inspect every dispatched pane recorded in the rolling log and, for each
+ * one that has reached a terminal or attention state, log a pane-close
+ * lifecycle entry and (except `implement`) close the pane
+ * (WL-0MU308WSF0002JWN).
+ *
+ * Fail-closed at every boundary (AC7): a missing log, an unreadable item, a
+ * failed pane close, or a failed log write is swallowed and never crashes
+ * the worker or blocks the remaining panes. Idempotent: a `(pane, outcome,
+ * reason)` triple already recorded in the log is never written twice, so
+ * repeated ticks (and multiple instances sharing a root) do not duplicate
+ * entries — while a genuine state CHANGE produces a new entry (intake Q&A).
+ *
+ * The monitor performs NO work when the deps are absent (legacy/test
+ * callers): with no `getItemLifecycleState` every pane classifies to null,
+ * so the pass is a cheap no-op.
+ */
+export async function monitorDispatchedPanes(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+): Promise<PaneLifecycleMonitorResult> {
+  const result: PaneLifecycleMonitorResult = { checked: 0, closed: 0, logged: 0, errors: 0 };
+
+  // Strict no-op for legacy callers: without an item-state resolver the
+  // monitor cannot distinguish a terminal stage from "unknown", so taking
+  // any action (e.g. flagging requires-attention on agent-done alone) would
+  // be guesswork. Production wiring always provides the dep.
+  if (typeof deps.getItemLifecycleState !== 'function') return result;
+
+  // Read the rolling log (fail-safe: unreadable → []).
+  let entries: Awaited<ReturnType<typeof _readDowntimeEntries>>;
+  try {
+    entries = await _readDowntimeEntries(cwd);
+  } catch {
+    return result; // fail-closed: no evidence, no action
+  }
+
+  const panes = collectDispatchedPanes(entries);
+  if (panes.length === 0) return result;
+  const loggedKeys = loggedPaneLifecycleKeys(entries);
+
+  // Running-pane liveness: `null` when unknown (fail-open — an unknown
+  // liveness must never be read as "agent done", which would close a live
+  // pane). When known, a dispatched pane absent from the live set has ended.
+  let livePanes: Set<string> | null = null;
+  if (typeof deps.getRunningDowntimePanes === 'function') {
+    try {
+      const running = await deps.getRunningDowntimePanes(cwd);
+      if (running.ok && Array.isArray(running.records)) {
+        livePanes = new Set(running.records.map((rec) => rec.paneId));
+      }
+    } catch {
+      livePanes = null; // fail-open — never close on unknown liveness
+    }
+  }
+
+  for (const pane of panes) {
+    result.checked += 1;
+    try {
+      let item: PaneItemState | null = null;
+      if (typeof deps.getItemLifecycleState === 'function') {
+        item = await deps.getItemLifecycleState(pane.itemId, cwd);
+      }
+      const agentDone = livePanes !== null && !livePanes.has(pane.paneId);
+      const decision = classifyPaneLifecycle(pane, item, agentDone);
+      if (decision === null) continue;
+
+      const key = paneLifecycleKey(pane.paneId, decision.outcome, decision.reasonCode);
+      if (loggedKeys.has(key)) continue; // already recorded — idempotent
+
+      // Close the pane (except `implement`, which is never auto-closed —
+      // AC6). A failed/absent close is recorded with `closed:false` and
+      // never blocks the log entry or the remaining panes (AC7).
+      let closed = false;
+      if (decision.close && typeof deps.closePane === 'function') {
+        try {
+          closed = await deps.closePane(pane.paneId, cwd);
+        } catch {
+          closed = false; // fail-closed
+        }
+      }
+
+      const entry: PaneCloseLogEntry = {
+        entryType: 'pane-close',
+        timestamp: new Date().toISOString(),
+        itemId: pane.itemId,
+        itemTitle: item?.title ?? pane.itemTitle,
+        paneId: pane.paneId,
+        kind: pane.kind,
+        outcome: decision.outcome,
+        reason: decision.reason,
+        reasonCode: decision.reasonCode,
+        closed,
+      };
+      try {
+        if (typeof deps.recordPaneClose === 'function') {
+          await deps.recordPaneClose(entry, cwd);
+        } else {
+          await _appendPaneCloseLogEntry(cwd, entry);
+        }
+        loggedKeys.add(key);
+        result.logged += 1;
+        if (closed) result.closed += 1;
+      } catch {
+        result.errors += 1; // fail-closed: logging must never crash the worker
+      }
+    } catch {
+      result.errors += 1; // fail-closed: one bad pane never blocks the rest
+    }
+  }
+
+  return result;
+}
+
 // ── Worker orchestrator (implemented — F3) ────────────────────────────
 
 /**
@@ -4300,6 +4478,12 @@ export interface DowntimeWorkerConfig {
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h).
      */
     markerStaleWindowMs?: number;
+    /**
+     * Pane-lifecycle monitor cadence, ms (WL-0MU308WSF0002JWN). Optional —
+     * defaults to `DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS` (30 s). Tests may
+     * pass 0 to run the monitor on every tick.
+     */
+    paneLifecycleIntervalMs?: number;
   };
   /**
    * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
@@ -4444,6 +4628,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   const perSlotTracker = createPerSlotIdleTracker();
   let dispatching = false;
   let lastDispatchAt: number | null = null;
+  // Pane-lifecycle monitor cadence gate (WL-0MU308WSF0002JWN): the timestamp
+  // of the last monitor pass. 0 forces a pass on the first tick.
+  let lastPaneMonitorAt = 0;
   // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
   // worker is fully paused (no poll, no idle tracking, no dispatch) after a
   // genuine empty backlog OR three consecutive CLI errors. Cancelled early
@@ -4786,6 +4973,29 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         if (!leaderState) {
           return { polled: false, dispatched: false, idle: false };
         }
+      }
+
+      // ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) ──────────────────
+      // Runs on the LEADER (legacy mode: always) and BEFORE the cooldown
+      // gate, so completed dispatched panes are tidied even while dispatch
+      // is paused in a no-candidate cooldown. Cadence-bounded (default 30 s)
+      // so the ~10 s tick does not re-query the worklog for every open pane
+      // on every tick.
+      //
+      // FIRE-AND-FORGET (deliberately NOT awaited): the single-flight
+      // dispatch guard relies on the first in-flight tick setting
+      // `dispatching` before a second concurrent tick reaches its check — an
+      // extra await on the pre-dispatch path lets the second tick win that
+      // race and double-dispatch (pinned by the worker single-flight test).
+      // The monitor is internally fail-closed and idempotent, so running it
+      // concurrently is safe; the `.catch` is belt-and-braces.
+      const paneMonitorIntervalMs =
+        cfg.paneLifecycleIntervalMs ?? DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS;
+      if (tickNow - lastPaneMonitorAt >= paneMonitorIntervalMs) {
+        lastPaneMonitorAt = tickNow;
+        void monitorDispatchedPanes(opts.deps, cfg.cwd).catch(() => {
+          // fail-closed: pane-lifecycle monitoring must never crash the worker
+        });
       }
 
       // Cooldown gate (WL-0MTEZ4XZJ006Y9U7 AC2 — ordering): the check-in
@@ -5955,6 +6165,17 @@ export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
     needsProducerReview:
       raw.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
   };
+  // Top-level audit result (WL-0MU308WSF0002JWN): `wl show --json` serves
+  // `auditResult` as a TOP-LEVEL sibling of `workItem` (not nested inside
+  // it), carrying the audit verdict (`readyToClose`) the pane-lifecycle
+  // monitor needs to distinguish audit-passed from audit-failed. Additive
+  // and tolerant — a missing/malformed auditResult leaves the fields absent.
+  const topAudit = (parsed as { auditResult?: unknown }).auditResult;
+  if (topAudit !== null && typeof topAudit === 'object') {
+    const a = topAudit as Record<string, unknown>;
+    if (typeof a.auditedAt === 'string') info.auditedAt = a.auditedAt;
+    if (typeof a.readyToClose === 'boolean') info.auditResult = a.readyToClose;
+  }
   return info;
 }
 
