@@ -111,6 +111,7 @@ export function validateStatusStageItems(items: WorkItem[], rules: StatusStageRu
           proposedFix: { stage: stage.normalized, allowedStages: rules.stageValues },
           safe: true,
           context: {
+            status: item.status,
             stage: stage.value,
             normalizedStage: stage.normalized,
             ruleSource: RULE_SOURCE,
@@ -126,6 +127,7 @@ export function validateStatusStageItems(items: WorkItem[], rules: StatusStageRu
           proposedFix: { allowedStages: rules.stageValues },
           safe: false,
           context: {
+            status: item.status,
             stage: stage.value,
             ruleSource: RULE_SOURCE,
           },

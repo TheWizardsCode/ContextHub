@@ -63,6 +63,21 @@ description = "Open the Worklog tab (Worklog work item selection pane)."'
 LEGACY_BINDING='herdr plugin action invoke worklog-selection-list.open-worklist'
 NEW_BINDING='herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab'
 
+# ── Helper: best-effort config reload ──────────────────────────────────────
+# WL-0MSHND11O007FKOU: herdr loads its config once at startup; after we
+# modify the config file we ask the running server to reload so the new
+# keybinding is active immediately.  Fails gracefully when no server is
+# running or herdr is absent on PATH.
+try_reload_config() {
+  if command -v herdr >/dev/null 2>&1; then
+    if herdr server reload-config 2>/dev/null; then
+      echo "Notified herdr server to reload config — new keybinding is active."
+    else
+      echo "Warning: 'herdr server reload-config' failed — the new keybinding will be active after restarting the herdr server." >&2
+    fi
+  fi
+}
+
 # ── 0. Install herdr plugin dependencies ─────────────────────────────────
 # Ensures marked and @worklog/shared are available so the plugin does not
 # crash on startup (ERR_MODULE_NOT_FOUND). Uses npm ci when a lockfile
@@ -104,6 +119,11 @@ fi
 # ── 2. Insert/replace the keybinding (idempotent) ──────────────────────
 if grep -qF "${NEW_BINDING}" "${CONFIG_PATH}" 2>/dev/null; then
   echo "herdr keybinding already present: ${CONFIG_PATH}"
+  # WL-0MSHND11O007FKOU: reload even when the binding is already in the
+  # file — an earlier installer may have written it without activating it
+  # (the running server keeps startup keybindings in memory). Re-running
+  # the installer must therefore make the binding active.
+  try_reload_config
   exit 0
 fi
 
@@ -123,6 +143,7 @@ if old in text:
 PY
   then
     echo "Migrated herdr keybinding (prefix+l -> worklog-selection-list.open-podcast-editor-tab) in ${CONFIG_PATH}"
+    try_reload_config
     exit 0
   else
     echo "Warning: cannot migrate herdr config '${CONFIG_PATH}' — skipping keybinding update." >&2
@@ -150,3 +171,4 @@ if ! printf '%s\n' "${KEYBINDING_BLOCK}" >> "${CONFIG_PATH}"; then
 fi
 
 echo "Inserted herdr keybinding (prefix+l -> worklog-selection-list.open-podcast-editor-tab) into ${CONFIG_PATH}"
+try_reload_config

@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -22,6 +22,8 @@ import {
   readCodeFreezeStatus,
   readCodeFreezeStatusForRoot,
   isCodeFreezeActive,
+  writeCodeFreezeMarker,
+  clearCodeFreezeMarker,
   type CodeFreezeState,
 } from './code-freeze.js';
 import { setWorklogDir, resetWorklogDir } from './fetcher.js';
@@ -200,7 +202,91 @@ describe('readCodeFreezeStatusForRoot', () => {
   });
 });
 
-// ── Type-level sanity ─────────────────────────────────────────────────────
+// ── writeCodeFreezeMarker (WL-0MUDEGBGO00609RV) ─────────────────────
+
+describe('writeCodeFreezeMarker', () => {
+  it('writes an active marker with the documented shape', () => {
+    const path = writeCodeFreezeMarker({ worklogDir: tmpDir, reason: 'ship release' });
+    expect(path).toBe(join(tmpDir, CODE_FREEZE_MARKER_FILENAME));
+    const state = readCodeFreezeState(tmpDir);
+    expect(state.active).toBe(true);
+    expect(state.reason).toBe('ship release');
+    expect(typeof state.startedAt).toBe('string');
+    expect(Number.isNaN(new Date(state.startedAt!).getTime())).toBe(false);
+    expect(state.pid).toBe(process.pid);
+  });
+
+  it('honours explicit pid and startedAt overrides (deterministic tests)', () => {
+    writeCodeFreezeMarker({
+      worklogDir: tmpDir,
+      reason: 'test',
+      pid: 4242,
+      startedAt: '2026-01-02T03:04:05.000Z',
+    });
+    const state = readCodeFreezeState(tmpDir);
+    expect(state.pid).toBe(4242);
+    expect(state.startedAt).toBe('2026-01-02T03:04:05.000Z');
+  });
+
+  it('produces a marker the tri-state read reports as frozen', () => {
+    writeCodeFreezeMarker({ worklogDir: tmpDir, reason: 'ship' });
+    expect(readCodeFreezeStatus(tmpDir)).toBe('frozen');
+    expect(isCodeFreezeActive(tmpDir)).toBe(true);
+  });
+
+  it('is atomic: no leftover temp files after a successful write', () => {
+    writeCodeFreezeMarker({ worklogDir: tmpDir });
+    const leftovers = readdirSync(tmpDir).filter((f) => f.includes('.tmp-'));
+    expect(leftovers).toEqual([]);
+  });
+
+  it('overwrites an existing marker (idempotent)', () => {
+    writeCodeFreezeMarker({ worklogDir: tmpDir, reason: 'first' });
+    writeCodeFreezeMarker({ worklogDir: tmpDir, reason: 'second' });
+    expect(readCodeFreezeState(tmpDir).reason).toBe('second');
+  });
+
+  it('returns null when the worklog directory is not writable (fail-closed)', () => {
+    const missing = join(tmpDir, 'does-not-exist');
+    expect(writeCodeFreezeMarker({ worklogDir: missing })).toBeNull();
+  });
+
+  it('returns null when no worklog dir is available', () => {
+    resetWorklogDir();
+    expect(writeCodeFreezeMarker()).toBeNull();
+  });
+});
+
+// ── clearCodeFreezeMarker (WL-0MUDEGBGO00609RV) ──────────────────────
+
+describe('clearCodeFreezeMarker', () => {
+  it('removes an existing marker', () => {
+    writeCodeFreezeMarker({ worklogDir: tmpDir, reason: 'ship' });
+    expect(isCodeFreezeActive(tmpDir)).toBe(true);
+    expect(clearCodeFreezeMarker(tmpDir)).toBe(true);
+    expect(isCodeFreezeActive(tmpDir)).toBe(false);
+    expect(existsSync(join(tmpDir, CODE_FREEZE_MARKER_FILENAME))).toBe(false);
+  });
+
+  it('silently succeeds when the marker does not exist (idempotent)', () => {
+    expect(clearCodeFreezeMarker(tmpDir)).toBe(true);
+    expect(clearCodeFreezeMarker(tmpDir)).toBe(true);
+  });
+
+  it('returns true when no worklog dir is available', () => {
+    resetWorklogDir();
+    expect(clearCodeFreezeMarker()).toBe(true);
+  });
+
+  it('round-trips: write then clear leaves the project not-frozen', () => {
+    writeCodeFreezeMarker({ worklogDir: tmpDir });
+    expect(readCodeFreezeStatus(tmpDir)).toBe('frozen');
+    clearCodeFreezeMarker(tmpDir);
+    expect(readCodeFreezeStatus(tmpDir)).toBe('not-frozen');
+  });
+});
+
+// ── Type-level sanity ─────────────────────────────────────────────────
 
 describe('CodeFreezeState type', () => {
   it('has the documented shape', () => {

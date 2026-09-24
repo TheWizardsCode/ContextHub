@@ -4,6 +4,7 @@ const READY_TO_CLOSE_YES = 'Ready to close: Yes';
 const READY_TO_CLOSE_NO = 'Ready to close: No';
 const GUTTER_CHAR_RE = /[│┃┆┇╎╏]/u;
 const NON_PRINTABLE_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B\u200C\u200D\u2060]/u;
+const AUDIT_CONTENT_FINGERPRINT_PREFIX = 'Audit content fingerprint: ';
 
 export type AuditFirstLineInspection = {
   firstNonEmptyLine: string;
@@ -114,4 +115,27 @@ export function parseReadinessLine(auditText: string): 'Complete' | 'Partial' | 
   if (inspection.trimmedFirstNonEmptyLine === READY_TO_CLOSE_YES) return 'Complete';
   if (inspection.trimmedFirstNonEmptyLine === READY_TO_CLOSE_NO) return 'Partial';
   return 'Missing Criteria';
+}
+
+/**
+ * Extract a content fingerprint from audit text.
+ *
+ * The fingerprint is stored as a metadata line:
+ * `Audit content fingerprint: <sha256-hex>`.
+ * Returns the fingerprint value, or `null` when absent (e.g. legacy
+ * human-written audit texts).
+ *
+ * Used by `wl update --audit-text` to pick up a fingerprint embedded
+ * in the audit report without requiring a separate flag (WL-0MUBVH5S0008NQ9K).
+ */
+export function extractAuditFingerprint(auditText: string | null | undefined): string | null {
+  if (!auditText) return null;
+  for (const line of auditText.split('\n')) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith(AUDIT_CONTENT_FINGERPRINT_PREFIX)) {
+      const value = trimmed.slice(AUDIT_CONTENT_FINGERPRINT_PREFIX.length).trim();
+      return value || null;
+    }
+  }
+  return null;
 }

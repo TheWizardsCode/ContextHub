@@ -54,7 +54,7 @@ time), so the proxy stays fast until a fresh full idle window passes
 | Setting | Default | Clamp |
 |---|---|---|
 | `modeSwitchEnabled` | `true` | — (disabled ⇒ no scheduler task, no-op hook) |
-| `modeSwitchIdleThresholdMs` | `900000` (15 min) | floor `60000` |
+| `modeSwitchIdleThresholdMs` | `1800000` (30 min) | floor `60000` |
 | `modeSwitchPollIntervalMs` | `10000` | `[5000, 60000]` |
 
 The proxy URL is **not** a new setting — it reuses `downtimeProxyUrl`.

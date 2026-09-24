@@ -18,6 +18,7 @@ import {
   buildBackgroundLogPath,
   spawnBackgroundShell,
   spawnBackgroundPi,
+  formatBackgroundFailure,
   CAPTURE_TIMEOUT_MS,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
@@ -633,6 +634,29 @@ describe('createDowntimeDeps', () => {
   afterEach(() => {
     resetExecFileAsync();
     resetWorklogDir();
+  });
+
+  // Herdr list head wiring + extended dispatch window (WL-0MU6UL3GQ0015AA5):
+  // the default head is fetched with `wl next -n 30`; an explicit limit — used
+  // by the dispatcher's bounded window extension — is forwarded verbatim so
+  // the extension re-reads the SAME ranking path with a larger window.
+  it('getHerdrListHead forwards the requested limit to wl next and defaults to 30', async () => {
+    const mockExec = vi.fn().mockImplementation((_bin: string, args: string[]) => {
+      if (args.includes('next')) {
+        return Promise.resolve({ stdout: JSON.stringify({ success: true, results: [] }), stderr: '' });
+      }
+      return Promise.resolve({ stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' });
+    });
+    setExecFileAsync(mockExec as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+
+    await deps.getHerdrListHead('/repo');
+    await deps.getHerdrListHead('/repo', 60);
+
+    const nextCalls = mockExec.mock.calls.filter(([, a]) => (a as string[]).includes('next'));
+    expect(nextCalls).toHaveLength(2);
+    expect(nextCalls[0][1]).toEqual(expect.arrayContaining(['-n', '30']));
+    expect(nextCalls[1][1]).toEqual(expect.arrayContaining(['-n', '60']));
   });
 
   // Route-aware wl mock for the critical-tier lookup (F3): `wl list`
@@ -1612,10 +1636,23 @@ describe('createDowntimeDeps', () => {
     setExecFileAsync(mockExec as never);
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
     // The real deps resolve the Dispatcher anchor via the herdr CLI, which is
-    // absent in tests — inject a stub anchor so the C0 anchored spawn path is
-    // exercised without a live herdr session (WL-0MTR2HLLJ009PTPJ).
+    // absent in tests — inject stub anchors so the anchored spawn path is
+    // exercised without a live herdr session (WL-0MTR2HLLJ009PTPJ). Per-prefix
+    // tabs (C1, WL-0MTRQT482001SNXC): the worklog dispatch path resolves the
+    // candidate's prefix via getDispatcherTabAnchor (the legacy single anchor
+    // is retained only for scheduled-prompt spawns).
     const anchorResolver = vi.fn().mockResolvedValue({ paneId: 'wD:pTEST', workspaceId: 'wD' });
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn, anchorResolver as never);
+    const tabAnchorResolver = vi
+      .fn()
+      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:pTEST' });
+    const deps = createDowntimeDeps(
+      '/path/to/send-to-pi.sh',
+      'Map',
+      spawnFn,
+      anchorResolver as never,
+      undefined,
+      tabAnchorResolver as never,
+    );
     const cwd = makeTempDir();
 
     // Idle window 1: audit candidate selected and dispatched.
@@ -1623,9 +1660,11 @@ describe('createDowntimeDeps', () => {
     expect(first.dispatched).toBe(true);
     expect(first.kind).toBe('audit');
     expect(first.candidate?.id).toBe('WL-ONCE');
-    // The resolved Dispatcher anchor pane id is forwarded to send-to-pi.sh as
-    // --anchor (C0): the pane lands in the Dispatcher workspace.
-    expect(anchorResolver).toHaveBeenCalled();
+    // The resolved per-prefix tab anchor pane id is forwarded to send-to-pi.sh
+    // as --anchor (C1): the pane lands in the WL tab of the Dispatcher
+    // workspace. The legacy single anchor is NOT used on this path.
+    expect(tabAnchorResolver).toHaveBeenCalledWith(cwd, 'WL');
+    expect(anchorResolver).not.toHaveBeenCalled();
     const spawnArgs = (spawnFn as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string[] | undefined;
     expect(spawnArgs).toContain('--anchor');
     expect(spawnArgs).toContain('wD:pTEST');
@@ -2478,6 +2517,50 @@ describe('spawnBackgroundShell', () => {
     });
     exitHandler?.(1, null);
     expect(onExit).toHaveBeenCalledWith(1, null);
+  });
+});
+
+describe('formatBackgroundFailure (WL-0MUEBQLRD00288VV AC4)', () => {
+  it('returns null for a clean (exit 0) run so no toast is shown', () => {
+    expect(formatBackgroundFailure('wl audit-set X', 0, null, '/tmp/log')).toBeNull();
+  });
+
+  it('surfaces the command, exit code and log path on failure', () => {
+    const failure = formatBackgroundFailure(
+      'wl reviewed WL-1 false && wl audit-set WL-1 --ready-to-close yes',
+      1,
+      null,
+      '/tmp/herdr-background-logs/x.log',
+    );
+    expect(failure).not.toBeNull();
+    expect(failure!.title).toBe('Background command failed');
+    expect(failure!.body).toContain('wl audit-set');
+    expect(failure!.body).toContain('exit 1');
+    expect(failure!.body).toContain('/tmp/herdr-background-logs/x.log');
+  });
+
+  it('includes a short output excerpt when one is available', () => {
+    const failure = formatBackgroundFailure(
+      'wl audit-set WL-1 --ready-to-close yes',
+      1,
+      null,
+      '/tmp/log',
+      'table audit_results has no column named fingerprint',
+    );
+    expect(failure!.body).toContain('no column named fingerprint');
+    expect(failure!.body).not.toContain('/tmp/log');
+  });
+
+  it('reports a termination signal when there is no exit code', () => {
+    const failure = formatBackgroundFailure('wl x', null, 'SIGTERM', '/tmp/log');
+    expect(failure!.body).toContain('signal SIGTERM');
+  });
+
+  it('collapses whitespace and bounds the excerpt length', () => {
+    const failure = formatBackgroundFailure('wl x', 2, null, '/tmp/log', 'a\n\n  b '.repeat(200));
+    expect(failure!.body).toContain('a b');
+    // command + reason + 200-char excerpt bound
+    expect(failure!.body.length).toBeLessThan(300);
   });
 });
 

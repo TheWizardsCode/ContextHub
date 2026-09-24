@@ -24,10 +24,45 @@ and the coordination leader path `dispatchFromCoordination`) derives
 its candidate from the **Herdr list head** (first ordered item) and applies every remaining
 safety gate as a **sequential filter** on that ordered sequence (scheduled-prompt → code-freeze
 → producer-review gate (WL-0MTIAL65N004T22F) → dispatched-marker → free-slot minimums →
-active-audit single-flight → freshness/recency → CAS claim → spawn). If no head item passes
-the filters, the dispatcher reports "no candidate" rather than falling back to a second ranking.
+active-audit single-flight → freshness/recency → CAS claim → spawn). **Critical escalation
+(WL-0MU6UL3XY001M3VT):** before the normal sequence walk, open critical items in the head are
+escalated by `selectCriticalFirstCandidates` — a blocked critical item bypasses the NON-safety
+filters (dispatched-marker, review-queue hold) while the safety gates above still apply — so
+critical work is never starved by lower-priority items occupying the window (see the
+*Critical-first tier* section). If no head item passes the filters, the dispatcher reports
+"no candidate" rather than falling back to a second ranking.
 No `wl next`/database scoring change is required; the observable contract is
 "dispatcher == Herdr list head".
+
+### Extended dispatch window (WL-0MU6UL3GQ0015AA5)
+
+The Herdr head is **windowed**: mandatory items (critical + `completed`/`in_review`) are
+always included and consume window slots, and the remaining slots are filled from "other"
+items. When the mandatory set is large, the first genuinely dispatchable candidate can fall
+**outside** the window — the 2026-09-18 incident (a 30-item head whose only dispatchable
+item was the 22nd "other") left the machine with **zero dispatches for 31 h** while a
+healthy backlog existed. The dispatcher therefore **extends the dispatch window when the
+head yields no candidate**:
+
+- It re-reads the **same ranking path** (`fetchNextItems` → `selectWorkItems` →
+  `regroupWorkItems`) with a bounded larger count and skips the items already seen — a
+  **window extension, never a second ranking**. Ordering is unchanged; only more "other"
+  items become visible.
+- The extension is bounded by `DOWNTIME_DISPATCH_EXTEND_MAX` (`downtime-worker.ts`, 30): at
+  most `head length + 30` items are scanned per dispatch cycle (a default 30-item head
+  therefore scans at most 60 items).
+- The extension runs on **both** dispatch paths — `dispatchDowntimeWork` (direct dispatch)
+  and `computeMostImportantItem` (the coordination check-in offer) — so an instance never
+  offers "nothing" while its backlog holds dispatchable work.
+- The **TUI worklist is unchanged**: it keeps rendering exactly `browseItemCount` items
+  (clamped 1–50). The extension is dispatch-only.
+- **Fail-open:** a failed/empty extended lookup degrades to the original terminal reason, so
+  the extension can never convert a defined outcome into a new failure.
+
+Because of the extension, the **"no candidate" contract applies only to a genuinely empty
+dispatchable backlog** (or a backlog fully blocked by a safety gate) — not to an item hidden
+beyond the `browseItemCount` window. Other terminal reasons (code-freeze, `audit-in-flight`,
+`fresh-audit-skip`, `review-queue-hold`, `wl-error`) keep their existing semantics.
 
 **Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
 entry per instance — an **offer** of that instance's own Herdr list head (computed at the
@@ -143,6 +178,93 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    refresh their lease check (a cheap local file read) and their
    coordination entry.
 
+### Retired-stage recovery (WL-0MTYL7DX9000MZOH)
+
+The `in_progress` **stage** was removed from the valid stage set
+(WL-0MTOHS5B4001Y9FX) but legacy rows still carry it. Such an **open** row is
+dispatchable via the `risk-effort` recovery tier
+(`classifyItemForDispatch` maps `stage === 'in_progress'` → `risk-effort`,
+WL-0MTTSWCJR003OMN7). The recovery claim is race-safe and self-migrating:
+
+- `claimItem` (→ `claimWorkItem`) CASes on the item's **actual** retired
+  stage (`--if-status open --if-stage in_progress`) and atomically advances
+  the stored stage to the tier's target (`--stage plan_complete`).
+- `wl update` validates **only the fields the update writes**: an unchanged
+  legacy stage no longer aborts a status-only update (`Invalid stage
+  \"in_progress\"`), so the claim can never be mistaken for a hard
+  `wl-error` strike.
+- Recovery is **contained**: a retired-stage offer that dispatches (or loses
+  its CAS race → neutral `claim-failed`) never blocks the offers behind it —
+  the leader continues to the next entry (never a 60-min pause for one bad
+  row).
+- `wl doctor --fix` migrates leftover retired-stage rows to `plan_complete`
+  automatically when `plan_complete` is compatible with the row's status
+  (open / in-progress / blocked / deleted). A status that does not admit
+  `plan_complete` (e.g. `completed`) is left for manual review rather than
+  migrated into another invalid combination.
+
+### Failed-dispatch claim recovery (WL-0MT32F908002YFFA)
+
+The dispatch pipeline is CAS claim → marker write → spawn. Two failure
+points can leave the claim stranded with no agent working the item; both
+are now recovered automatically:
+
+- **`marker-write-failed`** (the marker write failed AFTER the successful
+  claim): `dispatchClaimedTier` calls `rollbackClaim` (→
+  `rollbackClaimWorkItem`) to reverse the CAS transition —
+  `--status <pre-claim status> --if-status in_progress [--if-stage
+  <pre-claim stage> --stage <pre-claim stage>]`. Plan/intake/implement/
+  risk-effort roll back to `open` at the original stage; the audit tier
+  rolls back to `completed`/`in_review` so the item stays in the audit
+  queue. A successful rollback reports the neutral outcome
+  `claim-rolled-back`; a stale/failed rollback (a concurrent human/agent
+  already moved the item) reports `marker-write-failed` and leaves the item
+  untouched (fail-closed).
+- **`spawn-failed`** (the pane never appeared after the marker was written):
+  the failure trace (`outcome: 'spawn-failed'`) is appended to the rolling
+  log, the claim is rolled back the same way, and the spawn-failed entry is
+  **excluded from every dispatched-marker reader** (`dispatchedItemIds`,
+  `dispatchedItemMarkers`, `dispatchedItemStages`, `recentDispatchedItemIds`) — a failed spawn is not
+  a success, so it never permanently excludes the item. The outcome remains
+  `spawn-failed` (not success); the item is re-selectable on the next idle
+  period (immediate re-dispatch — the CAS claim still serializes concurrent
+  panes).
+
+A STANDING success marker (no `outcome`) excludes the item for its tier **for a bounded lifetime**, so a dispatched item is never double-dispatched while its pane may still be running — and never stranded forever if it is not (see below).
+
+### Success-marker lifetime (WL-0MU6UL0RJ008IHGT)
+
+A marker is written **before** the pane spawns to prevent duplicate dispatch, and its readers exclude the item **while the item remains at the marker's dispatched-at stage**. That is correct for a healthy run (the agent advances the item and the stage change releases the marker), but a pane that spawns successfully and never advances the item — a crash, a manual close, a silent failure, or an agent that exits without progressing — left the marker standing **forever**. The item became permanently invisible to the tier that would retry it and could only leave the stage by completing the very step that would never be scheduled: a deadlock.
+
+`markerStillExcludes` (`packages/herdr/src/downtime-log.ts`) now applies a **staleness window** in addition to the stage change-guard. A success marker excludes its item only while BOTH hold:
+
+1. the item is **still at the marker's dispatched-at stage** (`itemStage === marker.stage`), and
+2. the marker is **fresh** — its age (`now − dispatchedAt`) is **≤** `downtimeMarkerStaleWindowMs`.
+
+Otherwise the marker is released and the item becomes re-selectable:
+
+- **Stage advanced** → released exactly as before (no behaviour change for healthy flow).
+- **Stage unchanged, marker stale** (age **exceeds** the window) → released, so a stranded item is re-dispatched within one idle cycle with no manual intervention.
+- **`dispatchedAt` missing or unparseable** → **fail-closed** (keeps excluding): freshness cannot be proven, so duplicate-dispatch protection is never weakened.
+
+| Tier(s) | Reader / mode | Missing-stage (legacy) marker |
+|---|---|---|
+| plan / intake / risk-effort | `dispatchedItemMarkers` + `stage-guard` | Released (historical change-guard semantics) |
+| audit / implement | `dispatchedItemMarkers` + `id-guard` | Keeps excluding while fresh, released by the age TTL |
+
+**Configuration.** `downtimeMarkerStaleWindowMs` is a plugin setting (default **24 h**, `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`), clamped by `clampDowntimeMarkerStaleWindowMs` to **[1 h, 7 days]**: the floor prevents the release firing while a freshly dispatched pane is plausibly still running; the ceiling bounds how long a stranded item can be excluded. It is re-read from settings every tick (live), wired through `DowntimeWorkerConfig.config().markerStaleWindowMs` into `dispatchDowntimeWork`, `computeMostImportantItem` and the coordination check-in.
+
+Spawn-failed entries (`outcome: 'spawn-failed'`) remain **non-excluding unconditionally** (a failed spawn is not a success), as before.
+
+**Scope note.** The staleness release is implemented in the marker reader
+(`dispatchedItemMarkers` / `markerStillExcludes`) and applied on the live
+production dispatch paths — `dispatchFromHerdrList` (direct Herdr-head
+dispatch), `computeMostImportantItem` (coordination offers) and the
+coordination check-in. The legacy per-tier lookup chain in
+`dispatchDowntimeWork` (retained for test compatibility, reached only when
+the Herdr head is genuinely empty — production-unreachable, see
+downtime-worker.ts) keeps the historical change-guard semantics unchanged.
+
 ### Dispatcher workspace anchor (C0 WL-0MTR01EU7005SYZG — anchor-by-ID)
 
 Automated downtime dispatches always spawn in a **dedicated Dispatcher workspace**
@@ -191,12 +313,80 @@ idle `Dispatcher` workspaces can be closed when their panes finish
 (`herdr workspace close <id>` one at a time); do not disturb active dispatch
 panes.
 
+### Per-project tabs in the Dispatcher workspace (C1 WL-0MTRQT482001SNXC)
+
+Within the single `Dispatcher` workspace, each **work-item prefix** gets its
+own tab so overnight runs for different projects never intermix in one grid.
+For a candidate whose id is `<PREFIX>-<hash>`, `<PREFIX>` is the substring
+before the first `-` (case preserved, no normalisation): `WL-…` → tab `WL`,
+`TCE-…` → tab `TCE`, `CG-…` → tab `CG`. Automated downtime dispatches only —
+manual `open-worklist` / `open-pi-agent` flows keep their current-pane/tab
+behaviour, and scheduled-prompt panes (no work item) keep the C0 single
+anchor.
+
+Invariant: every `dispatchClaimedTier` spawn for a worklog item resolves the
+per-prefix tab anchor and forwards its anchor pane id via `spawnAgentPane` →
+`buildDowntimePaneArgs` → `--anchor <paneId>` → `send-to-pi.sh`, so the pane
+lands in `<PREFIX>`'s tab. Verified with `herdr tab list` (the tab's label is
+exactly the prefix) and `herdr pane list` (each `Downtime triggered …` pane's
+`tab_id` equals the prefix tab's `tab_id`, `cwd` equals the item's worklog
+root).
+
+Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`, C1):
+
+- **Resolver:** `getDispatcherTabAnchor(cwd, deps, prefix)` — fast-path reuse
+  of a persisted live entry, else ensure the `Dispatcher` workspace (via
+  `getDispatcherAnchor`, reused not duplicated), then under the coordination
+  lock double-check the persisted map, adopt an existing matching tab, or
+  create one. Returns `{ workspaceId, tabId, paneId }` or `null` (fail-closed).
+- **Persistence:** machine coordination dir file
+  `downtime-dispatch-tab-anchors.json` —
+  `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }` (atomic
+  tmp+rename). This map is the authority for reuse. Missing file → empty map
+  (inheriting the legacy anchor's `workspaceId` when present); corrupt JSON →
+  `null` (re-provision).
+- **Provisioning:** `herdr tab create --workspace <id> --label <PREFIX>
+  --no-focus`; the returned `tab_id` + `root_pane.pane_id` are the tab anchor.
+  Runs **under the coordination lock** (`tryAcquireCoordLock` on
+  `~/.herdr/downtime/downtime-coordination.lock`) with a double-check inside
+  the lock, so concurrent first-dispatches for the same new prefix create the
+  tab exactly once.
+- **Validation:** the tab's anchor pane is checked with `isPaneAlive`
+  (`herdr pane get <id>`). A stale persisted entry (dead/missing pane) is
+  re-provisioned on the next dispatch for that prefix; a matching tab that
+  still hosts a live pane is adopted and re-persisted (e.g. after the anchor
+  file was lost).
+- **Resolution (wiring, C1):** `createDowntimeDeps` wires
+  `defaultDispatcherTabAnchorResolver` (`src/index.ts` —
+  `resolveDispatcherTabAnchor` with `createDispatcherAnchorDeps(cwd, herdrBin)`
+  inside a `try/catch` → `null`). `dispatchClaimedTier` derives
+  `candidate.id.split('-', 1)[0]` and, when the resolver is present, uses it
+  **instead of** the legacy single anchor; a `null` result → neutral
+  `{ dispatched: false, reason: 'anchor-unavailable' }` — **never a fallback
+  to the legacy single anchor, another tab, or the leader's pane**.
+- **CLI shape tolerance:** `tab list` / `tab create` / `pane list` parsers
+  accept `tab_id`/`tabId`/`id`, `pane_id`/`paneId`/`id`, `label`/`title`, a
+  nested `result` envelope, and log lines before the JSON. A parse failure is
+  **fail-closed** (`null` → `anchor-unavailable`) and logs the raw output — it
+  is never silently read as "no tab exists", which would duplicate tabs.
+
+Duplicate tabs: the persisted `byPrefix` map is the authority. If a prefix tab
+must be reset, close it (`herdr tab close <tabId>`) and delete or edit its
+entry in `downtime-dispatch-tab-anchors.json`; the next dispatch for that
+prefix re-creates the tab under the lock.
+
 ### No-candidate cooldown & the empty offer file
 
 The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
 (no poll, no idle tracking, no dispatch) for `downtimeNoCandidateCooldownMs`
 (default 60 min) after a genuinely empty backlog, resetting the idle
-tracker so a fresh full idle period is required after the pause. In
+tracker so a fresh full idle period is required after the pause. The
+**extended dispatch window** (WL-0MU6UL3GQ0015AA5, see *Ranking contract*
+above) guarantees a `no-candidate` outcome means the *whole* bounded
+dispatch backlog — not merely the initial head — held nothing dispatchable:
+the window is extended at least to the first dispatchable candidate, up to
+`DOWNTIME_DISPATCH_EXTEND_MAX` additional items, before `no-candidate` is
+reported. In
 coordination mode (WL-0MTEZ4XZJ006Y9U7) the shared runtime file
 (`.worklog/downtime-coordination.json`) is an **offer list, not the
 backlog**: the leader removes each entry after dispatching (see step 4
@@ -294,6 +484,116 @@ desired it must be a separate, explicit mechanism (follow-up, out of scope here)
 > coordination tier ordering; the freeze split-by-skill rule below still
 > applies verbatim as a sequential filter (frozen → audit/implement offers
 > and candidates are skipped, plan/intake still dispatch).
+
+**Critical escalation in the Herdr-head contract (WL-0MU6UL3XY001M3VT).**
+Critical items are mandatory-always in the Herdr head, but a *non-safety*
+filter can still exclude one from dispatch — most notoriously a **stale
+dispatched marker** (a previous dispatch was rolled back / the implementing
+agent aborted and reset the item to `open` while the standing marker
+remained). Before Herdr-head migration (WL-0MTK1ILM2009QYB2) the legacy
+critical-first tier re-looked-up the highest-priority open critical item
+from outside the head; that tier is unreachable today because the head is
+never empty. The result was silent starvation: a critical item blocked by a
+stale marker (or the review-queue hold) sat indefinitely while
+lower-priority work consumed each idle window (2026-09-18 RCA: three open
+critical items undispatched for 30+ hours).
+
+What the contract now guarantees:
+
+1. **Non-safety filters are bypassed for critical work.** Within one idle
+   cycle, the direct dispatcher (`dispatchFromHerdrList`) and the
+   coordination offer computation (`computeMostImportantItem`) both run a
+   **critical-first scan** over the Herdr head's open critical items
+   (`selectCriticalFirstCandidates`) — deterministic lowest-`sortIndex`
+   first, matching the historical critical-tier ordering — and dispatch /
+   offer the first one that passes. The dispatched-marker exclusion and the
+   review-queue depth hold are deliberately **not** applied to it (they are
+   the non-safety filters named in AC1); the pre-dispatch CAS claim still
+   serialises concurrent panes.
+2. **Safety gates still block.** The scan applies ONLY the safety gates:
+   `needsProducerReview === true` excludes the candidate; the code-freeze /
+   ambiguous split-by-skill rule pauses audit/implement-kind candidates
+   while plan/intake/risk-effort prep still dispatches (Q1); per-tier
+   free-slot minimums gate the dispatch path; the CAS claim and
+   per-process single-flight guards are unchanged. The active-audit
+   single-flight gate remains audit-tier scoped (an open critical item is
+   never audit-kind, so matching the legacy tier ordering it escalates even
+   while an audit is in flight).
+3. **No second ranking is introduced (AC3).** Scanning never re-ranks
+   against a separate `wl list` lookup — candidates come only from the
+   Herdr head, and only the critical group is re-ordered (by `sortIndex`).
+   `computeMostImportantItem` returns the critical item as the instance's
+   offer, so the coordination leader (which validates offers at
+   dispatch-time without a marker check) dispatches it.
+4. **A critical `completed`/`in_review` (audit-kind) item is out of the
+   scan's scope** — it is handled by the normal audit tier, so the
+   audit-freshness and active-audit gates keep acting on it unchanged.
+
+**In-flight guard — the marker bypass is bounded, not unconditional
+(WL-0MUBEZ6PE002WLP4 / F3 WL-0MUBVKXQJ000L8EO).** The unconditional bypass
+above traded starvation for a *duplicate-dispatch window*: a critical item
+whose `status` reverted to `open` at its marker's stage (H5 — an aborted
+`implement.py start` reset, a `wl reviewed <id> true` release, a rolled-back
+dispatch) while its dispatch pane was still live was re-selected by the
+critical-first scan, the CAS claim succeeded (the DB genuinely said `open`),
+and a **second pane spawned for the same in-flight item** (H1+H5, confirmed by
+the F1 RCA). The critical-first loop (and the normal loop for critical
+candidates) now consults an **item-scoped** in-flight signal before
+escalating, via `evaluateCriticalFirstGuard`:
+
+| # | Condition | Decision | Reason |
+| --- | --- | --- | --- |
+| 1 | a live `working` downtime pane whose label suffix is the item id | **skip** | `in-flight-pane` |
+| 2 | pane query succeeded and found no such pane | **escalate** | `no-live-pane` |
+| 3 | pane query failed/unparseable, marker fresh (age ≤ `markerStaleWindowMs`) | **skip** | `in-flight-unverified` |
+| 3b | pane query failed/unparseable, marker stale/absent | **escalate** | `marker-stale-escalation` |
+
+This is deliberately **neither blind fail-closed nor blind fail-open**: a
+duplicate is impossible while a pane is proven in-flight, and escalation is
+never permanently starved (a pane-query outage only defers it until the
+marker goes stale — bounded by `markerStaleWindowMs`, default 24 h, clamped
+1 h – 7 d; the same bound documented under "Rolling log trimming"). It is
+benign in practice because pane spawn itself needs herdr, so a persistent
+pane-query outage also prevents dispatch.
+
+The guard is **item-scoped and gated on a non-terminal (`working`) agent** —
+it never uses the global running-pane count as a dispatch limit (the
+WL-0MU2EP6JL006A1U3 invariant is preserved: `count` remains the owner-lease
+qualifier only). Panes whose agent is absent, `done`, or `exited`, and idle
+or not-yet-started agents, do **not** block dispatch (no idle-pane
+deadlock).
+
+The signal is resolved **once per idle cycle** from the same `herdr pane
+list` read already used for the owner-lease qualifier
+(`getRunningDowntimePanes`, now returning the parsed `records` alongside
+`count`/`paneIds`) and threaded into both dispatch loops. A resolver failure
+or an unwired dep resolves `{available:false}` and the decision table falls
+back to the marker TTL — the resolver never throws into the dispatch loop.
+
+The guard covers **both dispatch paths** (AC5 names both): the direct
+Herdr-head dispatcher above, and the **coordination path** (WL-0MUBVKYH5009CGBI
+/ F4). On the coordination path the item-scoped signal is resolved **per offer
+root** — never the leader's root — preserving the cross-root invariant
+(WL-0MTQ14W7L003II5A):
+
+- `computeMostImportantItem` (the owner's check-in offer) skips an in-flight
+  critical item and offers its next dispatchable head item instead, returning
+  `{ok:true, inFlightHold:true}` when ONLY in-flight criticals remain (a
+  non-empty backlog — never `noCandidate`, so no cooldown);
+- `dispatchFromCoordination` (the leader) **re-checks at dispatch time** and
+  rejects an offer whose pane appeared after the offer was computed (the
+  TOCTOU gap), keeping the entry — the offer is still valid once the pane
+  finishes. When every surviving offer is in-flight the terminal reason is the
+  neutral `in-flight-pane` (never a strike/cooldown).
+
+The leader-side re-check blocks only a **proven** live working pane; an
+unavailable query does not stall all coordination dispatch (the owner's offer
+computation already applied the marker-TTL fallback).
+
+> **Post-fix verification:** the repeatable duplicate-dispatch scan and its
+> results are recorded in
+> [downtime-dispatcher-post-fix-verification.md](downtime-dispatcher-post-fix-verification.md)
+> (WL-0MUBVL5770009DO9 / F7).
 
 **Critical-first dispatch (WL-0MT3FM8VA005XBHE):** before the non-critical
 implement/plan/intake tiers, the leader looks up the highest-priority open
@@ -406,6 +706,69 @@ dispatch call — no per-worklog duplication (F5 WL-0MTII48OV008P2QU;
 WL-0MT50LKAK001EF5Q single cap source). v1 scope is single-machine; a
 multi-machine (real flock/NFS) extension is future work.
 
+### Owner lease, pane liveness & contention feedback (WL-0MTYZXSLN008HZOW;
+    pane-count cap removed by WL-0MU2EP6JL006A1U3)
+
+**Problem:** with a single-slot local LLM the worker over-dispatched agent
+panes because the free-slot gate used the instantaneous per-tick proxy poll —
+an agent on a tool call (wl, bash, tests) left the slot "free", so multiple
+`Downtime triggered` panes queued on one slot (`contention_queued_count` 6,
+~78 s cumulative queue time).
+
+**Fix — the parts that remain (lease/ownership/contention):**
+
+1. **Owner-lease gate (AC2)** — a non-null Local Proxy owner lease
+   (`local_owner_session_id` / `local_owner_lease_remaining_seconds`) counts
+   as "slot busy" for the dispatch decision when the worker has a live
+   dispatch pane; only a truly unowned slot is dispatchable. The lease
+   signal **self-heals**: proxy dispatch leases carry an `expires_at`
+   (~180 s, `_get_lease_timeout_seconds`) refreshed on activity, are marked
+   inactive when a stream ends, and expired records are cleaned up — so an
+   idle-but-open pane stops holding a slot.
+   Dispatch outcome reason: `slot-owned`.
+2. **Per-slot owner tracking (AC5)** — `LlamaSlot` carries an optional
+   `owner_session_id`; `countFreeUnownedSlots` excludes owned slots from the
+   free count and the per-slot idle tracker resets an owned slot's timer, so
+   a slot with a live lease is never considered available for a new pane.
+   A single idle-but-owned slot (count-based path) fails closed via the
+   derived `local_lease_active`.
+3. **Contention feedback (AC6)** — the proxy's LIVE `contention_queue_depth`
+   is parsed; while > 0 the dispatcher backs off with outcome reason
+   `proxy-contention` until the queue drains. The sibling
+   `contention_queued_count` is a CUMULATIVE counter (never decremented;
+   resets only on a proxy restart) and is telemetry only — it must never
+   gate dispatch (WL-0MU1DWXO600153OI: using it wedged dispatch permanently
+   after the first queue event, even with depth 0).
+
+These gates are neutral refusals — never a strike, never a cooldown — and
+apply to BOTH dispatch paths (coordination leader and legacy direct chain).
+The in-flight pipeline guard (`dispatch-in-flight`) remains as a same-process
+safeguard bounding PIPELINES (claim → marker → spawn), not live panes.
+
+**No client-side pane cap (WL-0MU2EP6JL006A1U3).** The
+`downtimeMaxRunningPanes` setting (and its legacy alias
+`downtimeMaxConcurrentDispatches`) has been **removed**, together with
+`DEFAULT_DOWNTIME_MAX_RUNNING_PANES` / `clampDowntimeMaxRunningPanes`. It
+counted *live panes* via `deps.getRunningDowntimePanes` and refused dispatch
+at `running-panes >= cap` (reason `running-pane-cap`). Because dispatched
+panes deliberately **stay open until an operator closes them**, that count
+never released and the worker dispatched exactly one item per pane-close —
+overnight dispatch stalled silently (a neutral refusal logs nothing).
+
+**The local LLM idle check is the sole concurrency limiter.** Each running
+agent holds a proxy slot/lease, so the free-slot idle gate already bounds
+real concurrency; adding a pane count on top is both redundant and harmful.
+Consequences of the removal:
+
+- `getRunningDowntimePanes` / `countRunningDowntimePanes` remain, but feed
+  **only** the `slotOwned` qualifier ("does this worker have a pane of its
+  own?") so an operator's own lease does not block spare-capacity dispatch.
+- A failed liveness query is now **fail-open**: it no longer blocks dispatch
+  (a `herdr pane list` hiccup must not silently stop the dispatcher); the
+  proxy's own lease/ownership signals still gate slot capacity.
+- A settings file still carrying either removed key loads cleanly and the key
+  is ignored.
+
 ### Migration & legacy retirement (F6 WL-0MTII4CWT00452HU, parent AC5)
 
 The machine dir `~/.herdr/downtime/` (or `HERDR_COORDINATION_DIR`) is
@@ -440,18 +803,22 @@ status refresh unchanged at 30s.**
 | Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.ts`, `leader-election.ts` |
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
+| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
+| (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin
 settings file (`~/.config/herdr/worklog-plugin.json`,
 `downtimePollIntervalMs` / `downtimeIdleThresholdMs`) and are clamped on
 load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
-`downtime-worker.ts`).
+`downtime-worker.ts`). The success-marker staleness window
+(`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped on load
+(`clampDowntimeMarkerStaleWindowMs`).
 
 ## Files & runtime artifacts
 
 | Path | Purpose |
 |---|---|
-| `packages/herdr/src/dispatcher-anchor.ts` | Dispatcher anchor provisioning (C0) — `getDispatcherAnchor`, persistence + lock + aliveness |
+| `packages/herdr/src/dispatcher-anchor.ts` | Dispatcher anchor provisioning (C0) — `getDispatcherAnchor` + per-prefix `getDispatcherTabAnchor` (C1), persistence + lock + aliveness |
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
@@ -460,6 +827,7 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 | `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` |
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |
 | `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher anchor `{ paneId, workspaceId }` (machine dir, C0) |
+| `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` | Persisted per-prefix tab map `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }` (machine dir, C1) |
 | `~/.herdr/downtime/downtime-leader.lock` | Leader lock file (machine dir, `O_CREAT\|O_EXCL`) |
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) |
@@ -471,7 +839,8 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 ## Troubleshooting / operations
 
 - **Pane landed in project workspace (e.g. Podcast `wR`) instead of Dispatcher:** the dispatcher invariant is anchor-by-ID — every automated pane must split the persisted anchor pane. Check (a) `~/.herdr/downtime/downtime-dispatch-anchor.json` exists and `herdr pane get <paneId>` is alive and `herdr workspace list` shows its `workspaceId` labelled `Dispatcher` (stale/missing → delete the file and let the next dispatch re-provision under the coordination lock); (b) the running herdr plugin loads this repo's code — `herdr plugin list` must show `worklog-selection-list` → `local:/…/packages/herdr` (stale `dist/` or a worktree link dangles the plugin; rebuild with `npm run build` in `packages/herdr` / re-link with `herdr plugin link <main-checkout>/packages/herdr/herdr-plugin.toml`); (c) duplicate `Dispatcher` workspaces are harmless — the anchor file is the authority, not the label count — close surplus idle ones with `herdr workspace close <id>` (one at a time) without disturbing active `Downtime triggered …` panes. Incident RCA 2026-09-07: the two Podcast `wR` dispatches (`wR:p1X` CG-0MTR7DLMY 13:03:57, `wR:p1Y` WL-0MTOHS5B4001Y9FX 13:10:14) pre-dated the anchor wiring commit `69ae52f2` (14:45) and the local `packages/herdr/dist/` rebuild (15:17) — the live code at incident time had no anchor resolution path (F1 `893d6d22` added the module only, F2 wired it), so the leader fell back to the legacy `pane current` split. After the rebuild the anchor persisted at `~/.herdr/downtime/downtime-dispatch-anchor.json` (observed 15:57 `wZ:p1` → later `w0:p1`) and all subsequent downtime panes landed in `Dispatcher` (`wZ`/`w0`, including this work item's own dispatch in `wZ:p4`).
-- **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** the Dispatcher anchor could not be provisioned — `getDispatcherAnchor()` returned `null` (fail-closed, never a project-workspace fallback). Check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock` held by another dispatch), `herdr workspace create --label Dispatcher` JSON parse (shape drift across herdr versions), and `herdr pane get <anchor>` RPC health. The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty `downtime-dispatch-anchor.json` or unreadable machine dir is treated as missing (never a crash).
+- **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** the Dispatcher anchor could not be provisioned — `getDispatcherAnchor()` / `getDispatcherTabAnchor()` returned `null` (fail-closed, never a project-workspace fallback). Check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock` held by another dispatch), the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <PREFIX> --no-focus` JSON parse (shape drift across herdr versions), and `herdr pane get <anchor>` RPC health. The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty/missing anchor file or unreadable machine dir is treated as missing (never a crash).
+- **Pane landed in the wrong tab/workspace (e.g. a `TCE-…` pane in the `WL` tab, or default `1` instead of `<PREFIX>`):** the per-prefix tab invariant is anchor-by-ID. Check (a) `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` has an entry for the item's prefix whose `paneId` is alive (`herdr pane get <paneId>`) and whose `tabId` still exists (`herdr tab get <tabId>`); (b) `herdr tab list --workspace <Dispatcher id>` shows a tab labelled exactly `<PREFIX>` (prefix is the id substring before the first `-`, case preserved — a `CG-…` item routes to `CG`, not `TCE`); (c) the running plugin loads this repo's code (`herdr plugin list` → `worklog-selection-list` → `local:/…/packages/herdr`; rebuild with `npm run build` in `packages/herdr` after pulling). To re-provision a prefix, close its tab (`herdr tab close <tabId>`) and delete/edit its `byPrefix` entry — the next dispatch re-creates it under the coordination lock. Duplicate tabs are harmless but stale: the persisted map is the authority.
 - **No dispatches happening:** confirm a leader is elected (lease file
   present + recent `lastUpdated` refresh), the proxy reports idle for ≥ 60 s
   continuously, and the coordination list has offers. Check
@@ -530,12 +899,55 @@ optional — only fields with actual data are serialized.
 | `command` | string | The CLI command that failed (e.g. `wl next <stage>`, `wl list --priority critical`) |
 | `probeContext` | string | One of `"coordination-probe"` (shared coordination file probe) or `"dispatch-cli"` (dispatch-tier `wl` call) |
 
+### Dispatch marker fields: selection provenance + pane id (F6)
+
+Successful dispatch marker entries (and their post-spawn enrichment entry)
+carry two additional provenance fields (WL-0MUBVL251006JAQ0 / F6), so the next
+duplicate-dispatch RCA is answerable from the log alone:
+
+| Field | Type | Description |
+|---|---|---|
+| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `scheduled-prompt`, or `legacy-tier` |
+| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `scheduled-due`, `critical-tier` |
+| `paneId` | string \| null | (Enrichment entry only) the resolved dispatch pane/session id, or `null` when it could not be resolved — never a guess |
+| `enrichment` | `true` | (Enrichment entry only) discriminator marking a post-spawn enrichment rather than a fresh dispatch |
+
+**Post-spawn enrichment (AC6.2/AC6.3).** The pane id is not available before
+the pane spawns (the marker is written BEFORE the spawn, fail-closed), so a
+second **best-effort** entry is appended after a successful spawn. It copies
+`itemId`/`kind`/`stage`/`dispatchedAt` verbatim from the success marker, so the
+dispatched-marker readers (last-entry-wins, stale-release, fail-closed
+staleness) see an **unchanged** marker state. Appending is fail-open: a missing
+dep, a thrown resolver, or an unresolved pane never blocks, rolls back, or
+un-marks the dispatch (an unresolved pane is recorded as `paneId: null`).
+Legacy entries without the new fields parse and behave exactly as before, and
+`scan_duplicate_dispatches.py` excludes `enrichment: true` entries from its
+dispatch count (they are not a second dispatch) while reporting
+`selectionPaths` / `selectionReasons` / `paneIds` for post-fix evidence.
+
 ### Rolling log trimming
 
 The log file is bounded to the most recent 100 entries
 (`DOWNTIME_LOG_MAX_ENTRIES`). Entries are appended; when the file exceeds
 100 lines the first lines are truncated. All new schema fields are
 preserved during trimming.
+
+**Atomic replacement (WL-0MUBVL1FI0071WN3 / F5).** Both the dispatch log
+(`downtime-dispatches.log`) and the coordination log
+(`downtime-coordination.log`) are written **atomically**: `appendRollingJsonl`
+writes the full new content to a temporary sibling file
+(`.<file>.<pid>.<random>.tmp` in the same directory, so the rename stays on one
+filesystem) and `rename`s it over the target. A concurrent reader — in
+particular the dispatched-marker readers that scan the log by kind — therefore
+sees either the whole previous file or the whole new one, **never** a
+truncated, empty, or partially written log. Previously the writer did
+`readFile → push → trim → writeFile` directly on the target, so a reader could
+momentarily observe an empty file and lose a marker (a contributing factor in
+the duplicate-dispatch RCA, WL-0MUBEZ6PE002WLP4 / H3). The temp file is removed
+on failure before the error is rethrown and the target is left untouched;
+trimming to `DOWNTIME_LOG_MAX_ENTRIES` and the throw-on-I/O-failure
+(fail-closed) contract are unchanged, and the JSONL format stays
+human-readable.
 
 ### Backward compatibility
 
@@ -556,6 +968,11 @@ export interface DowntimeLogEntry {
   command?: string;
   probeContext?: string;
   attempt?: number;
+  // Enriched (WL-0MUBVL251006JAQ0 / F6) — selection provenance + enrichment
+  selectionPath?: string;
+  selectionReason?: string;
+  paneId?: string | null;
+  enrichment?: true;
 }
 ```
 

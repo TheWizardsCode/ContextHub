@@ -130,3 +130,42 @@ in `packages/herdr/src/index.ts` (`createDowntimeDeps`) failed fast.
   `runWl` for the TUI refresh path (same busy-timeout pragmas).
 - Monitor `.worklog/downtime-dispatches.log` for post-fix `error` distribution
   to confirm the transient class.
+
+## Update (2026-09-12): second, dominant root cause — retired `in_progress` stage
+
+Follow-up investigation (WL-0MTYL7DX9000MZOH) found that the recurring
+`Invalid stage \"in_progress\"` strikes observed on 2026-09-11 were caused by a
+**retired stage value**, not (only) transient `SQLITE_BUSY`:
+
+1. The `in_progress` **stage** was removed from the valid set
+   (WL-0MTOHS5B4001Y9FX) but legacy rows across several roots still carried
+   it — 27 rows, of which 7 were `status=open` (the \"poison set\").
+2. `classifyItemForDispatch` maps `stage === 'in_progress'` → `risk-effort`
+   (WL-0MTTSWCJR003OMN7 recovery path), so the row was offered and dispatch
+   attempted.
+3. The CAS claim (`wl update <id> --status in_progress --if-status open
+   --if-stage plan_complete`) was rejected by the status/stage validator:
+   because no `--stage` was written, it re-validated the row's **current**
+   stage and threw `Invalid stage \"in_progress\"`.
+4. That surfaced as a hard `wl-error` strike; three strikes → 60-min pause;
+   the row stayed at the head of its root's Herdr list and was re-offered,
+   making the pause self-perpetuating.
+
+**Remediation:**
+
+- **Data (applied 2026-09-12):** the 7 `open` + `in_progress` rows were
+  normalised to `plan_complete`. No `open` + `in_progress` rows remain; the
+  remaining retired-stage rows (20) are `deleted`/`in-progress` status and are
+  not dispatchable. The dispatcher has been healthy since
+  2026-09-11T08:09Z (multiple dispatches through 2026-09-14T01:17Z, zero
+  `pausing dispatch` entries — a >2h pause-free window).
+- **CLI (WL-0MTYL7DX9000MZOH):** `wl update` now validates only the fields an
+  update actually writes — an unchanged legacy stage can never abort a
+  status-only update.
+- **Dispatcher:** `claimWorkItem` accepts a `migrateStage`; the risk-effort
+  recovery claim CASes on the item's **actual** retired stage and atomically
+  migrates it to `plan_complete`. A lost race resolves neutral `claim-failed`
+  (never a strike), and the leader continues to the next offer (containment).
+- **Tooling:** `wl doctor --fix` auto-migrates retired-stage rows to
+  `plan_complete` when compatible with the row's status (see
+  `docs/dev/downtime-dispatcher.md` → Retired-stage recovery).

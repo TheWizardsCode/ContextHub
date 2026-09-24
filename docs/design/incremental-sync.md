@@ -127,6 +127,12 @@ can never advance the baseline past data that was never published.
 | `edge` | `edge.createdAt > watermark.edges` |
 | `audit_result` | `audit.auditedAt > watermark.audit_results` |
 
+> **activityAt is not a workitem dirty key (WL-0MUBVH6JM0093KVM).** Comment
+> activity bumps `workitems.activityAt` only, deliberately leaving `updatedAt`
+> (and therefore the workitem dirty predicate) untouched. Comment activity still
+> reaches peers through the separate `comment` record, which has its own
+> watermark.
+
 > **Design note:** comments are treated as immutable-by-`id` (the merge
 > dedupes by `id`), so `createdAt` is the correct dirty key — a comment that
 > hasn't changed since the last export should not be re-emitted. If a future

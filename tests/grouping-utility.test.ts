@@ -582,7 +582,8 @@ describe('compareGroupableItems — within-group ordering', () => {
 import { inReviewBucket, compareInReviewItems } from '../src/commands/grouping.js';
 
 describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
-  // isAuditFresh(auditedAt, updatedAt) → auditedAt > updatedAt - 60s
+  // isAuditFresh(auditedAt, updatedAt): auditedAt within
+  // AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS of updatedAt → fresh
   // So auditedAt === updatedAt is fresh; auditedAt 10m before updatedAt is stale.
   const updatedAt = '2026-01-10T10:00:00.000Z';
   const freshAuditedAt = '2026-01-10T10:00:00.000Z'; // same instant → fresh

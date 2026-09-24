@@ -33,6 +33,7 @@ import depCommand from './commands/dep.js';
 import reSortCommand from './commands/re-sort.js';
 import doctorCommand from './commands/doctor.js';
 import reviewedCommand from './commands/reviewed.js';
+import interviewCommand from './commands/interview.js';
 import searchCommand from './commands/search.js';
 import unlockCommand from './commands/unlock.js';
 import auditCommand from './commands/audit.js';
@@ -318,6 +319,7 @@ const builtInCommands = [
   reSortCommand,
   doctorCommand,
   reviewedCommand,
+  interviewCommand,
   searchCommand,
   unlockCommand,
   auditCommand,
@@ -350,6 +352,7 @@ const builtInCommandNames = new Set([
   're-sort',
   'doctor',
   'reviewed',
+  'interview',
   'search',
   'unlock',
   'audit',

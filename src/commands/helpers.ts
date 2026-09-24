@@ -841,6 +841,10 @@ export interface GroupableItem {
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
+  /** Stored content fingerprint from the audit result (WL-0MUBVH5S0008NQ9K). */
+  fingerprint?: string | null;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
 }
 
 /**

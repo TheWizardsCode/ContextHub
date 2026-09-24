@@ -5,12 +5,14 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { UpdateOptions } from '../cli-types.js';
 import type { UpdateWorkItemInput, WorkItem, WorkItemStatus, WorkItemPriority, WorkItemRiskLevel, WorkItemEffortLevel, DemotedParent, RevertedItem } from '../types.js';
+import { isAutomationAuthoredChild } from '../automation.js';
+import { recordDemotionAuditTrail } from '../demotion-audit.js';
 import { promises as fs } from 'fs';
 import { humanFormatWorkItem, resolveFormat, extractFilePaths } from './helpers.js';
 import { canValidateStatusStage, validateStatusStageCompatibility, validateStatusStageInput } from './status-stage-validation.js';
 import { normalizeActionArgs } from './cli-utils.js';
-import { buildAuditEntry, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
-import { normalizeStatusValue } from '../status-stage-rules.js';
+import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
+import { loadStatusStageRules, normalizeStatusValue } from '../status-stage-rules.js';
 import { submitToOpenBrain } from '../openbrain.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 
@@ -41,6 +43,7 @@ export default function register(ctx: PluginContext): void {
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--audit-file <file>', 'Read audit text from a file')
+    .option('--audit-fingerprint <fingerprint>', 'Content fingerprint for freshness gate when persisting audit (WL-0MUBVH5S0008NQ9K)')
     .option('--do-not-delegate <true|false>', 'Set or clear the do-not-delegate tag (true|false|yes|no)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-re-sort', 'Skip automatic re-sort after the update')
@@ -50,14 +53,14 @@ export default function register(ctx: PluginContext): void {
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','doNotDelegate','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync']);
       // Robust detection of --no-re-sort that accepts multiple forms Commander
       // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
       const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','doNotDelegate','prefix','noReSort','reSortSync'
+        'title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync'
       ];
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
@@ -266,6 +269,14 @@ export default function register(ctx: PluginContext): void {
           // --audit-text doesn't clobber the machine-readable audit payload.
           const existingAudit = db.getAuditResult(normalizedId);
           const prevRawOutput = existingAudit?.rawOutput ?? null;
+          // Extract fingerprint: explicit flag takes priority, then embedded
+          // in the new audit text (from the audit skill's report line). A new
+          // audit without a fingerprint must NOT inherit the previous one —
+          // that would mark changed content as fresh.
+          const fingerprint =
+            options.auditFingerprint ??
+            extractAuditFingerprint(auditEntry.text) ??
+            null;
           try {
             db.saveAuditResult({
               workItemId: normalizedId,
@@ -274,6 +285,7 @@ export default function register(ctx: PluginContext): void {
               summary: auditEntry.text,
               rawOutput: prevRawOutput,
               author: auditEntry.author,
+              fingerprint,
             });
             auditWritten = true;
             auditEntryForOutput = auditEntry;
@@ -319,10 +331,29 @@ export default function register(ctx: PluginContext): void {
           let normalizedStage = current.stage;
           let warnings: string[] = [];
           try {
+            // Validate only the fields this update writes (WL-0MTYL7DX9000MZOH):
+            // a pre-existing stage the caller is NOT changing must never abort
+            // the update. The removed `in_progress` stage is still present on
+            // legacy rows; re-validating it on a status-only claim made
+            // `wl update` fail with `Invalid stage "in_progress"`, which the
+            // downtime dispatcher counted as a hard wl-error strike and
+            // cascaded into a 60-minute pause. When the stage is unchanged we
+            // validate the stored value only if it is a recognised stage
+            // (so genuine status/stage compatibility is still enforced for
+            // known data); an unrecognised stored stage is left untouched.
+            const stageRules = loadStatusStageRules(config);
+            const stageBeingWritten = stageCandidate !== undefined;
+            const storedStageRecognised =
+              typeof current.stage === 'string' &&
+              stageRules.stageValues.includes(current.stage);
             const validation = validateStatusStageInput(
               {
                 status: statusCandidate ?? current.status,
-                stage: stageCandidate ?? current.stage,
+                stage: stageBeingWritten
+                  ? stageCandidate
+                  : storedStageRecognised
+                    ? current.stage
+                    : '',
               },
               config
             );
@@ -488,13 +519,22 @@ export default function register(ctx: PluginContext): void {
         // Reparenting: a parent cannot stay `completed`/`in_review` while a
         // new, uncompleted child is attached to it. Demote the target parent
         // to `open`/`plan_complete` so its lifecycle state stays consistent.
+        //
+        // Exception: automation-authored telemetry children (test-failure /
+        // triage-bot) may be attached for visibility, but they must NOT rewind
+        // a finished parent's lifecycle (WL-0MTWU4XUD0001ALR).
         let demotedParent: DemotedParent | null = null;
-        if (updates.parentId) {
+        if (updates.parentId && !isAutomationAuthoredChild(item)) {
           try {
             demotedParent = db.demoteParentOnChildAdded(updates.parentId);
           } catch (err) {
             // Best-effort: a demotion failure must not abort the update.
             console.error(`Warning: failed to demote parent ${updates.parentId}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          // Record why the parent was reopened so a revival is explicable
+          // (WL-0MTWU4Y82001B3UH). Best-effort, never aborts the update.
+          if (demotedParent) {
+            recordDemotionAuditTrail(db, demotedParent, item);
           }
         }
 

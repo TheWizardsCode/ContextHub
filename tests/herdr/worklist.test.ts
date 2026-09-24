@@ -293,6 +293,7 @@ describe('StageFilter', () => {
       'in_progress',
       'in_review',
       'completed',
+      'done',
     ]);
   });
 
@@ -309,12 +310,9 @@ describe('StageFilter', () => {
 
   it('StageFilter wraps around', () => {
     const filter = new StageFilter();
-    // Cycle through all stages
-    for (let i = 0; i < 6; i++) filter.cycle();
-    // Should be back at null (off) after wrapping
-    // Actually, let's test: after setting to 'completed', next cycle goes to null
-    filter.set('completed');
-    expect(filter.current).toBe('completed');
+    // Cycle through all stages (7 stages including legacy 'done')
+    for (let i = 0; i < 7; i++) filter.cycle();
+    // Should be at 'done' (last stage), next cycle goes to null
     filter.cycle();
     expect(filter.current).toBeNull();
   });

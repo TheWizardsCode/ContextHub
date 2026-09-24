@@ -188,6 +188,54 @@ describe('audit_results table: schema DDL', () => {
       cleanupTempDir(tmp);
     }
   });
+
+  it('migration adds a nullable fingerprint column (WL-0MUBVH5S0008NQ9K AC1)', () => {
+    const tmp = createTempDir();
+    try {
+      const dbPath = path.join(tmp, 'worklog.db');
+      createLegacyDbWithoutAuditResults(dbPath);
+      runMigrations({ confirm: true }, dbPath);
+      const cols = getCols(dbPath);
+      const col = cols.find(c => c.name === 'fingerprint');
+      expect(col).toBeDefined();
+      expect(col!.type.toUpperCase()).toBe('TEXT');
+      // Nullable — legacy rows have no fingerprint and must remain valid.
+      expect(col!.notnull).toBe(0);
+    } finally {
+      cleanupTempDir(tmp);
+    }
+  });
+
+  it('migration is idempotent — second run applies nothing and legacy rows stay readable (AC1)', () => {
+    const tmp = createTempDir();
+    try {
+      const dbPath = path.join(tmp, 'worklog.db');
+      createLegacyDbWithoutAuditResults(dbPath);
+      const first = runMigrations({ confirm: true }, dbPath);
+      expect(first.applied.some(m => m.id === '20260923-add-audit-fingerprint')).toBe(true);
+
+      // Write a legacy (fingerprint-less) audit row, then re-run.
+      const writable = new Database(dbPath);
+      writable.prepare(
+        `INSERT OR REPLACE INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run('SA-TEST-001', 1, '2026-05-01T00:00:00.000Z', 'legacy', null, 'tester');
+      writable.close();
+
+      const second = runMigrations({ confirm: true }, dbPath);
+      expect(second.applied.filter(m => m.id === '20260923-add-audit-fingerprint')).toHaveLength(0);
+
+      // Legacy row is unaffected and readable with a NULL fingerprint.
+      const reader = new Database(dbPath, { readonly: true });
+      const row = reader.prepare('SELECT * FROM audit_results WHERE work_item_id = ?').get('SA-TEST-001') as any;
+      expect(row).toBeDefined();
+      expect(row.summary).toBe('legacy');
+      expect(row.fingerprint).toBeNull();
+      reader.close();
+    } finally {
+      cleanupTempDir(tmp);
+    }
+  });
 });
 
 describe('audit_results table: foreign key constraints', () => {

@@ -290,3 +290,70 @@ describe('wl update --audit-text writes to audit_results', () => {
     fs.chmodSync(dbPath, 0o644);
   });
 });
+
+describe('audit fingerprint persistence (WL-0MUBVH5S0008NQ9K AC2)', () => {
+  let state: { tempDir: string; originalCwd: string };
+  let targetId: string;
+
+  beforeEach(async () => {
+    state = enterTempDir();
+    writeConfig(state.tempDir, 'Test Project', 'AFPT');
+    writeInitSemaphore(state.tempDir);
+    const { stdout } = await execAsync(`tsx ${cliPath} --json create -t "Fingerprint target"`);
+    const created = JSON.parse(stdout);
+    expect(created.success).toBe(true);
+    targetId = created.workItem.id;
+  });
+
+  afterEach(() => {
+    leaveTempDir(state);
+  });
+
+  it('wl audit-set --fingerprint persists the fingerprint and returns it', async () => {
+    const { stdout } = await execAsync(
+      `tsx ${cliPath} --json audit-set ${targetId} --ready-to-close yes --summary "ok" --fingerprint sha256-cli`,
+    );
+    const result = JSON.parse(stdout);
+    expect(result.success).toBe(true);
+    expect(result.audit.fingerprint).toBe('sha256-cli');
+
+    const { stdout: showOut } = await execAsync(`tsx ${cliPath} --json audit-show ${targetId}`);
+    const shown = JSON.parse(showOut);
+    expect(shown.audit.fingerprint).toBe('sha256-cli');
+  });
+
+  it('wl update --audit-text extracts a fingerprint embedded in the report', async () => {
+    const auditText = [
+      'Ready to close: Yes',
+      'Audit content fingerprint: sha256-embedded',
+      'All checks passed',
+    ].join('\n');
+    await execAsync(`tsx ${cliPath} --json update ${targetId} --audit-text "${auditText}"`);
+
+    const { stdout } = await execAsync(`tsx ${cliPath} --json audit-show ${targetId}`);
+    const result = JSON.parse(stdout);
+    expect(result.success).toBe(true);
+    expect(result.audit.fingerprint).toBe('sha256-embedded');
+  });
+
+  it('wl update --audit-fingerprint flag takes priority over an embedded line', async () => {
+    const auditText = [
+      'Ready to close: Yes',
+      'Audit content fingerprint: sha256-embedded',
+    ].join('\n');
+    await execAsync(
+      `tsx ${cliPath} --json update ${targetId} --audit-text "${auditText}" --audit-fingerprint sha256-explicit`,
+    );
+
+    const { stdout } = await execAsync(`tsx ${cliPath} --json audit-show ${targetId}`);
+    const result = JSON.parse(stdout);
+    expect(result.audit.fingerprint).toBe('sha256-explicit');
+  });
+
+  it('legacy audit-set without --fingerprint leaves fingerprint null', async () => {
+    await execAsync(`tsx ${cliPath} --json audit-set ${targetId} --ready-to-close yes --summary "legacy"`);
+    const { stdout } = await execAsync(`tsx ${cliPath} --json audit-show ${targetId}`);
+    const result = JSON.parse(stdout);
+    expect(result.audit.fingerprint).toBeNull();
+  });
+});

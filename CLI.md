@@ -120,10 +120,21 @@ Options:
 - `--needs-producer-review <true|false>` — Set needsProducerReview flag (true|false|yes|no) (optional).
 - `--audit-text <text>` — Set structured audit text when creating an item. The audit result is stored in the `audit_results` table (the sole source of truth for audit state). Prefer `--audit-file` for file-based input to avoid shell-escaping issues (see docs/AUDIT_STATUS.md).
 - `--audit-file <file>` — Read audit text from a file (recommended for large or shell-sensitive content).
+- `--audit-fingerprint <fingerprint>` — Content fingerprint for the freshness gate (WL-0MUBVH5S0008NQ9K); an explicit value wins over an embedded `Audit content fingerprint: <hex>` line.
 - `--prefix <prefix>` — Override default ID prefix (repo-local scope) (optional).
 - `--allow-duplicate` — Bypass the dedup guard: create a new item even when a recent non-terminal item with the same title exists (optional).
 - `--dedup-window <duration>` — Dedup match window, e.g. `30s`, `5m`, `1h` or raw milliseconds (optional; default: `5m`).
 - `--json` — Output JSON (optional).
+
+When `--parent <id>` attaches a child to a `completed`/`in_review` parent, the
+parent is demoted to `open`/`plan_complete` so a finished parent never silently
+gains uncompleted work (WL-0MSJL00P5004Y0L6). **Automation-authored telemetry
+children are exempt**: items tagged `test-failure`, titles prefixed
+`[test-failure]`, or created by a known bot identity (e.g. `triage-bot`) stay
+attached so the failure remains discoverable, but they do **not** rewind the
+parent's lifecycle (WL-0MTWU4XUD0001ALR). Every demotion writes an audit-trail
+comment on the parent naming the attached child, the actor, and the transition
+(WL-0MTWU4Y82001B3UH).
 
 Dedup guard:
 
@@ -150,9 +161,11 @@ Automatic re-sort:
 
 ### `update` [options] <id...>
 
-Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
 
 > **Auto-revert:** when `--audit-text`/`--audit-file` carries a `Ready to close: No` verdict for an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
+
+> **Reparenting demotion:** when `--parent <id>` attaches an item to a `completed`/`in_review` parent, the parent is demoted to `open`/`plan_complete` so a finished parent never silently gains uncompleted work. Automation-authored telemetry children (tagged `test-failure`, titled `[test-failure]…`, or created by a known bot identity) are exempt and do not rewind the parent (WL-0MTWU4XUD0001ALR). A demotion records an audit-trail comment on the parent naming the attached child, the actor, and the transition (WL-0MTWU4Y82001B3UH).
 
 Automatic re-sort:
 
@@ -272,6 +285,7 @@ Options:
 - `--raw-output <text>` — Machine-readable raw output from the audit tool.
 - `--audit-file <file>` — Read audit raw output from a file (takes precedence over `--raw-output`).
 - `--author <author>` — Author of the audit (defaults to current user).
+- `--fingerprint <fingerprint>` — Content fingerprint for the freshness gate (WL-0MUBVH5S0008NQ9K). When omitted, an `Audit content fingerprint: <hex>` line in `--summary` or `--raw-output` is used automatically.
 - `--prefix <prefix>` — Override default ID prefix (optional).
 - `--json` — Output in JSON format.
 
@@ -282,6 +296,7 @@ wl audit-set WL-ABC123 --ready-to-close yes --summary "All criteria met"
 wl audit-set WL-ABC123 --ready-to-close no --summary "Outstanding work items" --json
 wl audit-set WL-ABC123 --ready-to-close yes --author "bot" --raw-output "..."
 wl audit-set WL-ABC123 --ready-to-close yes --audit-file report.md --summary "From file"
+wl audit-set WL-ABC123 --ready-to-close yes --fingerprint sha256-abc123 --summary "Content unchanged"
 ```
 
 ### `delete` [options] <id>
@@ -1107,7 +1122,9 @@ Other commands cover repository bootstrap and local system status. Use these to 
 
 ### `init`
 
-Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root with the canonical global-reference structure (`## Global agent guidance` pointing at `~/.pi/agent/AGENTS.md` plus a `## Project-specific guidance` placeholder). If `AGENTS.md` already contains the global reference, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the reference, it prompts O/A/M — **O**verwrite (destructive), **A**dd reference above existing content, **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
+Initialize Worklog configuration in the repository (creates `.worklog` and default config). `wl init` also installs `AGENTS.md` in the project root with the canonical global-reference structure (`## Global agent guidance` pointing at `~/.pi/agent/AGENTS.md` plus a `## Project-specific guidance` placeholder). If `AGENTS.md` already contains the global reference, installation is skipped (idempotent, no prompt). If `AGENTS.md` exists without the reference, it prompts O/A/M — **O**verwrite (destructive), **A**dd reference above existing content, **M**anual (skip) — unless you pass `--agents-template` for unattended runs. When workflow templates are available, `wl init` prompts you to choose between no formal workflow, a basic Worklog-aware workflow, or manual management (unless you pass `--workflow-inline` for unattended runs).
+
+When the **SorraAgents global install** is detected — `~/.pi/agent/AGENTS.md` is a symlink to `AGENTS_GLOBAL.md`, as installed by the canonical SorraAgents `scripts/install_pi.sh` — workflow setup is delegated to that install: `wl init` keeps the canonical global-reference structure in the project `AGENTS.md` and never inlines WORKFLOW content. In that path `--workflow-inline` is a no-op. Set `WL_SORRA_AGENTS_OVERRIDE=0` to force the standalone path or `=1` to force delegation (useful for automation and testing). See [AGENTS.md Install Model](docs/AGENTS-INSTALL.md) for the full install flow.
 
 Options:
 
@@ -1116,7 +1133,7 @@ Options:
 - `--auto-export <yes|no>` — Auto-export data to JSONL after changes (optional).
 - `--auto-sync <yes|no>` — Auto-sync data to git after changes (optional).
 - `--agents-template <overwrite|append|skip>` — What to do when AGENTS.md exists (optional). Append inserts the global-agents reference at the top while keeping existing content below.
-- `--workflow-inline <yes|no>` — Answer the workflow prompt (yes chooses the basic workflow option; no chooses no formal workflow). Omit to prompt interactively.
+- `--workflow-inline <yes|no>` — Answer the workflow prompt (yes chooses the basic workflow option; no chooses no formal workflow). Omit to prompt interactively. No-op when the SorraAgents global install is detected (workflow setup is then delegated to `~/.pi/agent/AGENTS.md`).
 - `--stats-plugin-overwrite <yes|no>` — Overwrite existing stats plugin if present (optional).
 
 Example:
@@ -1149,6 +1166,26 @@ Example (JSON):
 
 ```sh
 wl --json status
+```
+
+### `interview` [options] <id>
+
+Walk through outstanding interview questions on a work item interactively, capturing
+answers and clearing the `needsProducerReview` flag. Interview questions are set by
+producers when reviewing work items to request clarification or changes. This command
+presents each question in sequence, allowing you to provide answers or dismiss questions
+that are no longer relevant.
+
+Options:
+
+- `--prefix <prefix>` — Operate on a specific prefix (optional).
+- `--json` — Output machine-readable JSON (optional).
+
+Examples:
+
+```sh
+wl interview WL-ABC123
+wl interview WL-ABC123 --json
 ```
 
 ### `help` [command]

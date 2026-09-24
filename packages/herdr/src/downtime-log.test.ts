@@ -17,7 +17,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, statSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -29,6 +29,8 @@ import {
   planDispatchedItemStages,
   intakeDispatchedItemStages,
   dispatchedItemStages,
+  dispatchedItemMarkers,
+  markerStillExcludes,
   readDowntimeLogEntries,
   DOWNTIME_LOG_FILE,
   COORDINATION_LOG_FILE,
@@ -177,6 +179,78 @@ describe('downtime rolling log', () => {
     // The newest entries are retained (last 100 of 105)
     const lastEntry = JSON.parse(lines[lines.length - 1]);
     expect(lastEntry.attempt).toBe(3);
+  });
+});
+
+// ── Atomic rolling-log writes (F5 WL-0MUBVL1FI0071WN3) ─────────────────
+// `appendRollingJsonl` previously did readFile → push → trim → writeFile
+// directly on the target, so a concurrent reader could observe a truncated or
+// empty file and momentarily lose the dispatched marker (RCA H3,
+// WL-0MUBEZ6PE002WLP4). The writer is now temp-file + rename (atomic within a
+// filesystem).
+
+describe('atomic rolling-log writes (WL-0MUBVL1FI0071WN3 / F5)', () => {
+  const tmpFilesIn = (cwd: string): string[] =>
+    readdirSync(join(cwd, '.worklog')).filter((f) => f.endsWith('.tmp'));
+
+  it('AC4.1: replaces the target atomically and leaves no temp file behind on success', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ n: 1 }));
+    const inoBefore = statSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE)).ino;
+
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ n: 2 }));
+
+    const inoAfter = statSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE)).ino;
+    // The target was REPLACED (rename), never written in place.
+    expect(inoAfter).not.toBe(inoBefore);
+    expect(tmpFilesIn(cwd)).toEqual([]);
+    expect(readLog(cwd)).toHaveLength(2);
+  });
+
+  it('AC4.1: a write failure leaves the target untouched and cleans up the temp file', async () => {
+    const cwd = makeTempCwd();
+    // Make the TARGET a directory so the final rename fails (EISDIR/ENOTDIR).
+    mkdirSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), { recursive: true });
+
+    await expect(
+      appendDowntimeLogEntry(cwd, JSON.stringify({ n: 1 })),
+    ).rejects.toThrow();
+
+    // No temp file leaked, and the target (directory) is untouched.
+    expect(tmpFilesIn(cwd)).toEqual([]);
+    expect(statSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE)).isDirectory()).toBe(true);
+  });
+
+  it('AC4.2: concurrent appends and reads never observe an empty or partial line', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ n: -1 }));
+
+    const appends = Array.from({ length: 40 }, (_, i) =>
+      appendDowntimeLogEntry(cwd, JSON.stringify({ n: i })),
+    );
+    const reads = Array.from({ length: 60 }, async () => {
+      // Each read must resolve (never throw) and see a consistent snapshot.
+      await readDowntimeLogEntries(cwd);
+    });
+    await Promise.all([...appends, ...reads]);
+
+    // After settling, the raw file is a sequence of complete JSONL lines.
+    const raw = readFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim() !== '');
+    expect(lines.length).toBeGreaterThan(0);
+    for (const line of lines) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+    // No temp files leaked under concurrency.
+    expect(tmpFilesIn(cwd)).toEqual([]);
+  });
+
+  it('AC4.4: the coordination log uses the same atomic writer (no temp files leak)', async () => {
+    const cwd = makeTempCwd();
+    await appendCoordinationLogEntry(cwd, { kind: 'coordination', operation: 'checkin', instanceId: 'i1' });
+    expect(tmpFilesIn(cwd)).toEqual([]);
+    const raw = readFileSync(join(cwd, '.worklog', COORDINATION_LOG_FILE), 'utf8');
+    expect(() => JSON.parse(raw.trim())).not.toThrow();
   });
 });
 
@@ -404,5 +478,224 @@ describe('plan/intake dispatched-item stages (change-guard maps)', () => {
     expect(stages.get('WL-RE1')).toBe('plan_complete');
     expect(stages.get('WL-RE2')).toBe('');
     expect(stages.has('WL-X')).toBe(false);
+  });
+});
+
+describe('spawn-failed markers are non-excluding (WL-0MT32F908002YFFA AC2)', () => {
+  it('excludes spawn-failed entries from the dispatched-id readers, while standing success markers still exclude', () => {
+    const entries = [
+      { itemId: 'WL-IMP-OK', kind: 'implement' },
+      { itemId: 'WL-IMP-FAIL', kind: 'implement', outcome: 'spawn-failed' },
+      { itemId: 'WL-AUD-OK', kind: 'audit' },
+      { itemId: 'WL-AUD-FAIL', kind: 'audit', outcome: 'spawn-failed' },
+      { itemId: 'WL-RE-FAIL', kind: 'risk-effort', outcome: 'spawn-failed' },
+    ];
+
+    // AC3 regression: a STANDING success marker (no outcome) is unchanged and
+    // still excludes the item — never a double dispatch.
+    expect([...implementDispatchedItemIds(entries)]).toEqual(['WL-IMP-OK']);
+    expect([...auditDispatchedItemIds(entries)]).toEqual(['WL-AUD-OK']);
+    // AC2: a failed spawn never blocks the tier again.
+    expect([...riskEffortDispatchedItemIds(entries)]).toEqual([]);
+  });
+
+  it('excludes spawn-failed entries from the plan/intake stage change-guard maps', () => {
+    const entries = [
+      { itemId: 'WL-PLAN-OK', kind: 'plan', stage: 'intake_complete' },
+      { itemId: 'WL-PLAN-FAIL', kind: 'plan', stage: 'intake_complete', outcome: 'spawn-failed' },
+      { itemId: 'WL-INT-FAIL', kind: 'intake', stage: 'idea', outcome: 'spawn-failed' },
+    ];
+
+    expect([...planDispatchedItemStages(entries).keys()]).toEqual(['WL-PLAN-OK']);
+    expect([...intakeDispatchedItemStages(entries).keys()]).toEqual([]);
+  });
+
+  it('does not treat a spawn-failed audit marker as an active audit', () => {
+    const now = Date.now();
+    const windowMs = 2 * 60 * 60 * 1000;
+    const entries = [
+      {
+        itemId: 'WL-AUD-FAIL',
+        kind: 'audit',
+        outcome: 'spawn-failed',
+        dispatchedAt: new Date(now - 1000).toISOString(),
+      },
+      { itemId: 'WL-AUD-OK', kind: 'audit', dispatchedAt: new Date(now - 1000).toISOString() },
+    ];
+
+    expect([...recentAuditDispatchedItemIds(entries, windowMs, now)]).toEqual(['WL-AUD-OK']);
+  });
+
+  it('round-trips a real spawn-failed log entry into a non-excluding reader result', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({
+        itemId: 'WL-FAILED',
+        kind: 'implement',
+        stage: 'plan_complete',
+        outcome: 'spawn-failed',
+        error: 'ENOENT',
+      }),
+    );
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({ itemId: 'WL-DONE', kind: 'implement', stage: 'plan_complete' }),
+    );
+
+    const entries = await readDowntimeLogEntries(cwd);
+    expect([...implementDispatchedItemIds(entries)]).toEqual(['WL-DONE']);
+  });
+});
+
+// ── Dispatched success-marker staleness (WL-0MU6UL0RJ008IHGT) ────────
+//
+// A SUCCESS marker (no `outcome`) historically excluded its item forever, so
+// a pane that spawned but whose agent never advanced the item stranded it
+// permanently. These tests pin the marker-lifecycle contract: a marker
+// excludes only while the item is STILL at the marker's dispatched-at stage
+// AND the marker is fresh (age ≤ the configurable staleness window). An
+// advanced item releases the marker, and a missing/unparseable
+// `dispatchedAt` fails closed (keeps excluding).
+describe('dispatched success-marker staleness (WL-0MU6UL0RJ008IHGT)', () => {
+  const NOW = new Date('2026-01-02T12:00:00.000Z').getTime();
+  const WINDOW_MS = 24 * 60 * 60 * 1000; // 24h default
+  const ago = (ms: number) => new Date(NOW - ms).toISOString();
+
+  it('dispatchedItemMarkers maps id → {stage, dispatchedAt}, kind-scoped, spawn-failed excluded', () => {
+    const markers = dispatchedItemMarkers(
+      [
+        { itemId: 'WL-A', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(1000) },
+        { itemId: 'WL-B', kind: 'intake', stage: 'idea', dispatchedAt: ago(1000) },
+        { itemId: 'WL-C', kind: 'plan', stage: 'intake_complete', outcome: 'spawn-failed' },
+        { kind: 'plan' }, // error-style/scheduled entry without itemId
+      ],
+      'plan',
+    );
+    expect(markers.get('WL-A')).toEqual({
+      stage: 'intake_complete',
+      dispatchedAt: ago(1000),
+    });
+    expect(markers.has('WL-B')).toBe(false); // other kind → scoped out
+    expect(markers.has('WL-C')).toBe(false); // spawn-failed is not a success marker
+    expect(markers.size).toBe(1);
+  });
+
+  it('dispatchedItemMarkers tolerates a missing stage/timestamp and keeps the last entry', () => {
+    const markers = dispatchedItemMarkers(
+      [
+        { itemId: 'WL-A', kind: 'implement', stage: 'plan_complete', dispatchedAt: ago(9999) },
+        { itemId: 'WL-A', kind: 'implement', stage: 'plan_complete', dispatchedAt: ago(1000) },
+        { itemId: 'WL-LEGACY', kind: 'implement' }, // legacy: no stage, no timestamp
+      ],
+      'implement',
+    );
+    expect(markers.get('WL-A')?.dispatchedAt).toBe(ago(1000)); // most recent wins
+    expect(markers.get('WL-LEGACY')).toEqual({ stage: '', dispatchedAt: undefined });
+  });
+
+  it('a fresh marker at the unchanged stage still excludes', () => {
+    expect(
+      markerStillExcludes(
+        { stage: 'intake_complete', dispatchedAt: ago(60 * 1000) },
+        'intake_complete',
+        NOW,
+        WINDOW_MS,
+      ),
+    ).toBe(true);
+  });
+
+  it('a stale marker at the unchanged stage no longer excludes', () => {
+    expect(
+      markerStillExcludes(
+        { stage: 'intake_complete', dispatchedAt: ago(WINDOW_MS + 1) },
+        'intake_complete',
+        NOW,
+        WINDOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it('boundary: exactly at the window still excludes; one ms past releases', () => {
+    expect(
+      markerStillExcludes({ stage: 'idea', dispatchedAt: ago(WINDOW_MS) }, 'idea', NOW, WINDOW_MS),
+    ).toBe(true);
+    expect(
+      markerStillExcludes({ stage: 'idea', dispatchedAt: ago(WINDOW_MS + 1) }, 'idea', NOW, WINDOW_MS),
+    ).toBe(false);
+  });
+
+  it('a stage-advanced marker does not exclude (no behaviour change for healthy flow)', () => {
+    expect(
+      markerStillExcludes(
+        { stage: 'intake_complete', dispatchedAt: ago(60 * 1000) },
+        'plan_complete',
+        NOW,
+        WINDOW_MS,
+      ),
+    ).toBe(false);
+  });
+
+  it('unparseable/missing dispatchedAt fails closed (keeps excluding)', () => {
+    expect(markerStillExcludes({ stage: 'idea' }, 'idea', NOW, WINDOW_MS)).toBe(true);
+    expect(
+      markerStillExcludes({ stage: 'idea', dispatchedAt: 'not-a-date' }, 'idea', NOW, WINDOW_MS),
+    ).toBe(true);
+  });
+
+  it('a legacy marker without a recorded stage releases under the stage-guard mode', () => {
+    // The historical plan/intake/risk-effort change-guard: a missing
+    // dispatched-at stage never suppressed selection.
+    expect(
+      markerStillExcludes({ stage: '' }, 'intake_complete', NOW, WINDOW_MS, 'stage-guard'),
+    ).toBe(false);
+  });
+
+  it('a legacy marker without a recorded stage keeps excluding while fresh under id-guard mode, then releases when stale', () => {
+    // Audit/implement tiers historically excluded on the id set alone; an
+    // unknown stage must not weaken that protection for a possibly-in-flight
+    // marker — the age TTL is the only release.
+    expect(
+      markerStillExcludes(
+        { stage: '', dispatchedAt: ago(60 * 1000) },
+        'in_review',
+        NOW,
+        WINDOW_MS,
+        'id-guard',
+      ),
+    ).toBe(true);
+    expect(
+      markerStillExcludes(
+        { stage: '', dispatchedAt: ago(WINDOW_MS + 1) },
+        'in_review',
+        NOW,
+        WINDOW_MS,
+        'id-guard',
+      ),
+    ).toBe(false);
+  });
+});
+
+// ── Enrichment marker round-trip (F6 WL-0MUBVL251006JAQ0 AC6.2) ─────────
+
+describe('post-spawn enrichment preserves marker semantics (WL-0MUBVL251006JAQ0 / F6)', () => {
+  it('AC6.2: an enrichment entry with the same marker fields does not change the dispatched marker', async () => {
+    const cwd = makeTempCwd();
+    const dispatchedAt = new Date().toISOString();
+    const marker = { itemId: 'WL-ENR', kind: 'implement', dispatchedAt, cwd, title: 'Enr', stage: 'plan_complete',
+      selectionPath: 'critical-first', selectionReason: 'no-live-pane' };
+    const enrichment = { ...marker, paneId: 'w1:p1', enrichment: true };
+
+    await appendDowntimeLogEntry(cwd, JSON.stringify(marker));
+    const before = dispatchedItemMarkers(await readDowntimeLogEntries(cwd), 'implement');
+    await appendDowntimeLogEntry(cwd, JSON.stringify(enrichment));
+    const after = dispatchedItemMarkers(await readDowntimeLogEntries(cwd), 'implement');
+
+    // Last-entry-wins: the enrichment is the last entry, but it copies the
+    // marker's stage/dispatchedAt, so the marker state is UNCHANGED.
+    expect(after.get('WL-ENR')).toEqual(before.get('WL-ENR'));
+    expect(after.get('WL-ENR')?.stage).toBe('plan_complete');
+    // And the marker still excludes while fresh at the same stage.
+    expect(markerStillExcludes(after.get('WL-ENR')!, 'plan_complete', Date.now(), 24 * 60 * 60 * 1000, 'id-guard')).toBe(true);
   });
 });

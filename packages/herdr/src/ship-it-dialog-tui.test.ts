@@ -137,13 +137,23 @@ function writeActiveFreezeMarker(reason?: string): void {
 function startTui(
   onCommand?: (c: string) => void,
   items: WorkItem[] = [],
-  opts: { showHelpText?: boolean } = {},
+  opts: {
+    showHelpText?: boolean;
+    shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>;
+  } = {},
 ): Promise<WorkItem | undefined> {
   return runWorklistTui(async () => items, items, loadShortcutConfig(), {
     autoRefresh: false,
     autoSync: false,
     showHelpText: opts.showHelpText ?? false,
     onCommand,
+    // Clear guard by default so the dialog tests exercise the dialog, not the
+    // Ship Guard (which has its own tests). A test that wants the guard to
+    // block injects its own `shipGuardQuery`.
+    shipGuardQuery: opts.shipGuardQuery ?? (async () => ({
+      worklogOutput: JSON.stringify({ workItems: [] }),
+      paneOutput: JSON.stringify({ result: { panes: [] } }),
+    })),
   });
 }
 

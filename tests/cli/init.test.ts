@@ -307,6 +307,7 @@ describe('CLI Init Tests', () => {
   it('should inline WORKFLOW content into AGENTS.md with --workflow-inline yes (basic)', async () => {
     const tempState = enterTempDir();
     try {
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '0';
       const existing = '## Project Rules\n\n- Local rule\n';
       fs.writeFileSync('AGENTS.md', existing, 'utf-8');
 
@@ -323,6 +324,7 @@ describe('CLI Init Tests', () => {
         updated.indexOf(existing.trim())
       );
     } finally {
+      delete process.env.WL_SORRA_AGENTS_OVERRIDE;
       leaveTempDir(tempState);
     }
   }, 45000);
@@ -330,6 +332,7 @@ describe('CLI Init Tests', () => {
   it('should not write WORKFLOW content with --workflow-inline no (none)', async () => {
     const tempState = enterTempDir();
     try {
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '0';
       const existing = '## Project Rules\n\n- Local rule\n';
       fs.writeFileSync('AGENTS.md', existing, 'utf-8');
 
@@ -343,6 +346,7 @@ describe('CLI Init Tests', () => {
       // Standalone 'none' leaves the project AGENTS.md untouched.
       expect(updated).toBe(existing);
     } finally {
+      delete process.env.WL_SORRA_AGENTS_OVERRIDE;
       leaveTempDir(tempState);
     }
   }, 45000);
@@ -350,6 +354,7 @@ describe('CLI Init Tests', () => {
   it('should not duplicate the WORKFLOW marker when --workflow-inline yes is re-run', async () => {
     const tempState = enterTempDir();
     try {
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '0';
       const existing = '## Project Rules\n\n- Local rule\n';
       fs.writeFileSync('AGENTS.md', existing, 'utf-8');
 
@@ -363,6 +368,7 @@ describe('CLI Init Tests', () => {
         .filter(line => line.trim() === '<!-- WORKFLOW: start -->').length;
       expect(markers).toBe(1);
     } finally {
+      delete process.env.WL_SORRA_AGENTS_OVERRIDE;
       leaveTempDir(tempState);
     }
   }, 45000);
@@ -435,6 +441,143 @@ describe('CLI Init Tests', () => {
       const after = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
       expect(after).toEqual(edited);
     } finally {
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  // -------------------------------------------------------------------
+  // SorraAgents-delegation path (AC1 of WL-0MSIXMKOX0052514):
+  // when SorraAgents is detected, workflow setup is delegated and
+  // --workflow-inline is a no-op.
+  // -------------------------------------------------------------------
+  it('should delegate workflow to SorraAgents when detected (--workflow-inline yes is no-op)', async () => {
+    const tempState = enterTempDir();
+    try {
+      // Force SorraAgents detection via environment override.
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '1';
+      const existing = '## Project Rules\n\n- Local rule\n';
+      fs.writeFileSync('AGENTS.md', existing, 'utf-8');
+
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline yes --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const updated = fs.readFileSync('AGENTS.md', 'utf-8');
+      // Workflow should NOT be inlined when SorraAgents is detected.
+      expect(updated).not.toContain('<!-- WORKFLOW: start -->');
+      expect(updated).not.toContain('<!-- WORKFLOW: end -->');
+      // Pre-existing content is preserved.
+      expect(updated).toBe(existing);
+    } finally {
+      delete process.env.WL_SORRA_AGENTS_OVERRIDE;
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should delegate workflow to SorraAgents when detected (--workflow-inline no)', async () => {
+    const tempState = enterTempDir();
+    try {
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '1';
+      const existing = '## Project Rules\n\n- Local rule\n';
+      fs.writeFileSync('AGENTS.md', existing, 'utf-8');
+
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const updated = fs.readFileSync('AGENTS.md', 'utf-8');
+      expect(updated).not.toContain('<!-- WORKFLOW: start -->');
+      expect(updated).not.toContain('<!-- WORKFLOW: end -->');
+      expect(updated).toBe(existing);
+    } finally {
+      delete process.env.WL_SORRA_AGENTS_OVERRIDE;
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should keep standalone workflow behavior when SorraAgents is NOT detected', async () => {
+    const tempState = enterTempDir();
+    try {
+      // Explicitly ensure SorraAgents is NOT detected.
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '0';
+      const existing = '## Project Rules\n\n- Local rule\n';
+      fs.writeFileSync('AGENTS.md', existing, 'utf-8');
+
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline yes --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const updated = fs.readFileSync('AGENTS.md', 'utf-8');
+      expect(updated).toContain('<!-- WORKFLOW: start -->');
+      expect(updated).toContain('<!-- WORKFLOW: end -->');
+      expect(updated).toContain(existing.trim());
+      expect(updated.indexOf('<!-- WORKFLOW: start -->')).toBeLessThan(
+        updated.indexOf(existing.trim())
+      );
+    } finally {
+      delete process.env.WL_SORRA_AGENTS_OVERRIDE;
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should report sorraAgentsDetected in JSON output when detected', async () => {
+    const tempState = enterTempDir();
+    try {
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '0';
+      // First init creates the config; the second hits the config-exists
+      // branch whose --json output is pure JSON.
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`
+      );
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '1';
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json init`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.sorraAgentsDetected).toBe(true);
+    } finally {
+      delete process.env.WL_SORRA_AGENTS_OVERRIDE;
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should report sorraAgentsDetected false in JSON output when not detected', async () => {
+    const tempState = enterTempDir();
+    try {
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '0';
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline no --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const { stdout } = await execAsync(`tsx ${cliPath} --json init`);
+      const result = JSON.parse(stdout);
+      expect(result.success).toBe(true);
+      expect(result.sorraAgentsDetected).toBe(false);
+    } finally {
+      delete process.env.WL_SORRA_AGENTS_OVERRIDE;
+      leaveTempDir(tempState);
+    }
+  }, 45000);
+
+  it('should not inline workflow when SorraAgents is detected even with pre-existing loader', async () => {
+    const tempState = enterTempDir();
+    try {
+      process.env.WL_SORRA_AGENTS_OVERRIDE = '1';
+      const existing = '## Project Rules\n\n<!-- WORKFLOW: start -->\nworkflow content\n<!-- WORKFLOW: end -->\n';
+      fs.writeFileSync('AGENTS.md', existing, 'utf-8');
+
+      await execAsync(
+        `tsx ${cliPath} init --project-name "Test Project" --prefix TEST --auto-export yes --auto-sync no --workflow-inline yes --agents-template skip --stats-plugin-overwrite no`
+      );
+
+      const updated = fs.readFileSync('AGENTS.md', 'utf-8');
+      // Should not duplicate the marker.
+      const markers = updated
+        .split(/\r?\n/)
+        .filter(line => line.trim() === '<!-- WORKFLOW: start -->').length;
+      expect(markers).toBe(1);
+    } finally {
+      delete process.env.WL_SORRA_AGENTS_OVERRIDE;
       leaveTempDir(tempState);
     }
   }, 45000);

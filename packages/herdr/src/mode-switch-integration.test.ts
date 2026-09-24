@@ -33,7 +33,9 @@ describe('settings → worker creation integration', () => {
     expect(defaultSettings).toHaveProperty('modeSwitchEnabled');
     expect(defaultSettings).toHaveProperty('modeSwitchIdleThresholdMs');
     expect(defaultSettings).toHaveProperty('modeSwitchPollIntervalMs');
-    expect(typeof defaultSettings.modeSwitchEnabled).toBe('boolean');
+    // The feature is enabled out of the box (WL-0MU4MKVR4005WPBJ): the
+    // previous `false` default silently disabled the shipped worker.
+    expect(defaultSettings.modeSwitchEnabled).toBe(true);
     expect(typeof defaultSettings.modeSwitchIdleThresholdMs).toBe('number');
     expect(typeof defaultSettings.modeSwitchPollIntervalMs).toBe('number');
   });
@@ -114,7 +116,7 @@ describe('scheduler task configuration', () => {
 
   it('idle threshold floor is at least 60s', () => {
     expect(MODE_SWITCH_IDLE_THRESHOLD_FLOOR_MS).toBeGreaterThanOrEqual(60_000);
-    expect(DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS).toBe(900_000); // 15 minutes
+    expect(DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS).toBe(1_800_000); // 30 minutes
   });
 
   it('run timeout watchdog exceeds the admin API timeout (hung ticks get abandoned)', () => {

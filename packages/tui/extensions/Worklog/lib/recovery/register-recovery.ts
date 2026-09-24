@@ -32,7 +32,7 @@ import {
   type RetryCommandContext,
   type RetryCommandOptions,
 } from './retry-command.js';
-import { calculateDelay, formatDuration } from './retry-logic.js';
+import { formatDuration, resolveRetryDelay, DEFAULT_BACKOFF_CONFIG } from './retry-logic.js';
 
 let _recoveryRegistered = false;
 
@@ -338,6 +338,12 @@ let _sessionGenerationAtStart = 0;
  * 5. Checks the result — if still an error, loops; if success, exits
  *
  * Respects user abort (ESC) and session switches (/new, /resume).
+ *
+ * Single retry layer (AC7): pi's built-in agent-level retry is suppressed by
+ * `suppressBuiltinRetry()`, and the provider-level `retryProviderRequest`
+ * remains disabled by default (`retry.provider.maxRetries` unset -> 0), so a
+ * transient 5xx is retried by this loop exactly once per attempt — never by
+ * two layers stacking.
  */
 async function triggerInvisibleContinue(): Promise<void> {
   if (!_agent) return;
@@ -367,15 +373,22 @@ async function triggerInvisibleContinue(): Promise<void> {
     while (true) {
       if (interruptibleState.userAborted || interruptibleState.sessionGeneration !== _sessionGenerationAtStart) return;
 
+      // Capture the server-requested retry delay (`Retry-After` /
+      // `retry_after`) from the error message before the error is removed
+      // from agent state, then honour it (AC1/AC2).
+      attempt++;
+      const { delayMs: delay, serverHintMs } = resolveRetryDelay(
+        attempt,
+        lastErrorMessageFromAgentState(),
+        DEFAULT_BACKOFF_CONFIG,
+      );
+
       // Remove the error assistant message from agent state
       removeErrorFromAgentState();
 
-      attempt++;
-      const delay = calculateDelay(attempt);
-
       // Notify user
       const duration = formatDuration(delay);
-      _notifyRetryAttempt(attempt, duration);
+      _notifyRetryAttempt(attempt, duration, serverHintMs);
 
       // Interruptible sleep with backoff before the retry
       const interrupted = await interruptibleRetrySleep(delay);
@@ -530,10 +543,23 @@ async function triggerParseErrorContinue(): Promise<void> {
 }
 
 /** Notify user about a retry attempt */
-function _notifyRetryAttempt(attempt: number, duration: string): void {
+function _notifyRetryAttempt(attempt: number, duration: string, serverHintMs?: number): void {
   if (_notifyFn) {
-    _notifyFn(`Retry attempt ${attempt} (backoff ${duration})...`, 'info');
+    const source = serverHintMs !== undefined ? ' — server-requested' : '';
+    _notifyFn(`Retry attempt ${attempt} (backoff ${duration}${source})...`, 'info');
   }
+}
+
+/** Read the error message of the agent's last assistant error message (if any) */
+function lastErrorMessageFromAgentState(): string | undefined {
+  if (!_agent) return undefined;
+  const messages = _agent.state?.messages;
+  if (!messages || !Array.isArray(messages)) return undefined;
+  const lastMsg = messages[messages.length - 1];
+  if (lastMsg?.role === 'assistant' && lastMsg.stopReason === 'error' && typeof lastMsg.errorMessage === 'string') {
+    return lastMsg.errorMessage;
+  }
+  return undefined;
 }
 
 /** Remove the last error assistant message from agent state */

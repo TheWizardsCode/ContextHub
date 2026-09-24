@@ -53,6 +53,7 @@ Worklog uses a **dual-storage model** to combine the benefits of persistent data
   "parentId": null,
   "createdAt": "2024-01-01T00:00:00.000Z",
   "updatedAt": "2024-01-01T00:00:00.000Z",
+  "activityAt": "2024-01-01T00:00:00.000Z",
   "tags": ["feature", "backend"],
   "assignee": "john.doe",
   "stage": "development"
@@ -68,7 +69,8 @@ Worklog uses a **dual-storage model** to combine the benefits of persistent data
 - **priority**: `low`, `medium`, `high`, or `critical`
 - **parentId**: ID of parent work item (null for root items)
 - **createdAt**: ISO timestamp of creation
-- **updatedAt**: ISO timestamp of last update
+- **updatedAt**: ISO timestamp of the last *content* change. Comment writes do not move this field (audit freshness is computed against it), and audit persistence sets it to `auditedAt`
+- **activityAt** (optional): ISO timestamp of last activity, including comment create/update/delete. Always `>= updatedAt`. Recency/ordering surfaces (`wl recent`, score recency) read this field and fall back to `updatedAt` when absent (WL-0MUBVH6JM0093KVM)
 - **tags**: Array of string tags
 - **assignee**: Person assigned to the work item
 - **stage**: Current stage of the work item in the workflow

@@ -9,12 +9,12 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
   clampDowntimeIdleThresholdMs,
-  clampDowntimeMaxConcurrentDispatches,
+  clampDowntimeMarkerStaleWindowMs,
   clampDowntimeNoCandidateCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
-  DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
+  DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
@@ -70,10 +70,24 @@ export interface PluginSettings {
    * Floor 60s; default 3_600_000 ms (60 min).
    */
   downtimeNoCandidateCooldownMs: number;
-  /** Enable activity-gated mode-switching (fast on agent command, cheap on idle). */
+  /**
+   * Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT): a
+   * SUCCESS dispatch marker whose item is still at the marker's dispatched-at
+   * stage is released once its age exceeds this window, so a pane that
+   * spawned but whose agent never advanced the item (crash, manual close,
+   * silent failure) cannot strand the item permanently. Default 24 h;
+   * clamped to [1 h, 7 days].
+   */
+  downtimeMarkerStaleWindowMs: number;
+  /**
+   * Enable activity-gated mode-switching (fast on agent command, cheap on
+   * idle). Default `true` (WL-0MU4MKVR4005WPBJ — was `false`, which silently
+   * disabled the shipped feature); when `false` no scheduler task is
+   * registered and the agent-route hook is a no-op.
+   */
   modeSwitchEnabled: boolean;
   /**
-   * Idle window before switching to cheap mode (ms). Default 900_000 (15 min).
+   * Idle window before switching to cheap mode (ms). Default 1_800_000 (30 min).
    * A new operator agent-route command resets this timer.
    */
   modeSwitchIdleThresholdMs: number;
@@ -87,12 +101,6 @@ export interface PluginSettings {
    * Default 60000 (60 s), clamped to [1000, 300000] (1 s – 5 min).
    */
   maxSyncStalenessMs: number;
-  /**
-   * Bounded concurrency cap (WL-0MT50LKAK001EF5Q F2). Default 1 = single-flight
-   * (current behavior); clamped to [1, 4] on load; manually configured per
-   * operator. Cheap mode uses extra slots only when the operator raises this.
-   */
-  downtimeMaxConcurrentDispatches: number;
 }
 
 // ── Defaults ──────────────────────────────────────────────────────────
@@ -112,11 +120,11 @@ export const defaultSettings: PluginSettings = {
   downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
-  modeSwitchEnabled: false,
+  downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+  modeSwitchEnabled: true,
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
   maxSyncStalenessMs: 60_000,
-  downtimeMaxConcurrentDispatches: DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
 };
 
 /** Minimum allowed browseItemCount. */
@@ -217,6 +225,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeNoCandidateCooldownMs: typeof parsed.downtimeNoCandidateCooldownMs === 'number'
         ? clampDowntimeNoCandidateCooldownMs(parsed.downtimeNoCandidateCooldownMs)
         : defaultSettings.downtimeNoCandidateCooldownMs,
+      downtimeMarkerStaleWindowMs: typeof parsed.downtimeMarkerStaleWindowMs === 'number'
+        ? clampDowntimeMarkerStaleWindowMs(parsed.downtimeMarkerStaleWindowMs)
+        : defaultSettings.downtimeMarkerStaleWindowMs,
       modeSwitchEnabled: typeof parsed.modeSwitchEnabled === 'boolean'
         ? parsed.modeSwitchEnabled : defaultSettings.modeSwitchEnabled,
       modeSwitchIdleThresholdMs: typeof parsed.modeSwitchIdleThresholdMs === 'number'
@@ -228,9 +239,12 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       maxSyncStalenessMs: typeof parsed.maxSyncStalenessMs === 'number'
         ? clampMaxSyncStalenessMs(parsed.maxSyncStalenessMs)
         : defaultSettings.maxSyncStalenessMs,
-      downtimeMaxConcurrentDispatches: typeof parsed.downtimeMaxConcurrentDispatches === 'number'
-        ? clampDowntimeMaxConcurrentDispatches(parsed.downtimeMaxConcurrentDispatches)
-        : defaultSettings.downtimeMaxConcurrentDispatches,
+      // NOTE (WL-0MU2EP6JL006A1U3): `downtimeMaxRunningPanes` and its legacy
+      // alias `downtimeMaxConcurrentDispatches` are deliberately NOT read.
+      // Dispatched panes stay open until an operator closes them, so a
+      // client-side pane count can never be the concurrency limiter — the
+      // local LLM idle check is (see downtime-worker.ts). A config file still
+      // carrying either key loads cleanly and the key is simply ignored.
     };
   } catch {
     return { ...defaultSettings };

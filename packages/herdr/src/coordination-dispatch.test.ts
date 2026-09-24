@@ -18,7 +18,7 @@
  */
 
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -110,6 +110,9 @@ function makeCoordinationDeps(overrides: Partial<DowntimeWorkerDeps> = {}): Down
     // shallow (empty) queue by default so the gate is INACTIVE and existing
     // tests dispatch implement offers unchanged.
     getReviewQueueCount: vi.fn().mockResolvedValue(0),
+    // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F4): available query,
+    // no live panes by default → the guard is inert for existing tests.
+    getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
     ...overrides,
   } as DowntimeWorkerDeps;
 }
@@ -179,6 +182,11 @@ describe('classifyItemForDispatch', () => {
   it('rejects in_progress items (already claimed)', () => {
     expect(classifyItemForDispatch(itemInfo({ id: 'WL-1', status: 'in_progress', stage: 'in_progress' }))).toBeNull();
   });
+  it('maps an OPEN item stuck on the retired in_progress stage to risk-effort (WL-0MTTSWCJR003OMN7 / WL-0MTYL7DX9000MZOH)', () => {
+    // Retired-stage recovery: the item is dispatchable via the risk-effort
+    // evaluation, whose claim migrates the stage to a valid value.
+    expect(classifyItemForDispatch(itemInfo({ id: 'WL-1', status: 'open', stage: 'in_progress' }))).toBe('risk-effort');
+  });
   it('rejects unknown states (fail-closed)', () => {
     expect(classifyItemForDispatch(itemInfo({ id: 'WL-1', status: 'weird', stage: 'idea' }))).toBeNull();
     expect(classifyItemForDispatch({ id: 'WL-1' })).toBeNull(); // no status at all
@@ -229,6 +237,63 @@ describe('dispatchFromCoordination', () => {
     const outcome = await dispatchFromCoordination(deps, [entry], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
     expect(outcome.dispatched).toBe(true);
     expect(getEntry(testDir, 'inst-1')).toBe(null);
+  });
+
+  it('dispatches a retired-stage offer via risk-effort with an atomic stage-migrating claim (WL-0MTYL7DX9000MZOH AC2/AC3)', async () => {
+    // An OPEN item stuck on the retired `in_progress` stage is dispatchable:
+    // the claim CASes on the item's ACTUAL stage and migrates the stored
+    // stage to plan_complete in the same atomic update — never a hard
+    // wl-error strike, never a 60-min pause.
+    const entry = makeEntry('inst-retired', 'WL-RETIRED', '/worklog/root');
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+    const claimItem = vi.fn().mockResolvedValue({ ok: true });
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo({ id: 'WL-RETIRED', status: 'open', stage: 'in_progress' }) }),
+      claimItem,
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [entry], { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('risk-effort');
+    // CAS guard = the item's actual retired stage (race-safe) + migration.
+    const claimArgs = claimItem.mock.calls[0];
+    expect(claimArgs[0]).toBe('WL-RETIRED');
+    expect(claimArgs[1]).toEqual({ status: 'open', stage: 'in_progress' });
+    expect(claimArgs[3]).toBe('plan_complete');
+    const spawnCall = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][0] as string;
+    expect(spawnCall).toContain('/skill:effort-and-risk WL-RETIRED');
+    // Dispatched entry removed so the owner re-queues its next head.
+    expect(getEntry(testDir, 'inst-retired')).toBe(null);
+  });
+
+  it('a retired-stage offer never blocks a healthy offer behind it (containment, WL-0MTYL7DX9000MZOH AC4)', async () => {
+    // File order: the poisoned (retired-stage) offer first, a healthy
+    // implement offer second. If the poisoned offer hard-struck, the healthy
+    // offer would never dispatch and the leader would 60-min pause. After the
+    // fix, the retired-stage offer DISPATCHES (or at worst skips) and the
+    // healthy offers are still served.
+    const entries = [
+      makeEntry('inst-poison', 'WL-POISON', '/root/a'),
+      makeEntry('inst-healthy', 'WL-HEALTHY', '/root/b'),
+    ];
+    const claimItem = vi.fn()
+      .mockResolvedValueOnce({ ok: true }); // poison dispatched (recovery)
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn()
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-POISON', status: 'open', stage: 'in_progress' }) })
+        .mockResolvedValueOnce({ ok: true, info: itemInfo({ id: 'WL-HEALTHY', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }) }),
+      claimItem,
+    });
+
+    const outcome = await dispatchFromCoordination(deps, entries, { model: 'plan', cwd: '/repo', coordinationDir: testDir });
+    // ONE dispatch per cycle: the poison offer recovered and dispatched,
+    // with NO wl-error outcome (no strike, no 60-min pause for the leader).
+    expect(outcome.reason).not.toBe('wl-error');
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('risk-effort');
+    const claimArgs = claimItem.mock.calls[0];
+    expect(claimArgs[3]).toBe('plan_complete');
   });
 
   it('skips entries whose item is not currently dispatchable (stale/in_progress)', async () => {
@@ -1394,5 +1459,336 @@ describe('review-queue depth gate — coordination leader path (WL-0MTTSWC1X005P
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// ── Critical-first offer on the coordination path (WL-0MU6UL3XY001M3VT) ──
+// A critical item blocked by a NON-SAFETY filter (stale dispatched marker,
+// review-queue depth hold) must still be OFFERED — otherwise the check-in
+// floats a lower-priority head item and the leader never dispatches the
+// critical work. Safety gates (needsProducerReview, code-freeze split-by-
+// skill) still apply to the offer.
+
+describe('critical-first offer on coordination path (WL-0MU6UL3XY001M3VT)', () => {
+  const criticalHead = (id: string, sortIndex = 10): DowntimeHerdrItem =>
+    headItem({ id, title: `Crit ${id}`, status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S', sortIndex });
+  const nonCriticalHead = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Impl ${id}`, status: 'open', stage: 'plan_complete', priority: 'high', risk: 'Low', effort: 'S', sortIndex });
+
+  it('computeMostImportantItem: a critical implement with a stale marker is still offered ahead of a non-critical head item', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [criticalHead('CR-1'), nonCriticalHead('IMP-1')],
+      }),
+    });
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    expect(result.candidate.id).toBe('CR-1');
+    expect(result.kind).toBe('implement');
+  });
+
+  it('computeMostImportantItem: the lowest sortIndex critical item is offered first', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [
+          criticalHead('CR-2', 20),
+          criticalHead('CR-1', 10), // lower sortIndex → wins
+        ],
+      }),
+    });
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    expect(result.candidate.id).toBe('CR-1');
+  });
+
+  it('computeMostImportantItem: needsProducerReview critical item is NOT offered (safety gate)', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [
+          { ...criticalHead('CR-PR'), needsProducerReview: true },
+          nonCriticalHead('IMP-1'),
+        ],
+      }),
+    });
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    // Safety gate blocks the critical item; the non-critical head is offered.
+    expect(result.candidate.id).toBe('IMP-1');
+  });
+
+  it('computeMostImportantItem: a frozen critical IMPLEMENT is not offered (split-by-skill), critical plan still is', async () => {
+    const frozenDeps = makeCoordinationDeps({
+      readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [
+          criticalHead('CR-FREEZE-IMP'),
+          headItem({ id: 'CR-FREEZE-PLAN', title: 'Crit plan', status: 'open', stage: 'intake_complete', priority: 'critical', sortIndex: 20 }),
+        ],
+      }),
+    });
+    const result = await computeMostImportantItem(frozenDeps, '/repo', Date.now(), 20);
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    // Implement-kind critical paused by the freeze; plan-kind critical still offers.
+    expect(result.candidate.id).toBe('CR-FREEZE-PLAN');
+    expect(result.kind).toBe('plan');
+  });
+});
+
+// ── Regression: one dispatch per in-flight critical item (F2) ──────────
+// Parent WL-0MUBEZ6PE002WLP4 / F2 WL-0MUBVKS5I007LSWB (AC5.2).
+//
+// The coordination path has no dispatched-marker check at leader dispatch
+// time (docs/dev/downtime-dispatcher.md), and `computeMostImportantItem`'s
+// critical-first scan offers a critical item regardless of whether a pane for
+// it is already working. When the item's status has reverted to `open` at its
+// marker's stage (the H5 precondition confirmed by F1 WL-0MUBVKPLP006RRDJ),
+// the offer is re-floated and the leader's CAS claim succeeds — a duplicate.
+//
+// These cases are RED for the in-flight variants before F4
+// (WL-0MUBVKYH5009CGBI) lands and GREEN after; the suite asserts on OFFER and
+// DISPATCH counts so a second cycle can never pass unnoticed.
+
+describe('in-flight guard on the coordination offer path (WL-0MUBVKS5I007LSWB / AC5.2)', () => {
+  const inFlightCritical = (id: string, sortIndex = 10): DowntimeHerdrItem =>
+    headItem({ id, title: `Crit ${id}`, status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S', sortIndex });
+  const fallbackNonCritical = (id: string, sortIndex = 100): DowntimeHerdrItem =>
+    headItem({ id, title: `Impl ${id}`, status: 'open', stage: 'plan_complete', priority: 'high', risk: 'Low', effort: 'S', sortIndex });
+
+  /** A live `working` downtime pane whose label suffix is the item id. */
+  const livePaneFor = (itemId: string) => ({
+    ok: true as const,
+    count: 1,
+    paneIds: ['w1:p1'],
+    records: [
+      {
+        paneId: 'w1:p1',
+        label: `Downtime triggered implement Crit ${itemId} - ${itemId}`,
+        agent: 'pi',
+        agentStatus: 'working',
+      },
+    ],
+  });
+
+  it(
+    'AC5.2: an in-flight critical item is not offered by computeMostImportantItem; the non-critical fallback is chosen (RED pre-fix)',
+    async () => {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [inFlightCritical('CR-DUP'), fallbackNonCritical('IMP-1')],
+        }),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue(livePaneFor('CR-DUP')),
+      });
+
+      const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+
+      expect(result.ok).toBe(true);
+      if (!('candidate' in result)) throw new Error('expected a candidate');
+      // Post-fix: the in-flight critical is withheld, so the non-critical
+      // fallback is offered instead (never an empty cycle).
+      expect(result.candidate.id).toBe('IMP-1');
+      expect(result.kind).toBe('implement');
+    },
+  );
+
+  it(
+    'AC5.2/AC2.10: the leader re-checks at dispatch time — an offer computed before the pane appeared is rejected (RED pre-fix)',
+    async () => {
+      const deps = makeCoordinationDeps({
+        // The offer was computed while no pane existed (TOCTOU): the entry is
+        // already on the offer list when the pane appears.
+        fetchItem: vi.fn().mockResolvedValue({
+          ok: true,
+          info: itemInfo({ id: 'CR-DUP', status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S' }),
+        }),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue(livePaneFor('CR-DUP')),
+      });
+
+      const outcome = await dispatchFromCoordination(
+        deps,
+        [makeEntry('inst-lead', 'CR-DUP', '/impl-root')],
+        { model: 'plan', cwd: '/repo', coordinationDir: testDir },
+      );
+
+      // Post-fix: the leader's dispatch-time validation rejects the in-flight
+      // offer — no pane, no duplicate.
+      expect(outcome.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    },
+  );
+
+  it(
+    'AC5.2: two consecutive owner/leader cycles over a critical item re-offered after dispatch dispatch exactly once',
+    async () => {
+      // Faithful two-cycle simulation of the H5 status revert: the owner
+      // offers its critical head, the leader dispatches it, then the item's
+      // status is observed `open` again at the same stage so the owner
+      // RE-OFFERS it at the next check-in while the spawned pane is still
+      // working. Pre-fix the leader re-dispatches; post-fix the in-flight
+      // guard withholds the offer and the leader rejects the stale entry.
+      const root = mkdtempSync(join(tmpdir(), 'herdr-coord-inflight-'));
+      mkdirSync(join(root, '.worklog'), { recursive: true });
+      try {
+        // Cycle 1: no pane yet → the owner offers, the leader dispatches.
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-lead', 'CR-DUP', root)],
+        });
+        const deps = makeCoordinationDeps({
+          fetchItem: vi.fn().mockResolvedValue({
+            ok: true,
+            info: itemInfo({ id: 'CR-DUP', status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S' }),
+          }),
+          getHerdrListHead: vi
+            .fn()
+            .mockResolvedValueOnce({ ok: true, items: [inFlightCritical('CR-DUP')] })
+            .mockResolvedValue({ ok: true, items: [inFlightCritical('CR-DUP')] }),
+          // Cycle 1: no pane yet for BOTH the owner's offer and the leader's
+          // re-check. Cycle 2+: the spawned pane is live and working.
+          getRunningDowntimePanes: vi
+            .fn()
+            .mockResolvedValueOnce({ ok: true, count: 0, paneIds: [], records: [] })
+            .mockResolvedValueOnce({ ok: true, count: 0, paneIds: [], records: [] })
+            .mockResolvedValue(livePaneFor('CR-DUP')),
+        });
+
+        // Cycle 1 — owner offers, leader dispatches.
+        const offer1 = await computeMostImportantItem(deps, root, Date.now(), 20);
+        expect('candidate' in offer1 && offer1.candidate.id).toBe('CR-DUP');
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-lead', 'CR-DUP', root)],
+        });
+        const first = await dispatchFromCoordination(
+          deps,
+          readCoordinationFile(testDir)?.entries ?? [],
+          { model: 'plan', cwd: root, coordinationDir: testDir },
+        );
+        expect(first.dispatched).toBe(true);
+
+        // Cycle 2 — the item is observed `open` again (H5): the owner
+        // re-offers it, and the leader must reject the in-flight offer.
+        const offer2 = await computeMostImportantItem(deps, root, Date.now(), 20);
+        expect('candidate' in offer2).toBe(false); // withheld as in-flight
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-lead', 'CR-DUP', root)],
+        });
+        const second = await dispatchFromCoordination(
+          deps,
+          readCoordinationFile(testDir)?.entries ?? [],
+          { model: 'plan', cwd: root, coordinationDir: testDir },
+        );
+
+        expect(second.dispatched).toBe(false);
+        expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('AC2.7: only in-flight criticals remain → inFlightHold (not noCandidate, so the worker never pauses)', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [inFlightCritical('CR-ONLY')] }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue(livePaneFor('CR-ONLY')),
+    });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+
+    expect(result.ok).toBe(true);
+    expect('candidate' in result).toBe(false);
+    expect('noCandidate' in result && result.noCandidate).toBe(false);
+    expect('inFlightHold' in result && result.inFlightHold).toBe(true);
+  });
+
+  it('AC2.8: the pane query uses the OFFER\'s own root, never the leader root (cross-root invariant)', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [inFlightCritical('CR-CROSS')] }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+    });
+
+    await computeMostImportantItem(deps, '/offer-root', Date.now(), 20);
+
+    // The in-flight query must target the offer's OWN worklog root.
+    expect(deps.getRunningDowntimePanes).toHaveBeenCalledWith('/offer-root');
+    expect(deps.getRunningDowntimePanes).not.toHaveBeenCalledWith('/leader-root');
+  });
+
+  it('AC2.10: the leader re-check queries the OFFER root (cross-root), not the leader root', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({ id: 'CR-CROSS', status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S' }),
+      }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+    });
+
+    await dispatchFromCoordination(
+      deps,
+      [makeEntry('inst-x', 'CR-CROSS', '/offer-root')],
+      { model: 'plan', cwd: '/leader-root', coordinationDir: testDir },
+    );
+
+    expect(deps.getRunningDowntimePanes).toHaveBeenCalledWith('/offer-root');
+    expect(deps.getRunningDowntimePanes).not.toHaveBeenCalledWith('/leader-root');
+  });
+
+  it('AC6.1: a leader coordination dispatch records selectionPath=coordination-offer', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({ id: 'WL-COORD', status: 'open', stage: 'plan_complete', priority: 'critical', risk: 'Low', effort: 'S' }),
+      }),
+      recordDispatch: vi.fn().mockResolvedValue(true),
+    });
+
+    const outcome = await dispatchFromCoordination(
+      deps,
+      [makeEntry('inst-lead', 'WL-COORD', '/offer-root')],
+      { model: 'plan', cwd: '/leader-root', coordinationDir: testDir },
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ selectionPath: 'coordination-offer', selectionReason: 'leader-offer' }),
+    );
+  });
+
+  it('AC2.3: a terminal (`done`) pane for the item does NOT block the offer (no idle-pane deadlock)', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [inFlightCritical('CR-DONE')],
+      }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 0,
+        paneIds: [],
+        records: [
+          {
+            paneId: 'w1:p9',
+            label: 'Downtime triggered implement Crit CR-DONE - CR-DONE',
+            agent: 'pi',
+            agentStatus: 'done',
+          },
+        ],
+      }),
+    });
+
+    const result = await computeMostImportantItem(deps, '/repo', Date.now(), 20);
+
+    expect(result.ok).toBe(true);
+    if (!('candidate' in result)) throw new Error('expected a candidate');
+    expect(result.candidate.id).toBe('CR-DONE');
+    expect(result.kind).toBe('implement');
   });
 });

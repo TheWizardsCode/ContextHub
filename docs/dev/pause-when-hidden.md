@@ -21,7 +21,7 @@ Two pollers were fixed:
 | Poller | File | Cadence | Fix |
 |--------|------|---------|-----|
 | Pi extension browse selection widget | `packages/tui/extensions/Worklog/lib/browse.ts` | 5s interval (4–5 wl spawns/tick) | **Idle gating**: pause fetch + `wl sync --if-idle` after 30s without keypresses (`IDLE_PAUSE_MS`); resume immediately on the next keypress. |
-| Herdr worklist pane | `packages/herdr/src/worklist.ts` | 30s refresh + 60s sync timers (~4–5 wl spawns/tick per pane) | **Tab-focus gating**: skip timer ticks when the pane's tab is hidden (`HERDR_TAB_ID` → `herdr tab get` → `result.tab.focused === false`); fail-open otherwise. |
+| Herdr worklist pane | `packages/herdr/src/worklist.ts` | 30s refresh + 60s sync timers (~4–5 wl spawns/tick per pane) | **Tab-focus gating**: skip timer ticks when the pane's tab is hidden (`HERDR_TAB_ID` → `herdr tab get` → `result.tab.focused === false`); fail-open otherwise. **Typing gating** (WL-0MTV67MZU003H7SH): skip the same ticks while any text-input overlay is open so background re-render cannot drop keypresses. |
 
 ## Behavior summary
 
@@ -87,6 +87,40 @@ Two pollers were fixed:
   `onData` handler is never called — stdin is only read while the pane is
   visible (the input loop runs inside the scheduler-visible cadence).
 
+### Herdr worklist pane (typing gating — WL-0MTV67MZU003H7SH)
+
+All in-extension text-input screens intermittently dropped keypresses because
+a background `wl sync` / list refresh could fire while the user was typing and
+replace the render state mid-keystroke. The fix defers that background work
+while any text-input overlay is open.
+
+- **Shared predicate** — `isInputActive(formState, shipItDialog)` in
+  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null`.
+  It is defined once and exported for unit testing; the scheduler checks it at
+  the top of both the `refresh` (30s) and `sync` (60s) task callbacks,
+  alongside the existing `paneGate.visible()` check, and returns early when
+  true.
+- **Coverage** — the command-parameter form (`FormState` in
+  `form-dialog.ts`), the Ship It confirmation dialog (`ShipItDialogState` in
+  `ship-it-dialog.ts`), and `md-note-edit` (which opens a `FormState`) are all
+  covered. There is no separate note-edit input state.
+- **Resume contract: skip, don't coalesce** — ticks that fall inside a typing
+  window are silently dropped; the next regular tick after the overlay closes
+  fires normally. No immediate post-close refresh is queued (avoids refresh
+  loops; matches the single-flight semantics).
+- **Superset, not a replacement** — the typing gate is checked *before* the
+  visibility gate. When no input is active, pause-when-hidden, single-flight,
+  cross-instance heartbeat dedup, and the DB-change skip all behave exactly as
+  before.
+- **Downtime / mode-switch workers are NOT gated (audited)** — the `downtime`
+  and `mode-switch` scheduler tasks only probe idle state and
+  dispatch/switch inference mode; they never re-render the worklist while a
+  modal is open, so gating them would only delay low-urgency background work
+  with no keypress-loss benefit. The audit decision is recorded in code
+  comments next to each task registration in `worklist.ts`.
+- **No settings toggle** — the typing gate is always on. Manual actions are
+  never gated.
+
 ## Verification procedure
 
 ### 1. Count `wl` processes per session/pane
@@ -145,6 +179,23 @@ watch -n 2 'ps -eo args | grep -E "wl (next|list|sync)" | grep -v grep | wc -l'
 Expected: the count stays near **0** (only transient syncs from actively
 used panes). Before this fix, N idle agents produced dozens of concurrent
 `wl` processes per minute per session.
+
+### 5. Typing gate (zero sync/refresh while a form is open)
+
+1. Open the worklist pane with `autoSync=true` (60s) and `autoRefresh=true`
+   (30s) — the defaults.
+2. Open a text-input overlay (e.g. the command-parameter form via the
+   shortcut chord, or Ship It `S`).
+3. Hold the overlay open for at least two sync intervals (≥ 2× 60s).
+   Expected: the pane spawns **zero** `wl sync` processes and performs **no**
+   list re-render — `ps -eo args | grep 'wl sync' | grep -v grep` stays empty
+   and the form keeps every keystroke.
+4. Type rapidly across a scheduled tick boundary. Expected: **zero dropped
+   characters**.
+5. Close the overlay. Expected: the next scheduled tick refreshes/syncs
+   normally (no queued immediate refresh) and the header returns to its normal
+   state.
+6. Repeat with the Ship It dialog and with note editing; both behave the same.
 
 ## References
 

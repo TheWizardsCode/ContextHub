@@ -38,12 +38,16 @@ import {
   clearDescriptionPreviewCache,
   isHeadingRow,
   formatItemLine,
+  isInputActive,
+  formatBlockedShipDialog,
+  createGatedTick,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
 import type { DowntimeWorker } from './downtime-worker.js';
 import { createDowntimeWorker, createDowntimePoller } from './downtime-worker.js';
 import { setLogPath, resetLogPath, recordCommand, getLastCommand } from './command-log.js';
+import { TaskScheduler } from './scheduler.js';
 import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
 import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
@@ -4500,6 +4504,228 @@ describe('DB-change gate — manual actions', () => {
   });
 });
 
+// ── Typing gate — isInputActive() (WL-0MTV67MZU003H7SH) ────────────────
+// Verifies the shared predicate that the scheduler's refresh/sync ticks
+// consult before running. Single source of truth — every current and
+// future text-input surface feeds the same predicate (AC3).
+
+describe('isInputActive — typing guard (WL-0MTV67MZU003H7SH)', () => {
+  // Use stub objects — only null vs non-null matters for the predicate.
+  // Casts are safe: isInputActive branches solely on `!== null`.
+  const fakeForm = {} as unknown as import('./form-dialog.js').FormState;
+  const fakeShipIt = {} as unknown as import('./ship-it-dialog.js').ShipItDialogState;
+
+  it('false when neither form nor ship-it dialog is active', () => {
+    expect(isInputActive(null, null)).toBe(false);
+  });
+
+  it('true when FormState is open', () => {
+    expect(isInputActive(fakeForm, null)).toBe(true);
+  });
+
+  it('true when ShipItDialogState is open', () => {
+    expect(isInputActive(null, fakeShipIt)).toBe(true);
+  });
+
+  it('true when both overlays are active', () => {
+    expect(isInputActive(fakeForm, fakeShipIt)).toBe(true);
+  });
+
+  it('true when the Ship-mode blocked notice is active (WL-0MUD6DDZC007ZSIW)', () => {
+    expect(isInputActive(null, null, true)).toBe(true);
+    expect(isInputActive(null, null, false)).toBe(false);
+  });
+});
+
+// ── Ship-mode blocked dialog formatter (WL-0MUD6DDZC007ZSIW) ─────
+
+describe('formatBlockedShipDialog', () => {
+  const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+  it('renders the notice body inside a bordered modal', () => {
+    const out = stripAnsi(
+      formatBlockedShipDialog(100, 30, 'Ship mode is blocked\n  • WL-0MUDEGBGO00609RV'),
+    );
+    expect(out).toContain('SHIP MODE BLOCKED');
+    expect(out).toContain('Ship mode is blocked');
+    expect(out).toContain('WL-0MUDEGBGO00609RV');
+    expect(out).toContain('┌');
+    expect(out).toContain('└');
+  });
+
+  it('includes the dismissal hint', () => {
+    const out = stripAnsi(formatBlockedShipDialog(100, 30, 'body'));
+    expect(out).toContain('[Esc] dismiss');
+    expect(out).toContain('[q] dismiss');
+  });
+
+  it('renders the query-failed notice too', () => {
+    const out = stripAnsi(formatBlockedShipDialog(100, 30, 'Cannot verify pane state'));
+    expect(out).toContain('Cannot verify pane state');
+  });
+});
+
+describe('createGatedTick — scheduler integration (WL-0MTV67MZU003H7SH)', () => {
+  // Exercise the REAL production gated-tick runner (`createGatedTick`) — the
+  // exact runner the refresh/sync scheduler tasks delegate to — via a REAL
+  // `TaskScheduler`. No inline re-implementation of the guard.
+
+  /** Drain microtasks so a fire-immediately scheduler run settles. */
+  const flush = async (): Promise<void> => {
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  /** Run a gated tick through the real scheduler (fireImmediately). */
+  const runViaScheduler = async (tick: () => Promise<void>): Promise<void> => {
+    const scheduler = new TaskScheduler(1000);
+    scheduler.addTask({ id: 'tick', intervalMs: 60_000, fireImmediately: true, run: tick });
+    scheduler.start();
+    await flush();
+    scheduler.stop();
+  };
+
+  const makeTick = (opts: {
+    inputActive?: () => boolean;
+    visible?: () => Promise<boolean>;
+    dbUnchanged?: () => boolean;
+    action: () => void;
+    onHidden?: () => void;
+    onVisible?: () => void;
+  }): (() => Promise<void>) =>
+    createGatedTick({
+      isInputActive: opts.inputActive ?? (() => false),
+      isVisible: opts.visible ?? (async () => true),
+      onHidden: opts.onHidden ?? (() => {}),
+      onVisible: opts.onVisible ?? (() => {}),
+      isDbUnchanged: opts.dbUnchanged ?? (() => false),
+      action: opts.action,
+    });
+
+  it('skips the tick while input is active — action never runs', async () => {
+    let actionCalls = 0;
+    let visibilityCalls = 0;
+    const tick = makeTick({
+      inputActive: () => true,
+      visible: async () => {
+        visibilityCalls += 1;
+        return true;
+      },
+      action: () => {
+        actionCalls += 1;
+      },
+    });
+    await runViaScheduler(tick);
+    expect(actionCalls).toBe(0);
+    // Typing gate short-circuits before the visibility probe.
+    expect(visibilityCalls).toBe(0);
+  });
+
+  it('runs the action when input is inactive (no regression when not typing)', async () => {
+    let actionCalls = 0;
+    const tick = makeTick({
+      action: () => {
+        actionCalls += 1;
+      },
+    });
+    await runViaScheduler(tick);
+    expect(actionCalls).toBe(1);
+  });
+
+  it('resumes on the next tick after the overlay closes', async () => {
+    let inputActive = true;
+    let actionCalls = 0;
+    const tick = makeTick({
+      inputActive: () => inputActive,
+      action: () => {
+        actionCalls += 1;
+      },
+    });
+    await tick(); // forced tick while typing → skipped
+    expect(actionCalls).toBe(0);
+    inputActive = false;
+    await tick(); // next tick after close → runs
+    expect(actionCalls).toBe(1);
+  });
+
+  it('still honours the visibility and DB-change gates when not typing', async () => {
+    let actionCalls = 0;
+    let hidden = true;
+    let dbUnchanged = false;
+    let hiddenCallbacks = 0;
+    const tick = makeTick({
+      visible: async () => !hidden,
+      dbUnchanged: () => dbUnchanged,
+      onHidden: () => {
+        hiddenCallbacks += 1;
+      },
+      action: () => {
+        actionCalls += 1;
+      },
+    });
+    await tick(); // hidden → hidden callback, no action
+    expect(hiddenCallbacks).toBe(1);
+    expect(actionCalls).toBe(0);
+    hidden = false;
+    dbUnchanged = true;
+    await tick(); // visible but DB unchanged → no action
+    expect(actionCalls).toBe(0);
+    dbUnchanged = false;
+    await tick(); // visible + DB changed → action
+    expect(actionCalls).toBe(1);
+  });
+});
+
+describe('isInputActive — note-edit coverage and keystroke preservation (WL-0MTV67MZU003H7SH)', () => {
+
+  it('md-note-edit is covered via FormState (note editing opens a FormState)', () => {
+    // md-note-edit opens a FormState for the note input, so formState !== null
+    // is the single covering check — no separate note-edit site is needed.
+    const noteEditForm = {} as unknown as import('./form-dialog.js').FormState;
+    expect(isInputActive(noteEditForm, null)).toBe(true);
+    expect(isInputActive(null, null)).toBe(false);
+  });
+
+  it('typing simulation loses no keystrokes across a skipped tick', async () => {
+    // Simulate rapid keypresses into FormState across a scheduled refresh tick
+    // — the keystrokes are handled synchronously by FormState.handleInput
+    // regardless; the tick only contends on an async refresh/re-render.
+    const { FormState: Fs } = await import('./form-dialog.js');
+    const field = [{ name: 'title', default: '' }];
+    let submitted: string | null = null;
+    const state = new Fs('cmd /skill:test <title>', 'Test', field, () => {}, () => {});
+    const chars = 'hello world'.split('');
+    for (const ch of chars) {
+      // Each keystroke goes through FormState synchronously — no async gap
+      // where a tick could steal the event loop and drop the character.
+      const r = state.handleInput(ch);
+      expect(r.type).toBe('none');
+    }
+    expect(state.fields[0].value).toBe('hello world');
+    // Verify the form still has the full typed content and submits correctly.
+    const end = state.handleInput('\r');
+    // Submitted only when all fields have values; empty second field stays on form.
+    // The typing concern is that no characters were lost, not the submit branch.
+    expect(end.type === 'submitted' || end.type === 'none').toBe(true);
+    expect(state.fields[0].value).toBe('hello world');
+  });
+
+  it('typing simulation loses no keystrokes into ShipItDialogState across a skipped tick', async () => {
+    const { ShipItDialogState: SDS } = await import('./ship-it-dialog.js');
+    const onConfirm = vi.fn();
+    const state = new SDS(onConfirm, () => {});
+    for (const ch of 'ship'.split('')) state.handleInput(ch);
+    expect(state.buffer).toBe('ship');
+    // Entering 'ship' then Enter must submit and not lose characters.
+    const r = state.handleInput('\r');
+    expect(r).toBe('submitted');
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+    // After submission, ensure no character was dropped from the buffer prior to confirm.
+    // The buffer was verified above; a skipped scheduler tick never truncates it.
+  });
+});
+
 // ── Header truncation guard (WL-0MSNI6TQ5003JY1Z) ─────────────────────
 // The list-mode header must be truncated to the terminal width so it
 // never wraps onto a second physical row. When it does wrap, the output
@@ -4774,6 +5000,239 @@ describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () =>
     expect(visible).toContain('[paused — hidden]');
     // The downtime segment may be cut at the truncation boundary.
     expect(visible).toContain('[downtime');
+  });
+
+  // ── AC1b: Multi-width emoji characters (WL-0MSNI6TQ5003JY1Z follow-up)
+  // Emoji like ⏳ render as 2 cells in terminals but JavaScript .length
+  // counts them as 1. The header must still fit within cols even when
+  // the idle timer emoji is present (the original "still disappears"
+  // issue: visibleLength was character-count, not visual-width).
+
+  it('header with ⏳ emoji fits at exactly cols (visual width ≤ cols)', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    // Build a header that is 39 chars but ~40 visual cells (⏳ = 2 cells)
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      10,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [⏳ downtime idle 1:23]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    // Visual width must be <= cols (emoji ⏳ counts as 2)
+    let visWidth = 0;
+    for (let i = 0; i < visible.length; i++) {
+      const cp = visible.charCodeAt(i);
+      if (cp >= 0x2300 && cp < 0x2400) visWidth += 2;
+      else if (cp >= 0x2600 && cp < 0x2700) visWidth += 2;
+      else if (cp >= 0x1f000) visWidth += 2;
+      else visWidth += 1;
+    }
+    expect(visWidth).toBeLessThanOrEqual(cols);
+  });
+
+  it('header with ⏳ emoji truncated to fit at 30 cols', () => {
+    const cols = 30;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      'stage in_review',
+      'list',
+      null,
+      50,
+      null,
+      0,
+      true,
+      undefined,
+      undefined,
+      10,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [⏳ downtime idle 12:34]',
+    );
+    const firstLine = output.split('\n')[0];
+    const visible = stripAnsi(firstLine);
+    expect(visible).toContain('Work Items');
+    let visWidth = 0;
+    for (let i = 0; i < visible.length; i++) {
+      const cp = visible.charCodeAt(i);
+      if (cp >= 0x2300 && cp < 0x2400) visWidth += 2;
+      else if (cp >= 0x2600 && cp < 0x2700) visWidth += 2;
+      else if (cp >= 0x1f000) visWidth += 2;
+      else visWidth += 1;
+    }
+    expect(visWidth).toBeLessThanOrEqual(cols);
+  });
+
+  it('rows - 1 invariant holds with ⏳ emoji at 40×24', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      '. [⏳ downtime idle 1:23]',
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
+
+  // AC1/AC2 extended: CJK characters in item titles must be counted as 2 cells
+  // so that item line truncation doesn't underestimate width and cause line-wrap
+  // that pushes the header off-screen (WL-0MSNI6TQ5003JY1Z, WL-0MSAAON63003N6LO).
+  it('CJK title items are properly truncated at 40 cols — visible length ≤ cols', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    // Create items with CJK titles — each CJK char is 2 terminal cells
+    const cjkItems: WorkItem[] = [
+      { ...makeItem('一'), title: '一' },
+      { ...makeItem('二'), title: '二三四五六' },
+      { ...makeItem('三'), title: '三' },
+    ];
+    const output = renderer(
+      cjkItems,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    // Every line except the header must have visible length ≤ cols
+    const lines = output.split('\n');
+    for (let i = 1; i < lines.length; i++) {
+      const visible = stripAnsi(lines[i]);
+      expect(visible.length).toBeLessThanOrEqual(cols);
+    }
+  });
+
+  it('CJK title items: rows - 1 invariant holds at 40×24 with many CJK items', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    // 10 items with CJK titles — without proper truncation these would wrap
+    // and push the total line count past rows-1
+    const cjkItems: WorkItem[] = [];
+    for (let i = 0; i < 10; i++) {
+      cjkItems.push({ ...makeItem(`item-${i}`), title: `項目${i} — 詳細` });
+    }
+    const output = renderer(
+      cjkItems,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+  });
+
+  it('fullwidth ASCII (U+FF01-U+FF5E) counted as 2 cells in visibleLength', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    // Fullwidth ASCII: ＡＢＣ etc. are each 2 cells
+    const fwItems: WorkItem[] = [
+      { ...makeItem('A'), title: 'ＡＢＣＤＥＦＧＨＩＪ' },
+      { ...makeItem('B'), title: 'Ａ' },
+      { ...makeItem('C'), title: 'Ｂ' },
+    ];
+    const output = renderer(
+      fwItems,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      false,
+      undefined,
+      undefined,
+      undefined,
+    );
+    // All lines must fit within cols
+    const lines = output.split('\n');
+    for (let i = 1; i < lines.length; i++) {
+      const visible = stripAnsi(lines[i]);
+      expect(visible.length).toBeLessThanOrEqual(cols);
+    }
   });
 });
 

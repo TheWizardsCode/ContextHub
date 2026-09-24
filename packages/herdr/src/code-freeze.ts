@@ -18,9 +18,14 @@
  *   - Marker present with `active: false` → not frozen
  *   - Corrupt/unreadable marker           → not frozen (fail open)
  *
- * The plugin only READS the marker; writing/clearing it is the ship skill's
- * job (tracked in SorraAgents). Fail-open is deliberate: a broken or missing
- * marker must never block browsing the worklist.
+ * Marker ownership (WL-0MUD6DDZC007ZSIW): the ship skill remains the
+ * authority that writes the marker around the release. The herdr plugin ALSO
+ * writes the marker at Ship It confirmation time (so the freeze applies the
+ * moment the operator confirms, before `/skill:ship release` is dispatched)
+ * and best-effort clears it if the dispatch fails. The plugin never clears a
+ * marker it did not write — the ship skill owns clearing on release exit.
+ * Fail-open is deliberate: a broken or missing marker must never block
+ * browsing the worklist.
  *
  * For fail-closed consumers (the downtime dispatcher, the ambiguous-marker
  * banner — WL-0MSQ0RPQP00636JY) the module also exposes a tri-state read
@@ -30,7 +35,7 @@
  * during a release just because the marker cannot be parsed.
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, unlinkSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 import { getWorklogDir } from './fetcher.js';
 
@@ -189,4 +194,85 @@ export function readCodeFreezeStatus(worklogDir?: string): CodeFreezeStatus {
  */
 export function readCodeFreezeStatusForRoot(root: string): CodeFreezeStatus {
   return readCodeFreezeStatus(join(root, '.worklog'));
+}
+
+// ── Writer / clearer (WL-0MUDEGBGO00609RV parent WL-0MUD6DDZC007ZSIW) ──
+// The herdr plugin writes the marker when the operator confirms Ship It,
+// BEFORE dispatching `/skill:ship release`, so the Code Freeze applies the
+// moment of confirmation. The ship skill remains the authority that clears
+// the marker on release exit; the plugin best-effort clears the marker it
+// wrote when the dispatch fails (see worklist.ts).
+
+/** Options for `writeCodeFreezeMarker`. */
+export interface WriteCodeFreezeMarkerOptions {
+  /** Worklog directory (defaults to the configured worklog dir). */
+  worklogDir?: string;
+  /** Human-readable reason recorded in the marker. */
+  reason?: string;
+  /** PID to record (defaults to `process.pid`). */
+  pid?: number;
+  /** Freeze start timestamp (defaults to `new Date().toISOString()`). */
+  startedAt?: string;
+}
+
+/**
+ * Write the Code Freeze marker atomically.
+ *
+ * Writes to a temporary sibling file then renames it into place, so a
+ * concurrent reader never observes a partially-written marker. Returns the
+ * marker path on success, or `null` when the write fails (e.g. the worklog
+ * directory is missing or not writable) — fail-closed: callers must treat a
+ * `null` result as "freeze could not be applied" and surface the error.
+ *
+ * @param opts - Worklog dir, reason, pid, and start timestamp overrides.
+ * @returns The marker path, or `null` when the write failed.
+ */
+export function writeCodeFreezeMarker(opts: WriteCodeFreezeMarkerOptions = {}): string | null {
+  const markerPath = codeFreezeMarkerPath(opts.worklogDir);
+  if (!markerPath) return null;
+
+  const payload: CodeFreezeState = {
+    active: true,
+    reason: opts.reason ?? 'ship release in progress',
+    startedAt: opts.startedAt ?? new Date().toISOString(),
+    pid: opts.pid ?? process.pid,
+  };
+
+  const tmpPath = `${markerPath}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    writeFileSync(tmpPath, JSON.stringify(payload), 'utf8');
+    renameSync(tmpPath, markerPath);
+    return markerPath;
+  } catch {
+    // Best-effort cleanup of the temp file; ignore secondary failures.
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+}
+
+/**
+ * Remove the Code Freeze marker.
+ *
+ * Silently succeeds when the marker does not exist (idempotent). Returns
+ * `true` when the marker is gone after the call (removed or never present),
+ * `false` when removal failed for another reason (e.g. permissions) — the
+ * caller surfaces a stale-freeze warning in that case.
+ *
+ * @param worklogDir - Worklog directory (defaults to the configured dir).
+ * @returns true when no marker remains, false when removal failed.
+ */
+export function clearCodeFreezeMarker(worklogDir?: string): boolean {
+  const markerPath = codeFreezeMarkerPath(worklogDir);
+  if (!markerPath) return true; // no marker path → nothing to clear
+  try {
+    if (!existsSync(markerPath)) return true;
+    unlinkSync(markerPath);
+    return true;
+  } catch {
+    return false;
+  }
 }

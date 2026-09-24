@@ -10,7 +10,8 @@
  *    timestamp and fire-and-forget POSTs `/admin/set-mode {"mode":"fast"}`.
  *    A failed switch never blocks or delays the command dispatch (fail-open:
  *    the pane opens regardless).
- *  - **Cheap switch on idle:** on each tick, when the operator has been idle
+ *  - **Cheap switch on idle:** on each tick (scheduler task, or the downtime
+ *    dispatcher's `onProxyIdle` callback), when the operator has been idle
  *    (no agent-route commands) for ≥ `modeSwitchIdleThresholdMs` **AND** the
  *    proxy reports idle (reusing `evaluateIdle` from downtime-worker.ts), the
  *    worker POSTs `/admin/set-mode {"mode":"cheap"}`.
@@ -46,6 +47,16 @@
  * The proxy URL is shared with the downtime worker (`downtimeProxyUrl` — no
  * separate URL key), and the existing `/llama/local/status` idle evaluation
  * from downtime-worker.ts is reused.
+ *
+ * **Idle-trigger sources (WL-0MU4MKVR4005WPBJ):** the cheap check runs from
+ * two triggers — (1) the independent `mode-switch` scheduler task on
+ * `modeSwitchPollIntervalMs`, and (2) the downtime dispatcher's
+ * `onProxyIdle` callback, fired with the fresh proxy status whenever the
+ * dispatcher's own poll observes the proxy idle (before it dispatches the
+ * next item). Trigger (2) removes the up-to-one-poll-interval delay so a
+ * downtime item is served by the cheap pool; trigger (1) remains the
+ * fallback when the downtime worker is not polling (disabled, non-leader,
+ * paused). Both call the same fail-closed `tick()`.
  */
 
 import {
@@ -64,8 +75,8 @@ export const ADMIN_MODE_PATH = '/admin/mode';
 /** Proxy mode-switch endpoint path. */
 export const ADMIN_SET_MODE_PATH = '/admin/set-mode';
 
-/** Default idle window before switching to cheap mode: 15 minutes. */
-export const DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS = 900_000;
+/** Default idle window before switching to cheap mode: 30 minutes. */
+export const DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS = 1_800_000;
 
 /**
  * Defensive floor for the idle threshold (60s): a trivially small window
@@ -100,7 +111,7 @@ export const MODE_SWITCH_RUN_TIMEOUT_MS = 30_000;
 
 /**
  * Clamp the mode-switch idle threshold: reject negative/non-finite (fall
- * back to the 15-minute default) and floor at 60s so the operator cannot
+ * back to the 30-minute default) and floor at 60s so the operator cannot
  * configure an immediate cheap-switch.
  */
 export function clampModeSwitchIdleThresholdMs(value: number): number {

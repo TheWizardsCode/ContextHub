@@ -13,12 +13,13 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchCompletedItemCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchCompletedItemCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
 import { AgentTracker, mergeAgentStatesCached } from './agent-tracker.js';
-import { readCodeFreezeState, readCodeFreezeStatus } from './code-freeze.js';
+import { readCodeFreezeState, readCodeFreezeStatus, writeCodeFreezeMarker, clearCodeFreezeMarker } from './code-freeze.js';
+import { runShipGuard, formatBlockedNotice } from './ship-guard.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
 import {
   statusIcon,
@@ -46,6 +47,12 @@ import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
 import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
+import {
+  createHydratorRunner,
+  createProductionHydratorDeps,
+  HYDRATOR_INTERVAL_MS,
+  HYDRATOR_RUN_TIMEOUT_MS,
+} from './hydrator.js';
 import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
@@ -72,6 +79,70 @@ import {
   type NoteEditResult,
 } from './md-note-edit.js';
 
+// ── Input-active predicate (WL-0MTV67MZU003H7SH) ──────────────────────
+
+/**
+ * Whether any text-input overlay is currently active.
+ *
+ * Returns `true` when `formState` or `shipItDialog` is non-null — meaning
+ * the user is actively typing into a form (unknown-identifier input),
+ * the Ship It confirmation dialog, or note-edit (which opens a FormState).
+ * When `true`, the scheduler should skip auto-refresh and auto-sync ticks
+ * so keypresses are not dropped by a concurrent re-render.
+ *
+ * Design decision — skip, don't coalesce: ticks while typing are silently
+ * dropped; the next regular tick after close fires normally. No queued
+ * immediate refresh is emitted on close (avoids infinite-refresh loops).
+ */
+export function isInputActive(
+  formState: FormState | null,
+  shipItDialog: ShipItDialogState | null,
+  blockedNoticeActive = false,
+): boolean {
+  return formState !== null || shipItDialog !== null || blockedNoticeActive;
+}
+
+/**
+ * Build the standard scheduler-tick runner used by the worklist's periodic
+ * tasks (the 30s auto-refresh and the 60s auto-sync).
+ *
+ * Gate ordering:
+ *   1. Typing gate — skip while any text-input overlay is open so a
+ *      background re-render never steals focus or drops a keypress
+ *      (WL-0MTV67MZU003H7SH).
+ *   2. Visibility gate — skip while the pane's tab is hidden
+ *      (pause-when-hidden); the hidden/visible side effects are delegated to
+ *      the caller so it can drive the resume-poll and `panePaused` state.
+ *   3. DB-change gate — skip when the worklog DB is unchanged and the last
+ *      sync is still fresh (zero `wl` spawns for an idle pane).
+ *
+ * Skips are silent and NOT coalesced: the task stays scheduled, so the next
+ * regular tick after the reason clears fires normally.
+ *
+ * Exported so the scheduler-integration tests exercise the REAL guard
+ * ordering with a real `TaskScheduler`, instead of re-implementing the guard
+ * inline in the test body.
+ */
+export function createGatedTick(deps: {
+  isInputActive: () => boolean;
+  isVisible: () => Promise<boolean>;
+  onHidden: () => void;
+  onVisible: () => void;
+  isDbUnchanged: () => boolean;
+  action: () => void;
+}): () => Promise<void> {
+  return async () => {
+    if (deps.isInputActive()) return;
+    if (!(await deps.isVisible())) {
+      deps.onHidden();
+      return;
+    }
+    deps.onVisible();
+    if (deps.isDbUnchanged()) return;
+    deps.action();
+  };
+}
+
 // ── Constants ─────────────────────────────────────────────────────────
 
 /**
@@ -89,6 +160,7 @@ export const STAGES = [
   'in_progress',
   'in_review',
   'completed',
+  'done',  // legacy stage alias for completed (WL-0MU3U1AMP0044WUX)
 ] as const;
 
 export type Stage = (typeof STAGES)[number];
@@ -108,6 +180,7 @@ export const STAGE_MAP: Record<string, string> = {
   plan_complete: 'plan_complete',
   in_progress: 'in_progress',
   in_review: 'in_review',
+  done: 'done',  // legacy stage alias for completed (WL-0MU3U1AMP0044WUX)
 };
 
 // ── /wl --priority <priority> map (WL-0MSKC8T46006999S) ────────────────
@@ -129,6 +202,7 @@ export const STAGE_COLORS: Record<string, number> = {
   in_progress: 76,
   in_review: 220,
   completed: 33,
+  done: 33,  // legacy stage alias for completed (WL-0MU3U1AMP0044WUX)
 };
 
 // ── Metadata panel sizing ───────────────────────────────────────────────
@@ -1189,14 +1263,20 @@ export function formatItemLine(
 
   let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}`;
 
-  // Truncate to fit terminal width, accounting for ANSI codes
-  const visibleLength = line.replace(/\x1b\[[0-9;]*m/g, '').length;
-  if (visibleLength > maxCols - 1) {
-    // Truncate before ANSI codes, preserving them
+  // Truncate to fit terminal width, accounting for ANSI codes and
+  // multi-width characters (CJK, emoji, fullwidth forms). Reuses the
+  // visibleLength() helper so characters like Chinese/Japanese/Korean
+  // ideographs are counted as 2 terminal cells, preventing line-wrap
+  // that would push the total rendered line count past rows-1
+  // (WL-0MSNI6TQ5003JY1Z, WL-0MSAAON63003N6LO).
+  const visLen = visibleLength(line.replace(/\x1b\[[0-9;]*m/g, ''));
+  if (visLen > maxCols - 1) {
+    // Truncate before ANSI codes, preserving them and counting
+    // multi-width chars as 2 cells (truncateLine-compatible).
     let truncated = '';
-    let visLen = 0;
+    let charVisLen = 0;
     let i = 0;
-    while (visLen < maxCols - 4 && i < line.length) {
+    while (charVisLen < maxCols - 4 && i < line.length) {
       if (line[i] === '\x1b' && line[i + 1] === '[') {
         // Copy ANSI escape sequence
         const end = line.indexOf('m', i);
@@ -1206,9 +1286,40 @@ export function formatItemLine(
           continue;
         }
       }
-      truncated += line[i];
-      visLen += 1;
-      i += 1;
+      // Count visual width for multi-width characters. Appends the FULL
+      // character (both surrogate halves for supplementary-plane emoji) so a
+      // truncation point never leaves a lone surrogate — a lone surrogate
+      // written to stdout encodes as U+FFFD (�) and renders as an "error"
+      // glyph (WL-0MU3U1AMP0044WUX).
+      let ch: string;
+      let cp: number;
+      if (line.charCodeAt(i) >= 0xd800 && line.charCodeAt(i) < 0xdc00 && i + 1 < line.length) {
+        ch = line.slice(i, i + 2); // both halves of the surrogate pair
+        cp = 0x10000 + ((line.charCodeAt(i) - 0xd800) << 10) + (line.charCodeAt(i + 1) - 0xdc00);
+        i += 2;
+      } else {
+        ch = line[i];
+        cp = line.charCodeAt(i);
+        i += 1;
+      }
+      if (cp >= 0x2300 && cp < 0x2400) charVisLen += 2;
+      else if (cp >= 0x2600 && cp < 0x2700) charVisLen += 2;
+      else if (cp >= 0x1f000) charVisLen += 2;
+      else if (cp >= 0x3000 && cp < 0x3040) charVisLen += 2;
+      else if (cp >= 0x3400 && cp < 0x4DC0) charVisLen += 2;
+      else if (cp >= 0x4E00 && cp < 0xA000) charVisLen += 2;
+      else if (cp >= 0x20000) charVisLen += 2;
+      else if (cp >= 0xAC00 && cp < 0xD800) charVisLen += 2;
+      else if (cp >= 0x1100 && cp < 0x1200) charVisLen += 2;
+      else if (cp >= 0x3130 && cp < 0x3190) charVisLen += 2;
+      else if (cp >= 0x3100 && cp < 0x3130) charVisLen += 2;
+      else if (cp >= 0x31A0 && cp < 0x31C0) charVisLen += 2;
+      else if (cp >= 0xFF01 && cp < 0xFF5F) charVisLen += 2;
+      else if (cp >= 0xFFA0 && cp < 0xFFDD) charVisLen += 2;
+      else if (cp >= 0x3200 && cp < 0x3300) charVisLen += 2;
+      else if (cp >= 0x2460 && cp < 0x2500) charVisLen += 2;
+      else charVisLen += 1;
+      truncated += ch;
     }
     // Close any open ANSI codes before ellipsis
     truncated += `${ANSI.reset}…`;
@@ -1222,8 +1333,64 @@ export function formatItemLine(
  * Ensure a line (possibly with ANSI codes) fits within the given width
  * by truncating and appending an ellipsis if necessary.
  */
+/**
+ * Compute the visual (terminal) width of a string, accounting for
+ * multi-width characters that render as 2 cells.
+ *
+ * Characters in these Unicode ranges are known to be double-width
+ * in most terminals:
+ *   • U+2300–U+23FF  misc technical (⏳ etc.)
+ *   • U+2600–U+26FF  miscellaneous symbols (⚠, ⛔)
+ *   • U+1F000+       emoji (including supplementary-plane emoji)
+ *   • U+3000–U+303F  CJK punctuation (ideographic space U+3000)
+ *   • U+3400–U+4DBF  CJK Unified Ideographs Extension A
+ *   • U+4E00–U+9FFF  CJK Unified Ideographs (core)
+ *   • U+20000+       CJK Extension B+ (supplementary-plane)
+ *   • U+AC00–U+D7AF  Hangul Syllables (Korean)
+ *   • U+1100–U+11FF  Hangul Jamo
+ *   • U+3130–U+318F  Hangul Compatibility Jamo
+ *   • U+3100–U+312F  Bopomofo
+ *   • U+31A0–U+31BF  Bopomofo Extended
+ *   • U+FF01–U+FF5E  Fullwidth ASCII variants
+ *   • U+FFA0–U+FFDC  Fullwidth Hangul
+ *   • U+3200–U+32FF  Enclosed CJK
+ *   • U+2460–U+24FF  Enclosed Alphanumeric
+ */
+function visibleLength(s: string): number {
+  let width = 0;
+  for (let i = 0; i < s.length; i++) {
+    // Handle surrogate pairs
+    let cp: number;
+    if (s.charCodeAt(i) >= 0xd800 && s.charCodeAt(i) < 0xdc00 && i + 1 < s.length) {
+      cp = 0x10000 + ((s.charCodeAt(i) - 0xd800) << 10) + (s.charCodeAt(i + 1) - 0xdc00);
+      i += 1;
+    } else {
+      cp = s.charCodeAt(i);
+    }
+    // Double-width ranges: emoji, CJK, Hangul, fullwidth forms
+    if (cp >= 0x2300 && cp < 0x2400) width += 2;            // ⏳ misc technical
+    else if (cp >= 0x2600 && cp < 0x2700) width += 2;       // ⚠, ⛔ symbols
+    else if (cp >= 0x1f000) width += 2;                      // emoji (incl. supplementary)
+    else if (cp >= 0x3000 && cp < 0x3040) width += 2;       // CJK punctuation (ideographic space)
+    else if (cp >= 0x3400 && cp < 0x4DC0) width += 2;       // CJK Extension A
+    else if (cp >= 0x4E00 && cp < 0xA000) width += 2;       // CJK Unified Ideographs
+    else if (cp >= 0x20000) width += 2;                      // CJK Extension B+
+    else if (cp >= 0xAC00 && cp < 0xD800) width += 2;       // Hangul Syllables
+    else if (cp >= 0x1100 && cp < 0x1200) width += 2;       // Hangul Jamo
+    else if (cp >= 0x3130 && cp < 0x3190) width += 2;       // Hangul Compatibility Jamo
+    else if (cp >= 0x3100 && cp < 0x3130) width += 2;       // Bopomofo
+    else if (cp >= 0x31A0 && cp < 0x31C0) width += 2;       // Bopomofo Extended
+    else if (cp >= 0xFF01 && cp < 0xFF5F) width += 2;       // Fullwidth ASCII
+    else if (cp >= 0xFFA0 && cp < 0xFFDD) width += 2;       // Fullwidth Hangul
+    else if (cp >= 0x3200 && cp < 0x3300) width += 2;       // Enclosed CJK
+    else if (cp >= 0x2460 && cp < 0x2500) width += 2;       // Enclosed Alphanumeric
+    else width += 1;
+  }
+  return width;
+}
+
 function truncateLine(line: string, maxWidth: number): string {
-  const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+  const visibleLen = visibleLength(line.replace(/\x1b\[[0-9;]*m/g, ''));
   if (visibleLen <= maxWidth) return line;
 
   let result = '';
@@ -1238,9 +1405,30 @@ function truncateLine(line: string, maxWidth: number): string {
         continue;
       }
     }
-    result += line[i];
-    visLen += 1;
-    i += 1;
+    // Count visual width (multi-width chars add 2). Append the FULL
+    // character (both surrogate halves) so truncation never leaves a lone
+    // surrogate that would encode to U+FFFD (�) on write (WL-0MU3U1AMP0044WUX).
+    let ch: string;
+    let cp: number;
+    if (line.charCodeAt(i) >= 0xd800 && line.charCodeAt(i) < 0xdc00 && i + 1 < line.length) {
+      ch = line.slice(i, i + 2); // both halves of the surrogate pair
+      cp = 0x10000 + ((line.charCodeAt(i) - 0xd800) << 10) + (line.charCodeAt(i + 1) - 0xdc00);
+      i += 2;
+    } else {
+      ch = line[i];
+      cp = line.charCodeAt(i);
+      i += 1;
+    }
+    if (cp >= 0x2300 && cp < 0x2400) {
+      visLen += 2; // ⏳ etc.
+    } else if (cp >= 0x2600 && cp < 0x2700) {
+      visLen += 2; // ⚠, ⛔
+    } else if (cp >= 0x1f000) {
+      visLen += 2; // emoji
+    } else {
+      visLen += 1;
+    }
+    result += ch;
   }
   // Close open ANSI and append ellipsis
   result += `${ANSI.reset}…`;
@@ -1366,12 +1554,12 @@ export function formatTooltipOverlay(cols: number, lines: string[]): string[] {
   if (lines.length === 0) return [];
   let maxWidth = 0;
   for (const line of lines) {
-    const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const visibleLen = visibleLength(line.replace(/\x1b\[[0-9;]*m/g, ''));
     if (visibleLen > maxWidth) maxWidth = visibleLen;
   }
   const boxWidth = Math.min(Math.max(maxWidth + 2, 20), cols - 2);
   return lines.map((line) => {
-    const visibleLen = line.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const visibleLen = visibleLength(line.replace(/\x1b\[[0-9;]*m/g, ''));
     const padding = Math.max(0, boxWidth - visibleLen);
     const bg = ANSI.bg(238);
     const fg = ANSI.fg(252);
@@ -3643,7 +3831,7 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
   const leftPad = Math.max(0, Math.floor((maxCols - effectiveWidth) / 2));
 
   const padLine = (content: string): string => {
-    const visibleLen = content.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const visibleLen = visibleLength(content.replace(/\x1b\[[0-9;]*m/g, ''));
     const rightPad = Math.max(0, effectiveWidth - visibleLen - 2);
     return ' '.repeat(leftPad) + `│ ${content}${' '.repeat(rightPad)} │`;
   };
@@ -3685,6 +3873,101 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
   }
 
   return lines.join('\n');
+}
+
+/**
+ * Full-pane "Ship mode blocked" notice (WL-0MUD6DDZC007ZSIW). Renders the
+ * guard's plain-text blocked notice inside the same box style as the Code
+ * Freeze dialog, so the blocked state reuses the established in-pane modal
+ * pattern (esc/enter/q dismiss). Shown INSTEAD of the Ship It dialog when
+ * live agent panes are working on project items — the dialog never opens.
+ */
+export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: string): string {
+  const lines: string[] = [];
+  const dialogWidth = Math.min(maxCols - 4, 76);
+  const effectiveWidth = Math.max(52, dialogWidth);
+  const leftPad = Math.max(0, Math.floor((maxCols - effectiveWidth) / 2));
+
+  const padLine = (content: string): string => {
+    const visibleLen = visibleLength(content.replace(/\x1b\[[0-9;]*m/g, ''));
+    const rightPad = Math.max(0, effectiveWidth - visibleLen - 2);
+    return ' '.repeat(leftPad) + `│ ${content}${' '.repeat(rightPad)} │`;
+  };
+
+  const borderLine = (left: string, right: string): string =>
+    ' '.repeat(leftPad) + `${left}${'─'.repeat(effectiveWidth - 2)}${right}`;
+
+  lines.push('');
+  lines.push(borderLine('┌', '┐'));
+  lines.push(padLine(`${ANSI.bold}${ANSI.fg(196)}⛔ SHIP MODE BLOCKED${ANSI.reset}`));
+  lines.push(padLine(''));
+  for (const raw of body.split('\n')) {
+    lines.push(padLine(raw));
+  }
+  lines.push(padLine(''));
+  lines.push(borderLine('├', '┤'));
+  lines.push(padLine(`${ANSI.dim}[Esc] dismiss  [Enter] dismiss  [q] dismiss${ANSI.reset}`));
+  lines.push(borderLine('└', '┘'));
+  lines.push('');
+
+  const remaining = Math.max(0, maxRows - lines.length);
+  for (let i = 0; i < remaining; i++) {
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Build the production Ship Guard query seam (WL-0MUD6DDZC007ZSIW): runs
+ * `wl list --json --fields id` and `herdr pane list` and returns their raw
+ * stdout, or null for whichever query failed. A null output makes the guard
+ * fail safe (the dialog is not opened). The command-output-string shape keeps
+ * the guard pure and unit-testable without spawning processes.
+ *
+ * The worklog query requests ONLY the `id` field (`--fields id`): the guard
+ * needs the project's work-item ID set, nothing else. This keeps the payload
+ * tiny (~100 KB for ~2.3 k items vs ~8.5 MB for the full worklog) so it no
+ * longer risks Node's `maxBuffer` and will not re-break as the worklog grows
+ * (WL-0MUEK7H39008VVUF). The `maxBuffer` is raised as a defensive backstop.
+ *
+ * @param cwd - Project root (contains `.worklog/`); when provided the wl
+ *   query targets that root explicitly. When omitted the module-configured
+ *   worklog dir is used.
+ */
+export function createProductionShipGuardQuery(
+  cwd?: string,
+): () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> {
+  // IDs-only worklog query: bounded payload, resilient as the worklog grows.
+  const worklogArgs = ['list', '--json', '--fields', 'id'];
+  // Generous backstop; the --fields id projection keeps the real payload tiny.
+  const SHIP_GUARD_MAX_BUFFER = 32 * 1024 * 1024;
+  return async () => {
+    const exec = getExecFileAsync();
+    let worklogOutput: string | null = null;
+    let paneOutput: string | null = null;
+    try {
+      const wlArgs = cwd ? buildWlArgsForRoot(cwd, worklogArgs) : buildWlArgs(worklogArgs);
+      const { stdout } = await exec('wl', wlArgs, {
+        encoding: 'utf8',
+        timeout: DEFAULT_WL_TIMEOUT_MS,
+        maxBuffer: SHIP_GUARD_MAX_BUFFER,
+      });
+      worklogOutput = stdout;
+    } catch {
+      worklogOutput = null;
+    }
+    try {
+      const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+      const { stdout } = await exec(herdrBin, ['pane', 'list'], {
+        encoding: 'utf8',
+        maxBuffer: SHIP_GUARD_MAX_BUFFER,
+      });
+      paneOutput = stdout;
+    } catch {
+      paneOutput = null;
+    }
+    return { worklogOutput, paneOutput };
+  };
 }
 
 /**
@@ -4134,7 +4417,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -4159,6 +4442,7 @@ export async function runWorklistTui(
     maxSyncStalenessMs: options?.maxSyncStalenessMs ?? 60_000,
     onRefresh: options?.onRefresh,
     cwd: options?.cwd,
+    shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd),
   };
 
   let termSize = getTermSize();
@@ -4210,6 +4494,13 @@ export async function runWorklistTui(
   let codeFreezeActive = false;
   let codeFreezeAmbiguous = false;
   let codeFreezeNotice = false;
+  /**
+   * Ship-mode blocked notice (WL-0MUD6DDZC007ZSIW). Non-null while the guard
+   * has refused to open the Ship It dialog: holds the formatted plain-text
+   * notice listing the blocking panes/work items. Modal — Esc/Enter/q dismiss
+   * it; no command is ever dispatched while it is showing.
+   */
+  let blockedNotice: string | null = null;
 
   /**
    * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
@@ -4685,8 +4976,21 @@ export async function runWorklistTui(
    */
   const openShipItDialog = (model?: string): void => {
     shipItDialog = new ShipItDialogState(
-      // onConfirm — typed 'ship' + Enter: dispatch via the standard path.
+      // onConfirm — typed 'ship' + Enter: freeze, then dispatch.
       () => {
+        // Write the Code Freeze marker BEFORE dispatching `/skill:ship
+        // release` so the freeze applies from the moment of confirmation
+        // (WL-0MUD6DDZC007ZSIW AC4). When a freeze is ALREADY active the
+        // ship skill owns that marker — do not overwrite it, and do not
+        // clear it on dispatch failure (the release may already be running).
+        const alreadyFrozen = readCodeFreezeState().active;
+        const wroteMarker = alreadyFrozen
+          ? null
+          : writeCodeFreezeMarker({ reason: 'Ship It confirmed in herdr worklist' });
+        if (wroteMarker !== null) {
+          codeFreezeActive = true;
+          refreshFreezeState();
+        }
         try {
           // Fresh marker read at dispatch time (fail-safe client-side).
           const frozen = readCodeFreezeState().active;
@@ -4694,12 +4998,25 @@ export async function runWorklistTui(
             codeFreezeActive = true;
           }
           const result = executeResolvedCommand(SHIP_IT_COMMAND, state, opts.onCommand, frozen, model, opts.onDowntimeToggle, undefined, opts.onRefresh);
-          if (result === 'noop') {
+          if (result === 'noop' || result === 'blocked') {
+            // Dispatch was a no-op: best-effort clear the marker WE wrote so
+            // a release that never started cannot leave a stale freeze
+            // (WL-0MUD6DDZC007ZSIW AC5).
+            if (wroteMarker !== null) {
+              clearCodeFreezeMarker();
+              refreshFreezeState();
+            }
             showToast('Skipped', { body: `${SHIP_IT_COMMAND} (no item)` });
           } else {
             showToast('Sent', { body: SHIP_IT_COMMAND });
           }
         } catch (e) {
+          // onCommand threw (e.g. no agent pane available): clear the marker
+          // WE wrote and surface the error (WL-0MUD6DDZC007ZSIW AC5).
+          if (wroteMarker !== null) {
+            clearCodeFreezeMarker();
+            refreshFreezeState();
+          }
           showToast('Error', { body: (e as Error).message });
           process.stderr.write(`[herdr] Command error: ${(e as Error).message}\n`);
         }
@@ -4710,6 +5027,38 @@ export async function runWorklistTui(
       },
     );
     render();
+  };
+
+  /**
+   * Run the Ship Guard, then open the confirmation dialog — or show the
+   * blocked notice (WL-0MUD6DDZC007ZSIW). A live agent pane carrying a
+   * project work-item ID blocks ship mode; an unavailable guard query fails
+   * safe (no dialog). The dialog is never rendered while blocking panes
+   * exist.
+   */
+  const openShipItDialogGuarded = async (model?: string): Promise<void> => {
+    let query: { worklogOutput: string | null; paneOutput: string | null };
+    try {
+      query = await opts.shipGuardQuery();
+    } catch {
+      query = { worklogOutput: null, paneOutput: null };
+    }
+    const queryFailed = query.worklogOutput === null || query.paneOutput === null;
+    const result = runShipGuard(query.worklogOutput ?? '', query.paneOutput ?? '');
+    if (queryFailed || !result.ok || result.blockingPanes.length > 0) {
+      // Pass the guard's reason so the notice names WHICH query failed
+      // (worklog vs pane list) rather than a generic message
+      // (WL-0MUEK7H39008VVUF AC3).
+      blockedNotice = formatBlockedNotice(
+        result.blockingPanes,
+        queryFailed || !result.ok,
+        result.reason,
+      );
+      shipItDialog = null;
+      render();
+      return;
+    }
+    openShipItDialog(model);
   };
 
   // Double-click state tracker — persists across onData calls for the TUI
@@ -4742,7 +5091,7 @@ export async function runWorklistTui(
     // Try mouse event dispatch first — only runs when the pane is not in a
     // modal state (code-freeze notice, form, ship-it dialog), matching the
     // keyboard path. Mouse input is ignored during those modal states.
-    if (!codeFreezeNotice && formState === null && shipItDialog === null) {
+    if (!codeFreezeNotice && blockedNotice === null && formState === null && shipItDialog === null) {
       if (dispatchMouse(key)) {
         render();
         return;
@@ -4756,6 +5105,19 @@ export async function runWorklistTui(
     if (codeFreezeNotice) {
       if (key === '\x1b' || key === '\r' || key === '\n' || key === 'q') {
         codeFreezeNotice = false;
+      }
+      render();
+      return;
+    }
+
+    // ── Ship-mode blocked notice handling (WL-0MUD6DDZC007ZSIW) ──
+    // Shown when `S` was pressed while live agent panes carry project
+    // work-item IDs. Modal — Esc/Enter/q dismiss it; no command is
+    // dispatched, and the Ship It dialog is never opened while blocking
+    // panes exist.
+    if (blockedNotice !== null) {
+      if (key === '\x1b' || key === '\r' || key === '\n' || key === 'q') {
+        blockedNotice = null;
       }
       render();
       return;
@@ -4877,7 +5239,7 @@ export async function runWorklistTui(
           // 'ship' confirmation before dispatch. Esc cancels, the dialog
           // stays bottom-anchored over the list.
           if (command === SHIP_IT_COMMAND) {
-            openShipItDialog(model ?? undefined);
+            await openShipItDialogGuarded(model ?? undefined);
             return;
           }
           // Inline note-edit chords (WL-0MSKV6SKK008MMXR): add/edit/delete
@@ -5156,7 +5518,7 @@ export async function runWorklistTui(
         // selection list visible; the user must type `ship` + Enter to
         // dispatch, Esc to cancel.
         if (singleCmd === SHIP_IT_COMMAND) {
-          openShipItDialog(singleModel);
+          await openShipItDialogGuarded(singleModel);
           return;
         }
         // Single-key shortcut — check for unknown identifiers first
@@ -5372,6 +5734,18 @@ export async function runWorklistTui(
       return;
     }
 
+    // ── Ship-mode blocked notice overlay rendering ─────────────
+    // Shown when `S` was pressed while live agent panes carry project
+    // work-item IDs (WL-0MUD6DDZC007ZSIW). Full-pane modal — the Ship It
+    // dialog is never rendered while this notice is showing.
+    if (blockedNotice !== null) {
+      const dialogOutput = formatBlockedShipDialog(termSize.cols, termSize.rows, blockedNotice);
+      process.stdout.write(ANSI.clear);
+      process.stdout.write(ANSI.cursorHome);
+      process.stdout.write(dialogOutput);
+      return;
+    }
+
     // Use the display-rows model for list rendering (headings + items,
     // WL-0MSL5MPSZ003TG94). Heading rows have no stage/issueType, so
     // shortcut hints fall back to defaults for heading selections.
@@ -5565,6 +5939,19 @@ export async function runWorklistTui(
   // pause-when-hidden gating, and shutdown cleanup live in one place.
   const scheduler = new TaskScheduler(DEFAULT_SCHEDULER_TICK_MS);
 
+  // ── Hydrator (WL-0MSOJLZD9004P8PI) ──────────────────────────────────
+  // Self-heals the queue: periodically re-checks `in_progress` items against
+  // live agent panes in the current workspace and releases (demotes) any
+  // item claimed with no running pane. Visibility-gated via
+  // createHydratorRunner, so a hidden tab spawns zero `wl`/`herdr`
+  // processes (AC5). The SAME runner is invoked immediately on the
+  // hidden→visible resume below, so regaining focus re-checks without
+  // waiting for the next 30 s tick (AC4).
+  const runHydrator = createHydratorRunner(createProductionHydratorDeps(), {
+    workspaceId: process.env.HERDR_WORKSPACE_ID ?? undefined,
+    isVisible: () => paneGate.visible(),
+  });
+
   // DB-change tracker: detects whether the worklog DB has changed since the
   // last cycle. Used to gate auto-refresh/sync ticks so idle panes spawn
   // zero wl processes (WL-0MSJ1OLTL009N4IQ). Created only when we can
@@ -5598,25 +5985,31 @@ export async function runWorklistTui(
   // amplified the wl sync lock storm (WL-0MSAB7ZUC004SK7E).
   // Visibility-gated: when the pane is hidden (not focused), ticks are
   // skipped so hidden panes spawn zero wl processes (pause-when-hidden).
+  // Typing-gated (WL-0MTV67MZU003H7SH): while any text-input overlay is open
+  // (`isInputActive()`), the tick is skipped so keypresses aren't dropped by
+  // a concurrent re-render. md-note-edit is already covered — it opens a
+  // FormState, so `formState !== null` suffices for every current input site.
+  // Resume contract: skip silently, don't coalesce; the next regular tick
+  // after the overlay closes fires normally (no queued immediate refresh).
   if (opts.autoRefresh) {
     scheduler.addTask({
       id: 'refresh',
       intervalMs: opts.refreshIntervalMs,
       singleFlight: true,
-      run: async () => {
-        if (!(await paneGate.visible())) {
+      run: createGatedTick({
+        isInputActive: () => isInputActive(formState, shipItDialog, blockedNotice !== null),
+        isVisible: () => paneGate.visible(),
+        onHidden: () => {
           panePaused = true;
           if (resumePollEnabled()) startResumePoll();
-          return;
-        }
-        stopResumePoll();
-        panePaused = false;
-        // DB-change gate: skip when DB unchanged since last cycle
-        if (tracker && !tracker.dbChanged()) {
-          return; // DB unchanged — zero wl spawns for this tick
-        }
-        doRefresh(false);
-      },
+        },
+        onVisible: () => {
+          stopResumePoll();
+          panePaused = false;
+        },
+        isDbUnchanged: () => tracker !== null && !tracker.dbChanged(),
+        action: () => doRefresh(false),
+      }),
     });
   }
 
@@ -5625,7 +6018,10 @@ export async function runWorklistTui(
   // panes/TUI instances skip instead of piling up under lock contention,
   // and the cross-instance heartbeat (F3) so only the first pane per window
   // spawns `wl sync` at all. Visibility-gated like the refresh task: hidden
-  // panes skip the sync (and its follow-up refresh) entirely. Fires once
+  // panes skip the sync (and its follow-up refresh) entirely. Typing-gated
+  // (WL-0MTV67MZU003H7SH): ticks are skipped while any text-input overlay is
+  // open — `isInputActive()` covers FormState, ShipItDialog, and md-note-edit
+  // (via FormState). See resume contract on the refresh task above. Fires once
   // immediately on start (as the previous SyncTimer did) so the first sync
   // cycle is not delayed.
   if (opts.autoSync && opts.syncIntervalMs !== 0) {
@@ -5637,27 +6033,33 @@ export async function runWorklistTui(
       id: 'sync',
       intervalMs: opts.syncIntervalMs,
       fireImmediately: true,
-      run: async () => {
-        if (!(await paneGate.visible())) {
+      run: createGatedTick({
+        isInputActive: () => isInputActive(formState, shipItDialog, blockedNotice !== null),
+        isVisible: () => paneGate.visible(),
+        onHidden: () => {
           panePaused = true;
           if (resumePollEnabled()) startResumePoll();
-          return;
-        }
-        stopResumePoll();
-        panePaused = false;
+        },
+        onVisible: () => {
+          stopResumePoll();
+          panePaused = false;
+        },
         // DB-change gate: skip when DB unchanged AND last sync fresh within cap.
         // Subject to existing heartbeat / single-flight / --if-idle guards in doSync.
-        if (tracker && opts.maxSyncStalenessMs > 0) {
-          const dbChanged = tracker.dbChanged();
-          const syncDir = worklogDir ?? join(process.cwd(), '.worklog');
-          const heartbeatFresh = isSyncHeartbeatFresh(syncDir, opts.maxSyncStalenessMs);
-          if (!dbChanged && heartbeatFresh) {
-            return; // DB unchanged, last sync recent — skip
+        isDbUnchanged: () => {
+          if (tracker && opts.maxSyncStalenessMs > 0) {
+            const dbChanged = tracker.dbChanged();
+            const syncDir = worklogDir ?? join(process.cwd(), '.worklog');
+            const heartbeatFresh = isSyncHeartbeatFresh(syncDir, opts.maxSyncStalenessMs);
+            if (!dbChanged && heartbeatFresh) return true;
           }
-        }
-        doSync(true, heartbeatTtlMs); // ifIdle + heartbeat: skip when another sync is in-flight / fresh
-        doRefresh(false);
-      },
+          return false;
+        },
+        action: () => {
+          doSync(true, heartbeatTtlMs); // ifIdle + heartbeat: skip when another sync is in-flight / fresh
+          doRefresh(false);
+        },
+      }),
     });
   }
 
@@ -5685,14 +6087,43 @@ export async function runWorklistTui(
         stopResumePoll();
         panePaused = false;
         doRefresh(true);
+        // Hydrator focus-resume (AC4): the hidden→visible transition also
+        // re-checks `in_progress` claims immediately — the same runner the
+        // 30 s hydrate task uses — so a claim whose pane died while the tab
+        // was hidden is released as soon as the tab regains focus (no wait
+        // for the next hydrate tick). `paneGate.visible()` is already cached
+        // true here, so the runner proceeds without a new visibility probe.
+        void runHydrator();
       }
+    },
+  });
+
+  // Hydrator task — self-healing `in_progress` claims (WL-0MSOJLZD9004P8PI):
+  // every 30 s it fetches `in_progress` items, matches each against live
+  // pane titles (the work-item ID embedded by pane-title.ts) in the current
+  // workspace, and demotes any item with no matching pane so the claim
+  // re-enters the dispatchable pool. Visibility-gated via the runner
+  // (AC5 — a hidden tab spawns zero wl/herdr processes); single-flight +
+  // scheduler-level watchdog so a hung `wl`/`herdr` run is abandoned after
+  // HYDRATOR_RUN_TIMEOUT_MS and retried on the next tick.
+  scheduler.addTask({
+    id: 'hydrate',
+    intervalMs: HYDRATOR_INTERVAL_MS,
+    singleFlight: true,
+    runTimeoutMs: HYDRATOR_RUN_TIMEOUT_MS,
+    run: async () => {
+      await runHydrator();
     },
   });
 
   // Downtime-worker task — polls the llama-proxy for idle state and, after
   // the configured idle threshold, dispatches a pi agent pane (parent
-  // WL-0MSF49FMW009M06K). Unlike refresh/sync it is NOT visibility-gated:
-  // the worker runs while the worklist pane is open (parent Assumptions).
+  // WL-0MSF49FMW009M06K). Unlike refresh/sync it is NOT visibility-gated or
+  // typing-gated (WL-0MTV67MZU003H7SH audit): the worker only probes the
+  // proxy for idle state and, when idle long enough, dispatches a new pane
+  // — it never triggers a worklist list refresh or re-render while the
+  // typing overlay stays visible, so gating would only delay the (low
+  // urgency) dispatch with no keypress-loss benefit.
   // Single-flight: the poller and dispatch guards inside the worker prevent
   // overlapping work; the scheduler task itself is also single-flight.
   // Scheduler-level watchdog (WL-0MSJIPHD0001L1J9): a tick run that hangs
@@ -5723,7 +6154,10 @@ export async function runWorklistTui(
 
   // Mode-switch worker task — polls the llama-proxy for idle state and,
   // after the configured idle threshold, switches from fast (cloud) to
-  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). Pattern-matched on the
+  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). WL-0MTV67MZU003H7SH audit —
+  // same as downtime: NOT visibility-gated or typing-gated — the worker only
+  // switches inference mode via the proxy; it never re-renders the list while
+  // a form/ship-it dialog is open. Pattern-matched on the
   // downtime task: single-flight + runTimeoutMs watchdog (a hung tick can
   // never wedge the task), visibility-independent (runs while the worklist
   // pane is open). The task is only registered when the feature is enabled
