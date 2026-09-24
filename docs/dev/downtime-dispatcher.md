@@ -746,6 +746,21 @@ an agent on a tool call (wl, bash, tests) left the slot "free", so multiple
    a slot with a live lease is never considered available for a new pane.
    A single idle-but-owned slot (count-based path) fails closed via the
    derived `local_lease_active`.
+
+   **Stale/empty per-slot data (WL-0MUFP30T2003OX1F).** The proxy serves
+   `slots: []` together with `slots_stale: true` when its fresh `/slots`
+   query fails: the slot COUNTS come from the last-known cache but the
+   per-slot detail is unavailable. An empty array is **not** "zero free
+   slots", so the worker treats stale OR empty `slots` as "no per-slot
+   identity" and falls back to the count-based path. In that path, with a
+   multi-slot config (`0 < N < total`) a held lease no longer blocks
+   dispatch into the proxy-reported spare capacity: the count-based gate
+   uses `available_slots`, reserving one slot per lease only when the owner
+   may be idle (`local_active_query !== true` — an active query's slot is
+   already processing and excluded from the count). A single-slot
+   (`total_slots = 1`) or `N <= 0` / `N >= total` setup keeps the strict
+   fail-closed gate. The proxy-side improvement (serve cached per-slot
+   detail when stale) is tracked separately in `llm-manager`.
 3. **Contention feedback (AC6)** — the proxy's LIVE `contention_queue_depth`
    is parsed; while > 0 the dispatcher backs off with outcome reason
    `proxy-contention` until the queue drains. The sibling

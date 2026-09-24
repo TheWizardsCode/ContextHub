@@ -518,11 +518,22 @@ export interface LlamaStatus {
    */
   contention_queued_count?: number;
   /**
+   * Proxy degradation flag (LP-0MSVP7XJ6008QPKX, consumed by
+   * WL-0MUFP30T2003OX1F): `true` when the served slot COUNTS came from the
+   * proxy's last-known cache because the fresh `/slots` query failed. When
+   * true the per-slot `slots` detail cannot be trusted/paired with the
+   * counts, so the worker must fall back to the count-based path. ABSENT on
+   * pre-feature proxies (treated as not stale).
+   */
+  slots_stale?: boolean;
+  /**
    * Per-slot identity (LP-0MSG5TA7Y002GN39): served by proxies that expose
    * slot-level detail. ABSENT on pre-feature proxies — the worker then
    * falls back to the count-based all-slots-free logic. When present, the
    * downtime worker tracks idle duration PER SLOT ID so a configured N
-   * requires the SAME N slots continuously free.
+   * requires the SAME N slots continuously free. An EMPTY array means "no
+   * per-slot detail available" (WL-0MUFP30T2003OX1F) — never "zero free
+   * slots" — and likewise falls back to the count-based path.
    */
   slots?: LlamaSlot[];
 }
@@ -616,6 +627,90 @@ export function countFreeUnownedSlots(slots: LlamaSlot[]): number {
 }
 
 /**
+ * Usable per-slot identity (WL-0MUFP30T2003OX1F): the `slots` array is only
+ * trustworthy when it is NON-EMPTY and NOT flagged stale by the proxy. An
+ * empty array (`slots: []`) means "no per-slot detail available" — NOT "zero
+ * free slots" — and `slots_stale: true` means the counts came from the
+ * proxy's last-known cache after a failed /slots query, so the detail cannot
+ * be paired with them. In both cases the worker must fall back to the
+ * count-based path; `null` is that signal.
+ */
+function usablePerSlotSlots(status: LlamaStatus): LlamaSlot[] | null {
+  if (!Array.isArray(status.slots)) return null;
+  if (status.slots.length === 0) return null;
+  if (status.slots_stale === true) return null;
+  return status.slots;
+}
+
+/**
+ * Number of local dispatch leases the proxy reports (WL-0MUFP30T2003OX1F):
+ * the normalised `local_owner_session_ids` list when present, else the legacy
+ * single `local_owner_session_id` string, else 1 when only a positive lease
+ * TTL is served. Used both for the owner-lease qualifier and to reserve
+ * possibly-idle leased slots when the worker only has count-based data.
+ */
+function ownerLeaseCount(status: LlamaStatus): number {
+  if (Array.isArray(status.local_owner_session_ids)) {
+    return status.local_owner_session_ids.length;
+  }
+  if (
+    typeof status.local_owner_session_id === 'string' &&
+    status.local_owner_session_id.length > 0
+  ) {
+    return 1;
+  }
+  if (
+    typeof status.local_owner_lease_remaining_seconds === 'number' &&
+    Number.isFinite(status.local_owner_lease_remaining_seconds) &&
+    status.local_owner_lease_remaining_seconds > 0
+  ) {
+    return 1;
+  }
+  return 0;
+}
+
+/**
+ * Slots to reserve for a held lease in the count-based path
+ * (WL-0MUFP30T2003OX1F). While the lease owner is actively generating
+ * (`local_active_query === true`) its slot is processing and already excluded
+ * from `available_slots`, so nothing is reserved; otherwise the owner may be
+ * idle-but-leased, and one slot per lease is reserved so an idle leased slot
+ * counted as "available" is never dispatched onto.
+ */
+function leaseReserve(status: LlamaStatus): number {
+  return status.local_active_query === true ? 0 : ownerLeaseCount(status);
+}
+
+/**
+ * Genuinely-free slot count for the count-based path
+ * (WL-0MUFP30T2003OX1F): the proxy's `available_slots` minus any reserved
+ * lease slots (never negative).
+ */
+function countBasedFreeSlots(status: LlamaStatus): number {
+  const available = Number.isFinite(status.available_slots) ? status.available_slots : 0;
+  return Math.max(0, available - leaseReserve(status));
+}
+
+/**
+ * Count-based spare-capacity decision (WL-0MUFP30T2003OX1F): with a
+ * multi-slot config (0 < N < total) but NO usable per-slot identity, the
+ * proxy's `available_slots` count is the only availability signal. A held
+ * local lease must not block dispatch into the spare slots, so this mirrors
+ * the per-slot spare-capacity relaxation using the count (after reserving
+ * possibly-idle leased slots). Fail-closed on ambiguous/missing fields.
+ */
+function countBasedSpareCapacity(status: LlamaStatus, requiredFreeSlots: number): boolean {
+  const total = status.total_slots;
+  const available = status.available_slots;
+  if (!status.llama_server_running) return false;
+  if (status.model_switch_in_progress) return false;
+  if (!Number.isFinite(total) || total <= 0) return false;
+  if (!Number.isFinite(available) || available < 0) return false;
+  if (requiredFreeSlots <= 0 || requiredFreeSlots >= total) return false;
+  return countBasedFreeSlots(status) >= requiredFreeSlots;
+}
+
+/**
  * True when the proxy reports an idle state for the required free-slot
  * count:
  *
@@ -659,16 +754,23 @@ export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): bo
  * the global gate is the per-slot-safe subset (server up + no model switch
  * only) — a query/lease tied to a busy slot is the operator's own session
  * and must not block dispatch into the free slots (F1 tests AC1/AC2).
+ *
+ * Count-based spare-capacity (WL-0MUFP30T2003OX1F): when per-slot identity is
+ * unusable (stale/empty `slots`) but 0 < N < total AND a local lease is held,
+ * the same relaxation applies to the proxy's `available_slots` count (after
+ * reserving possibly-idle leased slots) instead of stalling for the whole
+ * lease.
  */
 export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): boolean {
   const total = status.total_slots;
   if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
 
-  // Per-slot mode: per-slot identity present AND 0 < N < total. The relaxed
-  // global gate applies (server up + no model switch); the slot requirement
-  // is the per-slot free count.
+  // Per-slot mode: usable per-slot identity present AND 0 < N < total. The
+  // relaxed global gate applies (server up + no model switch); the slot
+  // requirement is the per-slot free count.
+  const perSlotSlots = usablePerSlotSlots(status);
   if (
-    Array.isArray(status.slots) &&
+    perSlotSlots !== null &&
     requiredFreeSlots > 0 &&
     requiredFreeSlots < total
   ) {
@@ -676,8 +778,20 @@ export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): bo
     // Fail-closed counting: an entry without an explicit boolean
     // `is_processing` is treated as processing (busy), never free. Owned
     // slots (live lease) are excluded (AC5, WL-0MTYZXSLN008HZOW).
-    const free = countFreeUnownedSlots(status.slots);
+    const free = countFreeUnownedSlots(perSlotSlots);
     return free >= requiredFreeSlots;
+  }
+
+  // Count-based spare-capacity (WL-0MUFP30T2003OX1F): multi-slot config with
+  // 0 < N < total but no usable per-slot identity, and a held lease. The
+  // strict all-slots-free fallback below would stall for the whole (adaptive)
+  // lease; the proxy's count says the capacity is real.
+  if (
+    ownerLeaseCount(status) > 0 &&
+    requiredFreeSlots > 0 &&
+    requiredFreeSlots < total
+  ) {
+    return countBasedSpareCapacity(status, requiredFreeSlots);
   }
 
   const effective = requiredFreeSlots > 0 && requiredFreeSlots < total
@@ -898,6 +1012,16 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
       (typeof leaseSeconds === 'number' && Number.isFinite(leaseSeconds) && leaseSeconds > 0);
   }
 
+  // Optional degradation flag (LP-0MSVP7XJ6008QPKX): absent on pre-feature
+  // proxies. A malformed (non-boolean) value is ambiguous → null (busy,
+  // fail-closed), matching the other optional flags. When true the per-slot
+  // `slots` detail is unusable (WL-0MUFP30T2003OX1F).
+  let slotsStale: boolean | undefined;
+  if (o.slots_stale !== undefined) {
+    if (typeof o.slots_stale !== 'boolean') return null;
+    slotsStale = o.slots_stale;
+  }
+
   // Optional per-slot identity (LP-0MSG5TA7Y002GN39): absent on pre-feature
   // proxies (slots stays undefined — backward compatible). A malformed
   // array (non-array, entry missing/empty slot_id, non-boolean
@@ -989,6 +1113,7 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     contention_queue_depth: contentionQueueDepth,
     contention_queued_count: contentionQueuedCount,
     slots,
+    slots_stale: slotsStale,
   };
 }
 
@@ -5264,14 +5389,15 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // session and must not reset the free slots' timers (spare-capacity
       // dispatch, parent WL-0MT32F90V008UAD2). A slot reporting processing
       // resets only its own timer.
+      const perSlotSlots = usablePerSlotSlots(status);
       const perSlotMode =
-        Array.isArray(status.slots) &&
+        perSlotSlots !== null &&
         cfg.requiredFreeSlots > 0 &&
         cfg.requiredFreeSlots < status.total_slots;
 
       let idle: boolean;
       let ready: boolean;
-      if (perSlotMode && Array.isArray(status.slots)) {
+      if (perSlotMode && perSlotSlots !== null) {
         const globalIdle = perSlotGlobalIdleChecks(status);
         // Display-only: the global idle tracker also reflects per-slot query
         // activity for the title bar idle indicator — when any slot is
@@ -5279,12 +5405,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // not "idle". The dispatch logic (spare-capacity relaxation) is
         // unaffected because free-slot count comes from perSlotTracker, not
         // tracker.idleSince. (parent WL-0MT65T14L002HTWB)
-        const anySlotProcessing = status.slots.some(
+        const anySlotProcessing = perSlotSlots.some(
           (s) => typeof s.is_processing === 'boolean' && s.is_processing,
         );
         tracker.record(globalIdle && !anySlotProcessing);
         if (globalIdle) {
-          perSlotTracker.record(status.slots);
+          perSlotTracker.record(perSlotSlots);
           idle = true;
           ready =
             perSlotTracker.thresholdMetCount(cfg.thresholdMs) >= cfg.requiredFreeSlots;
@@ -5326,10 +5452,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // minimums (WL-0MT32F90V008UAD2 AC3): audit needs ≥2 (parent + Phase 2
       // child), single-pane tiers need ≥1; idle-duration gate (configured N)
       // is unchanged and shared.
-      const freeSlots =
-        Array.isArray(status.slots)
-          ? countFreeUnownedSlots(status.slots)
-          : status.available_slots;
+      // Count-based: the proxy's own free-slot count (historical behaviour).
+      // The lease reserve in `countBasedSpareCapacity` is a GATE only — the
+      // reported budget stays the proxy figure so the strict single-slot path
+      // and its decision log are unchanged.
+      const freeSlots = perSlotSlots
+        ? countFreeUnownedSlots(perSlotSlots)
+        : status.available_slots;
 
       // Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME): the
       // genuine free-slot snapshot (never the total budget), the current
@@ -5401,15 +5530,18 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // assumption was wrong (WL-0MU8809SZ0022VZG). The per-slot path
       // (WL-0MU8807BI008C9ME) is what keeps a dispatched pane's own lease
       // from blocking the OTHER free unowned slots.
-      const ownerLeaseHeld =
-        (parseLocalOwnerSessionId(status.local_owner_session_id) !== undefined) ||
-        (typeof status.local_owner_lease_remaining_seconds === 'number' &&
-          Number.isFinite(status.local_owner_lease_remaining_seconds) &&
-          status.local_owner_lease_remaining_seconds > 0);
+      const ownerLeaseHeld = ownerLeaseCount(status) > 0;
+      // Count-based spare-capacity (WL-0MUFP30T2003OX1F): when per-slot
+      // identity is unusable and 0 < N < total, a held lease no longer blocks
+      // dispatch into the proxy-reported spare slots. This mirrors the
+      // `evaluateIdle` relaxation exactly, so the idle gate and the ownership
+      // gate can never disagree.
+      const countBasedSpare =
+        !perSlotMode && countBasedSpareCapacity(status, cfg.requiredFreeSlots);
       const slotOwned =
-        perSlotMode && Array.isArray(status.slots)
-          ? countFreeUnownedSlots(status.slots) === 0
-          : ownerLeaseHeld && (runningPanes ?? 0) > 0;
+        perSlotMode && perSlotSlots !== null
+          ? countFreeUnownedSlots(perSlotSlots) === 0
+          : ownerLeaseHeld && (runningPanes ?? 0) > 0 && !countBasedSpare;
       // LIVE depth only (WL-0MU1DWXO600153OI): `contention_queued_count` is
       // cumulative telemetry and must never gate dispatch.
       const contentionQueueDepth =
