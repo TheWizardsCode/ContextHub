@@ -10494,6 +10494,83 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
       closed: true,
     });
   });
+
+  // ── Warn-level observability (WL-0MU4USJ07009JYL8 AC2/AC6) ──────────
+  // Every fail-closed catch must emit a stderr warn (never silent) so a
+  // production failure is diagnosable without a debugger.
+  function stderrMessages(spy: ReturnType<typeof vi.spyOn>): string {
+    return spy.mock.calls.map((c) => String(c[0])).join('\n');
+  }
+
+  it('warns on a failed pane close (AC2)', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const root = makeRoot();
+      await seedDispatch(root, { itemId: 'WL-W1', kind: 'intake', paneId: 'w1:pW1' });
+      const deps = monitorDeps({
+        getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-W1', stage: 'intake_complete' }),
+        closePane: vi.fn().mockRejectedValue(new Error('herdr: boom')),
+      });
+      await monitorDispatchedPanes(deps, root);
+      expect(stderrMessages(spy)).toContain('pane close failed for w1:pW1');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('warns on a failed item lookup (AC2)', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const root = makeRoot();
+      await seedDispatch(root, { itemId: 'WL-W2', kind: 'plan', paneId: 'w1:pW2' });
+      const deps = monitorDeps({
+        getItemLifecycleState: vi.fn().mockRejectedValue(new Error('wl exploded')),
+      });
+      await monitorDispatchedPanes(deps, root);
+      expect(stderrMessages(spy)).toContain('item lookup failed for WL-W2');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('warns on a failed pane-close log write (AC2)', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const root = makeRoot();
+      await seedDispatch(root, { itemId: 'WL-W3', kind: 'plan', paneId: 'w1:pW3' });
+      const deps = monitorDeps({
+        getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-W3', stage: 'plan_complete' }),
+        closePane: vi.fn().mockResolvedValue(true),
+        recordPaneClose: vi.fn().mockRejectedValue(new Error('disk full')),
+      });
+      const res = await monitorDispatchedPanes(deps, root);
+      expect(res).toMatchObject({ logged: 0, errors: 1 });
+      expect(stderrMessages(spy)).toContain('pane-close log write failed for w1:pW3');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('warns when the live-pane query fails (AC2) and still fails open', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const root = makeRoot();
+      await seedDispatch(root, { itemId: 'WL-W4', kind: 'plan', paneId: 'w1:pW4' });
+      const closePane = vi.fn().mockResolvedValue(true);
+      const deps = monitorDeps({
+        getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-W4', stage: 'plan_complete' }),
+        getRunningDowntimePanes: vi.fn().mockRejectedValue(new Error('herdr down')),
+        closePane,
+      });
+      const res = await monitorDispatchedPanes(deps, root);
+      // The terminal-stage close still happens (liveness is only needed for
+      // agent-done detection) — fail-open, not fail-closed, on liveness.
+      expect(res).toMatchObject({ logged: 1, closed: 1 });
+      expect(stderrMessages(spy)).toContain('live-pane query threw');
+    } finally {
+      spy.mockRestore();
+    }
+  });
 });
 
 // ── Worker tick ↔ pane-lifecycle integration (WL-0MU4US5MP001JFEN) ────

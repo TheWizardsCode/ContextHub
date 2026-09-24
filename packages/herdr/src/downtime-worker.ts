@@ -4457,6 +4457,23 @@ export interface PaneLifecycleMonitorResult {
  * callers): with no `getItemLifecycleState` every pane classifies to null,
  * so the pass is a cheap no-op.
  */
+/**
+ * Warn-level observability for pane-lifecycle failures
+ * (WL-0MU4USJ07009JYL8 AC2). Fail-closed: a stderr write failure is
+ * swallowed — observability must never crash the worker.
+ */
+function paneLifecycleWarn(message: string): void {
+  try {
+    process.stderr.write(`[worklog-plugin] Downtime pane-lifecycle: ${message}\n`);
+  } catch {
+    // fail-closed: logging must never crash the worker
+  }
+}
+
+function paneLifecycleErrMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export async function monitorDispatchedPanes(
   deps: DowntimeWorkerDeps,
   cwd: string,
@@ -4473,7 +4490,8 @@ export async function monitorDispatchedPanes(
   let entries: Awaited<ReturnType<typeof _readDowntimeEntries>>;
   try {
     entries = await _readDowntimeEntries(cwd);
-  } catch {
+  } catch (err) {
+    paneLifecycleWarn(`could not read the dispatch log — skipping this pass: ${paneLifecycleErrMsg(err)}`);
     return result; // fail-closed: no evidence, no action
   }
 
@@ -4490,8 +4508,11 @@ export async function monitorDispatchedPanes(
       const running = await deps.getRunningDowntimePanes(cwd);
       if (running.ok && Array.isArray(running.records)) {
         livePanes = new Set(running.records.map((rec) => rec.paneId));
+      } else if (!running.ok) {
+        paneLifecycleWarn('live-pane query failed — skipping agent-done detection this pass');
       }
-    } catch {
+    } catch (err) {
+      paneLifecycleWarn(`live-pane query threw — skipping agent-done detection this pass: ${paneLifecycleErrMsg(err)}`);
       livePanes = null; // fail-open — never close on unknown liveness
     }
   }
@@ -4500,8 +4521,12 @@ export async function monitorDispatchedPanes(
     result.checked += 1;
     try {
       let item: PaneItemState | null = null;
-      if (typeof deps.getItemLifecycleState === 'function') {
+      try {
         item = await deps.getItemLifecycleState(pane.itemId, cwd);
+      } catch (err) {
+        paneLifecycleWarn(`item lookup failed for ${pane.itemId} (pane ${pane.paneId}): ${paneLifecycleErrMsg(err)}`);
+        result.errors += 1;
+        continue; // fail-closed: no evidence → take no action for this pane
       }
       const agentDone = livePanes !== null && !livePanes.has(pane.paneId);
       const decision = classifyPaneLifecycle(pane, item, agentDone);
@@ -4517,7 +4542,8 @@ export async function monitorDispatchedPanes(
       if (decision.close && typeof deps.closePane === 'function') {
         try {
           closed = await deps.closePane(pane.paneId, cwd, { itemId: pane.itemId, kind: pane.kind });
-        } catch {
+        } catch (err) {
+          paneLifecycleWarn(`pane close failed for ${pane.paneId} (${pane.itemId}): ${paneLifecycleErrMsg(err)}`);
           closed = false; // fail-closed
         }
       }
@@ -4543,10 +4569,12 @@ export async function monitorDispatchedPanes(
         loggedKeys.add(key);
         result.logged += 1;
         if (closed) result.closed += 1;
-      } catch {
+      } catch (err) {
+        paneLifecycleWarn(`pane-close log write failed for ${pane.paneId} (${pane.itemId}): ${paneLifecycleErrMsg(err)}`);
         result.errors += 1; // fail-closed: logging must never crash the worker
       }
-    } catch {
+    } catch (err) {
+      paneLifecycleWarn(`lifecycle pass failed for pane ${pane.paneId}: ${paneLifecycleErrMsg(err)}`);
       result.errors += 1; // fail-closed: one bad pane never blocks the rest
     }
   }
@@ -5186,8 +5214,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         cfg.paneLifecycleIntervalMs ?? DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS;
       if (tickNow - lastPaneMonitorAt >= paneMonitorIntervalMs) {
         lastPaneMonitorAt = tickNow;
-        void monitorDispatchedPanes(opts.deps, cfg.cwd).catch(() => {
+        void monitorDispatchedPanes(opts.deps, cfg.cwd).catch((err) => {
           // fail-closed: pane-lifecycle monitoring must never crash the worker
+          paneLifecycleWarn(`monitor pass threw: ${paneLifecycleErrMsg(err)}`);
         });
       }
 
