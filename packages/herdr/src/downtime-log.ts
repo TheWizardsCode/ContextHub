@@ -52,6 +52,19 @@ export interface CoordinationLogEntry {
   workItemId?: string | null;
   /** Number of entries removed by a prune operation. */
   prunedCount?: number;
+  /**
+   * No-dispatch decision fields (WL-0MU8808ZY0091JIA): recorded on a
+   * `kind: 'decision'` / `operation: 'no-dispatch'` entry so the reason a
+   * tick refused to dispatch is observable from the log alone. All optional
+   * so coordination check-in/election entries are unchanged (additive
+   * schema).
+   */
+  reason?: string;
+  freeSlots?: number;
+  totalSlots?: number;
+  ownerPresent?: boolean;
+  runningPanes?: number | null;
+  contentionDepth?: number;
   at?: string;
 }
 
@@ -231,6 +244,37 @@ export async function readDowntimeLogEntries(cwd: string): Promise<DowntimeLogEn
       const parsed = JSON.parse(line) as unknown;
       if (typeof parsed === 'object' && parsed !== null) {
         entries.push(parsed as DowntimeLogEntry);
+      }
+    } catch {
+      // malformed line → skip (fail-safe)
+    }
+  }
+  return entries;
+}
+
+/**
+ * Read the bounded rolling coordination log at
+ * `<cwd>/.worklog/downtime-coordination.log` (WL-0MU8808ZY0091JIA). Same
+ * FAIL-SAFE contract as `readDowntimeLogEntries`: a missing or unreadable
+ * log yields `[]`, malformed JSONL lines are skipped, and the function never
+ * throws. Used by the decision-log tests and any observer that wants the
+ * dispatcher's refusal reasons without parsing the file by hand.
+ */
+export async function readCoordinationLogEntries(cwd: string): Promise<CoordinationLogEntry[]> {
+  const file = join(cwd, '.worklog', COORDINATION_LOG_FILE);
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch {
+    return []; // missing or unreadable → empty (fail-safe)
+  }
+  const entries: CoordinationLogEntry[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) {
+        entries.push(parsed as CoordinationLogEntry);
       }
     } catch {
       // malformed line → skip (fail-safe)

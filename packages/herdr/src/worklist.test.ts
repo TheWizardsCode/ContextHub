@@ -3291,6 +3291,28 @@ describe('renderDowntimeStatus', () => {
     expect(status).not.toContain('downtime idle');
   });
 
+  it('renders the held reason when a gate blocked the last tick (WL-0MU8808ZY0091JIA)', () => {
+    const worker = {
+      idleSince: Date.now() - 60_000,
+      dispatching: false,
+      enabled: true,
+      blockReason: 'slot-owner',
+    } as unknown as DowntimeWorker;
+    const status = renderDowntimeStatus(worker);
+    expect(status).toContain('downtime held: slot-owner');
+    expect(status).not.toContain('downtime idle');
+  });
+
+  it('renders plain idle when no gate blocked the last tick', () => {
+    const worker = {
+      idleSince: Date.now() - 60_000,
+      dispatching: false,
+      enabled: true,
+      blockReason: null,
+    } as unknown as DowntimeWorker;
+    expect(renderDowntimeStatus(worker)).toContain('downtime idle');
+  });
+
   it('renders busy when the proxy is not idle', () => {
     const worker = {
       idleSince: null,

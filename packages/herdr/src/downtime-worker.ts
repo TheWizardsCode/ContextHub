@@ -141,7 +141,7 @@ import {
   cleanupStaleElection,
   DEFAULT_LEASE_TTL_SECONDS,
 } from './leader-election.js';
-import { appendCoordinationLogEntry } from './downtime-log.js';
+import { appendCoordinationLogEntry, type CoordinationLogEntry } from './downtime-log.js';
 import {
   readDowntimeLogEntries as _readDowntimeEntries,
   dispatchedItemMarkers as _dispatchedMarkers,
@@ -210,6 +210,34 @@ export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
  * the single leader snapshot with WL-0MT50LKAK001EF5Q (one cap source).
  */
 export const DOWNTIME_PANE_MIN_FREE_SLOTS = 1;
+
+/**
+ * Minimum interval between identical no-dispatch decision-log entries
+ * (WL-0MU8808ZY0091JIA AC3): a healthy idle/gate-blocked loop must not flood
+ * `.worklog/downtime-coordination.log`. A repeated refusal with the SAME
+ * reason is suppressed until this window elapses; a reason CHANGE is always
+ * logged immediately. 10 minutes → at most 6 identical lines per hour.
+ */
+export const DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Short, stable header token for a no-dispatch reason (WL-0MU8808ZY0091JIA
+ * AC4). Distinct from the plain idle/busy labels so "idle slots but no
+ * dispatches" is visible in the herdr header. The RAW reason is what gets
+ * logged; only the header label is abbreviated.
+ */
+export function decisionHeaderToken(reason: string): string {
+  switch (reason) {
+    case 'slot-owned':
+      return 'slot-owner';
+    case 'proxy-contention':
+      return 'contention';
+    case 'review-queue-hold':
+      return 'review-queue';
+    default:
+      return reason;
+  }
+}
 
 /** Sane floor for the no-candidate cooldown (the pause cannot be disabled or set trivially small). */
 export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
@@ -1905,6 +1933,16 @@ export interface DowntimeWorkerDeps {
    * Must never throw (fail-closed): logging must not crash the worker.
    */
   recordError(event: DowntimeErrorEvent): Promise<void>;
+  /**
+   * Record one no-dispatch DECISION entry (WL-0MU8808ZY0091JIA) — the reason
+   * a polled tick refused to dispatch (slot-owner / contention / no-candidate
+   * / review-queue-hold / code-freeze / ...), with the observed slot/owner
+   * fields. Optional: when absent the worker appends directly to
+   * `.worklog/downtime-coordination.log` (the production default). Tests
+   * inject a spy to assert the decision vocabulary and rate-limiting without
+   * touching the filesystem. Fail-closed: a throw is swallowed.
+   */
+  recordDecision?(entry: CoordinationLogEntry, cwd: string): Promise<void>;
 }
 
 /** Audit event recorded for every successful downtime dispatch. */
@@ -4624,6 +4662,14 @@ export interface DowntimeWorker {
   /** Timestamp of the last successful dispatch (null until the first). */
   readonly lastDispatchAt: number | null;
   /**
+   * Short token for the gate that blocked the last polled tick (e.g.
+   * `'slot-owner'`, `'contention'`, `'code-freeze'`), or null when the worker
+   * was not gate-blocked (idle/busy/dispatching/disabled). Powers the header's
+   * `[downtime held: <token>]` label so "idle slots but no dispatches" is
+   * visible (WL-0MU8808ZY0091JIA AC4).
+   */
+  readonly blockReason: string | null;
+  /**
    * Whether the worker is enabled per the current settings (re-read) AND the
    * per-instance in-memory override: effective enabled = `override ??
    * cfg.enabled` (the override takes precedence when set). The getter re-reads
@@ -4707,6 +4753,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // Three-strike rule: consecutive CLI-error dispatch outcomes. A successful
   // dispatch, a genuine no-candidate outcome, or an expired cooldown resets it.
   let errorStrikes = 0;
+  // No-dispatch decision logging (WL-0MU8808ZY0091JIA): the last reason
+  // written and when, so repeated identical refusals are rate-limited.
+  let lastDecisionReason: string | null = null;
+  let lastDecisionAt = 0;
+  // Current header blocking token; null when not gate-blocked. Reset each tick.
+  let blockReason: string | null = null;
   // Per-instance in-memory enabled override (parent WL-0MSZ4NSOE007AQEF):
   // null (default) = follow the global setting; true/false force dispatch
   // on/off for THIS instance. In-memory only — resets on plugin restart,
@@ -4822,6 +4874,54 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     }
   };
 
+  // ── No-dispatch decision log (WL-0MU8808ZY0091JIA) ──
+  // Record WHY a polled tick refused to dispatch so "idle slots but no
+  // dispatches" is diagnosable from the logs alone. Rate-limited: a repeated
+  // refusal with the SAME reason is written at most once per
+  // DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS; a reason CHANGE always writes. The
+  // header blocking token is updated on EVERY refusal (even a rate-limited
+  // one) so the header never goes stale. Fail-closed: a logging failure never
+  // affects the dispatch decision.
+  const recordDecision = async (
+    cwd: string,
+    reason: string,
+    fields: {
+      freeSlots: number;
+      totalSlots: number;
+      ownerPresent: boolean;
+      runningPanes: number | null;
+      contentionDepth: number;
+    },
+  ): Promise<void> => {
+    blockReason = decisionHeaderToken(reason);
+    const now = Date.now();
+    if (
+      lastDecisionReason === reason &&
+      now - lastDecisionAt < DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS
+    ) {
+      return; // rate-limited: identical refusal within the window
+    }
+    lastDecisionReason = reason;
+    lastDecisionAt = now;
+    const entry: CoordinationLogEntry = {
+      kind: 'decision',
+      operation: 'no-dispatch',
+      instanceId,
+      reason,
+      ...fields,
+      at: new Date(now).toISOString(),
+    };
+    try {
+      if (typeof opts.deps.recordDecision === 'function') {
+        await opts.deps.recordDecision(entry, cwd);
+      } else {
+        await appendCoordinationLogEntry(cwd, entry);
+      }
+    } catch {
+      // fail-closed: decision logging must never crash the worker
+    }
+  };
+
   return {
     get idleSince(): number | null {
       return tracker.idleSince;
@@ -4881,8 +4981,14 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     get errorStrikes(): number {
       return errorStrikes;
     },
+    get blockReason(): string | null {
+      return blockReason;
+    },
     async tick(): Promise<DowntimeWorkerTickResult> {
       const cfg = opts.config();
+      // Fresh per-tick decision state: clear the header blocking reason; a
+      // gate below re-sets it when this tick is refused (WL-0MU8808ZY0091JIA).
+      blockReason = null;
       // Short-circuit on the EFFECTIVE enabled state (override ?? settings):
       // while toggled off the worker performs no proxy polling, no idle
       // tracking, and no dispatch — exactly the settings-disabled path.
@@ -5269,9 +5375,23 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // concurrency limiter, and a liveness-query failure no longer blocks
       // dispatch (it only feeds the `slotOwned` qualifier).
       if (slotOwned) {
+        void recordDecision(cfg.cwd, 'slot-owned', {
+          freeSlots,
+          totalSlots: status.total_slots,
+          ownerPresent: ownerLeaseHeld,
+          runningPanes,
+          contentionDepth: contentionQueueDepth,
+        });
         return { polled: true, dispatched: false, idle: true };
       }
       if (contentionQueueDepth > 0) {
+        void recordDecision(cfg.cwd, 'proxy-contention', {
+          freeSlots,
+          totalSlots: status.total_slots,
+          ownerPresent: ownerLeaseHeld,
+          runningPanes,
+          contentionDepth: contentionQueueDepth,
+        });
         return { polled: true, dispatched: false, idle: true };
       }
 
@@ -5320,6 +5440,20 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 markerStaleWindowMs: cfg.markerStaleWindowMs,
                 spawnConfig,
               });
+        // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
+        // no-dispatch outcomes (no-candidate / review-queue-hold / code-freeze
+        // / audit-in-flight / wl-error / ...) are logged (rate-limited) so the
+        // dispatcher's decision is observable. A successful dispatch is not a
+        // refusal.
+        if (!outcome.dispatched && typeof outcome.reason === 'string') {
+          void recordDecision(cfg.cwd, outcome.reason, {
+            freeSlots,
+            totalSlots: status.total_slots,
+            ownerPresent: ownerLeaseHeld,
+            runningPanes,
+            contentionDepth: contentionQueueDepth,
+          });
+        }
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
           errorStrikes = 0; // a successful dispatch proves the CLI is healthy

@@ -142,6 +142,8 @@ import {
   MIN_BROWSE_ITEM_COUNT,
   MAX_BROWSE_ITEM_COUNT,
   DOWNTIME_DISPATCH_EXTEND_MAX,
+  DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS,
+  decisionHeaderToken,
 } from './downtime-worker.js';
 import {
   clampBrowseItemCount,
@@ -158,6 +160,8 @@ import {
   appendDowntimeLogEntry,
   appendPaneCloseLogEntry,
   readDowntimeLogEntries,
+  readCoordinationLogEntries,
+  type CoordinationLogEntry,
 } from './downtime-log.js';
 import {
   LEASE_FILE,
@@ -10576,5 +10580,164 @@ describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN)', () => {
     expect(closePane).not.toHaveBeenCalled();
     const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
     expect(pc[0]).toMatchObject({ outcome: 'requires-attention', reasonCode: 'reached-in-review', closed: false });
+  });
+});
+
+// ── No-dispatch decision log + header (WL-0MU8808ZY0091JIA) ──────────
+
+describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
+  function makeDecisionWorker(opts: {
+    status: LlamaStatus;
+    root: string;
+    requiredFreeSlots?: number;
+    thresholdMs?: number;
+    runningPanes?: () => { ok: true; count: number } | { ok: false; error?: string };
+    recordDecision?: (entry: CoordinationLogEntry, cwd: string) => Promise<void>;
+  }) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: opts.thresholdMs ?? 0,
+      requiredFreeSlots: opts.requiredFreeSlots ?? 0,
+      model: 'plan',
+      cwd: opts.root,
+      noCandidateCooldownMs: 3_600_000,
+      browseItemCount: 20,
+    };
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
+    );
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      getRunningDowntimePanes: vi
+        .fn()
+        .mockImplementation(async () => (opts.runningPanes ?? (() => ({ ok: true, count: 0 })))()),
+      ...(opts.recordDecision ? { recordDecision: opts.recordDecision } : {}),
+    });
+    const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+    return { worker, deps };
+  }
+
+  it('maps internal reasons to stable header tokens', () => {
+    expect(decisionHeaderToken('slot-owned')).toBe('slot-owner');
+    expect(decisionHeaderToken('proxy-contention')).toBe('contention');
+    expect(decisionHeaderToken('review-queue-hold')).toBe('review-queue');
+    expect(decisionHeaderToken('code-freeze')).toBe('code-freeze');
+  });
+
+  it('AC1: a slot-owned refusal writes one decision line with reason + slot/owner fields', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-slot-'));
+    try {
+      // Count-based (no `slots`), idle (local_lease_active=false) but the
+      // global owner session id is present and a downtime pane is alive →
+      // slotOwned.
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: false,
+        available_slots: 1,
+        total_slots: 1,
+        local_owner_session_id: 'session-live-pane',
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker } = makeDecisionWorker({
+        status,
+        root,
+        runningPanes: () => ({ ok: true, count: 1 }),
+      });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('slot-owner');
+      await vi.waitFor(async () => {
+        const entries = (await readCoordinationLogEntries(root)).filter(
+          (e) => e.kind === 'decision',
+        );
+        expect(entries).toHaveLength(1);
+        expect(entries[0]).toMatchObject({
+          kind: 'decision',
+          operation: 'no-dispatch',
+          reason: 'slot-owned',
+          freeSlots: 1,
+          totalSlots: 1,
+          ownerPresent: true,
+          runningPanes: 1,
+          contentionDepth: 0,
+        });
+        expect(typeof entries[0].at).toBe('string');
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC2: a contention refusal writes the reason and the observed depth', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-contention-'));
+    try {
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: false,
+        available_slots: 1,
+        total_slots: 1,
+        contention_queue_depth: 3,
+        contention_queued_count: 3,
+      };
+      const { worker } = makeDecisionWorker({ status, root });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('contention');
+      await vi.waitFor(async () => {
+        const entries = (await readCoordinationLogEntries(root)).filter(
+          (e) => e.kind === 'decision',
+        );
+        expect(entries).toHaveLength(1);
+        expect(entries[0]).toMatchObject({
+          reason: 'proxy-contention',
+          contentionDepth: 3,
+          ownerPresent: false,
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3: repeated identical refusals are rate-limited, then logged again after the window', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-rate-'));
+    vi.useFakeTimers();
+    try {
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: false,
+        available_slots: 1,
+        total_slots: 1,
+        contention_queue_depth: 3,
+        contention_queued_count: 3,
+      };
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const { worker } = makeDecisionWorker({ status, root, recordDecision });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick(); // first refusal → logged
+      expect(recordDecision).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(start + 60_000); // 1 min later, same reason → suppressed
+      await worker.tick();
+      expect(recordDecision).toHaveBeenCalledTimes(1);
+      // Past the rate-limit window → logged again (≤ 6 identical lines/hour).
+      vi.setSystemTime(start + DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS + 1);
+      await worker.tick();
+      expect(recordDecision).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
