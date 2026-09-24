@@ -1608,7 +1608,16 @@ async function main(): Promise<void> {
         // Mode-aware Phase 2 parallelism (WL-0MT50S9JW001DHME): the last
         // proxy mode observed by the mode-switch worker (`null` until polled
         // → `undefined` → the dispatcher conservatively keeps PARALLELISM=1).
-        mode: modeSwitchWorker.getLastKnownMode() ?? undefined,
+        //
+        // WL-0MUFRFLRQ004KNDG: read through `modeSwitchHolder`, NOT the
+        // `modeSwitchWorker` const below. createDowntimeWorker calls config()
+        // SYNCHRONOUSLY during construction (the durable-disable marker check),
+        // which runs before `modeSwitchWorker` is initialized — referencing it
+        // directly hit the temporal dead zone and crashed the whole plugin at
+        // startup. The holder is declared above; it is empty at construction
+        // (conservative `undefined` → PARALLELISM=1) and populated immediately
+        // after, so later ticks read the real mode.
+        mode: modeSwitchHolder.worker?.getLastKnownMode() ?? undefined,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
