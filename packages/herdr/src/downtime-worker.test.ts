@@ -9853,6 +9853,72 @@ describe('parseLlamaStatus: array local_owner_session_id (WL-0MU88086A0089US4)',
   });
 });
 
+describe('parseLlamaStatus: local_owner_session_ids normalization (WL-0MU88086A0089US4)', () => {
+  function makeBase(): Record<string, unknown> {
+    return {
+      llama_server_running: true,
+      active_query: false,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 3,
+      total_slots: 3,
+      contention_queue_depth: 0,
+      contention_queued_count: 0,
+    };
+  }
+
+  it('captures every session in the array and drops the proxy URL element', () => {
+    const result = parseLlamaStatus({
+      ...makeBase(),
+      local_owner_session_id: ['http://localhost:8080', 'session-a', 'session-b'],
+    });
+    expect(result).not.toBeNull();
+    expect(result!.local_owner_session_ids).toEqual(['session-a', 'session-b']);
+    expect(result!.local_owner_session_id).toBe('session-a');
+  });
+
+  it('normalises a legacy string owner to a single-element array', () => {
+    const result = parseLlamaStatus({
+      ...makeBase(),
+      local_owner_session_id: 'legacy-session',
+    });
+    expect(result).not.toBeNull();
+    expect(result!.local_owner_session_ids).toEqual(['legacy-session']);
+    expect(result!.local_owner_session_id).toBe('legacy-session');
+  });
+
+  it('yields an empty owner list for malformed input (fail-closed, no throw)', () => {
+    const malformedInputs: unknown[] = [
+      42,
+      { id: 'bad' },
+      [],
+      ['http://localhost:8080'],
+      [42],
+      ['http://localhost:8080', 42],
+    ];
+    for (const malformed of malformedInputs) {
+      const result = parseLlamaStatus({
+        ...makeBase(),
+        local_owner_session_id: malformed,
+      });
+      expect(result).not.toBeNull();
+      expect(result!.local_owner_session_ids).toEqual([]);
+      expect(result!.local_owner_session_id).toBeUndefined();
+    }
+  });
+
+  it('marks local_lease_active from a multi-session array even without lease seconds', () => {
+    const result = parseLlamaStatus({
+      ...makeBase(),
+      local_lease_active: undefined,
+      local_owner_session_id: ['http://localhost:8080', 'session-a', 'session-b'],
+    });
+    expect(result).not.toBeNull();
+    expect(result!.local_lease_active).toBe(true);
+  });
+});
+
 // ── Per-slot owner-lease gate in tick() (WL-0MU8807BI008C9ME AC1-AC4) ──
 
 describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () => {

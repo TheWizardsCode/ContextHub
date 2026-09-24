@@ -440,6 +440,15 @@ export interface LlamaStatus {
   total_slots: number;
   current_model?: string;
   local_owner_session_id?: string | null;
+  /**
+   * Every owner session id reported by the proxy, normalised across the
+   * legacy string form and the current array form (WL-0MU88086A0089US4):
+   * array elements that are HTTP(S) URLs (the proxy's own base URL, e.g.
+   * `"http://localhost:8080"`) are excluded, and a legacy string yields a
+   * single-element array. Empty when no owner is reported. Kept alongside
+   * `local_owner_session_id` (the first id) for backward compatibility.
+   */
+  local_owner_session_ids?: string[];
   local_owner_lease_remaining_seconds?: number | null;
   /**
    * Proxy-reported LIVE contention queue depth (AC6, parent
@@ -752,23 +761,47 @@ export const DEFAULT_DOWNTIME_POLL_TIMEOUT_MS = 5_000;
  * malformed/negative (ambiguous → the caller fails closed to busy).
  */
 /**
- * Extract the owner session ID from `local_owner_session_id`, accepting both
- * the legacy string form and the current array form
+ * True for an HTTP(S) URL element of the proxy's owner array. The live proxy
+ * serves `local_owner_session_id` as `["http://localhost:8080", "<session>"]`
+ * where the first element is its own base URL, NOT an owner session.
+ */
+function isOwnerUrlElement(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+/**
+ * Normalise `local_owner_session_id` into the FULL list of owner session ids,
+ * accepting both the legacy string form and the current array form
  * `["http://localhost:8080", "herdr-<session>"]`.
  *
- * Returns the session string (2nd element of the array) for array inputs,
- * the string itself for string inputs, and `undefined` for any malformed
- * input (number, object, empty array, etc.) — fail-closed.
+ * Array elements that are HTTP(S) URLs (the proxy's own base URL) are not
+ * owners and are dropped; every non-empty non-URL string element is retained
+ * so a multi-owner payload is never silently truncated (contributing cause 1
+ * of RCA WL-0MU87ZGPP0029V28). A legacy string yields a single-element array.
+ * Malformed input (number, object, `null`, array of non-strings) yields `[]`
+ * — fail-closed, never throws.
  *
  * (WL-0MU88086A0089US4 — parse array local_owner_session_id from llama-proxy)
  */
-function parseLocalOwnerSessionId(value: unknown): string | undefined {
-  if (typeof value === 'string' && value.length > 0) return value;
-  if (Array.isArray(value) && value.length >= 2) {
-    const session = value[1];
-    if (typeof session === 'string' && session.length > 0) return session;
+function parseLocalOwnerSessionIds(value: unknown): string[] {
+  if (typeof value === 'string' && value.length > 0) return [value];
+  if (Array.isArray(value)) {
+    return value.filter(
+      (el): el is string =>
+        typeof el === 'string' && el.length > 0 && !isOwnerUrlElement(el),
+    );
   }
-  return undefined;
+  return [];
+}
+
+/**
+ * The first (primary) owner session id — kept for compatibility with existing
+ * call sites (`local_lease_active` derivation, `ownerLeaseHeld`). Returns
+ * `undefined` when no owner session is reported. See
+ * {@link parseLocalOwnerSessionIds}.
+ */
+function parseLocalOwnerSessionId(value: unknown): string | undefined {
+  return parseLocalOwnerSessionIds(value)[0];
 }
 
 function parseOptionalCount(value: unknown): number | undefined | null {
@@ -899,6 +932,8 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     current_model: typeof o.current_model === 'string' ? o.current_model : undefined,
     local_owner_session_id:
       parseLocalOwnerSessionId(o.local_owner_session_id),
+    local_owner_session_ids:
+      parseLocalOwnerSessionIds(o.local_owner_session_id),
     local_owner_lease_remaining_seconds:
       typeof o.local_owner_lease_remaining_seconds === 'number'
         ? o.local_owner_lease_remaining_seconds
