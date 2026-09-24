@@ -149,6 +149,7 @@ import {
   appendPaneCloseLogEntry as _appendPaneCloseLogEntry,
   type DispatchMarker,
   type PaneCloseLogEntry,
+  type PaneLifecycleKind,
 } from './downtime-log.js';
 import {
   classifyPaneLifecycle,
