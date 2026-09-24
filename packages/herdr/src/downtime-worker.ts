@@ -426,6 +426,26 @@ export const DEFAULT_COORDINATION_CHECK_IN_MS = 5 * 60 * 1000;
 export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
 
 /**
+ * Maximum local DISPATCH-lease TTL (seconds) the llama-proxy can hold a
+ * local slot — the cross-repo contract from `llm-manager`
+ * (`proxy/proxy/router_helpers.py`, WL-0MU8809SZ0022VZG).
+ *
+ * The lease is ADAPTIVE, not a fixed ~180 s: a static base plus
+ * generation-proportional extension, capped at
+ * `local_dispatch_lease_max_seconds` (default 1500 s), with chunk/prefill
+ * refresh buffers that keep it alive while a stream is active. A long agent
+ * generation therefore holds the lease for its WHOLE run — the RCA observed a
+ * dispatched-pane lease run 836 s → 0 (WL-0MU87ZGPP0029V28).
+ *
+ * The dispatcher MUST NOT assume leases expire after ~180 s. It does not WAIT
+ * OUT a lease: it dispatches into genuinely free UNOWNED slots (the per-slot
+ * gate, WL-0MU8807BI008C9ME) and only the count-based single-slot path treats
+ * a held lease as blocking. If `llm-manager` changes the default, revisit
+ * this constant and `docs/dev/downtime-dispatcher.md`.
+ */
+export const LOCAL_DISPATCH_LEASE_MAX_SECONDS = 1500;
+
+/**
  * Retired coordination tier ordering (parent AC4 → WL-0MTK1ILM2009QYB2).
  * The coordination leader no longer re-ranks offers by tier: it dispatches
  * the OFFER list in file order (each offer is its root's Herdr list head,
@@ -5345,9 +5365,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // `slotOwned` is qualified on a known running-pane count > 0 so an
       // OPERATOR lease on a spare-capacity multi-slot setup does not block
       // dispatch into the free slots when the worker has no running pane
-      // of its own. (The lease signal self-heals: proxy leases expire ~180 s
-      // after activity stops — router_helpers.py `_get_lease_timeout_seconds`
-      // — so an idle-but-open pane does not block dispatch indefinitely.)
+      // of its own. The lease is NOT short-lived: the proxy holds an
+      // ADAPTIVE lease up to `LOCAL_DISPATCH_LEASE_MAX_SECONDS` (default
+      // 1500 s, cross-repo `llm-manager`), so an idle-but-open pane CAN block
+      // the count-based path for its whole run — the historical "~180 s"
+      // assumption was wrong (WL-0MU8809SZ0022VZG). The per-slot path
+      // (WL-0MU8807BI008C9ME) is what keeps a dispatched pane's own lease
+      // from blocking the OTHER free unowned slots.
       const ownerLeaseHeld =
         (parseLocalOwnerSessionId(status.local_owner_session_id) !== undefined) ||
         (typeof status.local_owner_lease_remaining_seconds === 'number' &&

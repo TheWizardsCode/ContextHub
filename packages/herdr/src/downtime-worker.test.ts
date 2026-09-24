@@ -144,6 +144,7 @@ import {
   DOWNTIME_DISPATCH_EXTEND_MAX,
   DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS,
   decisionHeaderToken,
+  LOCAL_DISPATCH_LEASE_MAX_SECONDS,
 } from './downtime-worker.js';
 import {
   clampBrowseItemCount,
@@ -10738,6 +10739,126 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
     } finally {
       vi.useRealTimers();
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG) ──
+
+describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () => {
+  function makeLeaseWorker(opts: {
+    status: LlamaStatus;
+    requiredFreeSlots: number;
+    thresholdMs?: number;
+    runningPanes: number;
+  }) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: opts.thresholdMs ?? 0,
+      requiredFreeSlots: opts.requiredFreeSlots,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+      browseItemCount: 20,
+    };
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
+    );
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: opts.runningPanes,
+        paneIds: [],
+        records: [],
+      }),
+    });
+    const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+    return { worker, deps };
+  }
+
+  it('AC1: pins the proxy adaptive lease maximum (llm-manager default 1500 s)', () => {
+    // The proxy lease is adaptive and capped at local_dispatch_lease_max_seconds
+    // (default 1500 s) — NOT the historical ~180 s the code used to assume.
+    expect(LOCAL_DISPATCH_LEASE_MAX_SECONDS).toBe(1500);
+  });
+
+  it('AC1/AC3: a max-TTL unknown/operator lease on a count-based single slot still refuses dispatch', async () => {
+    // The dispatcher must not optimistically assume the lease expired: a lease
+    // at the proxy MAX on a count-based single-slot setup (an unknown/operator
+    // owner) keeps blocking while a downtime pane is alive. local_lease_active
+    // is false so the idle gate passes and the slot-owned gate is the blocker.
+    const status: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 1,
+      total_slots: 1,
+      local_owner_session_id: 'operator-session',
+      local_owner_lease_remaining_seconds: LOCAL_DISPATCH_LEASE_MAX_SECONDS,
+      contention_queue_depth: 0,
+      contention_queued_count: 0,
+    };
+    const { worker, deps } = makeLeaseWorker({
+      status,
+      requiredFreeSlots: 0,
+      runningPanes: 1,
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('slot-owner');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a max-TTL lease held by a dispatched pane does not block the free unowned slots (per-slot)', async () => {
+    // Self-blocking case (RCA WL-0MU87ZGPP0029V28): the dispatched pane owns
+    // slot-1; slots 2 and 3 are free and unowned. Even with the lease at the
+    // proxy MAX and the worker's own pane alive, dispatch into the free slots
+    // MUST proceed — the per-slot gate ignores the global lease when unowned
+    // slots remain.
+    vi.useFakeTimers();
+    try {
+      const ownSession = 'dispatched-pane-session';
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 2,
+        total_slots: 3,
+        local_owner_session_id: ['http://localhost:8080', ownSession],
+        local_owner_session_ids: [ownSession],
+        local_owner_lease_remaining_seconds: LOCAL_DISPATCH_LEASE_MAX_SECONDS,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true, owner_session_id: ownSession },
+          { slot_id: 'slot-2', is_processing: false },
+          { slot_id: 'slot-3', is_processing: false },
+        ],
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker, deps } = makeLeaseWorker({
+        status,
+        requiredFreeSlots: 2,
+        thresholdMs: 1_000,
+        runningPanes: 1,
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick(); // baseline — start the per-slot idle timers
+      vi.setSystemTime(start + 5_000);
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });
