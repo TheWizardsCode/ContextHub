@@ -33,6 +33,7 @@ import {
   fetchItemsByStage,
   setWorklogDir,
   claimWorkItem,
+  rollbackClaimWorkItem,
   getExecFileAsync,
   buildWlArgs,
   buildWlArgsForRoot,
@@ -47,6 +48,7 @@ import {
   stripSkillName,
   stripAgentPromptPrefix,
 } from './pane-title.js';
+import { showToast } from './notify.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -79,6 +81,7 @@ import {
   type DowntimeCandidate,
   type DowntimeDispatchEvent,
   type DowntimeDispatchFailureEvent,
+  type DowntimeDispatchEnrichmentEvent,
   type DowntimeErrorEvent,
   type DowntimeNextResult,
   type DowntimeClaimExpected,
@@ -95,10 +98,15 @@ import {
   parseInProgressOutput,
   type DowntimeActiveAuditResult,
   withTransientRetry,
+  parseHerdrPaneListOutput,
+  countRunningDowntimePanes,
+  type RunningPanesResult,
+  type LlamaStatus,
 } from './downtime-worker.js';
 import {
   createModeSwitchWorker,
   type ModeSwitchWorker,
+  DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
 } from './mode-switch-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
@@ -118,8 +126,10 @@ import {
 } from './scheduled-prompts.js';
 import {
   getDispatcherAnchor as resolveDispatcherAnchor,
+  getDispatcherTabAnchor as resolveDispatcherTabAnchor,
   createDispatcherAnchorDeps,
   type DispatcherAnchor,
+  type DispatcherTabAnchorEntry,
 } from './dispatcher-anchor.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
@@ -304,6 +314,63 @@ export function buildBackgroundLogPath(command: string): string {
     command.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) ||
     'command';
   return join(tmpdir(), BACKGROUND_LOG_DIR, `herdr-${stamp}-${process.pid}-${slug}.log`);
+}
+
+/**
+ * Build the operator-facing toast content for a background (`open_pane: false`)
+ * dispatch that exited non-zero. Returns null for a clean (exit 0) run. Pure so
+ * it can be unit-tested without spawning a process (WL-0MUEBQLRD00288VV AC4).
+ *
+ * @param command - the dispatched command (shown so the operator knows what failed)
+ * @param code - process exit code (null when terminated by a signal)
+ * @param signal - termination signal (null when exited normally)
+ * @param logPath - the per-run log file holding the full output
+ * @param excerpt - optional short excerpt of the command's output (e.g. stderr tail)
+ */
+export function formatBackgroundFailure(
+  command: string,
+  code: number | null,
+  signal: string | null,
+  logPath: string,
+  excerpt?: string | null,
+): { title: string; body: string } | null {
+  if (code === 0) return null;
+  const reason =
+    code !== null ? `exit ${code}` : signal ? `signal ${signal}` : 'unknown failure';
+  const short = (excerpt ?? '').trim().replace(/\s+/g, ' ').slice(0, 200);
+  return {
+    title: 'Background command failed',
+    body: short
+      ? `${command} (${reason}) — ${short}`
+      : `${command} (${reason}) — see ${logPath}`,
+  };
+}
+
+/**
+ * Read a short tail of a background log file for inclusion in a failure toast
+ * (never throws; returns null when the file is unreadable).
+ */
+function readBackgroundLogExcerpt(logPath: string, maxChars = 400): string | null {
+  try {
+    if (!existsSync(logPath)) return null;
+    return readFileSync(logPath, 'utf8').slice(-maxChars);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Surface a non-zero background dispatch exit as a Herdr toast so failures are
+ * not visible only in a log file (WL-0MUEBQLRD00288VV AC4).
+ */
+function notifyBackgroundFailure(
+  command: string,
+  code: number | null,
+  signal: string | null,
+  logPath: string,
+): void {
+  const failure = formatBackgroundFailure(command, code, signal, logPath, readBackgroundLogExcerpt(logPath));
+  if (failure) showToast(failure.title, { body: failure.body });
 }
 
 /**
@@ -594,6 +661,67 @@ async function defaultDispatcherAnchorResolver(
 }
 
 /**
+ * Default per-prefix Dispatcher tab-anchor resolver used by
+ * {@link createDowntimeDeps} (C1, parent WL-0MTRQT482001SNXC): resolves (or
+ * creates) the tab labelled with the work-item prefix inside the single
+ * machine-wide Dispatcher workspace, via the herdr CLI. Null on any failure —
+ * dispatch degrades to "no dispatch this cycle" (never a legacy/leader
+ * fallback). Injectable for tests that build real deps without a live herdr
+ * session.
+ */
+async function defaultDispatcherTabAnchorResolver(
+  cwd: string,
+  prefix: string,
+): Promise<(DispatcherTabAnchorEntry & { workspaceId: string }) | null> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    return await resolveDispatcherTabAnchor(
+      cwd,
+      createDispatcherAnchorDeps(cwd, herdrBin),
+      prefix,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Default running-downtime-panes liveness resolver (AC1/AC3, parent
+ * WL-0MTYZXSLN008HZOW): counts live dispatched downtime panes from
+ * `herdr pane list` — the machine-wide pane inventory — so the running-pane
+ * bound holds across roots and leader/instance restarts. A pane counts as a
+ * running downtime pane when its label starts with `Downtime` (set by
+ * send-to-pi.sh via `herdr pane rename`) and it hosts a live pi agent
+ * (status not `done`/`exited`).
+ *
+ * Fail-closed: any herdr failure (missing binary, timeout, unparseable
+ * output) resolves `{ok:false}`, which the worker treats as the bound being
+ * reached (no dispatch) rather than over-dispatching on unknown state.
+ */
+export async function defaultRunningDowntimePanesResolver(
+  _cwd: string,
+): Promise<RunningPanesResult> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const { stdout } = await getExecFileAsync()(
+      herdrBin,
+      ['pane', 'list'],
+      { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+    );
+    const panes = parseHerdrPaneListOutput(stdout);
+    if (panes === null) return { ok: false, error: 'herdr pane list parse failure' };
+    const paneIds = countRunningDowntimePanes(panes);
+    // `records` carries the full parsed pane set so the item-scoped in-flight
+    // guard (WL-0MUBEZ6PE002WLP4 / F3) can resolve label suffixes without a
+    // second `herdr pane list` call. `count`/`paneIds` keep their existing
+    // meaning (owner-lease qualifier ONLY, never a dispatch limit).
+    return { ok: true, count: paneIds.length, paneIds, records: panes };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
  * `wl next --stage <stage> --json` for dispatch selection, `wl update
  * <id> --status in_progress` for the pre-dispatch claim, and
@@ -610,6 +738,10 @@ export function createDowntimeDeps(
   assignee: string,
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
   anchorResolver: DowntimeWorkerDeps['getDispatcherAnchor'] = defaultDispatcherAnchorResolver,
+  runningPanesResolver: NonNullable<DowntimeWorkerDeps['getRunningDowntimePanes']> =
+    defaultRunningDowntimePanesResolver,
+  tabAnchorResolver: DowntimeWorkerDeps['getDispatcherTabAnchor'] =
+    defaultDispatcherTabAnchorResolver,
 ): DowntimeWorkerDeps {
   // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
   // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
@@ -660,6 +792,8 @@ export function createDowntimeDeps(
         if (audits === null) return { ok: false, error: 'audit list parse error' };
         const found = audits.find((a) => a.id === itemId);
         info.auditedAt = found?.auditedAt ?? null;
+        info.fingerprint = found?.fingerprint ?? null;
+        info.currentFingerprint = found?.currentFingerprint ?? null;
       }
       return { ok: true, info };
     } catch (err) {
@@ -672,16 +806,29 @@ export function createDowntimeDeps(
     // downtime pane spawn resolves this anchor so panes land in the Dispatcher
     // workspace regardless of leadership. Null → dispatch degrades to "no
     // dispatch this cycle". Injected (default = real herdr CLI) so tests that
-    // build real deps without a live herdr session can stub it.
+    // build real deps without a live herdr session can stub it. Retained for
+    // scheduled-prompt spawns (no work-item prefix) and legacy callers.
     getDispatcherAnchor: anchorResolver,
+    // Per-prefix Dispatcher tab anchor (C1, parent WL-0MTRQT482001SNXC): the
+    // worklog dispatch path routes each candidate's prefix (`WL`/`TCE`/…) to
+    // its own tab inside the single Dispatcher workspace. When wired it
+    // replaces `getDispatcherAnchor` on that path; null → 'anchor-unavailable'
+    // (never a legacy/leader fallback). Injected (default = real herdr CLI).
+    getDispatcherTabAnchor: tabAnchorResolver,
+    // Running-downtime-panes liveness (AC1/AC3, WL-0MTYZXSLN008HZOW): counts
+    // live dispatched downtime panes from `herdr pane list` so the
+    // running-pane bound is enforced machine-wide (across roots and
+    // leader/instance restarts). Injected (default = real herdr CLI) so tests
+    // can stub it without a live herdr session.
+    getRunningDowntimePanes: runningPanesResolver,
     // Herdr list head (WL-0MTK1ILM2009QYB2): canonical ranking via fetcher → smart-selection → grouping.
     // The dispatcher treats this as the single ranking source; remaining safety gates are filters.
     // Batch size 30: enough to filter through (code-freeze, dispatched-marker, single-flight)
     // without excessive overhead; fetchNextItems applies mandatory-always, browseItemCount
     // windowing, and regroupWorkItems grouping — the sole ranking path.
-    getHerdrListHead: async (_cwd: string): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
+    getHerdrListHead: async (_cwd: string, limit?: number): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
       try {
-        const items = await fetchNextItems(30);
+        const items = await fetchNextItems(limit ?? 30);
         return { ok: true, items };
       } catch (err) {
         return { ok: false, error: String(err) };
@@ -1029,6 +1176,7 @@ export function createDowntimeDeps(
       itemId: string,
       expected: DowntimeClaimExpected,
       cwd?: string,
+      migrateStage?: string,
     ): Promise<DowntimeClaimResult> {
       // CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1): the transition
       // only applies while the item is still in the state the tier selected
@@ -1044,7 +1192,10 @@ export function createDowntimeDeps(
       // OWN database. Without it the update fired at the leader's database
       // and a dispatchable foreign offer struck at claim time (the same
       // wrong-root failure as the fetch). Undefined → legacy behavior.
-      const result = await claimWorkItem(itemId, assignee, expected, cwd);
+      // Retired-stage migration (WL-0MTYL7DX9000MZOH): `migrateStage`
+      // advances a retired `in_progress`-stage item to the tier's target
+      // stage atomically with the claim (see claimWorkItem).
+      const result = await claimWorkItem(itemId, assignee, expected, cwd, migrateStage);
       if (result.success) return { ok: true };
       process.stderr.write(
         `[worklog-plugin] Downtime claim failed for ${itemId}: ` +
@@ -1133,9 +1284,11 @@ export function createDowntimeDeps(
       // outcome:'spawn-failed' entry with the error/exit details to the
       // rolling dispatch log, so the log distinguishes "attempted" (failed
       // spawn) from "opened" (success marker) and never claims success for
-      // a pane that never appeared. Mirrors the marker's fields (itemId,
-      // kind, stage) so the marker readers keep excluding the item exactly
-      // as the standing marker does. Fail-closed: never crash the worker.
+      // a pane that never appeared. The trace is a durable record but NOT an
+      // exclusion marker: the dispatched-marker readers skip spawn-failed
+      // entries (WL-0MT32F908002YFFA AC2), so the item becomes re-eligible
+      // once its rolled-back claim lands it back in a selectable state.
+      // Fail-closed: never crash the worker.
       try {
         await appendDowntimeLogEntry(
           event.cwd,
@@ -1144,6 +1297,30 @@ export function createDowntimeDeps(
       } catch {
         // fail-closed: audit logging must never crash the worker
       }
+    },
+    async recordDispatchEnrichment(event: DowntimeDispatchEnrichmentEvent): Promise<void> {
+      // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6): append a second
+      // rolling-log entry recording the resolved pane id, copying the marker
+      // fields so the dispatched-marker readers see an unchanged marker. A
+      // write failure is swallowed (fail-open) — the success marker already
+      // stands; enrichment must never block or un-mark a dispatch.
+      try {
+        const { noItemComment: _omit, ...rest } = event;
+        await appendDowntimeLogEntry(event.cwd, JSON.stringify(rest));
+      } catch {
+        // fail-open: enrichment logging must never crash the worker
+      }
+    },
+    async rollbackClaim(
+      itemId: string,
+      original: DowntimeClaimExpected,
+      cwd: string,
+    ): Promise<boolean> {
+      // Marker-write / spawn recovery (WL-0MT32F908002YFFA AC1/AC2): reverse
+      // a CAS claim whose dispatch never completed — restore the item to its
+      // pre-claim status+stage so a future idle period can re-select it.
+      // Race-safe (--if-status in_progress) and fail-closed (never throws).
+      return rollbackClaimWorkItem(itemId, original, cwd);
     },
   };
 }
@@ -1293,6 +1470,31 @@ async function main(): Promise<void> {
   // `config()` so changes apply without a plugin restart. The dispatch panes
   // open in the resolved worklog root (--cwd).
   const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
+
+  // Mode-switch worker: automatically switches the llama-proxy between fast
+  // (cloud) and cheap (local) modes based on operator activity and proxy
+  // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
+  // key). Passes `enabled` via the settings flag (modeSwitchEnabled).
+  // Created BEFORE the downtime worker so we can wire the idle callback.
+  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker();
+
+  // Callback: when the downtime dispatcher finds the proxy idle, trigger a
+  // mode-switch tick immediately with the fresh status — avoids the 10 s
+  // poll delay of the independent scheduler task.
+  const onProxyIdle = async (proxyStatus: LlamaStatus): Promise<void> => {
+    try {
+      const s = loadSettings();
+      await modeSwitchWorker.tick({
+        enabled: s.modeSwitchEnabled ?? true,
+        idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
+        proxyUrl: s.downtimeProxyUrl,
+        proxyStatus,
+      });
+    } catch {
+      // Fail-closed: a broken tick never crashes the downtime dispatcher.
+    }
+  };
+
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),
     deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
@@ -1312,20 +1514,20 @@ async function main(): Promise<void> {
         enabled: s.downtimeEnabled,
         thresholdMs: s.downtimeIdleThresholdMs,
         requiredFreeSlots: s.downtimeRequiredFreeSlots,
-        maxConcurrentDispatches: s.downtimeMaxConcurrentDispatches,
+        // NOTE (WL-0MU2EP6JL006A1U3): no `maxRunningPanes` — there is no
+        // client-side cap on dispatched panes. Panes stay open until an
+        // operator closes them and the local LLM idle / free-slot check is
+        // the concurrency limiter.
         model: s.downtimeModel,
         cwd: targetCwd,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
+        // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
+        markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
         browseItemCount: s.browseItemCount,
       };
     },
+    onProxyIdle,
   });
-
-  // Mode-switch worker: automatically switches the llama-proxy between fast
-  // (cloud) and cheap (local) modes based on operator activity and proxy
-  // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
-  // key). Passes `enabled` via the settings flag (modeSwitchEnabled).
-  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker();
 
   const selectedItem = await runWorklistTui(
     fetcher,
@@ -1423,7 +1625,12 @@ async function main(): Promise<void> {
               targetCwd,
               model,
               logPath,
-              { onExit: () => onRefresh?.() },
+              {
+                onExit: (code, signal) => {
+                  notifyBackgroundFailure(command, code, signal, logPath);
+                  onRefresh?.();
+                },
+              },
             );
             return;
           }
@@ -1482,7 +1689,12 @@ async function main(): Promise<void> {
               clean,
               targetCwd,
               logPath,
-              { onExit: () => onRefresh?.() },
+              {
+                onExit: (code, signal) => {
+                  notifyBackgroundFailure(clean, code, signal, logPath);
+                  onRefresh?.();
+                },
+              },
             );
             return;
           }
@@ -1520,7 +1732,12 @@ async function main(): Promise<void> {
               command,
               targetCwd,
               logPath,
-              { onExit: () => onRefresh?.() },
+              {
+                onExit: (code, signal) => {
+                  notifyBackgroundFailure(command, code, signal, logPath);
+                  onRefresh?.();
+                },
+              },
             );
             return;
           }

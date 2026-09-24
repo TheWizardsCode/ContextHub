@@ -223,7 +223,8 @@ describe('extractFilePaths (duplicated)', () => {
 });
 
 describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
-  // isAuditFresh(auditedAt, updatedAt) → auditedAt > updatedAt - 60s
+  // isAuditFresh(auditedAt, updatedAt): auditedAt within
+  // AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS of updatedAt → fresh
   // So auditedAt === updatedAt is fresh; auditedAt 10m before updatedAt is stale.
   const updatedAt = '2026-01-10T10:00:00.000Z';
   const freshAuditedAt = '2026-01-10T10:00:00.000Z'; // same instant → fresh
@@ -315,6 +316,31 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
       'WL-no-audit',
       'WL-passed-fresh',
     ]);
+  });
+
+  it('fingerprint match keeps a passed audit fresh (bucket 6) despite stale-looking updatedAt (AC4/AC7)', () => {
+    const fingerprint = 'sha256-match';
+    // auditedAt is 20m before updatedAt (would be stale by the time gate),
+    // but the stored and current fingerprints match → fresh.
+    const item = inReviewItem('WL-fingerprint-fresh', {
+      auditResult: true,
+      auditedAt: staleAuditedAt,
+      updatedAt,
+      fingerprint,
+      currentFingerprint: fingerprint,
+    });
+    expect(inReviewBucket(item)).toBe(6);
+  });
+
+  it('fingerprint mismatch marks a passed audit stale (bucket 5) even when timestamps are close (AC5/AC7)', () => {
+    const item = inReviewItem('WL-fingerprint-stale', {
+      auditResult: true,
+      auditedAt: freshAuditedAt,
+      updatedAt,
+      fingerprint: 'sha256-old',
+      currentFingerprint: 'sha256-new',
+    });
+    expect(inReviewBucket(item)).toBe(5);
   });
 });
 

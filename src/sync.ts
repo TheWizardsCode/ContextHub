@@ -812,32 +812,13 @@ function mergeSameTimestampItems(
     }
   }
 
-  // Bump updatedAt ONLY when the merge changed a user-visible, non-sortIndex field
-  // (WL-0MSKZ30SK007K9TO). The previous unconditional bump made any divergent pair
-  // forever "newer" than the remote, so the local value kept winning and updatedAt
-  // advanced on EVERY repeated sync — a self-sustaining conflict loop with no real
-  // user edit behind it. Case-by-case:
-  //   1. sortIndex-only conflicts (concurrent wl re-sort): NEVER bump — pure ordering,
-  //      zero timestamp churn (producer Q2).
-  //   2. Merge resolved back to the local content (tie-break/regression guard kept
-  //      local): no user-visible change — no bump; the same divergent state re-merges
-  //      deterministically with no timestamp advance, so updatedAt stays quiescent.
-  //   3. Real content change: bump once so the next sync has an unambiguous winner; the
-  //      merged item then propagates (newer side wins by recency) and both sides
-  //      converge — no unbounded bumping.
-  const mergedEqualsLocal = fields.every((field) =>
-    stableValueKey((merged as any)[field]) === stableValueKey(localItem[field])
-  );
-  const nonSortIndexMerged = mergedFields.some((f) => !f.startsWith('sortIndex'));
-  if (nonSortIndexMerged && !mergedEqualsLocal) {
-    merged.updatedAt = new Date().toISOString();
-  }
+  // Same-timestamp merges are quiescent: both sides share the identical updatedAt
+  // by definition, so the merged item inherits it unchanged. No wall-clock stamp;
+  // repeated syncs of the same divergence never advance updatedAt.
   merged.createdAt = localItem.createdAt;
 
   const conflictMessages: string[] = [
-    `${remoteItem.id}: Same updatedAt but different content - ${sameTimestampLabel}${
-      merged.updatedAt === localItem.updatedAt ? '' : ' and bumped updatedAt'
-    }`
+    `${remoteItem.id}: Same updatedAt but different content - ${sameTimestampLabel}`
   ];
   if (mergedFields.length > 0) {
     conflictMessages.push(`${remoteItem.id}: Merged fields [${mergedFields.join(', ')}]`);

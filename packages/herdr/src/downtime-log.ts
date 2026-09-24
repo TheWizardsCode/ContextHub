@@ -21,7 +21,8 @@
  * audit.
  */
 
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 /** File name of the downtime dispatch audit log inside `.worklog/`. */
@@ -148,12 +149,17 @@ export async function readDowntimeLogEntries(cwd: string): Promise<DowntimeLogEn
 /**
  * Build the set of itemIds the downtime worker has already dispatched for
  * the given kind (kind-scoped). Entries without an itemId (e.g.
- * persistent-error events) are ignored. Shared by the audit/implement/plan/
- * intake marker readers so every tier's scope guard stays identical.
+ * persistent-error events) are ignored. Entries with `outcome: 'spawn-failed'
+ * are excluded (WL-0MT32F908002YFFA AC2): a spawn-failed dispatch is NOT
+ * a success — the item should be re-eligible for selection on the next idle
+ * period. Shared by the audit/implement/plan/intake marker readers so every
+ * tier's scope guard stays identical.
  */
 function dispatchedItemIds(entries: DowntimeLogEntry[], kind: string): Set<string> {
   const ids = new Set<string>();
   for (const e of entries) {
+    // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2).
+    if (e.outcome === 'spawn-failed') continue;
     if (e.kind === kind && typeof e.itemId === 'string' && e.itemId.length > 0) {
       ids.add(e.itemId);
     }
@@ -181,7 +187,8 @@ export function auditDispatchedItemIds(entries: DowntimeLogEntry[]): Set<string>
  * work item — and ignored, so a NEW audit dispatch can proceed. Entries
  * without an itemId, without a parseable `dispatchedAt`, or of another
  * kind are ignored (fail-closed: missing evidence never claims an active
- * audit).
+ * audit). Spawn-failed entries are ignored too (WL-0MT32F908002YFFA AC2):
+ * a failed spawn is not an active run.
  */
 export function recentDispatchedItemIds(
   entries: DowntimeLogEntry[],
@@ -192,6 +199,10 @@ export function recentDispatchedItemIds(
   const cutoff = now - windowMs;
   const ids = new Set<string>();
   for (const e of entries) {
+    // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2): a
+    // failed spawn is NOT an active run — the pane never appeared, so a new
+    // dispatch must not be blocked by it.
+    if (e.outcome === 'spawn-failed') continue;
     if (e.kind !== kind || typeof e.itemId !== 'string' || e.itemId.length === 0) continue;
     if (typeof e.dispatchedAt !== 'string') continue; // unrecognized timestamp → no active evidence
     const t = Date.parse(e.dispatchedAt);
@@ -212,6 +223,114 @@ export function recentAuditDispatchedItemIds(
   now: number = Date.now(),
 ): Set<string> {
   return recentDispatchedItemIds(entries, 'audit', windowMs, now);
+}
+
+/**
+ * One success marker's lifetime data (WL-0MU6UL0RJ008IHGT): the worklog
+ * stage the item was at when dispatched, plus the dispatch timestamp that
+ * powers the staleness window. `stage` defaults to `''` for legacy entries
+ * and `dispatchedAt` is `undefined` when missing/unparseable, so
+ * malformed/foreign lines never break parsing (callers fail closed).
+ */
+export interface DispatchMarker {
+  /** Worklog stage at dispatch; `''` when absent (legacy entry). */
+  stage: string;
+  /** ISO-8601 dispatch timestamp; `undefined` when missing/unparseable. */
+  dispatchedAt?: string;
+}
+
+/**
+ * Tier semantics for a legacy marker without a recorded stage (see
+ * `markerStillExcludes`).
+ *
+ * - `'stage-guard'` (plan/intake/risk-effort tiers): a missing
+ *   dispatched-at stage NEVER suppressed selection — the historical
+ *   change-guard semantics (a legacy entry must not freeze an item).
+ * - `'id-guard'` (audit/implement tiers): the historical id-set readers
+ *   excluded on the id alone; an unknown stage must not weaken duplicate-
+ *   dispatch protection for a possibly in-flight marker, so a legacy
+ *   marker keeps excluding while fresh — only the age TTL releases it.
+ */
+export type MarkerStageGuardMode = 'stage-guard' | 'id-guard';
+
+/**
+ * Kind-scoped, staleness-aware success-marker map: itemId → the marker's
+ * lifetime data (dispatched-at stage + dispatch timestamp) for the
+ * dispatched-marker change-guard (WL-0MU6UL0RJ008IHGT). This is the
+ * canonical reader for the success-marker staleness window: a marker
+ * excludes its item only while the item is STILL at the marker's stage AND
+ * the marker is fresh (age ≤ the configured staleness window). Spawn-failed
+ * entries are excluded (WL-0MT32F908002YFFA AC2: a failed spawn is NOT a
+ * success — the pane never appeared).
+ *
+ * Missing `stage` maps to `''` (legacy pre-stage entries, backward
+ * compatible — see `markerStillExcludes` for how each tier mode treats
+ * them); missing `dispatchedAt` maps to `undefined` (fail-closed — the
+ * decision helper keeps excluding). When an itemId appears more than once,
+ * the LAST entry wins (the most recent dispatch is the authoritative
+ * marker: if it is fresh the item is in-flight; if it is stale every
+ * earlier, older marker is staler).
+ */
+export function dispatchedItemMarkers(
+  entries: DowntimeLogEntry[],
+  kind: string,
+): Map<string, DispatchMarker> {
+  const markers = new Map<string, DispatchMarker>();
+  for (const e of entries) {
+    // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2).
+    if (e.outcome === 'spawn-failed') continue;
+    if (e.kind !== kind || typeof e.itemId !== 'string' || e.itemId.length === 0) continue;
+    markers.set(e.itemId, {
+      stage: typeof e.stage === 'string' ? e.stage : '',
+      dispatchedAt: typeof e.dispatchedAt === 'string' ? e.dispatchedAt : undefined,
+    });
+  }
+  return markers;
+}
+
+/**
+ * Decide whether a dispatched SUCCESS marker still excludes its item from
+ * re-dispatch (WL-0MU6UL0RJ008IHGT AC1/AC2/AC5).
+ *
+ * A marker keeps excluding ONLY while BOTH hold:
+ *  1. the item has NOT advanced past the marker's dispatched-at stage
+ *     (`itemStage === marker.stage`), and
+ *  2. the marker is still fresh — its age is ≤ `stalenessWindowMs`.
+ *
+ * Fail-closed (AC5): a MISSING or UNPARSEABLE `dispatchedAt` keeps
+ * excluding — the staleness window cannot be proven, so the item stays
+ * protected against double dispatch. At exactly `stalenessWindowMs` the
+ * marker still excludes; one ms past the window it releases ("exceeds"
+ * the window per AC1).
+ *
+ * A stage advancement releases the marker exactly as the historical
+ * change-guard did (AC2 — no behaviour change for healthy flow). Legacy
+ * markers without a recorded stage follow `mode` (see
+ * `MarkerStageGuardMode`).
+ */
+export function markerStillExcludes(
+  marker: DispatchMarker,
+  itemStage: string | undefined,
+  now: number,
+  stalenessWindowMs: number,
+  mode: MarkerStageGuardMode = 'id-guard',
+): boolean {
+  if (marker.stage === '') {
+    // Legacy marker without a recorded stage. Stage-guard tiers release it
+    // (historical semantics); id-guard tiers keep excluding while fresh so
+    // a possibly-in-flight marker is never double-dispatched, and the age
+    // TTL below still releases it once stale.
+    if (mode === 'stage-guard') return false;
+  } else if (marker.stage !== (itemStage ?? '')) {
+    // The item advanced past its dispatched-at stage → released (AC2).
+    return false;
+  }
+  // Flowing through here: same stage (or unknown stage under id-guard) —
+  // the marker's age decides, fail-closed on unproven freshness.
+  if (marker.dispatchedAt === undefined) return true;
+  const t = Date.parse(marker.dispatchedAt);
+  if (Number.isNaN(t)) return true; // unparseable → fail-closed: keep excluding
+  return now - t <= stalenessWindowMs;
 }
 
 /**
@@ -249,6 +368,8 @@ export function riskEffortDispatchedItemIds(entries: DowntimeLogEntry[]): Set<st
 export function dispatchedItemStages(entries: DowntimeLogEntry[], kind: string): Map<string, string> {
   const stages = new Map<string, string>();
   for (const e of entries) {
+    // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2).
+    if (e.outcome === 'spawn-failed') continue;
     if (e.kind === kind && typeof e.itemId === 'string' && e.itemId.length > 0) {
       stages.set(e.itemId, typeof e.stage === 'string' ? e.stage : '');
     }
@@ -289,6 +410,15 @@ export async function appendDowntimeLogEntry(cwd: string, entry: string): Promis
  * write `line` to `<cwd>/.worklog/<file>`, creating `.worklog` if needed
  * and trimming to the most recent DOWNTIME_LOG_MAX_ENTRIES lines. Throws
  * on I/O failure — callers must catch (fail-closed).
+ *
+ * ATOMIC (WL-0MUBVL1FI0071WN3 / F5): the new content is written to a
+ * temporary sibling file and `rename`d over the target, so a concurrent
+ * reader (e.g. the dispatched-marker readers) can never observe a truncated,
+ * empty, or partially written log — it sees either the whole previous file or
+ * the whole new one. `rename(2)` is atomic within a filesystem, so the temp
+ * file is created in the SAME directory as the target. The temp file is
+ * removed on failure before the error is rethrown (and the target is left
+ * untouched).
  */
 async function appendRollingJsonl(cwd: string, file: string, line: string): Promise<void> {
   const dir = join(cwd, '.worklog');
@@ -307,5 +437,20 @@ async function appendRollingJsonl(cwd: string, file: string, line: string): Prom
   if (lines.length > DOWNTIME_LOG_MAX_ENTRIES) {
     lines = lines.slice(lines.length - DOWNTIME_LOG_MAX_ENTRIES);
   }
-  await writeFile(filePath, lines.join('\n') + '\n', 'utf8');
+
+  // Temp name carries pid + a random suffix so two concurrent writers never
+  // collide on the same temp path. Same directory → same filesystem → the
+  // rename is atomic.
+  const tmpPath = join(
+    dir,
+    `.${file}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`,
+  );
+  try {
+    await writeFile(tmpPath, lines.join('\n') + '\n', 'utf8');
+    await rename(tmpPath, filePath);
+  } catch (err) {
+    // Clean up the temp file (best-effort) and leave the target untouched.
+    await rm(tmpPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
 }

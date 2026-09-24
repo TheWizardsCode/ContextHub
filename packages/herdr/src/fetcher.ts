@@ -168,6 +168,10 @@ export interface WorkItem {
   needsProducerReview?: boolean;
   auditResult?: boolean | null;
   auditedAt?: string | null;
+  /** Stored content fingerprint from the audit result (WL-0MUBVH5S0008NQ9K). */
+  fingerprint?: string | null;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
   /** Child work items (populated on expand). */
   children?: WorkItem[];
   /** Depth in hierarchy (0 = top-level, 1 = child, etc.). Used by renderer. */
@@ -258,6 +262,8 @@ function normalizeItem(raw: any): WorkItem {
     needsProducerReview: raw?.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
     auditResult: raw?.auditResult !== undefined ? raw.auditResult : null,
     auditedAt: raw?.auditedAt == null ? (raw?.auditedAt as null | undefined) : String(raw.auditedAt),
+    fingerprint: raw?.fingerprint == null ? (raw?.fingerprint as null | undefined) : String(raw.fingerprint),
+    currentFingerprint: raw?.currentFingerprint == null ? (raw?.currentFingerprint as null | undefined) : String(raw.currentFingerprint),
   };
 }
 
@@ -764,6 +770,7 @@ export async function claimWorkItem(
   assignee: string,
   expected?: { status?: string; stage?: string },
   worklogRoot?: string,
+  migrateStage?: string,
 ): Promise<ClaimResult> {
   try {
     const args = ['update', id, '--status', 'in_progress', '--assignee', assignee];
@@ -772,6 +779,17 @@ export async function claimWorkItem(
     }
     if (expected?.stage) {
       args.push('--if-stage', expected.stage);
+    }
+    // Retired-stage recovery (WL-0MTYL7DX9000MZOH): an item stuck on a stage
+    // that is no longer valid (e.g. the removed `in_progress` stage) cannot
+    // satisfy the tier's normalised stage CAS. In that case the caller passes
+    // the tier's target stage as an atomic MIGRATION — the CAS guard still
+    // matches the item's ACTUAL (retired) stage for race safety, while
+    // `--stage` advances the stored value to a valid stage in the same write.
+    // Without this, the claim is rejected by the status/stage validator and
+    // counted as a hard wl-error strike.
+    if (migrateStage !== undefined) {
+      args.push('--stage', migrateStage);
     }
     // Per-call --worklog-dir targeting (WL-0MTQ14W7L003II5A): the downtime
     // leader claims coordination offers in the OFFER's own worklog root,
@@ -791,5 +809,61 @@ export async function claimWorkItem(
       message.includes("'stale'") ||
       message.includes('Conditional update skipped');
     return { success: false, stale, error: message };
+  }
+}
+
+/**
+ * Roll back a pre-dispatch CAS claim that succeeded but never completed
+ * dispatch (WL-0MT32F908002YFFA AC1/AC2): restore the item to its
+ * pre-claim status + stage so a future idle period can re-select it. Used
+ * when the dispatch marker cannot be written (`marker-write-failed`) or the
+ * pane spawn fails (`spawn-failed`) — in both cases the CAS claimed the item
+ * (`in_progress`) but no agent is working it, so leaving it claimed strands
+ * it in a state no tier selects.
+ *
+ * The reverse transition is guarded by the SAME race-safe CAS shape as the
+ * claim: `--if-status in_progress` (plus `--if-stage <original.stage>` when
+ * known) ensures only THIS claim's state is reverted. A concurrent
+ * human/agent that already moved the item makes the update stale → resolves
+ * `false` (nothing to roll back) and never clobbers their change.
+ *
+ * `original.status` defaults to `open` (the plan/intake/implement/risk-effort
+ * tiers); the audit tier passes `completed` so a failed audit dispatch
+ * returns to the audit queue rather than the open backlog. `worklogRoot`
+ * targets that root's database via per-call `--worklog-dir` (the same
+ * cross-root convention as `claimWorkItem`).
+ *
+ * Never throws — a failure resolves `false` so the caller can fall back to
+ * the fail-closed abort outcome.
+ */
+export async function rollbackClaimWorkItem(
+  id: string,
+  original?: { status?: string; stage?: string },
+  worklogRoot?: string,
+): Promise<boolean> {
+  try {
+    const args = [
+      'update',
+      id,
+      '--status',
+      original?.status ?? 'open',
+      '--if-status',
+      'in_progress',
+    ];
+    // Restore the stage the tier claimed at. The claim itself does not change
+    // the stage (except the retired-stage migration, which advances it to the
+    // tier's target); passing the tier's expectation is therefore a no-op in
+    // the migration path and the correct restore everywhere else.
+    if (original?.stage) {
+      args.push('--if-stage', original.stage);
+      args.push('--stage', original.stage);
+    }
+    const dirOverride = worklogRoot !== undefined ? join(worklogRoot, '.worklog') : undefined;
+    await runWl(args, true, CLAIM_TIMEOUT_MS, dirOverride);
+    return true;
+  } catch {
+    // Fail-closed: a failed/stale rollback resolves false (the caller reports
+    // the failure and leaves the item as-is — no worse than before recovery).
+    return false;
   }
 }

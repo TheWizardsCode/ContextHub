@@ -517,6 +517,149 @@ function makeFactoryItem(overrides: Partial<WorkItem> = {}): WorkItem {
   };
 }
 
+
+// ── WL-0MU2QKB98007BKYT: re-sort does NOT invalidate fresh audits via updatedAt churn ──
+
+describe('reSort does NOT bump updatedAt on audit-fresh items (WL-0MU2QKB98007BKYT)', () => {
+  it('reSort preserves updatedAt so a passing audit remains fresh after re-sort', () => {
+    const item1 = makeItem({ id: 'WI-A', sortIndex: 500 });
+    const item2 = makeItem({ id: 'WI-B', sortIndex: 600 });
+
+    db.import([item1, item2]);
+    expect(db.get('WI-A')?.updatedAt).toBe(FIXED_TS);
+
+    // Save an audit result that passes (readyToClose=true).
+    db.saveAuditResult({
+      workItemId: 'WI-A',
+      readyToClose: true,
+      auditedAt: FIXED_TS,
+      summary: 'ready to close',
+      rawOutput: null,
+      author: 'test',
+    });
+
+    const updatedAtBefore = db.get('WI-A')?.updatedAt!;
+
+    // Trigger re-sort — both items will likely get new sortIndex values.
+    db.reSort('ignore', 100);
+
+    // The updatedAt must NOT have changed — audit freshness is preserved.
+    const storedA = db.get('WI-A');
+    expect(storedA?.updatedAt).toBe(updatedAtBefore);
+
+    // The audit should still be considered fresh (auditedAt >= updatedAt).
+    const audit = db.getAuditResult('WI-A');
+    expect(audit?.readyToClose).toBe(true);
+  });
+
+  it('batchUpdateSortIndices does NOT update updatedAt on sort-only changes', () => {
+    const item1 = makeItem({ id: 'WI-C', sortIndex: 500 });
+    const item2 = makeItem({ id: 'WI-D', sortIndex: 1500 });
+
+    db.import([item1, item2]);
+
+    const updatedAtBefore = db.get('WI-C')?.updatedAt!;
+
+    // Assign sort indices — WI-C will move from 500 to 100 (index 1 * 100).
+    db.reSort('ignore', 100);
+
+    expect(db.get('WI-C')?.updatedAt).toBe(updatedAtBefore);
+    expect(db.get('WI-D')?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('genuine semantic edits still bump updatedAt — freshness invariant intact', () => {
+    const item = makeItem({ id: 'WI-E', sortIndex: 100 });
+    db.import([item]);
+    const originalUpdatedAt = db.get('WI-E')?.updatedAt!;
+
+    // Genuine status change bumps updatedAt.
+    db.import([{ ...item, status: 'in_progress' as any }]);
+    expect(db.get('WI-E')?.updatedAt).not.toBe(originalUpdatedAt);
+  });
+});
+
+// ── WL-0MT2KYCNB000CYWV: delta pull persists COMMENTS non-destructively ──
+
+// ── WL-0MU38HN2J008WWTB: update() persists deletedBy and deleteReason ──
+
+describe('update() persists deletedBy and deleteReason (WL-0MU38HN2J008WWTB)', () => {
+  function seed(status: string = 'open'): WorkItem {
+    const item = makeItem({ id: 'WI-DEL1', status: status as WorkItem['status'] });
+    db.import([item]);
+    return item;
+  }
+
+  it('persists deletedBy and deleteReason when updating a deleted item', () => {
+    const seeded = seed('completed');
+    const updated = db.update(seeded.id, {
+      status: 'closed' as WorkItem['status'],
+      deletedBy: 'alice@example.com',
+      deleteReason: 'Duplicated work item',
+    });
+    expect(updated?.deletedBy).toBe('alice@example.com');
+    expect(updated?.deleteReason).toBe('Duplicated work item');
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    // Verify persistence in the database.
+    const stored = db.get(seeded.id);
+    expect(stored?.deletedBy).toBe('alice@example.com');
+    expect(stored?.deleteReason).toBe('Duplicated work item');
+  });
+
+  it('persists updated deleteReason on a deleted item and bumps updatedAt', () => {
+    const seeded = seed('closed');
+    // First set deleteReason
+    db.update(seeded.id, { deletedBy: 'bob', deleteReason: 'initial reason' });
+    // Now update just the reason
+    const updated = db.update(seeded.id, { deleteReason: 'updated reason' });
+    expect(updated?.deleteReason).toBe('updated reason');
+    expect(updated?.deletedBy).toBe('bob'); // preserved
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.deleteReason).toBe('updated reason');
+  });
+
+  it('persists updated deletedBy on a deleted item and bumps updatedAt', () => {
+    const seeded = seed('closed');
+    db.update(seeded.id, { deleteReason: 'some reason' });
+    const updated = db.update(seeded.id, { deletedBy: 'charlie' });
+    expect(updated?.deletedBy).toBe('charlie');
+    expect(updated?.deleteReason).toBe('some reason'); // preserved
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.deletedBy).toBe('charlie');
+  });
+
+  it('persists deletedBy and deleteReason on a NON-deleted item', () => {
+    const seeded = seed('open');
+    const updated = db.update(seeded.id, {
+      deletedBy: 'dave',
+      deleteReason: 'preemptive note',
+    });
+    expect(updated?.deletedBy).toBe('dave');
+    expect(updated?.deleteReason).toBe('preemptive note');
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.deletedBy).toBe('dave');
+    expect(db.get(seeded.id)?.deleteReason).toBe('preemptive note');
+  });
+
+  it('detects deletedBy change as a semantic update', () => {
+    const seeded = seed('open');
+    db.update(seeded.id, { deletedBy: 'user1' });
+    expect(db.get(seeded.id)?.deletedBy).toBe('user1');
+
+    // Changing from empty to a value should be detected
+    const seeded2 = seed('open');
+    const updated2 = db.update(seeded2.id, { deletedBy: 'user2' });
+    expect(updated2?.updatedAt).not.toBe(FIXED_TS);
+  });
+
+  it('detects deleteReason change as a semantic update', () => {
+    const seeded = seed('open');
+    const updated = db.update(seeded.id, { deleteReason: 'test reason' });
+    expect(updated?.deleteReason).toBe('test reason');
+    expect(updated?.updatedAt).not.toBe(FIXED_TS);
+    expect(db.get(seeded.id)?.deleteReason).toBe('test reason');
+  });
+});
+
 // ── WL-0MT2KYCNB000CYWV: delta pull persists COMMENTS non-destructively ──
 
 describe('upsertComments() non-destructive merge (WL-0MT2KYCNB000CYWV)', () => {

@@ -6,8 +6,8 @@ relates to the global agent file, and why the model avoids duplication.
 > **Status:** documents the current behavior (verified against
 > `src/commands/init.ts` and `tests/cli/init.test.ts`).
 > The prior duplicated model (full template copy + pointer line) was retired
-> by SA-0MSITKWBP007VUJS; coordination with the Worklog side is tracked in
-> WL-0MSIXMKOX0052514 (open).
+> by SA-0MSITKWBP007VUJS. Workflow-setup delegation when the SorraAgents
+> global install is detected was implemented by WL-0MSIXMKOX0052514.
 
 ## Overview
 
@@ -48,12 +48,20 @@ wl init
   │              ├─ action=skip ─────► no-op ("user chose to manage manually")
   │              └─ no action ───────► interactive O/A/M prompt → same actions
   │
-  └─ ensureWorkflowTemplateInstalled()
-       └─ --workflow-inline yes (or prompt answer)
-            └─ insertWorkflowLoaderIntoAgents(AGENTS.md)
-                 │  repo WORKFLOW.md preferred, else packaged template
-                 └─ insert "<!-- WORKFLOW: start -->…<!-- WORKFLOW: end -->"
-                    if not already present                              ← idempotent
+  └─ isSorraAgentsInstalled()
+       │  ~/.pi/agent/AGENTS.md is a symlink to AGENTS_GLOBAL.md?
+       │  (override with WL_SORRA_AGENTS_OVERRIDE=0/1)
+       │
+       ├─ YES ──► delegate workflow setup
+       │            no workflow prompts; --workflow-inline is a no-op
+       │            (global AGENTS.md is managed by the SorraAgents install)
+       │
+       └─ NO ──► ensureWorkflowTemplateInstalled()
+                   └─ --workflow-inline yes (or prompt answer)
+                        └─ insertWorkflowLoaderIntoAgents(AGENTS.md)
+                             │  repo WORKFLOW.md preferred, else packaged template
+                             └─ insert "<!-- WORKFLOW: start -->…<!-- WORKFLOW: end -->"
+                                if not already present                  ← idempotent
 ```
 
 ### Global-reference detection
@@ -101,7 +109,13 @@ flag is given, `promptAgentTemplateAction()` asks:
 | Flag | Values | Behavior |
 |------|--------|----------|
 | `--agents-template` | `overwrite` (or `o`), `append` (or `a`), `skip` (or `m`/`manual`/`manage`) | Non-interactive action when AGENTS.md exists without the global reference |
-| `--workflow-inline` | `yes`/`true`/`1`, `no`/`false`/`0` | Inline workflow template into AGENTS.md (`yes`) or not (`no`); omitted → interactive prompt |
+| `--workflow-inline` | `yes`/`true`/`1`, `no`/`false`/`0` | Inline workflow template into AGENTS.md (`yes`) or not (`no`); omitted → interactive prompt. **No-op when the SorraAgents global install is detected** — workflow setup is then delegated to `~/.pi/agent/AGENTS.md` |
+
+When the SorraAgents global install is detected (see
+[Interaction with the global install](#interaction-with-the-global-install)),
+`--workflow-inline` and the N/B/M workflow prompt are skipped entirely. Set
+`WL_SORRA_AGENTS_OVERRIDE=0` to force the standalone path, or `=1` to force
+delegation (for automation and testing).
 
 `--agents-template skip` is the common choice for unattended init
 (see [WL-0MKVRI3580RXZ54H], the `--agents-template` flag item).
@@ -156,20 +170,31 @@ to the global guidance is picked up by every project automatically.
 
 ## Interaction with the global install
 
-- `wl init` installs its short canonical template unconditionally — the
-  template self-references `~/.pi/agent/AGENTS.md`, so when the global file
-exists (SorraAgents install) agents read both; when it does not, the
-reference is harmless and the project still has its own `AGENTS.md`.
-- There is **no delegation switch today** — no code path that says "if the
-  global file exists, skip the template entirely." The template is short by
-design so that no duplication occurs regardless of environment.
+`isSorraAgentsInstalled()` detects the SorraAgents global install: it checks
+whether `~/.pi/agent/AGENTS.md` is a **symlink whose resolved target file
+name is `AGENTS_GLOBAL.md`** (any path) — the same convention used by
+SorraAgents' `scripts/install_pi.sh`. When detected:
+
+- `wl init` keeps the canonical global-reference structure in the project
+  `AGENTS.md` (via `ensureAgentTemplateInstalled()`) and **delegates workflow
+  setup to the global install**: the N/B/M workflow prompt and the
+  `--workflow-inline` flag are skipped (the flag is a no-op). No WORKFLOW
+  content is inlined into the project file — the global file is the single
+  source of truth for workflow guidance.
+- Standalone environments (no global install) keep the existing N/B/M
+  workflow behavior unchanged.
+
+Set the environment variable `WL_SORRA_AGENTS_OVERRIDE=0` (force standalone)
+or `=1` (force delegation) to override detection for automation and tests.
+If the override is unset (or set to any other value), detection falls through
+per the table below.
 
 ### Environments
 
-| Environment | What agents see |
-|-------------|-----------------|
-| **Standalone** (no SorraAgents global install) | Only the project `AGENTS.md` (reference points at a file that does not exist — harmless) |
-| **Global** (SorraAgents `install_pi.sh` run) | Both the global `~/.pi/agent/AGENTS.md` (symlinked from `AGENTS_GLOBAL.md`) and the project `AGENTS.md` (reference + project-specific rules) |
+| Environment | Workflow guidance | What agents see |
+|-------------|-------------------|-----------------|
+| **Standalone** (no SorraAgents global install) | `wl init` N/B/M prompt / `--workflow-inline` as before | Only the project `AGENTS.md` (reference points at a file that does not exist — harmless) |
+| **Global** (SorraAgents `install_pi.sh` run) | Delegated — `wl init` does not inline workflow content | Both the global `~/.pi/agent/AGENTS.md` (symlinked from `AGENTS_GLOBAL.md`) and the project `AGENTS.md` (reference + project-specific rules) |
 
 ## Drift history
 
@@ -185,7 +210,7 @@ design so that no duplication occurs regardless of environment.
 
 ## Recommendation
 
-**Adopt the single-source-of-truth model: delegate agent-guidance/workflow setup to the SorraAgents global install** (the reference-global pattern), with implementation tracked in WL-0MSIXMKOX0052514. The current model already emits the canonical reference structure; further delegation (skipping the template when the global install is detected) is tracked there.
+**Adopt the single-source-of-truth model: delegate agent-guidance/workflow setup to the SorraAgents global install** (the reference-global pattern). Implemented in WL-0MSIXMKOX0052514: `wl init` now delegates workflow setup when `~/.pi/agent/AGENTS.md` resolves to a SorraAgents symlink (`AGENTS_GLOBAL.md`) and keeps the existing standalone N/B/M behavior otherwise.
 
 ### Evidence
 
@@ -205,14 +230,15 @@ design so that no duplication occurs regardless of environment.
    workflow; the project file only needs project-specific rules plus a
    reference line.
 
-### What the change looks like (scope boundary — NOT implemented here)
+### What the change looks like (implemented in WL-0MSIXMKOX0052514)
 
 - When the SorraAgents global install is detected (`~/.pi/agent/AGENTS.md`
-  resolves to a SorraAgents symlink), `wl init` could skip emitting even the
-  reference template. This is tracked in WL-0MSIXMKOX0052514; not
-  implemented in this item.
-- Standalone environments (no global install) keep the reference template so
-  Worklog remains usable without SorraAgents.
+  resolves to a SorraAgents symlink), `wl init` keeps the canonical
+  global-reference structure in the project `AGENTS.md` and delegates workflow
+  setup: no N/B/M prompt, no `--workflow-inline` inlining.
+- Standalone environments (no global install) keep the reference template and
+  the existing N/B/M workflow behavior, so Worklog remains usable without
+  SorraAgents.
 
 ## Related
 

@@ -90,6 +90,11 @@ def find_duplicates(
             item_id = e.get("itemId")
             kind = e.get("kind")
             dispatched_at = e.get("dispatchedAt")
+            # Post-spawn enrichment entries (WL-0MUBVL251006JAQ0 / F6) copy the
+            # marker fields, so they are NOT a second dispatch — counting them
+            # would report a false duplicate for a single dispatch.
+            if e.get("enrichment") is True:
+                continue
             if not isinstance(item_id, str) or not item_id:
                 continue
             if not isinstance(kind, str) or not kind:
@@ -125,6 +130,18 @@ def find_duplicates(
                     "firstDispatchedAt": times_sorted[0],
                     "lastDispatchedAt": times_sorted[-1],
                     "gapSeconds": gap_seconds,
+                    # Selection provenance (WL-0MUBVL251006JAQ0 / F6 AC6.5):
+                    # which loops/reasons produced each dispatch, so the next
+                    # RCA is answerable from the scan alone.
+                    "selectionPaths": sorted(
+                        {g["selectionPath"] for g in group if g.get("selectionPath")}
+                    ),
+                    "selectionReasons": sorted(
+                        {g["selectionReason"] for g in group if g.get("selectionReason")}
+                    ),
+                    "paneIds": sorted(
+                        {g["paneId"] for g in group if g.get("paneId")}
+                    ),
                 }
             )
     return reports

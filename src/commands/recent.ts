@@ -25,7 +25,12 @@ export default function register(ctx: PluginContext): void {
       if (!Number.isNaN(parsed) && parsed > 0) count = parsed;
 
       const all = db.getAll().filter(i => i.status !== 'deleted');
-      all.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      // Recency is activity-based: comment writes bump `activityAt` only, so
+      // ordering on `updatedAt` would hide recently commented items. Falls
+      // back to `updatedAt` for rows written before `activityAt` existed
+      // (WL-0MUBVH6JM0093KVM).
+      const activityMs = (i: WorkItem): number => new Date(i.activityAt ?? i.updatedAt).getTime();
+      all.sort((a, b) => activityMs(b) - activityMs(a));
 
       const selected = all.slice(0, count);
 

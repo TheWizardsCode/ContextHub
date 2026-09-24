@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_PANE_TITLE_LENGTH,
   truncatePaneTitle,
+  truncatePaneTitlePreservingSuffix,
   isAgentCommand,
   stripSkillName,
   stripAgentPromptPrefix,
@@ -33,6 +34,25 @@ describe('truncatePaneTitle', () => {
     expect(result).toHaveLength(MAX_PANE_TITLE_LENGTH);
     expect(result.endsWith('…')).toBe(true);
     expect(result.startsWith('y'.repeat(MAX_PANE_TITLE_LENGTH - 1))).toBe(true);
+  });
+});
+
+describe('truncatePaneTitlePreservingSuffix', () => {
+  it('returns the combined string unchanged when it fits', () => {
+    expect(truncatePaneTitlePreservingSuffix('Head', ' - WL-1')).toBe('Head - WL-1');
+  });
+
+  it('truncates the prefix but keeps the suffix (work-item ID) intact', () => {
+    const result = truncatePaneTitlePreservingSuffix('x'.repeat(200), ' - WL-ABC123');
+    expect(result.length).toBeLessThanOrEqual(MAX_PANE_TITLE_LENGTH);
+    expect(result.endsWith(' - WL-ABC123')).toBe(true);
+    expect(result.includes('…')).toBe(true);
+  });
+
+  it('falls back to plain truncation when the suffix alone cannot fit', () => {
+    const result = truncatePaneTitlePreservingSuffix('x'.repeat(200), 'y'.repeat(100));
+    expect(result.length).toBeLessThanOrEqual(MAX_PANE_TITLE_LENGTH);
+    expect(result.endsWith('…')).toBe(true);
   });
 });
 
@@ -112,11 +132,12 @@ describe('buildManuallyTriggeredPaneTitle', () => {
     );
   });
 
-  it('bounds the final title to the maximum length (AC5)', () => {
+  it('bounds the final title while preserving the work-item ID (AC5)', () => {
     const longTitle = 'A very long work item title '.repeat(5);
     const result = buildManuallyTriggeredPaneTitle('/skill:implement WL-1', longTitle, 'WL-1');
     expect(result.length).toBeLessThanOrEqual(MAX_PANE_TITLE_LENGTH);
-    expect(result.endsWith('…')).toBe(true);
+    // The work-item ID must survive truncation so the hydrator can match panes.
+    expect(result.endsWith(' - WL-1')).toBe(true);
   });
 });
 

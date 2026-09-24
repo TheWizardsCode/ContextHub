@@ -7,7 +7,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import { promises as fs } from 'fs';
-import { formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText, resolveAuditAuthor } from '../audit.js';
+import { extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText, resolveAuditAuthor } from '../audit.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -53,6 +53,7 @@ export default function register(ctx: PluginContext): void {
               summary: auditResult.summary,
               rawOutput: auditResult.rawOutput,
               author: auditResult.author,
+              fingerprint: auditResult.fingerprint,
             },
           });
         }
@@ -70,6 +71,9 @@ export default function register(ctx: PluginContext): void {
       console.log(`  Audited at:     ${auditResult.auditedAt}`);
       if (auditResult.author) {
         console.log(`  Author:         ${auditResult.author}`);
+      }
+      if (auditResult.fingerprint) {
+        console.log(`  Fingerprint:    ${auditResult.fingerprint}`);
       }
       if (auditResult.summary) {
         console.log(`  Summary:`);
@@ -95,6 +99,7 @@ export default function register(ctx: PluginContext): void {
     .option('--raw-output <text>', 'Machine-readable raw output from the audit tool')
     .option('--audit-file <file>', 'Read audit raw output from a file')
     .option('--author <author>', 'Author of the audit (defaults to current user)')
+    .option('--fingerprint <fingerprint>', 'Content fingerprint for freshness gate (WL-0MUBVH5S0008NQ9K)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--json', 'Output in JSON format')
     .action(async (id: string, options: {
@@ -103,6 +108,7 @@ export default function register(ctx: PluginContext): void {
       rawOutput?: string;
       auditFile?: string;
       author?: string;
+      fingerprint?: string;
       prefix?: string;
       json?: boolean;
     }) => {
@@ -155,6 +161,16 @@ export default function register(ctx: PluginContext): void {
       const author = options.author?.trim() || resolveAuditAuthor();
       const auditedAt = new Date().toISOString();
       const summary = options.summary || null;
+      // Fingerprint resolution order: explicit --fingerprint flag, then an
+      // embedded `Audit content fingerprint:` line in the raw output or
+      // summary. The audit skill's persist_audit.py embeds the fingerprint in
+      // the report text, so this path picks it up without a flag change
+      // (WL-0MUBVH5S0008NQ9K AC2).
+      const fingerprint =
+        options.fingerprint ??
+        extractAuditFingerprint(rawOutput) ??
+        extractAuditFingerprint(summary) ??
+        null;
 
       try {
         db.saveAuditResult({
@@ -164,6 +180,7 @@ export default function register(ctx: PluginContext): void {
           summary,
           rawOutput,
           author,
+          fingerprint,
         });
       } catch (err: any) {
         if (options.json || utils.isJsonMode()) {
@@ -206,6 +223,7 @@ export default function register(ctx: PluginContext): void {
             summary,
             rawOutput,
             author,
+            fingerprint,
           },
         });
         return;
@@ -215,6 +233,7 @@ export default function register(ctx: PluginContext): void {
       console.log(`  Ready to close: ${readyToClose ? 'Yes' : 'No'}`);
       console.log(`  Audited at:    ${auditedAt}`);
       if (author) console.log(`  Author:        ${author}`);
+      if (fingerprint) console.log(`  Fingerprint:   ${fingerprint}`);
       if (reverted) {
         console.log(`[${reverted.item.id} reverted from ${reverted.from.status}/${reverted.from.stage} to ${reverted.to.status}/${reverted.to.stage}]`);
       }

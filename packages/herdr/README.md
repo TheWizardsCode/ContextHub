@@ -16,6 +16,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
+- **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items, matches each against live agent panes in the current workspace (the pane title carries the work-item ID), and releases any claim with no matching pane so it re-enters the dispatchable pool: `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). See [Hydrator](#hydrator-self-healing-in_progress-claims).
 - **Mode-switch worker (activity-gated proxy mode switching)** — Automatically switches the llama-proxy between fast (cloud) and cheap (local) modes: agent-route commands fire an immediate fast switch (fail-open), while a full operator-idle window plus a proxy-idle check triggers the cheap switch (fail-closed). The proxy URL reuses `downtimeProxyUrl` and the plugin's switches are manual overrides that the proxy's own time schedule reclaims. See [Mode-switch worker](#mode-switch-worker-activity-gated-proxy-mode-switching-wl-0msn3fwv5008kqe9).
 - **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes. The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. Hovering a pane-associated row shows a tooltip with the work-item metadata (including the recorded command and pane start time). See [Agent status icons](#agent-status-icons).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
@@ -28,6 +29,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. Any markdown document opened in the viewer can also be annotated in place (`n,e` add/edit, `n,d` delete); podcast scripts sync notes to the worklog as child work items (PRD §7.3). See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
+- **Ship-mode guard** — Pressing `S` runs a pre-dialog guard first: if any live agent pane (machine-wide) is working on a work item from this project, the confirmation dialog is not opened and a notice lists the blocking panes/work items. On `ship` confirmation the plugin writes the Code Freeze marker before dispatching the release, and clears it if the dispatch fails. See [Ship-mode guard](#ship-mode-guard-pre-dialog).
 
 ## Requirements
 
@@ -121,7 +123,7 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `n` — Run the intake workflow on the selected item (idea stage)
    - Press `p` — Run the plan workflow on the selected item (intake_complete stage)
    - Press `s` — Insert a search command
-   - Press `S` (Shift+s) — **Ship It**: run the dev→main release. A typed-confirmation dialog anchored to the bottom of the list (the list stays visible above it) asks you to type `ship` (case-insensitive) and press Enter to dispatch `/skill:ship release`; Esc cancels. The release is a global command — no work item id is involved. `S` is distinct from lowercase `s` (Search). See [Ship It confirmation dialog](#ship-it-confirmation-dialog).
+   - Press `S` (Shift+s) — **Ship It**: run the dev→main release. A pre-dialog guard first checks that no other live agent pane is working on a project work item; if one is, a blocked notice lists the offending panes and nothing is dispatched. Otherwise a typed-confirmation dialog anchored to the bottom of the list (the list stays visible above it) asks you to type `ship` (case-insensitive) and press Enter to dispatch `/skill:ship release`; Esc cancels. The release is a global command — no work item id is involved. `S` is distinct from lowercase `s` (Search). See [Ship It confirmation dialog](#ship-it-confirmation-dialog).
 
 5. Producer review shortcut:
    - Press `r` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
@@ -215,6 +217,33 @@ Settings are persisted in `~/.config/herdr/worklog-plugin.json`. Key settings in
 - `showHelpText` — Show the shortcut hint line at the bottom of the list (default: `true`). When `false`, **all** shortcut hint lines are hidden — including the chord-in-progress footer (`chord: <keys> _ <hints>`) — consistent with the pi browse widget (WL-0MSGJDSMJ004128E). Chord key *handling* still works while hints are hidden; only rendering is affected. Changes apply on the next render without a plugin restart
 - `showIcons` — Toggle icons in the list and metadata (default: `true`); changes apply on the next render without a plugin restart. When disabled, list rows use text fallbacks (`[OPEN]`, `[IDEA]`, …) and metadata values fall back to plain text (no emoji)
 
+### Hydrator (self-healing `in_progress` claims, WL-0MSOJLZD9004P8PI)
+
+**Self-heals the work queue.** Work items claimed as `in_progress` are
+correctly excluded from downtime dispatch (single-flight — an active pane
+owns them), but a claim with no live pane (pane closed, session died,
+claim abandoned) lingers at the top of the queue and is never re-selected.
+The hydrator detects those claims and releases them:
+
+- **Cadence** — every 30 s (scheduler task `hydrate`, single-flight +
+  watchdog `HYDRATOR_RUN_TIMEOUT_MS`); the check also runs **immediately**
+  when the worklog tab regains focus (same runner as the tick).
+- **Signal** — fetch `wl list --status in-progress`, fetch `herdr pane list`,
+  and match each item against a live pane in the **current workspace** whose
+  title contains the work-item ID (the `pane-title.ts` builders preserve the
+  ID under truncation). No matching pane → the claim is stale.
+- **Release semantics** — `in_review` items → `completed`; items with an
+  active outbound dependency blocker → `blocked`; otherwise → `open` at the
+  claimed stage (folded-in no-activity/claim-age timeout, WL-0MTTSWE0G008M1VA;
+  a no-pane claim is released regardless of activity age). Stage is repaired
+  to a status-compatible value when needed.
+- **Safety** — the cycle is fail-open: an unavailable/unparseable
+  `wl`/`herdr` call aborts WITHOUT demoting; a live-pane item is never
+  touched; a hidden tab spawns zero processes.
+
+See [`docs/dev/herdr-hydrator.md`](../../docs/dev/herdr-hydrator.md) for the
+design and test map.
+
 ### Downtime worker (local-LLM idle dispatch)
 
 **Leader-election + shared coordination list (parent WL-0MST3OJ8S0001ROL):**
@@ -297,11 +326,25 @@ critical items at the Herdr head, so a critical item dispatches as soon as it is
 first classifyable list item (WL-0MSI8H3HP000K0RG audit, WL-0MSMAYPQP001FLR6 implement,
 WL-0MT3FM8VA005XBHE critical).
 
+**Extended dispatch window (WL-0MU6UL3GQ0015AA5):** the Herdr head is windowed
+(mandatory items always included, remaining slots filled from "other" items), so a large
+mandatory set can push the only dispatchable candidate past the window. When the head
+yields no candidate the dispatcher re-reads the **same ranking path** with a bounded
+larger count (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional items) and skips the items
+already seen — a window extension, never a second ranking. The TUI worklist still renders
+exactly `browseItemCount` items; the extension is dispatch-only. A `no-candidate` outcome
+therefore means the whole bounded dispatch backlog held nothing dispatchable.
+
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)
 **nor** the magnifying glass `🔍` (no audit / stale failed). Concretely,
-`isAuditFresh(auditedAt, updatedAt)` returns `true` (auditedAt within the 60s
-staleness buffer of updatedAt); missing audit timestamps are treated as
+`isAuditFresh(auditedAt, updatedAt, storedFingerprint, currentFingerprint)`
+returns `true`. Since WL-0MUBVH5S0008NQ9K freshness is **content-based**: when
+both fingerprints are available a match is fresh regardless of `updatedAt`
+churn (comment, sync-merge re-timestamp, re-sort), and a mismatch is stale. When
+no fingerprint is available (legacy audits, or a TUI render that cannot compute
+the current fingerprint) the legacy rule applies — `auditedAt` within the 60 s
+staleness buffer of `updatedAt`. Missing audit timestamps are treated as
 not-fresh and therefore selected.
 
 Guarantee (WL-0MSN6ZCTN0027U2R): `updatedAt` is bumped only on **content**
@@ -396,11 +439,12 @@ of `total` slots free never dispatches without per-slot identity.
 selection time, against the latest polled status, each dispatch tier
 additionally requires a minimum number of free slots (independent of the
 idle-duration gate): the **audit** tier needs **≥ 2 free slots** (a parent
-audit plus its Phase 2 child at `AUDIT_PHASE2_PARALLELISM=1` needs two
-local slots), while the single-pane tiers (scheduled prompts, critical,
-implement, plan, intake) need **≥ 1 free slot**. An unmet minimum skips that
-tier to the next eligible one — an ineligible skip, never a three-strike
-error and never an empty-backlog cooldown (mirrors the code-freeze skip).
+audit's Phase 2 children require up to 2 local slots at `AUDIT_PHASE2_PARALLELISM=2`;
+the sequential `AUDIT_PHASE2_PARALLELISM=1` case needs just 1), while the
+single-pane tiers (scheduled prompts, critical, implement, plan, intake)
+need **≥ 1 free slot**. An unmet minimum skips that tier to the next
+eligible one — an ineligible skip, never a three-strike error and never an
+empty-backlog cooldown (mirrors the code-freeze skip).
 
 **Dispatch behaviour** — once idle has been continuous for the threshold, the
 worker first runs `wl list --status completed --stage in_review --root-only
@@ -454,21 +498,35 @@ makes the item dispatchable again on the next idle poll.
 > the check lives in the audit-tier dispatch path with no new
 > instance-local state, so non-leader instances never dispatch audits).
 
-> **Bounded audit fan-out (WL-0MSORQ1RG005DGUS):** dispatched panes run
-> with `AUDIT_PHASE2_PARALLELISM=1` in the pane environment (inherited by
-> the pi process via `send-to-pi.sh`). The audit skill's Phase 2 deep
-> analysis (`audit_runner.py`) honours this env var (legacy fallback,
-> integer ≥ 1), so a parent audit's child deep-analysis calls run strictly
-> sequentially — the skill's documented historical mode. A parent audit
-> therefore needs exactly **2 local slots** (parent + at most one child),
-> fitting cheap mode's full capacity (2 × 262144 ctx) where the default
-> fan-out of 2 would need 3 and spill children to remote. Wall-clock
-> tradeoff: child-heavy audits take longer — acceptable for overnight
-> downtime work. Interactive (non-downtime) panes are unaffected. (Scope:
-> this bounds parallelism WITHIN one audit pane; fan-out ACROSS audit
-> dispatches is prevented outright by the single-active-audit guarantee
-> above — WL-0MT3PHW4I002SNOV — so at most one `/skill:audit` pane can
-> ever be dispatched at a time.)
+> **Bounded audit fan-out (WL-0MSORQ1RG005DGUS, WL-0MT50S9JW001DHME):**
+> dispatched panes run with a mode-aware `AUDIT_PHASE2_PARALLELISM` in the
+> pane environment (inherited by the pi process via `send-to-pi.sh`). The
+> audit skill's Phase 2 deep analysis (`audit_runner.py`) honours this env
+> var (legacy fallback, integer ≥ 1):
+>
+> - **`AUDIT_PHASE2_PARALLELISM=1`** (safe default): fast mode, cheap mode
+>   with full dispatch budget, or config absent. Children run strictly
+>   sequentially — the skill's documented historical mode. A parent audit
+>   needs exactly **2 local slots** (parent + at most one child).
+> - **`AUDIT_PHASE2_PARALLELISM=2`**: cheap mode AND a second slot is free
+>   AND the concurrent dispatch budget allows (≤ 1 concurrent dispatch).
+>   Up to 2 Phase 2 children run in parallel. Since the parent already
+>   completed Phase 1, the max concurrent streams per audit is 2 — the
+>   children — which fits cheap mode's 2-slot pool. This is only enabled
+>   when the combined dispatch budget would not exceed the slot capacity
+>   (e.g., with concurrent-dispatch cap ≥ 2, PARALLELISM stays at 1 to
+>   prevent multiple audits × 2 children from exceeding the 2-slot budget).
+>
+> A parent audit therefore needs at most **2 local slots** (the two
+> parallel children), fitting cheap mode's full capacity (2 × 262144 ctx)
+> where the default fan-out of 2 would need 3 and spill children to remote.
+> Wall-clock tradeoff: sequential child-heavy audits take longer — acceptable
+> for overnight downtime work. Interactive (non-downtime) panes are
+> unaffected. (Scope: this bounds parallelism WITHIN one audit pane; fan-out
+> ACROSS audit dispatches is constrained by both the single-active-audit
+> guarantee — WL-0MT3PHW4I002SNOV — and the concurrent-dispatch cap —
+> WL-0MT50LKAK001EF5Q — so total in-flight streams never exceed cheap mode's
+> 2-slot pool.)
 
 > **Audit-tier error channel (WL-0MSLWJ2KP0002SV0):** the audit lookup
 > resolves through the same `DowntimeNextResult` error channel as the
@@ -620,6 +678,13 @@ proxy idle state:
 - **Restart resets to active now** — on plugin/pane restart the idle clock
   starts from the worker's construction time, so a fresh pane begins with a
   full idle window before any cheap switch is eligible.
+- **Downtime-dispatcher idle trigger (WL-0MU4MKVR4005WPBJ)** — the downtime
+  dispatcher triggers a mode-switch check with the fresh proxy status whenever
+  its own poll observes the proxy idle, *before* it dispatches the next item.
+  This eliminates the up-to-`modeSwitchPollIntervalMs` delay of the
+  independent scheduler task, so an item dispatched during downtime is served
+  by the cheap pool. The scheduler task remains as the fallback when the
+  downtime worker is not polling (disabled, non-leader, or paused).
 
 New settings (all optional):
 
@@ -627,7 +692,7 @@ New settings (all optional):
   when `false` the scheduler registers no mode-switch task and the
   agent-route hook is a no-op)
 - `modeSwitchIdleThresholdMs` — Operator-inactivity window before a cheap
-  switch is considered (default: `900000` = 15 minutes, hard floor `60000`)
+  switch is considered (default: `1800000` = 30 minutes, hard floor `60000`)
 - `modeSwitchPollIntervalMs` — Poll interval for the proxy idle check when
   evaluating the idle window (default: `10000`, clamped to `[5000, 60000]`)
 
@@ -644,10 +709,10 @@ redundant `set-mode` calls.
 **Scheduled prompts (WL-0MSS1Q5ER007QDKX)** — the FIRST dispatch stage: a
 project-local config file `.worklog/scheduled-prompts.json` (provisioned by
 `wl init` from `templates/scheduled-prompts.json`, create-if-absent) carries
-periodic maintenance prompts with a best-effort frequency. The base set is a
-single `/skill:refactor` entry (`intervalDays: 3`, `lastTriggeredAt: null`),
-so refactoring runs automatically at most every three days during idle time
-without manual triggering. Each entry has:
+periodic maintenance prompts with a best-effort frequency. The base set includes a `/skill:refactor` entry (`intervalDays: 3`,
+`lastTriggeredAt: null`) for routine maintenance, and a `/skill:standup`
+entry (`intervalDays: 1`, `time: "06:05"`, `lastTriggeredAt: null`) that
+fires daily at or after 06:05 local — the canonical daily standup prompt. Each entry has:
 
 - `id` — stable entry id (pane name `Downtime <id>` and rolling-log marker
   `itemId`); set it to the command itself (e.g. `/skill:refactor`) so the
@@ -655,13 +720,36 @@ without manual triggering. Each entry has:
 - `prompt` — any text the pi agent pane can run (e.g. `/skill:refactor`),
 - `intervalDays` — best-effort frequency in whole days,
 - `lastTriggeredAt` — ISO-8601 UTC datetime of the last dispatch
-  (`null` = never run; a missing field is treated as due).
+  (`null` = never run; a missing field is treated as due),
+- `time` — *(optional)* wall-clock `HH:MM` in 24-hour format (e.g. `06:05`);
+  when present the entry is due only when **both** the interval gate has
+  elapsed **and** the current local time is at or after this time on the
+  calendar day of `now`.  A daily entry with `time: "06:05"` fires at most
+  once per calendar day at or after 06:05 local, even if the prior dispatch
+  was late (e.g. a 08:00 late dispatch makes the next due time tomorrow at
+  06:05, not immediately). When absent the behaviour is identical to today
+  (backward-compatible; the existing interval-only due check applies).
+  Invalid `time` values cause the entry to be skipped (fail-closed, never
+  a crash).
 
 While the proxy is idle long enough, the dispatcher checks scheduled prompts
-FIRST (before the audit/implement/plan/intake tiers). An entry is **due** iff
-`lastTriggeredAt` is `null` or `now - lastTriggeredAt >= intervalDays` — best
+FIRST (before the audit/implement/plan/intake tiers). An entry's **due**
+status depends on whether it carries a `time` field:
+
+- **No `time`** (backward-compatible): due iff `lastTriggeredAt` is `null`
+  or `now - lastTriggeredAt >= intervalDays * DAY_MS` (the existing interval
+  gate only).
+- **With `time`**: due only when **both** (a) the interval gate has elapsed
+  (using **calendar-day** difference for interval counting, so a daily entry
+  dispatched late at 08:00 is still due the next calendar day at 06:05 and
+  does not drift) **and** (b) the current local wall-clock time is at or
+  after the `time` value on the calendar day of `now`.
+
+A dispatched entry is **not** due again until the next calendar day's `time`
+has been reached and the interval gate has again elapsed — so a daily 06:05
+entry dispatched at 07:00 today is not due again at 08:00 today. Best
 effort: a dispatch may be delayed (no idle slot, cooldown, freeze) but never
-happens more often than the frequency. A due prompt dispatches a pi agent
+happens more often than once per interval. A due prompt dispatches a pi agent
 pane named `Downtime <id>` via the same send-to-pi.sh path as the tiers
 (`--no-focus`, `--cwd <worklog root>`, `--model <downtimeModel>`) running the
 prompt text. Multiple due entries dispatch one per idle slot in config order
@@ -793,7 +881,14 @@ non-zero script exit) additionally appends a **failure trace** entry
 (`outcome: 'spawn-failed'`, mirroring the marker's `itemId`/`kind`/`stage`
 fields plus the `error`/`exitCode` details) so the log distinguishes
 **attempted** from **opened** — it never claims success for a pane that
-never appeared (WL-0MSLWJ3I70031Z8U). The `kind:audit` entries double as
+never appeared (WL-0MSLWJ3I70031Z8U). Spawn-failed entries are
+**non-excluding** (WL-0MT32F908002YFFA AC2): the marker readers skip them,
+so a failed spawn never permanently removes the item from its tier. A
+marker-write failure or a spawn failure additionally rolls the successful
+CAS claim back to its pre-claim status + stage (audit tier:
+`completed`/`in_review`; every other tier: `open`), so no item is left
+stranded in `in_progress` with no agent (AC1/AC4) — the next idle period
+re-selects it. The `kind:audit` entries double as
 the dispatched-marker exclusion source for the audit tier (WL-0MSLIY8ZR004QUSY);
 `kind:implement` entries for the implement tier; and `kind:plan` /
 `kind:intake` entries (which also record the item's `stage` at dispatch)
@@ -821,8 +916,8 @@ leaves behind (documented for WL-0MSKUG2WW0058A7W, audit gap AC2):
 | Audit-tier wl/parse failure | `recordError` JSONL entry **on every strike** | `getNextAuditCandidate` resolves `{ok:false}` (never a `null` that looks like an empty tier, WL-0MSLWJ2KP0002SV0); the dispatch fails closed to busy — no fall-through to the implement/plan tiers — and each failure now logs per-strike, pausing after 3 consecutive failures |
 | Lost CAS claim race (`--if-status`/`--if-stage` stale) | **none** — and **no marker, no pane, no success record** | the dispatch ABORTS with reason `claim-failed` (neutral — another pane won); the failure is observable via the outcome and a stderr line, never silently discarded (WL-0MSLWJ310000ND0X absorbed) |
 | Claim wl CLI failure (non-stale) | **none** — counts as a `wl-error` strike | dispatch aborts; three consecutive such failures pause the worker |
-| Marker write failure | **none** — the item stays claimed (`in_progress`) | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched; the claim still removes it from `wl next`, so no other pane selects it) |
-| Pane spawn failure / non-zero script exit (`send-to-pi.sh`) | marker already written (pre-spawn) + a `recordDispatchFailure` JSONL entry (`outcome: 'spawn-failed'` with the `error`/`exitCode` trace) | a spawn `error` (ENOENT/EACCES) or a non-zero script exit within the 500 ms probe window is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`, carrying the error/exit trace); the log distinguishes **attempted** from **opened**, and the marker stands so the item is not re-dispatched (WL-0MSLWJ3I70031Z8U absorbed) |
+| Marker write failure | **none** — and the claim is rolled back | dispatch ABORTS **before** the pane spawns with reason `marker-write-failed` (fail-closed: an unmarked item is never dispatched). WL-0MT32F908002YFFA AC1 then rolls the successful CAS claim back to `open` + the original stage (audit tier: `completed`/`in_review`) so the next idle period re-selects the item — it is never stranded in `in_progress`. If the rollback is stale/fails (a concurrent agent already moved the item) the outcome stays `marker-write-failed` and the item is left as-is (fail-closed) |
+| Pane spawn failure / non-zero script exit (`send-to-pi.sh`) | marker already written (pre-spawn) + a `recordDispatchFailure` JSONL entry (`outcome: 'spawn-failed'` with the `error`/`exitCode` trace) | a spawn `error` (ENOENT/EACCES) or a non-zero script exit within the 500 ms probe window is handled (no unhandled-exception crash) and the outcome is **not** success (`spawn-failed`, carrying the error/exit trace); the log distinguishes **attempted** from **opened**. The `spawn-failed` entry is **non-excluding** and the CAS claim is rolled back to its pre-claim status + stage (WL-0MT32F908002YFFA AC2/AC4), so the item is re-eligible on the next idle period rather than permanently removed (WL-0MSLWJ3I70031Z8U absorbed) |
 | `recordError` write failure | **none** | fail-closed by design: logging must never crash or block the worker |
 
 Consequence: the log's *absence* of an entry is still ambiguous (it cannot
@@ -922,6 +1017,43 @@ process churn and memory pressure (WL-0MSB1N0HB0007N6N).
   fallback) and keeps refreshing. Zoom-over detection is out of scope for
   the visibility gate (approved plan, WL-0MSJNJPRM009RM35).
 - **No settings toggle** — pause-when-hidden is always on.
+
+### Typing gate (pause background work while a form is open)
+
+While any text-input overlay is open, the auto-refresh and auto-sync timer
+ticks are skipped so a background re-render cannot steal focus or drop
+keypresses mid-keystroke (WL-0MTV67MZU003H7SH). There is no user value in
+syncing or refreshing the list while a form is active, so the work is
+deferred until typing finishes.
+
+- **Shared predicate** — `isInputActive(formState, shipItDialog)` in
+  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null`.
+  Both scheduler ticks (the 30s `refresh` and the 60s `sync`) check it
+  alongside the existing `paneGate.visible()` check and return early when it
+  is true. The guard is defined once and shared — future text-input overlays
+  are covered by extending the single predicate, not per-screen copies.
+- **All text-input sites covered** — the command-parameter form
+  (`FormState`), the Ship It confirmation dialog (`ShipItDialogState`), and
+  `md-note-edit` (which opens a `FormState`) are all covered. There is no
+  separate note-edit state to gate.
+- **Resume contract: skip, don't coalesce** — ticks are silently dropped
+  while typing; the next regular tick after the overlay closes fires
+  normally. No queued or immediate post-close refresh is emitted (this
+  avoids refresh loops and matches the existing single-flight semantics).
+  If a future requirement needs an instant refresh on close it can be added
+  without changing the gating contract.
+- **Existing gates intact** — visibility (pause-when-hidden), single-flight,
+  cross-instance heartbeat dedup, and the DB-change skip are unchanged and
+  still apply when no input is active.
+- **No settings toggle** — the typing gate is always on. Manual actions
+  (navigation, shortcut chords, `S` sync, the initial data load) are never
+  gated.
+- **Downtime / mode-switch workers are not gated (audited)** — the
+  `downtime` and `mode-switch` scheduler tasks only probe idle state and
+  dispatch/switch inference mode; they never trigger a worklist list
+  re-render while a modal is open, so gating them would only delay
+  low-urgency background work with no keypress-loss benefit. See the audit
+  comments next to each task registration in `worklist.ts`.
 
 ### Selection List Behaviour
 
@@ -1274,7 +1406,20 @@ The Ship It shortcut (`S`, Shift+s) triggers a **dev→main release** via the sh
 - **Esc** dismisses the dialog and returns to the selection list without dispatching anything.
 - While the dialog is open all keys are consumed by it (modal input); navigation resumes after Esc.
 
-Implementation: `ship-it-dialog.ts` holds the dialog state (`ShipItDialogState`), renders the box (`formatShipItDialog`), and composes it over the list output (`overlayShipItDialog` — bottom-anchored, within the pane height budget). The `S` entry in `src/shortcuts.json` is a single-key chord with `code_freeze` omitted, so it stays available during a Code Freeze (the ship skill gates itself).
+### Ship-mode guard (pre-dialog)
+
+Before the confirmation dialog opens, the plugin runs a **Ship Guard** to make sure no other agent pane is still working on this project (WL-0MUD6DDZC007ZSIW):
+
+- The guard lists every **live** agent pane machine-wide (`herdr pane list`) and matches work-item IDs embedded in pane labels against the actual set of work-item IDs in the current project's worklog. The worklog query requests **only** the `id` field (`wl list --json --fields id`) — the guard needs the ID set alone, so the payload stays small (~100 KB for ~2.3 k items instead of the full ~8.5 MB worklog) and cannot overflow Node's process buffer as the worklog grows (WL-0MUEK7H39008VVUF). A pane blocks when it carries a project work-item ID **and** its agent is live (present, status not `done`/`exited`).
+- If any pane blocks, the dialog is **not** opened. A full-pane modal notice (`⛔ SHIP MODE BLOCKED`) lists the offending work-item IDs and pane labels, and tells the operator to close those panes and retry. The notice is dismissed with `Esc`, `Enter`, or `q`; nothing is dispatched.
+- A pane whose agent is absent, `done`, or `exited` does **not** block, even when its label carries a project work-item ID. Work-item IDs from a different project do not block (membership is by ID, not prefix).
+- **Fail safe:** if `wl list` or `herdr pane list` is unavailable, the guard cannot verify the pane state and the dialog is **not** opened. The notice names **which** query failed (`worklog list unavailable` vs `pane list unavailable`) so the operator knows what to retry, rather than pretending the project is clear.
+
+### Code Freeze on confirm
+
+Typing `ship` + Enter writes the Code Freeze marker **before** `/skill:ship release` is dispatched, so the freeze applies from the moment of confirmation (WL-0MUD6DDZC007ZSIW). The write is atomic (temp file + rename). If the dispatch fails — `onCommand` throws (e.g. no agent pane available) or the dispatch is a no-op — the plugin best-effort removes the marker **it wrote** and surfaces the error, so a release that never started cannot leave a stale freeze. A marker that was already active (written by the ship skill) is owned by the ship skill: the plugin neither overwrites nor clears it. The ship skill remains the authority that clears the marker on release exit.
+
+Implementation: `ship-it-dialog.ts` holds the dialog state (`ShipItDialogState`), renders the box (`formatShipItDialog`), and composes it over the list output (`overlayShipItDialog` — bottom-anchored, within the pane height budget). `ship-guard.ts` holds the pure guard (project-ID set, blocking-pane filter, blocked-notice formatter) and `worklist.ts` gates `openShipItDialog()` on it and writes/clears the marker on confirm. The `S` entry in `src/shortcuts.json` is a single-key chord with `code_freeze` omitted, so it stays available during a Code Freeze (the ship skill gates itself).
 
 > **Behavior change:** the former manual-sync `S` binding (immediate `wl sync` with a toast) was removed; background auto-sync on the timer is unchanged.
 
@@ -1291,7 +1436,8 @@ packages/herdr/
 │   ├── shortcut-config.ts  # Chord shortcut registry and config loader
 │   ├── shortcuts.json      # Shortcut/chord definitions
 │   ├── (icons)              # Icon & colour helpers via @worklog/shared/icons (packages/shared/src/icons.ts)
-│   ├── code-freeze.ts      # Code Freeze marker detection (fail-open)
+│   ├── code-freeze.ts      # Code Freeze marker detection + writer/clearer (fail-open reads)
+│   ├── ship-guard.ts       # Ship It pre-dialog guard (project IDs, blocking panes, notice)
 │   ├── form-dialog.ts      # Form state + rendering for parameter input (unknown <identifiers>, paste/cut/newline)
 │   ├── clipboard.ts        # OS clipboard read/paste + write/copy helpers (no tmux branch)
 │   ├── ship-it-dialog.ts   # Ship It typed-confirmation dialog (bottom-anchored, S shortcut)
@@ -1322,7 +1468,7 @@ packages/herdr/
   - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
 - **Selection-list dispatch keeps focus** — Every pane spawned from the worklist selection list (pi agent panes via `send-to-pi.sh`, and command-output panes via `run-in-pane.sh`) opens **without moving focus** by default (WL-0MSHIA53D009DJOT): the dispatch passes `--no-focus` to both launchers, so the final zoom/focus step is skipped and the selection list keeps the keyboard focus. The user can read dispatch feedback via toasts and inspect the opened pane with herdr pane navigation (`prefix+o`, `prefix+x` to close). The `P n` shortcut opts in to **focus the new pane immediately** (see **Focused shortcuts via `focus: true`** below). Out of scope and unchanged: the downtime worker (already `--no-focus`), the `open-pi-agent` unbound plugin action, and `open.sh`/`toggle.sh`.
 - **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". The dispatch passes `--no-focus` (selection-list dispatch keeps focus, see above) unless the shortcut opts in to **focus the new pane** (`focus: true` — only `P n` today, see **Focused shortcuts via `focus: true`** above), in which case `--focus` is passed and the new pane is zoomed. Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
-- **No-pane dispatch via `open_pane: false`** — A shortcut entry may carry an optional `open_pane: false` flag (WL-0MSJLD1I70045ZUL) to run its command **in the background without opening a pane**: shell (`!!`/`!`) commands execute via detached `bash -c` and agent commands run headless (`pi -p --mode json`, honoring the entry's `model`), with stdout/stderr captured to a per-run log file under `<tmpdir>/herdr-background-logs/` (the path is written to stderr so it can be located for inspection). No pane is created, so the work-item ↔ pane association is skipped for agent commands. The bundled quiet state-change shortcuts use it: `a-y` audit approve, `a-r` audit reject, `u-p-*` priority updates, and `x-c`/`x-d` close/delete — they complete silently and the worklist refresh shows the updated state. Shortcuts without the flag (all other bundled entries) open a pane exactly as today.
+- **No-pane dispatch via `open_pane: false`** — A shortcut entry may carry an optional `open_pane: false` flag (WL-0MSJLD1I70045ZUL) to run its command **in the background without opening a pane**: shell (`!!`/`!`) commands execute via detached `bash -c` and agent commands run headless (`pi -p --mode json`, honoring the entry's `model`), with stdout/stderr captured to a per-run log file under `<tmpdir>/herdr-background-logs/` (the path is written to stderr so it can be located for inspection). No pane is created, so the work-item ↔ pane association is skipped for agent commands. The bundled quiet state-change shortcuts use it: `a-y` audit approve, `a-r` audit reject, `u-p-*` priority updates, and `x-c`/`x-d` close/delete — they complete silently and the worklist refresh shows the updated state. If a background command exits non-zero, a **failure toast** is shown with the command, its exit code (or termination signal) and a short excerpt of its output (WL-0MUEBQLRD00288VV); the full output remains in the per-run log file. Shortcuts without the flag (all other bundled entries) open a pane exactly as today.
 - **Focused shortcuts via `focus: true`** — A shortcut entry may carry an optional `focus: true` flag (WL-0MT70LC6B009TL3Q) to **focus the newly opened pane** immediately after it spawns. When absent or `false` (the default) the selection list keeps focus (the behaviour above). The flag is orthogonal to `open_pane: false` (no pane → focus is moot) and invalid values are logged and treated as absent (no-focus). The only bundled entry with the flag is `P n` (new Pi session — blank `/prompt:`) so pressing `P n` puts the cursor straight in the new Pi pane for immediate typing without an extra `prefix+o` step. Any future shortcut can opt in with the same field without a schema change.
 - **Model lease release on pane close** — Pi agent panes launched by `send-to-pi.sh` or `open-pi-agent.sh` run pi via `shared/run-pi-agent.sh`, which gives the session a deterministic id (`pi --session-id herdr-<timestamp>-<pid>-<rand>`) and registers EXIT/TERM/HUP/INT traps. When the pi session ends — normal exit or pane close (`prefix+x`) — the wrapper runs `shared/release-lease-on-exit.mjs`, which posts to the Local Proxy's `POST {baseUrl}/leases/release` using the **same shared implementation** as the Pi extension (`@worklog/shared/lease-release`), so the proxy's dispatch lease is reclaimed promptly instead of lingering until timeout. The release is strictly best-effort: failures (unreachable proxy, missing `~/.pi/agent/models.json`, unconfigured provider) are silently discarded, a 5s request timeout bounds the pane-close path, and the wrapper always propagates pi's exit status (WL-0MSGI7UIH008USVB).
 - **Worklog tab naming** — `herdr plugin pane open` creates tabs with generated numeric labels. The `open-podcast-editor-tab` action wraps the same pane-open command and renames the created tab to "Worklog" via `herdr tab rename` (socket API, not session-state editing), so the worklog pane is instantly recognisable in the tab row. Each press still opens a new tab; only the label changes.
@@ -1346,7 +1492,7 @@ While a ship-it (dev → main release) process is running, the project is put in
 
 ### Marker contract (cross-repo)
 
-The freeze state is communicated via a marker file written by the ship release process (owned by the SorraAgents ship skill — see `SA-0MSBU4OBU005WJNB`) and read by this plugin:
+The freeze state is communicated via a marker file. The ship release process (owned by the SorraAgents ship skill — see `SA-0MSBU4OBU005WJNB`) is the authority that clears the marker on release exit; this plugin also **writes** the marker when the operator confirms Ship It (before dispatching the release), so the freeze applies immediately (WL-0MUD6DDZC007ZSIW). The file is read by this plugin:
 
 ```
 <worklog-dir>/code-freeze.json
@@ -1374,6 +1520,16 @@ Semantics:
 
 Fail-open is deliberate: a broken or missing marker must never block browsing the worklist. The module exposes two reads: `isCodeFreezeActive()` / `readCodeFreezeState()` keep the fail-open semantics for browsing and shortcut blocking, while `readCodeFreezeStatus()` adds a third **ambiguous** state for fail-closed consumers (the downtime dispatcher, the ambiguous-marker banner — WL-0MSQ0RPQP00636JY).
 
+### Marker ownership
+
+| Writer / clearer | When |
+|---|---|
+| Ship skill | Writes around the release; **clears** on release exit (authority) |
+| Herdr plugin (`writeCodeFreezeMarker`) | On Ship It confirmation, **before** dispatching `/skill:ship release` |
+| Herdr plugin (`clearCodeFreezeMarker`) | Best-effort, only when the plugin wrote the marker and the dispatch failed (throw or no-op) |
+
+The plugin never clears a marker it did not write — an already-active freeze (the ship skill's) is left untouched on dispatch failure, because the release may already be running. If the plugin process dies between writing the marker and dispatching the release, the marker can be removed manually with `rm <worklog-dir>/code-freeze.json`.
+
 ### Plugin behaviour while frozen
 
 - **Banner** — The selection list renders a prominent red `⛔ CODE FREEZE` banner above the header, warning that implementation is blocked. The banner respects the `rows - 1` pane-height budget (see WL-0MSAAON63003N6LO).
@@ -1387,7 +1543,9 @@ Fail-open is deliberate: a broken or missing marker must never block browsing th
   It shortcut (`S`) also stays available during a freeze: the release
   command is NOT `code_freeze: "block"` — the ship skill gates itself, so
   the confirmation dialog still opens and the user can consciously dispatch
-  the release even while a freeze is active.
+  the release even while a freeze is active. The Ship-mode guard still runs
+  first, so live agent panes carrying project work-item IDs continue to
+  block the dialog (see [Ship-mode guard](#ship-mode-guard-pre-dialog)).
 
 ### Shortcut filtering by work-item type
 
@@ -1457,7 +1615,7 @@ controlling whether dispatching the shortcut opens a visible pane
 
 | `open_pane` value | Behaviour on dispatch |
 |---|---|
-| `false` | Command runs **in the background — no pane opens**. Shell (`!!`/`!`) commands run via detached `bash -c`; agent commands (`/skill:*`, `/intake`, `/plan`, `/prompt:`) run headless via `pi -p --mode json` (honoring the entry's `model`). stdout/stderr are captured to a per-run log file under `<tmpdir>/herdr-background-logs/`; the path is written to stderr so it can be located for inspection. The work-item ↔ pane association is skipped when no pane is created. |
+| `false` | Command runs **in the background — no pane opens**. Shell (`!!`/`!`) commands run via detached `bash -c`; agent commands (`/skill:*`, `/intake`, `/plan`, `/prompt:`) run headless via `pi -p --mode json` (honoring the entry's `model`). stdout/stderr are captured to a per-run log file under `<tmpdir>/herdr-background-logs/`; the path is written to stderr so it can be located for inspection. A non-zero exit raises a failure toast (command + exit code/signal + a short output excerpt) so a failed background command is never silent (WL-0MUEBQLRD00288VV). The work-item ↔ pane association is skipped when no pane is created. |
 | omitted (or `true`) | A pane opens exactly as today — shell commands in a visible "Command Output" herdr pane, agent commands in a pi agent pane (backward compatible). |
 
 Semantics:

@@ -20,8 +20,12 @@ The `audit_results` table was introduced in schema version 8. A migration backfi
 1. **20260604-add-audit-results** — Creates the `audit_results` table
 2. **20260604-backfill-audit-results** — Reads `workitems.audit` JSON and inserts rows into `audit_results`
 3. **20260604-drop-audit-column** — Drops the `audit` column from `workitems`
+4. **20260923-add-audit-fingerprint** — Adds the nullable `fingerprint` column used by the content-fingerprint freshness gate (WL-0MUBVH5S0008NQ9K)
+5. **20260923-add-activity-at** — Adds the nullable `workitems.activityAt` last-activity column so comment writes no longer move the audit-relevant `updatedAt` (WL-0MUBVH6JM0093KVM)
 
 The legacy `20260315-add-audit` migration is now a no-op since the audit column is no longer needed.
+
+> **Automatic repair (WL-0MUEBQLRD00288VV).** `CREATE TABLE IF NOT EXISTS` never alters an existing table, so a database created before migration `20260923-add-audit-fingerprint` lacks the `fingerprint` column and `wl audit-set` would fail with `table audit_results has no column named fingerprint` — silently, for the `a-y`/`a-r` background shortcuts. The store now repairs this additively on open (idempotent `ALTER TABLE audit_results ADD COLUMN fingerprint TEXT`) and records the same `audit_fingerprint_added` sentinel the doctor migration uses, so no manual `wl doctor upgrade` is required. The same additive repair adds `workitems.activityAt` on open for databases created before `20260923-add-activity-at`. `wl doctor upgrade` remains the path for any other pending migrations.
 
 ## CLI Commands
 
@@ -171,19 +175,57 @@ Fields:
 
 ## Audit Freshness
 
-- `isAuditFresh(auditedAt, updatedAt)` (`packages/shared/src/icons.ts`, used by the herdr TUI) returns `auditedAt > updatedAt - 60s`.
-- Freshness is **atomic**: `saveAuditResult` — the path behind both `wl audit-set` and `wl update --audit-text` (see `packages/shared/src/persistent-store.ts`) — writes the `audit_results` row and sets `workitems.updatedAt = auditedAt` in the same transaction, so `isAuditFresh` is true immediately after an audit (WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51).
-- Flag-only flips of `needsProducerReview` do not bump `updatedAt` (WL-0MSN6ZCTN0027U2R); comments do bump `updatedAt`, but the 60 s grace keeps the audit fresh until real content changes advance `updatedAt` beyond the window.
+`isAuditFresh(auditedAt, updatedAt, storedFingerprint, currentFingerprint)` in
+`packages/shared/src/icons.ts` is the **single freshness definition** consumed by
+the TUI icon path (`stageDisplayIcon`), the `in_review` ordering predicate
+(`inReviewBucket` / `compareInReviewItems`), and the downtime dispatcher
+(`classifyItemForDispatch` / `selectAuditCandidate`). It evaluates two gates:
+
+1. **Content-fingerprint gate (primary, WL-0MUBVH5S0008NQ9K).** When both a
+   stored fingerprint (persisted on the `audit_results` row) and a current
+   fingerprint are supplied, the audit is fresh iff they are equal. This makes
+   freshness content-based: a metadata-only write that moves `updatedAt` — a
+   post-audit comment, a sync-merge re-timestamp, or a `sortIndex` re-sort —
+   leaves a fingerprinted audit fresh. A change to the auditable content
+   (description/ACs, Key Files, git HEAD sha, or working-tree state) changes the
+   fingerprint and marks the audit stale. The fingerprint is the canonical
+   algorithm from the audit skill (`HEAD sha + description hash + Key Files +
+   working-tree state`).
+2. **Time gate (legacy fallback).** When no stored fingerprint is present
+   (legacy audits) or the caller cannot supply a current fingerprint (e.g. a TUI
+   render), the original `auditedAt > updatedAt - 60s` floor applies unchanged.
+
+Freshness is **atomic**: `saveAuditResult` — the path behind `wl audit-set`,
+`wl update --audit-text`, and the audit runner's `persist_audit.py` (see
+`packages/shared/src/persistent-store.ts`) — writes the `audit_results` row
+(including the optional `fingerprint`) and sets `workitems.updatedAt = auditedAt`
+in the same transaction, so `isAuditFresh` is true immediately after an audit
+(WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51).
+
+Fingerprint sources: `wl audit-set --fingerprint <hex>`, or an
+`Audit content fingerprint: <hex>` line embedded in `--summary`/`--raw-output`
+(the audit skill's report format), or `wl update --audit-text` carrying the same
+line. An explicit `--fingerprint`/`--audit-fingerprint` flag wins over an
+embedded line.
+
+Flag-only flips of `needsProducerReview` do not bump `updatedAt`
+(WL-0MSN6ZCTN0027U2R), and neither do comment writes (WL-0MUBVH6JM0093KVM):
+comment create/update/delete bump `activityAt` only. `updatedAt` therefore
+changes only when tracked *content* changes (or an audit is persisted), so a
+fingerprinted audit stays fresh on a content match and a fingerprint-less
+(legacy) audit also stays fresh across comment activity — the time gate is no
+longer consumed by comments. Recency/ordering surfaces (`wl recent`, the score
+recency policy) read `activityAt`.
 
 ## Canonical Source of Truth
 
-The `audit_results` row is the **sole consumer** of the audit verdict. No flow parses audit-content comments: heartbeat, ship gate, TUI, and implement all read `auditResult`/`auditedAt` from the record. Audit verdicts duplicated into work-item comments are deprecated/legacy and must not be added by audit flows — they only harm freshness by bumping `updatedAt`.
+The `audit_results` row is the **sole consumer** of the audit verdict. No flow parses audit-content comments: heartbeat, ship gate, TUI, and implement all read `auditResult`/`auditedAt` from the record. Audit verdicts duplicated into work-item comments are deprecated/legacy and must not be added by audit flows. (Comment writes no longer affect freshness — they bump `activityAt`, not `updatedAt` — but the duplicated verdict still misleads human readers, so the record remains the only supported place for it.)
 
 ## Operational Notes
 
 - Config: `auditWriteEnabled` controls whether audit writes are allowed.
 - Storage: audit data is stored in the `audit_results` table with foreign key constraints and CASCADE DELETE semantics.
-- Migration: Use `wl doctor upgrade --confirm` to apply schema migrations on existing databases.
+- Migration: Use `wl doctor upgrade --confirm` to apply schema migrations on existing databases. Required columns such as `audit_results.fingerprint` are repaired automatically on open, so audit writes work even when doctor has not been run (WL-0MUEBQLRD00288VV).
 - Tests: Unit and integration tests cover valid first-line parsing, invalid first-line errors, redaction, whitespace handling, CRUD operations on the `audit_results` table, migration backfill, legacy column removal, and the atomic `updatedAt = auditedAt` freshness guarantee (`tests/database.test.ts` — audit-then-comment ordering and audit-text parity).
 
 ### Error Behavior

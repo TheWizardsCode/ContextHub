@@ -18,12 +18,6 @@ import {
   MIN_BROWSE_ITEM_COUNT,
   MAX_BROWSE_ITEM_COUNT,
 } from './settings.js';
-import {
-  clampDowntimeMaxConcurrentDispatches,
-  DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES,
-  DOWNTIME_MAX_CONCURRENT_DISPATCHES_FLOOR,
-  DOWNTIME_MAX_CONCURRENT_DISPATCHES_CEILING,
-} from './downtime-worker.js';
 
 function tempSettingsPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'herdr-settings-test-'));
@@ -122,11 +116,36 @@ describe('downtimeNoCandidateCooldownMs', () => {
   });
 });
 
-describe('modeSwitchEnabled', () => {
-  it('defaults to false (activity-gated mode switching is opt-in)', () => {
-    expect(defaultSettings.modeSwitchEnabled).toBe(false);
+describe('downtimeMarkerStaleWindowMs (WL-0MU6UL0RJ008IHGT)', () => {
+  it('defaults to 86_400_000 ms (24 hours)', () => {
+    expect(defaultSettings.downtimeMarkerStaleWindowMs).toBe(24 * 60 * 60 * 1000);
+  });
+
+  it('loads a persisted value and clamps into the [1h, 7d] range', () => {
     const path = tempSettingsPath();
-    expect(loadSettings(path).modeSwitchEnabled).toBe(false);
+    // Below the 1h floor → clamped up.
+    saveSettings(path, { ...defaultSettings, downtimeMarkerStaleWindowMs: 30 * 60 * 1000 });
+    expect(loadSettings(path).downtimeMarkerStaleWindowMs).toBe(60 * 60 * 1000);
+    // Above the 7d ceiling → clamped down.
+    saveSettings(path, { ...defaultSettings, downtimeMarkerStaleWindowMs: 8 * 24 * 60 * 60 * 1000 });
+    expect(loadSettings(path).downtimeMarkerStaleWindowMs).toBe(7 * 24 * 60 * 60 * 1000);
+    // In-range preserved.
+    saveSettings(path, { ...defaultSettings, downtimeMarkerStaleWindowMs: 6 * 60 * 60 * 1000 });
+    expect(loadSettings(path).downtimeMarkerStaleWindowMs).toBe(6 * 60 * 60 * 1000);
+  });
+
+  it('falls back to the default when the persisted value is not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMarkerStaleWindowMs: 'later' }), 'utf-8');
+    expect(loadSettings(path).downtimeMarkerStaleWindowMs).toBe(24 * 60 * 60 * 1000);
+  });
+});
+
+describe('modeSwitchEnabled', () => {
+  it('defaults to true (activity-gated mode switching is opt-out)', () => {
+    expect(defaultSettings.modeSwitchEnabled).toBe(true);
+    const path = tempSettingsPath();
+    expect(loadSettings(path).modeSwitchEnabled).toBe(true);
   });
 
   it('accepts a persisted boolean true', () => {
@@ -141,15 +160,15 @@ describe('modeSwitchEnabled', () => {
   it('falls back to the default when the persisted value is not a boolean', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, modeSwitchEnabled: 'yes' }), 'utf-8');
-    expect(loadSettings(path).modeSwitchEnabled).toBe(false);
+    expect(loadSettings(path).modeSwitchEnabled).toBe(true);
   });
 });
 
 describe('modeSwitchIdleThresholdMs', () => {
-  it('defaults to 900_000 ms (15 minutes)', () => {
-    expect(defaultSettings.modeSwitchIdleThresholdMs).toBe(900_000);
+  it('defaults to 1_800_000 ms (30 minutes)', () => {
+    expect(defaultSettings.modeSwitchIdleThresholdMs).toBe(1_800_000);
     const path = tempSettingsPath();
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(900_000);
+    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(1_800_000);
   });
 
   it('clamps a persisted value below the 60s floor up to the floor', () => {
@@ -164,7 +183,7 @@ describe('modeSwitchIdleThresholdMs', () => {
   it('falls back to the default when the persisted value is not a number', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, modeSwitchIdleThresholdMs: 'later' }), 'utf-8');
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(900_000);
+    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(1_800_000);
   });
 });
 
@@ -265,74 +284,43 @@ describe('maxSyncStalenessMs', () => {
 });
 
 // ---------------------------------------------------------------------------
-// downtimeMaxConcurrentDispatches (F2 WL-0MTSAB0QU003KTLA)
+// Removed downtime pane limit (WL-0MU2EP6JL006A1U3)
+//
+// `downtimeMaxRunningPanes` and its legacy alias
+// `downtimeMaxConcurrentDispatches` (both introduced by WL-0MTYZXSLN008HZOW)
+// are gone: the downtime dispatcher imposes NO client-side limit on the number
+// of live panes — dispatched panes stay open until an operator closes them, so
+// a pane count can never be the limiter. The local LLM idle check is the sole
+// concurrency authority. Old config files must still load cleanly, and the
+// removed keys must have no effect.
 // ---------------------------------------------------------------------------
 
-describe('downtimeMaxConcurrentDispatches', () => {
-  it('defaults to 1 (single-flight, unchanged from before F2)', () => {
-    expect(DEFAULT_DOWNTIME_MAX_CONCURRENT_DISPATCHES).toBe(1);
-    expect(defaultSettings.downtimeMaxConcurrentDispatches).toBe(1);
+describe('removed downtime pane limit (WL-0MU2EP6JL006A1U3)', () => {
+  it('is absent from the default settings', () => {
+    expect('downtimeMaxRunningPanes' in defaultSettings).toBe(false);
+    expect('downtimeMaxConcurrentDispatches' in defaultSettings).toBe(false);
   });
 
-  it('loads a persisted value', () => {
+  it('loads cleanly and ignores a persisted downtimeMaxRunningPanes key', () => {
     const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 2 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(2);
+    writeFileSync(
+      path,
+      JSON.stringify({ ...defaultSettings, downtimeMaxRunningPanes: 2 }),
+      'utf-8',
+    );
+    const loaded = loadSettings(path);
+    expect('downtimeMaxRunningPanes' in loaded).toBe(false);
+    // The rest of the settings are unaffected — the key is merely ignored.
+    expect(loaded.downtimeIdleThresholdMs).toBe(defaultSettings.downtimeIdleThresholdMs);
+    expect(loaded.downtimeRequiredFreeSlots).toBe(defaultSettings.downtimeRequiredFreeSlots);
   });
 
-  it('clamps values below the floor to 1', () => {
+  it('loads cleanly and ignores the legacy downtimeMaxConcurrentDispatches key', () => {
     const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 0 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: -5 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
-  });
-
-  it('clamps values above the ceiling to 4', () => {
-    const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 10 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(4);
-    saveSettings(path, { ...defaultSettings, downtimeMaxConcurrentDispatches: 99 });
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(4);
-  });
-
-  it('falls back to the default when not a number', () => {
-    const path = tempSettingsPath();
-    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxConcurrentDispatches: 'many' }), 'utf-8');
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
-  });
-
-  it('existing config without the key behaves as single-flight', () => {
-    const path = tempSettingsPath();
-    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxConcurrentDispatches: undefined }), 'utf-8');
-    expect(loadSettings(path).downtimeMaxConcurrentDispatches).toBe(1);
-  });
-});
-
-describe('clampDowntimeMaxConcurrentDispatches', () => {
-  it('keeps in-range values', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(1)).toBe(1);
-    expect(clampDowntimeMaxConcurrentDispatches(2)).toBe(2);
-    expect(clampDowntimeMaxConcurrentDispatches(4)).toBe(4);
-  });
-
-  it('clamps below floor to 1', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(0)).toBe(1);
-    expect(clampDowntimeMaxConcurrentDispatches(-1)).toBe(1);
-  });
-
-  it('clamps above ceiling to 4', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(5)).toBe(4);
-    expect(clampDowntimeMaxConcurrentDispatches(99)).toBe(4);
-  });
-
-  it('rounds fractional values', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(2.6)).toBe(3);
-    expect(clampDowntimeMaxConcurrentDispatches(2.4)).toBe(2);
-  });
-
-  it('returns the default (1) for non-finite input', () => {
-    expect(clampDowntimeMaxConcurrentDispatches(NaN)).toBe(1);
-    expect(clampDowntimeMaxConcurrentDispatches(Infinity)).toBe(1);
+    writeFileSync(path, JSON.stringify({ downtimeMaxConcurrentDispatches: 3 }), 'utf-8');
+    const loaded = loadSettings(path);
+    expect('downtimeMaxConcurrentDispatches' in loaded).toBe(false);
+    expect(loaded.downtimeEnabled).toBe(defaultSettings.downtimeEnabled);
+    expect(loaded.downtimeIdleThresholdMs).toBe(defaultSettings.downtimeIdleThresholdMs);
   });
 });

@@ -64,7 +64,50 @@ export interface LastExportTimestamps {
   audit_results?: string; // ISO 8601 — audit results after this are dirty
 }
 
+// NOTE: `audit_results.fingerprint` (WL-0MUBVH5S0008NQ9K) was added within
+// schema version 8 without a version bump. Rather than bump the version — which
+// would also require changing the value `src/migrations` writes, across the
+// workspace build boundary — `initializeSchema` repairs the column additively
+// on open; see REQUIRED_COLUMNS below (WL-0MUEBQLRD00288VV).
 const SCHEMA_VERSION = 8;
+
+/**
+ * A column required by the current code that may be absent from databases
+ * created by an older release. `CREATE TABLE IF NOT EXISTS` never alters an
+ * existing table, so a column added to a CREATE statement in a later release
+ * is missing from those databases and any statement referencing it fails at
+ * runtime (e.g. `table audit_results has no column named fingerprint`). Each
+ * entry is additive-only DDL (nullable columns only) and is applied
+ * idempotently on open.
+ */
+interface RequiredColumn {
+  table: string;
+  column: string;
+  ddl: string;
+  /**
+   * Metadata key set once the column has been added — mirrors the sentinel
+   * used by the equivalent `src/migrations` entry so the two paths converge.
+   */
+  sentinel?: string;
+}
+
+const REQUIRED_COLUMNS: RequiredColumn[] = [
+  {
+    table: 'audit_results',
+    column: 'fingerprint',
+    ddl: 'ALTER TABLE audit_results ADD COLUMN fingerprint TEXT',
+    sentinel: 'audit_fingerprint_added',
+  },
+  // activityAt (WL-0MUBVH6JM0093KVM): a separate last-activity stamp so comment
+  // writes no longer move the audit-relevant `updatedAt`. No sentinel here:
+  // the plain column check is sufficient (the column lives on workitems) and
+  // avoids leaving the doctor migration pending on freshly created databases.
+  {
+    table: 'workitems',
+    column: 'activityAt',
+    ddl: 'ALTER TABLE workitems ADD COLUMN activityAt TEXT',
+  },
+];
 
 // ── In-memory cache types (Phase 5) ────────────────────────────────
 
@@ -247,6 +290,7 @@ export class SqlitePersistentStore {
         parentId TEXT,
         createdAt TEXT NOT NULL,
         updatedAt TEXT NOT NULL,
+        activityAt TEXT,
         tags TEXT NOT NULL,
         assignee TEXT NOT NULL,
         stage TEXT NOT NULL,
@@ -266,15 +310,16 @@ export class SqlitePersistentStore {
     // NOTE: Historically this method performed non-destructive schema migrations
     // (ALTER TABLE ADD COLUMN ...) when opening an existing database. That caused
     // silent schema changes on first-run after upgrading the CLI with no backup
-    // or audit trail. Migrations are now centralized in src/migrations and
-    // surfaced via `wl doctor upgrade` so operators may review and back up the
-    // database before applying changes. To preserve compatibility for new
-    // databases we still create the necessary tables; however, we no longer
-    // modify existing databases here.
+    // or audit trail, so migrations are centralized in src/migrations and
+    // surfaced via `wl doctor upgrade`. The one exception is the additive
+    // compatibility repair below: a column the current code requires but that is
+    // absent from an older database is added with idempotent, additive-only DDL,
+    // because leaving it missing breaks core writes (e.g. `table audit_results
+    // has no column named fingerprint`) and background commands swallow the error.
 
     // If the database is newly created (no schemaVersion metadata present) set
     // the current schema version so the migration runner can detect pending
-    // migrations on existing DBs. We avoid altering existing databases here.
+    // migrations on existing DBs.
     const schemaVersionRaw = this.getMetadata('schemaVersion');
     const isNewDb = !schemaVersionRaw;
     if (isNewDb) {
@@ -282,44 +327,8 @@ export class SqlitePersistentStore {
     }
 
     // Determine test environment early so we can suppress operator-facing
-    // warnings during automated test runs. Tests MUST create the expected
-    // schema via the migration runner (`src/migrations`) or test setup; the
-    // persistent store will not modify existing databases in any environment.
+    // warnings during automated test runs.
     const runningInTest = process.env.NODE_ENV === 'test' || Boolean(process.env.JEST_WORKER_ID);
-
-    // For all environments we avoid performing non-destructive ALTERs here.
-    // If the DB is older than the current schema, emit a non-fatal warning for
-    // interactive operators but do not change schema silently. In test runs we
-    // suppress the warning so test output remains clean — tests should run the
-    // migration runner or create schema as part of setup.
-    if (!isNewDb) {
-      const existingVersion = schemaVersionRaw ? parseInt(schemaVersionRaw, 10) : 1;
-      if (existingVersion < SCHEMA_VERSION) {
-        // Try to include the pending migration ids to help operators run the
-        // appropriate `wl doctor upgrade` command. We deliberately do not
-        // perform any schema changes here — migrations are centralized in
-        // src/migrations and must be applied via `wl doctor upgrade` so that
-        // operators can preview and back up their DB first.
-        if (!runningInTest) {
-          let pendingMsg = "see 'wl doctor upgrade' to list and apply pending migrations";
-          try {
-            const pending = this._listPendingMigrations?.(this.dbPath);
-            if (pending && pending.length > 0) {
-              const ids = pending.map(p => p.id).join(', ');
-              pendingMsg = `pending migrations: ${ids}. Run 'wl doctor upgrade --dry-run' to preview and '--confirm' to apply`;
-            }
-          } catch (err) {
-            // Best-effort: if listing migrations fails do not throw — emit the
-            // warning without the migration list so opening the DB still works.
-          }
-
-          console.warn(
-            `Worklog: database at ${this.dbPath} has schemaVersion=${existingVersion} but the application expects schemaVersion=${SCHEMA_VERSION}. ` +
-            `No automatic schema changes were performed. ${pendingMsg} (migrations live in src/migrations)`
-          );
-        }
-      }
-    }
 
     // Create comments table
     this.db.exec(`
@@ -354,6 +363,9 @@ export class SqlitePersistentStore {
     // Create audit_results table for storing the latest audit per work item
     // This table is the sole source of truth for audit state (see WL-0MPZNJVWT000IKG7).
     // Only one row per work item is kept (latest-only, upsert via INSERT OR REPLACE).
+    // fingerprint: optional content-fingerprint for content-based freshness gate
+    // (WL-0MUBVH5S0008NQ9K). Existing rows without a fingerprint fall back to the
+    // legacy 60 s time gate.
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS audit_results (
         work_item_id TEXT PRIMARY KEY,
@@ -362,6 +374,7 @@ export class SqlitePersistentStore {
         summary TEXT,
         raw_output TEXT,
         author TEXT,
+        fingerprint TEXT,
         FOREIGN KEY (work_item_id) REFERENCES workitems(id) ON DELETE CASCADE
       )
     `);
@@ -389,10 +402,66 @@ export class SqlitePersistentStore {
       CREATE INDEX IF NOT EXISTS idx_dependency_edges_toId ON dependency_edges(toId);
     `);
 
-    // Existing databases retain their schemaVersion metadata. If an older
-    // schemaVersion is present we intentionally do not modify the DB here. The
-    // `wl doctor upgrade` workflow should be used to review and apply any
-    // required migrations (backups/pruning are handled there).
+    // ── Additive schema repair (WL-0MUEBQLRD00288VV) ───────────────────
+    // `CREATE TABLE IF NOT EXISTS` never alters an existing table, so a column
+    // added to a CREATE statement in a later release is absent from databases
+    // created by an older build. Ensure every column the current code requires
+    // exists, using additive-only, idempotent DDL, so all consumers (CLI,
+    // shared package, plugins) work without a manual migration step. A failure
+    // is surfaced with a clear remediation rather than a raw SQLite error.
+    if (!isNewDb) {
+      try {
+        this.repairRequiredColumns();
+      } catch (err) {
+        throw new Error(
+          `Database at ${this.dbPath} is missing a column required by this version of Worklog, and it could not be added automatically: ${(err as Error).message}. ` +
+          `Run 'wl doctor upgrade --confirm' to apply pending migrations, then retry.`
+        );
+      }
+      // The repair records the same sentinel the `20260923-add-audit-fingerprint`
+      // doctor migration uses, so the two paths converge and the migration
+      // becomes a no-op once repaired. Legacy databases older than the current
+      // schema still get the original advisory warning (unchanged behaviour);
+      // the additive repair above has already fixed the columns the current
+      // code needs.
+      const existingVersion = schemaVersionRaw ? parseInt(schemaVersionRaw, 10) : 1;
+      if (!runningInTest && existingVersion < SCHEMA_VERSION) {
+        let pendingMsg = "see 'wl doctor upgrade' to list and apply pending migrations";
+        try {
+          const pending = this._listPendingMigrations?.(this.dbPath);
+          if (pending && pending.length > 0) {
+            const ids = pending.map(p => p.id).join(', ');
+            pendingMsg = `pending migrations: ${ids}. Run 'wl doctor upgrade --dry-run' to preview and '--confirm' to apply`;
+          }
+        } catch (_err) {
+          // Best-effort: listing migrations must never prevent opening the DB.
+        }
+        console.warn(
+          `Worklog: database at ${this.dbPath} has schemaVersion=${existingVersion} but the application expects schemaVersion=${SCHEMA_VERSION}. ` +
+          `Required columns were repaired automatically. ${pendingMsg} (migrations live in src/migrations)`
+        );
+      }
+    }
+  }
+
+  /**
+   * Ensure every column required by the current code exists on existing tables,
+   * using additive-only, idempotent DDL. Returns the repairs actually applied.
+   * Throws when a required column is missing and cannot be added (e.g. a
+   * read-only database) — the caller wraps this in a clear, actionable error.
+   */
+  private repairRequiredColumns(): RequiredColumn[] {
+    const applied: RequiredColumn[] = [];
+    for (const req of REQUIRED_COLUMNS) {
+      const cols = this.db.prepare(`PRAGMA table_info('${req.table}')`).all() as Array<{ name: string }>;
+      if (cols.some((c) => String(c.name) === req.column)) continue;
+      this.db.exec(req.ddl);
+      if (req.sentinel) {
+        this.setMetadata(req.sentinel, '1');
+      }
+      applied.push(req);
+    }
+    return applied;
   }
 
   /**
@@ -513,8 +582,8 @@ export class SqlitePersistentStore {
     // Use INSERT ... ON CONFLICT DO UPDATE to avoid triggering DELETE (which would cascade and remove comments)
     const stmt = this.db.prepare(`
       INSERT INTO workitems
-      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -524,6 +593,7 @@ export class SqlitePersistentStore {
         parentId = excluded.parentId,
         createdAt = excluded.createdAt,
         updatedAt = excluded.updatedAt,
+        activityAt = excluded.activityAt,
         tags = excluded.tags,
         assignee = excluded.assignee,
         stage = excluded.stage,
@@ -555,6 +625,13 @@ export class SqlitePersistentStore {
     // accepts numbers, strings, bigints, buffers and null). Normalize tags to
     // a JSON string and convert any undefined to null before running.
     const tagsVal = Array.isArray(item.tags) ? JSON.stringify(item.tags) : JSON.stringify([]);
+    // activityAt tracks last activity and is always >= updatedAt. Comment
+    // writes pass an explicit activityAt (>= updatedAt); every other write
+    // only moves updatedAt, so taking the later of the two here keeps the
+    // invariant without touching every write site (WL-0MUBVH6JM0093KVM).
+    const activityAtVal = item.activityAt && item.activityAt > item.updatedAt
+      ? item.activityAt
+      : item.updatedAt;
     const values: any[] = [
       item.id,
       titleVal,
@@ -565,6 +642,7 @@ export class SqlitePersistentStore {
       item.parentId ?? null,
       item.createdAt,
       item.updatedAt,
+      activityAtVal,
       tagsVal,
       item.assignee ?? '',
       item.stage ?? '',
@@ -746,10 +824,9 @@ export class SqlitePersistentStore {
    */
   batchUpdateSortIndices(orderedItems: WorkItem[], gap: number): number {
     const updateStmt = this.db.prepare(`
-      UPDATE workitems SET sortIndex = ?, updatedAt = ? WHERE id = ?
+      UPDATE workitems SET sortIndex = ? WHERE id = ?
     `);
 
-    const now = new Date().toISOString();
     let updated = 0;
 
     const doUpdates = this.db.transaction(() => {
@@ -757,7 +834,7 @@ export class SqlitePersistentStore {
         const item = orderedItems[index];
         const nextSortIndex = (index + 1) * gap;
         if (item.sortIndex !== nextSortIndex) {
-          updateStmt.run(nextSortIndex, now, item.id);
+          updateStmt.run(nextSortIndex, item.id);
           updated += 1;
         }
       }
@@ -1235,16 +1312,17 @@ export class SqlitePersistentStore {
    * Save or update an audit result for a work item (upsert).
    * Only the latest audit per work item is kept.
    */
-  saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }): void {
+  saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }): void {
     const stmt = this.db.prepare(`
-      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author, fingerprint)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(work_item_id) DO UPDATE SET
         ready_to_close = excluded.ready_to_close,
         audited_at = excluded.audited_at,
         summary = excluded.summary,
         raw_output = excluded.raw_output,
-        author = excluded.author
+        author = excluded.author,
+        fingerprint = excluded.fingerprint
     `);
     const values: unknown[] = [
       audit.workItemId,
@@ -1253,9 +1331,15 @@ export class SqlitePersistentStore {
       audit.summary ?? null,
       audit.rawOutput ?? null,
       audit.author ?? null,
+      audit.fingerprint ?? null,
     ];
     const normalized = normalizeSqliteBindings(values);
-    const updateWorkItemUpdatedAt = this.db.prepare(`UPDATE workitems SET updatedAt = ? WHERE id = ?`);
+    // Align the content timestamp with the audit and keep activityAt >= it.
+    // MAX() is the scalar form (two arguments), so the earlier of the two
+    // never overwrites a more recent comment activity stamp.
+    const updateWorkItemUpdatedAt = this.db.prepare(
+      `UPDATE workitems SET updatedAt = ?, activityAt = MAX(COALESCE(activityAt, ''), ?) WHERE id = ?`
+    );
     // Both writes must be atomic so no intermediate read sees stale
     // auditedAt/updatedAt (AC2). A single better-sqlite3 transaction covers
     // this without exposing a window between the two UPDATEs.
@@ -1266,7 +1350,7 @@ export class SqlitePersistentStore {
       }
       const item = this.getWorkItem(audit.workItemId);
       if (item) {
-        updateWorkItemUpdatedAt.run(audit.auditedAt, audit.workItemId);
+        updateWorkItemUpdatedAt.run(audit.auditedAt, audit.auditedAt, audit.workItemId);
       }
     });
     saveTx();
@@ -1280,7 +1364,7 @@ export class SqlitePersistentStore {
    * Get the audit result for a work item.
    * Returns null if no audit result exists.
    */
-  getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null } | null {
+  getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint: string | null } | null {
     const stmt = this.db.prepare('SELECT * FROM audit_results WHERE work_item_id = ?');
     const row = stmt.get(workItemId) as any;
     if (!row) return null;
@@ -1291,6 +1375,7 @@ export class SqlitePersistentStore {
       summary: row.summary ?? null,
       rawOutput: row.raw_output ?? null,
       author: row.author ?? null,
+      fingerprint: row.fingerprint ?? null,
     };
   }
 
@@ -1316,22 +1401,24 @@ export class SqlitePersistentStore {
       summary: row.summary ?? null,
       rawOutput: row.raw_output ?? null,
       author: row.author ?? null,
+      fingerprint: row.fingerprint ?? null,
     }));
   }
 
   /**
    * Save or update audit results (upsert, bulk).
    */
-  saveAuditResults(audits: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null }[]): void {
+  saveAuditResults(audits: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }[]): void {
     const stmt = this.db.prepare(`
-      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO audit_results (work_item_id, ready_to_close, audited_at, summary, raw_output, author, fingerprint)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(work_item_id) DO UPDATE SET
         ready_to_close = excluded.ready_to_close,
         audited_at = excluded.audited_at,
         summary = excluded.summary,
         raw_output = excluded.raw_output,
-        author = excluded.author
+        author = excluded.author,
+        fingerprint = excluded.fingerprint
     `);
     const normalized = audits.map(audit => {
       const values: unknown[] = [
@@ -1341,6 +1428,7 @@ export class SqlitePersistentStore {
         audit.summary ?? null,
         audit.rawOutput ?? null,
         audit.author ?? null,
+        audit.fingerprint ?? null,
       ];
       return normalizeSqliteBindings(values);
     });
@@ -1948,6 +2036,7 @@ export class SqlitePersistentStore {
         parentId: row.parentId,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
+        activityAt: row.activityAt || row.updatedAt,
         tags: JSON.parse(row.tags),
         assignee: row.assignee,
         stage: row.stage,
@@ -1976,6 +2065,7 @@ export class SqlitePersistentStore {
         parentId: row.parentId,
         createdAt: row.createdAt,
         updatedAt: row.updatedAt,
+        activityAt: row.activityAt || row.updatedAt,
         tags: [],
         assignee: row.assignee,
         stage: row.stage,

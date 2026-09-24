@@ -56,6 +56,16 @@ let writes: string[];
 beforeEach(() => {
   vi.clearAllMocks();
   dataHandler = undefined;
+  // Hermetic env (WL-0MU2FM1L60002URI): the inherited herdr environment of a
+  // pane running the suite (HERDR_BIN_PATH / HERDR_TAB_ID / HERDR_PANE_ID / …)
+  // otherwise leaks into the FIRST test only — `afterEach` below deletes these
+  // keys, so later tests already ran isolated while test 1 did not. Clearing
+  // them up front makes every test start from a known environment; each test
+  // then opts back in to exactly the variables it needs.
+  delete process.env.HERDR_BIN_PATH;
+  delete process.env.HERDR_TAB_ID;
+  delete process.env.HERDR_PANE_ID;
+  delete process.env.HERDR_WORKSPACE_ID;
   writes = [];
 
   // Define missing stdin properties (vitest's process.stdin may not expose them)
@@ -91,6 +101,7 @@ afterEach(() => {
   delete process.env.HERDR_TAB_ID;
   delete process.env.HERDR_PANE_ID;
   delete process.env.HERDR_BIN_PATH;
+  delete process.env.HERDR_WORKSPACE_ID;
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -115,8 +126,15 @@ function makeExecMock(
   tabFocused: boolean | undefined,
   tabGetCalls?: { count: number },
 ): Mock {
-  return vi.fn(async (bin: string, args: string[]) => {
-    if (bin === 'herdr' && args[0] === 'tab' && args[1] === 'get') {
+  return vi.fn(async (_bin: string, args: string[]) => {
+    // Match on the ARGS, never the exact binary name: `isPaneVisible()`
+    // resolves the CLI as `process.env.HERDR_BIN_PATH ?? 'herdr'
+    // (visibility.ts), so matching `bin === 'herdr'` would silently miss
+    // whenever the suite runs inside a herdr pane (which sets
+    // HERDR_BIN_PATH to an absolute path) — the mock would fall through to
+    // the generic branch, `focused` would be undefined, and `isPaneVisible()`
+    // would fail open to "visible" (WL-0MU2FM1L60002URI).
+    if (args[0] === 'tab' && args[1] === 'get') {
       if (tabGetCalls) tabGetCalls.count += 1;
       if (tabFocused === undefined) {
         throw new Error('herdr: tab not found');
@@ -130,6 +148,7 @@ function makeExecMock(
       };
     }
     // wl CLI responses used by the fetcher during startup/refresh.
+    // (`bin` is intentionally unused beyond the tab-get branch above.)
     if (args.includes('list') && args.includes('--status')) {
       return { stdout: JSON.stringify({ count: 5 }), stderr: '' };
     }
@@ -140,7 +159,7 @@ function makeExecMock(
 /** Count how many tab-get execs were made through the mock. */
 function countTabGetCalls(mockFn: Mock): number {
   return mockFn.mock.calls.filter(
-    (c) => c[0] === 'herdr' && c[1]?.[0] === 'tab' && c[1]?.[1] === 'get',
+    (c) => c[1]?.[0] === 'tab' && c[1]?.[1] === 'get',
   ).length;
 }
 
@@ -284,6 +303,12 @@ describe('worklist TUI visibility gating', () => {
       autoSync: true,
       syncIntervalMs: 60_000,
       showHelpText: false,
+      // Clear Ship Guard: this test exercises the visibility gate on the
+      // manual S action, not the guard (which has its own tests).
+      shipGuardQuery: async () => ({
+        worklogOutput: JSON.stringify({ workItems: [] }),
+        paneOutput: JSON.stringify({ result: { panes: [] } }),
+      }),
     });
     await vi.advanceTimersByTimeAsync(0);
     fetcher.mockClear();
@@ -413,8 +438,12 @@ describe('worklist TUI visibility gating — hidden → visible transition (WL-0
    * test can flip the tab from hidden to visible mid-run.
    */
   function makeDynamicExecMock(getFocused: () => boolean | undefined, tabGetCalls?: { count: number }): Mock {
-    return vi.fn(async (bin: string, args: string[]) => {
-      if (bin === 'herdr' && args[0] === 'tab' && args[1] === 'get') {
+    return vi.fn(async (_bin: string, args: string[]) => {
+      // Match on the ARGS, never the exact binary name — `isPaneVisible()`
+      // resolves the CLI as `process.env.HERDR_BIN_PATH ?? 'herdr'`, so a
+      // `bin === 'herdr'` check misses whenever the suite runs inside a herdr
+      // pane (WL-0MU2FM1L60002URI).
+      if (args[0] === 'tab' && args[1] === 'get') {
         if (tabGetCalls) tabGetCalls.count += 1;
         const focused = getFocused();
         if (focused === undefined) {

@@ -122,6 +122,10 @@ export interface GroupableItem {
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
+  /** Stored content fingerprint from the audit result (WL-0MUBVH5S0008NQ9K). */
+  fingerprint?: string | null;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
 }
 
 /**
@@ -357,6 +361,10 @@ export function inReviewBucket(item: {
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
+  /** Stored content fingerprint from the audit result (optional). */
+  fingerprint?: string | null;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
 }): number {
   // Sentinel — only valid when stage === 'in_review'
   if (item.stage !== 'in_review') return 0;
@@ -368,9 +376,9 @@ export function inReviewBucket(item: {
   // Per AC4 stale buckets require auditedAt present; absence is the no-audit bucket.
   if (item.auditResult === null || item.auditResult === undefined || !item.auditedAt) return 4;
 
-  // Determine freshness via the shared predicate (isAuditFresh handles 60 s buffer)
+  // Determine freshness via the shared predicate (isAuditFresh/AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS)
   const fresh = Boolean(
-    item.auditedAt && item.updatedAt && isAuditFresh(item.auditedAt, item.updatedAt),
+    item.auditedAt && item.updatedAt && isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint),
   );
 
   if (item.auditResult === false) {
@@ -397,6 +405,8 @@ export function compareInReviewItems(a: GroupableItem & {
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
+  fingerprint?: string | null;
+  currentFingerprint?: string | null;
 }, b: typeof a): number {
   if (a.stage !== 'in_review' || b.stage !== 'in_review') return 0;
 
