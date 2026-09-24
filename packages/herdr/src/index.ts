@@ -101,6 +101,7 @@ import {
   withTransientRetry,
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
+  isSafeDowntimePaneToClose,
   type RunningPanesResult,
   type LlamaStatus,
 } from './downtime-worker.js';
@@ -1343,9 +1344,32 @@ export function createDowntimeDeps(
     // Close a dispatched pane (WL-0MU308WSF0002JWN): `herdr pane close
     // <paneId>`. Fail-closed: any herdr failure resolves false and the
     // monitor still records the lifecycle outcome with `closed:false`.
-    async closePane(paneId: string, _cwd: string): Promise<boolean> {
+    //
+    // Safety (WL-0MU4US5MP001JFEN AC7): when the dispatch context is
+    // supplied, verify the LIVE pane's label is a downtime pane whose
+    // item-id suffix matches THIS dispatch BEFORE closing — a stale entry
+    // must never close an unrelated/operator pane whose pane id collides.
+    async closePane(
+      paneId: string,
+      _cwd: string,
+      expected?: { itemId: string; kind: string },
+    ): Promise<boolean> {
       try {
         const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+        if (expected) {
+          const { stdout } = await getExecFileAsync()(
+            herdrBin,
+            ['pane', 'list'],
+            { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+          );
+          const panes = parseHerdrPaneListOutput(stdout);
+          // Only ever close a downtime pane for THIS item (AC7). A missing
+          // record (pane already gone) or a mismatched label means we must
+          // NOT close (never an unrelated/operator pane id collision).
+          if (panes === null || !isSafeDowntimePaneToClose(panes, paneId, expected.itemId)) {
+            return false;
+          }
+        }
         await getExecFileAsync()(
           herdrBin,
           ['pane', 'close', paneId],

@@ -1351,6 +1351,29 @@ export function paneLabelItemId(label: string | undefined): string | null {
 }
 
 /**
+ * Safe-close predicate (WL-0MU4US5MP001JFEN AC7): true ONLY when a LIVE herdr
+ * pane record exists for `paneId`, its label is a downtime pane label
+ * (`DOWNTIME_PANE_LABEL_PREFIX`) AND its item-id suffix equals `itemId`.
+ *
+ * Guarding the close with this predicate means a stale dispatch-log entry can
+ * never close an unrelated/operator pane whose pane id happens to collide with
+ * the recorded dispatched pane (pane ids may be reused after a pane closes).
+ * A missing record (the pane is already gone) returns false — there is nothing
+ * to close.
+ */
+export function isSafeDowntimePaneToClose(
+  records: HerdrPaneRecord[],
+  paneId: string,
+  itemId: string,
+): boolean {
+  const rec = records.find((p) => p.paneId === paneId);
+  if (rec === undefined) return false;
+  const label = rec.label ?? '';
+  if (!label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) return false;
+  return paneLabelItemId(label) === itemId;
+}
+
+/**
  * Item ids that currently have a LIVE `working` downtime pane
  * (WL-0MUBEZ6PE002WLP4, the in-flight guard).
  *
@@ -1802,8 +1825,17 @@ export interface DowntimeWorkerDeps {
    * when absent the monitor logs the outcome but performs no close (used by
    * legacy/test callers). Must never throw (fail-closed): a failed close is
    * logged with `closed:false` and never blocks other panes.
+   *
+   * `expected` (optional, WL-0MU4US5MP001JFEN AC7) carries the dispatch
+   * context so an implementation can verify the live pane really is the
+   * downtime pane spawned for THIS item before closing it — never close an
+   * unrelated/operator pane whose id happens to collide with a stale entry.
    */
-  closePane?(paneId: string, cwd: string): Promise<boolean>;
+  closePane?(
+    paneId: string,
+    cwd: string,
+    expected?: { itemId: string; kind: PaneLifecycleKind },
+  ): Promise<boolean>;
   /**
    * Record a pane-close lifecycle entry in the rolling dispatch log
    * (WL-0MU308WSF0002JWN). OPTIONAL — when absent the monitor falls back to
@@ -4391,7 +4423,7 @@ export async function monitorDispatchedPanes(
       let closed = false;
       if (decision.close && typeof deps.closePane === 'function') {
         try {
-          closed = await deps.closePane(pane.paneId, cwd);
+          closed = await deps.closePane(pane.paneId, cwd, { itemId: pane.itemId, kind: pane.kind });
         } catch {
           closed = false; // fail-closed
         }

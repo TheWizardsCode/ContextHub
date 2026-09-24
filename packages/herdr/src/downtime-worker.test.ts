@@ -107,6 +107,7 @@ import {
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
   paneLabelItemId,
+  isSafeDowntimePaneToClose,
   runningDowntimePaneItemIds,
   evaluateCriticalFirstGuard,
   resolveInFlightPanes,
@@ -8081,6 +8082,21 @@ describe('paneLabelItemId / runningDowntimePaneItemIds / evaluateCriticalFirstGu
     expect(paneLabelItemId(undefined)).toBeNull();
   });
 
+  it('isSafeDowntimePaneToClose only accepts the downtime pane for the SAME item (AC7)', () => {
+    const live = [
+      pane({ paneId: 'w1:p1', label: 'Downtime triggered implement Some item - WL-ABC' }),
+      pane({ paneId: 'w1:p2', label: 'pi - my operator session' }),
+    ];
+    // Matching downtime pane for the item → safe.
+    expect(isSafeDowntimePaneToClose(live, 'w1:p1', 'WL-ABC')).toBe(true);
+    // A different item's downtime pane (id collision) → NOT safe.
+    expect(isSafeDowntimePaneToClose(live, 'w1:p1', 'WL-OTHER')).toBe(false);
+    // A non-downtime (operator) pane → NOT safe.
+    expect(isSafeDowntimePaneToClose(live, 'w1:p2', 'WL-ABC')).toBe(false);
+    // The pane is already gone → NOT safe (nothing to close).
+    expect(isSafeDowntimePaneToClose(live, 'w1:p9', 'WL-ABC')).toBe(false);
+  });
+
   it('runningDowntimePaneItemIds returns only WORKING downtime panes, keyed by item id', () => {
     const ids = runningDowntimePaneItemIds([
       pane({ paneId: 'w1:p1', label: 'Downtime triggered implement A - WL-A', agentStatus: 'working' }),
@@ -10204,7 +10220,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
     const res = await monitorDispatchedPanes(deps, root);
 
     expect(res).toMatchObject({ checked: 1, logged: 1, closed: 1, errors: 0 });
-    expect(closePane).toHaveBeenCalledWith('w1:p1', root);
+    expect(closePane).toHaveBeenCalledWith('w1:p1', root, { itemId: 'WL-1', kind: 'intake' });
     const pc = await paneCloseEntries(root);
     expect(pc).toHaveLength(1);
     expect(pc[0]).toMatchObject({
@@ -10230,7 +10246,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
     const res = await monitorDispatchedPanes(deps, root);
 
     expect(res).toMatchObject({ logged: 1, closed: 1 });
-    expect(closePane).toHaveBeenCalledWith('w1:p2', root);
+    expect(closePane).toHaveBeenCalledWith('w1:p2', root, { itemId: 'WL-2', kind: 'plan' });
     expect((await paneCloseEntries(root))[0]).toMatchObject({ outcome: 'closed-as-plan-complete', closed: true });
   });
 
@@ -10248,7 +10264,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
     const res = await monitorDispatchedPanes(deps, root);
 
     expect(res).toMatchObject({ logged: 1, closed: 1 });
-    expect(closePane).toHaveBeenCalledWith('w1:p3', root);
+    expect(closePane).toHaveBeenCalledWith('w1:p3', root, { itemId: 'WL-3', kind: 'audit' });
     expect((await paneCloseEntries(root))[0]).toMatchObject({ outcome: 'audit-failed', closed: true });
   });
 
@@ -10372,7 +10388,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
 
     expect(res).toMatchObject({ checked: 2, logged: 1, closed: 1, errors: 1 });
     expect(closePane).toHaveBeenCalledTimes(1);
-    expect(closePane).toHaveBeenCalledWith('w1:pB', root);
+    expect(closePane).toHaveBeenCalledWith('w1:pB', root, { itemId: 'WL-GOOD', kind: 'intake' });
   });
 
   it('is a no-op when the item-state dep is absent (legacy callers)', async () => {
@@ -10400,11 +10416,99 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
 
     await monitorDispatchedPanes(deps, root);
 
-    expect(closePane).toHaveBeenCalledWith('w1:p11', root);
+    expect(closePane).toHaveBeenCalledWith('w1:p11', root, { itemId: 'WL-11', kind: 'plan' });
     expect((await paneCloseEntries(root))[0]).toMatchObject({
       outcome: 'requires-attention',
       reasonCode: 'producer-review',
       closed: true,
     });
+  });
+});
+
+// ── Worker tick ↔ pane-lifecycle integration (WL-0MU4US5MP001JFEN) ────
+//
+// The worker tick invokes the pane-lifecycle monitor (fire-and-forget, so it
+// never perturbs the dispatch single-flight ordering). These tests pin the
+// end-to-end auto-close path and the mandatory implement exception (AC6).
+describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN)', () => {
+  const roots: string[] = [];
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  function makeRoot(): string {
+    const root = mkdtempSync(join(tmpdir(), 'pane-monitor-tick-'));
+    roots.push(root);
+    return root;
+  }
+
+  async function seedDispatch(root: string, itemId: string, kind: string, paneId: string): Promise<void> {
+    const marker = {
+      itemId, kind, dispatchedAt: new Date().toISOString(), cwd: root, title: itemId, stage: 'intake_complete',
+    };
+    await appendDowntimeLogEntry(root, JSON.stringify(marker));
+    await appendDowntimeLogEntry(root, JSON.stringify({ ...marker, paneId, enrichment: true }));
+  }
+
+  function makeMonitorWorker(root: string, deps: Partial<DowntimeWorkerDeps>) {
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const worker = createDowntimeWorker({
+      poller,
+      deps: makeDeps({ getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }), ...deps }),
+      config: () => ({
+        enabled: true,
+        thresholdMs: 1,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd: root,
+        noCandidateCooldownMs: 3_600_000,
+        paneLifecycleIntervalMs: 0,
+      }),
+    });
+    return worker;
+  }
+
+  it('closes a completed non-implement pane from the worker tick (AC1/AC2)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, 'WL-TICK', 'plan', 'w9:p1');
+    const closePane = vi.fn().mockResolvedValue(true);
+    const worker = makeMonitorWorker(root, {
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-TICK', stage: 'plan_complete' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w9:p1' }] }),
+      closePane,
+    });
+
+    await worker.tick();
+
+    await vi.waitFor(() => expect(closePane).toHaveBeenCalledWith(
+      'w9:p1', root, { itemId: 'WL-TICK', kind: 'plan' },
+    ));
+    const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
+    expect(pc).toHaveLength(1);
+    expect(pc[0]).toMatchObject({ outcome: 'closed-as-plan-complete', closed: true });
+  });
+
+  it('never auto-closes an implement pane from the worker tick (AC6)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, 'WL-IMPL', 'implement', 'w9:p2');
+    const closePane = vi.fn().mockResolvedValue(true);
+    const worker = makeMonitorWorker(root, {
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-IMPL', stage: 'in_review' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w9:p2' }] }),
+      closePane,
+    });
+
+    await worker.tick();
+
+    // Wait for the (fire-and-forget) monitor to record the in_review event.
+    await vi.waitFor(async () => {
+      const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
+      expect(pc).toHaveLength(1);
+    });
+    expect(closePane).not.toHaveBeenCalled();
+    const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
+    expect(pc[0]).toMatchObject({ outcome: 'requires-attention', reasonCode: 'reached-in-review', closed: false });
   });
 });
