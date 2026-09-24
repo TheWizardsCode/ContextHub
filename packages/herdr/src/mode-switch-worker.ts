@@ -298,6 +298,14 @@ export interface ModeSwitchWorker {
    * fail-closed (no switch) and never throw.
    */
   tick(opts: ModeSwitchTickOptions): Promise<void>;
+  /**
+   * The most recently observed proxy mode, or `null` when it has not been
+   * resolved yet (mode switching disabled, or no poll/switch has run).
+   * Consumed by the downtime dispatcher's mode-aware
+   * `AUDIT_PHASE2_PARALLELISM` decision (WL-0MT50S9JW001DHME): an unknown
+   * mode (`null`) conservatively maps to the serial `'1'` default.
+   */
+  getLastKnownMode(): ProxyMode | null;
 }
 
 /**
@@ -352,6 +360,10 @@ export function createModeSwitchWorker(deps?: {
       lastOperatorCommandAt = now();
       // Fire-and-forget fast switch (fail-open: never blocks dispatch).
       void fireSwitch(proxyUrl, 'fast');
+    },
+
+    getLastKnownMode(): ProxyMode | null {
+      return lastKnownMode;
     },
 
     async tick(opts: ModeSwitchTickOptions): Promise<void> {

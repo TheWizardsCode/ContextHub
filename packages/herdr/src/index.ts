@@ -88,6 +88,7 @@ import {
   type DowntimeClaimResult,
   type DowntimeSpawn,
   type DowntimeSpawnResult,
+  type DowntimeSpawnConfig,
   type ScheduledPrompt,
   type DowntimeItemResult,
   parseShowItemOutput,
@@ -1215,13 +1216,14 @@ export function createDowntimeDeps(
         itemTitle?: string;
         itemId?: string;
         anchorId?: string;
+        spawnConfig?: DowntimeSpawnConfig;
       },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
         buildDowntimePaneArgs(kind, prompt, opts),
-        { cwd: opts.cwd },
+        { cwd: opts.cwd, config: opts.spawnConfig },
         spawnFn,
       );
     },
@@ -1520,6 +1522,10 @@ async function main(): Promise<void> {
         // the concurrency limiter.
         model: s.downtimeModel,
         cwd: targetCwd,
+        // Mode-aware Phase 2 parallelism (WL-0MT50S9JW001DHME): the last
+        // proxy mode observed by the mode-switch worker (`null` until polled
+        // → `undefined` → the dispatcher conservatively keeps PARALLELISM=1).
+        mode: modeSwitchWorker.getLastKnownMode() ?? undefined,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,

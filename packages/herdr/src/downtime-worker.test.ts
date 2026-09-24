@@ -3902,41 +3902,52 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     expect(optionsWithEmptyConfig.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
-  it('buildDowntimeSpawnOptions returns PARALLELISM=1 in fast mode', () => {
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 in fast mode even with free slots', () => {
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'fast', slotBudget: 3, concurrentDispatchCap: 1 },
+      config: { mode: 'fast', slotBudget: 3, freeSlots: 3, concurrentDispatchCap: 1 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
-  it('buildDowntimeSpawnOptions returns PARALLELISM=2 for cheap mode with free second slot and dispatch budget allows', () => {
-    // Cheap mode, 2 slots, only 1 concurrent dispatch allowed → 2 children = 2 streams total
+  it('buildDowntimeSpawnOptions returns PARALLELISM=2 for cheap mode with a genuinely free second slot (single-flight)', () => {
+    // Cheap mode, 2 slots, both genuinely free, single dispatch at a time →
+    // 2 children = 2 streams total, fitting the 2-slot pool.
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 0 },
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 1 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('2');
   });
 
-  it('buildDowntimeSpawnOptions returns PARALLELISM=2 for cheap mode with dispatch cap = 1', () => {
-    // Single dispatch at a time in cheap mode → 2 children = 2 streams total
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when the second slot is NOT genuinely free', () => {
+    // The operative signal is freeSlots, never the total slotBudget: a 2-slot
+    // pool with only 1 free slot cannot run 2 children.
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 1 },
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 1, concurrentDispatchCap: 1 },
     });
-    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('2');
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
+
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when the dispatch budget is unbounded (cap 0)', () => {
+    // 0 = unbounded → a second audit could run → 2 audits × 2 children would
+    // exceed the 2-slot cheap pool. Only cap === 1 is single-flight-safe.
+    const options = buildDowntimeSpawnOptions('/repo', {
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 0 },
+    });
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
   it('buildDowntimeSpawnOptions returns PARALLELISM=1 when concurrent dispatch budget would exceed slot capacity', () => {
     // 2+ concurrent dispatches × 2 children each = 4 streams, exceeds 2-slot budget
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 2 },
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 2 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
   it('buildDowntimeSpawnOptions returns PARALLELISM=1 when cheap mode slot budget is insufficient', () => {
-    // Only 1 slot available — cannot run 2 children
+    // Only 1 slot in the pool — cannot run 2 children
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 1, concurrentDispatchCap: 1 },
+      config: { mode: 'cheap', slotBudget: 1, freeSlots: 1, concurrentDispatchCap: 1 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
@@ -3944,9 +3955,29 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
   it('buildDowntimeSpawnOptions returns PARALLELISM=1 for cheap mode with high dispatch cap', () => {
     // 3+ concurrent dispatches × 2 children = 6 streams, far exceeds budget
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 3 },
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 3 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
+
+  it('spawnDowntimePane forwards the spawn config to the spawn boundary (WL-0MT50S9JW001DHME)', async () => {
+    const handle = {
+      unref: vi.fn(),
+      once: vi.fn((event: string, listener: (arg: unknown) => void) => {
+        if (event === 'exit') listener(0);
+      }),
+    };
+    const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
+    const config = {
+      mode: 'cheap' as const,
+      slotBudget: 2,
+      freeSlots: 2,
+      concurrentDispatchCap: 1,
+    };
+
+    await spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo', config }, spawnFn);
+
+    expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo', config });
   });
 });
 
@@ -3959,6 +3990,8 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     cooldownMs?: number;
     status?: unknown;
     deps?: Partial<DowntimeWorkerDeps>;
+    mode?: 'cheap' | 'fast';
+    concurrentDispatchCap?: number;
   } = {}) {
     const cfg = {
       enabled: overrides.enabled ?? true,
@@ -3967,6 +4000,11 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
       model: 'plan',
       cwd: '/repo',
       noCandidateCooldownMs: overrides.cooldownMs ?? 3_600_000,
+      // Mode-aware spawn config inputs (WL-0MT50S9JW001DHME).
+      ...(overrides.mode !== undefined ? { mode: overrides.mode } : {}),
+      ...(overrides.concurrentDispatchCap !== undefined
+        ? { concurrentDispatchCap: overrides.concurrentDispatchCap }
+        : {}),
     };
     const fetcher = vi
       .fn()
@@ -4046,6 +4084,38 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     expect(at.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     expect(worker.lastDispatchAt).toBe(start + cfg.thresholdMs);
+  });
+
+  it('tick forwards a mode-aware spawnConfig with the genuine free-slot snapshot (WL-0MT50S9JW001DHME)', async () => {
+    const { worker, deps, cfg } = makeWorker({ mode: 'cheap' });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    await worker.tick();
+
+    // idleAllSlotsFree: 4 of 4 slots free, total 4 → forwarded verbatim so
+    // the spawn boundary never has to reach back into the worker.
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        spawnConfig: { mode: 'cheap', slotBudget: 4, freeSlots: 4, concurrentDispatchCap: 1 },
+      }),
+    );
+  });
+
+  it('tick omits spawnConfig when the proxy mode is unknown (conservative serial default)', async () => {
+    const { worker, deps, cfg } = makeWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    await worker.tick();
+
+    const call = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[1]).not.toHaveProperty('spawnConfig');
   });
 
   it('requires a fresh full idle period after a dispatch (AC5)', async () => {

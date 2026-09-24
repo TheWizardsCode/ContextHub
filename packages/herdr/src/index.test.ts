@@ -1789,6 +1789,29 @@ describe('createDowntimeDeps', () => {
     );
   });
 
+  it('spawnAgentPane forwards the mode-aware spawnConfig to the spawn boundary (WL-0MT50S9JW001DHME)', async () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
+    const spawnConfig = {
+      mode: 'cheap' as const,
+      slotBudget: 2,
+      freeSlots: 2,
+      concurrentDispatchCap: 1,
+    };
+
+    await deps.spawnAgentPane('Run /skill:audit WL-AUD — Audit me.', {
+      model: 'plan',
+      cwd: '/repo',
+      spawnConfig,
+    });
+
+    expect(spawnFn).toHaveBeenCalledWith(
+      '/path/to/send-to-pi.sh',
+      expect.arrayContaining(['--pane-name', 'Downtime audit']),
+      { cwd: '/repo', config: spawnConfig },
+    );
+  });
+
   it('spawnAgentPane honours an explicit paneName (scheduled prompts run as Downtime <id>)', async () => {
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);

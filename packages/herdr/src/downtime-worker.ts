@@ -1675,6 +1675,14 @@ export interface DowntimeWorkerDeps {
       itemTitle?: string;
       itemId?: string;
       anchorId?: string;
+      /**
+       * Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME): the
+       * worker forwards the genuine free-slot snapshot and mode so the spawn
+       * boundary can set `AUDIT_PHASE2_PARALLELISM` without reaching back
+       * into the worker. Absent → the spawn falls back to `'1'` (backward
+       * compatible).
+       */
+      spawnConfig?: DowntimeSpawnConfig;
     },
   ): Promise<DowntimeSpawnResult>;
   /**
@@ -2143,7 +2151,7 @@ export function selectCriticalFirstCandidates(
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; inFlight: InFlightPanes },
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
   flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
@@ -2206,6 +2214,7 @@ async function dispatchFromHerdrList(
       cwd: ctx.cwd,
       selectionPath: 'critical-first',
       selectionReason: guard.reason,
+      spawnConfig: ctx.spawnConfig,
     });
     if (outcome.dispatched) return outcome;
     // A lost CAS race / marker-recovery rollback applies to one candidate:
@@ -2310,6 +2319,7 @@ async function dispatchFromHerdrList(
       cwd: ctx.cwd,
       selectionPath: 'normal-scan',
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
+      spawnConfig: ctx.spawnConfig,
     });
     if (outcome.dispatched) return outcome;
     if (outcome.reason === 'claim-failed') continue;
@@ -2378,7 +2388,14 @@ async function dispatchClaimedTier(
   deps: DowntimeWorkerDeps,
   kind: DowntimeSkillKind,
   candidate: DowntimeCandidate,
-  opts: { model: string; cwd: string; selectionPath?: string; selectionReason?: string },
+  opts: {
+    model: string;
+    cwd: string;
+    selectionPath?: string;
+    selectionReason?: string;
+    /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
+    spawnConfig?: DowntimeSpawnConfig;
+  },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
   // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): resolve the dedicated
@@ -2504,6 +2521,10 @@ async function dispatchClaimedTier(
       // leadership. Only set when the anchor resolved (never a bare
       // undefined key — legacy callers keep their exact opts shape).
       ...(anchorId !== undefined ? { anchorId } : {}),
+      // Mode-aware Phase 2 parallelism (WL-0MT50S9JW001DHME): only set when
+      // the worker supplied a snapshot (legacy/test callers keep the exact
+      // historical opts shape and fall back to '1').
+      ...(opts.spawnConfig !== undefined ? { spawnConfig: opts.spawnConfig } : {}),
     },
   );
   if (!spawn.ok) {
@@ -2660,7 +2681,7 @@ async function recordDispatchEnrichmentBestEffort(
 async function dispatchScheduledPrompt(
   deps: DowntimeWorkerDeps,
   prompt: ScheduledPrompt,
-  opts: { model: string; cwd: string },
+  opts: { model: string; cwd: string; spawnConfig?: DowntimeSpawnConfig },
 ): Promise<DowntimeDispatchOutcome> {
   const at = new Date().toISOString();
 
@@ -2721,6 +2742,7 @@ async function dispatchScheduledPrompt(
     cwd: opts.cwd,
     paneName: `Downtime ${prompt.id}`,
     ...(anchorId !== undefined ? { anchorId } : {}),
+    ...(opts.spawnConfig !== undefined ? { spawnConfig: opts.spawnConfig } : {}),
   });
   if (!spawn.ok) {
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2 pattern): the audit log
@@ -3138,7 +3160,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; spawnConfig?: DowntimeSpawnConfig },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -3211,6 +3233,7 @@ export async function dispatchFromCoordination(
       return await dispatchScheduledPrompt(deps, duePrompt, {
         model: opts.model,
         cwd: opts.cwd,
+        spawnConfig: opts.spawnConfig,
       });
     }
   }
@@ -3314,7 +3337,7 @@ export async function dispatchFromCoordination(
       deps,
       kind,
       toCoordinationCandidate(result.info),
-      { model: opts.model, cwd: worklogRoot, selectionPath: 'coordination-offer', selectionReason: 'leader-offer' },
+      { model: opts.model, cwd: worklogRoot, selectionPath: 'coordination-offer', selectionReason: 'leader-offer', spawnConfig: opts.spawnConfig },
     );
     if (outcome.dispatched) {
       // Dispatched — remove the entry so the owner re-queues its next
@@ -3577,6 +3600,8 @@ export async function dispatchDowntimeWork(
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`.
      */
     markerStaleWindowMs?: number;
+    /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
+    spawnConfig?: DowntimeSpawnConfig;
   },
 ): Promise<DowntimeDispatchOutcome> {
   // Per-process PIPELINE single-flight gate (F3, WL-0MT50LKAK001EF5Q): at
@@ -3677,7 +3702,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, inFlight };
+        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, inFlight, spawnConfig: opts.spawnConfig };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return herdrOutcome;
 
@@ -4061,22 +4086,35 @@ export type DowntimeSpawn = (
  * (WL-0MT50S9JW001DHME).
  *
  * When supplied, `buildDowntimeSpawnOptions` selects the Phase 2 parallelism
- * level based on the current operating mode and the available dispatch budget:
+ * level based on the current operating mode, the GENUINELY free slots at
+ * dispatch time, and the concurrent dispatch budget:
  *
- * - `'1'` (safe default): fast mode, cheap mode with full budget, or config
- *   not supplied.
- * - `'2'`: cheap mode AND a second slot is free AND the concurrent dispatch
- *   budget allows it (combined streams ≤ slot budget).
+ * - `'1'` (safe default): fast mode, cheap mode without a genuinely free
+ *   second slot, a non-single-flight dispatch budget, or config not supplied.
+ * - `'2'`: cheap mode AND a second slot is genuinely free AND exactly one
+ *   dispatch pipeline is in flight (combined streams ≤ slot budget).
  *
- * When the config is absent the function falls back to `'1'` (the historic,
- * backward-compatible value).
+ * `freeSlots` (not `slotBudget`) is the operative input for the second-slot
+ * check: `slotBudget` is the mode's total pool and being "free" cannot be
+ * inferred from it. When the config is absent the function falls back to
+ * `'1'` (the historic, backward-compatible value).
  */
 export interface DowntimeSpawnConfig {
   /** `'cheap'` or `'fast'` — the proxy's current operating mode. */
   mode: 'cheap' | 'fast';
-  /** Total number of local proxy slots available (cheap = 2, fast = 3). */
+  /** Total number of local proxy slots in the current mode (cheap = 2, fast = 3). */
   slotBudget: number;
-  /** Maximum number of concurrent downtime dispatches allowed (0 = unbounded). */
+  /**
+   * Genuinely free local proxy slots at dispatch time (unowned and not
+   * processing) — the real availability signal, never the total pool.
+   */
+  freeSlots: number;
+  /**
+   * Maximum number of concurrent downtime dispatch pipelines allowed.
+   * `0` means UNBOUNDED (no cap): other dispatches may be in flight, so the
+   * cheap 2-slot pool cannot be guaranteed → treated as unsafe for `'2'`.
+   * Only a single-flight budget (`1`) enables `'2'`.
+   */
   concurrentDispatchCap: number;
 }
 
@@ -4086,15 +4124,16 @@ export interface DowntimeSpawnConfig {
  *
  * `AUDIT_PHASE2_PARALLELISM` is mode-aware (WL-0MT50S9JW001DHME):
  *
- * - `'1'` (safe default): fast mode, cheap mode with full budget, or config
- *   not supplied.
- * - `'2'`: cheap mode AND a second slot is free AND the concurrent dispatch
- *   budget allows it — up to 2 Phase 2 children run in parallel, fitting the
+ * - `'1'` (safe default): fast mode, cheap mode without a genuinely free
+ *   second slot, a non-single-flight dispatch budget, or config not supplied.
+ * - `'2'`: cheap mode AND a second slot is genuinely free AND the dispatch
+ *   is single-flight — up to 2 Phase 2 children run in parallel, fitting the
  *   2-slot cheap-mode pool (parent already done Phase 1).
  *
  * The parent audit always completes Phase 1 before Phase 2 children start,
  * so the max concurrent streams per audit is 2 (the children). This fits
- * cheap mode's slot budget when a second slot is genuinely free.
+ * cheap mode's slot budget only when a second slot is genuinely free — the
+ * free count is therefore the operative check, never the total budget.
  */
 export function buildDowntimeSpawnOptions(
   cwd: string,
@@ -4109,23 +4148,22 @@ export function buildDowntimeSpawnOptions(
   // Default to '1' for backward compatibility when config is absent.
   let parallelism = '1';
   if (opts?.config) {
-    const { mode, slotBudget, concurrentDispatchCap } = opts.config;
-    if (mode === 'cheap' && slotBudget >= 2) {
-      // In cheap mode with ≥ 2 slots, check if a second slot is free.
-      // PARALLELISM=2 means up to 2 Phase 2 children run in parallel.
-      // The parent already completed Phase 1, so max concurrent streams = 2.
-      // Only enable when the dispatch budget allows it:
-      // - If concurrentDispatchCap is 0 (unbounded), only 1 dispatch at a time
-      //   during cheap mode → 2 children per audit = 2 streams total → safe.
-      // - If concurrentDispatchCap >= 2, multiple audits could run → each with
-      //   PARALLELISM=2 would exceed 2-slot budget → stay at '1'.
-      const dispatchBudgetAllows =
-        concurrentDispatchCap === 0 || concurrentDispatchCap === 1;
-      if (dispatchBudgetAllows) {
-        parallelism = '2';
-      }
+    const { mode, slotBudget, freeSlots, concurrentDispatchCap } = opts.config;
+    // Cheap mode is the 2-slot local pool this bound protects; fast mode
+    // (cloud-routed, wider pool) keeps the serial historic default.
+    const cheapPool = mode === 'cheap' && slotBudget >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
+    // A GENUINELY free second slot right now — Phase 2 needs the parent plus
+    // a child = 2 concurrent streams (the total budget is not availability).
+    const secondSlotFree = freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
+    // Single-flight dispatch only: an unbounded (0) or ≥ 2 concurrent-dispatch
+    // budget means a second audit could run, so two audits × 2 children would
+    // exceed the cheap 2-slot pool. Only cap === 1 is safe.
+    const dispatchIsSingleFlight = concurrentDispatchCap === 1;
+    if (cheapPool && secondSlotFree && dispatchIsSingleFlight) {
+      parallelism = '2';
     }
-    // Fast mode, insufficient budget, or config-supplied but constraints not met → '1'
+    // Fast mode, no free second slot, non-single-flight budget, or config
+    // supplied but constraints not met → '1'.
   }
 
   return {
@@ -4175,7 +4213,7 @@ export const DOWNTIME_SPAWN_PROBE_MS = 500;
 export async function spawnDowntimePane(
   scriptPath: string,
   args: string[],
-  opts: { cwd: string },
+  opts: { cwd: string; config?: DowntimeSpawnConfig },
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): Promise<DowntimeSpawnResult> {
   const child = spawnFn(scriptPath, args, opts);
@@ -4239,6 +4277,19 @@ export interface DowntimeWorkerConfig {
     requiredFreeSlots: number;
     model: string;
     cwd: string;
+    /**
+     * Current proxy operating mode (WL-0MT50S9JW001DHME). `undefined` when
+     * unknown (mode switching disabled, or the proxy has not been polled
+     * yet) → the dispatcher conservatively keeps `AUDIT_PHASE2_PARALLELISM`
+     * at `'1'`.
+     */
+    mode?: 'cheap' | 'fast';
+    /**
+     * Maximum concurrent dispatch pipelines (WL-0MT50S9JW001DHME). Defaults
+     * to `DISPATCH_PIPELINE_SINGLE_FLIGHT` (1). Only a single-flight budget
+     * permits `'2'`; an unbounded (`0`) or ≥ 2 budget keeps `'1'`.
+     */
+    concurrentDispatchCap?: number;
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
@@ -4848,6 +4899,22 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           ? countFreeUnownedSlots(status.slots)
           : status.available_slots;
 
+      // Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME): the
+      // genuine free-slot snapshot (never the total budget), the current
+      // proxy mode, and the single-flight pipeline budget. `mode` is
+      // undefined until the mode-switch worker has observed the proxy, so an
+      // unknown mode leaves `spawnConfig` absent → the spawn defaults to the
+      // safe serial '1'.
+      const spawnConfig: DowntimeSpawnConfig | undefined =
+        cfg.mode === undefined
+          ? undefined
+          : {
+              mode: cfg.mode,
+              slotBudget: status.total_slots,
+              freeSlots,
+              concurrentDispatchCap: cfg.concurrentDispatchCap ?? DISPATCH_PIPELINE_SINGLE_FLIGHT,
+            };
+
       // ── Running-pane liveness (owner-lease qualifier only) ──
       // Count dispatched downtime panes that are STILL ALIVE (machine-wide,
       // across roots and leader/instance restarts).
@@ -4959,6 +5026,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
+                  spawnConfig,
                 },
               )
             : await dispatchDowntimeWork(opts.deps, {
@@ -4973,6 +5041,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 contentionQueueDepth,
                 // Success-marker staleness window (WL-0MU6UL0RJ008IHGT).
                 markerStaleWindowMs: cfg.markerStaleWindowMs,
+                spawnConfig,
               });
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();

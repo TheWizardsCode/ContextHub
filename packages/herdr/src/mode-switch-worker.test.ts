@@ -301,6 +301,40 @@ describe('fast switch on command', () => {
   });
 });
 
+// ── Last-known-mode exposure (WL-0MT50S9JW001DHME) ───────────────────
+
+describe('getLastKnownMode', () => {
+  it('returns null before any poll or switch', () => {
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    expect(worker.getLastKnownMode()).toBeNull();
+  });
+
+  it('returns fast after an operator command triggers the fast switch', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    worker.onOperatorCommand('http://proxy');
+    await flushAsync();
+    expect(worker.getLastKnownMode()).toBe('fast');
+  });
+
+  it('returns cheap after an idle tick switches to cheap', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi(); // GET /admin/mode defaults to 'fast'
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(worker.getLastKnownMode()).toBe('cheap');
+  });
+});
+
 // ── Cheap switch trigger ─────────────────────────────────────────────
 
 describe('cheap switch trigger', () => {

@@ -505,17 +505,30 @@ makes the item dispatchable again on the next idle poll.
 > var (legacy fallback, integer ≥ 1):
 >
 > - **`AUDIT_PHASE2_PARALLELISM=1`** (safe default): fast mode, cheap mode
->   with full dispatch budget, or config absent. Children run strictly
->   sequentially — the skill's documented historical mode. A parent audit
->   needs exactly **2 local slots** (parent + at most one child).
-> - **`AUDIT_PHASE2_PARALLELISM=2`**: cheap mode AND a second slot is free
->   AND the concurrent dispatch budget allows (≤ 1 concurrent dispatch).
->   Up to 2 Phase 2 children run in parallel. Since the parent already
->   completed Phase 1, the max concurrent streams per audit is 2 — the
->   children — which fits cheap mode's 2-slot pool. This is only enabled
->   when the combined dispatch budget would not exceed the slot capacity
->   (e.g., with concurrent-dispatch cap ≥ 2, PARALLELISM stays at 1 to
->   prevent multiple audits × 2 children from exceeding the 2-slot budget).
+>   without a genuinely free second slot, a non-single-flight dispatch budget,
+>   or config absent. Children run strictly sequentially — the skill's
+>   documented historical mode. A parent audit needs exactly **2 local
+>   slots** (parent + at most one child).
+> - **`AUDIT_PHASE2_PARALLELISM=2`**: cheap mode AND a second slot is
+>   GENUINELY free at dispatch time AND the dispatch is single-flight. Up to
+>   2 Phase 2 children run in parallel. Since the parent already completed
+>   Phase 1, the max concurrent streams per audit is 2 — the children —
+>   which fits cheap mode's 2-slot pool.
+>
+> The operative availability signal is the **free-slot count**, never the
+> total slot budget: a mode can have a 2-slot pool with only one slot free.
+> An unbounded dispatch budget (`concurrentDispatchCap = 0`) or a budget of
+> ≥ 2 keeps `PARALLELISM` at `1` — a second audit could otherwise run and
+> two audits × 2 children would exceed the cheap pool. Only a single-flight
+> budget (`1`, the default pipeline bound) enables `'2'`.
+>
+> Production wiring (WL-0MT50S9JW001DHME): the downtime worker passes a
+> `DowntimeSpawnConfig` — the current proxy mode (from the mode-switch
+> worker's last observed mode; unknown until polled, which conservatively
+> keeps `'1'`), the genuine free-slot snapshot, the mode's total slot
+> budget, and the single-flight pipeline cap — through `spawnAgentPane` to
+> `buildDowntimeSpawnOptions`, so dispatched audits no longer fall back to
+> the serial default when a second slot is truly free.
 >
 > A parent audit therefore needs at most **2 local slots** (the two
 > parallel children), fitting cheap mode's full capacity (2 × 262144 ctx)
