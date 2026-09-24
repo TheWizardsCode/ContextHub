@@ -8841,6 +8841,127 @@ describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
   });
 });
 
+// ── Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE) ──
+//
+// The live Herdr-head dispatch path (`dispatchFromHerdrList` → normal scan)
+// builds its `classifyItemForDispatch` input from the Herdr item fields. Before
+// the fix (022f1b24) it OMITTED `needsProducerReview`, so a non-critical item
+// flagged for producer review was dispatched anyway — even though the offer
+// path (`computeMostImportantItem`, which passes the item object directly)
+// already honoured the flag. These tests pin AC1–AC3: the flag blocks a
+// non-critical plan_complete / idea candidate, the direct path agrees with the
+// offer path, and clearing the flag restores dispatchability.
+
+describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)', () => {
+  const implementItem = (id: string, overrides: Partial<DowntimeHerdrItem> = {}): DowntimeHerdrItem => ({
+    id,
+    title: `Non-critical ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'medium',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 10,
+    ...overrides,
+  });
+
+  const intakeItem = (id: string, overrides: Partial<DowntimeHerdrItem> = {}): DowntimeHerdrItem => ({
+    id,
+    title: `Idea ${id}`,
+    status: 'open',
+    stage: 'idea',
+    priority: 'medium',
+    sortIndex: 10,
+    ...overrides,
+  });
+
+  const dispatchDeps = (items: DowntimeHerdrItem[]): DowntimeWorkerDeps => makeDeps({
+    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items }),
+    claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    recordDispatch: vi.fn().mockResolvedValue(true),
+  });
+
+  describe('AC2 — the flag blocks a non-critical candidate on dispatchDowntimeWork', () => {
+    it('blocks a plan_complete item (implement) and dispatches the next eligible item', async () => {
+      const deps = dispatchDeps([
+        implementItem('NPR-GATED', { needsProducerReview: true, sortIndex: 1 }),
+        implementItem('NPR-ALLOWED', { needsProducerReview: false, sortIndex: 2 }),
+      ]);
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      expect(outcome.candidate?.id).toBe('NPR-ALLOWED');
+      // The gated item was never claimed.
+      expect(deps.claimItem).not.toHaveBeenCalledWith('NPR-GATED', expect.any(Object), '/repo');
+    });
+
+    it('blocks an idea item (intake) and dispatches the next eligible item', async () => {
+      const deps = dispatchDeps([
+        intakeItem('NPR-IDEA-GATED', { needsProducerReview: true, sortIndex: 1 }),
+        intakeItem('NPR-IDEA-ALLOWED', { needsProducerReview: false, sortIndex: 2 }),
+      ]);
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('intake');
+      expect(outcome.candidate?.id).toBe('NPR-IDEA-ALLOWED');
+      expect(deps.claimItem).not.toHaveBeenCalledWith('NPR-IDEA-GATED', expect.any(Object), '/repo');
+    });
+
+    it('dispatches nothing when every candidate is review-gated', async () => {
+      const deps = dispatchDeps([
+        implementItem('NPR-ONLY', { needsProducerReview: true }),
+      ]);
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(false);
+      expect(deps.claimItem).not.toHaveBeenCalled();
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    });
+
+    it('clearing the flag restores dispatchability (same item shape)', async () => {
+      const gated = implementItem('NPR-CLEAR', { needsProducerReview: true });
+      const blocked = await dispatchDowntimeWork(dispatchDeps([gated]), { model: 'plan', cwd: '/repo' });
+      expect(blocked.dispatched).toBe(false);
+
+      gated.needsProducerReview = false;
+      const released = await dispatchDowntimeWork(dispatchDeps([gated]), { model: 'plan', cwd: '/repo' });
+      expect(released.dispatched).toBe(true);
+      expect(released.candidate?.id).toBe('NPR-CLEAR');
+    });
+  });
+
+  describe('AC3 — direct and offer paths agree on the producer-review gate', () => {
+    it('both the direct dispatch and the offer skip the gated item and pick the same next item', async () => {
+      const items = [
+        implementItem('NPR-PARITY-GATED', { needsProducerReview: true, sortIndex: 1 }),
+        implementItem('NPR-PARITY-ALLOWED', { needsProducerReview: false, sortIndex: 2 }),
+      ];
+
+      const direct = await dispatchDowntimeWork(dispatchDeps(items), { model: 'plan', cwd: '/repo' });
+      const offer = await computeMostImportantItem(dispatchDeps(items), '/repo');
+
+      expect(direct.dispatched).toBe(true);
+      expect(direct.candidate?.id).toBe('NPR-PARITY-ALLOWED');
+      expect(offer).toMatchObject({ ok: true, candidate: { id: 'NPR-PARITY-ALLOWED' } });
+    });
+
+    it('the offer reports no candidate when every candidate is review-gated', async () => {
+      const offer = await computeMostImportantItem(
+        dispatchDeps([implementItem('NPR-OFFER-ONLY', { needsProducerReview: true })]),
+        '/repo',
+      );
+
+      expect(offer).toMatchObject({ ok: true, noCandidate: true });
+    });
+  });
+});
+
 // ── RCA: duplicate re-dispatch of a critical in-flight item ─────────────
 // Parent WL-0MUBEZ6PE002WLP4 / F1 WL-0MUBVKPLP006RRDJ (AC1.1).
 //
@@ -9187,10 +9308,10 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
 //
 // Blocking is done by CLASSIFICATION SHAPE (a non-dispatchable stage for
 // open items, out-of-recency for completed/in_review) rather than by the
-// `needsProducerReview` flag: on the current `dev` the live Herdr-head
-// dispatcher builds its `classifyItemForDispatch` input WITHOUT threading
-// `needsProducerReview`, so that flag does not block on this path yet (a
-// separate defect tracked as a discovered-from work item).
+// `needsProducerReview` flag: the window-extension tests deliberately isolate
+// the window mechanism from the review gate. (The flag now blocks on this
+// path too — the field is threaded into `classifyItemForDispatch` as of
+// WL-0MU72WJ8C0005GIE / 022f1b24.)
 
 describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5)', () => {
   const OLD = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();

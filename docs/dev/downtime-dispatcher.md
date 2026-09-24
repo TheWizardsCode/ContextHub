@@ -428,6 +428,15 @@ leader path equally skips review-gated entries (retaining them for later re-offe
 flag is cleared). The filter report is "no candidate" (not a `wl-error` strike) and the
 no-candidate cooldown is not triggered while review-gated work exists.
 
+**Live Herdr-head thread (WL-0MU72WJ8C0005GIE).** The flag reaches
+`classifyItemForDispatch` on BOTH dispatch paths. The normal scan in
+`dispatchFromHerdrList` builds its `DowntimeItemInfo` field-by-field from the Herdr
+head item, so it must thread `needsProducerReview` explicitly; the offer path
+(`computeMostImportantItem`) passes the item object directly, so it always honoured
+the flag. Before the threading fix (`022f1b24`) the two paths disagreed and the live
+path auto-dispatched a `needsProducerReview: true` item — the regression suite
+(`needsProducerReview === true blocks a non-critical item…`) pins the agreement.
+
 ### Review-queue depth gate — producer review policy (WL-0MT2UQWOR007CYY9; live-path rewire WL-0MTTSWC1X005P4VD)
 
 The **producer review policy**: while the root-only `completed`/`in_review` queue is deep
