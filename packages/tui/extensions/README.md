@@ -249,9 +249,8 @@ Recovery behaviour is driven by `DEFAULT_RECOVERY_CONFIG` in
 ### Server-Requested Retry Delays (`Retry-After`)
 
 When a provider asks the client to wait — e.g. the llm-proxy startup-ramp gate
-returns HTTP `503` with a `Retry-After` header and a body containing
-`retry_after` (seconds) — the retry loop honours that hint instead of
-retrying on the plain exponential schedule:
+returns HTTP `503` with a `Retry-After` header — the retry loop honours that
+hint instead of retrying on the plain exponential schedule:
 
 - The delay is the **larger** of the exponential backoff and the
   server-requested delay, so the client never retries sooner than asked
@@ -264,11 +263,28 @@ retrying on the plain exponential schedule:
   (the proxy's `startup_ramp.max_seconds`, default 180s) without surfacing a
   hard failure.
 
-Supported forms: `retry-after-ms` / `retry_after_ms` (milliseconds),
-`retry-after` / `retry_after` delta-seconds (fractional allowed), and
-HTTP-date `Retry-After`. Escaped JSON bodies (`\"retry_after\": 9`) are also
-parsed. Parsing lives in `parseServerRetryDelayMs()` and the single decision
-point `resolveRetryDelay()` in `retry-logic.ts`.
+#### Where the hint is read from
+
+The server hint is resolved from two sources, in precedence order:
+
+1. **Response headers** (`after_provider_response` / `fetch` capture). Pi's
+   `openai-completions` provider throws on a non-2xx response *before* the
+   `after_provider_response` extension event fires, and the resulting
+   assistant error message drops the header. The recovery module therefore
+   installs a transparent `globalThis.fetch` wrapper
+   (`createRetryHintCapturingFetch()`) that records the parsed
+   `Retry-After` / `Retry-After-Ms` header for 429/5xx responses and clears it
+   on 2xx. This is the source that works for the llm-proxy startup ramp.
+2. **Assistant error message** (`parseServerRetryDelayMs()`), for providers
+   that fold the hint into the error text (e.g. a JSON body containing
+   `retry_after`). Real llm-proxy startup-ramp messages do **not** carry this
+   field — the header is authoritative.
+
+`resolveRetryDelay()` is the single decision point that combines both sources
+and hands the delay to `calculateDelay()`. Supported header/body forms:
+`retry-after-ms` / `retry_after_ms` (milliseconds), `retry-after` /
+`retry_after` delta-seconds (fractional allowed), and HTTP-date `Retry-After`.
+Escaped JSON bodies (`\"retry_after\": 9`) are also parsed.
 
 ### `/retry` Command
 
@@ -309,7 +325,7 @@ The recovery module is implemented in `Worklog/lib/recovery/` and consists of:
 | File | Purpose |
 |------|---------|
 | `error-patterns.ts` | Error classification patterns for all 8 categories |
-| `retry-logic.ts` | Exponential backoff, `Retry-After`/`retry_after` parsing and jitter, state managers, interruptible sleep |
+| `retry-logic.ts` | Exponential backoff, `Retry-After` header/`retry_after` parsing (plus a `fetch` capture wrapper) and jitter, state managers, interruptible sleep |
 | `recovery.ts` | Compact-and-continue, checkpoint-and-terminate, and single-shot parse-error continue handlers |
 | `retry-command.ts` | `/retry` command interface (status, reset, manual-trigger) |
 | `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start, session_compact) |
