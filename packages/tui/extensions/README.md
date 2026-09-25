@@ -252,9 +252,11 @@ When a provider asks the client to wait — e.g. the llm-proxy startup-ramp gate
 returns HTTP `503` with a `Retry-After` header — the retry loop honours that
 hint instead of retrying on the plain exponential schedule:
 
-- The delay is the **larger** of the exponential backoff and the
-  server-requested delay, so the client never retries sooner than asked
-  (bounded by `maxDelayMs`, default 60s).
+- When a hint is present it is **authoritative**: the delay tracks the
+  server-requested delay (plus upward-only jitter, bounded by `maxDelayMs`,
+  default 60s). The local exponential backoff is used only when the hint is
+  absent or malformed, so a grown local backoff can never override the
+  server's recommended wait.
 - Upward-only jitter (25% by default, `serverHintJitterRatio`) is applied to
   hint-derived delays so concurrent clients do not retry in lockstep.
 - Missing or malformed hints fall back to the existing exponential backoff,

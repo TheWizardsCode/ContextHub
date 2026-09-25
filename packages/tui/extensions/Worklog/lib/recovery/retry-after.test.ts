@@ -120,9 +120,12 @@ describe('calculateDelay with a server hint', () => {
     expect(calculateDelay(1, DEFAULT_BACKOFF_CONFIG, 7000, noJitter)).toBe(7000);
   });
 
-  it('uses the exponential backoff when it exceeds the hint', () => {
-    // attempt 5 exponential = 32000ms, hint = 5000ms -> floor is 32000ms.
-    expect(calculateDelay(5, DEFAULT_BACKOFF_CONFIG, 5000, noJitter)).toBe(32000);
+  it('honours the server hint even when the local exponential has grown larger', () => {
+    // attempt 5 exponential = 32000ms, hint = 5000ms. The server hint is
+    // authoritative: the local backoff must not override the recommended wait
+    // (producer rejection: "the local retry mechanism overriding the
+    // recommended wait duration").
+    expect(calculateDelay(5, DEFAULT_BACKOFF_CONFIG, 5000, noJitter)).toBe(5000);
   });
 
   it('caps the server-requested delay at the configured maximum', () => {
@@ -137,10 +140,18 @@ describe('calculateDelay with a server hint', () => {
       multiplier: 2,
       serverHintJitterRatio: 0.25,
     };
-    const floor = 8000; // max(exponential 2000, hint 8000)
-    expect(calculateDelay(1, config, 8000, () => 0)).toBe(floor);
+    // Hint-derived delays track the hint, not the (smaller) exponential.
+    expect(calculateDelay(1, config, 8000, () => 0)).toBe(8000);
     expect(calculateDelay(1, config, 8000, () => 0.5)).toBe(9000);
     expect(calculateDelay(1, config, 8000, () => 1)).toBe(10_000);
+  });
+
+  it('does not let the local backoff escalate a hint-derived delay across attempts', () => {
+    // A constant 7s hint must yield ~7s on every attempt, even at attempt 6
+    // where the local exponential would otherwise be capped at 60s.
+    for (const attempt of [1, 2, 3, 4, 5, 6, 10]) {
+      expect(calculateDelay(attempt, DEFAULT_BACKOFF_CONFIG, 7000, () => 0)).toBe(7000);
+    }
   });
 
   it('never retries sooner than the hint under maximum jitter', () => {

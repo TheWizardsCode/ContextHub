@@ -211,10 +211,17 @@ export function createRetryHintCapturingFetch(
  * capped at `maxDelayMs` (existing exponential backoff, unchanged).
  *
  * With a usable server hint (from `Retry-After` / `retry_after`): the delay
- * is the larger of the exponential backoff and the server-requested delay,
- * plus upward-only jitter, capped at `maxDelayMs`. This guarantees the client
- * never retries sooner than the server asked (unless the configured cap is
- * below the hint).
+ * tracks the server-requested delay (plus upward-only jitter, capped at
+ * `maxDelayMs`). The local exponential backoff is **not** combined into this
+ * value — a growing local backoff must not silently override the server's
+ * recommendation.
+ *
+ * @remarks
+ * The server hint is authoritative when present. An earlier revision used
+ * `max(exponential, serverHintMs)`, which let the local exponential override
+ * the hint once it outgrew it (e.g. `Retry-After: 7` -> retry at 32s/60s).
+ * That is the behaviour the producer rejected as "the local retry mechanism
+ * overriding the recommended wait duration".
  *
  * @param attempt - The attempt number (1-based)
  * @param config - Backoff configuration (defaults if not provided)
@@ -241,9 +248,11 @@ export function calculateDelay(
     return exponential;
   }
 
-  const floor = Math.max(exponential, serverHintMs);
+  // A usable server hint is authoritative: the delay tracks the hint, not the
+  // local exponential. Upward-only jitter keeps the delay at or above the
+  // requested wait, and the configurable maximum still bounds it.
   const jitterRatio = Math.max(0, config.serverHintJitterRatio ?? DEFAULT_SERVER_HINT_JITTER_RATIO);
-  const jittered = floor * (1 + jitterRatio * random());
+  const jittered = serverHintMs * (1 + jitterRatio * random());
   return Math.min(Math.round(jittered), config.maxDelayMs);
 }
 

@@ -119,6 +119,14 @@ describe('resolveRetryDelay with a header hint', () => {
     expect(result.delayMs).toBe(60_000);
   });
 
+  it('does not let a grown local backoff override the header hint', () => {
+    // attempt 6 local exponential is capped at 60000ms, but the header hint is
+    // authoritative — the local backoff must not override the server's wait.
+    const result = resolveRetryDelay(6, REAL_RAMP_503, DEFAULT_BACKOFF_CONFIG, noJitter, 8000);
+    expect(result.hintSource).toBe('header');
+    expect(result.delayMs).toBe(8000);
+  });
+
   it('treats a negative/NaN header hint as absent', () => {
     expect(resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, noJitter, -1).hintSource).toBeUndefined();
     expect(resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, noJitter, Number.NaN).hintSource).toBeUndefined();
@@ -220,6 +228,7 @@ describe('startup_ramp RCA regression', () => {
       const headerHint = parseRetryAfterHeaders(new Headers({ 'Retry-After': String(5 + (attempt % 14)) }));
       const { delayMs } = resolveRetryDelay(attempt, REAL_RAMP_503, config, () => 0, headerHint);
       expect(delayMs).toBeGreaterThanOrEqual(headerHint!);
+      expect(delayMs).toBeLessThanOrEqual(config.maxDelayMs);
       elapsed += delayMs;
     }
     expect(elapsed).toBeGreaterThanOrEqual(180_000);
