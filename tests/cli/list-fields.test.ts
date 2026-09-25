@@ -116,6 +116,38 @@ describe('wl list --fields', () => {
     expect(Object.keys(wi)).toEqual(['id', 'title']);
   });
 
+  it('accepts space-separated fields (shell splits --fields id, title)', async () => {
+    seedWorkItems(state.tempDir, [FULL_ITEM]);
+
+    const { stdout } = await execAsync(`tsx ${cliPath} list --fields id, title --json`);
+    const result = JSON.parse(stdout);
+    expect(result.workItems).toHaveLength(1);
+    const wi = result.workItems[0];
+    expect(wi.id).toBe('TEST-1');
+    expect(wi.title).toBe('Feature item');
+    expect(Object.keys(wi)).toEqual(['id', 'title']);
+  });
+
+  it('accepts three or more space-separated fields', async () => {
+    seedWorkItems(state.tempDir, [FULL_ITEM]);
+
+    const { stdout } = await execAsync(`tsx ${cliPath} list --fields id, title, status --json`);
+    const result = JSON.parse(stdout);
+    const wi = result.workItems[0];
+    expect(Object.keys(wi)).toEqual(['id', 'title', 'status']);
+    expect(wi.status).toBe('in-progress');
+  });
+
+  it('does not swallow a positional search term after a complete --fields value', async () => {
+    seedWorkItems(state.tempDir, [FULL_ITEM]);
+
+    // `--fields id,title` is complete, so `Feature` is a search term, not a field.
+    const { stdout } = await execAsync(`tsx ${cliPath} list Feature --fields id,title --json`);
+    const result = JSON.parse(stdout);
+    expect(result.workItems).toHaveLength(1);
+    expect(Object.keys(result.workItems[0])).toEqual(['id', 'title']);
+  });
+
   it('produces smaller output than full records (projection reduces size)', async () => {
     const items = Array.from({ length: 50 }, (_, i) => ({
       id: `TEST-${i + 1}`,

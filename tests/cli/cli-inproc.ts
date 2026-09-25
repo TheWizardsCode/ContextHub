@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { createPluginContext } from '../../src/cli-utils.js';
+import { createPluginContext, normalizeFieldsArgv } from '../../src/cli-utils.js';
 import { applyWorklogDirOverrideFromArgv, setWorklogDirOverride } from '../../src/worklog-paths.js';
 // Import the shared throttler so the in-process harness can wait for any
 // scheduled GitHub tasks to drain when a parse timeout occurs. Accessing the
@@ -98,6 +98,9 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   // find index of the script path (ends with src/cli.ts)
   const cliIndex = tokens.findIndex(t => t.endsWith(path.join('src', 'cli.ts')) || t.endsWith(path.join('dist', 'cli.js')));
   const args = cliIndex >= 0 ? tokens.slice(cliIndex + 1) : tokens;
+  // Mirror src/cli.ts: merge space-separated --fields continuations before
+  // Commander parses them (WL-0MSLW8GHQ0092PJK).
+  const normalizedArgs = normalizeFieldsArgv(args);
 
   // Capture stdout/stderr
   const out: string[] = [];
@@ -110,7 +113,7 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   const origConsoleWarn = console.warn;
   const origConsoleInfo = console.info;
   const origArgv = process.argv;
-  const argv = ['node', 'worklog', ...args];
+  const argv = ['node', 'worklog', ...normalizedArgs];
   process.argv = argv;
   process.stdout.write = ((chunk: any, enc?: any, cb?: any) => {
     try {
@@ -144,7 +147,7 @@ export async function runInProcess(commandLine: string, timeoutMs: number = 1500
   // Mirror src/cli.ts: apply --worklog-dir from argv BEFORE creating the
   // plugin context so ctx.dataPath (and -f/--file defaults) reflect the
   // override (WL-0MSAH26DD001XXST).
-  applyWorklogDirOverrideFromArgv(args);
+  applyWorklogDirOverrideFromArgv(normalizedArgs);
 
   try {
     const program = new Command();
