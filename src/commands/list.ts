@@ -45,7 +45,10 @@ export default function register(ctx: PluginContext): void {
         requestedFields = options.fields.split(',').map(f => f.trim()).filter(Boolean);
         const unknown = requestedFields.filter(f => !VALID_FIELDS.includes(f as (typeof VALID_FIELDS)[number]));
         if (unknown.length > 0) {
-          const fieldsError = `Unknown fields: ${unknown.join(', ')}. Valid fields: ${VALID_FIELDS.join(', ')}`;
+          // id is always included regardless of request, so omit it from the
+          // valid-fields list shown in the error message.
+          const validFieldsList = VALID_FIELDS.filter(f => f !== 'id').join(', ');
+          const fieldsError = `Unknown fields: ${unknown.join(', ')}. Valid fields: ${validFieldsList}`;
           output.error(fieldsError, { success: false, error: fieldsError, message: fieldsError });
           process.exit(1);
         }

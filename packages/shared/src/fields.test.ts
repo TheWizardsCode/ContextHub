@@ -146,4 +146,20 @@ describe('pickFields', () => {
   it('VALID_FIELDS has no unexpected entries', () => {
     expect(VALID_FIELDS).toHaveLength(14);
   });
+
+  it('error message for unknown fields excludes id from valid fields list', () => {
+    let error: Error | undefined;
+    try {
+      pickFields(SAMPLE_ITEM, ['bogusField']);
+    } catch (e) {
+      error = e instanceof Error ? e : undefined;
+    }
+    expect(error).toBeDefined();
+    // id is always included regardless of request, so it must NOT appear in
+    // the error message's valid-fields list.
+    expect(error!.message).not.toMatch(/Valid fields:.*\bid\b/);
+    // but other fields should still appear
+    expect(error!.message).toContain('title');
+    expect(error!.message).toContain('status');
+  });
 });

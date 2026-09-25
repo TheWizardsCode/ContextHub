@@ -45,10 +45,14 @@ describe('--fields end-to-end integration', () => {
     expect(searchErr).not.toBeNull();
     // Both commands report the same valid-field vocabulary.
     expect(listErr![1]).toBe(searchErr![1]);
-    // The vocabulary contains the documented field set.
-    for (const f of ['id', 'title', 'description', 'status', 'stage', 'priority', 'issueType', 'assignee', 'tags', 'createdAt', 'updatedAt', 'parentId', 'needsProducerReview', 'sortIndex']) {
+    // The vocabulary lists all fields EXCEPT id (id is always included,
+    // so it is not mentioned in the error message).
+    const expectedFields = ['title', 'description', 'status', 'stage', 'priority', 'issueType', 'assignee', 'tags', 'createdAt', 'updatedAt', 'parentId', 'needsProducerReview', 'sortIndex'];
+    for (const f of expectedFields) {
       expect(listErr![1]).toContain(f);
     }
+    // id must NOT appear in the valid-fields list
+    expect(listErr![1]).not.toMatch(/\bid\b/);
   });
 
   it('search --fields combined with --semantic keeps projection and search metadata', async () => {
