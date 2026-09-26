@@ -1170,22 +1170,37 @@ wl --json status
 
 ### `interview` [options] <id>
 
-Walk through outstanding interview questions on a work item interactively, capturing
-answers and clearing the `needsProducerReview` flag. Interview questions are set by
-producers when reviewing work items to request clarification or changes. This command
-presents each question in sequence, allowing you to provide answers or dismiss questions
-that are no longer relevant.
+Walk through the outstanding clarifying questions on a work item interactively,
+capturing answers and clearing the `needsProducerReview` flag.
+
+The command reads the work item's clarifying-questions appendix (written by the
+`intake` and `plan` skills) and prompts for every question that is still
+outstanding — that is, questions with no answer or an explicit
+`*(awaiting producer)*` placeholder. Answers are written back into the
+appendix in place, so surrounding markup (`Source:` lines, attribution,
+quotes, bold markers) is preserved.
+
+Both appendix styles are recognised:
+
+- the canonical bullet appendix (`## Appendix: Clarifying questions` with
+  `- Q: "…" — Answer (user): "…"` entries), and
+- the legacy numbered form (`1. **Q:** …` / `**A:** …`).
+
+Answers are persisted after each response, so an interrupted session can be
+resumed by re-running the command: only the questions that remain outstanding
+are asked. `needsProducerReview` is cleared once every question has an answer.
 
 Options:
 
 - `--prefix <prefix>` — Operate on a specific prefix (optional).
-- `--json` — Output machine-readable JSON (optional).
+
+> The command requires interactive (TTY) input; it cannot be used with
+> `--json`.
 
 Examples:
 
 ```sh
 wl interview WL-ABC123
-wl interview WL-ABC123 --json
 ```
 
 ### `help` [command]
