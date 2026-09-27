@@ -656,9 +656,9 @@ export class WorklogDatabase {
    * Ordering-tier gate (WL-0MTH7G2O1004BHN5): only an audit that exists,
    * is not ready to close (`readyToClose === false`), and is fresh per the
    * shared `isAuditFresh` predicate qualifies for the audit-not-ready boost.
-   * Stale audits (content edited after the audit, or an audit/updatedAt skew
-   * beyond the 60 s at-or-near tolerance) are treated as no audit for
-   * ordering. The timestamp comparison is delegated to the single source of
+   * Stale audits (content edited more than the 60 s at-or-near tolerance
+   * after the audit) are treated as no audit for ordering. The timestamp
+   * comparison is delegated to the single source of
    * truth in `@worklog/shared/icons` (WL-0MUBVH7ZR009PP80) — no competing
    * `auditedAt`-vs-`updatedAt` comparison lives here. No fingerprints are
    * passed: the ordering path has no per-item current fingerprint, so the

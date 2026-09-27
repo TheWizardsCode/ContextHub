@@ -3584,6 +3584,31 @@ describe('WorklogDatabase', () => {
       db.update(id, { description: `content tweak at ${Date.now()}` });
     };
 
+    // Force updatedAt to a deterministic value (the audit's own persistence
+    // sets updatedAt = auditedAt atomically, so a clearly-newer audit can only
+    // be constructed by rewinding updatedAt).
+    const setUpdatedAt = (id: string, iso: string): void => {
+      const ps: any = db.store;
+      ps.db.prepare('UPDATE workitems SET updatedAt = ? WHERE id = ?').run(iso, id);
+      ps.invalidateWorkItemCaches();
+      ps.cacheInvalidate(`workitem_${id}`);
+    };
+
+    it('reSort: a clearly-newer audit (auditedAt > updatedAt) is boosted, agreeing with isAuditFresh', async () => {
+      // Regression guard for the symmetric-gate mistake (WL-0MUBVH7ZR009PP80):
+      // an audit that postdates the item's last content change covers it and
+      // must be treated as fresh, not stale.
+      const medium = db.create({ title: 'Medium unaudited', priority: 'medium', sortIndex: 100 });
+      const low = db.create({ title: 'Low audit later than update', priority: 'low', sortIndex: 200 });
+
+      saveNotReadyAudit(low.id, new Date().toISOString());
+      setUpdatedAt(low.id, new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString());
+      expect(isAuditFresh(db.getAuditResult(low.id)!.auditedAt, db.get(low.id)!.updatedAt)).toBe(true);
+
+      db.reSort();
+      expect(db.get(low.id)!.sortIndex).toBeLessThan(db.get(medium.id)!.sortIndex);
+    });
+
     it('reSort: a within-tolerance audited-not-ready item is boosted, agreeing with isAuditFresh', async () => {
       const medium = db.create({ title: 'Medium unaudited', priority: 'medium', sortIndex: 100 });
       const low = db.create({ title: 'Low audited 30 s ago', priority: 'low', sortIndex: 200 });

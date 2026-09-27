@@ -870,9 +870,10 @@ describe('createDowntimeDeps', () => {
         success: true,
         count: 2,
         workItems: [
-          // Fresh per the symmetric isAuditFresh time gate: auditedAt within
-          // the 60 s tolerance band of updatedAt (WL-0MUBVH7ZR009PP80).
-          { id: 'WL-FRESH', title: 'Fresh audit', auditedAt: new Date(now - HOUR_MS + 30_000).toISOString(), updatedAt: new Date(now - HOUR_MS).toISOString(), sortIndex: 100 },
+          // Fresh per the one-sided isAuditFresh gate: the audit (30 min ago)
+          // postdates the item's last update (1 h ago), so it covers the
+          // current content (WL-0MUBVH7ZR009PP80).
+          { id: 'WL-FRESH', title: 'Fresh audit', auditedAt: new Date(now - 30 * 60 * 1000).toISOString(), updatedAt: new Date(now - HOUR_MS).toISOString(), sortIndex: 100 },
           { id: 'WL-STALE', title: 'Stale audit', auditedAt: new Date(now - 2 * HOUR_MS).toISOString(), updatedAt: new Date(now - HOUR_MS).toISOString(), sortIndex: 200 },
         ],
       }),

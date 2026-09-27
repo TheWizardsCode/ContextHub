@@ -193,12 +193,16 @@ the TUI icon path (`stageDisplayIcon`), the `in_review` ordering predicate
    working-tree state`).
 2. **Time gate (legacy fallback).** When no stored fingerprint is present
    (legacy audits) or the caller cannot supply a current fingerprint (e.g. a TUI
-   render), the audit is fresh iff
-   `|auditedAt - updatedAt| < AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s,
-   symmetric at-or-near; WL-0MUBVH7ZR009PP80). The earlier one-sided
-   `auditedAt > updatedAt - 60s` form was a competing definition and has been
-   removed, so the ordering tier, the icon path and the dispatcher cannot
-   disagree.
+   render), the audit is fresh iff `auditedAt > updatedAt -
+   AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s, one-sided; WL-0MUBVH7ZR009PP80).
+   That is: an audit at or after the item's content timestamp is always fresh
+   (it covers the content), and an audit that precedes a later content edit is
+   stale once the gap exceeds the tolerance. The ordering tier, the icon path
+   and the dispatcher all share this single comparison — the earlier competing
+   `auditedAt >= updatedAt` (no tolerance) form in the ordering tier has been
+   removed. (SorraAgents' runner uses a stricter `updatedAt + 60 s` reuse gate;
+   that is a different, pipeline-skip decision and is deliberately not used as
+   the currency predicate here.)
 
 Freshness is **atomic**: `saveAuditResult` — the path behind `wl audit-set`,
 `wl update --audit-text`, and the audit runner's `persist_audit.py` (see

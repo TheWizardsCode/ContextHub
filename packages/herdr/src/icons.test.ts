@@ -225,33 +225,34 @@ describe('isAuditFresh — genuinely stale (WL-0MSIAOFI70075REE)', () => {
   });
 });
 
-describe('isAuditFresh — symmetric at-or-near boundary (WL-0MUBVH7ZR009PP80)', () => {
+describe('isAuditFresh — one-sided at-or-near boundary (WL-0MUBVH7ZR009PP80)', () => {
   const base = Date.parse('2026-08-02T10:00:00.000Z');
   const at = (offsetMs: number) => new Date(base + offsetMs).toISOString();
 
-  it('treats an audit 30 s after updatedAt as fresh (within tolerance)', () => {
+  it('treats an audit 30 s after updatedAt as fresh (audit covers the content)', () => {
     expect(isAuditFresh(at(30_000), at(0))).toBe(true);
   });
 
-  it('treats an audit exactly 60 s after updatedAt as stale (strict <)', () => {
-    expect(isAuditFresh(at(60_000), at(0))).toBe(false);
-  });
-
-  it('treats an audit beyond 60 s after updatedAt as stale (previously one-sided fresh)', () => {
-    // The old one-sided gate (`auditedAt > updatedAt - 60 s`) accepted any
-    // audit later than updatedAt; the symmetric gate rejects a >60 s skew.
-    expect(isAuditFresh(at(120_000), at(0))).toBe(false);
+  it('treats an audit 120 s after updatedAt as fresh (regression: symmetric gate wrongly rejected this)', () => {
+    // A clearly-newer audit covers the current content; both the original
+    // one-sided gate and the SorraAgents `updatedAt + 60 s` reuse gate treat
+    // it as fresh. The symmetric intermediate form did not — do not regress.
+    expect(isAuditFresh(at(120_000), at(0))).toBe(true);
   });
 
   it('treats an audit 30 s before updatedAt as fresh (within tolerance)', () => {
     expect(isAuditFresh(at(0), at(30_000))).toBe(true);
   });
 
-  it('treats an audit exactly 60 s before updatedAt as stale (strict <)', () => {
+  it('treats an audit exactly 60 s before updatedAt as stale (strict > bound)', () => {
     expect(isAuditFresh(at(0), at(60_000))).toBe(false);
   });
 
-  it('treats an audit beyond 60 s before updatedAt as stale', () => {
+  it('treats an audit 60.001 s before updatedAt as stale (outside tolerance)', () => {
+    expect(isAuditFresh(at(0), at(60_001))).toBe(false);
+  });
+
+  it('treats an audit 120 s before updatedAt as stale (content edited after the audit)', () => {
     expect(isAuditFresh(at(0), at(120_000))).toBe(false);
   });
 

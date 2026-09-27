@@ -8,7 +8,7 @@
  * downtime-dispatch path (`selectAuditCandidate`) and the `in_review`
  * ordering path (`inReviewBucket`) all reach the same verdict as
  * `isAuditFresh` for fresh / just-persisted / stale / missing-audit inputs —
- * including inputs on both sides of the symmetric 60 s tolerance band.
+ * including the one-sided boundary (audit before vs after `updatedAt`).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -41,7 +41,7 @@ const FIXTURES: Fixture[] = [
   { name: 'audit 30 s after updatedAt', auditedAt: at(30_000), updatedAt: at(0), fresh: true, bucket: 2, icon: AUDIT_NOT_READY },
   { name: 'audit 30 s before updatedAt', auditedAt: at(-30_000), updatedAt: at(0), fresh: true, bucket: 2, icon: AUDIT_NOT_READY },
   { name: 'audit 120 s before updatedAt (stale)', auditedAt: at(-120_000), updatedAt: at(0), fresh: false, bucket: 3, icon: IN_REVIEW_STAGE },
-  { name: 'audit 120 s after updatedAt (stale, symmetric)', auditedAt: at(120_000), updatedAt: at(0), fresh: false, bucket: 3, icon: IN_REVIEW_STAGE },
+  { name: 'audit 120 s after updatedAt (fresh, one-sided)', auditedAt: at(120_000), updatedAt: at(0), fresh: true, bucket: 2, icon: AUDIT_NOT_READY },
   { name: 'missing audit', auditedAt: null, updatedAt: at(0), fresh: false, bucket: 4, icon: IN_REVIEW_STAGE },
 ];
 

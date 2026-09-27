@@ -932,9 +932,10 @@ describe('Sync Operations', () => {
       // (isAuditFresh(auditedAt, updatedAt) stays true when updatedAt is stable.)
 
       const sameTimestamp = '2024-06-01T12:00:00.000Z';
-      // Audit persisted just after the item's last edit (within the shared
-      // 60 s at-or-near tolerance) — freshness is delegated to isAuditFresh.
-      const auditedAt = '2024-06-01T12:00:30.000Z';
+      // The audit was persisted well after the item's last edit, so it covers
+      // the current content and is fresh under the one-sided isAuditFresh gate
+      // (an audit at or after updatedAt is always fresh).
+      const auditedAt = '2024-08-15T10:00:00.000Z';
 
       const localItem: WorkItem = {
         id: 'WI-006',

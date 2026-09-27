@@ -266,10 +266,11 @@ export function needsProducerReviewIcon(
 // ── Audit freshness ───────────────────────────────────────────────────
 
 /**
- * Named tolerance (ms) for treating an audit as fresh when `auditedAt` and
- * `updatedAt` are within the same atomic persistence window.  Covers the
- * just-persisted case where `auditedAt ≈ updatedAt` (delta well under 1 s)
- * as well as brief comment-only bumps that stay within the 60 s window.
+ * Named tolerance (ms) for treating an audit as fresh when `auditedAt` is at
+ * or near `updatedAt`. Covers the just-persisted case where
+ * `auditedAt ≈ updatedAt` (delta well under 1 s) and allows for a brief
+ * content edit shortly *before* the audit is persisted (delta slightly
+ * positive) — see {@link isAuditFresh} for the one-sided comparison.
  *
  * Single source of truth: the icon path (`stageDisplayIcon` / `auditIcon`), the
  * audit-dispatch path (`selectAuditCandidate` / `classifyItemForDispatch`) and
@@ -302,13 +303,26 @@ export interface ParentAuditState {
  * regardless of `updatedAt` movement caused by comments, sync merges, or
  * lifecycle transitions.
  *
- * Fallback (legacy time gate): When the stored fingerprint is absent, the
- * 60 s symmetric at-or-near gate is used — an audit is fresh when
- * `|auditedAt - updatedAt| < AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS`
- * (WL-0MUBVH7ZR009PP80). The previous one-sided
- * `auditedAt > updatedAt - 60 s` form was a competing definition; this
- * symmetric form is the single freshness comparison shared by the icon,
- * dispatch and ordering paths.
+ * Fallback (legacy time gate): When the stored fingerprint is absent, an
+ * audit is fresh unless the item's content was updated after the audit by
+ * more than `AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` — fresh iff
+ * `auditedAt > updatedAt - tolerance` (i.e. delta = `auditedAt - updatedAt`
+ * is greater than -60 s). This is the long-standing ContextHub currency
+ * predicate (WL-0MSIAOFI70075REE), restored as the single comparison shared
+ * by the icon, dispatch and ordering paths (WL-0MUBVH7ZR009PP80). It is
+ * deliberately one-sided: an audit at or AFTER `updatedAt` is always fresh
+ * (it covers the content, even if it is far in the future), while an audit
+ * that precedes a later content edit is stale once the gap exceeds the
+ * tolerance.
+ *
+ * The SorraAgents runner uses a different, stricter gate for its
+ * pipeline-reuse decision (`auditedAt > updatedAt + 60 s`, plus a 30 s
+ * reverse persistence window; SA-0MRJBEJGY0095XAY, patched by
+ * SA-0MSI3XH34001LLU4 / SA-0MTHC710X003ORZM). That gate answers "is it safe
+ * to skip re-auditing?" and rejects audits that are only slightly newer than
+ * the update; it must not be conflated with this currency predicate. A
+ * symmetric or `updatedAt + 60 s` form would wrongly mark a valid,
+ * clearly-newer audit as stale and trigger redundant re-audits.
  *
  * Guarantees:
  *   • `updatedAt` churn alone (post-audit comment, sync merge re-timestamp,
@@ -323,9 +337,10 @@ export interface ParentAuditState {
  * Atomic freshness (WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51): `saveAuditResult`
  * (and therefore `wl audit-set` and `wl update --audit-text`) atomically sets
  * `updatedAt = auditedAt` in the same transaction that writes the
- * `audit_results` row. Subsequent comments do bump `updatedAt`, but the
- * fingerprint gate keeps fingerprinted audits fresh, and the legacy time gate
- * keeps non-fingerprinted audits fresh within the 60 s window.
+ * `audit_results` row. Subsequent comments bump `activityAt`, not
+ * `updatedAt`, so they never invalidate a legacy audit; the time gate keeps
+ * non-fingerprinted audits fresh within the 60 s window after a content
+ * edit.
  * The audit record in `audit_results` is the canonical source of truth;
  * audit-content comments are deprecated and not consumed by any flow
  * (ship/heartbeat/TUI/implement).
@@ -351,9 +366,10 @@ export function isAuditFresh(
   const auditTime = new Date(auditedAt).getTime();
   const updateTime = new Date(updatedAt).getTime();
   if (isNaN(auditTime) || isNaN(updateTime)) return false;
-  // Symmetric at-or-near: fresh only when the two timestamps are within the
-  // tolerance band (strict `<`, so an exact 60 s gap is stale).
-  return Math.abs(auditTime - updateTime) < AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
+  // One-sided at-or-near: fresh unless the item's content was updated more
+  // than the tolerance AFTER the audit (delta <= -tolerance is stale). An
+  // audit at or after `updatedAt` is always fresh.
+  return auditTime > updateTime - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
 }
 
 /**
