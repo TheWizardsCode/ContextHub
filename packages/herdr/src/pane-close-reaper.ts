@@ -1,0 +1,152 @@
+/**
+ * packages/herdr/src/pane-close-reaper.ts — Closure reaper orchestration
+ *
+ * Scans herdr panes, classifies each via the shared `classifySession`
+ * classifier, closes eligible panes, and writes a per-run ledger.
+ *
+ * I/O is injected via the `ReaperDeps` interface so the core logic is fully
+ * testable without real herdr calls.
+ *
+ * The reaper is idempotent against the existing `pane-lifecycle.ts` dispatch
+ * monitor: a pane already closed by the dispatch monitor is simply gone from
+ * `listPanes()` and is skipped. Both mechanisms use the same classifier,
+ * so decisions cannot diverge (parent AC6).
+ */
+
+import { classifySession, extractFinalAssistantText } from './pane-close.js';
+import type { CloseDecision, SessionSample } from './pane-close.js';
+import type { TerminateResult } from './process-group.js';
+
+// ── Types ─────────────────────────────────────────────────────────────
+
+/**
+ * The injectable I/O interface for the reaper. Tests provide fakes;
+ * production code provides real herdr/wl integrations.
+ */
+export interface ReaperDeps {
+  /** List all currently active panes with their session state. */
+  listPanes(): Promise<PaneStatus[]>;
+  /** Close a pane by ID. Returns a result indicating success/failure. */
+  closePane(paneId: string): Promise<{ success: boolean; error?: string }>;
+  /** Terminate the session-scoped process group for a pane. */
+  terminateProcessGroup(pid: number, opts?: { graceMs?: number }): Promise<TerminateResult>;
+}
+
+/**
+ * The state of one pane as seen by the reaper. Populated from herdr's
+ * agent list and session log.
+ */
+export interface PaneStatus {
+  id: string;
+  kind: 'plan' | 'intake' | 'audit' | 'risk-effort' | 'implement' | 'unknown';
+  itemId: string;
+  title: string;
+  /** Concatenated text of the final assistant message. */
+  lastAssistantText: string;
+  /** Whether the agent process is alive. */
+  agentProcessAlive: boolean;
+  /** Idle time in milliseconds. */
+  idleMs: number;
+  /** Whether the work item needs producer review. */
+  needsProducerReview: boolean;
+  /** Whether this pane is the invoking/launching pane. */
+  isInvokingPane: boolean;
+  /** Number of child processes spawned by this session. */
+  childProcessCount: number;
+  /** The PID of the agent process (for process-group teardown). */
+  pid?: number;
+}
+
+/** The result of classifying one pane. */
+export interface ReaperResult {
+  paneId: string;
+  paneTitle: string;
+  decision: CloseDecision;
+  success: boolean;
+  error?: string;
+}
+
+/** Options for the reaper run. */
+export interface ReaperOptions {
+  /** Idle threshold in milliseconds (default: 30 minutes). */
+  idleThresholdMs?: number;
+  /** If true, report decisions but do not close any panes. */
+  dryRun?: boolean;
+}
+
+// ── Constants ─────────────────────────────────────────────────────────
+
+const DEFAULT_OPTIONS: ReaperOptions = {
+  idleThresholdMs: 30 * 60 * 1000,
+  dryRun: false,
+};
+
+// ── Classification ────────────────────────────────────────────────────
+
+/**
+ * Build a `SessionSample` from a `PaneStatus` for classification.
+ */
+function toSessionSample(ps: PaneStatus): SessionSample {
+  return {
+    lastAssistantText: ps.lastAssistantText,
+    agentProcessAlive: ps.agentProcessAlive,
+    idleMs: ps.idleMs,
+    kind: ps.kind,
+    needsProducerReview: ps.needsProducerReview,
+    isInvokingPane: ps.isInvokingPane,
+    childProcessCount: ps.childProcessCount,
+  };
+}
+
+// ── Orchestration ─────────────────────────────────────────────────────
+
+/**
+ * Run the closure reaper: enumerate panes, classify each, close eligible
+ * panes, and return a ledger of results.
+ *
+ * A single pane close failure is recorded but does not abort the run.
+ *
+ * In dry-run mode, decisions are computed but no panes are closed.
+ */
+export async function runReaper(
+  deps: ReaperDeps,
+  opts?: ReaperOptions,
+): Promise<ReaperResult[]> {
+  const options = { ...DEFAULT_OPTIONS, ...opts };
+  const results: ReaperResult[] = [];
+
+  const panes = await deps.listPanes();
+
+  for (const pane of panes) {
+    const sample = toSessionSample(pane);
+    const decision = classifySession(sample, {
+      idleThresholdMs: options.idleThresholdMs,
+    });
+
+    let success = true;
+    let error: string | undefined;
+
+    if (decision.close && !options.dryRun) {
+      try {
+        // Terminate child processes first (AC5).
+        if (pane.pid) {
+          await deps.terminateProcessGroup(pane.pid, { graceMs: 5_000 });
+        }
+        await deps.closePane(pane.id);
+      } catch (err) {
+        success = false;
+        error = err instanceof Error ? err.message : String(err);
+      }
+    }
+
+    results.push({
+      paneId: pane.id,
+      paneTitle: pane.title,
+      decision,
+      success,
+      error,
+    });
+  }
+
+  return results;
+}
