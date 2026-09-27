@@ -3681,14 +3681,23 @@ export function createListRenderer(getShowIcons?: () => boolean): (
           ? `  ${ANSI.dim}${chordState!.hints}${ANSI.reset}`
           : '';
         const footerLine = ` ${ANSI.reverse} chord: ${pendingStr} _ ${ANSI.reset}${hintStr}`;
-        output.push(footerLine);
+        output.push(truncateLine(footerLine, cols));
       } else {
         const navHint = (navStackDepth && navStackDepth > 0)
           ? ` ${ANSI.dim}[esc] back${navStackDepth > 1 ? ` (${navStackDepth} levels)` : ''}${ANSI.reset}`
           : '';
         const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
         const footerLine = navHint + chordHelpSuffix || ' ';
-        output.push(footerLine);
+        // ── Footer wrap guard (WL-0MTV979LK005YB1B) ──────────────
+        // In narrow panes the dynamic help line can exceed `cols`,
+        // causing the terminal to wrap it onto a second physical row.
+        // The safety clamp below counts array elements (logical rows),
+        // not physical rows, so the wrapped footer pushed the header
+        // off the top of the pane (mirrors the header guard,
+        // WL-0MSNI6TQ5003JY1Z). Truncating to exactly `cols` visible
+        // characters guarantees the footer occupies one output row
+        // and preserves the `rows - 1` invariant.
+        output.push(truncateLine(footerLine, cols));
       }
     }
 

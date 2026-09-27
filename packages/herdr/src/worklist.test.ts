@@ -5381,6 +5381,141 @@ describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () =>
   });
 });
 
+// ── Footer help-line wrap guard (WL-0MTV979LK005YB1B) ─────────────────
+// In narrow panes the (dynamic) footer help line can exceed `cols`. An
+// untruncated footer wraps onto a second physical row; because the safety
+// clamp counts array elements (logical rows), not physical rows, the wrapped
+// line pushes the header off the top of the pane. Truncating the footer to
+// `cols` guarantees it occupies exactly one output row and the header stays
+// visible. "If I make the pane wider so that it unwraps the line comes back"
+// is the observed symptom this guards against.
+
+describe('createListRenderer — footer help-line wrap guard (WL-0MTV979LK005YB1B)', () => {
+  const renderer = createListRenderer();
+  const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+
+  // A realistic long help line: the dynamic hints + the alt+m mouse toggle.
+  const LONG_HINTS =
+    'u:update  e:edit  s:ship  a:audit  p:plan  i:implement  c:comment  ' +
+    'd:delete  m:metadata  r:refresh  alt+m mouse off';
+
+  const visualWidth = (s: string): number => {
+    let w = 0;
+    for (let i = 0; i < s.length; i++) {
+      const cp = s.charCodeAt(i);
+      if (cp >= 0x2300 && cp < 0x2400) w += 2;
+      else if (cp >= 0x2600 && cp < 0x2700) w += 2;
+      else if (cp >= 0x1f000) w += 2;
+      else w += 1;
+    }
+    return w;
+  };
+
+  // AC1: no rendered line exceeds `cols` (so nothing wraps onto a second
+  // physical row) when the help line is longer than the pane width.
+  it('truncates an over-long help line so no line exceeds cols at 40 cols', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      LONG_HINTS, // chordHelpHints → the help line
+    );
+    const lines = output.split('\n');
+    for (const line of lines) {
+      expect(visualWidth(stripAnsi(line))).toBeLessThanOrEqual(cols);
+    }
+    // The over-long help line must be truncated with an ellipsis.
+    expect(output).toContain('…');
+  });
+
+  // AC2: the header stays on the first line and the `rows - 1` invariant
+  // holds with an over-long help line (the original off-screen symptom).
+  it('keeps the header on row 0 and holds rows - 1 at 40×24', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      LONG_HINTS,
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
+
+  // AC3: the chord-in-progress footer is truncated the same way.
+  it('truncates an over-long chord-in-progress footer', () => {
+    const cols = 30;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const chordState = createChordState();
+    chordState.pendingKeys = ['u'];
+    chordState.hints = 'update  everything  everywhere  repeatedly';
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      chordState,
+    );
+    const lines = output.split('\n');
+    for (const line of lines) {
+      expect(visualWidth(stripAnsi(line))).toBeLessThanOrEqual(cols);
+    }
+    expect(output).toContain('chord:');
+  });
+
+  // AC4 (no over-truncation): a help line that fits is rendered intact.
+  it('renders a short help line intact on a wide pane', () => {
+    const cols = 120;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const shortHints = 'u:update  alt+m mouse off';
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      shortHints,
+    );
+    expect(output).toContain('u:update  alt+m mouse off');
+  });
+});
+
 // ── Header item count excludes heading rows (WL-0MT26TE72002FLKX) ──────
 // AC1: Header item count is WorkItem rows only, not displayRows length.
 // AC2: "top N of M" badge uses the same item-based N.
