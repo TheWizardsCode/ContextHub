@@ -2273,6 +2273,35 @@ describe('audit selection (selectAuditCandidate)', () => {
     expect(selectAuditCandidate([], NOW)).toBeNull();
   });
 
+  it('never selects a covered child — children are never dispatched independently (AC2)', () => {
+    // A covered child: completed/in_review, no own fresh audit, parent has the
+    // fresh covering audit. The audit tier is root-only, and this client-side
+    // guard is belt-and-suspenders for a leaking/faulty response.
+    const coveredChild: AuditCandidate = {
+      id: 'WL-COVERED-CHILD',
+      title: 'Covered child',
+      parentId: 'WL-PARENT',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortIndex: 1,
+    };
+    expect(selectAuditCandidate([coveredChild, unaudited], NOW)?.id).toBe('NOAUDIT');
+    expect(selectAuditCandidate([coveredChild], NOW)).toBeNull();
+  });
+
+  it('never selects an uncovered child either (AC2)', () => {
+    // Uncovered child: parent demoted/stale, so no covering audit — it must
+    // still never enter the audit dispatch tier (flagged, not dispatched;
+    // WL-0MUBVH9FV0027COG owns durable uncovered reporting).
+    const uncoveredChild: AuditCandidate = {
+      id: 'WL-UNCOVERED-CHILD',
+      title: 'Uncovered child',
+      parentId: 'WL-DEMOTED-PARENT',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortIndex: 1,
+    };
+    expect(selectAuditCandidate([uncoveredChild], NOW)).toBeNull();
+  });
+
   it('classifies the 60s freshness boundary correctly', () => {
     // auditedAt exactly 60s before updatedAt -> stale (selected)
     const boundaryStale: AuditCandidate = {
@@ -2470,6 +2499,18 @@ describe('parseAuditCandidatesOutput', () => {
 
   it('returns an empty array for an empty workItems list', () => {
     expect(parseAuditCandidatesOutput(JSON.stringify({ workItems: [] }))).toEqual([]);
+  });
+
+  it('parses parentId so child candidates can be excluded client-side (AC2)', () => {
+    const stdout = JSON.stringify({
+      workItems: [
+        { id: 'WL-ROOT', title: 'Root', sortIndex: 1 },
+        { id: 'WL-CHILD', title: 'Child', parentId: 'WL-ROOT', sortIndex: 2 },
+      ],
+    });
+    const parsed = parseAuditCandidatesOutput(stdout);
+    expect(parsed?.[0].parentId).toBeUndefined();
+    expect(parsed?.[1].parentId).toBe('WL-ROOT');
   });
 });
 

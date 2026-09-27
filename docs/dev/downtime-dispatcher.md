@@ -452,6 +452,14 @@ moment the queue thins.
   (`DEFAULT_BROWSE_ITEM_COUNT = 20`). **Fail-closed:** a count-query failure activates the
   gate (only critical implements remain eligible) — same convention as the code-freeze
   "ambiguous ⇒ frozen" rule.
+
+> **Child coverage is display-only (WL-0MUBVH8QG0020H9L):** a `completed`/`in_review`
+> child never enters the audit tier — it is *covered* by its parent's fresh audit
+> (rendered as a dimmed parent-audit symbol in the worklist). Coverage is derived at
+> read time by the shared `isCoveredByParent`/`isAuditFresh` predicates; nothing is
+> persisted and the root-only dispatch query is unchanged (plus a belt-and-suspenders
+> client-side `parentId` exclusion in `selectAuditCandidate`). Durable reporting of
+> uncovered children is out of scope here (WL-0MUBVH9FV0027COG).
 - **Shared gate implementation** (`readReviewQueueGate` / `isImplementHeldByReviewGate` in
   `downtime-worker.ts`): ONE bounded `wl list` per dispatch/offer computation, applied
   identically on every dispatch path — `dispatchFromHerdrList` (direct Herdr-head

@@ -929,6 +929,60 @@ describe('createDowntimeDeps', () => {
     expect(result).toEqual({ ok: true, candidate: { id: 'WL-PARENT', title: 'Parent epic', stage: 'audit' } });
   });
 
+  it('never dispatches a covered or uncovered child even if a leaking response includes one (AC2, WL-0MUBVH8QG0020H9L)', async () => {
+    // Belt-and-suspenders: the query is root-only, but a faulty/legacy
+    // response could still include a child. Neither a covered child (parent
+    // has a fresh audit) nor an uncovered child (parent demoted/stale) may
+    // ever be selected as an independent audit candidate.
+    const now = Date.now();
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 3,
+        workItems: [
+          {
+            id: 'WL-PARENT',
+            title: 'Parent',
+            auditedAt: null,
+            updatedAt: new Date(now - 60_000).toISOString(),
+            sortIndex: 100,
+          },
+          {
+            id: 'WL-COVERED-CHILD',
+            title: 'Covered child',
+            parentId: 'WL-PARENT',
+            auditedAt: null,
+            updatedAt: new Date(now - 60_000).toISOString(),
+            sortIndex: 50,
+          },
+          {
+            id: 'WL-UNCOVERED-CHILD',
+            title: 'Uncovered child',
+            parentId: 'WL-DEMOTED-PARENT',
+            auditedAt: null,
+            updatedAt: new Date(now - 60_000).toISOString(),
+            sortIndex: 10,
+          },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextAuditCandidate('/repo');
+
+    // The query must stay root-only...
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json'],
+      expect.anything(),
+    );
+    // ...and the child candidates (lowest sortIndex, so they'd win without the
+    // guard) are excluded client-side too.
+    expect(result).toEqual({ ok: true, candidate: { id: 'WL-PARENT', title: 'Parent', stage: 'audit' } });
+  });
+
   it('getNextAuditCandidate returns ok:true with no candidate when no stale/missing-audit item exists', async () => {
     const mockExec = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({

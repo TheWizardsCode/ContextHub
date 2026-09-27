@@ -104,6 +104,13 @@ const AUDIT_UNKNOWN = '\u{2753}';     // ❓
 const AUDIT_STALE_PASSED = '\u{23F3}';  // ⏳
 const AUDIT_STALE_FAILED = '\u{26A0}';   // ⚠️
 
+/**
+ * Text fallback for the derived child-coverage indicator (`noIcons` mode) so
+ * a covered child is never silently dropped from the list row
+ * (WL-0MUBVH8QG0020H9L).
+ */
+const AUDIT_COVERED_FALLBACK = '[COVERED]';
+
 const NEEDS_REVIEW_ICON = '\u{274C}';  // ❌
 const REVIEW_DONE_ICON = '\u{2705}';    // ✅
 
@@ -272,6 +279,19 @@ export function needsProducerReviewIcon(
 export const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 60000;
 
 /**
+ * The direct parent's audit state, supplied to the display helpers to derive
+ * child coverage at read time (WL-0MUBVH8QG0020H9L). Mirrors the audit
+ * freshness inputs consumed by {@link isAuditFresh}; no new persisted state.
+ */
+export interface ParentAuditState {
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  updatedAt?: string;
+  fingerprint?: string | null;
+  currentFingerprint?: string | null;
+}
+
+/**
  * Determine whether an audit result is fresh (not stale).
  *
  * Primary gate (content-fingerprint, SA-0MSKB6US1009CNHT / WL-0MUBVH5S0008NQ9K):
@@ -311,7 +331,7 @@ export function isAuditFresh(
 ): boolean {
   if (!auditedAt || !updatedAt) return false;
 
-  // ── Primary gate: content-fingerprint match ───────────────────────────
+  // ── Primary gate: content-fingerprint match ──────────────────────────
   // Only usable when BOTH fingerprints are present. A match → fresh
   // regardless of updatedAt; a mismatch → stale (content changed). When
   // either side is unavailable the gate degrades to the legacy time floor
@@ -320,11 +340,36 @@ export function isAuditFresh(
     return storedFingerprint === currentFingerprint;
   }
 
-  // ── Fallback: legacy 60 s time gate ───────────────────────────────────
+  // ── Fallback: legacy 60 s time gate ──────────────────────────────
   const auditTime = new Date(auditedAt).getTime();
   const updateTime = new Date(updatedAt).getTime();
   if (isNaN(auditTime) || isNaN(updateTime)) return false;
   return auditTime > updateTime - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
+}
+
+/**
+ * Derived child coverage (WL-0MUBVH8QG0020H9L): a child (`parentId` set) is
+ * covered iff its DIRECT parent (depth 1 only) has a fresh audit, decided by
+ * the single shared {@link isAuditFresh} predicate over the parent's
+ * `auditedAt`/`updatedAt`/`fingerprint`/`currentFingerprint`. That predicate
+ * is the only freshness comparison in the codebase — this helper must never
+ * introduce a competing `auditedAt` vs `updatedAt` check
+ * (WL-0MUBVH7ZR009PP80).
+ *
+ * Coverage is derived at read time for DISPLAY only; nothing is persisted,
+ * there is no `audit_results` coverage column, and no schema migration. The
+ * audit-dispatch path stays root-only (WL-0MSTLFW14000KPEC), so a covered
+ * child is never dispatched independently.
+ *
+ * Returns `false` for a root item (no `parentId`) or when the parent audit
+ * state is unavailable (fail-safe: never claim covered without evidence).
+ */
+export function isCoveredByParent(
+  item: { parentId?: string | null },
+  parent: ParentAuditState | null | undefined,
+): boolean {
+  if (!item.parentId || !parent) return false;
+  return isAuditFresh(parent.auditedAt, parent.updatedAt, parent.fingerprint, parent.currentFingerprint);
 }
 
 /**
@@ -334,12 +379,27 @@ export function isAuditFresh(
  * (⏳), a stale or missing audit on an `in_review` item falls back to the
  * plain stage icon (🔍), and every other stage shows the plain stage icon.
  *
+ * Derived child coverage (WL-0MUBVH8QG0020H9L): when the item is a child
+ * (`parentId` set) with no own audit and its direct parent has a fresh audit
+ * (per the shared {@link isAuditFresh} predicate over the supplied
+ * `parentAudit`), the parent's audit-result symbol is returned instead of the
+ * plain stage icon. In `noIcons` mode the covered indicator renders as the
+ * `[COVERED]` text fallback so it is never silently dropped. Coverage is
+ * display-only and derived at read time; an item's OWN audit result always
+ * wins over inherited coverage.
+ *
+ * The caller applies the dim/grey styling around the covered indicator
+ * (the list row and metadata panel use `ANSI.dim`); this dependency-free
+ * helper returns the plain glyph only so display-width maths is never
+ * corrupted by ANSI escapes.
+ *
  * Shared by the list row prefix (`getIconPrefix`) and the metadata Stage
  * row so the two sections can never diverge (WL-0MSGIXHHI009KFW9 AC2).
  */
 export function stageDisplayIcon(
   item: {
     stage?: string;
+    parentId?: string | null;
     auditResult?: boolean | null;
     auditedAt?: string | null;
     updatedAt?: string;
@@ -347,6 +407,8 @@ export function stageDisplayIcon(
     fingerprint?: string | null;
     /** Current content fingerprint for the item, when the caller can compute it. */
     currentFingerprint?: string | null;
+    /** The direct parent's audit state, when the caller has it (derived coverage). */
+    parentAudit?: ParentAuditState | null;
   },
   opts?: IconOptions,
 ): string {
@@ -358,6 +420,12 @@ export function stageDisplayIcon(
     }
     if (item.auditResult === true) {
       return auditStaleIcon(item.auditResult, { noIcons });
+    }
+    // A child's own (non-fresh) audit result wins over inherited coverage;
+    // only a child with NO own audit can inherit the parent's verdict.
+    if (item.auditResult == null && isCoveredByParent(item, item.parentAudit)) {
+      if (noIcons) return AUDIT_COVERED_FALLBACK;
+      return auditIcon(item.parentAudit?.auditResult, { noIcons: false });
     }
   }
   return stageIcon(item.stage, { noIcons });
@@ -469,22 +537,51 @@ const ICON_PREFIX_WIDTH = 12;
 // ── Icon prefix composition ───────────────────────────────────────────
 
 /**
- * Compute the icon prefix string for a work item (just icon characters,
- * no trailing space).  Icons are concatenated without spaces and padded
- * to a fixed display width so the item-ID column aligns vertically
- * regardless of how many icon fields are present.
- *
- * Column layout (left to right):
- *   0. Agent status (fixed-width reserved slot, WL-0MSBQUJQX005RAT9)
- *   1. Status icon
- *   2. Stage icon (for in_review items, shows audit-aware icon instead)
- *   3. Producer review flag
- *   4. Optional epic icon + child count
+ * The item fields consumed by {@link getIconPrefix} / {@link getIconPrefixParts}.
+ * `parentId` / `parentAudit` carry the derived coverage inputs
+ * (WL-0MUBVH8QG0020H9L); they are optional so existing root-item callers are
+ * unaffected.
  */
-export function getIconPrefix(
-  item: { status: string; stage?: string; priority?: string; auditResult?: boolean | null; auditedAt?: string | null; needsProducerReview?: boolean; updatedAt?: string; issueType?: string; childCount?: number; agentState?: string },
+export interface IconPrefixItem {
+  status: string;
+  stage?: string;
+  priority?: string;
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  needsProducerReview?: boolean;
+  updatedAt?: string;
+  issueType?: string;
+  childCount?: number;
+  agentState?: string;
+  parentId?: string | null;
+  fingerprint?: string | null;
+  currentFingerprint?: string | null;
+  parentAudit?: ParentAuditState | null;
+}
+
+/**
+ * The composed icon prefix plus the location of the stage/audit icon inside
+ * it, so the renderer can apply dim/grey styling to the covered indicator
+ * only (WL-0MUBVH8QG0020H9L). `stageStart`/`stageEnd` are JS string indices
+ * into `text` (surrogate-pair safe for slicing).
+ */
+export interface IconPrefixParts {
+  /** Full prefix string (no ANSI styling), padded to the fixed width. */
+  text: string;
+  /** JS string index where the stage/audit icon starts within `text`. */
+  stageStart: number;
+  /** JS string index just past the stage/audit icon within `text`. */
+  stageEnd: number;
+}
+
+/**
+ * Compose the icon prefix and expose the stage/audit icon's range so a caller
+ * can dim just that icon (see {@link getIconPrefixParts}).
+ */
+export function getIconPrefixParts(
+  item: IconPrefixItem,
   opts?: IconOptions,
-): string {
+): IconPrefixParts {
   const noIcons = opts?.noIcons ?? false;
 
   // Column 0: agent status — fixed-width reserved slot so rows with and
@@ -515,9 +612,29 @@ export function getIconPrefix(
   let prefix = [agentSlot, coreIcons, epicSuffix].filter(Boolean).join('');
   const width = stringDisplayWidth(prefix);
   if (width < ICON_PREFIX_WIDTH) {
-    const padCount = ICON_PREFIX_WIDTH - width;
-    prefix = prefix.padEnd(prefix.length + padCount, ' ');
+    prefix = prefix.padEnd(prefix.length + (ICON_PREFIX_WIDTH - width), ' ');
   }
 
-  return prefix;
+  // `sIcon` and `secondIcon` are always non-empty (status/stage icons have
+  // fallbacks), so these indices are always valid and point at the stage
+  // icon the coverage dimming wraps.
+  const stageStart = agentSlot.length + sIcon.length;
+  return { text: prefix, stageStart, stageEnd: stageStart + secondIcon.length };
+}
+
+/**
+ * Compute the icon prefix string for a work item (just icon characters,
+ * no trailing space).  Icons are concatenated without spaces and padded
+ * to a fixed display width so the item-ID column aligns vertically
+ * regardless of how many icon fields are present.
+ *
+ * Column layout (left to right):
+ *   0. Agent status (fixed-width reserved slot, WL-0MSBQUJQX005RAT9)
+ *   1. Status icon
+ *   2. Stage icon (for in_review items, shows audit-aware icon instead)
+ *   3. Producer review flag
+ *   4. Optional epic icon + child count
+ */
+export function getIconPrefix(item: IconPrefixItem, opts?: IconOptions): string {
+  return getIconPrefixParts(item, opts).text;
 }

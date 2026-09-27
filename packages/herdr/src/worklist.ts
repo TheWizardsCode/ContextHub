@@ -31,7 +31,8 @@ import {
   auditIcon,
   needsProducerReviewIcon,
   stageDisplayIcon,
-  getIconPrefix,
+  getIconPrefixParts,
+  isCoveredByParent,
   applyStageColour,
   stageColor,
   applyPriorityColour,
@@ -769,7 +770,7 @@ export class WorkItemListState {
 
     let lastGroup: number | undefined;
 
-    const appendItem = (item: WorkItem, depth: number): void => {
+    const appendItem = (item: WorkItem, depth: number, parent: WorkItem | null): void => {
       // Insert a heading row when the group changes between consecutive
       // items. Items without a group field (e.g. children, ungrouped items)
       // never trigger a new heading.
@@ -796,20 +797,24 @@ export class WorkItemListState {
         return;
       }
 
+      // Enrich nested items with their direct parent's audit state so the
+      // render layer can derive coverage at read time
+      // (WL-0MUBVH8QG0020H9L). Root rows pass through unchanged.
+      const node = depth > 0 ? withParentAudit(item, parent) : item;
       if (depth === 0) {
-        result.push(item);
+        result.push(node);
       } else {
-        result.push(item.depth === depth ? item : { ...item, depth });
+        result.push(node.depth === depth ? node : { ...node, depth });
       }
       if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
         for (const child of item.children) {
-          appendItem(child, depth + 1);
+          appendItem(child, depth + 1, item);
         }
       }
     };
 
     for (const item of this.items) {
-      appendItem(item, 0);
+      appendItem(item, 0, null);
     }
 
     return result;
@@ -826,25 +831,30 @@ export class WorkItemListState {
    */
   getFlattenedItems(): WorkItem[] {
     const result: WorkItem[] = [];
-    const appendItem = (item: WorkItem, depth: number): void => {
+    const appendItem = (item: WorkItem, depth: number, parent: WorkItem | null): void => {
+      // Enrich nested items with their direct parent's audit state so derived
+      // coverage is available on the flattened rows as well as the display
+      // rows (WL-0MUBVH8QG0020H9L).
+      const node = depth > 0 ? withParentAudit(item, parent) : item;
       // Top-level items are pushed as-is (no depth field, matching the
-      // pre-hierarchy shape). Nested items keep their object reference when
-      // their stored depth already matches the hierarchy position (so
-      // on-demand child fetches mutate the live tree object), otherwise the
-      // depth is corrected with a shallow copy.
+      // pre-hierarchy shape). Nested items are always shallow copies: the
+      // coverage enrichment above adds `parentAudit`, and a stored depth that
+      // does not match the hierarchy position is additionally corrected.
+      // On-demand child fetches mutate the LIVE tree (attachChildren), which
+      // the next flatten picks up — the copy is display-only.
       if (depth === 0) {
-        result.push(item);
+        result.push(node);
       } else {
-        result.push(item.depth === depth ? item : { ...item, depth });
+        result.push(node.depth === depth ? node : { ...node, depth });
       }
       if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
         for (const child of item.children) {
-          appendItem(child, depth + 1);
+          appendItem(child, depth + 1, item);
         }
       }
     };
     for (const item of this.items) {
-      appendItem(item, 0);
+      appendItem(item, 0, null);
     }
     return result;
   }
@@ -1224,6 +1234,30 @@ export class StageFilter {
 // ── Formatting functions ──────────────────────────────────────────────
 
 /**
+ * Return a shallow copy of a nested item carrying its DIRECT parent's audit
+ * state, so the render layer can derive child coverage at read time
+ * (WL-0MUBVH8QG0020H9L). Coverage is derived, never persisted: the copy's
+ * `parentAudit` is consumed by the shared `isCoveredByParent` /
+ * `stageDisplayIcon` helpers. A root item (parent === null) is returned
+ * unchanged. Depth is limited to the direct parent (depth 1); transitive
+ * coverage is intentionally out of scope.
+ */
+function withParentAudit(item: WorkItem, parent: WorkItem | null): WorkItem {
+  if (!parent) return item;
+  return {
+    ...item,
+    parentId: item.parentId ?? parent.id,
+    parentAudit: {
+      auditResult: parent.auditResult,
+      auditedAt: parent.auditedAt,
+      updatedAt: parent.updatedAt,
+      fingerprint: parent.fingerprint,
+      currentFingerprint: parent.currentFingerprint,
+    },
+  };
+}
+
+/**
  * Format a single item line for the list display.
  *
  * Includes icon prefix, stage colouring, and group markers.
@@ -1246,8 +1280,22 @@ export function formatItemLine(
     : '  ';
 
   const prefix = isSelected ? '▸ ' : '  ';
-  const iconPrefix = getIconPrefix(item, { noIcons });
-  const iconStr = iconPrefix.length > 0 ? `${iconPrefix}` : '';
+  // Derived child coverage (WL-0MUBVH8QG0020H9L): a child whose direct parent
+  // has a fresh audit shows the parent's audit-result symbol. The shared,
+  // dependency-free icon helper returns the plain glyph; the ANSI dim styling
+  // is applied HERE, around the stage/audit icon only, so the prefix's
+  // display-width alignment (computed on the plain string) is never corrupted
+  // and other icons are not dimmed.
+  const parts = getIconPrefixParts(item, { noIcons });
+  let iconStr = parts.text;
+  if (!noIcons && parts.stageEnd > parts.stageStart && isCoveredByParent(item, item.parentAudit)) {
+    iconStr =
+      parts.text.slice(0, parts.stageStart) +
+      ANSI.dim +
+      parts.text.slice(parts.stageStart, parts.stageEnd) +
+      ANSI.reset +
+      parts.text.slice(parts.stageEnd);
+  }
 
   // Apply priority colouring to both title and ID (same colour)
   const colouredTitle = applyPriorityColour(item.title, item.priority);
@@ -1622,8 +1670,25 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('Title', item.title);
   addMeta('Status', iconText(noIcons ? '' : statusIcon(item.status), item.status));
   // Stage mirrors the list's audit-aware in_review icon via the shared
-  // stageDisplayIcon helper (AC2).
-  addMeta('Stage', iconText(noIcons ? '' : stageDisplayIcon(item), item.stage));
+  // stageDisplayIcon helper (AC2). A covered child's inherited parent-audit
+  // symbol is dimmed to match the list row; the `Covered by` row that follows
+  // names the covering parent so coverage is explicit and never silently
+  // dropped (WL-0MUBVH8QG0020H9L AC3). The row is omitted when the parent's
+  // audit state is unavailable (e.g. the detail view may not have the parent
+  // loaded) — coverage is never guessed.
+  const coveredByParent = isCoveredByParent(item, item.parentAudit);
+  const stageGlyph = noIcons ? '' : stageDisplayIcon(item);
+  addMeta(
+    'Stage',
+    noIcons
+      ? item.stage
+      : coveredByParent
+        ? `${ANSI.dim}${stageGlyph}${ANSI.reset} ${item.stage}`
+        : iconText(stageGlyph, item.stage),
+  );
+  if (coveredByParent && item.parentId) {
+    addMeta('Covered by', item.parentId);
+  }
   addMeta('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
   // Type shows the epic icon (⊙) for epic items only, matching the list;
   // non-epic types remain text-only (AC3).

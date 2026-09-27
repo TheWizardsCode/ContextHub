@@ -921,7 +921,12 @@ export function createDowntimeDeps(
         // (WL-0MSTLFW14000KPEC): only PARENT items are audit candidates —
         // completed/in_review children (sub-tasks) are never dispatched
         // independently; the producer reviews deliverable units (parents),
-        // whose audits cover their children. Same fail-closed semantics as
+        // whose audits cover their children. Derived coverage
+        // (WL-0MUBVH8QG0020H9L) is display-only and computed at read time by
+        // isCoveredByParent/stageDisplayIcon; it never relaxes this root-only
+        // dispatch contract. selectAuditCandidate adds a belt-and-suspenders
+        // parentId exclusion so a leaking response can never dispatch a
+        // child either. Same fail-closed semantics as
         // getNextItem, with the same error channel
         // (WL-0MSLWJ2KP0002SV0): a wl/parse failure resolves {ok:false} — a
         // CLI-error strike — NOT a null that is indistinguishable from a

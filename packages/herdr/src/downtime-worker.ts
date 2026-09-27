@@ -1305,6 +1305,13 @@ export interface AuditCandidate {
    * exclude from audit-tier selection (AC1).
    */
   needsProducerReview?: boolean;
+  /**
+   * Parent work item id when present. The audit-tier query is root-only
+   * (`--root-only`, WL-0MSTLFW14000KPEC) so children never reach selection;
+   * this field powers a belt-and-suspenders client-side guard that excludes
+   * any child that would otherwise slip through (WL-0MUBVH8QG0020H9L AC2).
+   */
+  parentId?: string | null;
 }
 
 /**
@@ -6036,6 +6043,7 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       currentFingerprint: typeof o.currentFingerprint === 'string' ? o.currentFingerprint : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      parentId: o.parentId == null ? (o.parentId as null | undefined) : String(o.parentId),
       needsProducerReview:
         o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
@@ -6120,6 +6128,11 @@ export function selectAuditCandidate(
   const recencyCutoff = now - DOWNTIME_AUDIT_RECENCY_WINDOW_MS;
   const filtered = candidates
     .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt, c.fingerprint, c.currentFingerprint))
+    // Belt-and-suspenders child exclusion (WL-0MUBVH8QG0020H9L AC2): the
+    // audit-tier query is root-only, so children are already excluded
+    // server-side; this guard ensures a child can NEVER be dispatched as an
+    // audit candidate even if a non-root-only/faulty response leaks one.
+    .filter((c) => !c.parentId)
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
     .filter((c) => c.needsProducerReview !== true)

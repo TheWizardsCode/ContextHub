@@ -13,7 +13,7 @@ import { join } from 'node:path';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
 import type { AgentState } from './agent-tracker.js';
-import { isAuditFresh } from '@worklog/shared/icons';
+import { isAuditFresh, type ParentAuditState } from '@worklog/shared/icons';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -173,6 +173,12 @@ export interface WorkItem {
   fingerprint?: string | null;
   /** Current content fingerprint for the item, when the caller can compute it. */
   currentFingerprint?: string | null;
+  /**
+   * The direct parent's audit state, populated by the worklist render layer
+   * when nesting children so derived coverage can be computed at read time
+   * (WL-0MUBVH8QG0020H9L). Never persisted.
+   */
+  parentAudit?: ParentAuditState | null;
   /** Child work items (populated on expand). */
   children?: WorkItem[];
   /** Depth in hierarchy (0 = top-level, 1 = child, etc.). Used by renderer. */
@@ -707,6 +713,11 @@ export interface ReviewQueueState {
  * these items — the same semantics the audit-dispatch tier uses for a
  * non-hydrated list (AC3). A CLI error or unparseable output resolves to
  * undefined (never throws).
+ *
+ * Root-only is intentional (WL-0MSTLFW14000KPEC): children are not counted as
+ * independent review-queue entries — a completed/in_review child is covered by
+ * its parent's audit (derived at read time for display, WL-0MUBVH8QG0020H9L)
+ * and is never dispatched for audit independently.
  */
 export async function fetchReviewQueueState(): Promise<ReviewQueueState | undefined> {
   try {
@@ -747,6 +758,11 @@ export async function fetchCompletedItemCount(): Promise<number | undefined> {
  * Results are regrouped priority-first (WL-0MSOPHLD1000EWNN): priority
  * bucket sections, then stage, then id — same ordering as the default
  * worklist.
+ *
+ * The returned children are NOT enriched with parent-audit state here; the
+ * worklist render layer does that at read time (withParentAudit) when it
+ * nests a child under its parent, so derived coverage
+ * (WL-0MUBVH8QG0020H9L) never leaks into the fetch/model layer.
  */
 export async function fetchChildrenForItem(parentId: string, depth = 1): Promise<WorkItem[]> {
   const output = await runWl(['list', '--parent', parentId]);
