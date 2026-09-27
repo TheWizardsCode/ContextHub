@@ -13,7 +13,10 @@
  *
  * Persistence: machine-coordination dir / downtime-dispatch-anchor.json — { paneId, workspaceId }.
  *              machine-coordination dir / downtime-dispatch-tab-anchors.json — per-prefix map.
- * Provisioning: workspace create --label Dispatcher (no-focus) + anchor pane;
+ * Provisioning: workspace create --label Dispatcher (no-focus); the workspace
+ *               root pane is then adopted into a "Downtime" tab
+ *               (pane move <id> --new-tab --tab-label Downtime --no-focus) so
+ *               it is never left blank (WL-0MU2EOHK900425VU);
  *               tab create --workspace <id> --label <PREFIX> --no-focus.
  * Validation: pane RPC aliveness check detects closed anchor; re-provisions.
  */
@@ -35,6 +38,13 @@ const execFile = promisify(_execFile);
 export const DISPATCHER_ANCHOR_FILE = 'downtime-dispatch-anchor.json';
 export const DISPATCHER_TAB_ANCHOR_FILE = 'downtime-dispatch-tab-anchors.json';
 export const DISPATCHER_WORKSPACE_LABEL = 'Dispatcher';
+/**
+ * Label of the tab that adopts the workspace's initial root pane
+ * (WL-0MU2EOHK900425VU) so it is never left blank/unused. The root pane is
+ * the split anchor for scheduled-prompt dispatches, so keeping it alive in a
+ * labelled tab preserves `send-to-pi.sh --anchor <paneId>` semantics.
+ */
+export const DISPATCHER_ROOT_TAB_LABEL = 'Downtime';
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -46,6 +56,14 @@ export interface DispatcherAnchor {
 export interface DispatcherAnchorDeps {
   /** Create a workspace. Resolves to { workspaceId, paneId } or throws. */
   createWorkspace(label: string): Promise<{ workspaceId: string; paneId: string }>;
+  /**
+   * Move `paneId` into a new tab labelled `label`. Returns true on success,
+   * false on CLI failure (the raw error is logged). Used to adopt the
+   * workspace's initial root pane so it is never left blank
+   * (WL-0MU2EOHK900425VU). Optional; when absent, adoption is skipped and the
+   * pre-fix layout is retained (legacy/test callers).
+   */
+  movePaneToNewTab?(paneId: string, label: string): Promise<boolean>;
   /** True when the pane for `paneId` is alive (RPC pane.get succeeds). */
   isPaneAlive(paneId: string): Promise<boolean>;
   /**
@@ -111,6 +129,23 @@ export function createDispatcherAnchorDeps(
         throw new Error(`Cannot parse workspace create output: ${out.slice(0, 400)}`);
       }
       return { workspaceId, paneId };
+    },
+    async movePaneToNewTab(paneId: string, label: string) {
+      try {
+        await execFile(
+          herdrBin,
+          ['pane', 'move', paneId, '--new-tab', '--tab-label', label, '--no-focus'],
+          { cwd, maxBuffer: 1024 * 1024 },
+        );
+        return true;
+      } catch (err) {
+        process.stderr.write(
+          `[worklog-plugin] Dispatcher root-pane adoption failed (pane ${paneId}, label ${label}): ${
+            err instanceof Error ? err.message : String(err)
+          }\n`,
+        );
+        return false;
+      }
     },
     async isPaneAlive(paneId: string) {
       try {
@@ -437,6 +472,32 @@ function writeAnchor(dir: string, anchor: DispatcherAnchor): boolean {
   }
 }
 
+/**
+ * Adopt the workspace's initial root pane into a labelled tab so it is never
+ * left blank/unused (WL-0MU2EOHK900425VU). `herdr workspace create` always
+ * provisions a root pane, which was previously persisted as the anchor but
+ * never surfaced in any tab — leaving a blank pane alongside the per-prefix
+ * tabs. Moving it into a {@link DISPATCHER_ROOT_TAB_LABEL} tab keeps the pane
+ * (and therefore `send-to-pi.sh --anchor <paneId>` dispatch) alive while
+ * giving it a productive home.
+ *
+ * Best-effort: a `false`/throwing `movePaneToNewTab` leaves the pane where it
+ * is and the caller still persists the anchor, so dispatch degrades to the
+ * pre-fix layout rather than entering a re-provision loop. Deps without
+ * `movePaneToNewTab` (legacy/test callers) skip adoption entirely.
+ */
+async function adoptRootPaneIntoNewTab(
+  deps: DispatcherAnchorDeps,
+  paneId: string,
+): Promise<void> {
+  if (typeof deps.movePaneToNewTab !== 'function') return;
+  try {
+    await deps.movePaneToNewTab(paneId, DISPATCHER_ROOT_TAB_LABEL);
+  } catch {
+    // best-effort — never fail provisioning on an adoption error
+  }
+}
+
 // ── Public API ─────────────────────────────────────────────────────────
 
 /**
@@ -499,6 +560,9 @@ export async function getDispatcherAnchor(
     } catch {
       return null;
     }
+    // Adopt the freshly-provisioned root pane into its own tab so the
+    // workspace never shows a blank pane (WL-0MU2EOHK900425VU).
+    await adoptRootPaneIntoNewTab(deps, created.paneId);
     const anchor: DispatcherAnchor = { paneId: created.paneId, workspaceId: created.workspaceId };
     if (!writeAnchor(dir, anchor)) return null;
     return anchor;

@@ -14,9 +14,11 @@ import * as path from 'node:path';
 import {
   getDispatcherAnchor,
   getDispatcherTabAnchor,
+  createDispatcherAnchorDeps,
   DISPATCHER_ANCHOR_FILE,
   DISPATCHER_TAB_ANCHOR_FILE,
   DISPATCHER_WORKSPACE_LABEL,
+  DISPATCHER_ROOT_TAB_LABEL,
   type DispatcherAnchor,
   type DispatcherAnchorDeps,
   type DispatcherTabAnchor,
@@ -156,6 +158,101 @@ describe('getDispatcherAnchor ACs', () => {
     };
     const got = await getDispatcherAnchor(tmpDir, deps);
     expect(got).toBeNull();
+  });
+
+  // ── Root-pane adoption (WL-0MU2EOHK900425VU) ──────────────────────────
+
+  it('AC1 root-pane adoption: first provision moves the root pane into a labelled tab', async () => {
+    const movePaneToNewTab = vi.fn(async () => true);
+    const deps: DispatcherAnchorDeps = {
+      createWorkspace: vi.fn(async () => ({ workspaceId: 'wD', paneId: 'wD:p1' })),
+      isPaneAlive: vi.fn(async () => true),
+      movePaneToNewTab,
+    };
+    const got = await getDispatcherAnchor(tmpDir, deps);
+    expect(got).toEqual({ paneId: 'wD:p1', workspaceId: 'wD' });
+    expect(DISPATCHER_ROOT_TAB_LABEL).toBe('Downtime');
+    expect(movePaneToNewTab).toHaveBeenCalledTimes(1);
+    expect(movePaneToNewTab).toHaveBeenCalledWith('wD:p1', DISPATCHER_ROOT_TAB_LABEL);
+    expect(readPersisted()).toEqual({ paneId: 'wD:p1', workspaceId: 'wD' });
+  });
+
+  it('AC2 stale re-provision also adopts the replacement root pane', async () => {
+    writePersisted({ paneId: 'wD:OLD', workspaceId: 'wD' });
+    const movePaneToNewTab = vi.fn(async () => true);
+    const deps: DispatcherAnchorDeps = {
+      createWorkspace: vi.fn(async () => ({ workspaceId: 'wD2', paneId: 'wD2:p1' })),
+      isPaneAlive: vi.fn(async () => false),
+      movePaneToNewTab,
+    };
+    const got = await getDispatcherAnchor(tmpDir, deps);
+    expect(got).toEqual({ paneId: 'wD2:p1', workspaceId: 'wD2' });
+    expect(movePaneToNewTab).toHaveBeenCalledWith('wD2:p1', DISPATCHER_ROOT_TAB_LABEL);
+    expect(readPersisted()).toEqual({ paneId: 'wD2:p1', workspaceId: 'wD2' });
+  });
+
+  it('AC2 live anchor is reused without re-adopting (never moves it twice)', async () => {
+    writePersisted({ paneId: 'wD:p1', workspaceId: 'wD' });
+    const movePaneToNewTab = vi.fn(async () => true);
+    const deps: DispatcherAnchorDeps = {
+      createWorkspace: vi.fn(async () => { throw new Error('should not create'); }),
+      isPaneAlive: vi.fn(async () => true),
+      movePaneToNewTab,
+    };
+    const got = await getDispatcherAnchor(tmpDir, deps);
+    expect(got).toEqual({ paneId: 'wD:p1', workspaceId: 'wD' });
+    expect(movePaneToNewTab).not.toHaveBeenCalled();
+  });
+
+  it('AC2 idempotency: a second call reuses the anchor with no new adoption', async () => {
+    const movePaneToNewTab = vi.fn(async () => true);
+    const createWorkspace = vi.fn(async () => ({ workspaceId: 'wD', paneId: 'wD:p1' }));
+    const deps: DispatcherAnchorDeps = {
+      createWorkspace,
+      isPaneAlive: vi.fn(async () => true),
+      movePaneToNewTab,
+    };
+    const first = await getDispatcherAnchor(tmpDir, deps);
+    const second = await getDispatcherAnchor(tmpDir, deps);
+    expect(second).toEqual(first);
+    expect(createWorkspace).toHaveBeenCalledTimes(1);
+    expect(movePaneToNewTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC1 adoption returning false is non-fatal: anchor still persisted and returned', async () => {
+    const movePaneToNewTab = vi.fn(async () => false);
+    const deps: DispatcherAnchorDeps = {
+      createWorkspace: vi.fn(async () => ({ workspaceId: 'wD', paneId: 'wD:p1' })),
+      isPaneAlive: vi.fn(async () => true),
+      movePaneToNewTab,
+    };
+    const got = await getDispatcherAnchor(tmpDir, deps);
+    expect(got).toEqual({ paneId: 'wD:p1', workspaceId: 'wD' });
+    expect(readPersisted()).toEqual({ paneId: 'wD:p1', workspaceId: 'wD' });
+  });
+
+  it('AC1 adoption throwing is non-fatal: anchor still persisted and returned', async () => {
+    const movePaneToNewTab = vi.fn(async () => {
+      throw new Error('pane move broke');
+    });
+    const deps: DispatcherAnchorDeps = {
+      createWorkspace: vi.fn(async () => ({ workspaceId: 'wD', paneId: 'wD:p1' })),
+      isPaneAlive: vi.fn(async () => true),
+      movePaneToNewTab,
+    };
+    const got = await getDispatcherAnchor(tmpDir, deps);
+    expect(got).toEqual({ paneId: 'wD:p1', workspaceId: 'wD' });
+    expect(readPersisted()).toEqual({ paneId: 'wD:p1', workspaceId: 'wD' });
+  });
+
+  it('legacy deps without movePaneToNewTab still provision (adoption skipped)', async () => {
+    const deps: DispatcherAnchorDeps = {
+      createWorkspace: vi.fn(async () => ({ workspaceId: 'wD', paneId: 'wD:p1' })),
+      isPaneAlive: vi.fn(async () => true),
+    };
+    const got = await getDispatcherAnchor(tmpDir, deps);
+    expect(got).toEqual({ paneId: 'wD:p1', workspaceId: 'wD' });
+    expect(readPersisted()).toEqual({ paneId: 'wD:p1', workspaceId: 'wD' });
   });
 });
 
@@ -502,5 +599,49 @@ describe('tab CLI parsers (TC2)', () => {
       { paneId: 'wD:tWL:p1', tabId: 'wD:tWL' },
       { paneId: 'wD:tTCE:p1', tabId: 'wD:tTCE' },
     ]);
+  });
+});
+
+// ── Root-pane adoption CLI wrapper (WL-0MU2EOHK900425VU) ───────────────
+
+describe('createDispatcherAnchorDeps.movePaneToNewTab', () => {
+  /** Write an executable fake `herdr` into the per-test tmp dir. */
+  function writeFakeHerdr(script: string): string {
+    const binPath = path.join(tmpDir, 'herdr');
+    fs.writeFileSync(binPath, `#!/usr/bin/env bash\n${script}\n`, 'utf-8');
+    fs.chmodSync(binPath, 0o755);
+    return binPath;
+  }
+
+  it('invokes `pane move <id> --new-tab --tab-label <label> --no-focus`', async () => {
+    const record = path.join(tmpDir, 'argv.txt');
+    const binPath = writeFakeHerdr(`printf '%s\\n' "$@" > "${record}"`);
+    const deps = createDispatcherAnchorDeps(tmpDir, binPath);
+    const ok = await deps.movePaneToNewTab!('wD:p1', DISPATCHER_ROOT_TAB_LABEL);
+    expect(ok).toBe(true);
+    const argv = fs.readFileSync(record, 'utf-8').trim().split('\n');
+    expect(argv).toEqual([
+      'pane',
+      'move',
+      'wD:p1',
+      '--new-tab',
+      '--tab-label',
+      DISPATCHER_ROOT_TAB_LABEL,
+      '--no-focus',
+    ]);
+  });
+
+  it('returns false (never throws) and logs when the CLI fails', async () => {
+    const binPath = writeFakeHerdr('exit 3');
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const deps = createDispatcherAnchorDeps(tmpDir, binPath);
+      await expect(
+        deps.movePaneToNewTab!('wD:p1', DISPATCHER_ROOT_TAB_LABEL),
+      ).resolves.toBe(false);
+      expect(stderrSpy).toHaveBeenCalled();
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });
