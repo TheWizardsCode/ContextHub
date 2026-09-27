@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
 import type { AgentState } from './agent-tracker.js';
+import { isAuditFresh } from '@worklog/shared/icons';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -678,26 +679,60 @@ export async function runWlSync(): Promise<{ success: boolean; error?: string }>
 }
 
 /**
- * Count completed + in_review work items (root-only) for the sprint-complete
- * check (parent WL-0MTHSHN5V008R5L0). Returns the count, or undefined on
- * failure — callers treat undefined as "unknown" and must NOT auto-disable
- * on a query failure (fail-closed, AC1).
+ * Review-queue state for the footer banner (AH-0MUDYTQ55002NUSJ): the
+ * root-only completed/in_review count plus whether at least one of those
+ * items still has an OUTSTANDING audit (no stored audit, or a stored audit
+ * that is not current per `isAuditFresh`).
+ */
+export interface ReviewQueueState {
+  /** Number of root-level completed/in_review items. */
+  count: number;
+  /** True when any of those items lacks a current (fresh) audit. */
+  auditsOutstanding: boolean;
+}
+
+/**
+ * Fetch the review-queue state (root-only completed/in_review items) for
+ * the sprint-complete / queue-depth banner (parent WL-0MTHSHN5V008R5L0;
+ * banner copy selection AH-0MUDYTQ55002NUSJ). Returns the count and whether
+ * an outstanding audit remains, or undefined on failure — callers treat
+ * undefined as "unknown" and leave state unchanged (fail-closed, AC1).
  *
  * Uses `wl list --status completed --stage in_review --root-only --json`
- * and counts the resulting items. A CLI error or unparseable output
- * resolves to undefined (never throws).
+ * (the same query as the former `fetchCompletedItemCount`). "Outstanding
+ * audit" reuses the shared `isAuditFresh` predicate: a missing `auditedAt`
+ * or a stored audit that is not current counts as outstanding; a fresh
+ * audit (passed or failed) does not. `wl list --json` does not expose
+ * `currentFingerprint`, so the predicate degrades to the 60 s time gate for
+ * these items — the same semantics the audit-dispatch tier uses for a
+ * non-hydrated list (AC3). A CLI error or unparseable output resolves to
+ * undefined (never throws).
  */
-export async function fetchCompletedItemCount(): Promise<number | undefined> {
+export async function fetchReviewQueueState(): Promise<ReviewQueueState | undefined> {
   try {
     const output = await runWl(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']);
     const payload = extractJson(output);
     const items = extractItems(payload);
-    return items.length;
+    const auditsOutstanding = items.some((item) =>
+      !isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint),
+    );
+    return { count: items.length, auditsOutstanding };
   } catch {
-    // Fail-closed: a query failure means we cannot determine completion status
-    // — the conservative default is to NOT auto-disable (AC1).
+    // Fail-closed: a query failure means we cannot determine queue state
+    // — the conservative default is to leave the banner state unchanged (AC1).
     return undefined;
   }
+}
+
+/**
+ * Count completed + in_review work items (root-only) for the sprint-complete
+ * check (parent WL-0MTHSHN5V008R5L0). Returns the count, or undefined on
+ * failure. Thin wrapper over {@link fetchReviewQueueState}, retained for
+ * existing callers.
+ */
+export async function fetchCompletedItemCount(): Promise<number | undefined> {
+  const state = await fetchReviewQueueState();
+  return state?.count;
 }
 
 /**

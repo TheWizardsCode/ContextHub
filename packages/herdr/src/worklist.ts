@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchCompletedItemCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
@@ -3334,6 +3334,44 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
   return ` ${ANSI.dim}[downtime busy]${ANSI.reset}`;
 }
 
+/**
+ * Review-queue banner state for the footer (parent WL-0MTHSHN5V008R5L0).
+ */
+export interface ReviewQueueBannerState {
+  /** True when the root-only completed/in_review count ≥ browseItemCount. */
+  queueDeep: boolean;
+  /** Number of root-level completed/in_review items counted. */
+  completedCount: number;
+  /** browseItemCount threshold (undefined when the setting is unavailable). */
+  browseItemCount?: number;
+  /** True when at least one root in_review item has an outstanding audit. */
+  auditsOutstanding: boolean;
+}
+
+/**
+ * Choose the review-queue-depth footer banner copy, or `null` when the banner
+ * must not render (the queue is not deep).
+ *
+ * Copy (AH-0MUDYTQ55002NUSJ):
+ *  - deep queue + an outstanding audit →
+ *    `Review queue deep (<n> of <browseItemCount> completed/in_review) — focus on audits`;
+ *  - deep queue + every root in_review item freshly audited →
+ *    `Ready to Ship (shortcut 'S')`.
+ *
+ * Display-only: callers must NEVER gate downtime dispatch on this signal
+ * (WL-0MTTSWC1X005P4VD). A fresh (current) audit of any result counts as
+ * "not outstanding" — only a missing or non-current audit keeps "focus on
+ * audits" (AC3).
+ */
+export function reviewQueueBannerText(state: ReviewQueueBannerState): string | null {
+  if (!state.queueDeep) return null;
+  if (!state.auditsOutstanding) return "Ready to Ship (shortcut 'S')";
+  const countDisplay = state.browseItemCount !== undefined
+    ? ` (${state.completedCount} of ${state.browseItemCount} completed/in_review)`
+    : '';
+  return `Review queue deep${countDisplay} — focus on audits`;
+}
+
 export function createListRenderer(getShowIcons?: () => boolean): (
   displayRows: DisplayRow[],
   selectedIndex: number,
@@ -3371,6 +3409,13 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   sprintCompletedCount?: number,
   /** browseItemCount threshold for the review-queue-depth banner. (parent WL-0MTHSHN5V008R5L0) */
   browseItemCount?: number,
+  /**
+   * True when at least one root-level in_review item still has an outstanding
+   * audit (no stored audit, or a non-current/stale audit). Drives the banner
+   * copy: outstanding → "focus on audits"; none → "Ready to Ship".
+   * (AH-0MUDYTQ55002NUSJ)
+   */
+  sprintAuditsOutstanding?: boolean,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -3405,6 +3450,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     sprintComplete?: boolean,
     sprintCompletedCount?: number,
     browseItemCount?: number,
+    sprintAuditsOutstanding?: boolean,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -3602,18 +3648,24 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // count is at/over browseItemCount. Green background, white text. This is
     // a REVIEW-QUEUE DEPTH indicator (the producer's distinct "queue is deep"
     // signal) — it is display-only and NEVER disables dispatch: audits keep
-    // draining the queue and check-ins continue (RCA root cause A). The
-    // former "Sprint Complete, hit S to ship" copy was the queue-depth
-    // masquerade; a genuine sprint-complete signal would be a separate,
-    // explicit mechanism (out of scope). Only shown when help text is
-    // enabled (`showHelpText: true`); does NOT interfere with code-freeze
-    // banners (those render above the list).
+    // draining the queue and check-ins continue (RCA root cause A). Copy is
+    // chosen by `reviewQueueBannerText` (AH-0MUDYTQ55002NUSJ): while any root
+    // in_review item still has an outstanding audit the banner says
+    // `— focus on audits`; once every one has a current audit it says
+    // `Ready to Ship (shortcut 'S')` (see `sprintAuditsOutstanding`). The former
+    // "Sprint Complete, hit S to ship" copy was the queue-depth masquerade.
+    // Only shown when help text is enabled (`showHelpText: true`); does NOT
+    // interfere with code-freeze banners (those render above the list).
     const isSprintComplete = sprintComplete ?? false;
     const completedCount = sprintCompletedCount ?? 0;
     const helpEnabled = showHelpText ?? true;
-    if (isSprintComplete && helpEnabled) {
-      const countDisplay = browseItemCount !== undefined ? ` (${completedCount} of ${browseItemCount} completed/in_review)` : '';
-      const bannerText = `Review queue deep${countDisplay} — audits will drain it`;
+    const bannerText = reviewQueueBannerText({
+      queueDeep: isSprintComplete,
+      completedCount,
+      browseItemCount,
+      auditsOutstanding: sprintAuditsOutstanding ?? false,
+    });
+    if (bannerText !== null && helpEnabled) {
       const bannerLine = `${ANSI.bg(40)}${ANSI.fg(255)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
     } else if (hoverTooltip && hoverTooltip.length > 0) {
@@ -4540,20 +4592,23 @@ export async function runWorklistTui(
   // toggle in the downtime worker.
   let sprintComplete = false;
   let sprintCompletedCount = 0;
+  let sprintAuditsOutstanding = false;
 
   /**
    * Refresh the review-queue-depth indicator by counting completed/
-   * in_review ROOT items. Fail-closed: a query failure leaves
-   * `sprintComplete` unchanged (conservative). Display-only — NEVER
-   * writes/removes the disable marker (WL-0MTTSWC1X005P4VD).
+   * in_review ROOT items and recording whether any still has an outstanding
+   * audit (drives the banner copy — AH-0MUDYTQ55002NUSJ). Fail-closed: a
+   * query failure leaves the state unchanged (conservative). Display-only —
+   * NEVER writes/removes the disable marker (WL-0MTTSWC1X005P4VD).
    */
   const refreshSprintState = async (): Promise<void> => {
-    const count = await fetchCompletedItemCount();
-    if (count === undefined) return; // fail-closed: unknown count → no state change
-    sprintCompletedCount = count;
+    const state = await fetchReviewQueueState();
+    if (state === undefined) return; // fail-closed: unknown state → no change
+    sprintCompletedCount = state.count;
+    sprintAuditsOutstanding = state.auditsOutstanding;
     // Re-read browseItemCount live so a settings change applies without a plugin restart.
     const liveBrowseCount = loadSettings().browseItemCount ?? opts.browseItemCount;
-    sprintComplete = count >= liveBrowseCount;
+    sprintComplete = state.count >= liveBrowseCount;
   };
 
   // Pane-visibility gating (pause-when-hidden). When the pane's tab is not
@@ -4859,9 +4914,11 @@ export async function runWorklistTui(
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
         // Refresh the review-queue-depth banner indicator (display-only;
-        // completed+in_review root count vs browseItemCount). Fail-closed:
-        // query failure leaves state unchanged. Queue depth never writes the
-        // disable marker (WL-0MTTSWC1X005P4VD).
+        // completed+in_review root count vs browseItemCount, plus whether any
+        // of those items still has an outstanding audit — this drives the
+        // banner copy; AH-0MUDYTQ55002NUSJ). Fail-closed: query failure leaves
+        // state unchanged. Queue depth never writes the disable marker
+        // (WL-0MTTSWC1X005P4VD).
         await refreshSprintState();
         // Merge agent-status state into the refreshed items (top-level +
         // expanded children) so the agent icons reflect the latest tracker
@@ -5899,10 +5956,12 @@ export async function runWorklistTui(
       codeFreezeAmbiguous,
       // Hover tooltip lines for the footer overlay (WL-0MT9XRZDK006GMUH).
       hoverTooltipLines,
-      // Sprint-complete banner state (parent WL-0MTHSHN5V008R5L0).
+      // Review-queue-depth banner state (parent WL-0MTHSHN5V008R5L0).
       sprintComplete,
       sprintCompletedCount,
       loadSettings().browseItemCount ?? opts.browseItemCount,
+      // Outstanding-audit flag driving the banner copy (AH-0MUDYTQ55002NUSJ).
+      sprintAuditsOutstanding,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

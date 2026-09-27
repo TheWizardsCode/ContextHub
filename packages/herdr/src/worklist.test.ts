@@ -41,6 +41,7 @@ import {
   isInputActive,
   formatBlockedShipDialog,
   createGatedTick,
+  reviewQueueBannerText,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
@@ -153,6 +154,128 @@ describe('createListRenderer — line-count invariant', () => {
     // In Review heading appears after the Other heading in the rendered output.
     expect(output.indexOf('Other (')).toBeGreaterThan(-1);
     expect(output.indexOf('── In Review (')).toBeGreaterThan(output.indexOf('Other ('));
+  });
+});
+
+// ── Review-queue depth banner copy (AH-0MUDYTQ55002NUSJ) ──────────────
+// The footer banner is display-only (WL-0MTTSWC1X005P4VD) and must reflect
+// the actual audit state: while any root in_review item still has an
+// outstanding audit it says "— focus on audits"; once every item has a
+// current audit it says "Ready to Ship (shortcut 'S')".
+
+describe('reviewQueueBannerText — copy selection', () => {
+  it('deep + outstanding audit → exact focus-on-audits copy (AC1)', () => {
+    expect(reviewQueueBannerText({
+      queueDeep: true,
+      completedCount: 25,
+      browseItemCount: 20,
+      auditsOutstanding: true,
+    })).toBe('Review queue deep (25 of 20 completed/in_review) — focus on audits');
+  });
+
+  it('deep + no outstanding audit → exact Ready to Ship copy (AC2)', () => {
+    expect(reviewQueueBannerText({
+      queueDeep: true,
+      completedCount: 20,
+      browseItemCount: 20,
+      auditsOutstanding: false,
+    })).toBe("Ready to Ship (shortcut 'S')");
+  });
+
+  it('shallow queue → null (banner not rendered)', () => {
+    expect(reviewQueueBannerText({
+      queueDeep: false, completedCount: 3, browseItemCount: 20, auditsOutstanding: true,
+    })).toBeNull();
+    expect(reviewQueueBannerText({
+      queueDeep: false, completedCount: 3, browseItemCount: 20, auditsOutstanding: false,
+    })).toBeNull();
+  });
+
+  it('omits the count display when browseItemCount is unavailable', () => {
+    expect(reviewQueueBannerText({
+      queueDeep: true, completedCount: 25, auditsOutstanding: true,
+    })).toBe('Review queue deep — focus on audits');
+  });
+});
+
+describe('createListRenderer — review-queue depth banner (AH-0MUDYTQ55002NUSJ)', () => {
+  const renderer = createListRenderer();
+
+  /**
+   * Invoke the renderer with the banner-state seam (params 27–30); the
+   * intermediate optional params are left undefined so the banner branch is
+   * exercised exactly as the TUI does.
+   */
+  function renderBanner(state: {
+    queueDeep: boolean;
+    completedCount: number;
+    browseItemCount?: number;
+    auditsOutstanding: boolean;
+    helpText?: boolean;
+  }): string {
+    return renderer(
+      [makeItem('A')],        // displayRows
+      0,                      // selectedIndex
+      0,                      // scrollOffset
+      TERM_80x24,             // termSize
+      null,                   // activeFilter
+      'list',                 // mode
+      null,                   // detailItem
+      undefined,              // totalCount
+      undefined,              // chordState
+      undefined,              // detailScrollOffset
+      undefined,              // autoRefresh
+      undefined,              // expandedItems
+      undefined,              // chordHelpHints
+      undefined,              // navStackDepth
+      undefined,              // panePaused
+      undefined,              // codeFreezeActive
+      undefined,              // metaScrollOffset
+      undefined,              // metaLastCommand
+      undefined,              // readFile
+      undefined,              // downtimeStatus
+      undefined,              // detailToCIndex
+      undefined,              // detailToCFocus
+      undefined,              // detailRenderedIndex
+      state.helpText,         // showHelpText (undefined → enabled)
+      undefined,              // codeFreezeAmbiguous
+      undefined,              // hoverTooltip
+      state.queueDeep,        // sprintComplete
+      state.completedCount,   // sprintCompletedCount
+      state.browseItemCount,  // browseItemCount
+      state.auditsOutstanding, // sprintAuditsOutstanding
+    );
+  }
+
+  it('renders the focus-on-audits copy while an audit is outstanding', () => {
+    const output = renderBanner({
+      queueDeep: true, completedCount: 25, browseItemCount: 20, auditsOutstanding: true,
+    });
+    expect(output).toContain('Review queue deep (25 of 20 completed/in_review) — focus on audits');
+    expect(output).not.toContain("Ready to Ship (shortcut 'S')");
+  });
+
+  it('renders the Ready to Ship copy once every audit is current', () => {
+    const output = renderBanner({
+      queueDeep: true, completedCount: 20, browseItemCount: 20, auditsOutstanding: false,
+    });
+    expect(output).toContain("Ready to Ship (shortcut 'S')");
+    expect(output).not.toContain('focus on audits');
+  });
+
+  it('renders no banner for a shallow queue', () => {
+    const output = renderBanner({
+      queueDeep: false, completedCount: 3, browseItemCount: 20, auditsOutstanding: true,
+    });
+    expect(output).not.toContain('Review queue deep');
+    expect(output).not.toContain("Ready to Ship (shortcut 'S')");
+  });
+
+  it('hides the banner when help text is disabled', () => {
+    const output = renderBanner({
+      queueDeep: true, completedCount: 25, browseItemCount: 20, auditsOutstanding: true, helpText: false,
+    });
+    expect(output).not.toContain('Review queue deep');
   });
 });
 
