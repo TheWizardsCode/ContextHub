@@ -193,7 +193,12 @@ the TUI icon path (`stageDisplayIcon`), the `in_review` ordering predicate
    working-tree state`).
 2. **Time gate (legacy fallback).** When no stored fingerprint is present
    (legacy audits) or the caller cannot supply a current fingerprint (e.g. a TUI
-   render), the original `auditedAt > updatedAt - 60s` floor applies unchanged.
+   render), the audit is fresh iff
+   `|auditedAt - updatedAt| < AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s,
+   symmetric at-or-near; WL-0MUBVH7ZR009PP80). The earlier one-sided
+   `auditedAt > updatedAt - 60s` form was a competing definition and has been
+   removed, so the ordering tier, the icon path and the dispatcher cannot
+   disagree.
 
 Freshness is **atomic**: `saveAuditResult` — the path behind `wl audit-set`,
 `wl update --audit-text`, and the audit runner's `persist_audit.py` (see

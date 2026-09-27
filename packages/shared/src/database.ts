@@ -8,6 +8,10 @@ import * as path from 'path';
 import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, DemotedParent, RevertedItem } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
+// Self-referencing package export (WL-0MSJ4BT4Z002HH9B grep guard forbids a
+// relative `icons.js` import; `@worklog/shared/icons` is the canonical path
+// even from within the shared package).
+import { isAuditFresh } from '@worklog/shared/icons';
 
 /**
  * Return the later of two ISO-8601 timestamps (undefined/null-safe).
@@ -649,16 +653,21 @@ export class WorklogDatabase {
   }
 
   /**
-   * Freshness rule (WL-0MTH7G2O1004BHN5): only audits with `auditedAt >= updatedAt`
-   * qualify for the audit-not-ready boost. Stale audits (edited after the last
-   * audit) are treated as no audit for ordering. Only `readyToClose === false`
-   * qualifies; `true` or absent audits receive no boost. Critical items are
-   * never boosted past by the audit tier (hard boundary).
+   * Ordering-tier gate (WL-0MTH7G2O1004BHN5): only an audit that exists,
+   * is not ready to close (`readyToClose === false`), and is fresh per the
+   * shared `isAuditFresh` predicate qualifies for the audit-not-ready boost.
+   * Stale audits (content edited after the audit, or an audit/updatedAt skew
+   * beyond the 60 s at-or-near tolerance) are treated as no audit for
+   * ordering. The timestamp comparison is delegated to the single source of
+   * truth in `@worklog/shared/icons` (WL-0MUBVH7ZR009PP80) — no competing
+   * `auditedAt`-vs-`updatedAt` comparison lives here. No fingerprints are
+   * passed: the ordering path has no per-item current fingerprint, so the
+   * shared helper applies its time-gate fallback. Critical items are never
+   * boosted past by the audit tier (hard boundary, enforced by callers).
    */
   private isAuditNotReadyFresh(audit: AuditResult | null | undefined, itemUpdatedAt: string | undefined): boolean {
     if (!audit || audit.readyToClose) return false;
-    if (!itemUpdatedAt || !audit.auditedAt) return false;
-    return new Date(audit.auditedAt).getTime() >= new Date(itemUpdatedAt).getTime();
+    return isAuditFresh(audit.auditedAt, itemUpdatedAt);
   }
 
   /**

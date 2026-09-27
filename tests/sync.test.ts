@@ -18,6 +18,7 @@ import { WorklogDatabase } from '../src/database.js';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { _testOnly_getRemoteTrackingRef } from '../src/sync.js';
 import { WorkItem, Comment } from '../src/types.js';
+import { isAuditFresh } from '@worklog/shared/icons';
 
 describe('Sync Operations', () => {
 
@@ -931,7 +932,9 @@ describe('Sync Operations', () => {
       // (isAuditFresh(auditedAt, updatedAt) stays true when updatedAt is stable.)
 
       const sameTimestamp = '2024-06-01T12:00:00.000Z';
-      const auditedAt = '2024-08-15T10:00:00.000Z'; // audit done well after the item was last edited
+      // Audit persisted just after the item's last edit (within the shared
+      // 60 s at-or-near tolerance) — freshness is delegated to isAuditFresh.
+      const auditedAt = '2024-06-01T12:00:30.000Z';
 
       const localItem: WorkItem = {
         id: 'WI-006',
@@ -977,10 +980,7 @@ describe('Sync Operations', () => {
         auditedAt,
       };
 
-      // Inline isAuditFresh check: auditedAt > updatedAt - tolerance
-      const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-      const isAuditFresh = (a: string, u: string) =>
-        new Date(a).getTime() > new Date(u).getTime() - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
+      // Shared single-source-of-truth freshness predicate (no inline copy).
       expect(isAuditFresh(auditedAt, sameTimestamp)).toBe(true);
 
       // Merge: same-timestamp conflict resolved deterministically

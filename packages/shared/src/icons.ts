@@ -271,10 +271,12 @@ export function needsProducerReviewIcon(
  * just-persisted case where `auditedAt ≈ updatedAt` (delta well under 1 s)
  * as well as brief comment-only bumps that stay within the 60 s window.
  *
- * Single source of truth: the icon path (`stageDisplayIcon` / `auditIcon`) and
- * the audit-dispatch path (`selectAuditCandidate` / `classifyItemForDispatch`)
- * both import this predicate — no competing comparison is added anywhere.
- * (WL-0MSIAOFI70075REE)
+ * Single source of truth: the icon path (`stageDisplayIcon` / `auditIcon`), the
+ * audit-dispatch path (`selectAuditCandidate` / `classifyItemForDispatch`) and
+ * the ordering path (`sortItemsByScore` / `computeScore` /
+ * `compareAuditNotReadyTier` via `isAuditNotReadyFresh`) all import this
+ * predicate — no competing `auditedAt`-vs-`updatedAt` comparison exists
+ * anywhere (WL-0MSIAOFI70075REE, WL-0MUBVH7ZR009PP80).
  */
 export const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 60000;
 
@@ -301,7 +303,12 @@ export interface ParentAuditState {
  * lifecycle transitions.
  *
  * Fallback (legacy time gate): When the stored fingerprint is absent, the
- * existing 60 s floor (`AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS`) is used.
+ * 60 s symmetric at-or-near gate is used — an audit is fresh when
+ * `|auditedAt - updatedAt| < AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS`
+ * (WL-0MUBVH7ZR009PP80). The previous one-sided
+ * `auditedAt > updatedAt - 60 s` form was a competing definition; this
+ * symmetric form is the single freshness comparison shared by the icon,
+ * dispatch and ordering paths.
  *
  * Guarantees:
  *   • `updatedAt` churn alone (post-audit comment, sync merge re-timestamp,
@@ -344,7 +351,9 @@ export function isAuditFresh(
   const auditTime = new Date(auditedAt).getTime();
   const updateTime = new Date(updatedAt).getTime();
   if (isNaN(auditTime) || isNaN(updateTime)) return false;
-  return auditTime > updateTime - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
+  // Symmetric at-or-near: fresh only when the two timestamps are within the
+  // tolerance band (strict `<`, so an exact 60 s gap is stale).
+  return Math.abs(auditTime - updateTime) < AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
 }
 
 /**

@@ -344,9 +344,10 @@ returns `true`. Since WL-0MUBVH5S0008NQ9K freshness is **content-based**: when
 both fingerprints are available a match is fresh regardless of `updatedAt`
 churn (comment, sync-merge re-timestamp, re-sort), and a mismatch is stale. When
 no fingerprint is available (legacy audits, or a TUI render that cannot compute
-the current fingerprint) the legacy rule applies — `auditedAt` within the 60 s
-staleness buffer of `updatedAt`. Missing audit timestamps are treated as
-not-fresh and therefore selected.
+the current fingerprint) the legacy time gate applies — the audit is fresh iff
+`|auditedAt - updatedAt| < AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s,
+symmetric at-or-near; WL-0MUBVH7ZR009PP80). Missing audit timestamps are treated
+as not-fresh and therefore selected.
 
 Guarantee (WL-0MSN6ZCTN0027U2R): `updatedAt` is bumped only on **content**
 changes (title, description, status, stage, priority, tags, assignee, etc.).
@@ -1325,7 +1326,8 @@ safety net for unknown/custom stages.
 | 5      | passed audit, stale                |
 | 6      | passed audit, fresh                |
 
-A "fresh" audit has `auditedAt > updatedAt - 60 s`; otherwise it is stale.
+A "fresh" audit has `|auditedAt - updatedAt| < 60 s` (symmetric at-or-near,
+via the shared `isAuditFresh` predicate); otherwise it is stale.
 Within the same bucket items are ordered by priority (high → medium → low),
 then by `updatedAt` (older first), then by `id` as a tie-break.  The same
 predicate is shared by the Herdr worklist, `wl next --groups`, and

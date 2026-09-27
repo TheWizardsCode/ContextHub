@@ -3562,4 +3562,81 @@ describe('WorklogDatabase', () => {
       expect(result.workItem?.id).toBe(critical.id);
     });
   });
+
+  describe('audit-freshness agreement with the shared predicate (WL-0MUBVH7ZR009PP80)', () => {
+    const saveNotReadyAudit = (workItemId: string, auditedAt: string): void => {
+      db.saveAuditResult({
+        workItemId,
+        readyToClose: false,
+        auditedAt,
+        summary: null,
+        rawOutput: null,
+        author: null,
+      });
+    };
+
+    // saveAuditResult sets updatedAt = auditedAt atomically, so a content
+    // write after the save moves updatedAt away from the audit within the
+    // ordering tier. That is how the within/beyond-tolerance cases are built
+    // deterministically (30 s inside the 60 s band, 120 s outside).
+    const auditThenContentWrite = (id: string, ageMs: number): void => {
+      saveNotReadyAudit(id, new Date(Date.now() - ageMs).toISOString());
+      db.update(id, { description: `content tweak at ${Date.now()}` });
+    };
+
+    it('reSort: a within-tolerance audited-not-ready item is boosted, agreeing with isAuditFresh', async () => {
+      const medium = db.create({ title: 'Medium unaudited', priority: 'medium', sortIndex: 100 });
+      const low = db.create({ title: 'Low audited 30 s ago', priority: 'low', sortIndex: 200 });
+
+      auditThenContentWrite(low.id, 30_000);
+      expect(isAuditFresh(db.getAuditResult(low.id)!.auditedAt, db.get(low.id)!.updatedAt)).toBe(true);
+
+      db.reSort();
+      expect(db.get(low.id)!.sortIndex).toBeLessThan(db.get(medium.id)!.sortIndex);
+    });
+
+    it('reSort: a stale audited-not-ready item is not boosted, agreeing with isAuditFresh', async () => {
+      const medium = db.create({ title: 'Medium baseline', priority: 'medium', sortIndex: 100 });
+      const low = db.create({ title: 'Low audited 120 s ago', priority: 'low', sortIndex: 200 });
+
+      auditThenContentWrite(low.id, 120_000);
+      expect(isAuditFresh(db.getAuditResult(low.id)!.auditedAt, db.get(low.id)!.updatedAt)).toBe(false);
+
+      db.reSort();
+      expect(db.get(medium.id)!.sortIndex).toBeLessThan(db.get(low.id)!.sortIndex);
+    });
+
+    it('selectBySortIndex fallback: a within-tolerance audited-not-ready item outranks unaudited, agreeing with isAuditFresh', async () => {
+      const low = db.create({ title: 'Low audited fresh', priority: 'low', sortIndex: 0 });
+      const medium = db.create({ title: 'Medium unaudited', priority: 'medium', sortIndex: 0 });
+
+      auditThenContentWrite(low.id, 30_000);
+      expect(isAuditFresh(db.getAuditResult(low.id)!.auditedAt, db.get(low.id)!.updatedAt)).toBe(true);
+      // All sortIndex values still coincide, so the all-equal fallback path runs.
+      expect(db.get(low.id)!.sortIndex).toBe(0);
+      expect(db.get(medium.id)!.sortIndex).toBe(0);
+
+      expect(db.findNextWorkItem().workItem?.id).toBe(low.id);
+    });
+
+    it('a missing audit receives no boost, agreeing with isAuditFresh', async () => {
+      const medium = db.create({ title: 'Medium baseline', priority: 'medium', sortIndex: 100 });
+      const low = db.create({ title: 'Low no audit', priority: 'low', sortIndex: 200 });
+
+      expect(isAuditFresh(null, db.get(low.id)!.updatedAt)).toBe(false);
+
+      db.reSort();
+      expect(db.get(medium.id)!.sortIndex).toBeLessThan(db.get(low.id)!.sortIndex);
+    });
+
+    it('AC7: critical still outranks a within-tolerance audited-not-ready non-critical item', async () => {
+      const critical = db.create({ title: 'Critical unaudited', priority: 'critical', sortIndex: 0 });
+      const low = db.create({ title: 'Low audited fresh', priority: 'low', sortIndex: 0 });
+
+      auditThenContentWrite(low.id, 30_000);
+      expect(isAuditFresh(db.getAuditResult(low.id)!.auditedAt, db.get(low.id)!.updatedAt)).toBe(true);
+
+      expect(db.findNextWorkItem().workItem?.id).toBe(critical.id);
+    });
+  });
 });
