@@ -32,7 +32,12 @@ import {
   type RetryCommandContext,
   type RetryCommandOptions,
 } from './retry-command.js';
-import { formatDuration, resolveRetryDelay, DEFAULT_BACKOFF_CONFIG } from './retry-logic.js';
+import {
+  formatDuration,
+  resolveRetryDelay,
+  createRetryHintCapturingFetch,
+  DEFAULT_BACKOFF_CONFIG,
+} from './retry-logic.js';
 
 let _recoveryRegistered = false;
 
@@ -48,6 +53,13 @@ let _notifyFn: ((message: string, level: 'info' | 'warning' | 'error') => void) 
 
 // Timestamp of the last completed triggerInvisibleContinue call.
 let _lastInvisibleContinueTime = 0;
+
+// Server-requested retry delay captured from the latest provider response
+// headers (`Retry-After` / `Retry-After-Ms`). Consumed by the retry loop.
+let _lastServerRetryHintMs: number | undefined = undefined;
+
+// Guards against installing the fetch hint capture more than once.
+let _fetchHintCaptureInstalled = false;
 
 /**
  * Register the recovery module with the extension API.
@@ -65,6 +77,7 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
   // the built-in retry from racing with our retry loop.
   suppressBuiltinRetry();
   captureAgentInstance();
+  installFetchRetryHintCapture();
 
   // Refresh the notify function on every handler that carries a ctx.
   pi.on('agent_end', async (_event, ctx) => {
@@ -373,14 +386,18 @@ async function triggerInvisibleContinue(): Promise<void> {
     while (true) {
       if (interruptibleState.userAborted || interruptibleState.sessionGeneration !== _sessionGenerationAtStart) return;
 
-      // Capture the server-requested retry delay (`Retry-After` /
-      // `retry_after`) from the error message before the error is removed
-      // from agent state, then honour it (AC1/AC2).
+      // Capture the server-requested retry delay before the error is removed
+      // from agent state, then honour it (AC1/AC2). The header captured by
+      // `installFetchRetryHintCapture()` takes precedence over the
+      // error-message fallback: real startup_ramp errors carry the hint only
+      // on the `Retry-After` header, never in the message text.
       attempt++;
       const { delayMs: delay, serverHintMs } = resolveRetryDelay(
         attempt,
         lastErrorMessageFromAgentState(),
         DEFAULT_BACKOFF_CONFIG,
+        Math.random,
+        _lastServerRetryHintMs,
       );
 
       // Remove the error assistant message from agent state
@@ -580,6 +597,34 @@ function lastMessageIsRetryableError(): boolean {
   if (!messages || !Array.isArray(messages)) return false;
   const lastMsg = messages[messages.length - 1];
   return lastMsg?.role === 'assistant' && lastMsg.stopReason === 'error';
+}
+
+// ── Server retry-hint capture (fetch wrapper) ─────────────────────────
+
+/**
+ * Capture the server-requested retry delay from provider HTTP response
+ * headers.
+ *
+ * Pi's `openai-completions` provider throws on a non-2xx response before the
+ * `after_provider_response` extension event fires, and the assistant error
+ * message does not carry the `Retry-After` header value. Wrapping
+ * `globalThis.fetch` is the only point at which the recovery module can see
+ * the header for that provider. The wrapper is transparent: it returns the
+ * original response untouched and never swallows errors.
+ */
+function installFetchRetryHintCapture(): void {
+  if (_fetchHintCaptureInstalled) return;
+  const originalFetch = globalThis.fetch;
+  if (typeof originalFetch !== 'function') return;
+  _fetchHintCaptureInstalled = true;
+  try {
+    globalThis.fetch = createRetryHintCapturingFetch(originalFetch, (hintMs) => {
+      _lastServerRetryHintMs = hintMs;
+    });
+  } catch {
+    // Non-writable fetch in this runtime — fall back to message parsing.
+    _fetchHintCaptureInstalled = false;
+  }
 }
 
 // ── Built-in retry suppression ────────────────────────────────────────

@@ -88,6 +88,7 @@ import {
   type DowntimeClaimResult,
   type DowntimeSpawn,
   type DowntimeSpawnResult,
+  type DowntimeSpawnConfig,
   type ScheduledPrompt,
   type DowntimeItemResult,
   parseShowItemOutput,
@@ -100,6 +101,7 @@ import {
   withTransientRetry,
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
+  isSafeDowntimePaneToClose,
   type RunningPanesResult,
   type LlamaStatus,
 } from './downtime-worker.js';
@@ -111,6 +113,7 @@ import {
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
   appendDowntimeLogEntry,
+  appendPaneCloseLogEntry,
   auditDispatchedItemIds,
   implementDispatchedItemIds,
   planDispatchedItemStages,
@@ -1215,13 +1218,14 @@ export function createDowntimeDeps(
         itemTitle?: string;
         itemId?: string;
         anchorId?: string;
+        spawnConfig?: DowntimeSpawnConfig;
       },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
         buildDowntimePaneArgs(kind, prompt, opts),
-        { cwd: opts.cwd },
+        { cwd: opts.cwd, config: opts.spawnConfig },
         spawnFn,
       );
     },
@@ -1310,6 +1314,77 @@ export function createDowntimeDeps(
       } catch {
         // fail-open: enrichment logging must never crash the worker
       }
+    },
+    // Pane-lifecycle item state (WL-0MU308WSF0002JWN): resolve the current
+    // state of a dispatched pane's item so the monitor can classify its
+    // lifecycle outcome. Reuses the enriched `wl show` fetch (which now also
+    // carries the top-level audit verdict). Fail-closed: a wl failure or an
+    // unparseable item resolves null (the monitor then takes no action for
+    // that pane). Never throws.
+    async getItemLifecycleState(itemId: string, cwd: string) {
+      try {
+        const result = await fetchAuditItemById(itemId, cwd);
+        if (!result.ok || !result.info) return null;
+        const info = result.info;
+        return {
+          id: info.id,
+          title: info.title,
+          status: info.status,
+          stage: info.stage,
+          risk: info.risk,
+          effort: info.effort,
+          auditedAt: info.auditedAt,
+          auditResult: info.auditResult,
+          needsProducerReview: info.needsProducerReview,
+        };
+      } catch {
+        return null; // fail-closed: an unreadable item is never acted upon
+      }
+    },
+    // Close a dispatched pane (WL-0MU308WSF0002JWN): `herdr pane close
+    // <paneId>`. Fail-closed: any herdr failure resolves false and the
+    // monitor still records the lifecycle outcome with `closed:false`.
+    //
+    // Safety (WL-0MU4US5MP001JFEN AC7): when the dispatch context is
+    // supplied, verify the LIVE pane's label is a downtime pane whose
+    // item-id suffix matches THIS dispatch BEFORE closing — a stale entry
+    // must never close an unrelated/operator pane whose pane id collides.
+    async closePane(
+      paneId: string,
+      _cwd: string,
+      expected?: { itemId: string; kind: string },
+    ): Promise<boolean> {
+      try {
+        const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+        if (expected) {
+          const { stdout } = await getExecFileAsync()(
+            herdrBin,
+            ['pane', 'list'],
+            { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+          );
+          const panes = parseHerdrPaneListOutput(stdout);
+          // Only ever close a downtime pane for THIS item (AC7). A missing
+          // record (pane already gone) or a mismatched label means we must
+          // NOT close (never an unrelated/operator pane id collision).
+          if (panes === null || !isSafeDowntimePaneToClose(panes, paneId, expected.itemId)) {
+            return false;
+          }
+        }
+        await getExecFileAsync()(
+          herdrBin,
+          ['pane', 'close', paneId],
+          { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS },
+        );
+        return true;
+      } catch {
+        return false; // fail-closed: a failed close must never crash the worker
+      }
+    },
+    // Record a pane-close lifecycle entry in the rolling dispatch log
+    // (WL-0MU308WSF0002JWN). Fail-closed: `appendPaneCloseLogEntry` never
+    // throws.
+    async recordPaneClose(entry, cwd: string): Promise<void> {
+      await appendPaneCloseLogEntry(cwd, entry);
     },
     async rollbackClaim(
       itemId: string,
@@ -1471,20 +1546,30 @@ async function main(): Promise<void> {
   // open in the resolved worklog root (--cwd).
   const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
 
+  // Machine-wide coordination directory shared by the downtime leader
+  // election and the mode-switch shared activity file (WL-0MU6MXCZZ007ZXT9,
+  // AC2). HERDR_COORDINATION_DIR override wins; default ~/.herdr/downtime/.
+  const coordinationDir = getMachineCoordinationDir() ?? join(targetCwd, '.worklog');
+
   // Mode-switch worker: automatically switches the llama-proxy between fast
   // (cloud) and cheap (local) modes based on operator activity and proxy
   // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
-  // key). Passes `enabled` via the settings flag (modeSwitchEnabled).
-  // Created BEFORE the downtime worker so we can wire the idle callback.
-  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker();
+  // key). Created AFTER the downtime worker because it needs
+  // `downtimeWorker.isLeader` for leader-only cheap switching (AC1) and the
+  // coordination directory for shared activity broadcast (AC2). The idle
+  // callback is wired through a holder because createDowntimeWorker needs
+  // `onProxyIdle` before the mode-switch worker exists.
+  const modeSwitchHolder: { worker?: ModeSwitchWorker } = {};
 
   // Callback: when the downtime dispatcher finds the proxy idle, trigger a
   // mode-switch tick immediately with the fresh status — avoids the 10 s
   // poll delay of the independent scheduler task.
   const onProxyIdle = async (proxyStatus: LlamaStatus): Promise<void> => {
+    const worker = modeSwitchHolder.worker;
+    if (!worker) return; // dispatcher cannot tick before the worker exists
     try {
       const s = loadSettings();
-      await modeSwitchWorker.tick({
+      await worker.tick({
         enabled: s.modeSwitchEnabled ?? true,
         idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
         proxyUrl: s.downtimeProxyUrl,
@@ -1507,7 +1592,7 @@ async function main(): Promise<void> {
     // ~/.herdr/downtime/. The per-worklog join(targetCwd, '.worklog')
     // coupling is retired (F6). The instance id is auto-generated at
     // worker construction (stable for the process lifetime).
-    coordinationDir: getMachineCoordinationDir() ?? join(targetCwd, '.worklog'),
+    coordinationDir,
     config: () => {
       const s = loadSettings();
       return {
@@ -1520,6 +1605,19 @@ async function main(): Promise<void> {
         // the concurrency limiter.
         model: s.downtimeModel,
         cwd: targetCwd,
+        // Mode-aware Phase 2 parallelism (WL-0MT50S9JW001DHME): the last
+        // proxy mode observed by the mode-switch worker (`null` until polled
+        // → `undefined` → the dispatcher conservatively keeps PARALLELISM=1).
+        //
+        // WL-0MUFRFLRQ004KNDG: read through `modeSwitchHolder`, NOT the
+        // `modeSwitchWorker` const below. createDowntimeWorker calls config()
+        // SYNCHRONOUSLY during construction (the durable-disable marker check),
+        // which runs before `modeSwitchWorker` is initialized — referencing it
+        // directly hit the temporal dead zone and crashed the whole plugin at
+        // startup. The holder is declared above; it is empty at construction
+        // (conservative `undefined` → PARALLELISM=1) and populated immediately
+        // after, so later ticks read the real mode.
+        mode: modeSwitchHolder.worker?.getLastKnownMode() ?? undefined,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
@@ -1528,6 +1626,15 @@ async function main(): Promise<void> {
     },
     onProxyIdle,
   });
+
+  // Mode-switch worker (created AFTER the downtime worker so it can reuse the
+  // leader probe): only the downtime leader runs the idle cheap switch (AC1)
+  // and the shared activity file is read from the same coordination dir.
+  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker({
+    isLeader: () => downtimeWorker.isLeader,
+    coordinationDir,
+  });
+  modeSwitchHolder.worker = modeSwitchWorker;
 
   const selectedItem = await runWorklistTui(
     fetcher,

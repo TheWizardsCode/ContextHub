@@ -84,6 +84,7 @@ import {
   parseCriticalCandidatesOutput,
   parseDepListBlockersOutput,
   parseShownWorkItem,
+  parseShowItemOutput,
   selectCriticalCandidate,
   criticalSkillKind,
   resolveDependencyFrontier,
@@ -106,9 +107,12 @@ import {
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
   paneLabelItemId,
+  isSafeDowntimePaneToClose,
   runningDowntimePaneItemIds,
   evaluateCriticalFirstGuard,
   resolveInFlightPanes,
+  monitorDispatchedPanes,
+  DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS,
   DOWNTIME_POLL_INTERVAL_FLOOR_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
@@ -138,6 +142,9 @@ import {
   MIN_BROWSE_ITEM_COUNT,
   MAX_BROWSE_ITEM_COUNT,
   DOWNTIME_DISPATCH_EXTEND_MAX,
+  DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS,
+  decisionHeaderToken,
+  LOCAL_DISPATCH_LEASE_MAX_SECONDS,
 } from './downtime-worker.js';
 import {
   clampBrowseItemCount,
@@ -152,7 +159,10 @@ import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import {
   DOWNTIME_LOG_FILE,
   appendDowntimeLogEntry,
+  appendPaneCloseLogEntry,
   readDowntimeLogEntries,
+  readCoordinationLogEntries,
+  type CoordinationLogEntry,
 } from './downtime-log.js';
 import {
   LEASE_FILE,
@@ -3902,41 +3912,52 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     expect(optionsWithEmptyConfig.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
-  it('buildDowntimeSpawnOptions returns PARALLELISM=1 in fast mode', () => {
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 in fast mode even with free slots', () => {
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'fast', slotBudget: 3, concurrentDispatchCap: 1 },
+      config: { mode: 'fast', slotBudget: 3, freeSlots: 3, concurrentDispatchCap: 1 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
-  it('buildDowntimeSpawnOptions returns PARALLELISM=2 for cheap mode with free second slot and dispatch budget allows', () => {
-    // Cheap mode, 2 slots, only 1 concurrent dispatch allowed → 2 children = 2 streams total
+  it('buildDowntimeSpawnOptions returns PARALLELISM=2 for cheap mode with a genuinely free second slot (single-flight)', () => {
+    // Cheap mode, 2 slots, both genuinely free, single dispatch at a time →
+    // 2 children = 2 streams total, fitting the 2-slot pool.
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 0 },
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 1 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('2');
   });
 
-  it('buildDowntimeSpawnOptions returns PARALLELISM=2 for cheap mode with dispatch cap = 1', () => {
-    // Single dispatch at a time in cheap mode → 2 children = 2 streams total
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when the second slot is NOT genuinely free', () => {
+    // The operative signal is freeSlots, never the total slotBudget: a 2-slot
+    // pool with only 1 free slot cannot run 2 children.
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 1 },
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 1, concurrentDispatchCap: 1 },
     });
-    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('2');
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
+
+  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when the dispatch budget is unbounded (cap 0)', () => {
+    // 0 = unbounded → a second audit could run → 2 audits × 2 children would
+    // exceed the 2-slot cheap pool. Only cap === 1 is single-flight-safe.
+    const options = buildDowntimeSpawnOptions('/repo', {
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 0 },
+    });
+    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
   it('buildDowntimeSpawnOptions returns PARALLELISM=1 when concurrent dispatch budget would exceed slot capacity', () => {
     // 2+ concurrent dispatches × 2 children each = 4 streams, exceeds 2-slot budget
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 2 },
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 2 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
   it('buildDowntimeSpawnOptions returns PARALLELISM=1 when cheap mode slot budget is insufficient', () => {
-    // Only 1 slot available — cannot run 2 children
+    // Only 1 slot in the pool — cannot run 2 children
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 1, concurrentDispatchCap: 1 },
+      config: { mode: 'cheap', slotBudget: 1, freeSlots: 1, concurrentDispatchCap: 1 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
@@ -3944,9 +3965,29 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
   it('buildDowntimeSpawnOptions returns PARALLELISM=1 for cheap mode with high dispatch cap', () => {
     // 3+ concurrent dispatches × 2 children = 6 streams, far exceeds budget
     const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, concurrentDispatchCap: 3 },
+      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 3 },
     });
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
+
+  it('spawnDowntimePane forwards the spawn config to the spawn boundary (WL-0MT50S9JW001DHME)', async () => {
+    const handle = {
+      unref: vi.fn(),
+      once: vi.fn((event: string, listener: (arg: unknown) => void) => {
+        if (event === 'exit') listener(0);
+      }),
+    };
+    const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
+    const config = {
+      mode: 'cheap' as const,
+      slotBudget: 2,
+      freeSlots: 2,
+      concurrentDispatchCap: 1,
+    };
+
+    await spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo', config }, spawnFn);
+
+    expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo', config });
   });
 });
 
@@ -3959,6 +4000,8 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     cooldownMs?: number;
     status?: unknown;
     deps?: Partial<DowntimeWorkerDeps>;
+    mode?: 'cheap' | 'fast';
+    concurrentDispatchCap?: number;
   } = {}) {
     const cfg = {
       enabled: overrides.enabled ?? true,
@@ -3967,6 +4010,11 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
       model: 'plan',
       cwd: '/repo',
       noCandidateCooldownMs: overrides.cooldownMs ?? 3_600_000,
+      // Mode-aware spawn config inputs (WL-0MT50S9JW001DHME).
+      ...(overrides.mode !== undefined ? { mode: overrides.mode } : {}),
+      ...(overrides.concurrentDispatchCap !== undefined
+        ? { concurrentDispatchCap: overrides.concurrentDispatchCap }
+        : {}),
     };
     const fetcher = vi
       .fn()
@@ -4046,6 +4094,38 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     expect(at.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     expect(worker.lastDispatchAt).toBe(start + cfg.thresholdMs);
+  });
+
+  it('tick forwards a mode-aware spawnConfig with the genuine free-slot snapshot (WL-0MT50S9JW001DHME)', async () => {
+    const { worker, deps, cfg } = makeWorker({ mode: 'cheap' });
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    await worker.tick();
+
+    // idleAllSlotsFree: 4 of 4 slots free, total 4 → forwarded verbatim so
+    // the spawn boundary never has to reach back into the worker.
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        spawnConfig: { mode: 'cheap', slotBudget: 4, freeSlots: 4, concurrentDispatchCap: 1 },
+      }),
+    );
+  });
+
+  it('tick omits spawnConfig when the proxy mode is unknown (conservative serial default)', async () => {
+    const { worker, deps, cfg } = makeWorker();
+    const start = 1_000_000;
+    vi.setSystemTime(start);
+    await worker.tick();
+
+    vi.setSystemTime(start + cfg.thresholdMs);
+    await worker.tick();
+
+    const call = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect(call[1]).not.toHaveProperty('spawnConfig');
   });
 
   it('requires a fresh full idle period after a dispatch (AC5)', async () => {
@@ -6383,6 +6463,36 @@ describe('parseShownWorkItem', () => {
   });
 });
 
+describe('parseShowItemOutput audit verdict (WL-0MU308WSF0002JWN)', () => {
+  it('reads the TOP-LEVEL auditResult verdict and timestamp', () => {
+    const info = parseShowItemOutput(
+      JSON.stringify({
+        success: true,
+        workItem: { id: 'WL-AUD', status: 'completed', stage: 'in_review' },
+        auditResult: {
+          workItemId: 'WL-AUD',
+          readyToClose: false,
+          auditedAt: '2026-01-02T00:00:00.000Z',
+        },
+      }),
+    );
+    expect(info).toMatchObject({
+      id: 'WL-AUD',
+      status: 'completed',
+      stage: 'in_review',
+      auditedAt: '2026-01-02T00:00:00.000Z',
+      auditResult: false,
+    });
+  });
+
+  it('leaves the verdict absent when auditResult is null (no audit recorded)', () => {
+    const info = parseShowItemOutput(
+      JSON.stringify({ success: true, workItem: { id: 'WL-AUD2', stage: 'in_review' }, auditResult: null }),
+    );
+    expect(info!.auditResult).toBeUndefined();
+  });
+});
+
 // ── Critical-first: tier wiring (F4, decisions Q1/Q2/Q3) ─────────────
 
 describe('dispatch critical-first tier', () => {
@@ -7977,6 +8087,21 @@ describe('paneLabelItemId / runningDowntimePaneItemIds / evaluateCriticalFirstGu
     expect(paneLabelItemId(undefined)).toBeNull();
   });
 
+  it('isSafeDowntimePaneToClose only accepts the downtime pane for the SAME item (AC7)', () => {
+    const live = [
+      pane({ paneId: 'w1:p1', label: 'Downtime triggered implement Some item - WL-ABC' }),
+      pane({ paneId: 'w1:p2', label: 'pi - my operator session' }),
+    ];
+    // Matching downtime pane for the item → safe.
+    expect(isSafeDowntimePaneToClose(live, 'w1:p1', 'WL-ABC')).toBe(true);
+    // A different item's downtime pane (id collision) → NOT safe.
+    expect(isSafeDowntimePaneToClose(live, 'w1:p1', 'WL-OTHER')).toBe(false);
+    // A non-downtime (operator) pane → NOT safe.
+    expect(isSafeDowntimePaneToClose(live, 'w1:p2', 'WL-ABC')).toBe(false);
+    // The pane is already gone → NOT safe (nothing to close).
+    expect(isSafeDowntimePaneToClose(live, 'w1:p9', 'WL-ABC')).toBe(false);
+  });
+
   it('runningDowntimePaneItemIds returns only WORKING downtime panes, keyed by item id', () => {
     const ids = runningDowntimePaneItemIds([
       pane({ paneId: 'w1:p1', label: 'Downtime triggered implement A - WL-A', agentStatus: 'working' }),
@@ -8716,6 +8841,127 @@ describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
   });
 });
 
+// ── Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE) ──
+//
+// The live Herdr-head dispatch path (`dispatchFromHerdrList` → normal scan)
+// builds its `classifyItemForDispatch` input from the Herdr item fields. Before
+// the fix (022f1b24) it OMITTED `needsProducerReview`, so a non-critical item
+// flagged for producer review was dispatched anyway — even though the offer
+// path (`computeMostImportantItem`, which passes the item object directly)
+// already honoured the flag. These tests pin AC1–AC3: the flag blocks a
+// non-critical plan_complete / idea candidate, the direct path agrees with the
+// offer path, and clearing the flag restores dispatchability.
+
+describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)', () => {
+  const implementItem = (id: string, overrides: Partial<DowntimeHerdrItem> = {}): DowntimeHerdrItem => ({
+    id,
+    title: `Non-critical ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'medium',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 10,
+    ...overrides,
+  });
+
+  const intakeItem = (id: string, overrides: Partial<DowntimeHerdrItem> = {}): DowntimeHerdrItem => ({
+    id,
+    title: `Idea ${id}`,
+    status: 'open',
+    stage: 'idea',
+    priority: 'medium',
+    sortIndex: 10,
+    ...overrides,
+  });
+
+  const dispatchDeps = (items: DowntimeHerdrItem[]): DowntimeWorkerDeps => makeDeps({
+    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items }),
+    claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    recordDispatch: vi.fn().mockResolvedValue(true),
+  });
+
+  describe('AC2 — the flag blocks a non-critical candidate on dispatchDowntimeWork', () => {
+    it('blocks a plan_complete item (implement) and dispatches the next eligible item', async () => {
+      const deps = dispatchDeps([
+        implementItem('NPR-GATED', { needsProducerReview: true, sortIndex: 1 }),
+        implementItem('NPR-ALLOWED', { needsProducerReview: false, sortIndex: 2 }),
+      ]);
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      expect(outcome.candidate?.id).toBe('NPR-ALLOWED');
+      // The gated item was never claimed.
+      expect(deps.claimItem).not.toHaveBeenCalledWith('NPR-GATED', expect.any(Object), '/repo');
+    });
+
+    it('blocks an idea item (intake) and dispatches the next eligible item', async () => {
+      const deps = dispatchDeps([
+        intakeItem('NPR-IDEA-GATED', { needsProducerReview: true, sortIndex: 1 }),
+        intakeItem('NPR-IDEA-ALLOWED', { needsProducerReview: false, sortIndex: 2 }),
+      ]);
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('intake');
+      expect(outcome.candidate?.id).toBe('NPR-IDEA-ALLOWED');
+      expect(deps.claimItem).not.toHaveBeenCalledWith('NPR-IDEA-GATED', expect.any(Object), '/repo');
+    });
+
+    it('dispatches nothing when every candidate is review-gated', async () => {
+      const deps = dispatchDeps([
+        implementItem('NPR-ONLY', { needsProducerReview: true }),
+      ]);
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(outcome.dispatched).toBe(false);
+      expect(deps.claimItem).not.toHaveBeenCalled();
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    });
+
+    it('clearing the flag restores dispatchability (same item shape)', async () => {
+      const gated = implementItem('NPR-CLEAR', { needsProducerReview: true });
+      const blocked = await dispatchDowntimeWork(dispatchDeps([gated]), { model: 'plan', cwd: '/repo' });
+      expect(blocked.dispatched).toBe(false);
+
+      gated.needsProducerReview = false;
+      const released = await dispatchDowntimeWork(dispatchDeps([gated]), { model: 'plan', cwd: '/repo' });
+      expect(released.dispatched).toBe(true);
+      expect(released.candidate?.id).toBe('NPR-CLEAR');
+    });
+  });
+
+  describe('AC3 — direct and offer paths agree on the producer-review gate', () => {
+    it('both the direct dispatch and the offer skip the gated item and pick the same next item', async () => {
+      const items = [
+        implementItem('NPR-PARITY-GATED', { needsProducerReview: true, sortIndex: 1 }),
+        implementItem('NPR-PARITY-ALLOWED', { needsProducerReview: false, sortIndex: 2 }),
+      ];
+
+      const direct = await dispatchDowntimeWork(dispatchDeps(items), { model: 'plan', cwd: '/repo' });
+      const offer = await computeMostImportantItem(dispatchDeps(items), '/repo');
+
+      expect(direct.dispatched).toBe(true);
+      expect(direct.candidate?.id).toBe('NPR-PARITY-ALLOWED');
+      expect(offer).toMatchObject({ ok: true, candidate: { id: 'NPR-PARITY-ALLOWED' } });
+    });
+
+    it('the offer reports no candidate when every candidate is review-gated', async () => {
+      const offer = await computeMostImportantItem(
+        dispatchDeps([implementItem('NPR-OFFER-ONLY', { needsProducerReview: true })]),
+        '/repo',
+      );
+
+      expect(offer).toMatchObject({ ok: true, noCandidate: true });
+    });
+  });
+});
+
 // ── RCA: duplicate re-dispatch of a critical in-flight item ─────────────
 // Parent WL-0MUBEZ6PE002WLP4 / F1 WL-0MUBVKPLP006RRDJ (AC1.1).
 //
@@ -9062,10 +9308,10 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
 //
 // Blocking is done by CLASSIFICATION SHAPE (a non-dispatchable stage for
 // open items, out-of-recency for completed/in_review) rather than by the
-// `needsProducerReview` flag: on the current `dev` the live Herdr-head
-// dispatcher builds its `classifyItemForDispatch` input WITHOUT threading
-// `needsProducerReview`, so that flag does not block on this path yet (a
-// separate defect tracked as a discovered-from work item).
+// `needsProducerReview` flag: the window-extension tests deliberately isolate
+// the window mechanism from the review gate. (The flag now blocks on this
+// path too — the field is threaded into `classifyItemForDispatch` as of
+// WL-0MU72WJ8C0005GIE / 022f1b24.)
 
 describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5)', () => {
   const OLD = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
@@ -9733,6 +9979,72 @@ describe('parseLlamaStatus: array local_owner_session_id (WL-0MU88086A0089US4)',
   });
 });
 
+describe('parseLlamaStatus: local_owner_session_ids normalization (WL-0MU88086A0089US4)', () => {
+  function makeBase(): Record<string, unknown> {
+    return {
+      llama_server_running: true,
+      active_query: false,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 3,
+      total_slots: 3,
+      contention_queue_depth: 0,
+      contention_queued_count: 0,
+    };
+  }
+
+  it('captures every session in the array and drops the proxy URL element', () => {
+    const result = parseLlamaStatus({
+      ...makeBase(),
+      local_owner_session_id: ['http://localhost:8080', 'session-a', 'session-b'],
+    });
+    expect(result).not.toBeNull();
+    expect(result!.local_owner_session_ids).toEqual(['session-a', 'session-b']);
+    expect(result!.local_owner_session_id).toBe('session-a');
+  });
+
+  it('normalises a legacy string owner to a single-element array', () => {
+    const result = parseLlamaStatus({
+      ...makeBase(),
+      local_owner_session_id: 'legacy-session',
+    });
+    expect(result).not.toBeNull();
+    expect(result!.local_owner_session_ids).toEqual(['legacy-session']);
+    expect(result!.local_owner_session_id).toBe('legacy-session');
+  });
+
+  it('yields an empty owner list for malformed input (fail-closed, no throw)', () => {
+    const malformedInputs: unknown[] = [
+      42,
+      { id: 'bad' },
+      [],
+      ['http://localhost:8080'],
+      [42],
+      ['http://localhost:8080', 42],
+    ];
+    for (const malformed of malformedInputs) {
+      const result = parseLlamaStatus({
+        ...makeBase(),
+        local_owner_session_id: malformed,
+      });
+      expect(result).not.toBeNull();
+      expect(result!.local_owner_session_ids).toEqual([]);
+      expect(result!.local_owner_session_id).toBeUndefined();
+    }
+  });
+
+  it('marks local_lease_active from a multi-session array even without lease seconds', () => {
+    const result = parseLlamaStatus({
+      ...makeBase(),
+      local_lease_active: undefined,
+      local_owner_session_id: ['http://localhost:8080', 'session-a', 'session-b'],
+    });
+    expect(result).not.toBeNull();
+    expect(result!.local_lease_active).toBe(true);
+  });
+});
+
 // ── Per-slot owner-lease gate in tick() (WL-0MU8807BI008C9ME AC1-AC4) ──
 
 describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () => {
@@ -10034,5 +10346,903 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       vi.useRealTimers();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN, child WL-0MU4URK4H006OFCE) ──
+//
+// The monitor inspects every dispatched pane recorded in the rolling log
+// (marker + post-spawn enrichment), classifies its lifecycle outcome, logs a
+// pane-close entry, and closes the pane — EXCEPT `implement` panes, which are
+// never auto-closed (AC6). Every boundary is fail-closed (AC7).
+describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
+  const roots: string[] = [];
+
+  function makeRoot(): string {
+    const root = mkdtempSync(join(tmpdir(), 'pane-lifecycle-'));
+    roots.push(root);
+    return root;
+  }
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  /** Seed a dispatch marker + its post-spawn enrichment (paneId) entry. */
+  async function seedDispatch(
+    root: string,
+    opts: { itemId: string; kind: string; paneId: string; stage?: string; title?: string },
+  ): Promise<void> {
+    const marker = {
+      itemId: opts.itemId,
+      kind: opts.kind,
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+      cwd: root,
+      title: opts.title ?? opts.itemId,
+      stage: opts.stage ?? 'idea',
+    };
+    await appendDowntimeLogEntry(root, JSON.stringify(marker));
+    await appendDowntimeLogEntry(root, JSON.stringify({ ...marker, paneId: opts.paneId, enrichment: true }));
+  }
+
+  /** Deps with a real (rolling-log-appending) recordPaneClose so idempotency works. */
+  function monitorDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
+    return makeDeps({
+      recordPaneClose: vi.fn(async (entry, cwd) => {
+        await appendPaneCloseLogEntry(cwd, entry);
+      }),
+      ...overrides,
+    });
+  }
+
+  async function paneCloseEntries(root: string) {
+    return (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
+  }
+
+  it('closes an intake pane and logs closed-as-intake-complete when the item reaches intake_complete', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-1', kind: 'intake', paneId: 'w1:p1', stage: 'idea', title: 'Intake me' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-1', title: 'Intake me', stage: 'intake_complete' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w1:p1' }] }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 1, logged: 1, closed: 1, errors: 0 });
+    expect(closePane).toHaveBeenCalledWith('w1:p1', root, { itemId: 'WL-1', kind: 'intake' });
+    const pc = await paneCloseEntries(root);
+    expect(pc).toHaveLength(1);
+    expect(pc[0]).toMatchObject({
+      entryType: 'pane-close',
+      itemId: 'WL-1',
+      itemTitle: 'Intake me',
+      paneId: 'w1:p1',
+      kind: 'intake',
+      outcome: 'closed-as-intake-complete',
+      closed: true,
+    });
+  });
+
+  it('closes a plan pane and logs closed-as-plan-complete when the item reaches plan_complete', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-2', kind: 'plan', paneId: 'w1:p2', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-2', stage: 'plan_complete' }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ logged: 1, closed: 1 });
+    expect(closePane).toHaveBeenCalledWith('w1:p2', root, { itemId: 'WL-2', kind: 'plan' });
+    expect((await paneCloseEntries(root))[0]).toMatchObject({ outcome: 'closed-as-plan-complete', closed: true });
+  });
+
+  it('closes an audit pane and records the pass/fail verdict (AC5)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-3', kind: 'audit', paneId: 'w1:p3', stage: 'in_review' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({
+        id: 'WL-3', stage: 'in_review', auditedAt: '2026-01-02T00:00:00.000Z', auditResult: false,
+      }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ logged: 1, closed: 1 });
+    expect(closePane).toHaveBeenCalledWith('w1:p3', root, { itemId: 'WL-3', kind: 'audit' });
+    expect((await paneCloseEntries(root))[0]).toMatchObject({ outcome: 'audit-failed', closed: true });
+  });
+
+  it('NEVER closes an implement pane but still logs its in_review completion (AC4/AC6)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-4', kind: 'implement', paneId: 'w1:p4', stage: 'plan_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-4', stage: 'in_review' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w1:p4' }] }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ logged: 1, closed: 0 });
+    expect(closePane).not.toHaveBeenCalled();
+    expect((await paneCloseEntries(root))[0]).toMatchObject({
+      outcome: 'requires-attention',
+      reasonCode: 'reached-in-review',
+      closed: false,
+    });
+  });
+
+  it('is idempotent: a second pass with no state change writes no duplicate entry', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-5', kind: 'plan', paneId: 'w1:p5', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-5', stage: 'plan_complete' }),
+      closePane,
+    });
+
+    const first = await monitorDispatchedPanes(deps, root);
+    const second = await monitorDispatchedPanes(deps, root);
+
+    expect(first).toMatchObject({ logged: 1, closed: 1 });
+    expect(second).toMatchObject({ logged: 0, closed: 0 });
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(await paneCloseEntries(root)).toHaveLength(1);
+  });
+
+  it('logs a NEW entry when the item changes state again (agent-ended → plan_complete)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-6', kind: 'plan', paneId: 'w1:p6', stage: 'intake_complete' });
+    const noLivePanes = vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] });
+    // First pass: the agent session has ended but the item is NOT terminal.
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-6', stage: 'intake_complete' }),
+      getRunningDowntimePanes: noLivePanes,
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+    await monitorDispatchedPanes(deps, root);
+
+    // The item then advances — a second outcome must be recorded.
+    deps.getItemLifecycleState = vi.fn().mockResolvedValue({ id: 'WL-6', stage: 'plan_complete' });
+    await monitorDispatchedPanes(deps, root);
+
+    const outcomes = (await paneCloseEntries(root)).map((e) => e.outcome);
+    expect(outcomes).toEqual(['requires-attention', 'closed-as-plan-complete']);
+  });
+
+  it('does NOT act on unknown liveness when the item has not reached a terminal (fail-open)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-7', kind: 'plan', paneId: 'w1:p7', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-7', stage: 'intake_complete' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: false, error: 'herdr down' }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 1, logged: 0, closed: 0, errors: 0 });
+    expect(closePane).not.toHaveBeenCalled();
+    expect(await paneCloseEntries(root)).toEqual([]);
+  });
+
+  it('is fail-closed: a throwing closePane still logs the outcome (closed:false) and never throws (AC7)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-8', kind: 'intake', paneId: 'w1:p8', stage: 'idea' });
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-8', stage: 'intake_complete' }),
+      closePane: vi.fn().mockRejectedValue(new Error('herdr: pane not found')),
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 1, logged: 1, closed: 0, errors: 0 });
+    expect((await paneCloseEntries(root))[0]).toMatchObject({ closed: false });
+  });
+
+  it('is fail-closed: a throwing item lookup counts an error and never throws (AC7)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-9', kind: 'plan', paneId: 'w1:p9' });
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockRejectedValue(new Error('wl exploded')),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 1, logged: 0, errors: 1 });
+  });
+
+  it('continues past a bad pane so later panes still process (AC7)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-BAD', kind: 'plan', paneId: 'w1:pA' });
+    await seedDispatch(root, { itemId: 'WL-GOOD', kind: 'intake', paneId: 'w1:pB' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn(async (itemId: string) => {
+        if (itemId === 'WL-BAD') throw new Error('wl exploded');
+        return { id: itemId, stage: 'intake_complete' };
+      }),
+      closePane,
+    });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 2, logged: 1, closed: 1, errors: 1 });
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith('w1:pB', root, { itemId: 'WL-GOOD', kind: 'intake' });
+  });
+
+  it('is a no-op when the item-state dep is absent (legacy callers)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-10', kind: 'plan', paneId: 'w1:p10', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({ closePane });
+
+    const res = await monitorDispatchedPanes(deps, root);
+
+    expect(res).toMatchObject({ checked: 0, logged: 0, closed: 0, errors: 0 });
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('logs requires-attention for an item awaiting producer review (AC3)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, { itemId: 'WL-11', kind: 'plan', paneId: 'w1:p11', stage: 'intake_complete' });
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = monitorDeps({
+      getItemLifecycleState: vi.fn().mockResolvedValue({
+        id: 'WL-11', stage: 'intake_complete', needsProducerReview: true,
+      }),
+      closePane,
+    });
+
+    await monitorDispatchedPanes(deps, root);
+
+    expect(closePane).toHaveBeenCalledWith('w1:p11', root, { itemId: 'WL-11', kind: 'plan' });
+    expect((await paneCloseEntries(root))[0]).toMatchObject({
+      outcome: 'requires-attention',
+      reasonCode: 'producer-review',
+      closed: true,
+    });
+  });
+
+  // ── Warn-level observability (WL-0MU4USJ07009JYL8 AC2/AC6) ──────────
+  // Every fail-closed catch must emit a stderr warn (never silent) so a
+  // production failure is diagnosable without a debugger.
+  function stderrMessages(spy: ReturnType<typeof vi.spyOn>): string {
+    return spy.mock.calls.map((c) => String(c[0])).join('\n');
+  }
+
+  it('warns on a failed pane close (AC2)', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const root = makeRoot();
+      await seedDispatch(root, { itemId: 'WL-W1', kind: 'intake', paneId: 'w1:pW1' });
+      const deps = monitorDeps({
+        getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-W1', stage: 'intake_complete' }),
+        closePane: vi.fn().mockRejectedValue(new Error('herdr: boom')),
+      });
+      await monitorDispatchedPanes(deps, root);
+      expect(stderrMessages(spy)).toContain('pane close failed for w1:pW1');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('warns on a failed item lookup (AC2)', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const root = makeRoot();
+      await seedDispatch(root, { itemId: 'WL-W2', kind: 'plan', paneId: 'w1:pW2' });
+      const deps = monitorDeps({
+        getItemLifecycleState: vi.fn().mockRejectedValue(new Error('wl exploded')),
+      });
+      await monitorDispatchedPanes(deps, root);
+      expect(stderrMessages(spy)).toContain('item lookup failed for WL-W2');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('warns on a failed pane-close log write (AC2)', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const root = makeRoot();
+      await seedDispatch(root, { itemId: 'WL-W3', kind: 'plan', paneId: 'w1:pW3' });
+      const deps = monitorDeps({
+        getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-W3', stage: 'plan_complete' }),
+        closePane: vi.fn().mockResolvedValue(true),
+        recordPaneClose: vi.fn().mockRejectedValue(new Error('disk full')),
+      });
+      const res = await monitorDispatchedPanes(deps, root);
+      expect(res).toMatchObject({ logged: 0, errors: 1 });
+      expect(stderrMessages(spy)).toContain('pane-close log write failed for w1:pW3');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('warns when the live-pane query fails (AC2) and still fails open', async () => {
+    const spy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const root = makeRoot();
+      await seedDispatch(root, { itemId: 'WL-W4', kind: 'plan', paneId: 'w1:pW4' });
+      const closePane = vi.fn().mockResolvedValue(true);
+      const deps = monitorDeps({
+        getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-W4', stage: 'plan_complete' }),
+        getRunningDowntimePanes: vi.fn().mockRejectedValue(new Error('herdr down')),
+        closePane,
+      });
+      const res = await monitorDispatchedPanes(deps, root);
+      // The terminal-stage close still happens (liveness is only needed for
+      // agent-done detection) — fail-open, not fail-closed, on liveness.
+      expect(res).toMatchObject({ logged: 1, closed: 1 });
+      expect(stderrMessages(spy)).toContain('live-pane query threw');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+// ── Worker tick ↔ pane-lifecycle integration (WL-0MU4US5MP001JFEN) ────
+//
+// The worker tick invokes the pane-lifecycle monitor (fire-and-forget, so it
+// never perturbs the dispatch single-flight ordering). These tests pin the
+// end-to-end auto-close path and the mandatory implement exception (AC6).
+describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN)', () => {
+  const roots: string[] = [];
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  function makeRoot(): string {
+    const root = mkdtempSync(join(tmpdir(), 'pane-monitor-tick-'));
+    roots.push(root);
+    return root;
+  }
+
+  async function seedDispatch(root: string, itemId: string, kind: string, paneId: string): Promise<void> {
+    const marker = {
+      itemId, kind, dispatchedAt: new Date().toISOString(), cwd: root, title: itemId, stage: 'intake_complete',
+    };
+    await appendDowntimeLogEntry(root, JSON.stringify(marker));
+    await appendDowntimeLogEntry(root, JSON.stringify({ ...marker, paneId, enrichment: true }));
+  }
+
+  function makeMonitorWorker(root: string, deps: Partial<DowntimeWorkerDeps>) {
+    const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+    const poller = createDowntimePoller('http://proxy:8000', fetcher);
+    const worker = createDowntimeWorker({
+      poller,
+      deps: makeDeps({ getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }), ...deps }),
+      config: () => ({
+        enabled: true,
+        thresholdMs: 1,
+        requiredFreeSlots: 0,
+        model: 'plan',
+        cwd: root,
+        noCandidateCooldownMs: 3_600_000,
+        paneLifecycleIntervalMs: 0,
+      }),
+    });
+    return worker;
+  }
+
+  it('closes a completed non-implement pane from the worker tick (AC1/AC2)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, 'WL-TICK', 'plan', 'w9:p1');
+    const closePane = vi.fn().mockResolvedValue(true);
+    const worker = makeMonitorWorker(root, {
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-TICK', stage: 'plan_complete' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w9:p1' }] }),
+      closePane,
+    });
+
+    await worker.tick();
+
+    await vi.waitFor(() => expect(closePane).toHaveBeenCalledWith(
+      'w9:p1', root, { itemId: 'WL-TICK', kind: 'plan' },
+    ));
+    const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
+    expect(pc).toHaveLength(1);
+    expect(pc[0]).toMatchObject({ outcome: 'closed-as-plan-complete', closed: true });
+  });
+
+  it('never auto-closes an implement pane from the worker tick (AC6)', async () => {
+    const root = makeRoot();
+    await seedDispatch(root, 'WL-IMPL', 'implement', 'w9:p2');
+    const closePane = vi.fn().mockResolvedValue(true);
+    const worker = makeMonitorWorker(root, {
+      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-IMPL', stage: 'in_review' }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w9:p2' }] }),
+      closePane,
+    });
+
+    await worker.tick();
+
+    // Wait for the (fire-and-forget) monitor to record the in_review event.
+    await vi.waitFor(async () => {
+      const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
+      expect(pc).toHaveLength(1);
+    });
+    expect(closePane).not.toHaveBeenCalled();
+    const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
+    expect(pc[0]).toMatchObject({ outcome: 'requires-attention', reasonCode: 'reached-in-review', closed: false });
+  });
+});
+
+// ── No-dispatch decision log + header (WL-0MU8808ZY0091JIA) ──────────
+
+describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
+  function makeDecisionWorker(opts: {
+    status: LlamaStatus;
+    root: string;
+    requiredFreeSlots?: number;
+    thresholdMs?: number;
+    runningPanes?: () => { ok: true; count: number } | { ok: false; error?: string };
+    recordDecision?: (entry: CoordinationLogEntry, cwd: string) => Promise<void>;
+  }) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: opts.thresholdMs ?? 0,
+      requiredFreeSlots: opts.requiredFreeSlots ?? 0,
+      model: 'plan',
+      cwd: opts.root,
+      noCandidateCooldownMs: 3_600_000,
+      browseItemCount: 20,
+    };
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
+    );
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      getRunningDowntimePanes: vi
+        .fn()
+        .mockImplementation(async () => (opts.runningPanes ?? (() => ({ ok: true, count: 0 })))()),
+      ...(opts.recordDecision ? { recordDecision: opts.recordDecision } : {}),
+    });
+    const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+    return { worker, deps };
+  }
+
+  it('maps internal reasons to stable header tokens', () => {
+    expect(decisionHeaderToken('slot-owned')).toBe('slot-owner');
+    expect(decisionHeaderToken('proxy-contention')).toBe('contention');
+    expect(decisionHeaderToken('review-queue-hold')).toBe('review-queue');
+    expect(decisionHeaderToken('code-freeze')).toBe('code-freeze');
+  });
+
+  it('AC1: a slot-owned refusal writes one decision line with reason + slot/owner fields', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-slot-'));
+    try {
+      // Count-based (no `slots`), idle (local_lease_active=false) but the
+      // global owner session id is present and a downtime pane is alive →
+      // slotOwned.
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: false,
+        available_slots: 1,
+        total_slots: 1,
+        local_owner_session_id: 'session-live-pane',
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker } = makeDecisionWorker({
+        status,
+        root,
+        runningPanes: () => ({ ok: true, count: 1 }),
+      });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('slot-owner');
+      await vi.waitFor(async () => {
+        const entries = (await readCoordinationLogEntries(root)).filter(
+          (e) => e.kind === 'decision',
+        );
+        expect(entries).toHaveLength(1);
+        expect(entries[0]).toMatchObject({
+          kind: 'decision',
+          operation: 'no-dispatch',
+          reason: 'slot-owned',
+          freeSlots: 1,
+          totalSlots: 1,
+          ownerPresent: true,
+          runningPanes: 1,
+          contentionDepth: 0,
+        });
+        expect(typeof entries[0].at).toBe('string');
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC2: a contention refusal writes the reason and the observed depth', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-contention-'));
+    try {
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: false,
+        available_slots: 1,
+        total_slots: 1,
+        contention_queue_depth: 3,
+        contention_queued_count: 3,
+      };
+      const { worker } = makeDecisionWorker({ status, root });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('contention');
+      await vi.waitFor(async () => {
+        const entries = (await readCoordinationLogEntries(root)).filter(
+          (e) => e.kind === 'decision',
+        );
+        expect(entries).toHaveLength(1);
+        expect(entries[0]).toMatchObject({
+          reason: 'proxy-contention',
+          contentionDepth: 3,
+          ownerPresent: false,
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC3: repeated identical refusals are rate-limited, then logged again after the window', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-rate-'));
+    vi.useFakeTimers();
+    try {
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: false,
+        available_slots: 1,
+        total_slots: 1,
+        contention_queue_depth: 3,
+        contention_queued_count: 3,
+      };
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const { worker } = makeDecisionWorker({ status, root, recordDecision });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick(); // first refusal → logged
+      expect(recordDecision).toHaveBeenCalledTimes(1);
+      vi.setSystemTime(start + 60_000); // 1 min later, same reason → suppressed
+      await worker.tick();
+      expect(recordDecision).toHaveBeenCalledTimes(1);
+      // Past the rate-limit window → logged again (≤ 6 identical lines/hour).
+      vi.setSystemTime(start + DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS + 1);
+      await worker.tick();
+      expect(recordDecision).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG) ──
+
+describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () => {
+  function makeLeaseWorker(opts: {
+    status: LlamaStatus;
+    requiredFreeSlots: number;
+    thresholdMs?: number;
+    runningPanes: number;
+  }) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: opts.thresholdMs ?? 0,
+      requiredFreeSlots: opts.requiredFreeSlots,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+      browseItemCount: 20,
+    };
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
+    );
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: opts.runningPanes,
+        paneIds: [],
+        records: [],
+      }),
+    });
+    const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+    return { worker, deps };
+  }
+
+  it('AC1: pins the proxy adaptive lease maximum (llm-manager default 1500 s)', () => {
+    // The proxy lease is adaptive and capped at local_dispatch_lease_max_seconds
+    // (default 1500 s) — NOT the historical ~180 s the code used to assume.
+    expect(LOCAL_DISPATCH_LEASE_MAX_SECONDS).toBe(1500);
+  });
+
+  it('AC1/AC3: a max-TTL unknown/operator lease on a count-based single slot still refuses dispatch', async () => {
+    // The dispatcher must not optimistically assume the lease expired: a lease
+    // at the proxy MAX on a count-based single-slot setup (an unknown/operator
+    // owner) keeps blocking while a downtime pane is alive. local_lease_active
+    // is false so the idle gate passes and the slot-owned gate is the blocker.
+    const status: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 1,
+      total_slots: 1,
+      local_owner_session_id: 'operator-session',
+      local_owner_lease_remaining_seconds: LOCAL_DISPATCH_LEASE_MAX_SECONDS,
+      contention_queue_depth: 0,
+      contention_queued_count: 0,
+    };
+    const { worker, deps } = makeLeaseWorker({
+      status,
+      requiredFreeSlots: 0,
+      runningPanes: 1,
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('slot-owner');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a max-TTL lease held by a dispatched pane does not block the free unowned slots (per-slot)', async () => {
+    // Self-blocking case (RCA WL-0MU87ZGPP0029V28): the dispatched pane owns
+    // slot-1; slots 2 and 3 are free and unowned. Even with the lease at the
+    // proxy MAX and the worker's own pane alive, dispatch into the free slots
+    // MUST proceed — the per-slot gate ignores the global lease when unowned
+    // slots remain.
+    vi.useFakeTimers();
+    try {
+      const ownSession = 'dispatched-pane-session';
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: false,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 2,
+        total_slots: 3,
+        local_owner_session_id: ['http://localhost:8080', ownSession],
+        local_owner_session_ids: [ownSession],
+        local_owner_lease_remaining_seconds: LOCAL_DISPATCH_LEASE_MAX_SECONDS,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true, owner_session_id: ownSession },
+          { slot_id: 'slot-2', is_processing: false },
+          { slot_id: 'slot-3', is_processing: false },
+        ],
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker, deps } = makeLeaseWorker({
+        status,
+        requiredFreeSlots: 2,
+        thresholdMs: 1_000,
+        runningPanes: 1,
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick(); // baseline — start the per-slot idle timers
+      vi.setSystemTime(start + 5_000);
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+// ── Stale/empty slots fallback + count-based spare capacity ───────────
+// (WL-0MUFP30T2003OX1F)
+
+describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T2003OX1F)', () => {
+  function makeRaw(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      llama_server_running: true,
+      active_query: true,
+      local_active_query: true,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 1,
+      total_slots: 3,
+      slots: [],
+      slots_stale: true,
+      local_owner_session_id: ['http://localhost:8080', 'audit-pane-session'],
+      local_owner_lease_remaining_seconds: 645.5,
+      contention_queue_depth: 0,
+      contention_queued_count: 0,
+      ...overrides,
+    };
+  }
+
+  function makeStaleWorker(opts: {
+    status: LlamaStatus;
+    requiredFreeSlots: number;
+    thresholdMs?: number;
+    runningPanes: number;
+  }) {
+    const cfg = {
+      enabled: true,
+      thresholdMs: opts.thresholdMs ?? 0,
+      requiredFreeSlots: opts.requiredFreeSlots,
+      model: 'plan',
+      cwd: '/repo',
+      noCandidateCooldownMs: 3_600_000,
+      browseItemCount: 20,
+    };
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
+    );
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
+      }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: opts.runningPanes,
+        paneIds: [],
+        records: [],
+      }),
+    });
+    const worker = createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) });
+    return { worker, deps };
+  }
+
+  it('AC4: parses slots_stale and preserves the empty slots array', () => {
+    const status = parseLlamaStatus(makeRaw());
+    expect(status).not.toBeNull();
+    expect(status!.slots).toEqual([]);
+    expect(status!.slots_stale).toBe(true);
+    // The array owner form still normalises (child WL-0MU88086A0089US4).
+    expect(status!.local_owner_session_ids).toEqual(['audit-pane-session']);
+    expect(status!.local_owner_session_id).toBe('audit-pane-session');
+  });
+
+  it('AC4: a malformed slots_stale fails closed (null)', () => {
+    expect(parseLlamaStatus(makeRaw({ slots_stale: 'yes' }))).toBeNull();
+    expect(parseLlamaStatus(makeRaw({ slots_stale: 1 }))).toBeNull();
+  });
+
+  it('AC4: empty/stale slots are NOT per-slot identity — evaluateIdle falls back to the count', () => {
+    // Active local query → the leased slot is processing, not reserved → 2 free >= N=2.
+    const active = parseLlamaStatus(makeRaw({ available_slots: 2 }))!;
+    expect(evaluateIdle(active, 2)).toBe(true);
+    // Idle-but-leased (no active query) → reserve the leased slot → 1 < 2.
+    const idleLease = parseLlamaStatus(
+      makeRaw({ available_slots: 2, local_active_query: false, active_query: false }),
+    )!;
+    expect(evaluateIdle(idleLease, 2)).toBe(false);
+  });
+
+  it('AC1: live payload (stale/empty slots, lease, live pane) dispatches into the free slot', async () => {
+    vi.useFakeTimers();
+    try {
+      // The exact live shape: total=3, available=1, slots:[], slots_stale:true,
+      // an owner lease held by a dispatched pane. N=1 (single-pane dispatch).
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: true,
+        local_active_query: true,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 1,
+        total_slots: 3,
+        slots: [],
+        slots_stale: true,
+        local_owner_session_id: 'audit-pane-session',
+        local_owner_session_ids: ['audit-pane-session'],
+        local_owner_lease_remaining_seconds: 645.5,
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker, deps } = makeStaleWorker({
+        status,
+        requiredFreeSlots: 1,
+        thresholdMs: 1_000,
+        runningPanes: 1,
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick(); // baseline
+      vi.setSystemTime(start + 5_000);
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC2: count-based multi-slot with spare capacity and a held lease dispatches', async () => {
+    vi.useFakeTimers();
+    try {
+      // 3 slots, 2 free, N=2, an active local query holding the lease: the RCA
+      // window shape. The machine-wide lease must not block the spare capacity.
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        active_query: true,
+        local_active_query: true,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 2,
+        total_slots: 3,
+        local_owner_session_id: 'dispatched-pane-session',
+        local_owner_session_ids: ['dispatched-pane-session'],
+        local_owner_lease_remaining_seconds: 840,
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker, deps } = makeStaleWorker({
+        status,
+        requiredFreeSlots: 2,
+        thresholdMs: 1_000,
+        runningPanes: 1,
+      });
+      const start = 2_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + 5_000);
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC3: count-based single-slot with a held lease still refuses', async () => {
+    const status: LlamaStatus = {
+      llama_server_running: true,
+      active_query: false,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 1,
+      total_slots: 1,
+      local_owner_session_id: 'operator-session',
+      local_owner_session_ids: ['operator-session'],
+      contention_queue_depth: 0,
+      contention_queued_count: 0,
+    };
+    const { worker, deps } = makeStaleWorker({
+      status,
+      requiredFreeSlots: 1,
+      runningPanes: 1,
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('slot-owner');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });

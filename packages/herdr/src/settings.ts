@@ -87,7 +87,7 @@ export interface PluginSettings {
    */
   modeSwitchEnabled: boolean;
   /**
-   * Idle window before switching to cheap mode (ms). Default 1_800_000 (30 min).
+   * Idle window before switching to cheap mode (ms). Default 3_600_000 (60 min).
    * A new operator agent-route command resets this timer.
    */
   modeSwitchIdleThresholdMs: number;

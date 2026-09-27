@@ -22,6 +22,9 @@ export const idleAllSlotsFree: LlamaStatus = {
   available_slots: 4,
   total_slots: 4,
   current_model: 'qwen3-8b',
+  // Normalised owner-session list (WL-0MU88086A0089US4): always present on
+  // the parsed status, empty when the proxy reports no owner.
+  local_owner_session_ids: [],
 };
 
 export const busyActiveQuery: LlamaStatus = { ...idleAllSlotsFree, local_active_query: true };

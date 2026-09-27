@@ -82,6 +82,32 @@ describe('wl search --fields', () => {
     expect(errOut).toContain('description');
   });
 
+  it('accepts space-separated fields (shell splits --fields id, title)', async () => {
+    await createItem('Spaced fields item', 'Unique phrase quokka appears here');
+
+    const { stdout } = await execAsync(`tsx ${cliPath} search quokka --fields id, title --json`);
+    const result = JSON.parse(stdout);
+    expect(result.workItems.length).toBeGreaterThan(0);
+    const wi = result.workItems[0];
+    expect(wi.id).toBeDefined();
+    expect(wi.title).toBe('Spaced fields item');
+    expect('priority' in wi).toBe(false);
+    // Search metadata is still present alongside the projection
+    expect('score' in wi).toBe(true);
+    expect('snippet' in wi).toBe(true);
+  });
+
+  it('does not swallow the query when --fields precedes it with space-separated values', async () => {
+    await createItem('Query after fields item', 'Unique phrase narwhal appears here');
+
+    const { stdout } = await execAsync(`tsx ${cliPath} search --fields id, title narwhal --json`);
+    const result = JSON.parse(stdout);
+    expect(result.workItems.length).toBeGreaterThan(0);
+    const wi = result.workItems[0];
+    expect(wi.id).toBeDefined();
+    expect(wi.title).toBe('Query after fields item');
+  });
+
   it('output is unchanged without --fields (backward compatible)', async () => {
     await createItem('Plain searchable item', 'Unique phrase tiger appears here', ['-p', 'medium']);
 

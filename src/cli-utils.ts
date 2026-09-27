@@ -15,6 +15,72 @@ const _cliUtilsRequire = createRequire(import.meta.url);
 import { WORKLOG_VERSION } from './version.js';
 
 /**
+ * Normalise space-separated `--fields` values before Commander parses argv.
+ *
+ * Users naturally write a comma-separated list with spaces, e.g.
+ * `wl list --fields id, title, status`. The shell tokenises that as
+ * `["--fields", "id,", "title,", "status"]`, so Commander assigns only
+ * `"id,"` to `--fields` and treats the remaining tokens as positional
+ * arguments (the trailing `status` is silently dropped as an excess
+ * argument). The projection then appears to ignore most of the requested
+ * fields.
+ *
+ * When (and only when) the accumulated `--fields` value ends with a comma —
+ * the unambiguous signal that more fields follow — the following non-option
+ * tokens are merged back into the value. A value that does not end with a
+ * comma is left untouched, so a legitimate positional search/query term
+ * after `--fields id,title` is preserved.
+ *
+ * @param argv - argument list without the leading node/script entries
+ * @returns a new argument list with `--fields` continuations merged
+ */
+export function normalizeFieldsArgv(argv: readonly string[]): string[] {
+  const out: string[] = [];
+
+  // `--fields` is unique to list/search, but the `-f` shorthand is shared
+  // with `--file` on export/import/migrate/sync/doctor. Only treat `-f` as
+  // `--fields` when the invocation targets a command that defines it.
+  const shortFlagIsFields = argv.includes('list') || argv.includes('search');
+
+  for (let i = 0; i < argv.length; i++) {
+    const token = argv[i];
+
+    if (token === '--fields' || (token === '-f' && shortFlagIsFields)) {
+      out.push(token);
+      if (i + 1 < argv.length) {
+        let value = argv[++i];
+        while (
+          value.trim().endsWith(',') &&
+          i + 1 < argv.length &&
+          !argv[i + 1].startsWith('-')
+        ) {
+          value += argv[++i];
+        }
+        out.push(value);
+      }
+      continue;
+    }
+
+    if (token.startsWith('--fields=')) {
+      let value = token;
+      while (
+        value.trim().endsWith(',') &&
+        i + 1 < argv.length &&
+        !argv[i + 1].startsWith('-')
+      ) {
+        value += argv[++i];
+      }
+      out.push(value);
+      continue;
+    }
+
+    out.push(token);
+  }
+
+  return out;
+}
+
+/**
  * Output formatting helpers
  */
 export function createOutputHelpers(program: Command) {
