@@ -55,6 +55,8 @@ import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
 import { getMachineCoordinationDir } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
+import { createHerdrReaperDeps } from './pane-close-herdr.js';
+import { runScheduledPaneClose } from './pane-close-scheduler.js';
 import {
   createDowntimeWorker,
   createDowntimePoller,
@@ -725,6 +727,32 @@ export async function defaultRunningDowntimePanesResolver(
 }
 
 /**
+ * Collect the pane ids already handled by the dispatch monitor
+ * (WL-0MU308WSF0002JWN) from the rolling dispatch log. Used to keep the
+ * scheduled pane-close reaper from double-handling a pane the monitor has
+ * already processed (parent constraint). Fail-safe: an unreadable log
+ * yields an empty set.
+ */
+async function readClosedPaneIds(cwd: string): Promise<Set<string>> {
+  try {
+    const entries = await readDowntimeLogEntries(cwd);
+    const ids = new Set<string>();
+    for (const entry of entries) {
+      if (
+        entry.entryType === 'pane-close' &&
+        typeof entry.paneId === 'string' &&
+        entry.paneId !== ''
+      ) {
+        ids.add(entry.paneId);
+      }
+    }
+    return ids;
+  } catch {
+    return new Set<string>();
+  }
+}
+
+/**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
  * `wl next --stage <stage> --json` for dispatch selection, `wl update
  * <id> --status in_progress` for the pre-dispatch claim, and
@@ -1386,6 +1414,68 @@ export function createDowntimeDeps(
     async recordPaneClose(entry, cwd: string): Promise<void> {
       await appendPaneCloseLogEntry(cwd, entry);
     },
+    // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): classify and close
+    // settled/abandoned pi panes out-of-process. Fail-closed: the runner
+    // never throws (the worker catches anyway); settings gate it upstream.
+    async runPaneCloseReaper(
+      cwd: string,
+      opts: { idleThresholdMinutes: number; ledgerPath?: string },
+    ): Promise<void> {
+      const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+      const invokingPaneId =
+        process.env.HERDR_PANE_ID ?? process.env.HERDR_PANE ?? undefined;
+      const deps = createHerdrReaperDeps({
+        listPanesRaw: async () => {
+          const { stdout } = await getExecFileAsync()(herdrBin, ['pane', 'list'], {
+            encoding: 'utf8',
+            timeout: DOWNTIME_WL_TIMEOUT_MS,
+            maxBuffer: 8 * 1024 * 1024,
+          });
+          return stdout;
+        },
+        closePane: async (paneId: string) => {
+          try {
+            await getExecFileAsync()(herdrBin, ['pane', 'close', paneId], {
+              encoding: 'utf8',
+              timeout: DOWNTIME_WL_TIMEOUT_MS,
+            });
+            return true;
+          } catch {
+            return false; // fail-closed: a failed close is recorded, never thrown
+          }
+        },
+        invokingPaneId,
+        getNeedsProducerReview: async (itemId: string) => {
+          const { stdout } = await getExecFileAsync()(
+            'wl',
+            ['show', itemId, '--json'],
+            { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, cwd },
+          );
+          const parsed = extractJson(stdout) as {
+            workItem?: { needsProducerReview?: boolean };
+          };
+          return parsed?.workItem?.needsProducerReview === true;
+        },
+      });
+      const result = await runScheduledPaneClose(
+        deps,
+        {
+          paneCloseEnabled: true,
+          paneCloseIdleThresholdMinutes: opts.idleThresholdMinutes,
+        },
+        {
+          ledgerPath: opts.ledgerPath ?? join(cwd, '.worklog', 'pane-close-ledger.jsonl'),
+          // Coexistence with the dispatch monitor (WL-0MU308WSF0002JWN): a
+          // pane the monitor already closed (recorded in the rolling log with
+          // `closed:true`) is never handled a second time. `readDowntimeLogEntries`
+          // is fail-safe (returns [] on any error).
+          alreadyClosedPaneIds: await readClosedPaneIds(cwd),
+        },
+      );
+      if (result.error) {
+        process.stderr.write(`[worklog-plugin] Pane-close reaper: ${result.error}\n`);
+      }
+    },
     async rollbackClaim(
       itemId: string,
       original: DowntimeClaimExpected,
@@ -1622,6 +1712,14 @@ async function main(): Promise<void> {
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
         browseItemCount: s.browseItemCount,
+        // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
+        // `paneCloseEnabled` setting (default on) with a configurable
+        // `paneCloseIdleThresholdMinutes` (default 30). The worker only
+        // invokes the reaper when enabled; disabling yields zero closes.
+        paneClose: {
+          enabled: s.paneCloseEnabled ?? true,
+          idleThresholdMinutes: s.paneCloseIdleThresholdMinutes ?? 30,
+        },
       };
     },
     onProxyIdle,

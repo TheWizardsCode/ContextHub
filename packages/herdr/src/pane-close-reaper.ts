@@ -85,6 +85,12 @@ export interface ReaperOptions {
    * run. When omitted, no ledger is written (keeps the pure tests honest).
    */
   ledgerPath?: string;
+  /**
+   * Pane ids already closed by the existing dispatch monitor
+   * (`pane-lifecycle.ts`) — skipped so the two mechanisms never double-handle
+   * the same pane (parent constraint).
+   */
+  alreadyClosedPaneIds?: ReadonlySet<string>;
 }
 
 // ── Ledger ────────────────────────────────────────────────────────────
@@ -176,6 +182,12 @@ export async function runReaper(
   const panes = await deps.listPanes();
 
   for (const pane of panes) {
+    // Coexistence with the dispatch monitor (parent constraint): a pane the
+    // `pane-lifecycle.ts` monitor already closed is never handled again.
+    if (options.alreadyClosedPaneIds?.has(pane.id)) {
+      continue;
+    }
+
     const sample = toSessionSample(pane);
     const decision = classifySession(sample, {
       idleThresholdMs: options.idleThresholdMs,

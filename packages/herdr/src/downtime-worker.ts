@@ -159,6 +159,7 @@ import {
   type DispatchedPane,
   type PaneItemState,
 } from './pane-lifecycle.js';
+import { paneCloseReaperDue } from './pane-close-scheduler.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 import type { DispatcherAnchor, DispatcherTabAnchorEntry } from './dispatcher-anchor.js';
 
@@ -2045,6 +2046,17 @@ export interface DowntimeWorkerDeps {
     cwd: string,
     expected?: { itemId: string; kind: PaneLifecycleKind },
   ): Promise<boolean>;
+  /**
+   * Pane-close reaper runner (WL-0MUJL1NAH0042GOS). OPTIONAL — when absent
+   * the periodic reaper does not run (legacy/test callers). Production wires
+   * this to `runScheduledPaneClose` over the real herdr/session-log I/O.
+   * Fail-closed: must never throw (the worker catches and logs a throw);
+   * disabled settings must result in zero close calls.
+   */
+  runPaneCloseReaper?(
+    cwd: string,
+    opts: { idleThresholdMinutes: number; ledgerPath?: string },
+  ): Promise<void>;
   /**
    * Record a pane-close lifecycle entry in the rolling dispatch log
    * (WL-0MU308WSF0002JWN). OPTIONAL — when absent the monitor falls back to
@@ -4763,6 +4775,19 @@ export interface DowntimeWorkerConfig {
      * pass 0 to run the monitor on every tick.
      */
     paneLifecycleIntervalMs?: number;
+    /**
+     * Pane-close reaper scheduling (WL-0MUJL1NAH0042GOS). Optional — when
+     * absent the reaper does not run. `enabled` gates the pass, `intervalMs`
+     * overrides the cadence, and `ledgerPath` overrides the ledger location.
+     * The reaper is fail-closed: a throw is caught and never crashes the
+     * worker.
+     */
+    paneClose?: {
+      enabled: boolean;
+      idleThresholdMinutes: number;
+      intervalMs?: number;
+      ledgerPath?: string;
+    };
   };
   /**
    * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
@@ -4918,6 +4943,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // Pane-lifecycle monitor cadence gate (WL-0MU308WSF0002JWN): the timestamp
   // of the last monitor pass. 0 forces a pass on the first tick.
   let lastPaneMonitorAt = 0;
+  // Pane-close reaper cadence gate (WL-0MUJL1NAH0042GOS): timestamp of the
+  // last scheduled reaper pass. 0 forces a pass on the first tick.
+  let lastPaneCloseReaperAt = 0;
   // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
   // worker is fully paused (no poll, no idle tracking, no dispatch) after a
   // genuine empty backlog OR three consecutive CLI errors. Cancelled early
@@ -5344,6 +5372,36 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // fail-closed: pane-lifecycle monitoring must never crash the worker
           paneLifecycleWarn(`monitor pass threw: ${paneLifecycleErrMsg(err)}`);
         });
+      }
+
+      // ── Pane-close reaper (WL-0MUJL1NAH0042GOS) ────────────────────────
+      // Scheduled, out-of-process closure of settled/abandoned panes.
+      // Cadence-bounded (default 60 s) and gated by `paneClose.enabled`.
+      // FIRE-AND-FORGET (like the monitor) so an extra await never lets a
+      // concurrent tick win the single-flight dispatch race; the reaper is
+      // internally fail-closed and idempotent, and its throw is caught here
+      // so the worker continues. A pane already handled by the dispatch
+      // monitor above is skipped by the reaper (shared classifier +
+      // already-closed set), so the two mechanisms never double-close.
+      if (paneCloseReaperDue(cfg.paneClose, lastPaneCloseReaperAt, tickNow)) {
+        lastPaneCloseReaperAt = tickNow;
+        const paneClose = cfg.paneClose!;
+        if (typeof opts.deps.runPaneCloseReaper === 'function') {
+          try {
+            void opts.deps
+              .runPaneCloseReaper(cfg.cwd, {
+                idleThresholdMinutes: paneClose.idleThresholdMinutes,
+                ledgerPath: paneClose.ledgerPath,
+              })
+              .catch((err) => {
+                // fail-closed: the reaper must never crash the worker
+                paneLifecycleWarn(`pane-close reaper pass threw: ${paneLifecycleErrMsg(err)}`);
+              });
+          } catch (err) {
+            // Synchronous throw from the injected runner — swallow and log.
+            paneLifecycleWarn(`pane-close reaper pass threw synchronously: ${paneLifecycleErrMsg(err)}`);
+          }
+        }
       }
 
       // Cooldown gate (WL-0MTEZ4XZJ006Y9U7 AC2 — ordering): the check-in
