@@ -131,6 +131,25 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Wait for the mock socket to accept its first client, polling instead of
+ * sleeping a fixed interval. The subscriber connects asynchronously; under
+ * heavy concurrent load a fixed 100 ms sleep is flaky (WL-0MUK6DGM6000K5NV).
+ */
+async function waitForClient(
+  server: MockHerdrSocket,
+  timeoutMs = 5_000,
+): Promise<NonNullable<ReturnType<MockHerdrSocket['getFirstClient']>>> {
+  const deadline = Date.now() + timeoutMs;
+  let client = server.getFirstClient();
+  while (!client && Date.now() < deadline) {
+    await sleep(10);
+    client = server.getFirstClient();
+  }
+  if (!client) throw new Error('mock herdr socket never received a client');
+  return client;
+}
+
 const GREEN_CIRCLE = '\u{1F7E2}'; // 🟢 working
 const RED_CIRCLE = '\u{26D4}'; // ⛔ blocked
 const WHITE_CIRCLE = '\u{26AA}'; // ⚪ idle
@@ -160,10 +179,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       mergeAgentStates: async () => {},
     });
 
-    // Let initial render + subscriber connect settle.
-    await sleep(100);
-    const client = mockServer.getFirstClient();
-    expect(client).toBeDefined();
+    const client = await waitForClient(mockServer);
     // No icon before any state is seeded.
     expect(writes.join('')).not.toContain(GREEN_CIRCLE);
 
@@ -206,9 +222,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       agentTracker: tracker,
       mergeAgentStates: async () => {},
     });
-    await sleep(100);
-    const client = mockServer.getFirstClient();
-
+    const client = await waitForClient(mockServer);
     // Seed the association at runtime (as if dispatch recorded it).
     await tracker.recordAgentForWorkItem('WL-1', 'w3:p99');
     await sleep(20);
@@ -247,9 +261,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       agentTracker: tracker,
       mergeAgentStates: async () => {},
     });
-    await sleep(100);
-    const client = mockServer.getFirstClient();
-
+    const client = await waitForClient(mockServer);
     // Seed a working icon VIA THE EVENT PATH so the renderer re-applies
     // the cached state (a direct tracker call never triggers a render).
     client!.pushEvent({
@@ -290,9 +302,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       agentTracker: tracker,
       mergeAgentStates: async () => {},
     });
-    await sleep(100);
-    const client = mockServer.getFirstClient();
-
+    const client = await waitForClient(mockServer);
     // Another instance records a late association to the shared file.
     seedStateFile(sf.path, [{ workItemId: 'WL-LATE', paneId: 'w5:p55' }]);
     await sleep(20);
@@ -339,9 +349,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       agentTracker: tracker,
       mergeAgentStates: async () => {},
     });
-    await sleep(100);
-    const client = mockServer.getFirstClient();
-
+    const client = await waitForClient(mockServer);
     // Seed a working icon via the event path.
     client!.pushEvent({
       event: 'pane_agent_status_changed',
