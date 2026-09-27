@@ -593,19 +593,33 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
  * `in-progress` while it is being re-worked after review feedback), so
  * restricting to `status=open` would hide the entire review queue. `open`
  * is included for robustness (no in_review item carries it today).
+ *
+ * plan_complete and intake_complete are also exceptions (WL-0MUIB7D30009KG00):
+ * after WL-0MTOHS5B4001Y9FX removed the in_progress stage, actively-worked
+ * items retain their pipeline stage (`plan_complete`/`intake_complete`) and
+ * only flip `status` to `in-progress`. Excluding `in-progress` from these
+ * stages would make actively-worked items invisible in their corresponding
+ * stage-filtered worklists.
  */
 const STAGE_STATUS: Record<string, string> = {
   in_review: 'completed,in-progress,open',
+  plan_complete: 'open,in-progress',
+  intake_complete: 'open,in-progress',
 };
 
 /**
  * Fetch work items filtered by stage (via `wl list`).
- * Status per stage (WL-0MSKCRX730052IIW): the in_review stage fetches items
- * with status `completed`, `in-progress`, or `open` — in_review items carry
- * `completed`/`in-progress` status per the project workflow. All other
- * stages fetch open items only (WL-0MSDT8X1V003206G): items with status
- * `blocked`, `in-progress`, or `completed` are excluded even when their
- * stage matches.
+ * Status per stage:
+ * - `in_review` (WL-0MSKCRX730052IIW): `completed`, `in-progress`, `open` —
+ *   in_review items carry `completed`/`in-progress` status per the project
+ *   workflow.
+ * - `plan_complete` / `intake_complete` (WL-0MUIB7D30009KG00): `open`,
+ *   `in-progress` — actively-worked items retain their pipeline stage and
+ *   flip `status` to `in-progress` (WL-0MTOHS5B4001Y9FX removed the
+ *   in_progress stage).
+ * - All other stages: `open` only (WL-0MSDT8X1V003206G): items with status
+ *   `blocked`, `in-progress`, or `completed` are excluded even when their
+ *   stage matches.
  * Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
  * child items; children remain reachable via expand (wl list --parent).
  * Results are regrouped priority-first (WL-0MSOPHLD1000EWNN): priority
