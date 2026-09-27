@@ -1,5 +1,20 @@
 # Changelog
 
+## v1.0.16 (2026-09-27)
+### Features
+- Projects now take turns getting work done, and urgent tasks jump to the front. (WL-0MTJ7IEI80055V2V)
+- Downtime tasks now run two at a time, so more work gets done overnight. (WL-0MT50LKAK001EF5Q)
+- Sync now protects your completed work from being silently reset by stale data. (WL-0MSOYWZTH003JFVD)
+- Query worklogs faster with smaller, focused results. (WL-0MSLW8GHQ0092PJK)
+- Answer interview questions in one guided step instead of searching through notes. (WL-0MU55UDBJ008DJ67)
+- Stale in-progress items now return to the queue automatically when no agent is working on them. (WL-0MSOJLZD9004P8PI)
+- Ship mode now blocks if any work is still in progress, preventing half-finished releases. (WL-0MUD6DDZC007ZSIW)
+- Project setup now uses your global agent guidance instead of duplicating it. (WL-0MSIXMKOX0052514)
+### Bug Fixes
+- Stalled tasks now retry automatically instead of getting stuck forever. (WL-0MU6UL0RJ008IHGT)
+- Agents no longer clash over the same files when work is dispatched twice. (WL-0MUBEZ6PE002WLP4)
+- Overnight jobs now keep running instead of stalling when one task is active. (WL-0MU87ZGPP0029V28)
+
 ## v1.0.15 (2026-09-24)
 ### Features
 - Import and export help now clearly warns that import replaces your entire database. (WL-0MTD0IVNN003WCOB)
