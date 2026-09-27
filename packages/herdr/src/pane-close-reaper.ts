@@ -16,6 +16,8 @@
 import { classifySession, extractFinalAssistantText } from './pane-close.js';
 import type { CloseDecision, SessionSample } from './pane-close.js';
 import type { TerminateResult } from './process-group.js';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { dirname } from 'node:path';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -43,6 +45,12 @@ export interface PaneStatus {
   title: string;
   /** Concatenated text of the final assistant message. */
   lastAssistantText: string;
+  /**
+   * Raw session-log entries. When provided, the reaper derives the final
+   * assistant text via the shared `extractFinalAssistantText` helper
+   * (parent AC6) instead of trusting `lastAssistantText`.
+   */
+  sessionEntries?: { type?: string; text?: string }[];
   /** Whether the agent process is alive. */
   agentProcessAlive: boolean;
   /** Idle time in milliseconds. */
@@ -72,6 +80,52 @@ export interface ReaperOptions {
   idleThresholdMs?: number;
   /** If true, report decisions but do not close any panes. */
   dryRun?: boolean;
+  /**
+   * Ledger path (JSONL). When set, one row per pane is appended after each
+   * run. When omitted, no ledger is written (keeps the pure tests honest).
+   */
+  ledgerPath?: string;
+}
+
+// ── Ledger ────────────────────────────────────────────────────────────
+
+/** Default ledger path inside `.worklog/`. */
+export const DEFAULT_LEDGER_PATH = '.worklog/pane-close-ledger.jsonl';
+
+/**
+ * One row in the closure ledger (JSONL format).
+ */
+export interface LedgerEntry {
+  timestamp: string;
+  paneId: string;
+  paneTitle: string;
+  decision: CloseDecision;
+  success: boolean;
+  error?: string;
+}
+
+/**
+ * Write a ledger row to a JSONL file. Creates parent directories if needed.
+ * Fail-closed: never throws — a write failure is logged to stderr.
+ */
+export function writeLedgerRow(ledgerPath: string, result: ReaperResult): void {
+  try {
+    mkdirSync(dirname(ledgerPath), { recursive: true });
+    const entry: LedgerEntry = {
+      timestamp: new Date().toISOString(),
+      paneId: result.paneId,
+      paneTitle: result.paneTitle,
+      decision: result.decision,
+      success: result.success,
+      error: result.error,
+    };
+    appendFileSync(ledgerPath, JSON.stringify(entry) + '\n');
+  } catch (err) {
+    // Fail-closed: never crash the worker.
+    console.error(
+      `reaper: failed to write ledger row for ${result.paneId}: ${err}`,
+    );
+  }
 }
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -87,8 +141,12 @@ const DEFAULT_OPTIONS: ReaperOptions = {
  * Build a `SessionSample` from a `PaneStatus` for classification.
  */
 function toSessionSample(ps: PaneStatus): SessionSample {
+  const lastAssistantText =
+    Array.isArray(ps.sessionEntries)
+      ? extractFinalAssistantText(ps.sessionEntries)
+      : ps.lastAssistantText;
   return {
-    lastAssistantText: ps.lastAssistantText,
+    lastAssistantText,
     agentProcessAlive: ps.agentProcessAlive,
     idleMs: ps.idleMs,
     kind: ps.kind,
@@ -139,14 +197,74 @@ export async function runReaper(
       }
     }
 
-    results.push({
+    const result: ReaperResult = {
       paneId: pane.id,
       paneTitle: pane.title,
       decision,
       success,
       error,
-    });
+    };
+    results.push(result);
+
+    if (options.ledgerPath) {
+      writeLedgerRow(options.ledgerPath, result);
+    }
   }
 
   return results;
+}
+
+// ── CLI ───────────────────────────────────────────────────────────────
+
+/**
+ * Parse the reaper CLI arguments into `ReaperOptions`.
+ *
+ * Supported flags:
+ *  - `--dry-run`                report only, close nothing
+ *  - `--threshold-minutes <n>`  idle threshold in minutes (default 30)
+ *  - `--ledger <path>`          ledger output path (default `.worklog/pane-close-ledger.jsonl`)
+ */
+export function parseReaperArgs(argv: string[]): ReaperOptions {
+  const options: ReaperOptions = {};
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--dry-run') {
+      options.dryRun = true;
+    } else if (arg === '--threshold-minutes') {
+      const value = Number(argv[++i]);
+      if (Number.isFinite(value) && value >= 0) {
+        options.idleThresholdMs = value * 60 * 1000;
+      }
+    } else if (arg === '--ledger') {
+      options.ledgerPath = argv[++i];
+    }
+  }
+  return options;
+}
+
+/**
+ * CLI entrypoint. Wires the real `ReaperDeps` (herdr pane listing, pane
+ * close, process-group teardown) and runs the reaper. Returns the process
+ * exit code: 0 on success, 1 on any partial failure.
+ *
+ * The real `ReaperDeps` implementation lives in the scheduling/wiring item
+ * (WL-0MUJW9FFW009008M); this entrypoint accepts deps so the caller can
+ * inject them and keeps the module free of direct herdr imports.
+ */
+export async function runReaperCli(
+  deps: ReaperDeps,
+  argv: string[] = process.argv.slice(2),
+): Promise<number> {
+  const options = parseReaperArgs(argv);
+  const ledgerPath =
+    options.ledgerPath ?? process.env.WORKLOG_PANE_CLOSE_LEDGER ?? DEFAULT_LEDGER_PATH;
+  const results = await runReaper(deps, { ...options, ledgerPath });
+
+  const failures = results.filter((r) => !r.success);
+  if (options.dryRun) {
+    console.log(`reaper (dry-run): ${results.length} pane(s) evaluated, ${results.filter((r) => r.decision.close).length} would close`);
+  } else {
+    console.log(`reaper: ${results.length} pane(s) evaluated, ${results.filter((r) => r.decision.close).length} closed, ${failures.length} failed`);
+  }
+  return failures.length > 0 ? 1 : 0;
 }

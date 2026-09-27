@@ -268,3 +268,147 @@ describe('reaper — idle threshold configurable via --threshold-minutes', () =>
     expect(results[0].decision.reasonCode).toBe('idle-threshold');
   });
 });
+
+// ── CLI parsing and ledger ────────────────────────────────────────────
+
+describe('parseReaperArgs', () => {
+  it('parses --dry-run', async () => {
+    const { parseReaperArgs } = await import('./pane-close-reaper');
+    expect(parseReaperArgs(['--dry-run'])).toEqual({ dryRun: true });
+  });
+
+  it('parses --threshold-minutes <n> into milliseconds', async () => {
+    const { parseReaperArgs } = await import('./pane-close-reaper');
+    expect(parseReaperArgs(['--threshold-minutes', '5'])).toEqual({
+      idleThresholdMs: 5 * 60 * 1000,
+    });
+  });
+
+  it('parses --ledger <path>', async () => {
+    const { parseReaperArgs } = await import('./pane-close-reaper');
+    expect(parseReaperArgs(['--ledger', '/tmp/x.jsonl'])).toEqual({
+      ledgerPath: '/tmp/x.jsonl',
+    });
+  });
+
+  it('ignores invalid threshold values', async () => {
+    const { parseReaperArgs } = await import('./pane-close-reaper');
+    expect(parseReaperArgs(['--threshold-minutes', 'not-a-number'])).toEqual({});
+    expect(parseReaperArgs(['--threshold-minutes', '-1'])).toEqual({});
+  });
+
+  it('parses combined flags', async () => {
+    const { parseReaperArgs } = await import('./pane-close-reaper');
+    expect(parseReaperArgs(['--dry-run', '--threshold-minutes', '10', '--ledger', '/tmp/l.jsonl'])).toEqual({
+      dryRun: true,
+      idleThresholdMs: 10 * 60 * 1000,
+      ledgerPath: '/tmp/l.jsonl',
+    });
+  });
+});
+
+describe('runReaper — ledger writing', () => {
+  it('appends one JSONL ledger row per evaluated pane', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const dir = mkdtempSync(join(tmpdir(), 'reaper-ledger-'));
+    const ledgerPath = join(dir, 'ledger.jsonl');
+    try {
+      const panes = [
+        pane({ id: 'p1', lastAssistantText: '</end_session>', agentProcessAlive: false }),
+        pane({ id: 'p2', lastAssistantText: '', agentProcessAlive: false }),
+      ];
+      const deps = makeDeps(panes);
+      await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, ledgerPath });
+
+      const lines = readFileSync(ledgerPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(lines).toHaveLength(2);
+      expect(lines[0].paneId).toBe('p1');
+      expect(lines[0].decision.reasonCode).toBe('marker');
+      expect(lines[1].paneId).toBe('p2');
+      expect(lines[1].decision.reasonCode).toBe('dead-agent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runReaperCli', () => {
+  it('returns exit code 0 when all closes succeed', async () => {
+    const { runReaperCli } = await import('./pane-close-reaper');
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const dir = mkdtempSync(join(tmpdir(), 'reaper-cli-'));
+    try {
+      const planPanes = [pane({ id: 'p1', lastAssistantText: '</end_session>', agentProcessAlive: false })];
+      const deps = makeDeps(planPanes);
+      const code = await runReaperCli(deps, ['--dry-run', '--ledger', join(dir, 'l.jsonl')]);
+      expect(code).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns exit code 1 when a close fails', async () => {
+    const { runReaperCli } = await import('./pane-close-reaper');
+    const { mkdtempSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const dir = mkdtempSync(join(tmpdir(), 'reaper-cli-fail-'));
+    try {
+      const panes = [pane({ id: 'p1', lastAssistantText: '</end_session>', agentProcessAlive: false })];
+      const deps: ReaperDeps = {
+        listPanes: vi.fn().mockResolvedValue(panes),
+        closePane: vi.fn().mockRejectedValue(new Error('boom')),
+        terminateProcessGroup: vi.fn().mockResolvedValue({ terminated: true }),
+      };
+      const code = await runReaperCli(deps, ['--ledger', join(dir, 'l.jsonl')]);
+      expect(code).toBe(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('reaper — reuses extractFinalAssistantText (AC6)', () => {
+  it('derives the marker from raw session entries and closes', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      kind: 'plan',
+      lastAssistantText: '', // deliberately empty — entries are authoritative
+      sessionEntries: [
+        { type: 'user', text: 'go' },
+        { type: 'assistant', text: 'Finished.\n\n</end_session>' },
+      ],
+      agentProcessAlive: false,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(results[0].decision.reasonCode).toBe('marker');
+  });
+
+  it('does not close when session entries lack the marker', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      kind: 'plan',
+      lastAssistantText: '</end_session>', // stale text ignored when entries present
+      sessionEntries: [{ type: 'assistant', text: 'Still working.' }],
+      agentProcessAlive: true,
+      idleMs: 1_000,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.closePane).not.toHaveBeenCalled();
+    expect(results[0].decision.reasonCode).toBe('active');
+  });
+});
