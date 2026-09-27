@@ -65,7 +65,10 @@ export function pickFields(
   // Validate: reject unknown field names.
   const unknown = fields.filter((f) => !VALID_FIELDS.includes(f as (typeof VALID_FIELDS)[number]));
   if (unknown.length > 0) {
-    const validList = VALID_FIELDS.join(', ');
+    // id is always included regardless of request, so omit it from the
+    // error message's valid-fields list — the caller doesn't need to
+    // request it.
+    const validList = VALID_FIELDS.filter(f => f !== 'id').join(', ');
     throw new Error(
       `Unknown fields: ${unknown.join(', ')}. Valid fields: ${validList}`
     );

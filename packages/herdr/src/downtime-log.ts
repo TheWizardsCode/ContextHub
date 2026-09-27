@@ -52,6 +52,19 @@ export interface CoordinationLogEntry {
   workItemId?: string | null;
   /** Number of entries removed by a prune operation. */
   prunedCount?: number;
+  /**
+   * No-dispatch decision fields (WL-0MU8808ZY0091JIA): recorded on a
+   * `kind: 'decision'` / `operation: 'no-dispatch'` entry so the reason a
+   * tick refused to dispatch is observable from the log alone. All optional
+   * so coordination check-in/election entries are unchanged (additive
+   * schema).
+   */
+  reason?: string;
+  freeSlots?: number;
+  totalSlots?: number;
+  ownerPresent?: boolean;
+  runningPanes?: number | null;
+  contentionDepth?: number;
   at?: string;
 }
 
@@ -75,6 +88,78 @@ export async function appendCoordinationLogEntry(
 
 /** Rolling bound: keep at most this many entries in the log file. */
 export const DOWNTIME_LOG_MAX_ENTRIES = 100;
+
+// ── Pane-close lifecycle entries (WL-0MU308WSF0002JWN) ─────────────────
+
+/**
+ * Outcome for a pane-lifecycle close event, capturing WHY the pane was
+ * closed (or, for `requires-attention`, why it was flagged).
+ */
+export type PaneLifecycleOutcome =
+  | 'closed-as-intake-complete'
+  | 'closed-as-plan-complete'
+  | 'audit-passed'
+  | 'audit-failed'
+  | 'requires-attention';
+
+/**
+ * The dispatch kind that spawned the pane (plan / intake / audit /
+ * risk-effort / implement). Re-exports the worker's `DowntimeSkillKind`
+ * for the pane-lifecycle module so the worker and log share the same set.
+ */
+export type PaneLifecycleKind = 'plan' | 'intake' | 'audit' | 'risk-effort' | 'implement';
+
+/**
+ * A pane-close lifecycle event recorded in the rolling dispatch log
+ * (WL-0MU308WSF0002JWN). These entries are keyed by pane id + outcome so
+ * the lifecycle collector can track which outcomes have already been
+ * logged and avoid duplicate entries.
+ *
+ * This entry type uses `entryType: 'pane-close'` as a discriminator so
+ * dispatched-marker readers (which filter by `kind === <tier>`) ignore
+ * pane-close entries entirely.
+ */
+export interface PaneCloseLogEntry {
+  /** Discriminator — ensures dispatched-marker readers ignore this entry. */
+  entryType: 'pane-close';
+  /** ISO-8601 UTC timestamp of the pane-close/log event. */
+  timestamp: string;
+  /** Work item id of the dispatched item. */
+  itemId: string;
+  /** Work item title at the time the pane was closed. */
+  itemTitle: string;
+  /** Pane id (unique per pane, e.g. "w2T:p3"). */
+  paneId: string;
+  /** The dispatch kind that spawned this pane. */
+  kind: PaneLifecycleKind;
+  /** Why the pane was closed (or flagged). */
+  outcome: PaneLifecycleOutcome;
+  /** Human-readable reason (required for `requires-attention`). */
+  reason?: string;
+  /**
+   * Stable machine-readable reason code (part of the monitor's idempotency
+   * key — see `pane-lifecycle.ts`). `'none'` for clean terminal outcomes.
+   */
+  reasonCode?: string;
+  /** Whether the pane was actually closed (false for informational log-only). */
+  closed: boolean;
+}
+
+/**
+ * Append one pane-close lifecycle entry to the rolling dispatch log.
+ * Fail-closed: never throws — the lifecycle logger must never crash the
+ * worker.
+ */
+export async function appendPaneCloseLogEntry(
+  cwd: string,
+  entry: PaneCloseLogEntry,
+): Promise<void> {
+  try {
+    await appendRollingJsonl(cwd, DOWNTIME_LOG_FILE, JSON.stringify(entry));
+  } catch {
+    // fail-closed: pane-close logging must never crash the worker
+  }
+}
 
 /**
  * One parsed line of the downtime dispatch log: either a dispatch event
@@ -111,6 +196,27 @@ export interface DowntimeLogEntry {
   error?: string;
   /** send-to-pi.sh exit code (non-zero spawn-failed trace; null = signal). */
   exitCode?: number | null;
+  /**
+   * Entry-type discriminator (WL-0MU308WSF0002JWN): `'pane-close'` marks a
+   * pane-lifecycle close event. Absent on dispatch markers, spawn-failure
+   * traces, and error entries (backward compatible — marker readers ignore
+   * unknown fields).
+   */
+  entryType?: string;
+  /**
+   * Resolved pane id for a dispatch (post-spawn enrichment entry,
+   * WL-0MUBVL251006JAQ0) or the pane id a pane-close entry refers to. Absent
+   * when the pane could not be resolved (backward compatible).
+   */
+  paneId?: string | null;
+  /** Discriminator for a post-spawn enrichment entry. */
+  enrichment?: boolean;
+  /**
+   * Stable machine-readable reason code for a pane-close entry
+   * (WL-0MU308WSF0002JWN) — part of the monitor's idempotency key. Absent on
+   * legacy/other entries.
+   */
+  reasonCode?: string;
 }
 
 /**
@@ -147,6 +253,49 @@ export async function readDowntimeLogEntries(cwd: string): Promise<DowntimeLogEn
 }
 
 /**
+ * Read the bounded rolling coordination log at
+ * `<cwd>/.worklog/downtime-coordination.log` (WL-0MU8808ZY0091JIA). Same
+ * FAIL-SAFE contract as `readDowntimeLogEntries`: a missing or unreadable
+ * log yields `[]`, malformed JSONL lines are skipped, and the function never
+ * throws. Used by the decision-log tests and any observer that wants the
+ * dispatcher's refusal reasons without parsing the file by hand.
+ */
+export async function readCoordinationLogEntries(cwd: string): Promise<CoordinationLogEntry[]> {
+  const file = join(cwd, '.worklog', COORDINATION_LOG_FILE);
+  let raw: string;
+  try {
+    raw = await readFile(file, 'utf8');
+  } catch {
+    return []; // missing or unreadable → empty (fail-safe)
+  }
+  const entries: CoordinationLogEntry[] = [];
+  for (const line of raw.split('\n')) {
+    if (line.trim() === '') continue;
+    try {
+      const parsed = JSON.parse(line) as unknown;
+      if (typeof parsed === 'object' && parsed !== null) {
+        entries.push(parsed as CoordinationLogEntry);
+      }
+    } catch {
+      // malformed line → skip (fail-safe)
+    }
+  }
+  return entries;
+}
+
+/**
+ * True for a rolling-log line that participates in the dispatched-marker
+ * readers. Pane-lifecycle close entries (`entryType: 'pane-close'`,
+ * WL-0MU308WSF0002JWN) reuse `itemId`/`kind` but are NOT dispatch markers —
+ * without this guard their missing `stage`/`dispatchedAt` would clobber a
+ * standing marker (last-entry-wins). Any future typed entry is likewise
+ * excluded; dispatch markers and enrichment entries (no `entryType`) pass.
+ */
+function isDispatchMarkerEntry(e: DowntimeLogEntry): boolean {
+  return e.entryType === undefined;
+}
+
+/**
  * Build the set of itemIds the downtime worker has already dispatched for
  * the given kind (kind-scoped). Entries without an itemId (e.g.
  * persistent-error events) are ignored. Entries with `outcome: 'spawn-failed'
@@ -158,6 +307,7 @@ export async function readDowntimeLogEntries(cwd: string): Promise<DowntimeLogEn
 function dispatchedItemIds(entries: DowntimeLogEntry[], kind: string): Set<string> {
   const ids = new Set<string>();
   for (const e of entries) {
+    if (!isDispatchMarkerEntry(e)) continue; // pane-close/lifecycle entries are not markers
     // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2).
     if (e.outcome === 'spawn-failed') continue;
     if (e.kind === kind && typeof e.itemId === 'string' && e.itemId.length > 0) {
@@ -199,6 +349,7 @@ export function recentDispatchedItemIds(
   const cutoff = now - windowMs;
   const ids = new Set<string>();
   for (const e of entries) {
+    if (!isDispatchMarkerEntry(e)) continue; // pane-close/lifecycle entries are not markers
     // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2): a
     // failed spawn is NOT an active run — the pane never appeared, so a new
     // dispatch must not be blocked by it.
@@ -277,6 +428,7 @@ export function dispatchedItemMarkers(
 ): Map<string, DispatchMarker> {
   const markers = new Map<string, DispatchMarker>();
   for (const e of entries) {
+    if (!isDispatchMarkerEntry(e)) continue; // pane-close/lifecycle entries are not markers
     // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2).
     if (e.outcome === 'spawn-failed') continue;
     if (e.kind !== kind || typeof e.itemId !== 'string' || e.itemId.length === 0) continue;
@@ -368,6 +520,7 @@ export function riskEffortDispatchedItemIds(entries: DowntimeLogEntry[]): Set<st
 export function dispatchedItemStages(entries: DowntimeLogEntry[], kind: string): Map<string, string> {
   const stages = new Map<string, string>();
   for (const e of entries) {
+    if (!isDispatchMarkerEntry(e)) continue; // pane-close/lifecycle entries are not markers
     // Spawn-failed entries are non-excluding (WL-0MT32F908002YFFA AC2).
     if (e.outcome === 'spawn-failed') continue;
     if (e.kind === kind && typeof e.itemId === 'string' && e.itemId.length > 0) {

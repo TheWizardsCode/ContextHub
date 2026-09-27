@@ -428,6 +428,15 @@ leader path equally skips review-gated entries (retaining them for later re-offe
 flag is cleared). The filter report is "no candidate" (not a `wl-error` strike) and the
 no-candidate cooldown is not triggered while review-gated work exists.
 
+**Live Herdr-head thread (WL-0MU72WJ8C0005GIE).** The flag reaches
+`classifyItemForDispatch` on BOTH dispatch paths. The normal scan in
+`dispatchFromHerdrList` builds its `DowntimeItemInfo` field-by-field from the Herdr
+head item, so it must thread `needsProducerReview` explicitly; the offer path
+(`computeMostImportantItem`) passes the item object directly, so it always honoured
+the flag. Before the threading fix (`022f1b24`) the two paths disagreed and the live
+path auto-dispatched a `needsProducerReview: true` item — the regression suite
+(`needsProducerReview === true blocks a non-critical item…`) pins the agreement.
+
 ### Review-queue depth gate — producer review policy (WL-0MT2UQWOR007CYY9; live-path rewire WL-0MTTSWC1X005P4VD)
 
 The **producer review policy**: while the root-only `completed`/`in_review` queue is deep
@@ -720,18 +729,47 @@ an agent on a tool call (wl, bash, tests) left the slot "free", so multiple
 1. **Owner-lease gate (AC2)** — a non-null Local Proxy owner lease
    (`local_owner_session_id` / `local_owner_lease_remaining_seconds`) counts
    as "slot busy" for the dispatch decision when the worker has a live
-   dispatch pane; only a truly unowned slot is dispatchable. The lease
-   signal **self-heals**: proxy dispatch leases carry an `expires_at`
-   (~180 s, `_get_lease_timeout_seconds`) refreshed on activity, are marked
-   inactive when a stream ends, and expired records are cleaned up — so an
-   idle-but-open pane stops holding a slot.
+   dispatch pane; only a truly unowned slot is dispatchable.
    Dispatch outcome reason: `slot-owned`.
+
+   **Lease contract (WL-0MU8809SZ0022VZG; cross-repo dependency:
+   `llm-manager`).** The lease is **adaptive**, NOT a fixed ~180 s. The
+   implementation lives in `llm-manager` (`proxy/proxy/router_helpers.py`):
+   it extends a static base in proportion to the generation and caps it at
+   `local_dispatch_lease_max_seconds` (**default 1500 s**), with chunk/prefill
+   refresh buffers keeping it alive while a stream is active. A long agent
+   generation therefore holds the lease for its **whole run** — the RCA
+   observed a dispatched-pane lease run 836 s → 0 (WL-0MU87ZGPP0029V28).
+   The dispatcher does **not** wait out a lease: it dispatches into genuinely
+   free **unowned** slots via the per-slot gate (WL-0MU8807BI008C9ME), and a
+   lease held by a dispatched pane (which already owns its own slot) does not
+   block the OTHER free unowned slots. Only the **count-based single-slot**
+   path treats a held lease as blocking (a truly owned sole slot stays
+   protected). The maximum is pinned in code as
+   `LOCAL_DISPATCH_LEASE_MAX_SECONDS`; if `llm-manager` changes the default,
+   revisit that constant and this section so the assumption cannot drift
+   silently again.
 2. **Per-slot owner tracking (AC5)** — `LlamaSlot` carries an optional
    `owner_session_id`; `countFreeUnownedSlots` excludes owned slots from the
    free count and the per-slot idle tracker resets an owned slot's timer, so
    a slot with a live lease is never considered available for a new pane.
    A single idle-but-owned slot (count-based path) fails closed via the
    derived `local_lease_active`.
+
+   **Stale/empty per-slot data (WL-0MUFP30T2003OX1F).** The proxy serves
+   `slots: []` together with `slots_stale: true` when its fresh `/slots`
+   query fails: the slot COUNTS come from the last-known cache but the
+   per-slot detail is unavailable. An empty array is **not** "zero free
+   slots", so the worker treats stale OR empty `slots` as "no per-slot
+   identity" and falls back to the count-based path. In that path, with a
+   multi-slot config (`0 < N < total`) a held lease no longer blocks
+   dispatch into the proxy-reported spare capacity: the count-based gate
+   uses `available_slots`, reserving one slot per lease only when the owner
+   may be idle (`local_active_query !== true` — an active query's slot is
+   already processing and excluded from the count). A single-slot
+   (`total_slots = 1`) or `N <= 0` / `N >= total` setup keeps the strict
+   fail-closed gate. The proxy-side improvement (serve cached per-slot
+   detail when stale) is tracked separately in `llm-manager`.
 3. **Contention feedback (AC6)** — the proxy's LIVE `contention_queue_depth`
    is parsed; while > 0 the dispatcher backs off with outcome reason
    `proxy-contention` until the queue drains. The sibling

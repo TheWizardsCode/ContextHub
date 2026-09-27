@@ -114,16 +114,114 @@ function normaliseDelayMs(value: number, factor: number): number | undefined {
 }
 
 /**
+ * Parse a server-requested retry delay from HTTP response headers.
+ *
+ * The llm-proxy startup-ramp gate sets a `Retry-After` header (delta-seconds
+ * or HTTP-date) on its 503 response. Pi's `openai-completions` provider throws
+ * before the `after_provider_response` extension event fires and formats the
+ * assistant error message without the header value, so the recovery retry
+ * loop captures the header from a `fetch` wrapper and parses it here.
+ *
+ * Supports both a real `Headers` object (case-insensitive by construction) and
+ * a plain string record. `retry-after-ms` wins over `retry-after`, matching the
+ * provider-level retry helper's precedence.
+ *
+ * @param headers - Response headers (`Headers` or a plain record)
+ * @returns Delay in milliseconds, or `undefined` when absent or malformed
+ */
+export function parseRetryAfterHeaders(
+  headers: Headers | Record<string, string | string[] | undefined> | undefined | null,
+): number | undefined {
+  if (!headers) return undefined;
+
+  const get = (name: string): string | undefined => {
+    const maybeHeaders = headers as Headers;
+    if (typeof maybeHeaders.get === 'function') {
+      const value = maybeHeaders.get(name);
+      return value === null ? undefined : value;
+    }
+    const record = headers as Record<string, string | string[] | undefined>;
+    const direct = record[name];
+    if (typeof direct === 'string') return direct;
+    for (const [key, value] of Object.entries(record)) {
+      if (key.toLowerCase() === name && typeof value === 'string') return value;
+    }
+    return undefined;
+  };
+
+  // 1. Milliseconds form (checked first so `retry-after-ms` is not read as
+  //    delta-seconds).
+  const msHeader = get('retry-after-ms');
+  if (msHeader !== undefined) {
+    const value = Number.parseFloat(msHeader);
+    if (Number.isFinite(value)) return normaliseDelayMs(value, 1);
+  }
+
+  // 2. Delta-seconds form, then HTTP-date form.
+  const retryAfter = get('retry-after');
+  if (retryAfter !== undefined) {
+    const seconds = Number.parseFloat(retryAfter);
+    if (Number.isFinite(seconds)) return normaliseDelayMs(seconds, 1000);
+    const target = Date.parse(retryAfter);
+    if (!Number.isNaN(target)) {
+      // A past date means "retry now" (0ms) rather than an invalid hint.
+      return Math.max(0, Math.round(target - Date.now()));
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Wrap a `fetch` implementation so retryable provider responses report the
+ * server-requested retry delay (`Retry-After` / `Retry-After-Ms` on 429/5xx)
+ * to `onHint`. Successful (2xx) responses report `undefined` so a stale hint
+ * is not reused. The response is returned untouched and fetch rejections
+ * propagate unchanged.
+ *
+ * This is the transport-level source of the retry hint for providers that
+ * throw before an extension event can observe the response headers.
+ *
+ * @param originalFetch - The fetch implementation to delegate to
+ * @param onHint - Called with the parsed delay in ms (or undefined to clear)
+ * @returns A drop-in fetch wrapper
+ */
+export function createRetryHintCapturingFetch(
+  originalFetch: typeof fetch,
+  onHint: (hintMs: number | undefined) => void,
+): typeof fetch {
+  const capturingFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const response = await originalFetch(input, init);
+    if (response && typeof response.status === 'number') {
+      if (response.status === 429 || response.status >= 500) {
+        onHint(parseRetryAfterHeaders(response.headers));
+      } else if (response.status >= 200 && response.status < 300) {
+        onHint(undefined);
+      }
+    }
+    return response;
+  };
+  return capturingFetch as typeof fetch;
+}
+
+/**
  * Calculate delay for a given attempt number.
  *
  * Without a server hint: `delay = baseDelayMs * multiplier^(attempt-1)`,
  * capped at `maxDelayMs` (existing exponential backoff, unchanged).
  *
  * With a usable server hint (from `Retry-After` / `retry_after`): the delay
- * is the larger of the exponential backoff and the server-requested delay,
- * plus upward-only jitter, capped at `maxDelayMs`. This guarantees the client
- * never retries sooner than the server asked (unless the configured cap is
- * below the hint).
+ * tracks the server-requested delay (plus upward-only jitter, capped at
+ * `maxDelayMs`). The local exponential backoff is **not** combined into this
+ * value — a growing local backoff must not silently override the server's
+ * recommendation.
+ *
+ * @remarks
+ * The server hint is authoritative when present. An earlier revision used
+ * `max(exponential, serverHintMs)`, which let the local exponential override
+ * the hint once it outgrew it (e.g. `Retry-After: 7` -> retry at 32s/60s).
+ * That is the behaviour the producer rejected as "the local retry mechanism
+ * overriding the recommended wait duration".
  *
  * @param attempt - The attempt number (1-based)
  * @param config - Backoff configuration (defaults if not provided)
@@ -150,9 +248,11 @@ export function calculateDelay(
     return exponential;
   }
 
-  const floor = Math.max(exponential, serverHintMs);
+  // A usable server hint is authoritative: the delay tracks the hint, not the
+  // local exponential. Upward-only jitter keeps the delay at or above the
+  // requested wait, and the configurable maximum still bounds it.
   const jitterRatio = Math.max(0, config.serverHintJitterRatio ?? DEFAULT_SERVER_HINT_JITTER_RATIO);
-  const jittered = floor * (1 + jitterRatio * random());
+  const jittered = serverHintMs * (1 + jitterRatio * random());
   return Math.min(Math.round(jittered), config.maxDelayMs);
 }
 
@@ -168,17 +268,32 @@ export function calculateDelay(
  * @param errorMessage - The assistant error message
  * @param config - Backoff configuration (defaults if not provided)
  * @param random - Random source in [0, 1) used for jitter (injectable for tests)
- * @returns The delay in milliseconds and the parsed server hint, if present
+ * @param headerHintMs - Retry delay parsed from the response `Retry-After`
+ *   header (see {@link parseRetryAfterHeaders}); takes precedence over the
+ *   error-message hint
+ * @returns The delay in milliseconds, the parsed server hint (if any), and
+ *   which source produced it
  */
 export function resolveRetryDelay(
   attempt: number,
   errorMessage: string | undefined | null,
   config: BackoffConfig = DEFAULT_BACKOFF_CONFIG,
   random: () => number = Math.random,
-): { delayMs: number; serverHintMs?: number } {
-  const serverHintMs = parseServerRetryDelayMs(errorMessage);
+  headerHintMs?: number,
+): { delayMs: number; serverHintMs?: number; hintSource?: 'header' | 'message' } {
+  const headerHint =
+    typeof headerHintMs === 'number' && Number.isFinite(headerHintMs) && headerHintMs >= 0
+      ? headerHintMs
+      : undefined;
+  const messageHint = parseServerRetryDelayMs(errorMessage);
+  const serverHintMs = headerHint ?? messageHint;
+  const hintSource = headerHint !== undefined ? 'header' : messageHint !== undefined ? 'message' : undefined;
   const delayMs = calculateDelay(attempt, config, serverHintMs, random);
-  return serverHintMs === undefined ? { delayMs } : { delayMs, serverHintMs };
+
+  const result: { delayMs: number; serverHintMs?: number; hintSource?: 'header' | 'message' } = { delayMs };
+  if (serverHintMs !== undefined) result.serverHintMs = serverHintMs;
+  if (hintSource !== undefined) result.hintSource = hintSource;
+  return result;
 }
 
 /**

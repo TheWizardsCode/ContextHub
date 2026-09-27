@@ -3286,6 +3286,10 @@ export function handleMouseInput(
  * `[Downtime Off (restored)]` (disable restored from the persisted marker,
  * WL-0MT5SG0VU005ARUR), or `[downtime paused]` (no-candidate cooldown,
  * WL-0MSI7DQL10016QYX).
+ * `[downtime held: <token>]` (WL-0MU8808ZY0091JIA) shows the gate that
+ * refused the last polled tick (e.g. `slot-owner`, `contention`,
+ * `code-freeze`) so "idle slots but no dispatches" is visible instead of a
+ * misleading idle label.
  * `[Downtime Off]` replaces the legacy `[downtime disabled]` text and is
  * shown whenever dispatch is off for the instance — either globally
  * settings-disabled or toggled off via the `d` shortcut (parent
@@ -3314,6 +3318,12 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
     // stale/empty — render the honest paused state instead of a stale idle
     // duration (AC6, WL-0MSI7DQL10016QYX).
     return ` ${ANSI.dim}[downtime paused]${ANSI.reset}`;
+  }
+  if (worker.blockReason) {
+    // A gate refused the last polled tick (slot-owner / contention /
+    // code-freeze / ...). Distinct from the idle label so the operator can
+    // see WHY idle slots are not being used (WL-0MU8808ZY0091JIA AC4).
+    return ` ${ANSI.fg(208)}[downtime held: ${worker.blockReason}]${ANSI.reset}`;
   }
   if (worker.idleSince !== null) {
     const elapsedSecs = Math.max(0, Math.floor((Date.now() - worker.idleSince) / 1000));

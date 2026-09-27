@@ -4,7 +4,7 @@
  */
 
 import { Command } from 'commander';
-import { createPluginContext, getVersion } from './cli-utils.js';
+import { createPluginContext, getVersion, normalizeFieldsArgv } from './cli-utils.js';
 import { loadPlugins } from './plugin-loader.js';
 import { renderCliMarkdown, resolveMarkdownEnabled } from './cli-output.js';
 import { loadConfig } from './config.js';
@@ -175,6 +175,15 @@ if (_parsedWatch.enabled) {
   // After loop exits, just return so the watcher process ends
   process.exit(0);
 }
+
+// Merge space-separated --fields continuations (e.g. `--fields id, title`)
+// before Commander parses argv. Without this, the trailing token is mistaken
+// for the positional search/query argument and the projection silently drops
+// requested fields (WL-0MSLW8GHQ0092PJK).
+process.argv = [
+  ...process.argv.slice(0, 2),
+  ...normalizeFieldsArgv(process.argv.slice(2)),
+];
 
 // Allowed formats for validation
 const ALLOWED_FORMATS = new Set(['concise', 'summary', 'normal', 'full', 'raw', 'markdown', 'text', 'plain', 'auto']);

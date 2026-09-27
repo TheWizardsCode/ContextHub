@@ -141,13 +141,24 @@ import {
   cleanupStaleElection,
   DEFAULT_LEASE_TTL_SECONDS,
 } from './leader-election.js';
-import { appendCoordinationLogEntry } from './downtime-log.js';
+import { appendCoordinationLogEntry, type CoordinationLogEntry } from './downtime-log.js';
 import {
   readDowntimeLogEntries as _readDowntimeEntries,
   dispatchedItemMarkers as _dispatchedMarkers,
   markerStillExcludes as _markerStillExcludes,
+  appendPaneCloseLogEntry as _appendPaneCloseLogEntry,
   type DispatchMarker,
+  type PaneCloseLogEntry,
+  type PaneLifecycleKind,
 } from './downtime-log.js';
+import {
+  classifyPaneLifecycle,
+  collectDispatchedPanes,
+  loggedPaneLifecycleKeys,
+  paneLifecycleKey,
+  type DispatchedPane,
+  type PaneItemState,
+} from './pane-lifecycle.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 import type { DispatcherAnchor, DispatcherTabAnchorEntry } from './dispatcher-anchor.js';
 
@@ -200,6 +211,34 @@ export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
  * the single leader snapshot with WL-0MT50LKAK001EF5Q (one cap source).
  */
 export const DOWNTIME_PANE_MIN_FREE_SLOTS = 1;
+
+/**
+ * Minimum interval between identical no-dispatch decision-log entries
+ * (WL-0MU8808ZY0091JIA AC3): a healthy idle/gate-blocked loop must not flood
+ * `.worklog/downtime-coordination.log`. A repeated refusal with the SAME
+ * reason is suppressed until this window elapses; a reason CHANGE is always
+ * logged immediately. 10 minutes → at most 6 identical lines per hour.
+ */
+export const DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS = 10 * 60_000;
+
+/**
+ * Short, stable header token for a no-dispatch reason (WL-0MU8808ZY0091JIA
+ * AC4). Distinct from the plain idle/busy labels so "idle slots but no
+ * dispatches" is visible in the herdr header. The RAW reason is what gets
+ * logged; only the header label is abbreviated.
+ */
+export function decisionHeaderToken(reason: string): string {
+  switch (reason) {
+    case 'slot-owned':
+      return 'slot-owner';
+    case 'proxy-contention':
+      return 'contention';
+    case 'review-queue-hold':
+      return 'review-queue';
+    default:
+      return reason;
+  }
+}
 
 /** Sane floor for the no-candidate cooldown (the pause cannot be disabled or set trivially small). */
 export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
@@ -270,6 +309,15 @@ export const DOWNTIME_AUDIT_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
  * failure) must not strand the item permanently. Default 24 hours.
  */
 export const DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Pane-lifecycle monitor cadence (WL-0MU308WSF0002JWN): the worker re-checks
+ * dispatched panes for terminal states at most once per this interval,
+ * bounding the per-tick worklog queries ("reasonable polling cadence" —
+ * parent Constraint) while still closing completed panes promptly. Overridable
+ * per tick via the optional `paneLifecycleIntervalMs` config field.
+ */
+export const DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS = 30_000;
 
 /**
  * Hard floor for the success-marker staleness window (1 h): below this the
@@ -379,6 +427,26 @@ export const DEFAULT_COORDINATION_CHECK_IN_MS = 5 * 60 * 1000;
 export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
 
 /**
+ * Maximum local DISPATCH-lease TTL (seconds) the llama-proxy can hold a
+ * local slot — the cross-repo contract from `llm-manager`
+ * (`proxy/proxy/router_helpers.py`, WL-0MU8809SZ0022VZG).
+ *
+ * The lease is ADAPTIVE, not a fixed ~180 s: a static base plus
+ * generation-proportional extension, capped at
+ * `local_dispatch_lease_max_seconds` (default 1500 s), with chunk/prefill
+ * refresh buffers that keep it alive while a stream is active. A long agent
+ * generation therefore holds the lease for its WHOLE run — the RCA observed a
+ * dispatched-pane lease run 836 s → 0 (WL-0MU87ZGPP0029V28).
+ *
+ * The dispatcher MUST NOT assume leases expire after ~180 s. It does not WAIT
+ * OUT a lease: it dispatches into genuinely free UNOWNED slots (the per-slot
+ * gate, WL-0MU8807BI008C9ME) and only the count-based single-slot path treats
+ * a held lease as blocking. If `llm-manager` changes the default, revisit
+ * this constant and `docs/dev/downtime-dispatcher.md`.
+ */
+export const LOCAL_DISPATCH_LEASE_MAX_SECONDS = 1500;
+
+/**
  * Retired coordination tier ordering (parent AC4 → WL-0MTK1ILM2009QYB2).
  * The coordination leader no longer re-ranks offers by tier: it dispatches
  * the OFFER list in file order (each offer is its root's Herdr list head,
@@ -421,6 +489,15 @@ export interface LlamaStatus {
   total_slots: number;
   current_model?: string;
   local_owner_session_id?: string | null;
+  /**
+   * Every owner session id reported by the proxy, normalised across the
+   * legacy string form and the current array form (WL-0MU88086A0089US4):
+   * array elements that are HTTP(S) URLs (the proxy's own base URL, e.g.
+   * `"http://localhost:8080"`) are excluded, and a legacy string yields a
+   * single-element array. Empty when no owner is reported. Kept alongside
+   * `local_owner_session_id` (the first id) for backward compatibility.
+   */
+  local_owner_session_ids?: string[];
   local_owner_lease_remaining_seconds?: number | null;
   /**
    * Proxy-reported LIVE contention queue depth (AC6, parent
@@ -442,11 +519,22 @@ export interface LlamaStatus {
    */
   contention_queued_count?: number;
   /**
+   * Proxy degradation flag (LP-0MSVP7XJ6008QPKX, consumed by
+   * WL-0MUFP30T2003OX1F): `true` when the served slot COUNTS came from the
+   * proxy's last-known cache because the fresh `/slots` query failed. When
+   * true the per-slot `slots` detail cannot be trusted/paired with the
+   * counts, so the worker must fall back to the count-based path. ABSENT on
+   * pre-feature proxies (treated as not stale).
+   */
+  slots_stale?: boolean;
+  /**
    * Per-slot identity (LP-0MSG5TA7Y002GN39): served by proxies that expose
    * slot-level detail. ABSENT on pre-feature proxies — the worker then
    * falls back to the count-based all-slots-free logic. When present, the
    * downtime worker tracks idle duration PER SLOT ID so a configured N
-   * requires the SAME N slots continuously free.
+   * requires the SAME N slots continuously free. An EMPTY array means "no
+   * per-slot detail available" (WL-0MUFP30T2003OX1F) — never "zero free
+   * slots" — and likewise falls back to the count-based path.
    */
   slots?: LlamaSlot[];
 }
@@ -540,6 +628,90 @@ export function countFreeUnownedSlots(slots: LlamaSlot[]): number {
 }
 
 /**
+ * Usable per-slot identity (WL-0MUFP30T2003OX1F): the `slots` array is only
+ * trustworthy when it is NON-EMPTY and NOT flagged stale by the proxy. An
+ * empty array (`slots: []`) means "no per-slot detail available" — NOT "zero
+ * free slots" — and `slots_stale: true` means the counts came from the
+ * proxy's last-known cache after a failed /slots query, so the detail cannot
+ * be paired with them. In both cases the worker must fall back to the
+ * count-based path; `null` is that signal.
+ */
+function usablePerSlotSlots(status: LlamaStatus): LlamaSlot[] | null {
+  if (!Array.isArray(status.slots)) return null;
+  if (status.slots.length === 0) return null;
+  if (status.slots_stale === true) return null;
+  return status.slots;
+}
+
+/**
+ * Number of local dispatch leases the proxy reports (WL-0MUFP30T2003OX1F):
+ * the normalised `local_owner_session_ids` list when present, else the legacy
+ * single `local_owner_session_id` string, else 1 when only a positive lease
+ * TTL is served. Used both for the owner-lease qualifier and to reserve
+ * possibly-idle leased slots when the worker only has count-based data.
+ */
+function ownerLeaseCount(status: LlamaStatus): number {
+  if (Array.isArray(status.local_owner_session_ids)) {
+    return status.local_owner_session_ids.length;
+  }
+  if (
+    typeof status.local_owner_session_id === 'string' &&
+    status.local_owner_session_id.length > 0
+  ) {
+    return 1;
+  }
+  if (
+    typeof status.local_owner_lease_remaining_seconds === 'number' &&
+    Number.isFinite(status.local_owner_lease_remaining_seconds) &&
+    status.local_owner_lease_remaining_seconds > 0
+  ) {
+    return 1;
+  }
+  return 0;
+}
+
+/**
+ * Slots to reserve for a held lease in the count-based path
+ * (WL-0MUFP30T2003OX1F). While the lease owner is actively generating
+ * (`local_active_query === true`) its slot is processing and already excluded
+ * from `available_slots`, so nothing is reserved; otherwise the owner may be
+ * idle-but-leased, and one slot per lease is reserved so an idle leased slot
+ * counted as "available" is never dispatched onto.
+ */
+function leaseReserve(status: LlamaStatus): number {
+  return status.local_active_query === true ? 0 : ownerLeaseCount(status);
+}
+
+/**
+ * Genuinely-free slot count for the count-based path
+ * (WL-0MUFP30T2003OX1F): the proxy's `available_slots` minus any reserved
+ * lease slots (never negative).
+ */
+function countBasedFreeSlots(status: LlamaStatus): number {
+  const available = Number.isFinite(status.available_slots) ? status.available_slots : 0;
+  return Math.max(0, available - leaseReserve(status));
+}
+
+/**
+ * Count-based spare-capacity decision (WL-0MUFP30T2003OX1F): with a
+ * multi-slot config (0 < N < total) but NO usable per-slot identity, the
+ * proxy's `available_slots` count is the only availability signal. A held
+ * local lease must not block dispatch into the spare slots, so this mirrors
+ * the per-slot spare-capacity relaxation using the count (after reserving
+ * possibly-idle leased slots). Fail-closed on ambiguous/missing fields.
+ */
+function countBasedSpareCapacity(status: LlamaStatus, requiredFreeSlots: number): boolean {
+  const total = status.total_slots;
+  const available = status.available_slots;
+  if (!status.llama_server_running) return false;
+  if (status.model_switch_in_progress) return false;
+  if (!Number.isFinite(total) || total <= 0) return false;
+  if (!Number.isFinite(available) || available < 0) return false;
+  if (requiredFreeSlots <= 0 || requiredFreeSlots >= total) return false;
+  return countBasedFreeSlots(status) >= requiredFreeSlots;
+}
+
+/**
  * True when the proxy reports an idle state for the required free-slot
  * count:
  *
@@ -583,16 +755,23 @@ export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): bo
  * the global gate is the per-slot-safe subset (server up + no model switch
  * only) — a query/lease tied to a busy slot is the operator's own session
  * and must not block dispatch into the free slots (F1 tests AC1/AC2).
+ *
+ * Count-based spare-capacity (WL-0MUFP30T2003OX1F): when per-slot identity is
+ * unusable (stale/empty `slots`) but 0 < N < total AND a local lease is held,
+ * the same relaxation applies to the proxy's `available_slots` count (after
+ * reserving possibly-idle leased slots) instead of stalling for the whole
+ * lease.
  */
 export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): boolean {
   const total = status.total_slots;
   if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
 
-  // Per-slot mode: per-slot identity present AND 0 < N < total. The relaxed
-  // global gate applies (server up + no model switch); the slot requirement
-  // is the per-slot free count.
+  // Per-slot mode: usable per-slot identity present AND 0 < N < total. The
+  // relaxed global gate applies (server up + no model switch); the slot
+  // requirement is the per-slot free count.
+  const perSlotSlots = usablePerSlotSlots(status);
   if (
-    Array.isArray(status.slots) &&
+    perSlotSlots !== null &&
     requiredFreeSlots > 0 &&
     requiredFreeSlots < total
   ) {
@@ -600,8 +779,20 @@ export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): bo
     // Fail-closed counting: an entry without an explicit boolean
     // `is_processing` is treated as processing (busy), never free. Owned
     // slots (live lease) are excluded (AC5, WL-0MTYZXSLN008HZOW).
-    const free = countFreeUnownedSlots(status.slots);
+    const free = countFreeUnownedSlots(perSlotSlots);
     return free >= requiredFreeSlots;
+  }
+
+  // Count-based spare-capacity (WL-0MUFP30T2003OX1F): multi-slot config with
+  // 0 < N < total but no usable per-slot identity, and a held lease. The
+  // strict all-slots-free fallback below would stall for the whole (adaptive)
+  // lease; the proxy's count says the capacity is real.
+  if (
+    ownerLeaseCount(status) > 0 &&
+    requiredFreeSlots > 0 &&
+    requiredFreeSlots < total
+  ) {
+    return countBasedSpareCapacity(status, requiredFreeSlots);
   }
 
   const effective = requiredFreeSlots > 0 && requiredFreeSlots < total
@@ -733,23 +924,47 @@ export const DEFAULT_DOWNTIME_POLL_TIMEOUT_MS = 5_000;
  * malformed/negative (ambiguous → the caller fails closed to busy).
  */
 /**
- * Extract the owner session ID from `local_owner_session_id`, accepting both
- * the legacy string form and the current array form
+ * True for an HTTP(S) URL element of the proxy's owner array. The live proxy
+ * serves `local_owner_session_id` as `["http://localhost:8080", "<session>"]`
+ * where the first element is its own base URL, NOT an owner session.
+ */
+function isOwnerUrlElement(value: string): boolean {
+  return /^https?:\/\//i.test(value);
+}
+
+/**
+ * Normalise `local_owner_session_id` into the FULL list of owner session ids,
+ * accepting both the legacy string form and the current array form
  * `["http://localhost:8080", "herdr-<session>"]`.
  *
- * Returns the session string (2nd element of the array) for array inputs,
- * the string itself for string inputs, and `undefined` for any malformed
- * input (number, object, empty array, etc.) — fail-closed.
+ * Array elements that are HTTP(S) URLs (the proxy's own base URL) are not
+ * owners and are dropped; every non-empty non-URL string element is retained
+ * so a multi-owner payload is never silently truncated (contributing cause 1
+ * of RCA WL-0MU87ZGPP0029V28). A legacy string yields a single-element array.
+ * Malformed input (number, object, `null`, array of non-strings) yields `[]`
+ * — fail-closed, never throws.
  *
  * (WL-0MU88086A0089US4 — parse array local_owner_session_id from llama-proxy)
  */
-function parseLocalOwnerSessionId(value: unknown): string | undefined {
-  if (typeof value === 'string' && value.length > 0) return value;
-  if (Array.isArray(value) && value.length >= 2) {
-    const session = value[1];
-    if (typeof session === 'string' && session.length > 0) return session;
+function parseLocalOwnerSessionIds(value: unknown): string[] {
+  if (typeof value === 'string' && value.length > 0) return [value];
+  if (Array.isArray(value)) {
+    return value.filter(
+      (el): el is string =>
+        typeof el === 'string' && el.length > 0 && !isOwnerUrlElement(el),
+    );
   }
-  return undefined;
+  return [];
+}
+
+/**
+ * The first (primary) owner session id — kept for compatibility with existing
+ * call sites (`local_lease_active` derivation, `ownerLeaseHeld`). Returns
+ * `undefined` when no owner session is reported. See
+ * {@link parseLocalOwnerSessionIds}.
+ */
+function parseLocalOwnerSessionId(value: unknown): string | undefined {
+  return parseLocalOwnerSessionIds(value)[0];
 }
 
 function parseOptionalCount(value: unknown): number | undefined | null {
@@ -796,6 +1011,16 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     localLeaseActive =
       (ownerSession !== undefined) ||
       (typeof leaseSeconds === 'number' && Number.isFinite(leaseSeconds) && leaseSeconds > 0);
+  }
+
+  // Optional degradation flag (LP-0MSVP7XJ6008QPKX): absent on pre-feature
+  // proxies. A malformed (non-boolean) value is ambiguous → null (busy,
+  // fail-closed), matching the other optional flags. When true the per-slot
+  // `slots` detail is unusable (WL-0MUFP30T2003OX1F).
+  let slotsStale: boolean | undefined;
+  if (o.slots_stale !== undefined) {
+    if (typeof o.slots_stale !== 'boolean') return null;
+    slotsStale = o.slots_stale;
   }
 
   // Optional per-slot identity (LP-0MSG5TA7Y002GN39): absent on pre-feature
@@ -880,6 +1105,8 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     current_model: typeof o.current_model === 'string' ? o.current_model : undefined,
     local_owner_session_id:
       parseLocalOwnerSessionId(o.local_owner_session_id),
+    local_owner_session_ids:
+      parseLocalOwnerSessionIds(o.local_owner_session_id),
     local_owner_lease_remaining_seconds:
       typeof o.local_owner_lease_remaining_seconds === 'number'
         ? o.local_owner_lease_remaining_seconds
@@ -887,6 +1114,7 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     contention_queue_depth: contentionQueueDepth,
     contention_queued_count: contentionQueuedCount,
     slots,
+    slots_stale: slotsStale,
   };
 }
 
@@ -1127,6 +1355,12 @@ export interface DowntimeItemInfo {
    * coordination leader path skips it (AC3).
    */
   needsProducerReview?: boolean;
+  /**
+   * Recorded audit verdict (`auditResult.readyToClose` from `wl show
+   * --json`, WL-0MU308WSF0002JWN): `false` means the audit FAILED; `true`
+   * means it passed. Absent when the item has no recorded audit result.
+   */
+  auditResult?: boolean | null;
 }
 
 /**
@@ -1323,6 +1557,29 @@ export function paneLabelItemId(label: string | undefined): string | null {
   if (idx < 0) return null;
   const id = label.slice(idx + 3).trim();
   return id === '' ? null : id;
+}
+
+/**
+ * Safe-close predicate (WL-0MU4US5MP001JFEN AC7): true ONLY when a LIVE herdr
+ * pane record exists for `paneId`, its label is a downtime pane label
+ * (`DOWNTIME_PANE_LABEL_PREFIX`) AND its item-id suffix equals `itemId`.
+ *
+ * Guarding the close with this predicate means a stale dispatch-log entry can
+ * never close an unrelated/operator pane whose pane id happens to collide with
+ * the recorded dispatched pane (pane ids may be reused after a pane closes).
+ * A missing record (the pane is already gone) returns false — there is nothing
+ * to close.
+ */
+export function isSafeDowntimePaneToClose(
+  records: HerdrPaneRecord[],
+  paneId: string,
+  itemId: string,
+): boolean {
+  const rec = records.find((p) => p.paneId === paneId);
+  if (rec === undefined) return false;
+  const label = rec.label ?? '';
+  if (!label.startsWith(DOWNTIME_PANE_LABEL_PREFIX)) return false;
+  return paneLabelItemId(label) === itemId;
 }
 
 /**
@@ -1675,6 +1932,14 @@ export interface DowntimeWorkerDeps {
       itemTitle?: string;
       itemId?: string;
       anchorId?: string;
+      /**
+       * Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME): the
+       * worker forwards the genuine free-slot snapshot and mode so the spawn
+       * boundary can set `AUDIT_PHASE2_PARALLELISM` without reaching back
+       * into the worker. Absent → the spawn falls back to `'1'` (backward
+       * compatible).
+       */
+      spawnConfig?: DowntimeSpawnConfig;
     },
   ): Promise<DowntimeSpawnResult>;
   /**
@@ -1754,6 +2019,40 @@ export interface DowntimeWorkerDeps {
    */
   recordDispatchEnrichment?(event: DowntimeDispatchEnrichmentEvent): Promise<void>;
   /**
+   * Pane-lifecycle item state lookup (WL-0MU308WSF0002JWN): resolve the
+   * current work-item state (stage/status/risk/effort/auditedAt/auditResult/
+   * needsProducerReview) for a dispatched pane's item so the monitor can
+   * classify its lifecycle outcome. OPTIONAL — when absent the monitor
+   * cannot classify and takes no action (fail-open; production wiring always
+   * provides it). Must never throw; resolves null on a wl/CLI failure so a
+   * lookup failure never triggers a spurious close.
+   */
+  getItemLifecycleState?(itemId: string, cwd: string): Promise<PaneItemState | null>;
+  /**
+   * Close a dispatched pane (WL-0MU308WSF0002JWN): `herdr pane close
+   * <paneId>`. Resolves true on success, false on any failure. OPTIONAL —
+   * when absent the monitor logs the outcome but performs no close (used by
+   * legacy/test callers). Must never throw (fail-closed): a failed close is
+   * logged with `closed:false` and never blocks other panes.
+   *
+   * `expected` (optional, WL-0MU4US5MP001JFEN AC7) carries the dispatch
+   * context so an implementation can verify the live pane really is the
+   * downtime pane spawned for THIS item before closing it — never close an
+   * unrelated/operator pane whose id happens to collide with a stale entry.
+   */
+  closePane?(
+    paneId: string,
+    cwd: string,
+    expected?: { itemId: string; kind: PaneLifecycleKind },
+  ): Promise<boolean>;
+  /**
+   * Record a pane-close lifecycle entry in the rolling dispatch log
+   * (WL-0MU308WSF0002JWN). OPTIONAL — when absent the monitor falls back to
+   * appending directly via `appendPaneCloseLogEntry`. Must never throw
+   * (fail-closed): logging must never crash the worker.
+   */
+  recordPaneClose?(entry: PaneCloseLogEntry, cwd: string): Promise<void>;
+  /**
    * Roll back a CAS claim that succeeded but never completed dispatch
    * (WL-0MT32F908002YFFA AC1/AC2): restore the item to its pre-claim
    * status + stage so a future idle period can re-select it. Called when
@@ -1780,6 +2079,16 @@ export interface DowntimeWorkerDeps {
    * Must never throw (fail-closed): logging must not crash the worker.
    */
   recordError(event: DowntimeErrorEvent): Promise<void>;
+  /**
+   * Record one no-dispatch DECISION entry (WL-0MU8808ZY0091JIA) — the reason
+   * a polled tick refused to dispatch (slot-owner / contention / no-candidate
+   * / review-queue-hold / code-freeze / ...), with the observed slot/owner
+   * fields. Optional: when absent the worker appends directly to
+   * `.worklog/downtime-coordination.log` (the production default). Tests
+   * inject a spy to assert the decision vocabulary and rate-limiting without
+   * touching the filesystem. Fail-closed: a throw is swallowed.
+   */
+  recordDecision?(entry: CoordinationLogEntry, cwd: string): Promise<void>;
 }
 
 /** Audit event recorded for every successful downtime dispatch. */
@@ -2143,7 +2452,7 @@ export function selectCriticalFirstCandidates(
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; inFlight: InFlightPanes },
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
   flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
@@ -2206,6 +2515,7 @@ async function dispatchFromHerdrList(
       cwd: ctx.cwd,
       selectionPath: 'critical-first',
       selectionReason: guard.reason,
+      spawnConfig: ctx.spawnConfig,
     });
     if (outcome.dispatched) return outcome;
     // A lost CAS race / marker-recovery rollback applies to one candidate:
@@ -2310,6 +2620,7 @@ async function dispatchFromHerdrList(
       cwd: ctx.cwd,
       selectionPath: 'normal-scan',
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
+      spawnConfig: ctx.spawnConfig,
     });
     if (outcome.dispatched) return outcome;
     if (outcome.reason === 'claim-failed') continue;
@@ -2378,7 +2689,14 @@ async function dispatchClaimedTier(
   deps: DowntimeWorkerDeps,
   kind: DowntimeSkillKind,
   candidate: DowntimeCandidate,
-  opts: { model: string; cwd: string; selectionPath?: string; selectionReason?: string },
+  opts: {
+    model: string;
+    cwd: string;
+    selectionPath?: string;
+    selectionReason?: string;
+    /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
+    spawnConfig?: DowntimeSpawnConfig;
+  },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
   // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): resolve the dedicated
@@ -2504,6 +2822,10 @@ async function dispatchClaimedTier(
       // leadership. Only set when the anchor resolved (never a bare
       // undefined key — legacy callers keep their exact opts shape).
       ...(anchorId !== undefined ? { anchorId } : {}),
+      // Mode-aware Phase 2 parallelism (WL-0MT50S9JW001DHME): only set when
+      // the worker supplied a snapshot (legacy/test callers keep the exact
+      // historical opts shape and fall back to '1').
+      ...(opts.spawnConfig !== undefined ? { spawnConfig: opts.spawnConfig } : {}),
     },
   );
   if (!spawn.ok) {
@@ -2660,7 +2982,7 @@ async function recordDispatchEnrichmentBestEffort(
 async function dispatchScheduledPrompt(
   deps: DowntimeWorkerDeps,
   prompt: ScheduledPrompt,
-  opts: { model: string; cwd: string },
+  opts: { model: string; cwd: string; spawnConfig?: DowntimeSpawnConfig },
 ): Promise<DowntimeDispatchOutcome> {
   const at = new Date().toISOString();
 
@@ -2721,6 +3043,7 @@ async function dispatchScheduledPrompt(
     cwd: opts.cwd,
     paneName: `Downtime ${prompt.id}`,
     ...(anchorId !== undefined ? { anchorId } : {}),
+    ...(opts.spawnConfig !== undefined ? { spawnConfig: opts.spawnConfig } : {}),
   });
   if (!spawn.ok) {
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2 pattern): the audit log
@@ -3138,7 +3461,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; spawnConfig?: DowntimeSpawnConfig },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -3211,6 +3534,7 @@ export async function dispatchFromCoordination(
       return await dispatchScheduledPrompt(deps, duePrompt, {
         model: opts.model,
         cwd: opts.cwd,
+        spawnConfig: opts.spawnConfig,
       });
     }
   }
@@ -3314,7 +3638,7 @@ export async function dispatchFromCoordination(
       deps,
       kind,
       toCoordinationCandidate(result.info),
-      { model: opts.model, cwd: worklogRoot, selectionPath: 'coordination-offer', selectionReason: 'leader-offer' },
+      { model: opts.model, cwd: worklogRoot, selectionPath: 'coordination-offer', selectionReason: 'leader-offer', spawnConfig: opts.spawnConfig },
     );
     if (outcome.dispatched) {
       // Dispatched — remove the entry so the owner re-queues its next
@@ -3577,6 +3901,8 @@ export async function dispatchDowntimeWork(
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`.
      */
     markerStaleWindowMs?: number;
+    /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
+    spawnConfig?: DowntimeSpawnConfig;
   },
 ): Promise<DowntimeDispatchOutcome> {
   // Per-process PIPELINE single-flight gate (F3, WL-0MT50LKAK001EF5Q): at
@@ -3677,7 +4003,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, inFlight };
+        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, inFlight, spawnConfig: opts.spawnConfig };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return herdrOutcome;
 
@@ -4061,22 +4387,35 @@ export type DowntimeSpawn = (
  * (WL-0MT50S9JW001DHME).
  *
  * When supplied, `buildDowntimeSpawnOptions` selects the Phase 2 parallelism
- * level based on the current operating mode and the available dispatch budget:
+ * level based on the current operating mode, the GENUINELY free slots at
+ * dispatch time, and the concurrent dispatch budget:
  *
- * - `'1'` (safe default): fast mode, cheap mode with full budget, or config
- *   not supplied.
- * - `'2'`: cheap mode AND a second slot is free AND the concurrent dispatch
- *   budget allows it (combined streams ≤ slot budget).
+ * - `'1'` (safe default): fast mode, cheap mode without a genuinely free
+ *   second slot, a non-single-flight dispatch budget, or config not supplied.
+ * - `'2'`: cheap mode AND a second slot is genuinely free AND exactly one
+ *   dispatch pipeline is in flight (combined streams ≤ slot budget).
  *
- * When the config is absent the function falls back to `'1'` (the historic,
- * backward-compatible value).
+ * `freeSlots` (not `slotBudget`) is the operative input for the second-slot
+ * check: `slotBudget` is the mode's total pool and being "free" cannot be
+ * inferred from it. When the config is absent the function falls back to
+ * `'1'` (the historic, backward-compatible value).
  */
 export interface DowntimeSpawnConfig {
   /** `'cheap'` or `'fast'` — the proxy's current operating mode. */
   mode: 'cheap' | 'fast';
-  /** Total number of local proxy slots available (cheap = 2, fast = 3). */
+  /** Total number of local proxy slots in the current mode (cheap = 2, fast = 3). */
   slotBudget: number;
-  /** Maximum number of concurrent downtime dispatches allowed (0 = unbounded). */
+  /**
+   * Genuinely free local proxy slots at dispatch time (unowned and not
+   * processing) — the real availability signal, never the total pool.
+   */
+  freeSlots: number;
+  /**
+   * Maximum number of concurrent downtime dispatch pipelines allowed.
+   * `0` means UNBOUNDED (no cap): other dispatches may be in flight, so the
+   * cheap 2-slot pool cannot be guaranteed → treated as unsafe for `'2'`.
+   * Only a single-flight budget (`1`) enables `'2'`.
+   */
   concurrentDispatchCap: number;
 }
 
@@ -4086,15 +4425,16 @@ export interface DowntimeSpawnConfig {
  *
  * `AUDIT_PHASE2_PARALLELISM` is mode-aware (WL-0MT50S9JW001DHME):
  *
- * - `'1'` (safe default): fast mode, cheap mode with full budget, or config
- *   not supplied.
- * - `'2'`: cheap mode AND a second slot is free AND the concurrent dispatch
- *   budget allows it — up to 2 Phase 2 children run in parallel, fitting the
+ * - `'1'` (safe default): fast mode, cheap mode without a genuinely free
+ *   second slot, a non-single-flight dispatch budget, or config not supplied.
+ * - `'2'`: cheap mode AND a second slot is genuinely free AND the dispatch
+ *   is single-flight — up to 2 Phase 2 children run in parallel, fitting the
  *   2-slot cheap-mode pool (parent already done Phase 1).
  *
  * The parent audit always completes Phase 1 before Phase 2 children start,
  * so the max concurrent streams per audit is 2 (the children). This fits
- * cheap mode's slot budget when a second slot is genuinely free.
+ * cheap mode's slot budget only when a second slot is genuinely free — the
+ * free count is therefore the operative check, never the total budget.
  */
 export function buildDowntimeSpawnOptions(
   cwd: string,
@@ -4109,23 +4449,22 @@ export function buildDowntimeSpawnOptions(
   // Default to '1' for backward compatibility when config is absent.
   let parallelism = '1';
   if (opts?.config) {
-    const { mode, slotBudget, concurrentDispatchCap } = opts.config;
-    if (mode === 'cheap' && slotBudget >= 2) {
-      // In cheap mode with ≥ 2 slots, check if a second slot is free.
-      // PARALLELISM=2 means up to 2 Phase 2 children run in parallel.
-      // The parent already completed Phase 1, so max concurrent streams = 2.
-      // Only enable when the dispatch budget allows it:
-      // - If concurrentDispatchCap is 0 (unbounded), only 1 dispatch at a time
-      //   during cheap mode → 2 children per audit = 2 streams total → safe.
-      // - If concurrentDispatchCap >= 2, multiple audits could run → each with
-      //   PARALLELISM=2 would exceed 2-slot budget → stay at '1'.
-      const dispatchBudgetAllows =
-        concurrentDispatchCap === 0 || concurrentDispatchCap === 1;
-      if (dispatchBudgetAllows) {
-        parallelism = '2';
-      }
+    const { mode, slotBudget, freeSlots, concurrentDispatchCap } = opts.config;
+    // Cheap mode is the 2-slot local pool this bound protects; fast mode
+    // (cloud-routed, wider pool) keeps the serial historic default.
+    const cheapPool = mode === 'cheap' && slotBudget >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
+    // A GENUINELY free second slot right now — Phase 2 needs the parent plus
+    // a child = 2 concurrent streams (the total budget is not availability).
+    const secondSlotFree = freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
+    // Single-flight dispatch only: an unbounded (0) or ≥ 2 concurrent-dispatch
+    // budget means a second audit could run, so two audits × 2 children would
+    // exceed the cheap 2-slot pool. Only cap === 1 is safe.
+    const dispatchIsSingleFlight = concurrentDispatchCap === 1;
+    if (cheapPool && secondSlotFree && dispatchIsSingleFlight) {
+      parallelism = '2';
     }
-    // Fast mode, insufficient budget, or config-supplied but constraints not met → '1'
+    // Fast mode, no free second slot, non-single-flight budget, or config
+    // supplied but constraints not met → '1'.
   }
 
   return {
@@ -4175,7 +4514,7 @@ export const DOWNTIME_SPAWN_PROBE_MS = 500;
 export async function spawnDowntimePane(
   scriptPath: string,
   args: string[],
-  opts: { cwd: string },
+  opts: { cwd: string; config?: DowntimeSpawnConfig },
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): Promise<DowntimeSpawnResult> {
   const child = spawnFn(scriptPath, args, opts);
@@ -4213,6 +4552,162 @@ export async function spawnDowntimePane(
   });
 }
 
+// ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) ──────────────────────
+
+/** Summary of one pane-lifecycle monitor pass. */
+export interface PaneLifecycleMonitorResult {
+  /** Number of dispatched panes inspected. */
+  checked: number;
+  /** Number of panes actually closed this pass. */
+  closed: number;
+  /** Number of lifecycle outcomes logged this pass. */
+  logged: number;
+  /** Number of per-pane failures swallowed (fail-closed). */
+  errors: number;
+}
+
+/**
+ * Inspect every dispatched pane recorded in the rolling log and, for each
+ * one that has reached a terminal or attention state, log a pane-close
+ * lifecycle entry and (except `implement`) close the pane
+ * (WL-0MU308WSF0002JWN).
+ *
+ * Fail-closed at every boundary (AC7): a missing log, an unreadable item, a
+ * failed pane close, or a failed log write is swallowed and never crashes
+ * the worker or blocks the remaining panes. Idempotent: a `(pane, outcome,
+ * reason)` triple already recorded in the log is never written twice, so
+ * repeated ticks (and multiple instances sharing a root) do not duplicate
+ * entries — while a genuine state CHANGE produces a new entry (intake Q&A).
+ *
+ * The monitor performs NO work when the deps are absent (legacy/test
+ * callers): with no `getItemLifecycleState` every pane classifies to null,
+ * so the pass is a cheap no-op.
+ */
+/**
+ * Warn-level observability for pane-lifecycle failures
+ * (WL-0MU4USJ07009JYL8 AC2). Fail-closed: a stderr write failure is
+ * swallowed — observability must never crash the worker.
+ */
+function paneLifecycleWarn(message: string): void {
+  try {
+    process.stderr.write(`[worklog-plugin] Downtime pane-lifecycle: ${message}\n`);
+  } catch {
+    // fail-closed: logging must never crash the worker
+  }
+}
+
+function paneLifecycleErrMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+export async function monitorDispatchedPanes(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+): Promise<PaneLifecycleMonitorResult> {
+  const result: PaneLifecycleMonitorResult = { checked: 0, closed: 0, logged: 0, errors: 0 };
+
+  // Strict no-op for legacy callers: without an item-state resolver the
+  // monitor cannot distinguish a terminal stage from "unknown", so taking
+  // any action (e.g. flagging requires-attention on agent-done alone) would
+  // be guesswork. Production wiring always provides the dep.
+  if (typeof deps.getItemLifecycleState !== 'function') return result;
+
+  // Read the rolling log (fail-safe: unreadable → []).
+  let entries: Awaited<ReturnType<typeof _readDowntimeEntries>>;
+  try {
+    entries = await _readDowntimeEntries(cwd);
+  } catch (err) {
+    paneLifecycleWarn(`could not read the dispatch log — skipping this pass: ${paneLifecycleErrMsg(err)}`);
+    return result; // fail-closed: no evidence, no action
+  }
+
+  const panes = collectDispatchedPanes(entries);
+  if (panes.length === 0) return result;
+  const loggedKeys = loggedPaneLifecycleKeys(entries);
+
+  // Running-pane liveness: `null` when unknown (fail-open — an unknown
+  // liveness must never be read as "agent done", which would close a live
+  // pane). When known, a dispatched pane absent from the live set has ended.
+  let livePanes: Set<string> | null = null;
+  if (typeof deps.getRunningDowntimePanes === 'function') {
+    try {
+      const running = await deps.getRunningDowntimePanes(cwd);
+      if (running.ok && Array.isArray(running.records)) {
+        livePanes = new Set(running.records.map((rec) => rec.paneId));
+      } else if (!running.ok) {
+        paneLifecycleWarn('live-pane query failed — skipping agent-done detection this pass');
+      }
+    } catch (err) {
+      paneLifecycleWarn(`live-pane query threw — skipping agent-done detection this pass: ${paneLifecycleErrMsg(err)}`);
+      livePanes = null; // fail-open — never close on unknown liveness
+    }
+  }
+
+  for (const pane of panes) {
+    result.checked += 1;
+    try {
+      let item: PaneItemState | null = null;
+      try {
+        item = await deps.getItemLifecycleState(pane.itemId, cwd);
+      } catch (err) {
+        paneLifecycleWarn(`item lookup failed for ${pane.itemId} (pane ${pane.paneId}): ${paneLifecycleErrMsg(err)}`);
+        result.errors += 1;
+        continue; // fail-closed: no evidence → take no action for this pane
+      }
+      const agentDone = livePanes !== null && !livePanes.has(pane.paneId);
+      const decision = classifyPaneLifecycle(pane, item, agentDone);
+      if (decision === null) continue;
+
+      const key = paneLifecycleKey(pane.paneId, decision.outcome, decision.reasonCode);
+      if (loggedKeys.has(key)) continue; // already recorded — idempotent
+
+      // Close the pane (except `implement`, which is never auto-closed —
+      // AC6). A failed/absent close is recorded with `closed:false` and
+      // never blocks the log entry or the remaining panes (AC7).
+      let closed = false;
+      if (decision.close && typeof deps.closePane === 'function') {
+        try {
+          closed = await deps.closePane(pane.paneId, cwd, { itemId: pane.itemId, kind: pane.kind });
+        } catch (err) {
+          paneLifecycleWarn(`pane close failed for ${pane.paneId} (${pane.itemId}): ${paneLifecycleErrMsg(err)}`);
+          closed = false; // fail-closed
+        }
+      }
+
+      const entry: PaneCloseLogEntry = {
+        entryType: 'pane-close',
+        timestamp: new Date().toISOString(),
+        itemId: pane.itemId,
+        itemTitle: item?.title ?? pane.itemTitle,
+        paneId: pane.paneId,
+        kind: pane.kind,
+        outcome: decision.outcome,
+        reason: decision.reason,
+        reasonCode: decision.reasonCode,
+        closed,
+      };
+      try {
+        if (typeof deps.recordPaneClose === 'function') {
+          await deps.recordPaneClose(entry, cwd);
+        } else {
+          await _appendPaneCloseLogEntry(cwd, entry);
+        }
+        loggedKeys.add(key);
+        result.logged += 1;
+        if (closed) result.closed += 1;
+      } catch (err) {
+        paneLifecycleWarn(`pane-close log write failed for ${pane.paneId} (${pane.itemId}): ${paneLifecycleErrMsg(err)}`);
+        result.errors += 1; // fail-closed: logging must never crash the worker
+      }
+    } catch (err) {
+      paneLifecycleWarn(`lifecycle pass failed for pane ${pane.paneId}: ${paneLifecycleErrMsg(err)}`);
+      result.errors += 1; // fail-closed: one bad pane never blocks the rest
+    }
+  }
+
+  return result;
+}
+
 // ── Worker orchestrator (implemented — F3) ────────────────────────────
 
 /**
@@ -4239,6 +4734,19 @@ export interface DowntimeWorkerConfig {
     requiredFreeSlots: number;
     model: string;
     cwd: string;
+    /**
+     * Current proxy operating mode (WL-0MT50S9JW001DHME). `undefined` when
+     * unknown (mode switching disabled, or the proxy has not been polled
+     * yet) → the dispatcher conservatively keeps `AUDIT_PHASE2_PARALLELISM`
+     * at `'1'`.
+     */
+    mode?: 'cheap' | 'fast';
+    /**
+     * Maximum concurrent dispatch pipelines (WL-0MT50S9JW001DHME). Defaults
+     * to `DISPATCH_PIPELINE_SINGLE_FLIGHT` (1). Only a single-flight budget
+     * permits `'2'`; an unbounded (`0`) or ≥ 2 budget keeps `'1'`.
+     */
+    concurrentDispatchCap?: number;
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
@@ -4249,6 +4757,12 @@ export interface DowntimeWorkerConfig {
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h).
      */
     markerStaleWindowMs?: number;
+    /**
+     * Pane-lifecycle monitor cadence, ms (WL-0MU308WSF0002JWN). Optional —
+     * defaults to `DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS` (30 s). Tests may
+     * pass 0 to run the monitor on every tick.
+     */
+    paneLifecycleIntervalMs?: number;
   };
   /**
    * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
@@ -4322,6 +4836,14 @@ export interface DowntimeWorker {
   /** Timestamp of the last successful dispatch (null until the first). */
   readonly lastDispatchAt: number | null;
   /**
+   * Short token for the gate that blocked the last polled tick (e.g.
+   * `'slot-owner'`, `'contention'`, `'code-freeze'`), or null when the worker
+   * was not gate-blocked (idle/busy/dispatching/disabled). Powers the header's
+   * `[downtime held: <token>]` label so "idle slots but no dispatches" is
+   * visible (WL-0MU8808ZY0091JIA AC4).
+   */
+  readonly blockReason: string | null;
+  /**
    * Whether the worker is enabled per the current settings (re-read) AND the
    * per-instance in-memory override: effective enabled = `override ??
    * cfg.enabled` (the override takes precedence when set). The getter re-reads
@@ -4393,6 +4915,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   const perSlotTracker = createPerSlotIdleTracker();
   let dispatching = false;
   let lastDispatchAt: number | null = null;
+  // Pane-lifecycle monitor cadence gate (WL-0MU308WSF0002JWN): the timestamp
+  // of the last monitor pass. 0 forces a pass on the first tick.
+  let lastPaneMonitorAt = 0;
   // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
   // worker is fully paused (no poll, no idle tracking, no dispatch) after a
   // genuine empty backlog OR three consecutive CLI errors. Cancelled early
@@ -4402,6 +4927,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // Three-strike rule: consecutive CLI-error dispatch outcomes. A successful
   // dispatch, a genuine no-candidate outcome, or an expired cooldown resets it.
   let errorStrikes = 0;
+  // No-dispatch decision logging (WL-0MU8808ZY0091JIA): the last reason
+  // written and when, so repeated identical refusals are rate-limited.
+  let lastDecisionReason: string | null = null;
+  let lastDecisionAt = 0;
+  // Current header blocking token; null when not gate-blocked. Reset each tick.
+  let blockReason: string | null = null;
   // Per-instance in-memory enabled override (parent WL-0MSZ4NSOE007AQEF):
   // null (default) = follow the global setting; true/false force dispatch
   // on/off for THIS instance. In-memory only — resets on plugin restart,
@@ -4517,6 +5048,54 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     }
   };
 
+  // ── No-dispatch decision log (WL-0MU8808ZY0091JIA) ──
+  // Record WHY a polled tick refused to dispatch so "idle slots but no
+  // dispatches" is diagnosable from the logs alone. Rate-limited: a repeated
+  // refusal with the SAME reason is written at most once per
+  // DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS; a reason CHANGE always writes. The
+  // header blocking token is updated on EVERY refusal (even a rate-limited
+  // one) so the header never goes stale. Fail-closed: a logging failure never
+  // affects the dispatch decision.
+  const recordDecision = async (
+    cwd: string,
+    reason: string,
+    fields: {
+      freeSlots: number;
+      totalSlots: number;
+      ownerPresent: boolean;
+      runningPanes: number | null;
+      contentionDepth: number;
+    },
+  ): Promise<void> => {
+    blockReason = decisionHeaderToken(reason);
+    const now = Date.now();
+    if (
+      lastDecisionReason === reason &&
+      now - lastDecisionAt < DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS
+    ) {
+      return; // rate-limited: identical refusal within the window
+    }
+    lastDecisionReason = reason;
+    lastDecisionAt = now;
+    const entry: CoordinationLogEntry = {
+      kind: 'decision',
+      operation: 'no-dispatch',
+      instanceId,
+      reason,
+      ...fields,
+      at: new Date(now).toISOString(),
+    };
+    try {
+      if (typeof opts.deps.recordDecision === 'function') {
+        await opts.deps.recordDecision(entry, cwd);
+      } else {
+        await appendCoordinationLogEntry(cwd, entry);
+      }
+    } catch {
+      // fail-closed: decision logging must never crash the worker
+    }
+  };
+
   return {
     get idleSince(): number | null {
       return tracker.idleSince;
@@ -4576,8 +5155,14 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     get errorStrikes(): number {
       return errorStrikes;
     },
+    get blockReason(): string | null {
+      return blockReason;
+    },
     async tick(): Promise<DowntimeWorkerTickResult> {
       const cfg = opts.config();
+      // Fresh per-tick decision state: clear the header blocking reason; a
+      // gate below re-sets it when this tick is refused (WL-0MU8808ZY0091JIA).
+      blockReason = null;
       // Short-circuit on the EFFECTIVE enabled state (override ?? settings):
       // while toggled off the worker performs no proxy polling, no idle
       // tracking, and no dispatch — exactly the settings-disabled path.
@@ -4737,6 +5322,30 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         }
       }
 
+      // ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) ──────────────────
+      // Runs on the LEADER (legacy mode: always) and BEFORE the cooldown
+      // gate, so completed dispatched panes are tidied even while dispatch
+      // is paused in a no-candidate cooldown. Cadence-bounded (default 30 s)
+      // so the ~10 s tick does not re-query the worklog for every open pane
+      // on every tick.
+      //
+      // FIRE-AND-FORGET (deliberately NOT awaited): the single-flight
+      // dispatch guard relies on the first in-flight tick setting
+      // `dispatching` before a second concurrent tick reaches its check — an
+      // extra await on the pre-dispatch path lets the second tick win that
+      // race and double-dispatch (pinned by the worker single-flight test).
+      // The monitor is internally fail-closed and idempotent, so running it
+      // concurrently is safe; the `.catch` is belt-and-braces.
+      const paneMonitorIntervalMs =
+        cfg.paneLifecycleIntervalMs ?? DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS;
+      if (tickNow - lastPaneMonitorAt >= paneMonitorIntervalMs) {
+        lastPaneMonitorAt = tickNow;
+        void monitorDispatchedPanes(opts.deps, cfg.cwd).catch((err) => {
+          // fail-closed: pane-lifecycle monitoring must never crash the worker
+          paneLifecycleWarn(`monitor pass threw: ${paneLifecycleErrMsg(err)}`);
+        });
+      }
+
       // Cooldown gate (WL-0MTEZ4XZJ006Y9U7 AC2 — ordering): the check-in
       // block above runs FIRST, so a no-candidate pause never suppresses the
       // coordination check-in (the only mechanism that re-offers work once
@@ -4781,14 +5390,15 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // session and must not reset the free slots' timers (spare-capacity
       // dispatch, parent WL-0MT32F90V008UAD2). A slot reporting processing
       // resets only its own timer.
+      const perSlotSlots = usablePerSlotSlots(status);
       const perSlotMode =
-        Array.isArray(status.slots) &&
+        perSlotSlots !== null &&
         cfg.requiredFreeSlots > 0 &&
         cfg.requiredFreeSlots < status.total_slots;
 
       let idle: boolean;
       let ready: boolean;
-      if (perSlotMode && Array.isArray(status.slots)) {
+      if (perSlotMode && perSlotSlots !== null) {
         const globalIdle = perSlotGlobalIdleChecks(status);
         // Display-only: the global idle tracker also reflects per-slot query
         // activity for the title bar idle indicator — when any slot is
@@ -4796,12 +5406,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // not "idle". The dispatch logic (spare-capacity relaxation) is
         // unaffected because free-slot count comes from perSlotTracker, not
         // tracker.idleSince. (parent WL-0MT65T14L002HTWB)
-        const anySlotProcessing = status.slots.some(
+        const anySlotProcessing = perSlotSlots.some(
           (s) => typeof s.is_processing === 'boolean' && s.is_processing,
         );
         tracker.record(globalIdle && !anySlotProcessing);
         if (globalIdle) {
-          perSlotTracker.record(status.slots);
+          perSlotTracker.record(perSlotSlots);
           idle = true;
           ready =
             perSlotTracker.thresholdMetCount(cfg.thresholdMs) >= cfg.requiredFreeSlots;
@@ -4843,10 +5453,29 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // minimums (WL-0MT32F90V008UAD2 AC3): audit needs ≥2 (parent + Phase 2
       // child), single-pane tiers need ≥1; idle-duration gate (configured N)
       // is unchanged and shared.
-      const freeSlots =
-        Array.isArray(status.slots)
-          ? countFreeUnownedSlots(status.slots)
-          : status.available_slots;
+      // Count-based: the proxy's own free-slot count (historical behaviour).
+      // The lease reserve in `countBasedSpareCapacity` is a GATE only — the
+      // reported budget stays the proxy figure so the strict single-slot path
+      // and its decision log are unchanged.
+      const freeSlots = perSlotSlots
+        ? countFreeUnownedSlots(perSlotSlots)
+        : status.available_slots;
+
+      // Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME): the
+      // genuine free-slot snapshot (never the total budget), the current
+      // proxy mode, and the single-flight pipeline budget. `mode` is
+      // undefined until the mode-switch worker has observed the proxy, so an
+      // unknown mode leaves `spawnConfig` absent → the spawn defaults to the
+      // safe serial '1'.
+      const spawnConfig: DowntimeSpawnConfig | undefined =
+        cfg.mode === undefined
+          ? undefined
+          : {
+              mode: cfg.mode,
+              slotBudget: status.total_slots,
+              freeSlots,
+              concurrentDispatchCap: cfg.concurrentDispatchCap ?? DISPATCH_PIPELINE_SINGLE_FLIGHT,
+            };
 
       // ── Running-pane liveness (owner-lease qualifier only) ──
       // Count dispatched downtime panes that are STILL ALIVE (machine-wide,
@@ -4895,18 +5524,25 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // `slotOwned` is qualified on a known running-pane count > 0 so an
       // OPERATOR lease on a spare-capacity multi-slot setup does not block
       // dispatch into the free slots when the worker has no running pane
-      // of its own. (The lease signal self-heals: proxy leases expire ~180 s
-      // after activity stops — router_helpers.py `_get_lease_timeout_seconds`
-      // — so an idle-but-open pane does not block dispatch indefinitely.)
-      const ownerLeaseHeld =
-        (parseLocalOwnerSessionId(status.local_owner_session_id) !== undefined) ||
-        (typeof status.local_owner_lease_remaining_seconds === 'number' &&
-          Number.isFinite(status.local_owner_lease_remaining_seconds) &&
-          status.local_owner_lease_remaining_seconds > 0);
+      // of its own. The lease is NOT short-lived: the proxy holds an
+      // ADAPTIVE lease up to `LOCAL_DISPATCH_LEASE_MAX_SECONDS` (default
+      // 1500 s, cross-repo `llm-manager`), so an idle-but-open pane CAN block
+      // the count-based path for its whole run — the historical "~180 s"
+      // assumption was wrong (WL-0MU8809SZ0022VZG). The per-slot path
+      // (WL-0MU8807BI008C9ME) is what keeps a dispatched pane's own lease
+      // from blocking the OTHER free unowned slots.
+      const ownerLeaseHeld = ownerLeaseCount(status) > 0;
+      // Count-based spare-capacity (WL-0MUFP30T2003OX1F): when per-slot
+      // identity is unusable and 0 < N < total, a held lease no longer blocks
+      // dispatch into the proxy-reported spare slots. This mirrors the
+      // `evaluateIdle` relaxation exactly, so the idle gate and the ownership
+      // gate can never disagree.
+      const countBasedSpare =
+        !perSlotMode && countBasedSpareCapacity(status, cfg.requiredFreeSlots);
       const slotOwned =
-        perSlotMode && Array.isArray(status.slots)
-          ? countFreeUnownedSlots(status.slots) === 0
-          : ownerLeaseHeld && (runningPanes ?? 0) > 0;
+        perSlotMode && perSlotSlots !== null
+          ? countFreeUnownedSlots(perSlotSlots) === 0
+          : ownerLeaseHeld && (runningPanes ?? 0) > 0 && !countBasedSpare;
       // LIVE depth only (WL-0MU1DWXO600153OI): `contention_queued_count` is
       // cumulative telemetry and must never gate dispatch.
       const contentionQueueDepth =
@@ -4925,9 +5561,23 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // concurrency limiter, and a liveness-query failure no longer blocks
       // dispatch (it only feeds the `slotOwned` qualifier).
       if (slotOwned) {
+        void recordDecision(cfg.cwd, 'slot-owned', {
+          freeSlots,
+          totalSlots: status.total_slots,
+          ownerPresent: ownerLeaseHeld,
+          runningPanes,
+          contentionDepth: contentionQueueDepth,
+        });
         return { polled: true, dispatched: false, idle: true };
       }
       if (contentionQueueDepth > 0) {
+        void recordDecision(cfg.cwd, 'proxy-contention', {
+          freeSlots,
+          totalSlots: status.total_slots,
+          ownerPresent: ownerLeaseHeld,
+          runningPanes,
+          contentionDepth: contentionQueueDepth,
+        });
         return { polled: true, dispatched: false, idle: true };
       }
 
@@ -4959,6 +5609,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
+                  spawnConfig,
                 },
               )
             : await dispatchDowntimeWork(opts.deps, {
@@ -4973,7 +5624,22 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 contentionQueueDepth,
                 // Success-marker staleness window (WL-0MU6UL0RJ008IHGT).
                 markerStaleWindowMs: cfg.markerStaleWindowMs,
+                spawnConfig,
               });
+        // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
+        // no-dispatch outcomes (no-candidate / review-queue-hold / code-freeze
+        // / audit-in-flight / wl-error / ...) are logged (rate-limited) so the
+        // dispatcher's decision is observable. A successful dispatch is not a
+        // refusal.
+        if (!outcome.dispatched && typeof outcome.reason === 'string') {
+          void recordDecision(cfg.cwd, outcome.reason, {
+            freeSlots,
+            totalSlots: status.total_slots,
+            ownerPresent: ownerLeaseHeld,
+            runningPanes,
+            contentionDepth: contentionQueueDepth,
+          });
+        }
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
           errorStrikes = 0; // a successful dispatch proves the CLI is healthy
@@ -5886,6 +6552,17 @@ export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
     needsProducerReview:
       raw.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
   };
+  // Top-level audit result (WL-0MU308WSF0002JWN): `wl show --json` serves
+  // `auditResult` as a TOP-LEVEL sibling of `workItem` (not nested inside
+  // it), carrying the audit verdict (`readyToClose`) the pane-lifecycle
+  // monitor needs to distinguish audit-passed from audit-failed. Additive
+  // and tolerant — a missing/malformed auditResult leaves the fields absent.
+  const topAudit = (parsed as { auditResult?: unknown }).auditResult;
+  if (topAudit !== null && typeof topAudit === 'object') {
+    const a = topAudit as Record<string, unknown>;
+    if (typeof a.auditedAt === 'string') info.auditedAt = a.auditedAt;
+    if (typeof a.readyToClose === 'boolean') info.auditResult = a.readyToClose;
+  }
   return info;
 }
 
