@@ -125,8 +125,9 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `s` — Insert a search command
    - Press `S` (Shift+s) — **Ship It**: run the dev→main release. A pre-dialog guard first checks that no other live agent pane is working on a project work item; if one is, a blocked notice lists the offending panes and nothing is dispatched. Otherwise a typed-confirmation dialog anchored to the bottom of the list (the list stays visible above it) asks you to type `ship` (case-insensitive) and press Enter to dispatch `/skill:ship release`; Esc cancels. The release is a global command — no work item id is involved. `S` is distinct from lowercase `s` (Search). See [Ship It confirmation dialog](#ship-it-confirmation-dialog).
 
-5. Producer review shortcut:
-   - Press `r` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
+5. Review chords (press `r` then a key):
+   - Press `r`, `p` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
+   - Press `r`, `i` — Walk through outstanding interview questions on the selected item (`wl interview`)
 
 6. Priority update chords (press `u` then `p` then a priority key):
    - Press `u`, `p`, `l` — Set priority to low
@@ -467,7 +468,7 @@ log is treated as empty (fail-safe), so audit dispatch keeps working on a
 fresh worklog. Every dispatch tier — audit, critical, implement, plan,
 and intake — additionally excludes items with `needsProducerReview === true`
 (WL-0MTIAL65N004T22F): items flagged for producer review are never
-auto-dispatched (the `r` shortcut / `wl update --needs-producer-review true`),
+auto-dispatched (the `r p` chord / `wl update --needs-producer-review true`),
 so the worker never consumes local slots on items awaiting a human decision.
 Absent/false/undefined → dispatchable (`=== true` only). Clearing the flag
 makes the item dispatchable again on the next idle poll.
@@ -1672,7 +1673,7 @@ Semantics:
   and `i` (implement) carry `work_item_types: ["bug","docs","feature",
   "task","chore","epic"]`, so they are hidden on non-code and non-docs types
   (e.g. `podcast`). All other bundled shortcuts (audit `a-*`, producer review
-  `r`, housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
+  `r-p`/`r-i`, housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
   available on all types. Consumer projects can add their own type-gated
   chords (e.g. a `w` chord leader → `wiki-podcast-script` for `podcast`
   items) via the project-local `shortcuts.json` mechanism above.
