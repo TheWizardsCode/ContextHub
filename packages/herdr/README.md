@@ -656,6 +656,74 @@ tick), so two instances with identical configuration do not probe in
 lockstep — other machines get a fair chance to win the dispatch race. The
 jitter factor is clamped to `[0.5×, 1.5×]` of the configured interval.
 
+### Pane-closure reaper (WL-0MUJL1NAH0042GOS)
+
+Agent panes launched in Herdr run `pi` in interactive mode. A skill that
+finishes emits a `</end_session>` marker in its final report, but nothing
+consumed it, so completed panes (and their ~200 MB `pi` processes) lingered
+indefinitely. The pane-closure reaper closes settled or abandoned panes
+programmatically.
+
+**Shared classifier (`packages/herdr/src/pane-close.ts`).** A pure module
+that both the reaper and the `pane-triage` skill consume, so the two
+mechanisms cannot diverge:
+
+- `classifySession(sample, opts?) → { close, reasonCode }`
+- `extractFinalAssistantText(entries) → string` — the `.trimEnd()`-ed final
+  assistant text; marker detection requires `</end_session>` at the very end
+  (a marker quoted mid-message does not match)
+- `SessionSample` fields: `lastAssistantText`, `agentProcessAlive`, `idleMs`,
+  `kind`, `needsProducerReview`, `isInvokingPane`, `childProcessCount`
+- `DEFAULT_IDLE_THRESHOLD_MS = 30 min`
+
+**Decision order (first match wins):**
+
+1. Never-close guards — `implement` pane, `needsProducerReview`, invoking
+   pane, live children.
+2. Marker at the end of the final assistant message → close (`marker`).
+3. Agent process gone → close (`dead-agent`).
+4. Agent alive but idle beyond the threshold → close (`idle-threshold`).
+5. Otherwise → keep (`active`).
+
+**Reaper orchestration (`pane-close-reaper.ts`).** `runReaper(deps, options)`
+scans panes, classifies each, closes eligible panes, and appends one JSONL
+row per pane to the ledger (default `.worklog/pane-close-ledger.jsonl`). I/O
+is injected via `ReaperDeps` (`listPanes`, `closePane`,
+`terminateProcessGroup`) so the orchestration is fully testable.
+`runReaperCli(deps, argv)` is the CLI entrypoint and accepts `--dry-run`,
+`--threshold-minutes <n>` and `--ledger <path>`.
+
+**Scheduling (`pane-close-scheduler.ts`).** The downtime worker runs the
+reaper on its tick at most once per `PANE_CLOSE_REAPER_INTERVAL_MS`
+(default 60 s), gated by `paneCloseEnabled`. `runScheduledPaneClose` is a
+complete no-op when disabled; a throw is caught and logged so the reaper can
+never crash the worker.
+
+**Configuration** (`~/.config/herdr/worklog-plugin.json`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `paneCloseEnabled` | `true` | Master on/off switch for automatic pane closure. |
+| `paneCloseIdleThresholdMinutes` | `30` | Marker-less idle threshold in minutes (clamped [1, 1440]). |
+
+**Child processes (`process-group.ts`).** On close, the pane's session-scoped
+process group is torn down (SIGTERM → grace → SIGKILL) so spawned children
+(audit/plan runners) are never reparented to PID 1.
+
+**Interaction with the dispatch monitor (`pane-lifecycle.ts`).** The
+dispatch monitor (`WL-0MU308WSF0002JWN`) closes *dispatched* panes recorded
+in `.worklog/downtime-dispatches.log` and already excludes `implement`
+panes. The reaper covers panes the monitor never sees (manually opened,
+marker-less) and reuses the same classifier. Both are idempotent: the reaper
+skips pane ids already recorded as handled in the dispatch log, and a pane
+the monitor closed is gone from `herdr pane list`, so it cannot be
+double-closed. Headless (JSON/RPC) modes are unaffected — closure is only
+performed by the scheduled reaper over Herdr panes.
+
+**`pane-triage` skill reuse.** The approval-gated `pane-triage` skill
+(`WL-0MUJMXVPO0016DZM`) consumes `classifySession` / `extractFinalAssistantText`
+from this module rather than re-deriving idle state from the session log.
+
 ### Mode-switch worker (activity-gated proxy mode switching, WL-0MSN3FWV5008KQE9)
 
 The mode-switch worker automatically switches the llama-proxy between

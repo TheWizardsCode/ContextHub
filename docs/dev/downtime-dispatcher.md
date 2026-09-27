@@ -807,6 +807,38 @@ Consequences of the removal:
 - A settings file still carrying either removed key loads cleanly and the key
   is ignored.
 
+### Pane-closure reaper (WL-0MUJL1NAH0042GOS)
+
+Dispatched panes should not linger once their agent has finished or died.
+Two mechanisms close panes, and both are idempotent:
+
+- **Dispatch monitor (`pane-lifecycle.ts`, WL-0MU308WSF0002JWN)** — closes
+  *dispatched* panes recorded in the rolling dispatch log
+  (`.worklog/downtime-dispatches.log`) once their item reaches a terminal or
+  attention state. `implement` panes are never auto-closed (AC6).
+- **Scheduled pane-closure reaper** — covers panes the monitor never sees
+  (manually opened panes, and marker-less panes whose agent died). It runs
+  on the downtime-worker tick at most once per `PANE_CLOSE_REAPER_INTERVAL_MS`
+  (default 60 s), gated by the `paneCloseEnabled` setting (default on), with
+  a `paneCloseIdleThresholdMinutes` idle threshold (default 30, clamped
+  [1, 1440]).
+
+The reaper classifies each Herdr pane via the shared `classifySession()`
+module (`packages/herdr/src/pane-close.ts`): close when the final assistant
+message ends with `</end_session>`, when the agent process is gone, or when
+the agent is alive but idle beyond the threshold. It never closes an
+`implement` pane, an item awaiting producer review, the invoking pane, or a
+pane with live children. A close failure for one pane is recorded and the
+run continues; a reaper throw is caught and logged so it can never crash the
+worker.
+
+**Coexistence.** The reaper skips pane ids already recorded as handled in
+the rolling dispatch log, and a pane the monitor closed is absent from
+`herdr pane list` — so the two mechanisms cannot double-close.
+Session-scoped child processes are torn down on close
+(`packages/herdr/src/process-group.ts`), so spawned audit/plan runners are
+not reparented to PID 1.
+
 ### Migration & legacy retirement (F6 WL-0MTII4CWT00452HU, parent AC5)
 
 The machine dir `~/.herdr/downtime/` (or `HERDR_COORDINATION_DIR`) is
@@ -842,6 +874,8 @@ status refresh unchanged at 30s.**
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
+| Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
+| Pane-closure idle threshold | **30 min** (`paneCloseIdleThresholdMinutes`; clamped to 1 min – 24 h) | `pane-close-scheduler.ts` |
 | (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin
@@ -862,6 +896,11 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
 | `packages/herdr/src/downtime-worker.ts` | Worker tick: election, check-in, idle gate, dispatch (anchor-before-claim) |
 | `packages/herdr/src/downtime-log.ts` | Coordination/dispatch rolling logs (per worklog root, retained) |
+| `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
+| `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |
+| `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
+| `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + pi session logs |
+| `packages/herdr/src/process-group.ts` | Session-scoped child-process teardown (SIGTERM → grace → SIGKILL) |
 | `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` |
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |
 | `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher anchor `{ paneId, workspaceId }` (machine dir, C0) |
@@ -873,6 +912,7 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
 | `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning (per worklog, retained) |
 | `<worklog-root>/.worklog/downtime-dispatches.log` | Dispatched items (per worklog, retained; includes `anchor-unavailable` neutral no-dispatch) |
+| `<worklog-root>/.worklog/pane-close-ledger.jsonl` | Pane-closure reaper ledger (one JSONL row per evaluated pane, per worklog, WL-0MUJL1NAH0042GOS) |
 
 ## Troubleshooting / operations
 

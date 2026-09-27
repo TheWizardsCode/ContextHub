@@ -379,3 +379,29 @@ drift (WL-0MSGI7UIH008USVB).
   `packages/shared/src/lease-release.test.ts` (shared HTTP behavior).
 - The Herdr plugin runs the same release on pi-pane close — see
   `packages/herdr/README.md` ("Pi agent dispatch").
+
+## Pane-Closure Reaper (WL-0MUJL1NAH0042GOS)
+
+Completed `/intake`, `/plan`, `/skill:audit` and `/skill:implement` skills emit a
+`</end_session>` marker in their final report, but the interactive `pi` REPL
+does not exit on its own — abandoned panes accumulated (observed 50 concurrent
+`pi` processes / ~12.4 GB RSS). The **pane-closure reaper** closes settled or
+abandoned agent panes out-of-process, releasing the pane, its `pi` process and
+its proxy model lease.
+
+The reaper lives in the Herdr plugin (`packages/herdr/src/pane-close-reaper.ts`,
+`pane-close-scheduler.ts`, `pane-close.ts`) and runs on the downtime-worker tick
+at most once per `PANE_CLOSE_REAPER_INTERVAL_MS` (default 60 s). It is
+gated by two settings in `~/.config/herdr/worklog-plugin.json`:
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `paneCloseEnabled` | `true` | Master on/off switch. |
+| `paneCloseIdleThresholdMinutes` | `30` | Marker-less idle threshold (clamped [1, 1440]). |
+
+The reaper never closes an `implement` pane, an item awaiting producer review,
+the invoking pane, or a pane with live children, and it reuses the same
+classifier as the approval-gated `pane-triage` skill so the two cannot diverge.
+See `packages/herdr/README.md` ("Pane-closure reaper") for the full contract
+and `docs/dev/downtime-dispatcher.md` for its interaction with the dispatch
+monitor (`pane-lifecycle.ts`).
