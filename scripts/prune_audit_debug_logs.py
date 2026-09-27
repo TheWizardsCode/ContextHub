@@ -53,6 +53,8 @@ Exit codes
 * 1 — ``--check`` over budget, invalid argument, or usage error.
 
 Stdlib only; no network.
+
+Policy and runbook: ``docs/dev/audit-debug-log-retention.md``.
 """
 
 from __future__ import annotations

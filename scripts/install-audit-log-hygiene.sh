@@ -22,6 +22,8 @@
 #
 # The managed entry is tagged with a stable marker comment so install/remove
 # are idempotent and never touch unrelated crontab lines.
+#
+# Policy and runbook: docs/dev/audit-debug-log-retention.md
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
