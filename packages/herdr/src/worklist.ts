@@ -1309,7 +1309,15 @@ export function formatItemLine(
     ? ` [${item.stage}]`
     : '';
 
-  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}`;
+  // Log-derived dispatch rows (WL-0MUL2IY8L009S3PQ): annotate the list row
+  // with the dispatch kind and latest pane-close outcome so an operator can
+  // triage without opening the detail view. Live items never carry these
+  // fields, so existing rows are unchanged.
+  const dispatchTag = item.isLogDerived
+    ? `${item.dispatchKind ? ` [${item.dispatchKind}]` : ''}${item.dispatchOutcome ? ` ${item.dispatchOutcome}` : ''}`
+    : '';
+
+  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}${dispatchTag}`;
 
   // Truncate to fit terminal width, accounting for ANSI codes and
   // multi-width characters (CJK, emoji, fullwidth forms). Reuses the
@@ -1644,6 +1652,16 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
       metaRows.push([label, value]);
     }
   };
+  // Log-derived dispatch rows (WL-0MUL2IY8L009S3PQ) have no live
+  // priority/risk/effort/audit state; render an explicit `—` instead of
+  // silently dropping the row, so the panel never looks blank or broken.
+  const addMetaOrDash = (label: string, value: string | undefined | null): void => {
+    if (item.isLogDerived) {
+      metaRows.push([label, value != null && value !== '' ? value : '—']);
+    } else {
+      addMeta(label, value);
+    }
+  };
 
   // Prefix a display value with its icon (`icon + text`, e.g. `🔄
   // in_progress`). Unknown icon keys return '' (e.g. free-form effort `3`),
@@ -1689,12 +1707,18 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   if (coveredByParent && item.parentId) {
     addMeta('Covered by', item.parentId);
   }
-  addMeta('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
+  addMetaOrDash('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
   // Type shows the epic icon (⊙) for epic items only, matching the list;
   // non-epic types remain text-only (AC3).
   addMeta('Type', iconText(noIcons ? '' : (item.issueType === 'epic' ? epicIcon() : ''), item.issueType));
-  addMeta('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
-  addMeta('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
+  addMetaOrDash('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
+  addMetaOrDash('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
+  // Dispatch provenance for log-derived rows (WL-0MUL2IY8L009S3PQ).
+  if (item.isLogDerived) {
+    addMeta('Dispatch', item.dispatchKind);
+    addMeta('Outcome', item.dispatchOutcome);
+    addMeta('Dispatched', item.dispatchedAt ? formatTimestamp(item.dispatchedAt) : undefined);
+  }
   addMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
   addMeta('Parent', item.parentId);
   if (item.tags && item.tags.length > 0) {
@@ -1703,7 +1727,12 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
   addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
   addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
-  addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
+  if (item.isLogDerived) {
+    // No live audit state on a synthetic row — show `—` (WL-0MUL2IY8L009S3PQ).
+    addMeta('Audit', '—');
+  } else {
+    addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
+  }
   addMeta('Reviewed', iconText(noIcons ? '' : needsProducerReviewIcon(item.needsProducerReview), reviewLabel(item.needsProducerReview)));
   addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
 

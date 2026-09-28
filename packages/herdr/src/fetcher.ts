@@ -191,6 +191,22 @@ export interface WorkItem {
    * render an icon; `done`/`unknown`/absent render none (WL-0MSBQUJQX005RAT9).
    */
   agentState?: AgentState;
+  /**
+   * True when the row is a synthetic, log-derived "recent dispatch" row
+   * rather than a live `wl` work item (WL-0MUL2IY8L009S3PQ). Synthetic rows
+   * have no live priority/risk/effort/audit state; the renderer shows `—`
+   * for those fields and annotates the row with the dispatch metadata below.
+   */
+  isLogDerived?: boolean;
+  /**
+   * Dispatch kind carried by a log-derived row (plan/intake/audit/
+   * risk-effort/implement). Unset on live items (WL-0MUL2IY8L009S3PQ).
+   */
+  dispatchKind?: string;
+  /** Latest pane-close outcome carried by a log-derived row, when present. */
+  dispatchOutcome?: string;
+  /** ISO-8601 timestamp of the log-derived row's most recent log entry. */
+  dispatchedAt?: string;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
