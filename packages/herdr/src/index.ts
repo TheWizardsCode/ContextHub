@@ -131,10 +131,12 @@ import {
 } from './scheduled-prompts.js';
 import {
   getDispatcherAnchor as resolveDispatcherAnchor,
-  getDispatcherTabAnchor as resolveDispatcherTabAnchor,
+  getItemTabAnchor as resolveItemTabAnchor,
+  resolveProjectWorkspace as resolveProjectWorkspaceForRoot,
   createDispatcherAnchorDeps,
   type DispatcherAnchor,
-  type DispatcherTabAnchorEntry,
+  type ItemTabAnchor,
+  type ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
@@ -666,24 +668,48 @@ async function defaultDispatcherAnchorResolver(
 }
 
 /**
- * Default per-prefix Dispatcher tab-anchor resolver used by
- * {@link createDowntimeDeps} (C1, parent WL-0MTRQT482001SNXC): resolves (or
- * creates) the tab labelled with the work-item prefix inside the single
- * machine-wide Dispatcher workspace, via the herdr CLI. Null on any failure —
- * dispatch degrades to "no dispatch this cycle" (never a legacy/leader
- * fallback). Injectable for tests that build real deps without a live herdr
- * session.
+ * Default project-workspace resolver used by {@link createDowntimeDeps}
+ * (WL-0MU321YK70035AYT): resolves the herdr plugin pane/workspace whose
+ * logical root (`HERDR_RESOLVED_CWD`) equals the worklog root `cwd`, via the
+ * herdr CLI. Null on any failure — dispatch falls back to the retained
+ * Dispatcher anchor (AC4). Injectable for tests that build real deps without
+ * a live herdr session.
  */
-async function defaultDispatcherTabAnchorResolver(
+async function defaultProjectWorkspaceResolver(
   cwd: string,
-  prefix: string,
-): Promise<(DispatcherTabAnchorEntry & { workspaceId: string }) | null> {
+): Promise<ProjectWorkspaceTarget | null> {
   try {
     const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveDispatcherTabAnchor(
+    return await resolveProjectWorkspaceForRoot(
       cwd,
       createDispatcherAnchorDeps(cwd, herdrBin),
-      prefix,
+      cwd,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Default item-ID tab-anchor resolver used by {@link createDowntimeDeps}
+ * (WL-0MU321YK70035AYT): ensures/reuses the tab labelled with the exact
+ * work-item id inside the resolved project workspace and returns its root
+ * pane, via the herdr CLI. Null on any failure — the dispatch fails closed
+ * ('anchor-unavailable'). Injectable for tests that build real deps without
+ * a live herdr session.
+ */
+async function defaultItemTabAnchorResolver(
+  cwd: string,
+  workspaceId: string,
+  itemId: string,
+): Promise<ItemTabAnchor | null> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    return await resolveItemTabAnchor(
+      cwd,
+      createDispatcherAnchorDeps(cwd, herdrBin),
+      workspaceId,
+      itemId,
     );
   } catch {
     return null;
@@ -762,7 +788,14 @@ async function readClosedPaneIds(cwd: string): Promise<Set<string>> {
  *
  * @param anchorResolver Dispatcher-anchor resolver (C0 WL-0MTR01EU7005SYZG).
  *   Defaults to the real herdr-CLI-backed resolver; injectable for tests that
- *   build real deps without a live herdr session.
+ *   build real deps without a live herdr session. Retained as the AC4
+ *   fallback (no project workspace) and for scheduled-prompt spawns.
+ * @param projectWorkspaceResolver Project-workspace resolver
+ *   (WL-0MU321YK70035AYT). Defaults to the real herdr-CLI-backed resolver;
+ *   injectable for tests.
+ * @param itemTabAnchorResolver Item-ID tab-anchor resolver
+ *   (WL-0MU321YK70035AYT). Defaults to the real herdr-CLI-backed resolver;
+ *   injectable for tests.
  */
 export function createDowntimeDeps(
   scriptPath: string,
@@ -771,8 +804,10 @@ export function createDowntimeDeps(
   anchorResolver: DowntimeWorkerDeps['getDispatcherAnchor'] = defaultDispatcherAnchorResolver,
   runningPanesResolver: NonNullable<DowntimeWorkerDeps['getRunningDowntimePanes']> =
     defaultRunningDowntimePanesResolver,
-  tabAnchorResolver: DowntimeWorkerDeps['getDispatcherTabAnchor'] =
-    defaultDispatcherTabAnchorResolver,
+  projectWorkspaceResolver: DowntimeWorkerDeps['resolveProjectWorkspace'] =
+    defaultProjectWorkspaceResolver,
+  itemTabAnchorResolver: DowntimeWorkerDeps['getItemTabAnchor'] =
+    defaultItemTabAnchorResolver,
 ): DowntimeWorkerDeps {
   // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
   // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
@@ -833,19 +868,20 @@ export function createDowntimeDeps(
   };
   return {
     // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): the machine-wide dedicated
-    // Dispatcher workspace/pane resolver (F1 WL-0MTR2CD4X006XI7U). Every
-    // downtime pane spawn resolves this anchor so panes land in the Dispatcher
-    // workspace regardless of leadership. Null → dispatch degrades to "no
-    // dispatch this cycle". Injected (default = real herdr CLI) so tests that
-    // build real deps without a live herdr session can stub it. Retained for
-    // scheduled-prompt spawns (no work-item prefix) and legacy callers.
+    // Dispatcher workspace/pane resolver. Retained ONLY as the AC4 fallback
+    // (no resolvable project plugin pane for the item's root,
+    // WL-0MU321YK70035AYT) and for scheduled-prompt spawns (no work-item id).
+    // Null → dispatch degrades to "no dispatch this cycle". Injected
+    // (default = real herdr CLI) so tests can stub it.
     getDispatcherAnchor: anchorResolver,
-    // Per-prefix Dispatcher tab anchor (C1, parent WL-0MTRQT482001SNXC): the
-    // worklog dispatch path routes each candidate's prefix (`WL`/`TCE`/…) to
-    // its own tab inside the single Dispatcher workspace. When wired it
-    // replaces `getDispatcherAnchor` on that path; null → 'anchor-unavailable'
-    // (never a legacy/leader fallback). Injected (default = real herdr CLI).
-    getDispatcherTabAnchor: tabAnchorResolver,
+    // Project workspace + item-ID tab (WL-0MU321YK70035AYT): the worklog
+    // dispatch path resolves the project workspace hosting the item's root,
+    // then ensures/reuses the tab labelled with the exact work-item id and
+    // anchors the pane to that tab's root pane. A null workspace falls back to
+    // `getDispatcherAnchor`; a null item tab fails closed ('anchor-unavailable').
+    // Injected (default = real herdr CLI).
+    resolveProjectWorkspace: projectWorkspaceResolver,
+    getItemTabAnchor: itemTabAnchorResolver,
     // Running-downtime-panes liveness (AC1/AC3, WL-0MTYZXSLN008HZOW): counts
     // live dispatched downtime panes from `herdr pane list` so the
     // running-pane bound is enforced machine-wide (across roots and

@@ -64,20 +64,19 @@
  *    deep-analysis strictly sequential so a parent audit needs exactly
  *    2 local slots (parent + one child), fitting cheap mode's capacity
  *    (WL-0MSORQ1RG005DGUS). Dispatcher anchor (C0 WL-0MTR01EU7005SYZG):
- *    every spawn resolves the dedicated machine-wide Dispatcher anchor pane
- *    (`deps.getDispatcherAnchor`, F1 WL-0MTR2CD4X006XI7U) and forwards it as
- *    `--anchor <id>` so send-to-pi.sh splits from THAT pane — dispatched
- *    panes always land in the Dispatcher workspace regardless of which
- *    instance holds the leader lease. Anchor provisioning failure degrades
- *    to reason 'anchor-unavailable' (neutral "no dispatch this cycle", never
- *    a fallback to the leader's pane). Per-prefix tabs (C1, parent
- *    WL-0MTRQT482001SNXC): the worklog dispatch path resolves the candidate's
- *    prefix (`candidate.id.split('-', 1)[0]` → `WL`/`TCE`/`CG`) via
- *    `deps.getDispatcherTabAnchor` instead of the legacy single anchor, so
- *    each project's panes land in their own tab inside the Dispatcher
- *    workspace; the per-prefix resolver replaces the legacy anchor (null →
- *    'anchor-unavailable', never a fallback). Scheduled-prompt spawns keep
- *    the legacy single anchor (no work-item prefix).
+ *    pane placement (WL-0MU321YK70035AYT): the worklog dispatch path resolves
+ *    the candidate's project workspace from its worklog root
+ *    (`deps.resolveProjectWorkspace` — the herdr plugin pane whose logical
+ *    root equals `opts.cwd`), ensures/reuses a tab labelled with the exact
+ *    work-item id (`deps.getItemTabAnchor`), and forwards that tab's root
+ *    pane as `--anchor <id>` so send-to-pi.sh splits from THAT pane. Each
+ *    project's automated panes therefore land in the project's own workspace
+ *    grouped per item. When no plugin pane resolves, the path falls back to
+ *    the retained machine-wide Dispatcher anchor (`deps.getDispatcherAnchor`,
+ *    C0 WL-0MTR01EU7005SYZG). Anchor provisioning failure degrades to reason
+ *    'anchor-unavailable' (neutral "no dispatch this cycle", never a fallback
+ *    to the leader's pane). Scheduled-prompt spawns keep the Dispatcher
+ *    anchor (no work-item id).
  *  - `createDowntimeWorker` — per-tick orchestrator (poll → evaluate →
  *    track → dispatch) with settings re-read each tick, plus the
  *    no-candidate cooldown (WL-0MSI7DQL10016QYX): a genuine empty backlog
@@ -161,7 +160,11 @@ import {
 } from './pane-lifecycle.js';
 import { paneCloseReaperDue } from './pane-close-scheduler.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
-import type { DispatcherAnchor, DispatcherTabAnchorEntry } from './dispatcher-anchor.js';
+import type {
+  DispatcherAnchor,
+  ItemTabAnchor,
+  ProjectWorkspaceTarget,
+} from './dispatcher-anchor.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 export type { CoordinationEntry } from './coordination.js';
@@ -1966,20 +1969,30 @@ export interface DowntimeWorkerDeps {
    */
   getDispatcherAnchor?(cwd: string): Promise<DispatcherAnchor | null>;
   /**
-   * Resolve the per-prefix tab anchor pane inside the single Dispatcher
-   * workspace (C1, parent WL-0MTRQT482001SNXC): routes `<PREFIX>` (the
-   * work-item id before the first `-`) to its own tab, creating the tab on
-   * first use and persisting the mapping. When supplied it REPLACES
-   * {@link getDispatcherAnchor} on the worklog dispatch path
-   * (audit/implement/plan/intake/risk-effort): a null result degrades to
-   * 'anchor-unavailable' — never a legacy single-anchor or leader-pane
-   * fallback. Optional for backward compatibility with pre-C1 callers/tests;
-   * production wiring (`createDowntimeDeps`) always provides it.
+   * Resolve the project workspace hosting the worklog plugin pane for the
+   * worklog root `cwd` (WL-0MU321YK70035AYT, AC1/AC3). When it resolves, the
+   * worklog dispatch path places the pane in that workspace (via
+   * {@link getItemTabAnchor}) instead of the machine-wide Dispatcher anchor.
+   * A `null` result (no plugin pane, or an unreadable/ambiguous one) falls
+   * back to {@link getDispatcherAnchor} (AC4). Optional for backward
+   * compatibility with pre-change callers/tests; production wiring
+   * (`createDowntimeDeps`) always provides it.
    */
-  getDispatcherTabAnchor?(
+  resolveProjectWorkspace?(cwd: string): Promise<ProjectWorkspaceTarget | null>;
+  /**
+   * Ensure/reuse the tab labelled with the exact work-item id `itemId` inside
+   * the resolved project `workspaceId`, returning its anchor (root) pane
+   * (WL-0MU321YK70035AYT, AC2). A second dispatch for the same item reuses the
+   * same tab. A `null` result fails the dispatch closed with
+   * 'anchor-unavailable' — never a wrong-workspace placement. Optional for
+   * backward compatibility with pre-change callers/tests; production wiring
+   * (`createDowntimeDeps`) always provides it.
+   */
+  getItemTabAnchor?(
     cwd: string,
-    prefix: string,
-  ): Promise<(DispatcherTabAnchorEntry & { workspaceId: string }) | null>;
+    workspaceId: string,
+    itemId: string,
+  ): Promise<ItemTabAnchor | null>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
@@ -2671,17 +2684,18 @@ async function rollbackClaimForFailure(
 
 /**
  * Dispatch one already-selected candidate through the fixed pipeline:
- * per-prefix anchor resolution → CAS claim → marker write (before spawn) → spawn.
+ * project-workspace anchor resolution → CAS claim → marker write (before
+ * spawn) → spawn.
  *
- *  - Per-prefix tab anchor (C1, parent WL-0MTRQT482001SNXC): BEFORE the claim,
- *    resolve the candidate's prefix (`candidate.id.split('-', 1)[0]` →
- *    `WL`/`TCE`/`CG`) to its own tab anchor inside the single Dispatcher
- *    workspace via `deps.getDispatcherTabAnchor`, forwarding the tab's anchor
- *    pane id as `anchorId` so the pane lands in that tab. When that dep is
- *    wired it REPLACES the legacy `deps.getDispatcherAnchor` path (retained
- *    for scheduled-prompt spawns and pre-C1 callers); a null/failed
- *    resolution aborts with reason 'anchor-unavailable' — never a legacy
- *    anchor, another tab, or the leader's pane.
+ *  - Project workspace + item-ID tab (WL-0MU321YK70035AYT): BEFORE the claim,
+ *    resolve the candidate's project workspace from `opts.cwd` via
+ *    `deps.resolveProjectWorkspace`, ensure/reuse the tab labelled with the
+ *    exact work-item id via `deps.getItemTabAnchor`, and forward that tab's
+ *    root pane as `anchorId` so the pane lands in the project workspace under
+ *    the item's tab. When no project workspace resolves, fall back to the
+ *    retained machine-wide `deps.getDispatcherAnchor` (AC4). A null/failed
+ *    resolution aborts with reason 'anchor-unavailable' — never the leader's
+ *    pane and never another project's workspace.
  *  - Claim (compare-and-swap): exactly one concurrent pane wins; a loser
  *    (or a wl claim failure) ABORTS the dispatch — no pane, no marker, no
  *    success record. A lost race resolves reason 'claim-failed' (neutral,
@@ -2731,19 +2745,34 @@ async function dispatchClaimedTier(
   // 'anchor-unavailable' and NEVER falls back to the legacy anchor or the
   // leader's pane.
   let anchorId: string | undefined;
-  if (typeof deps.getDispatcherTabAnchor === 'function') {
-    const prefix = candidate.id.split('-', 1)[0];
-    let tabAnchor: (DispatcherTabAnchorEntry & { workspaceId: string }) | null = null;
+  // Primary path (AC1/AC3): resolve the project workspace that hosts the
+  // worklog plugin pane for this item's root, then ensure/reuse the tab
+  // labelled with the exact work-item id and anchor the pane there (AC2).
+  let projectTarget: ProjectWorkspaceTarget | null = null;
+  if (typeof deps.resolveProjectWorkspace === 'function') {
     try {
-      tabAnchor = await deps.getDispatcherTabAnchor(opts.cwd, prefix);
+      projectTarget = await deps.resolveProjectWorkspace(opts.cwd);
     } catch {
-      tabAnchor = null; // fail-closed on any anchor error
+      projectTarget = null; // fail-closed on any resolver error
+    }
+  }
+  if (projectTarget !== null && typeof deps.getItemTabAnchor === 'function') {
+    let tabAnchor: ItemTabAnchor | null = null;
+    try {
+      tabAnchor = await deps.getItemTabAnchor(opts.cwd, projectTarget.workspaceId, candidate.id);
+    } catch {
+      tabAnchor = null; // fail-closed
     }
     if (tabAnchor === null) {
+      // The workspace resolved but its item tab could not be provisioned:
+      // fail closed rather than place a project pane in the Dispatcher
+      // workspace (never a wrong placement).
       return { dispatched: false, reason: 'anchor-unavailable' };
     }
     anchorId = tabAnchor.paneId;
   } else if (typeof deps.getDispatcherAnchor === 'function') {
+    // Fallback (AC4): no project plugin pane resolved → the retained
+    // machine-wide Dispatcher anchor.
     let anchor: DispatcherAnchor | null = null;
     try {
       anchor = await deps.getDispatcherAnchor(opts.cwd);
