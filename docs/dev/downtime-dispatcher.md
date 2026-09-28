@@ -282,7 +282,15 @@ Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`, F1 WL-0MTR2CD4X006XI7U):
   `downtime-dispatch-anchor.json` — `{ paneId, workspaceId }` (atomic
   tmp+rename, `fs.renameSync`).
 - **Provisioning:** `herdr workspace create --label Dispatcher --no-focus` +
-  its `root_pane` is the anchor pane. Provisioning runs **under the
+  its `root_pane` is the anchor pane. The freshly-provisioned root pane is
+  then **adopted into a `Downtime` tab**
+  (`herdr pane move <rootPaneId> --new-tab --tab-label Downtime --no-focus`)
+  so the workspace never shows a blank/unused pane alongside the per-prefix
+  tabs (WL-0MU2EOHK900425VU); the pane id is unchanged, so
+  `send-to-pi.sh --anchor <paneId>` dispatch is unaffected. Adoption is
+  best-effort — a failed move leaves the pane in place and the anchor is
+  still persisted (degrade to the pre-fix layout, never a re-provision
+  loop). Provisioning runs **under the
   coordination lock** (`tryAcquireCoordLock` on
   `~/.herdr/downtime/downtime-coordination.lock`, `O_CREAT|O_EXCL`), so
   concurrent first-dispatches produce exactly one workspace/pane (double-check
