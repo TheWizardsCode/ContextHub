@@ -332,6 +332,15 @@ The recovery module is implemented in `Worklog/lib/recovery/` and consists of:
 | `retry-command.ts` | `/retry` command interface (status, reset, manual-trigger) |
 | `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start, session_compact) |
 
+### Notify/ctx safety (WL-0MUIV50EJ007VH9B)
+
+The `_notifyFn` closure is captured from `ctx.ui.notify` in the `agent_end`,
+`turn_end`, and `session_compact` handlers. It is cleared on `session_start` so
+that a replaced/reloaded session never retains a stale `ExtensionContext`
+reference. All asynchronous notification dispatch goes through `_safeNotify`,
+which wraps the call in a `try/catch`: if the ctx is stale the notification is
+silently skipped rather than throwing an uncaught exception that crashes pi.
+
 The module is auto-registered during extension initialization in `index.ts`.
 
 ## Lease Release
