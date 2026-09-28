@@ -1047,6 +1047,37 @@ fields and continue to work — they simply ignore them.
 - **Lease expiry after a crash:** the other instances detect the stale lease
   (TTL 5 min), clean up, and re-elect automatically.
 
+## Recent Dispatches View (Herdr)
+
+The Herdr worklist exposes a **recent dispatches** view (`f d`, or
+`/wl dispatches`) that projects the local rolling dispatch log into browsable
+rows (WL-0MUGLL9SS002E1D2). It exists because the pane-closure reaper (see
+[Pane-closure reaper](#pane-closure-reaper-wl-0mujl1nah0042gos)) now
+auto-closes panes whose dispatched work reached a clean terminal state, so
+completed work otherwise disappears from the active worklist without a durable
+trace.
+
+- **Local-log scope only.** The view reads
+  `<worklog-root>/.worklog/downtime-dispatches.log` for the **current worklog
+  root** — the same per-root file the dispatcher writes. It deliberately does
+  **not** aggregate across project roots; machine-wide cross-project reporting
+  is a separate effort (`/skill:dispatch-logs`, WL-0MTJQOZ0K007KD40).
+- **Bounded window.** The log keeps only the most recent
+  `DOWNTIME_LOG_MAX_ENTRIES` (100) entries, so a very busy period can push an
+  older candidate out of the retained window; the view therefore shows at most
+  the 20 most recent items that are still present in the log.
+- **Projection semantics.** Rows are deduplicated by work item id, ordered
+  newest-first by the item's most recent log entry, and annotated with the
+  dispatch `kind` and the latest pane-close `outcome` where available. The
+  id and title come from the log, so closed/deleted items still appear.
+- **Read-only & fail-safe.** The view never writes the log or mutates work
+  items, and a missing/unreadable/empty/malformed log renders an empty list
+  (0 items) with no crash. Selecting a row opens the detail view with a
+  best-effort `wl show <id>` fetch that falls back to the log-derived
+  metadata for closed/deleted items.
+- **Single filter slot.** Dispatches replaces (and is replaced by) the
+  stage/priority filters; bare `/wl` clears all three axes (WL-0MSKC8T46006999S).
+
 ## Related
 
 - Work item: **WL-0MST3OJ8S0001ROL** *Refactor Downtime Dispatcher: leader
