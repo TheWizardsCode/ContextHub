@@ -886,6 +886,113 @@ describe('project workspace + item-ID tab dispatch wiring', () => {
     const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(markerOrder).toBeLessThan(spawnOrder);
   });
+
+  // ── Root-pane cleanup (WL-0MU2EOHK900425VU) ────────────────────────
+
+  it('AC1: closes the project-workspace item tab root pane after a successful dispatch', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // No live downtime pane carries the anchor id → the anchor IS the root
+      // pane and must be closed.
+      getRunningDowntimePanes: vi
+        .fn()
+        .mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith('wC:tWL-ABC:p1', '/repo');
+  });
+
+  it('AC2: NEVER closes the Dispatcher-fallback anchor (would re-provision a blank pane)', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi.fn().mockResolvedValue(null),
+      getDispatcherAnchor: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wD:pFALLBACK', workspaceId: 'wD' }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC2: NEVER closes an anchor that is itself a live downtime dispatch pane', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // The anchor id is a recorded downtime pane → it is a previous
+      // dispatch's agent pane and must stay open.
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 1,
+        paneIds: ['wC:tWL-ABC:p1'],
+        records: [{ paneId: 'wC:tWL-ABC:p1', label: 'Downtime triggered plan X - WL-ABC' }],
+      }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC5 fail-safe: a throwing closePane never blocks the dispatch outcome', async () => {
+    const closePane = vi.fn().mockRejectedValue(new Error('herdr close blew up'));
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC5 backward-compat: without the closePane dep no cleanup call is attempted', async () => {
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.closePane).toBeUndefined();
+  });
 });
 
 

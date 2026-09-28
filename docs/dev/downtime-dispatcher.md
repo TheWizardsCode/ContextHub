@@ -290,6 +290,15 @@ worklog root is `R`:
    <tabRootPaneId>` → `send-to-pi.sh` (`herdr pane split --pane <anchor>`),
    `--no-focus` preserved. The new pane's `workspace_id` equals the project
    workspace and its `tab_id` equals the item tab.
+4. **Root-pane cleanup** — after the dispatch pane has spawned, the item
+   tab's initial root pane (herdr's automatically-provisioned empty bash
+   pane, used only as the split anchor) is closed, so the tab shows only the
+   productive dispatch pane (WL-0MU2EOHK900425VU). Only the ROOT pane is ever
+   closed: the anchor is closed only when live-pane liveness positively
+   confirms it is not itself a downtime dispatch pane (fail-safe — an
+   absent/failed liveness query leaves it open). The retained `Dispatcher`
+   fallback anchor is deliberately exempt: closing it would trigger the
+   stale-detection re-provision loop.
 
 If step 1 cannot resolve a project workspace for `R`, the dispatcher falls
 back to the **retained machine-wide `Dispatcher` anchor** (C0
@@ -316,6 +325,10 @@ Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`):
   returns the new `tab_id` + `root_pane.pane_id`. A second dispatch for the
   same item reuses the same tab (never a duplicate); no persistence file is
   needed — the tab label IS the key, discovered via `herdr tab list`.
+  After the first dispatch the tab's root pane is closed (see invariant
+  step 4) so the tab is never left with an empty bash pane; a later dispatch
+  for the same item reuses the surviving dispatch pane as the split anchor
+  (WL-0MU2EOHK900425VU).
 - **Fallback anchor:** `getDispatcherAnchor(cwd, deps)` provisions one
   `Dispatcher` workspace + persisted anchor pane in the machine coordination
   dir (`~/.herdr/downtime/downtime-dispatch-anchor.json`, atomic tmp+rename,

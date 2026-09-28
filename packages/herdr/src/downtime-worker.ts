@@ -2749,6 +2749,14 @@ async function dispatchClaimedTier(
   // 'anchor-unavailable' and NEVER falls back to the legacy anchor or the
   // leader's pane.
   let anchorId: string | undefined;
+  // True when `anchorId` is a PROJECT-WORKSPACE item-tab anchor (the primary
+  // path). Those tabs are provisioned with herdr's initial root pane (an
+  // empty bash pane) which is only needed as the split anchor for the FIRST
+  // dispatch — after the dispatch pane spawns it is closed so the tab shows
+  // only the productive pane (WL-0MU2EOHK900425VU). The Dispatcher fallback
+  // anchor is deliberately exempt: its root pane is the persisted dispatch
+  // anchor and closing it would trigger a blank re-provision loop.
+  let anchorIsTabRoot = false;
   // Primary path (AC1/AC3): resolve the project workspace that hosts the
   // worklog plugin pane for this item's root, then ensure/reuse the tab
   // labelled with the exact work-item id and anchor the pane there (AC2).
@@ -2774,6 +2782,7 @@ async function dispatchClaimedTier(
       return { dispatched: false, reason: 'anchor-unavailable' };
     }
     anchorId = tabAnchor.paneId;
+    anchorIsTabRoot = true;
   } else if (typeof deps.getDispatcherAnchor === 'function') {
     // Fallback (AC4): no project plugin pane resolved → the retained
     // machine-wide Dispatcher anchor.
@@ -2942,6 +2951,44 @@ async function dispatchClaimedTier(
       error: spawn.error,
       exitCode: spawn.exitCode,
     };
+  }
+
+  // Root-pane cleanup (WL-0MU2EOHK900425VU): a project-workspace item tab is
+  // provisioned with herdr's initial root pane (an empty bash pane) that is
+  // only used as the split anchor for the FIRST dispatch. Once the dispatch
+  // pane has spawned, close that root pane so the tab shows only the
+  // productive pane. Only ever close a ROOT pane: an anchor pane already
+  // carrying a downtime dispatch label is a live agent session and must stay
+  // open. Best-effort — cleanup must never block or fail the dispatch
+  // outcome.
+  if (
+    anchorIsTabRoot &&
+    anchorId !== undefined &&
+    typeof deps.closePane === 'function'
+  ) {
+    try {
+      // Fail-safe: the anchor is only closed when liveness POSITIVELY
+      // confirms it is not a live dispatch pane. An absent/failed liveness
+      // query leaves it open rather than risk closing a running agent pane.
+      let confirmedRootPane = false;
+      if (typeof deps.getRunningDowntimePanes === 'function') {
+        const running = await deps.getRunningDowntimePanes(opts.cwd);
+        if (running.ok) {
+          const liveIds =
+            running.records !== undefined
+              ? running.records.map((rec) => rec.paneId)
+              : Array.isArray(running.paneIds)
+                ? running.paneIds
+                : null;
+          if (liveIds !== null) confirmedRootPane = !liveIds.includes(anchorId);
+        }
+      }
+      if (confirmedRootPane) {
+        await deps.closePane(anchorId, opts.cwd);
+      }
+    } catch {
+      // fail-open: root-pane cleanup must never block the dispatch outcome
+    }
   }
 
   // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6 AC6.2/AC6.3): best-effort
