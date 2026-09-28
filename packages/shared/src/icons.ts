@@ -374,6 +374,90 @@ export function isAuditFresh(
   return auditTime > updateTime - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
 }
 
+// ── Smart audit re-instatement (WL-0MU1EWMHN000YUCG) ──────────────────
+
+/**
+ * Verdict returned by {@link assessAuditInvalidate} for a stored audit.
+ *
+ * - `fresh`      — the audit is current by the timestamp gate; no action.
+ * - `reinstate`  — the timestamp gate is stale, but the audit's stored
+ *                  content fingerprint matches the item's current content, so
+ *                  the audit still covers the item and is re-instated by
+ *                  resetting `updatedAt = auditedAt` (the `saveAuditResult`
+ *                  pattern). No re-run is required.
+ * - `re-audit`   — the content changed (fingerprint mismatch) or cannot be
+ *                  proven unchanged (no fingerprints); the audit must be
+ *                  re-run (existing fail-safe behaviour).
+ */
+export type AuditInvalidationVerdict = 'fresh' | 'reinstate' | 're-audit';
+
+/**
+ * Inputs for {@link assessAuditInvalidate}. Mirrors the freshness inputs of
+ * {@link isAuditFresh} so the two decisions stay aligned on one comparison.
+ */
+export interface AuditInvalidationInput {
+  /** Timestamp the audit was persisted. Missing → no prior audit. */
+  auditedAt?: string | null;
+  /** The item's current content timestamp (`updatedAt`). */
+  updatedAt?: string;
+  /** The content fingerprint stored with the audit, when present. */
+  fingerprint?: string | null;
+  /**
+   * The item's current content fingerprint, when the caller can compute it
+   * (description/ACs/Key Files + touched-file git state, per the audit skill).
+   * Callers without git access may omit it; the verdict then fails safe to
+   * `re-audit` when the timestamp gate is stale.
+   */
+  currentFingerprint?: string | null;
+}
+
+/**
+ * Decide whether a stored audit is fresh, should be re-instated, or must be
+ * re-run — the "smart re-instatement" used when the timestamp gate flags an
+ * audit as stale (WL-0MU1EWMHN000YUCG).
+ *
+ * The timestamp comparison is delegated to the single shared
+ * {@link isAuditFresh} predicate (its fingerprint-less time-gate path); no
+ * competing `auditedAt`-vs-`updatedAt` comparison is introduced here
+ * (WL-0MUBVH7ZR009PP80). The distinction from {@link isAuditFresh} is
+ * deliberate: this helper answers the *action* question (re-instate vs
+ * re-run) using the **timestamp gate** as the staleness trigger, then uses the
+ * content fingerprint to prove the change was non-semantic. An audit whose
+ * fingerprint matches is fresh to {@link isAuditFresh} regardless of
+ * `updatedAt`, so without this reconciliation a consumer that lacks the
+ * current fingerprint (e.g. the ordering path) would still treat the item as
+ * stale.
+ *
+ * Rules:
+ *   1. No prior audit (`auditedAt` missing) → `re-audit` (unchanged
+ *      no-audit behaviour; there is nothing to re-instate).
+ *   2. Timestamp gate fresh → `fresh` (no action).
+ *   3. Timestamp-stale but `fingerprint === currentFingerprint` → `reinstate`
+ *      (description/comments/dependency/commit churn that did not change the
+ *      audited content).
+ *   4. Otherwise → `re-audit` (content changed, or no fingerprints to prove
+ *      it did not — fail-safe, never claim an unchanged audit).
+ */
+export function assessAuditInvalidate(
+  input: AuditInvalidationInput,
+): AuditInvalidationVerdict {
+  const { auditedAt, updatedAt, fingerprint, currentFingerprint } = input;
+  // 1. No prior audit → must run (preserve existing no-audit behaviour).
+  if (!auditedAt) return 're-audit';
+  // 2. Fresh by the shared timestamp gate → nothing to do. Delegates to
+  //    isAuditFresh's fingerprint-less path so there is exactly one
+  //    auditedAt/updatedAt comparison in the codebase.
+  if (isAuditFresh(auditedAt, updatedAt)) return 'fresh';
+  // 3. Stale by timestamp but the audited content is unchanged → re-instate.
+  //    Both fingerprints must be present: a missing either side is not proof
+  //    of equality (fail-safe, mirrors isAuditFresh's primary gate).
+  if (fingerprint && currentFingerprint && fingerprint === currentFingerprint) {
+    return 'reinstate';
+  }
+  // 4. Content changed or unprovable → re-run.
+  return 're-audit';
+}
+
 /**
  * Derived child coverage (WL-0MUBVH8QG0020H9L): a child (`parentId` set) is
  * covered iff its DIRECT parent (depth 1 only) has a fresh audit, decided by

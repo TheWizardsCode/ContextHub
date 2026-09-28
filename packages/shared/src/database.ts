@@ -11,7 +11,7 @@ import { normalizeStatusValue } from './status-stage-rules.js';
 // Self-referencing package export (WL-0MSJ4BT4Z002HH9B grep guard forbids a
 // relative `icons.js` import; `@worklog/shared/icons` is the canonical path
 // even from within the shared package).
-import { isAuditFresh } from '@worklog/shared/icons';
+import { isAuditFresh, type AuditInvalidationVerdict } from '@worklog/shared/icons';
 
 /**
  * Return the later of two ISO-8601 timestamps (undefined/null-safe).
@@ -1060,6 +1060,28 @@ export class WorklogDatabase {
    */
   saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }): void {
     this.store.saveAuditResult(audit);
+  }
+
+  /**
+   * Decide whether a stored audit is fresh, should be re-instated, or must be
+   * re-run — and automatically re-instate it when the only change since the
+   * audit was non-semantic (WL-0MU1EWMHN000YUCG).
+   *
+   * Delegates to {@link SqlitePersistentStore.reconcileAuditInvalidation}, so
+   * the automatic `updatedAt = auditedAt` reset and the decision live in the
+   * store. Callers that can compute the item's current content fingerprint
+   * pass it in; callers without git access omit it and get a fail-safe
+   * `re-audit` verdict for any timestamp-stale audit.
+   *
+   * @param workItemId The work item whose audit is being reconciled.
+   * @param currentFingerprint The item's current content fingerprint, when known.
+   * @returns The invalidation verdict (`fresh` | `reinstate` | `re-audit`).
+   */
+  reconcileAuditInvalidation(
+    workItemId: string,
+    currentFingerprint?: string | null,
+  ): AuditInvalidationVerdict {
+    return this.store.reconcileAuditInvalidation(workItemId, currentFingerprint);
   }
 
   /**

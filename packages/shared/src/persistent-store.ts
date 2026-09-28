@@ -7,6 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, Comment, DependencyEdge, AuditResult, AuditWaiver } from './types.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
+import { assessAuditInvalidate, type AuditInvalidationVerdict } from '@worklog/shared/icons';
 
 /**
  * Info about a pending schema migration.
@@ -1398,6 +1399,62 @@ export class SqlitePersistentStore {
     // observe a half-committed state.
     this.invalidateWorkItemCaches();
     this.cacheInvalidate(`workitem_${audit.workItemId}`);
+  }
+
+  /**
+   * Smart audit re-instatement (WL-0MU1EWMHN000YUCG): decide whether a stored
+   * audit should be re-instated or re-run, and *automatically* re-instate it
+   * when the only change since the audit was non-semantic.
+   *
+   * A stale-by-timestamp audit whose stored content fingerprint still matches
+   * the item's current content fingerprint (supplied by the caller when it can
+   * compute one — description/ACs/Key Files + touched-file git state) is
+   * re-instated by resetting `updatedAt = auditedAt`, exactly like
+   * {@link saveAuditResult}. This keeps consumers that lack the current
+   * fingerprint (e.g. the `wl next` ordering path) from treating an unchanged
+   * audit as stale after comment/metadata/sync timestamp churn.
+   *
+   * Returns the {@link AuditInvalidationVerdict} so callers can act on a
+   * `re-audit` verdict (queue the item for re-audit) without a second read.
+   *
+   * Fail-safe: when there is no prior audit, or the content changed, or no
+   * fingerprints are available to prove the content is unchanged, the verdict
+   * is `re-audit` and nothing is written — an unchanged audit is never
+   * claimed without evidence.
+   *
+   * @param workItemId The work item whose audit is being reconciled.
+   * @param currentFingerprint The item's current content fingerprint, when the
+   *   caller can compute it. Omit when unavailable (verdict degrades to
+   *   `re-audit` for a stale timestamp gate).
+   * @returns The invalidation verdict.
+   */
+  reconcileAuditInvalidation(
+    workItemId: string,
+    currentFingerprint?: string | null,
+  ): AuditInvalidationVerdict {
+    const audit = this.getAuditResult(workItemId);
+    const item = this.getWorkItem(workItemId);
+    if (!audit || !item) return 're-audit';
+
+    const verdict = assessAuditInvalidate({
+      auditedAt: audit.auditedAt,
+      updatedAt: item.updatedAt,
+      fingerprint: audit.fingerprint,
+      currentFingerprint,
+    });
+
+    if (verdict === 'reinstate') {
+      // Atomic with the read decision: reset the content timestamp to the
+      // audit and keep activityAt >= it (same MAX pattern as saveAuditResult).
+      const updateWorkItemUpdatedAt = this.db.prepare(
+        `UPDATE workitems SET updatedAt = ?, activityAt = MAX(COALESCE(activityAt, ''), ?) WHERE id = ?`
+      );
+      updateWorkItemUpdatedAt.run(audit.auditedAt, audit.auditedAt, workItemId);
+      this.invalidateWorkItemCaches();
+      this.cacheInvalidate(`workitem_${workItemId}`);
+    }
+
+    return verdict;
   }
 
   /**

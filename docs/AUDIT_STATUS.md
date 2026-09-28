@@ -211,6 +211,27 @@ Freshness is **atomic**: `saveAuditResult` — the path behind `wl audit-set`,
 in the same transaction, so `isAuditFresh` is true immediately after an audit
 (WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51).
 
+**Smart re-instatement (WL-0MU1EWMHN000YUCG).** When an audit is stale by the
+*time gate*, `assessAuditInvalidate({ auditedAt, updatedAt, fingerprint,
+currentFingerprint })` in `packages/shared/src/icons.ts` decides between
+treating it as fresh, **re-instating** it, or flagging it for re-audit:
+
+- `fresh` — already current by the time gate; no action.
+- `reinstate` — time-stale, but `fingerprint === currentFingerprint`, i.e. the
+  change since the audit was non-semantic (a comment/metadata/sync re-timestamp,
+  or any edit that did not alter the audited content).
+  `WorklogDatabase.reconcileAuditInvalidation(id, currentFingerprint)` then
+  resets `workitems.updatedAt = auditedAt` (the `saveAuditResult` pattern,
+  preserving `activityAt`), so consumers that cannot compute the current
+  fingerprint — notably the `wl next` ordering tier — no longer treat the
+  unchanged audit as stale.
+- `re-audit` — no prior audit, a changed fingerprint (semantic change), or no
+  fingerprints available to prove the content is unchanged (fail-safe).
+
+The decision delegates the timestamp comparison to `isAuditFresh` itself (its
+fingerprint-less path), so exactly one `auditedAt`-vs-`updatedAt` comparison
+exists in the codebase.
+
 Fingerprint sources: `wl audit-set --fingerprint <hex>`, or an
 `Audit content fingerprint: <hex>` line embedded in `--summary`/`--raw-output`
 (the audit skill's report format), or `wl update --audit-text` carrying the same
