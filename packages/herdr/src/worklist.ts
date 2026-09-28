@@ -48,6 +48,8 @@ import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
 import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
+import { recentDispatchedItems } from './downtime-log.js';
+import { buildDispatchWorkItem } from './dispatch-view.js';
 import {
   createHydratorRunner,
   createProductionHydratorDeps,
@@ -535,13 +537,24 @@ export class WorkItemListState {
   activePriorityFilter: string | null = null;
 
   /**
+   * Active recent-dispatches filter (WL-0MUL2IZLF002S9X5). The third
+   * mutually-exclusive filter axis: when true the list shows log-derived
+   * synthetic rows from `.worklog/downtime-dispatches.log` instead of live
+   * `wl` items. Applying a stage/priority filter clears it and vice versa,
+   * and `clearFilter()` clears all three axes.
+   */
+  activeDispatchFilter = false;
+
+  /**
    * Display label for the active filter, axis-qualified, or null when no
-   * filter is active (e.g. `stage in_review`, `priority critical`). The
-   * list header renders `(filtered: <label>)` from this value.
+   * filter is active (e.g. `stage in_review`, `priority critical`,
+   * `dispatches`). The list header renders `(filtered: <label>)` from this
+   * value.
    */
   get activeFilterLabel(): string | null {
     if (this.activeFilter) return `stage ${this.activeFilter}`;
     if (this.activePriorityFilter) return `priority ${this.activePriorityFilter}`;
+    if (this.activeDispatchFilter) return 'dispatches';
     return null;
   }
 
@@ -1013,6 +1026,7 @@ export class WorkItemListState {
   applyFilter(stage: string): void {
     this.activeFilter = stage;
     this.activePriorityFilter = null; // replace semantics: one axis at a time
+    this.activeDispatchFilter = false; // replace semantics: one axis at a time
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -1030,6 +1044,27 @@ export class WorkItemListState {
   applyPriorityFilter(priority: string): void {
     this.activePriorityFilter = priority;
     this.activeFilter = null; // replace semantics: one axis at a time
+    this.activeDispatchFilter = false; // replace semantics: one axis at a time
+    this._applyFilters();
+    this.selectedIndex = 0;
+    this.scrollOffset = 0;
+    this.mode = 'list';
+    this._resetMetaScroll();
+    // Filter changes the visible item set — invalidate cached previews.
+    clearDescriptionPreviewCache();
+  }
+
+  /**
+   * Apply the recent-dispatches filter (replace semantics,
+   * WL-0MUL2IZLF002S9X5): clears any active stage/priority filter so the
+   * dispatch axis is mutually exclusive with the other two. The dispatch
+   * rows are supplied by `fetchItemsForView` (sourced from the local rolling
+   * dispatch log), so `_applyFilters` passes them through unchanged.
+   */
+  applyDispatchFilter(): void {
+    this.activeDispatchFilter = true;
+    this.activeFilter = null; // replace semantics: one axis at a time
+    this.activePriorityFilter = null; // replace semantics: one axis at a time
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -1042,6 +1077,7 @@ export class WorkItemListState {
   clearFilter(): void {
     this.activeFilter = null;
     this.activePriorityFilter = null;
+    this.activeDispatchFilter = false;
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -1138,6 +1174,10 @@ export class WorkItemListState {
     } else if (this.activePriorityFilter) {
       filtered = filtered.filter((item) => item.priority === this.activePriorityFilter);
     }
+    // The dispatches axis is applied at FETCH time (fetchItemsForView
+    // returns exactly the log-derived rows); there is nothing further to
+    // filter here, so every fetched row passes through unchanged
+    // (WL-0MUL2IZLF002S9X5).
     this.items = filtered;
   }
 
@@ -4161,12 +4201,27 @@ export function createProductionShipGuardQuery(
  *   priority filter). Mutually exclusive with `activeFilter` (replace
  *   semantics, WL-0MSKC8T46006999S): at most one is set.
  * @param defaultFetcher - The default fetcher for the unfiltered view
+ * @param activeDispatchFilter - When true, return the log-derived recent
+ *   dispatch rows instead of live `wl` items (WL-0MUL2IZLF002S9X5).
+ * @param cwd - Project root containing `.worklog/` for the dispatch-log read
+ *   (defaults to `process.cwd()`).
  */
 export function fetchItemsForView(
   activeFilter: string | null,
   activePriorityFilter: string | null,
   defaultFetcher: () => Promise<WorkItem[]>,
+  activeDispatchFilter = false,
+  cwd: string = process.cwd(),
 ): Promise<WorkItem[]> {
+  if (activeDispatchFilter) {
+    // Recent-dispatches view (WL-0MUL2IZLF002S9X5): project the LOCAL
+    // rolling dispatch log into synthetic rows. Fail-safe — the reader
+    // already returns [] for a missing/unreadable/malformed log, and the
+    // catch keeps a surprise error from blanking the TUI.
+    return recentDispatchedItems(cwd)
+      .then((rows) => rows.map(buildDispatchWorkItem))
+      .catch(() => []);
+  }
   if (activeFilter) {
     // Fail-open: a wl error must never blank the list — fall back to the
     // default fetcher (which itself fails open in index.ts).
@@ -4239,6 +4294,14 @@ export function dispatchChordCommand(
       state.applyPriorityFilter(internalPriority);
       return true;
     }
+  }
+
+  // ── /wl dispatches (internal action, WL-0MUL2IZLF002S9X5) ─────
+  // Recent-dispatches view: fully internal — no pane spawned, no stdout
+  // write, no <id> substitution. Bound to the `f d` chord via shortcuts.json.
+  if (/^\/wl\s+dispatches$/.test(command.trim())) {
+    state.applyDispatchFilter();
+    return true;
   }
 
   // ── /wl <stage> commands (internal dispatch) ──────────────
@@ -4984,7 +5047,13 @@ export async function runWorklistTui(
           }
         };
         const [newItems] = await Promise.all([
-          fetchItemsForView(state.activeFilter, state.activePriorityFilter, fetcher),
+          fetchItemsForView(
+            state.activeFilter,
+            state.activePriorityFilter,
+            fetcher,
+            state.activeDispatchFilter,
+            opts.cwd,
+          ),
           ...expanded.map(fetchExpandedChildren),
         ]);
         const oldLen = state.items.length;

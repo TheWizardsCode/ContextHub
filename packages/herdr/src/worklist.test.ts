@@ -52,6 +52,7 @@ import { TaskScheduler } from './scheduler.js';
 import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
 import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
+import { appendDowntimeLogEntry } from './downtime-log.js';
 
 // ── ANSI helpers ───────────────────────────────────────────────────────
 // Regression test: the sync-failed status indicator uses ANSI.yellow
@@ -803,6 +804,147 @@ describe('WorkItemListState — priority filter slot (WL-0MSKC8T46006999S)', () 
     state.refreshItems(items);
     expect(state.activePriorityFilter).toBe('critical');
     expect(state.items.map((i) => i.id)).toEqual(['A']);
+  });
+});
+
+describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
+  const TERM = { rows: 24, cols: 80 };
+  const tempDirs: string[] = [];
+
+  function makeTempRoot(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'worklist-dispatches-'));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    resetExecFileAsync();
+  });
+
+  async function writeDispatch(root: string, entry: Record<string, unknown>): Promise<void> {
+    await appendDowntimeLogEntry(root, JSON.stringify(entry));
+  }
+
+  it('applyDispatchFilter activates the dispatches axis and clears stage/priority', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM);
+    state.applyFilter('idea');
+    state.applyDispatchFilter();
+    expect(state.activeDispatchFilter).toBe(true);
+    expect(state.activeFilter).toBeNull();
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('applyFilter replaces (clears) the dispatch filter', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM);
+    state.applyDispatchFilter();
+    state.applyFilter('idea');
+    expect(state.activeDispatchFilter).toBe(false);
+    expect(state.activeFilter).toBe('idea');
+  });
+
+  it('applyPriorityFilter replaces (clears) the dispatch filter', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    state.applyDispatchFilter();
+    state.applyPriorityFilter('critical');
+    expect(state.activeDispatchFilter).toBe(false);
+    expect(state.activePriorityFilter).toBe('critical');
+  });
+
+  it('clearFilter clears the dispatch axis too (sprint)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    state.applyDispatchFilter();
+    state.clearFilter();
+    expect(state.activeDispatchFilter).toBe(false);
+    expect(state.activeFilter).toBeNull();
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('activeFilterLabel returns dispatches for the dispatch axis', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    expect(state.activeFilterLabel).toBeNull();
+    state.applyDispatchFilter();
+    expect(state.activeFilterLabel).toBe('dispatches');
+  });
+
+  it('renders the dispatches filter label and the item count in the header', () => {
+    const renderer = createListRenderer();
+    const state = new WorkItemListState([makeItem('A'), makeItem('B')], TERM);
+    state.applyDispatchFilter();
+    const output = renderer(state.getDisplayRows(), 0, 0, TERM, state.activeFilterLabel, 'list', null);
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('(filtered: dispatches)');
+    expect(firstLine).toContain('2 item(s)');
+  });
+
+  it('dispatchChordCommand recognises /wl dispatches and applies the filter', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    const handled = dispatchChordCommand('/wl dispatches', state);
+    expect(handled).toBe(true);
+    expect(state.activeDispatchFilter).toBe(true);
+  });
+
+  it('dispatchChordCommand leaves an unknown /wl value unhandled', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    expect(dispatchChordCommand('/wl bogus', state)).toBe(false);
+    expect(state.activeDispatchFilter).toBe(false);
+  });
+
+  it('fetchItemsForView returns log-derived synthetic rows for the dispatches view', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-OLD',
+      kind: 'plan',
+      title: 'Older dispatch',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    await writeDispatch(root, {
+      itemId: 'WL-NEW',
+      kind: 'implement',
+      title: 'Newer dispatch',
+      dispatchedAt: '2026-01-02T00:00:00.000Z',
+    });
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('LIVE')]);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+
+    expect(items.map((i) => i.id)).toEqual(['WL-NEW', 'WL-OLD']);
+    expect(items[0].title).toBe('Newer dispatch');
+    expect(items[0].isLogDerived).toBe(true);
+    expect(items[0].dispatchKind).toBe('implement');
+    // The default (live) fetcher is never consulted for the dispatches view.
+    expect(defaultFetcher).not.toHaveBeenCalled();
+  });
+
+  it('fetchItemsForView dispatches view is fail-safe for a missing log', async () => {
+    const root = makeTempRoot();
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('LIVE')]);
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+    expect(items).toEqual([]);
+  });
+
+  it('fetchItemsForView dispatches view caps rows and dedups by id via the projection', async () => {
+    const root = makeTempRoot();
+    for (let i = 0; i < 25; i++) {
+      await writeDispatch(root, {
+        itemId: `WL-${String(i).padStart(2, '0')}`,
+        kind: 'plan',
+        title: `Item ${i}`,
+        dispatchedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+      });
+    }
+    // A later pane-close for the same id must not add a duplicate row.
+    await writeDispatch(root, {
+      itemId: 'WL-00',
+      kind: 'plan',
+      title: 'Item 0',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const items = await fetchItemsForView(null, null, vi.fn(), true, root);
+    expect(items).toHaveLength(20);
+    expect(new Set(items.map((i) => i.id)).size).toBe(20);
   });
 });
 
