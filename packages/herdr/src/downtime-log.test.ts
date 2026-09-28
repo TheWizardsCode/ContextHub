@@ -33,6 +33,7 @@ import {
   dispatchedItemMarkers,
   markerStillExcludes,
   readDowntimeLogEntries,
+  recentDispatchedItems,
   DOWNTIME_LOG_FILE,
   COORDINATION_LOG_FILE,
   DOWNTIME_LOG_MAX_ENTRIES,
@@ -779,5 +780,246 @@ describe('pane-close lifecycle entries (WL-0MU308WSF0002JWN)', () => {
     // The enrichment-less pane-close entry must NOT be reconstructed as a
     // dispatched pane (only dispatch/enrichment entries carry a paneId).
     expect(entries.filter((e) => e.entryType === 'pane-close')).toHaveLength(1);
+  });
+});
+
+// ── Recent dispatched items projection (WL-0MUL2IX6H001YHDO) ───────────
+//
+// `recentDispatchedItems(cwd, limit)` projects the rolling dispatch log into
+// up to `limit` synthetic rows (default 20), one per work item id, ordered by
+// that item's most recent log entry (newest first). It reads only the local
+// fail-safe `readDowntimeLogEntries` reader, ignores pane-close lifecycle
+// entries, and never throws — a missing/unreadable/empty/malformed log yields
+// `[]`.
+describe('recentDispatchedItems (log projection, WL-0MUL2IX6H001YHDO)', () => {
+  it('returns [] for a missing log (fail-safe)', async () => {
+    const cwd = makeTempCwd();
+    expect(await recentDispatchedItems(cwd)).toEqual([]);
+  });
+
+  it('returns [] for an empty log file', async () => {
+    const cwd = makeTempCwd();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), '\n\n', 'utf8');
+    expect(await recentDispatchedItems(cwd)).toEqual([]);
+  });
+
+  it('returns [] when the log is unreadable (directory at the log path)', async () => {
+    const cwd = makeTempCwd();
+    mkdirSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), { recursive: true });
+    expect(await recentDispatchedItems(cwd)).toEqual([]);
+  });
+
+  it('skips malformed JSONL lines without throwing and projects the valid ones', async () => {
+    const cwd = makeTempCwd();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      [
+        'not-json',
+        JSON.stringify({
+          itemId: 'WL-A',
+          kind: 'plan',
+          title: 'Plan A',
+          dispatchedAt: '2026-01-01T00:00:00.000Z',
+        }),
+        '{ broken',
+      ].join('\n') + '\n',
+      'utf8',
+    );
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].itemId).toBe('WL-A');
+  });
+
+  it('projects a dispatch marker into a row with id, title, kind and timestamp', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({
+        itemId: 'WL-A',
+        kind: 'plan',
+        title: 'Plan the thing',
+        dispatchedAt: '2026-01-01T00:00:00.000Z',
+        stage: 'intake_complete',
+      }),
+    );
+    expect(await recentDispatchedItems(cwd)).toEqual([
+      {
+        itemId: 'WL-A',
+        title: 'Plan the thing',
+        kind: 'plan',
+        latestTimestamp: '2026-01-01T00:00:00.000Z',
+        latestOutcome: undefined,
+      },
+    ]);
+  });
+
+  it('deduplicates by work item id, using the most recent entry for metadata', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({ itemId: 'WL-A', kind: 'intake', title: 'Old title', dispatchedAt: '2026-01-01T00:00:00.000Z' }),
+    );
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({ itemId: 'WL-A', kind: 'plan', title: 'New title', dispatchedAt: '2026-01-02T00:00:00.000Z' }),
+    );
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ itemId: 'WL-A', title: 'New title', kind: 'plan', latestTimestamp: '2026-01-02T00:00:00.000Z' });
+  });
+
+  it('orders rows newest-first by their most recent entry', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-OLD', kind: 'plan', title: 'Old', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-NEW', kind: 'plan', title: 'New', dispatchedAt: '2026-01-03T00:00:00.000Z' }));
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-MID', kind: 'plan', title: 'Mid', dispatchedAt: '2026-01-02T00:00:00.000Z' }));
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows.map((r) => r.itemId)).toEqual(['WL-NEW', 'WL-MID', 'WL-OLD']);
+  });
+
+  it('ignores pane-close lifecycle entries (they are not dispatch markers)', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-A', kind: 'plan', title: 'A', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:00.000Z',
+      itemId: 'WL-B',
+      itemTitle: 'B',
+      paneId: 'w1:p1',
+      kind: 'plan',
+      outcome: 'closed-as-plan-complete',
+      closed: true,
+    });
+    const rows = await recentDispatchedItems(cwd);
+    // Pane-close B is ignored — only the dispatch marker A appears.
+    expect(rows.map((r) => r.itemId)).toEqual(['WL-A']);
+  });
+
+  it('records the latest pane-close outcome without adding a duplicate row', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-A', kind: 'plan', title: 'A', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:00.000Z',
+      itemId: 'WL-A',
+      itemTitle: 'A',
+      paneId: 'w1:p1',
+      kind: 'plan',
+      outcome: 'closed-as-plan-complete',
+      closed: true,
+    });
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].latestOutcome).toBe('closed-as-plan-complete');
+    // The latest timestamp is the pane-close event (most recent entry).
+    expect(rows[0].latestTimestamp).toBe('2026-01-02T00:00:00.000Z');
+  });
+
+  it('reorders by the item most recent entry when a later pane-close arrives', async () => {
+    const cwd = makeTempCwd();
+    // A dispatched earlier, B dispatched later; A then closes after B.
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-A', kind: 'plan', title: 'A', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-B', kind: 'plan', title: 'B', dispatchedAt: '2026-01-02T00:00:00.000Z' }));
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close',
+      timestamp: '2026-01-03T00:00:00.000Z',
+      itemId: 'WL-A',
+      itemTitle: 'A',
+      paneId: 'w1:p1',
+      kind: 'plan',
+      outcome: 'requires-attention',
+      closed: true,
+    });
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows.map((r) => r.itemId)).toEqual(['WL-A', 'WL-B']);
+    expect(rows[0].latestOutcome).toBe('requires-attention');
+  });
+
+  it('falls back to a placeholder title when the title is missing', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-NOTITLE', kind: 'implement', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-EMPTY', kind: 'implement', title: '', dispatchedAt: '2026-01-02T00:00:00.000Z' }));
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows.find((r) => r.itemId === 'WL-NOTITLE')?.title).toBe('[unknown]');
+    expect(rows.find((r) => r.itemId === 'WL-EMPTY')?.title).toBe('[unknown]');
+  });
+
+  it('caps the result at 20 rows by default (newest first)', async () => {
+    const cwd = makeTempCwd();
+    for (let i = 0; i < 25; i++) {
+      await appendDowntimeLogEntry(
+        cwd,
+        JSON.stringify({
+          itemId: `WL-${String(i).padStart(2, '0')}`,
+          kind: 'plan',
+          title: `Item ${i}`,
+          dispatchedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+        }),
+      );
+    }
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows).toHaveLength(20);
+    // Newest is the last dispatched (i = 24), oldest retained is i = 5.
+    expect(rows[0].itemId).toBe('WL-24');
+    expect(rows[19].itemId).toBe('WL-05');
+  });
+
+  it('honours an explicit limit argument', async () => {
+    const cwd = makeTempCwd();
+    for (let i = 0; i < 5; i++) {
+      await appendDowntimeLogEntry(
+        cwd,
+        JSON.stringify({ itemId: `WL-${i}`, kind: 'plan', title: `Item ${i}`, dispatchedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString() }),
+      );
+    }
+    const rows = await recentDispatchedItems(cwd, 2);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.itemId)).toEqual(['WL-4', 'WL-3']);
+  });
+
+  it('backfills a placeholder title from a pane-close itemTitle', async () => {
+    const cwd = makeTempCwd();
+    // Marker carries no title → placeholder; the pane-close entry supplies one.
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-NOTITLE', kind: 'audit', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:00.000Z',
+      itemId: 'WL-NOTITLE',
+      itemTitle: 'Recovered title',
+      paneId: 'w1:p1',
+      kind: 'audit',
+      outcome: 'audit-passed',
+      closed: true,
+    });
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].title).toBe('Recovered title');
+    expect(rows[0].latestOutcome).toBe('audit-passed');
+  });
+
+  it('ignores entries without an itemId', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ cwd: '/repo', at: '2026-01-01T00:00:00.000Z', message: 'error' }));
+    expect(await recentDispatchedItems(cwd)).toEqual([]);
+  });
+
+  it('round-trips a real enriched dispatch entry (paneId/enrichment) into a row', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({
+        itemId: 'WL-ENR',
+        kind: 'implement',
+        title: 'Enriched',
+        dispatchedAt: '2026-01-01T00:00:00.000Z',
+        paneId: 'w1:p1',
+        enrichment: true,
+      }),
+    );
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ itemId: 'WL-ENR', title: 'Enriched', kind: 'implement' });
   });
 });
