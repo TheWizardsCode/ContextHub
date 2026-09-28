@@ -33,6 +33,8 @@ import {
   formatDetailContent,
   formatDetailView,
   fetchItemsForView,
+  isWlViewCommand,
+  resolveDispatchDetail,
   formatChordHintsForHelp,
   resolvePodcastTarget,
   clearDescriptionPreviewCache,
@@ -53,6 +55,7 @@ import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shor
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
 import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
 import { appendDowntimeLogEntry } from './downtime-log.js';
+import { buildDispatchWorkItem } from './dispatch-view.js';
 
 // ── ANSI helpers ───────────────────────────────────────────────────────
 // Regression test: the sync-failed status indicator uses ANSI.yellow
@@ -945,6 +948,73 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
     const items = await fetchItemsForView(null, null, vi.fn(), true, root);
     expect(items).toHaveLength(20);
     expect(new Set(items.map((i) => i.id)).size).toBe(20);
+  });
+});
+
+describe('dispatch view refetch trigger and detail fallback (WL-0MUL2J15W00277XH)', () => {
+  const TERM = { rows: 24, cols: 80 };
+
+  it('isWlViewCommand recognises /wl dispatches as a view command (refetch trigger)', () => {
+    expect(isWlViewCommand('/wl dispatches')).toBe(true);
+    // Existing view commands stay recognised.
+    expect(isWlViewCommand('/wl')).toBe(true);
+    expect(isWlViewCommand('/wl idea')).toBe(true);
+    expect(isWlViewCommand('/wl --priority critical')).toBe(true);
+    // Non-view commands are not.
+    expect(isWlViewCommand('/wl bogus')).toBe(false);
+    expect(isWlViewCommand('/skill:implement WL-1')).toBe(false);
+  });
+
+  it('upgrades a log-derived detail item to the live item when it still exists', async () => {
+    const state = new WorkItemListState([], TERM);
+    state.detailItem = buildDispatchWorkItem({
+      itemId: 'WL-1',
+      title: 'Log title',
+      kind: 'plan',
+      latestOutcome: 'closed-as-plan-complete',
+      latestTimestamp: '2026-01-01T00:00:00.000Z',
+    });
+    const fresh = { id: 'WL-1', title: 'Live title', status: 'completed' } as WorkItem;
+    const fetchDetails = vi.fn().mockResolvedValue(fresh);
+
+    await resolveDispatchDetail(state, fetchDetails);
+
+    expect(fetchDetails).toHaveBeenCalledWith('WL-1');
+    expect(state.detailItem).toBe(fresh);
+  });
+
+  it('falls back to the log-derived metadata when the item no longer exists', async () => {
+    const state = new WorkItemListState([], TERM);
+    const synthetic = buildDispatchWorkItem({ itemId: 'WL-GONE', title: 'Deleted title' });
+    state.detailItem = synthetic;
+    const fetchDetails = vi.fn().mockResolvedValue(null);
+
+    await resolveDispatchDetail(state, fetchDetails);
+
+    expect(state.detailItem).toBe(synthetic);
+    expect(state.detailItem?.title).toBe('Deleted title');
+    expect(state.detailItem?.isLogDerived).toBe(true);
+  });
+
+  it('falls back (no crash) when the detail fetch throws', async () => {
+    const state = new WorkItemListState([], TERM);
+    const synthetic = buildDispatchWorkItem({ itemId: 'WL-ERR', title: 'Error title' });
+    state.detailItem = synthetic;
+    const fetchDetails = vi.fn().mockRejectedValue(new Error('wl failed'));
+
+    await expect(resolveDispatchDetail(state, fetchDetails)).resolves.toBeUndefined();
+    expect(state.detailItem).toBe(synthetic);
+  });
+
+  it('never fetches for a non-log-derived detail item', async () => {
+    const state = new WorkItemListState([], TERM);
+    state.detailItem = makeItem('WL-LIVE');
+    const fetchDetails = vi.fn().mockResolvedValue(null);
+
+    await resolveDispatchDetail(state, fetchDetails);
+
+    expect(fetchDetails).not.toHaveBeenCalled();
+    expect(state.detailItem?.id).toBe('WL-LIVE');
   });
 });
 

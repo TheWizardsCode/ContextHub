@@ -204,6 +204,17 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     }
   });
 
+  it('registers the f d chord for the recent-dispatches view (WL-0MUL2J15W00277XH)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['f', 'd'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe('/wl dispatches');
+    expect(entry?.label).toBe('filter dispatches');
+    expect(entry?.view).toBe('both');
+    // `f d` is a complete chord, not a prefix — it must resolve directly.
+    expect(registry.lookupChordEntry(['f', 'd'], 'both', undefined, false)).toBeDefined();
+  });
+
   it('no longer registers the old single-key stage filter chords (f i, f n, f p, f r) or the single f s sprint chord (WL-0MSKC8T46006999S)', () => {
     const registry = loadShortcutConfig();
     // The old single-key stage chords must NOT resolve — `f i`/`f n`/`f p`/

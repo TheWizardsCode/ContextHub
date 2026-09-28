@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
@@ -4237,6 +4237,56 @@ export function fetchItemsForView(
 }
 
 /**
+ * True when a resolved command is a `/wl` view command — a stage filter
+ * (`/wl <stage>`, shorthand alias or canonical name), a priority filter
+ * (`/wl --priority <p>`, canonical name), the recent-dispatches view
+ * (`/wl dispatches`, WL-0MUL2J15W00277XH), or the clear-filter `/wl` with no
+ * arguments.
+ *
+ * Used after dispatch to trigger an immediate view refetch: filtered views
+ * show every root item matching the filter's rule (`wl list --status <status>
+ * --stage <stage> --root-only` / `--priority <p>`; see STAGE_STATUS in
+ * fetcher.ts) — most stages show `open`-status items only, while the in_review
+ * stage additionally includes `completed` and `in-progress` items
+ * (WL-0MSKCRX730052IIW); the dispatches view refetches the log-derived rows;
+ * clearing the filter restores the default view (WL-0MSGSE15000746F7).
+ */
+export function isWlViewCommand(cmd: string): boolean {
+  if (/^\/wl\s*$/.test(cmd)) return true;
+  if (/^\/wl\s+dispatches$/.test(cmd)) return true;
+  const stageMatch = cmd.match(/^\/wl\s+(\S+)$/);
+  if (stageMatch !== null && STAGE_MAP[stageMatch[1]] !== undefined) return true;
+  const priorityMatch = cmd.match(/^\/wl\s+--priority\s+(\S+)$/);
+  return priorityMatch !== null && PRIORITY_MAP[priorityMatch[1]] !== undefined;
+}
+
+/**
+ * Best-effort upgrade of a log-derived detail item to the live `wl` item
+ * (WL-0MUL2J15W00277XH): when a recent-dispatch row is opened (Enter),
+ * `state.detailItem` starts as the synthetic row. This fetches the live item
+ * by id and, if it still exists, replaces the detail item so the view shows
+ * fresh live metadata; a closed/deleted item (or a fetch error) leaves the
+ * log-derived metadata in place — the view never blanks or crashes.
+ *
+ * @param state - The list state whose `detailItem` is upgraded in place.
+ * @param fetchDetails - Injectable single-item fetcher (defaults to the
+ *   production `fetchItemDetails`, which already returns null on failure).
+ */
+export async function resolveDispatchDetail(
+  state: WorkItemListState,
+  fetchDetails: (id: string) => Promise<WorkItem | null> = fetchItemDetails,
+): Promise<void> {
+  const item = state.detailItem;
+  if (item === null || item === undefined || item.isLogDerived !== true) return;
+  const fresh = await fetchDetails(item.id).catch(() => null);
+  // Only upgrade when the user has not navigated away in the meantime — the
+  // same synthetic object is still the detail item.
+  if (fresh !== null && state.detailItem === item) {
+    state.detailItem = fresh;
+  }
+}
+
+/**
  * Dispatch a chord command by mapping it to the appropriate TUI action
  * or routing it through the stdout command output mechanism.
  *
@@ -5141,25 +5191,9 @@ export async function runWorklistTui(
   // global watcher, no cross-instance effects).
   opts.onRefresh = opts.onRefresh ?? (() => doRefresh(false));
 
-  /**
-   * True when the resolved command is a `/wl` view command — a stage filter
-   * (`/wl <stage>`, shorthand alias or canonical name), a priority filter
-   * (`/wl --priority <p>`, canonical name), or the clear-filter `/wl` with
-   * no arguments. Used after dispatch to trigger a view refetch: filtered
-   * views show every root item matching the filter's rule (`wl list --status
-   * <status> --stage <stage> --root-only` / `--priority <p>`; see
-   * STAGE_STATUS in fetcher.ts) — most stages show `open`-status items only,
-   * while the in_review stage additionally includes `completed` and
-   * `in-progress` items (WL-0MSKCRX730052IIW); clearing the filter restores
-   * the default view (WL-0MSGSE15000746F7).
-   */
-  const isWlViewCommand = (cmd: string): boolean => {
-    if (/^\/wl\s*$/.test(cmd)) return true;
-    const stageMatch = cmd.match(/^\/wl\s+(\S+)$/);
-    if (stageMatch !== null && STAGE_MAP[stageMatch[1]] !== undefined) return true;
-    const priorityMatch = cmd.match(/^\/wl\s+--priority\s+(\S+)$/);
-    return priorityMatch !== null && PRIORITY_MAP[priorityMatch[1]] !== undefined;
-  };
+  // `isWlViewCommand` is the module-level exported helper (see above); it
+  // recognises the stage/priority/dispatches view commands and the bare
+  // clear-filter `/wl`.
 
   // True when a command modifies the work-item data set (close, delete,
   // update, reviewed, search), warranting an immediate list refresh so the
@@ -5868,6 +5902,17 @@ export async function runWorklistTui(
 
     if (action === 'refresh') {
       await doRefresh(true);
+      return;
+    }
+
+    if (action === 'select' && prevMode === 'list' && state.detailItem?.isLogDerived) {
+      // Enter on a log-derived dispatch row (WL-0MUL2J15W00277XH): open the
+      // detail view immediately from the log metadata, then best-effort
+      // fetch the live item and upgrade in place when it still exists. A
+      // closed/deleted item keeps the log-derived metadata — never blank.
+      render();
+      await resolveDispatchDetail(state);
+      render();
       return;
     }
 
