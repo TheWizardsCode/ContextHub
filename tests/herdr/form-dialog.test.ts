@@ -158,7 +158,7 @@ describe('substituteIdentifiers', () => {
       id: 'WL-001',
       title: 'New Title',
     });
-    expect(result).toBe('!!wl update WL-001 --title New Title');
+    expect(result).toBe("!!wl update 'WL-001' --title 'New Title'");
   });
 
   it('replaces multiple occurrences of same identifier', () => {
@@ -172,7 +172,7 @@ describe('substituteIdentifiers', () => {
     const result = substituteIdentifiers('!!wl update <id> --title <title>', {
       id: 'WL-001',
     });
-    expect(result).toBe('!!wl update WL-001 --title <title>');
+    expect(result).toBe("!!wl update 'WL-001' --title <title>");
   });
 
   it('returns command unchanged when no identifiers match', () => {
@@ -335,7 +335,7 @@ describe('FormState', () => {
       state.fields[0].value = 'My Title';
       state.handleInput('\r');
       expect(onSubmit).toHaveBeenCalledWith(
-        '!!wl update <id> --title My Title'
+        "!!wl update <id> --title 'My Title'"
       );
       expect(onCancel).not.toHaveBeenCalled();
     });
@@ -346,7 +346,7 @@ describe('FormState', () => {
       const state = new FormState('!!wl update <id> --title <title>', '', [{ name: 'title', default: '' }], onSubmit, onCancel);
       state.handleInput('\r');
       expect(onSubmit).toHaveBeenCalledWith(
-        '!!wl update <id> --title '
+        "!!wl update <id> --title ''"
       );
     });
 
@@ -358,7 +358,7 @@ describe('FormState', () => {
       state.fields[1].value = 'completed';
       state.handleInput('\r');
       expect(onSubmit).toHaveBeenCalledWith(
-        '!!wl update <id> --title New Title --status completed'
+        "!!wl update <id> --title 'New Title' --status 'completed'"
       );
     });
   });
@@ -515,7 +515,7 @@ describe('FormState', () => {
       );
       state.fields[0].value = 'My Title';
       const result = state.getResult();
-      expect(result).toBe('!!wl update <id> --title My Title');
+      expect(result).toBe("!!wl update <id> --title 'My Title'");
     });
   });
 });
