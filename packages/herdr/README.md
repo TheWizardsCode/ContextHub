@@ -178,6 +178,13 @@ Semantics:
   also shows the dispatch `kind` (`plan`/`intake`/`audit`/`risk-effort`/
   `implement`) and the latest pane-close **outcome** (e.g.
   `closed-as-plan-complete`, `audit-passed`, `requires-attention`).
+- **Same icons as every other view** — a row renders the dispatch's
+  log-derived **stage** icon (📥 `intake_complete`, 📋 `plan_complete`, 🔍
+  `in_review`, …) and, for an audit outcome, the fresh **audit verdict** icon
+  (✅/❌), using the same shared icon helpers as the live views instead of the
+  ❓ unknown-stage fallback (WL-0MUGLL9SS002E1D2). The stage comes from the
+  dispatch marker, overridden by the stage a pane-close outcome advanced the
+  item to; `requires-attention` keeps the dispatched-at stage.
 - **Selectable** — pressing Enter on a row opens the detail view. The plugin
   makes a best-effort `wl show <id>` fetch so a still-existing item shows
   fresh metadata; a closed/deleted item gracefully falls back to the

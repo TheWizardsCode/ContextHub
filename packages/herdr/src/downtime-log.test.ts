@@ -849,6 +849,7 @@ describe('recentDispatchedItems (log projection, WL-0MUL2IX6H001YHDO)', () => {
         itemId: 'WL-A',
         title: 'Plan the thing',
         kind: 'plan',
+        stage: 'intake_complete',
         latestTimestamp: '2026-01-01T00:00:00.000Z',
         latestOutcome: undefined,
       },
@@ -1021,5 +1022,95 @@ describe('recentDispatchedItems (log projection, WL-0MUL2IX6H001YHDO)', () => {
     const rows = await recentDispatchedItems(cwd);
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ itemId: 'WL-ENR', title: 'Enriched', kind: 'implement' });
+  });
+
+  // ── Stage / audit-icon projection (WL-0MUGLL9SS002E1D2 audit fix) ──────
+  // The dispatches view must render the SAME stage/audit icons as every other
+  // view; the projection therefore exposes the item's effective stage (and any
+  // audit verdict) so `buildDispatchWorkItem` can carry them through the shared
+  // icon helpers instead of falling back to the ❓ unknown-stage glyph.
+
+  it('projects the dispatched-at stage into the row', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({ itemId: 'WL-A', kind: 'plan', title: 'A', stage: 'intake_complete', dispatchedAt: '2026-01-01T00:00:00.000Z' }),
+    );
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows[0].stage).toBe('intake_complete');
+    expect(rows[0].auditResult).toBeUndefined();
+  });
+
+  it('overrides the dispatched-at stage with the stage reached by a pane-close outcome', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({ itemId: 'WL-A', kind: 'plan', title: 'A', stage: 'intake_complete', dispatchedAt: '2026-01-01T00:00:00.000Z' }),
+    );
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close', timestamp: '2026-01-02T00:00:00.000Z', itemId: 'WL-A', itemTitle: 'A',
+      paneId: 'w1:p1', kind: 'plan', outcome: 'closed-as-plan-complete', closed: true,
+    });
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows[0].stage).toBe('plan_complete');
+  });
+
+  it('lets the newest stage-advancing close win across re-dispatches', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-A', kind: 'intake', title: 'A', stage: 'idea', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close', timestamp: '2026-01-02T00:00:00.000Z', itemId: 'WL-A', itemTitle: 'A',
+      paneId: 'w1:p1', kind: 'intake', outcome: 'closed-as-intake-complete', closed: true,
+    });
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-A', kind: 'plan', title: 'A', stage: 'intake_complete', dispatchedAt: '2026-01-03T00:00:00.000Z' }));
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close', timestamp: '2026-01-04T00:00:00.000Z', itemId: 'WL-A', itemTitle: 'A',
+      paneId: 'w1:p2', kind: 'plan', outcome: 'closed-as-plan-complete', closed: true,
+    });
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].stage).toBe('plan_complete');
+  });
+
+  it('derives the audit verdict from audit pane-close outcomes', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-PASS', kind: 'audit', title: 'Pass', stage: 'in_review', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close', timestamp: '2026-01-02T00:00:00.000Z', itemId: 'WL-PASS', itemTitle: 'Pass',
+      paneId: 'w1:p1', kind: 'audit', outcome: 'audit-passed', closed: true,
+    });
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-FAIL', kind: 'audit', title: 'Fail', stage: 'in_review', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close', timestamp: '2026-01-02T00:00:00.000Z', itemId: 'WL-FAIL', itemTitle: 'Fail',
+      paneId: 'w1:p2', kind: 'audit', outcome: 'audit-failed', closed: true,
+    });
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows.find((r) => r.itemId === 'WL-PASS')?.auditResult).toBe(true);
+    expect(rows.find((r) => r.itemId === 'WL-FAIL')?.auditResult).toBe(false);
+    expect(rows.find((r) => r.itemId === 'WL-PASS')?.stage).toBe('in_review');
+  });
+
+  it('keeps the dispatched-at stage for a requires-attention close (no stage implication)', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({ itemId: 'WL-A', kind: 'implement', title: 'A', stage: 'plan_complete', dispatchedAt: '2026-01-01T00:00:00.000Z' }),
+    );
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close', timestamp: '2026-01-02T00:00:00.000Z', itemId: 'WL-A', itemTitle: 'A',
+      paneId: 'w1:p1', kind: 'implement', outcome: 'requires-attention', closed: true,
+    });
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows[0].stage).toBe('plan_complete');
+    expect(rows[0].auditResult).toBeUndefined();
+  });
+
+  it('treats an empty or non-string stage as absent without throwing', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-EMPTY', kind: 'plan', title: 'A', stage: '', dispatchedAt: '2026-01-01T00:00:00.000Z' }));
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-BAD', kind: 'plan', title: 'B', stage: 42, dispatchedAt: '2026-01-02T00:00:00.000Z' }));
+    const rows = await recentDispatchedItems(cwd);
+    expect(rows.find((r) => r.itemId === 'WL-EMPTY')?.stage).toBeUndefined();
+    expect(rows.find((r) => r.itemId === 'WL-BAD')?.stage).toBeUndefined();
   });
 });

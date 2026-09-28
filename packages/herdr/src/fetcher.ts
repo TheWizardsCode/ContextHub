@@ -194,8 +194,11 @@ export interface WorkItem {
   /**
    * True when the row is a synthetic, log-derived "recent dispatch" row
    * rather than a live `wl` work item (WL-0MUL2IY8L009S3PQ). Synthetic rows
-   * have no live priority/risk/effort/audit state; the renderer shows `—`
-   * for those fields and annotates the row with the dispatch metadata below.
+   * have no live priority/risk/effort state; the renderer shows `—` for those
+   * fields and annotates the row with the dispatch metadata below. A stage
+   * (and, for an audit outcome, a fresh audit verdict) IS carried so the row
+   * renders the same stage/audit icons as the live views
+   * (WL-0MUGLL9SS002E1D2).
    */
   isLogDerived?: boolean;
   /**

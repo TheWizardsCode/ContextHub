@@ -1152,6 +1152,14 @@ trace.
   newest-first by the item's most recent log entry, and annotated with the
   dispatch `kind` and the latest pane-close `outcome` where available. The
   id and title come from the log, so closed/deleted items still appear.
+- **Same icons as the live views.** Each row renders the same shared stage and
+  audit icons every other Herdr view uses: the stage is the dispatch marker's
+  dispatched-at stage, overridden by the stage a stage-advancing pane-close
+  outcome reached (`closed-as-intake-complete` → 📥 `intake_complete`,
+  `closed-as-plan-complete` → 📋 `plan_complete`, `audit-passed`/`audit-failed`
+  → 🔍 `in_review` with the fresh ✅/❌ verdict); `requires-attention` keeps the
+  dispatched-at stage. This avoids the ❓ unknown-stage fallback the first cut
+  rendered (WL-0MUGLL9SS002E1D2).
 - **Read-only & fail-safe.** The view never writes the log or mutates work
   items, and a missing/unreadable/empty/malformed log renders an empty list
   (0 items) with no crash. Selecting a row opens the detail view with a

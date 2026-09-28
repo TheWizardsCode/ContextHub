@@ -10,6 +10,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { stageIcon, auditIcon } from '@worklog/shared/icons';
 import { buildDispatchWorkItem } from './dispatch-view.js';
 import type { RecentDispatchRow } from './downtime-log.js';
 import { formatItemLine, formatMetadataPanel, buildMetaRows } from './worklist.js';
@@ -120,5 +121,62 @@ describe('formatMetadataPanel — absent live fields degrade to — (WL-0MUL2IY8
     expect(labels).not.toContain('Priority');
     expect(labels).not.toContain('Risk');
     expect(labels).not.toContain('Effort');
+  });
+});
+
+// ── Icon consistency with every other view (WL-0MUGLL9SS002E1D2 audit fix) ──
+// A manual review rejected the first implementation because the dispatches view
+// rendered the ❓ unknown-stage glyph where every other view shows a real
+// stage/audit icon. The synthetic row now carries the log-derived stage (and
+// any audit verdict) so the shared icon helpers produce identical output.
+describe('buildDispatchWorkItem — stage/audit icons match other views', () => {
+  it('carries the log-derived stage onto the synthetic item', () => {
+    const item = buildDispatchWorkItem({ ...baseRow, stage: 'plan_complete' });
+    expect(item.stage).toBe('plan_complete');
+  });
+
+  it('renders a real stage icon in the list line, never the ❓ unknown fallback', () => {
+    const line = visible(formatItemLine(buildDispatchWorkItem({ ...baseRow, stage: 'plan_complete' }), 160));
+    expect(line).toContain(stageIcon('plan_complete'));
+    expect(line).not.toContain('\u{2753}');
+  });
+
+  it('renders the fresh audit verdict icon for an audit outcome (like a live in_review audit)', () => {
+    const passed = visible(
+      formatItemLine(
+        buildDispatchWorkItem({ ...baseRow, stage: 'in_review', auditResult: true, latestOutcome: 'audit-passed' }),
+        160,
+      ),
+    );
+    expect(passed).toContain(auditIcon(true));
+
+    const failed = visible(
+      formatItemLine(
+        buildDispatchWorkItem({ ...baseRow, stage: 'in_review', auditResult: false, latestOutcome: 'audit-failed' }),
+        160,
+      ),
+    );
+    expect(failed).toContain(auditIcon(false));
+  });
+
+  it('shows the stage icon in the metadata Stage row', () => {
+    const rows = buildMetaRows(buildDispatchWorkItem({ ...baseRow, stage: 'plan_complete' }));
+    const stageRow = rows.find(([label]) => label === 'Stage');
+    expect(stageRow?.[1]).toBe(`${stageIcon('plan_complete')} plan_complete`);
+  });
+
+  it('shows the audit verdict in the metadata Audit row for an audit outcome', () => {
+    const rows = buildMetaRows(
+      buildDispatchWorkItem({ ...baseRow, stage: 'in_review', auditResult: true, latestOutcome: 'audit-passed' }),
+    );
+    const auditRow = rows.find(([label]) => label === 'Audit');
+    expect(auditRow?.[1]).toContain(auditIcon(true));
+    expect(auditRow?.[1]).toContain('ready to close');
+  });
+
+  it('still shows — for the Audit row when the log carries no verdict', () => {
+    const rows = buildMetaRows(buildDispatchWorkItem({ ...baseRow, stage: 'plan_complete' }));
+    const auditRow = rows.find(([label]) => label === 'Audit');
+    expect(auditRow?.[1]).toBe('—');
   });
 });

@@ -11,8 +11,10 @@
  *
  * Synthetic rows are DISPLAY-ONLY: they are never written back to `wl` and are
  * marked with `isLogDerived: true` so the renderer can show `—` for absent
- * live fields (priority/risk/effort/audit state) and annotate the dispatch
- * kind/outcome instead of pretending to have full work-item metadata.
+ * live fields (priority/risk/effort) and annotate the dispatch kind/outcome
+ * instead of pretending to have full work-item metadata. The log-derived
+ * `stage` (and, for an audit outcome, the audit verdict) IS carried so the row
+ * renders the same stage/audit icons as every other view (WL-0MUGLL9SS002E1D2).
  */
 
 import type { WorkItem } from './fetcher.js';
@@ -38,6 +40,18 @@ export function buildDispatchWorkItem(row: RecentDispatchRow): WorkItem {
   const status =
     outcome === 'requires-attention' ? 'blocked' : outcome ? 'completed' : 'in_progress';
 
+  // Render the SAME stage/audit icons as a live row (WL-0MUGLL9SS002E1D2 audit
+  // fix): carry the log-derived stage so the list prefix and metadata Stage row
+  // show a real stage glyph (📥/📋/🔍/…) instead of the ❓ unknown fallback.
+  // For an audit outcome, the pane-close timestamp is both the audited-at and
+  // the last-content-change time (nothing later in the log), so the shared
+  // `stageDisplayIcon` resolves a fresh ✅/❌ verdict exactly as a freshly
+  // audited `in_review` live row would.
+  const auditTimestamps =
+    row.auditResult !== undefined && row.latestTimestamp !== undefined
+      ? { auditedAt: row.latestTimestamp, updatedAt: row.latestTimestamp }
+      : {};
+
   const description = [
     'Log-derived dispatch row — projected from `.worklog/downtime-dispatches.log`, not a live work item.',
     '',
@@ -50,6 +64,9 @@ export function buildDispatchWorkItem(row: RecentDispatchRow): WorkItem {
     id: row.itemId,
     title: row.title,
     status,
+    stage: row.stage,
+    auditResult: row.auditResult,
+    ...auditTimestamps,
     isLogDerived: true,
     dispatchKind: row.kind,
     dispatchOutcome: outcome,

@@ -326,6 +326,21 @@ export interface RecentDispatchRow {
   title: string;
   /** Dispatch kind (plan/intake/audit/risk-effort/implement) when present. */
   kind?: string;
+  /**
+   * Worklog stage the item reached, derived from the log: the dispatch
+   * marker's dispatched-at `stage`, overridden by a stage-advancing
+   * pane-close outcome (see `PANE_CLOSE_OUTCOME_STAGE`). Rendered through the
+   * same stage/audit icon logic as a live row so the dispatches view shows the
+   * SAME icons as every other view (WL-0MUGLL9SS002E1D2 audit fix). Unset when
+   * the log carried no usable stage.
+   */
+  stage?: string;
+  /**
+   * Audit verdict implied by an audit pane-close outcome
+   * (`audit-passed` → `true`, `audit-failed` → `false`). Unset for non-audit
+   * outcomes.
+   */
+  auditResult?: boolean;
   /** Latest pane-close outcome, when a pane-close entry exists for the item. */
   latestOutcome?: string;
   /**
@@ -334,6 +349,31 @@ export interface RecentDispatchRow {
    * carried a parseable timestamp.
    */
   latestTimestamp?: string;
+}
+
+/**
+ * Stage a pane-close outcome indicates the item reached
+ * (WL-0MUGLL9SS002E1D2 audit fix). Outcomes that do not imply a canonical
+ * stage (`requires-attention`) are absent so the row keeps the marker's
+ * dispatched-at stage. `audit-passed`/`audit-failed` are audit-tier closes on
+ * `in_review` items, so they map to `in_review`.
+ */
+const PANE_CLOSE_OUTCOME_STAGE: Record<string, string> = {
+  'closed-as-intake-complete': 'intake_complete',
+  'closed-as-plan-complete': 'plan_complete',
+  'audit-passed': 'in_review',
+  'audit-failed': 'in_review',
+};
+
+/**
+ * Audit verdict implied by an audit pane-close outcome, or `undefined` for a
+ * non-audit outcome. Drives the audit-aware `in_review` icon so a log-derived
+ * audit row renders ✅/❌ exactly like a freshly audited live row.
+ */
+function paneCloseAuditResult(outcome: string | undefined): boolean | undefined {
+  if (outcome === 'audit-passed') return true;
+  if (outcome === 'audit-failed') return false;
+  return undefined;
 }
 
 /** Numeric sort key for a row timestamp; missing/unparseable sorts oldest. */
@@ -374,6 +414,17 @@ export async function recentDispatchedItems(
       if (row === undefined) continue;
       if (typeof e.outcome === 'string' && e.outcome.length > 0) {
         row.latestOutcome = e.outcome;
+        // A stage-advancing close overrides the dispatched-at stage so the
+        // row's stage icon reflects where the item ended up, not where it
+        // started (WL-0MUGLL9SS002E1D2 audit fix).
+        const reachedStage = PANE_CLOSE_OUTCOME_STAGE[e.outcome];
+        if (reachedStage !== undefined) {
+          row.stage = reachedStage;
+        }
+        const auditResult = paneCloseAuditResult(e.outcome);
+        if (auditResult !== undefined) {
+          row.auditResult = auditResult;
+        }
       }
       if (typeof e.timestamp === 'string' && e.timestamp.length > 0) {
         row.latestTimestamp = e.timestamp;
@@ -397,6 +448,8 @@ export async function recentDispatchedItems(
         ? e.title
         : existing?.title ?? UNKNOWN_DISPATCH_TITLE;
     const kind = typeof e.kind === 'string' ? e.kind : existing?.kind;
+    const stage =
+      (typeof e.stage === 'string' && e.stage.length > 0 ? e.stage : undefined) ?? existing?.stage;
     const latestTimestamp =
       (typeof e.dispatchedAt === 'string' ? e.dispatchedAt : undefined) ?? existing?.latestTimestamp;
 
@@ -404,6 +457,8 @@ export async function recentDispatchedItems(
       itemId: e.itemId,
       title,
       kind,
+      stage,
+      auditResult: existing?.auditResult,
       latestOutcome: existing?.latestOutcome,
       latestTimestamp,
     });

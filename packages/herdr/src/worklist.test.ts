@@ -921,6 +921,31 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
     expect(defaultFetcher).not.toHaveBeenCalled();
   });
 
+  it('renders dispatch rows with the same stage icon as other views (WL-0MUGLL9SS002E1D2 audit fix)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-PLAN',
+      kind: 'plan',
+      title: 'Plan dispatch',
+      stage: 'intake_complete',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    await writeDispatch(root, {
+      itemId: 'WL-PLAN',
+      kind: 'plan',
+      itemTitle: 'Plan dispatch',
+      outcome: 'closed-as-plan-complete',
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:00.000Z',
+    });
+    const items = await fetchItemsForView(null, null, vi.fn(), true, root);
+    expect(items[0].stage).toBe('plan_complete');
+    const line = formatItemLine(items[0], 160).replace(/\x1b\[[0-9;]*m/g, '');
+    // The real stage glyph, never the ❓ unknown-stage fallback.
+    expect(line).toContain('\u{1F4CB}');
+    expect(line).not.toContain('\u{2753}');
+  });
+
   it('fetchItemsForView dispatches view is fail-safe for a missing log', async () => {
     const root = makeTempRoot();
     const defaultFetcher = vi.fn().mockResolvedValue([makeItem('LIVE')]);
