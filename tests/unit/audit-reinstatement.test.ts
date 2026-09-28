@@ -16,9 +16,9 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
-import { WorklogDatabase } from '../src/database.js';
+import { WorklogDatabase } from '../../src/database.js';
 import { assessAuditInvalidate } from '@worklog/shared/icons';
-import { createTempDir, cleanupTempDir, createTempJsonlPath, createTempDbPath } from './test-utils.js';
+import { createTempDir, cleanupTempDir, createTempJsonlPath, createTempDbPath } from '../test-utils.js';
 
 describe('assessAuditInvalidate — decision truth table (WL-0MU1EWMHN000YUCG)', () => {
   it('returns re-audit when there is no prior audit', () => {
