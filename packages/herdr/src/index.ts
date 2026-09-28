@@ -53,7 +53,12 @@ import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
-import { getMachineCoordinationDir } from './machine-coordination.js';
+import {
+  getMachineCoordinationDir,
+  isHostAuditActive,
+  writeActiveAuditMarker,
+  removeActiveAuditMarker,
+} from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
 import { createHerdrReaperDeps } from './pane-close-herdr.js';
 import { runScheduledPaneClose } from './pane-close-scheduler.js';
@@ -1002,6 +1007,25 @@ export function createDowntimeDeps(
     },
     async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
       try {
+        // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): FIRST check
+        // the machine-wide active-audit marker at
+        // `~/.herdr/downtime/active-audit`. This coordinates audits ACROSS
+        // projects and herdr instances on the same host — the per-worklog
+        // check below cannot see audits dispatched by other projects'
+        // dispatchers, which is what allowed host-wide saturation
+        // (2026-09-26 incident). A non-stale marker means an audit is
+        // running somewhere on this host; defer this audit. A stale marker
+        // (older than DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS) is treated as
+        // released. Fail-open: if the coordination dir cannot be resolved
+        // the host-wide check is skipped and the per-worklog check below
+        // still runs (the legacy behaviour is preserved).
+        const coordinationDir = getMachineCoordinationDir();
+        if (coordinationDir !== null && isHostAuditActive(coordinationDir)) {
+          // Host-wide saturation: an audit is active on this host
+          // (dispatched by another instance/project). Report with source
+          // so the worker can log 'audit-host-saturated' specifically.
+          return { ok: true, active: true, source: 'host-wide' };
+        }
         // Active-audit single-flight (WL-0MT3PHW4I002SNOV): does any
         // non-stale kind=audit dispatch marker map to an item still
         // `in_progress`? Dispatch-log-first (per plan decision Q2): read the
@@ -1020,8 +1044,8 @@ export function createDowntimeDeps(
         );
         if (auditCandidateIds.size === 0) {
           // Cheap fast-path: no non-stale audit markers → no active audit
-          // (no worklog query needed).
-          return { ok: true, active: false };
+          // (no worklog query needed). Source is per-worklog.
+          return { ok: true, active: false, source: 'per-worklog' };
         }
         // Intersect with the worklog's in_progress items: a marker only
         // counts as an ACTIVE audit while its item is still in_progress
@@ -1039,7 +1063,7 @@ export function createDowntimeDeps(
           return { ok: false, error: 'in_progress parse error' } as const;
         }
         const active = [...auditCandidateIds].some((id) => inProgress.has(id));
-        return { ok: true, active };
+        return { ok: true, active, source: 'per-worklog' };
       } catch (err) {
         // Fail-open: a wl failure yields {ok:false} — the dispatcher skips
         // the audit tier and falls through to the next tier; dispatch is
@@ -1336,11 +1360,32 @@ export function createDowntimeDeps(
       // than dispatching an unmarked item.
       try {
         await appendDowntimeLogEntry(event.cwd, JSON.stringify(event));
-        return true;
       } catch {
         // fail-closed: the marker could not be written → abort the dispatch
         return false;
       }
+      // 3. Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): write the
+      // machine-wide active-audit marker when the durable per-worklog marker
+      // landed. This coordinates audit serialisation ACROSS projects and
+      // herdr instances on the same host. Fail-safe: the write is
+      // best-effort — a failure does NOT abort the dispatch (the per-worklog
+      // marker and stale window still protect against double-dispatch within
+      // this project). Written AFTER the marker write so a failed marker
+      // never leaves a host-wide lock behind with no corresponding dispatch;
+      // a spawn failure releases it via `recordDispatchFailure`.
+      if (event.kind === 'audit') {
+        try {
+          const coordinationDir = getMachineCoordinationDir();
+          if (coordinationDir !== null) {
+            // Identify the dispatching plugin process for diagnostics; the
+            // marker's single-flight semantics do not depend on the id.
+            writeActiveAuditMarker(coordinationDir, `herdr:${process.pid}`);
+          }
+        } catch {
+          // fail-safe: marker write failure must never abort dispatch
+        }
+      }
+      return true;
     },
     async recordError(event: DowntimeErrorEvent): Promise<void> {
       // Persistent CLI-error trail (three-strike rule): rolling JSONL log
@@ -1369,6 +1414,20 @@ export function createDowntimeDeps(
         );
       } catch {
         // fail-closed: audit logging must never crash the worker
+      }
+      // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): a failed audit
+      // spawn never produced a running audit, so release the machine-wide
+      // marker immediately instead of stranding the host slot for the full
+      // stale window. Best-effort — the stale window remains the backstop.
+      if (event.kind === 'audit') {
+        try {
+          const coordinationDir = getMachineCoordinationDir();
+          if (coordinationDir !== null) {
+            removeActiveAuditMarker(coordinationDir);
+          }
+        } catch {
+          // fail-safe: marker removal failure must never crash the worker
+        }
       }
     },
     async recordDispatchEnrichment(event: DowntimeDispatchEnrichmentEvent): Promise<void> {
@@ -1453,6 +1512,24 @@ export function createDowntimeDeps(
     // (WL-0MU308WSF0002JWN). Fail-closed: `appendPaneCloseLogEntry` never
     // throws.
     async recordPaneClose(entry, cwd: string): Promise<void> {
+      // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): when an audit
+      // pane completes (audit-passed or audit-failed), release the
+      // machine-wide active-audit marker so other instances can dispatch.
+      // Fail-safe: best-effort only — a removal failure must never crash the
+      // worker. The stale window provides a safety net if the removal fails.
+      if (
+        entry.kind === 'audit' &&
+        (entry.outcome === 'audit-passed' || entry.outcome === 'audit-failed')
+      ) {
+        try {
+          const coordinationDir = getMachineCoordinationDir();
+          if (coordinationDir !== null) {
+            removeActiveAuditMarker(coordinationDir);
+          }
+        } catch {
+          // fail-safe: marker removal failure must never crash worker
+        }
+      }
       await appendPaneCloseLogEntry(cwd, entry);
     },
     // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): classify and close

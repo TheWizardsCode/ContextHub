@@ -62,7 +62,8 @@ head yields no candidate**:
 Because of the extension, the **"no candidate" contract applies only to a genuinely empty
 dispatchable backlog** (or a backlog fully blocked by a safety gate) — not to an item hidden
 beyond the `browseItemCount` window. Other terminal reasons (code-freeze, `audit-in-flight`,
-`fresh-audit-skip`, `review-queue-hold`, `wl-error`) keep their existing semantics.
+`audit-host-saturated`, `fresh-audit-skip`, `review-queue-hold`, `wl-error`) keep their
+existing semantics.
 
 **Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
 entry per instance — an **offer** of that instance's own Herdr list head (computed at the
@@ -385,6 +386,75 @@ the worklog still holds dispatchable work. Therefore:
 - **Bound achieved:** dispatch occurs at least once per `min(noCandidateCooldownMs,
   2 × checkInIntervalMs)` (60 min) whenever the worklog holds dispatchable
   work — never once per full cooldown.
+
+### Host-wide audit serialisation (WL-0MUIVE0YG000UVIA)
+
+**Problem.** On 2026-09-26 four downtime audits ran concurrently on a single host —
+dispatched by *different projects' dispatchers*. The existing per-instance
+active-audit single-flight (WL-0MT3PHW4I002SNOV) only reads the per-worklog
+`<cwd>/.worklog/downtime-dispatches.log`, so it cannot see an audit dispatched
+by another project on the same host. Both the shared Local Proxy slots and the
+audit runner's host-wide slot (`AUDIT_MAX_CONCURRENCY=1` in cheap-proxy mode)
+were saturated; the audit for `SA-0MUG0WFP8008WN63` failed on every Pi call
+after 90 s and was aborted with no usable verdict.
+
+**Contract.** At most **one audit-tier `/skill:audit` run is actively
+executing per host**, across herdr instances and projects. The mechanism is a
+dedicated machine-wide marker file
+(`~/.herdr/downtime/active-audit`, or `HERDR_COORDINATION_DIR`):
+
+- **Written** by `recordDispatch` on an **audit** dispatch, immediately before
+the per-worklog marker (best-effort: a write failure never aborts the
+dispatch — the per-worklog marker and stale window still protect the project).
+- **Read first** by `getActiveAudit` before the per-worklog check. A non-stale
+marker returns `{ ok: true, active: true, source: 'host-wide' }` without any
+`wl` call, so the audit tier is skipped host-wide; the candidate falls
+through to the next tier (implement → plan → intake) or the tick reports the
+neutral reason **`audit-host-saturated`** (never `no-candidate`, so the
+no-candidate cooldown is not entered and the next idle tick re-checks).
+- **Removed** by `recordPaneClose` when an audit pane completes
+(`audit-passed` / `audit-failed`), releasing the host slot for other
+instances, and by `recordDispatchFailure` when an audit **spawn fails** (the
+attempt never produced a running audit, so the slot must not be stranded). A
+best-effort removal; a crashed audit pane is released by the stale window.
+- **Staleness:** a marker older than `DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS`
+(default **2 h**, matching `DOWNTIME_AUDIT_STALE_WINDOW_MS`) is treated as
+released, so a crashed audit pane can never block the host indefinitely.
+
+**Relationship to the existing guards** (defence in depth — the host-wide
+gate is the *outermost* audit-concurrency guard, never a replacement):
+
+| Guard | Scope | Sees | Action |
+|---|---|---|---|
+| **Host-wide marker** (this mechanism) | machine-wide, all projects/instances | an audit dispatched by ANY project on this host | skip audit tier; reason `audit-host-saturated` |
+| **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
+| **Proxy-slot gating** (`available_slots` / `contention_queue_depth` / per-slot ownership) | the Local Proxy | live slot availability, queue depth, live leases | ineligible/skip audit dispatch (per-tier minimum 2 free slots) or `proxy-contention` |
+| **`AUDIT_PHASE2_PARALLELISM=1`** | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots |
+
+**Observability.** The skip is logged to stderr as
+`Downtime audit tier skipped: audit-host-saturated (concurrentAudits=1,
+freeSlots=…, contentionQueueDepth=…)` and recorded (rate-limited) in
+`.worklog/downtime-coordination.log` via the shared no-dispatch decision log
+(`reason: 'audit-host-saturated'`, with the poll's `freeSlots`/`totalSlots`/
+`contentionDepth`). The concurrent-audit count is `1` by construction (the
+host-wide single-flight); the free-slot and contention figures distinguish
+infrastructure saturation from a content problem.
+
+**Scope.** Single-machine v1 only — matches the machine-coordination contract
+(`machine-coordination.ts`): multi-machine (flock/NFS) is out of scope and the
+dir resolves per-user. The marker adds no read-modify-write contention on the
+shared `downtime-coordination.json` (a dedicated file, read as a cheap
+fast-path before the `wl` query).
+
+**Tests.** `machine-coordination.test.ts` pins the marker lifecycle
+(write/read/remove, malformed/stale/absent fail-safe); `index.test.ts`
+exercises the real `createDowntimeDeps` wiring (a second instance sees the
+marker; `recordDispatch` writes it for audits only; `recordPaneClose` releases
+it on audit completion); `downtime-worker.test.ts` pins the worker gate (a
+host-wide active audit skips the tier, reports `audit-host-saturated`, and
+falls through/deferred; a per-worklog active audit still reports
+`audit-in-flight`; the observability line carries the concurrent-audit count
+and slot state).
 
 ### Producer-review gate (WL-0MTIAL65N004T22F)
 
@@ -886,6 +956,7 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 | `~/.herdr/downtime/downtime-leader-lease.json` | Leader lease (5-min TTL, machine dir) |
 | `~/.herdr/downtime/downtime-coordination.json` | Shared coordination list (machine dir, one entry per instance) |
 | `~/.herdr/downtime/downtime-coordination.lock` | Coordination lock (machine dir, guards anchor provisioning + coordination writes) |
+| `~/.herdr/downtime/active-audit` | Host-wide audit serialisation marker `{ instanceId, dispatchedAt }` (machine dir; written on audit dispatch, removed on audit-pane close, stale-released after 2 h — WL-0MUIVE0YG000UVIA) |
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
 | `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning (per worklog, retained) |
 | `<worklog-root>/.worklog/downtime-dispatches.log` | Dispatched items (per worklog, retained; includes `anchor-unavailable` neutral no-dispatch) |
@@ -901,6 +972,17 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
   continuously, and the coordination list has offers. Check
   `downtime-coordination.log` for check-ins and the dispatches log for the
   last dispatch.
+- **Audits skipped with `audit-host-saturated` (WL-0MUIVE0YG000UVIA):** a
+  non-stale `~/.herdr/downtime/active-audit` marker means an audit is running
+  on this host — possibly dispatched by another project's dispatcher. This is
+  expected host-wide single-flight behaviour, not a failure: audits resume
+  when the running pane completes and `recordPaneClose` removes the marker,
+  or after the 2-hour stale window. Inspect the marker (`cat
+  ~/.herdr/downtime/active-audit`) and the decision log
+  (`grep audit-host-saturated <root>/.worklog/downtime-coordination.log`). If
+  no audit is actually running, the marker is stale — wait for the window or
+  remove the file; set `HERDR_COORDINATION_DIR` when testing to avoid the live
+  machine dir.
 - **Diagnosing wl errors with per-strike logs (WL-0MTJPYM53003ORCV):**
   when the downtime worker encounters CLI errors, it now logs a **structured
   JSONL entry on every strike** (not just the third). To diagnose:

@@ -1360,6 +1360,130 @@ describe('dispatch active-audit single-flight (parent WL-0MT3PHW4I002SNOV)', () 
   });
 });
 
+// ── Host-wide audit saturation (WL-0MUIVE0YG000UVIA) ──────────────────
+//
+// The per-worklog active-audit check (WL-0MT3PHW4I002SNOV) only sees audits
+// dispatched by THIS project's dispatcher. The 2026-09-26 incident ran four
+// downtime audits concurrently on one host — dispatched by DIFFERENT
+// projects — saturating the shared Local Proxy and the audit runner's
+// host-wide slot. These tests pin the host-wide serialisation gate: when a
+// machine-wide active-audit marker is present (`source: 'host-wide'`), a
+// second audit is NOT started; the candidate falls through/deferred.
+describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
+  const auditCandidate: DowntimeCandidate = {
+    id: 'WL-AUD',
+    title: 'Audit me',
+    stage: 'audit',
+  };
+  const implementCandidate: DowntimeCandidate = {
+    id: 'WL-IMP',
+    title: 'Implement me',
+    stage: 'implement',
+  };
+
+  const hostSaturated: DowntimeActiveAuditResult = {
+    ok: true,
+    active: true,
+    source: 'host-wide',
+  };
+  const perWorklogActive: DowntimeActiveAuditResult = {
+    ok: true,
+    active: true,
+    source: 'per-worklog',
+  };
+
+  it('a host-wide active audit skips the audit tier and falls through to the implement tier (AC1/AC2)', async () => {
+    // A second instance/project on the same host sees the machine-wide
+    // marker and must NOT start another audit. The audit candidate lookup is
+    // never consulted and dispatch falls through to the next tier.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(hostSaturated),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getActiveAudit).toHaveBeenCalledWith('/repo');
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('WL-IMP');
+  });
+
+  it('host-wide saturation with an empty remaining backlog reports audit-host-saturated (never no-candidate)', async () => {
+    // A host-wide skip is NOT a genuine empty backlog: it must never enter
+    // the no-candidate cooldown — polling continues and the next idle tick
+    // re-checks while the remote audit is still running.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(hostSaturated),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-host-saturated');
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes host-wide from per-worklog saturation: a per-worklog active audit still reports audit-in-flight', async () => {
+    // The reason string must not regress the existing per-worklog semantics:
+    // only `source: 'host-wide'` produces 'audit-host-saturated'.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(perWorklogActive),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-in-flight');
+  });
+
+  it('logs audit-host-saturated with the concurrent-audit count and slot state (AC3)', async () => {
+    // Contention must be visible: the skip line names the condition and
+    // carries the concurrent-audit count (1 — host-wide single-flight) plus
+    // the live free-slot / contention queue state so an operator can tell
+    // infra saturation from a content problem.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const deps = makeDeps({
+        getActiveAudit: vi.fn().mockResolvedValue(hostSaturated),
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, {
+        model: 'plan',
+        cwd: '/repo',
+        freeSlots: 2,
+        contentionQueueDepth: 0,
+      });
+
+      expect(outcome.kind).toBe('implement');
+      expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Downtime audit tier skipped: audit-host-saturated'),
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('concurrentAudits=1'),
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('contentionQueueDepth=0'),
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('freeSlots=2'),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+});
+
 describe('dispatch tier free-slot minimums (parent WL-0MT32F90V008UAD2 AC3)', () => {
   const auditCandidate: DowntimeCandidate = {
     id: 'WL-AUD',

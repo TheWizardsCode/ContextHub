@@ -19,7 +19,8 @@
  *  - `dispatchDowntimeWork` — Herdr-list-head dispatch (WL-0MTK1ILM2009QYB2): consumes the Herdr selection list head
  *    (`deps.getHerdrListHead` = fetcher → smart-selection → grouping, the sole ranking path) and applies
  *    every remaining safety gate as a sequential FILTER on that ordered sequence (scheduled prompt first,
- *    then code-freeze, dispatched-marker, free-slot minimums, active-audit single-flight, freshness/recency,
+ *    then code-freeze, dispatched-marker, free-slot minimums, active-audit single-flight (per-worklog
+ *    AND host-wide machine marker, WL-0MUIVE0YG000UVIA — reason 'audit-host-saturated'), freshness/recency,
  *    pre-dispatch CAS claim + per-process single-flight, then spawn). No second ranking implementation remains
  *    on the dispatch path (AC1–2). The former audit/implement/plan/intake tier ordering is retired.
  *    Code-freeze gate
@@ -1440,7 +1441,7 @@ export type DowntimeClaimResult =
  *    unanswerable check.
  */
 export type DowntimeActiveAuditResult =
-  | { ok: true; active: boolean }
+  | { ok: true; active: boolean; source?: 'host-wide' | 'per-worklog' }
   | { ok: false; error?: string };
 
 /**
@@ -2250,7 +2251,10 @@ export interface DowntimeDispatchOutcome {
    * machine-wide Dispatcher anchor pane could not be provisioned — neutral
    * "no dispatch this cycle", never a fallback to the leader's pane) |
    * 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
-   * in flight) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
+   * in flight) | 'audit-host-saturated' (WL-0MUIVE0YG000UVIA: the
+   * machine-wide active-audit marker shows an audit running on this host —
+   * dispatched by ANY project/instance — so the audit tier is deferred
+   * host-wide) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
    * was recorded during interim). When `reason` is 'wl-error', `error`
    * may carry the underlying wl/CLI error details (timeout, SQLITE_BUSY,
    * parse failure, stderr) for the three-strike pause log.
@@ -2485,7 +2489,7 @@ async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
   ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -2585,7 +2589,7 @@ async function dispatchFromHerdrList(
     // still be the active-audit item that should cause the skip).
     if (k === 'audit') {
       const active = await deps.getActiveAudit(ctx.cwd);
-      if (active.ok) { if (active.active) { flags.auditInFlight = true; continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide') { flags.auditHostSaturated = true; } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
       try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
     }
     // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion
@@ -3828,6 +3832,33 @@ export async function runCoordinationCheckIn(
 }
 
 /**
+ * Observability for host-wide audit saturation (WL-0MUIVE0YG000UVIA AC3):
+ * emit a clear skip/defer line that names the condition and includes the
+ * audit-runner queue state and free-slot contention so an operator can tell
+ * infrastructure saturation from content problems. The machine-wide marker
+ * guarantees at most one active audit per host, so the concurrent-audit
+ * count is 1 by construction; the free-slot and contention figures are the
+ * live slot state captured at the poll.
+ *
+ * Fail-closed: logging must never crash the worker.
+ */
+function logHostAuditSaturation(
+  freeSlots: number | undefined,
+  contentionQueueDepth: number | undefined,
+): void {
+  try {
+    const slots = typeof freeSlots === 'number' ? freeSlots : 'unknown';
+    const contention = typeof contentionQueueDepth === 'number' ? contentionQueueDepth : 'unknown';
+    process.stderr.write(
+      `[worklog-plugin] Downtime audit tier skipped: audit-host-saturated ` +
+        `(concurrentAudits=1, freeSlots=${slots}, contentionQueueDepth=${contention})\n`,
+    );
+  } catch {
+    // fail-closed: logging must never crash the worker
+  }
+}
+
+/**
  * dispatch one downtime work item. Selection priority: FIRST the
  * scheduled-prompts tier (WL-0MSS1Q5ER007QDKX) — a due scheduled prompt
  * (e.g. `/skill:refactor` every 3 days) dispatches its prompt text before
@@ -3917,6 +3948,7 @@ export async function runCoordinationCheckIn(
  * met (AC1); a dispatch consumes the local slot, so the proxy reports busy
  * and the tracker requires a fresh full idle period before the next dispatch.
  */
+
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
   opts: {
@@ -3999,6 +4031,11 @@ export async function dispatchDowntimeWork(
     let auditInFlight = false;
     let auditCheckFailed = false;
     let freshnessSkip = false;
+    // Host-wide audit saturation (WL-0MUIVE0YG000UVIA): true when the
+    // machine-wide active-audit marker (another project/instance on this
+    // host) caused the audit-tier skip, as opposed to a per-worklog
+    // in-flight audit. Drives the 'audit-host-saturated' reason/log token.
+    let auditHostSaturated = false;
 
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
@@ -4041,7 +4078,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, auditHostSaturated };
       const head = await deps.getHerdrListHead(opts.cwd);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -4074,6 +4111,7 @@ export async function dispatchDowntimeWork(
         }
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
+        auditHostSaturated = flags.auditHostSaturated;
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
@@ -4082,7 +4120,19 @@ export async function dispatchDowntimeWork(
         // chain (AC2 — gates are filters, not a fallback ranking).
         if (frozen) return { dispatched: false, reason: 'code-freeze' };
         if (freshnessSkip) return { dispatched: false, reason: 'fresh-audit-skip' };
-        if (auditInFlight) return { dispatched: false, reason: 'audit-in-flight' };
+        if (auditInFlight) {
+          // Host-wide saturation (WL-0MUIVE0YG000UVIA) vs per-worklog:
+          // distinct reason strings for observability. 'audit-host-saturated'
+          // means the machine-wide marker (another project/instance on this
+          // host) held the audit slot; 'audit-in-flight' is a per-worklog
+          // in-flight audit. auditInFlight keeps its original priority over
+          // auditCheckFailed (a mixed tick still reports the audit skip).
+          if (auditHostSaturated) {
+            logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth);
+            return { dispatched: false, reason: 'audit-host-saturated' };
+          }
+          return { dispatched: false, reason: 'audit-in-flight' };
+        }
         if (auditCheckFailed) return { dispatched: false, reason: 'wl-error', error: auditCheckError };
         // Deep review queue held the only remaining (non-critical implement)
         // candidates: neutral 'review-queue-hold', NEVER 'no-candidate' — no
@@ -4094,6 +4144,7 @@ export async function dispatchDowntimeWork(
       // legacy chain (test-compat path; flags still drive the terminal reason).
       auditInFlight = flags.auditInFlight;
       auditCheckFailed = flags.auditCheckFailed;
+      auditHostSaturated = flags.auditHostSaturated;
       freshnessSkip = flags.freshnessSkip;
     }
 
@@ -4142,9 +4193,23 @@ export async function dispatchDowntimeWork(
         if (activeAudit.ok) {
           if (activeAudit.active) {
             auditInFlight = true;
-            process.stderr.write(
-              `[worklog-plugin] Downtime audit tier skipped: audit-in-flight\n`,
-            );
+            auditHostSaturated = activeAudit.source === 'host-wide';
+            // Host-wide saturation (WL-0MUIVE0YG000UVIA) vs per-worklog:
+            // use distinct reason strings for observability. The `source`
+            // field is set by getActiveAudit: 'host-wide' when the machine-
+            // wide marker is active (cross-project serialisation),
+            // 'per-worklog' when a per-worklog dispatch marker maps to an
+            // in_progress item (single-project serialisation).
+            const skipReason = activeAudit.source === 'host-wide'
+              ? 'audit-host-saturated'
+              : 'audit-in-flight';
+            if (activeAudit.source === 'host-wide') {
+              logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth);
+            } else {
+              process.stderr.write(
+                `[worklog-plugin] Downtime audit tier skipped: ${skipReason}\n`,
+              );
+            }
           } else {
             // No active audit: proceed with the candidate lookup unchanged.
             const audit = await deps.getNextAuditCandidate(opts.cwd);
@@ -4343,7 +4408,10 @@ export async function dispatchDowntimeWork(
         : freshnessSkip
           ? { dispatched: false, reason: 'fresh-audit-skip' }
           : auditInFlight
-            ? { dispatched: false, reason: 'audit-in-flight' }
+            ? {
+                dispatched: false,
+                reason: auditHostSaturated ? 'audit-host-saturated' : 'audit-in-flight',
+              }
             : auditCheckFailed
               ? { dispatched: false, reason: 'wl-error', error: tier2ErrorDetail }
               : { dispatched: false, reason: 'no-candidate' };
