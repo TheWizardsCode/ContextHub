@@ -38,6 +38,7 @@ import searchCommand from './commands/search.js';
 import unlockCommand from './commands/unlock.js';
 import auditCommand from './commands/audit.js';
 import auditResultCommand from './commands/audit-result.js';
+import auditWaiveCommand from './commands/audit-waive.js';
 import completionCommand from './commands/completion.js';
 import cleanupWorktreeCommand from './commands/cleanup-worktree.js';
 import { detectWorktreeFromCwd, registerCurrentProcess } from './process-lifecycle.js';
@@ -333,6 +334,7 @@ const builtInCommands = [
   unlockCommand,
   auditCommand,
   auditResultCommand,
+  auditWaiveCommand,
   cleanupWorktreeCommand,
   completionCommand,
   // onboard command removed
@@ -367,6 +369,8 @@ const builtInCommandNames = new Set([
   'audit',
   'audit-show',
   'audit-set',
+  'audit-waive',
+  'audit-unwaive',
   'completion',
   'cleanup-worktree',
   // 'onboard' removed

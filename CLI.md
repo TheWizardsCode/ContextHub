@@ -299,6 +299,53 @@ wl audit-set WL-ABC123 --ready-to-close yes --audit-file report.md --summary "Fr
 wl audit-set WL-ABC123 --ready-to-close yes --fingerprint sha256-abc123 --summary "Content unchanged"
 ```
 
+### `audit-waive` [options] <id>
+
+Record an explicit, durable audit-gap waiver on a work item (WL-0MUBVH9FV0027COG).
+
+A waiver is a deliberate, auditable exception to the "no audit" gate. It suppresses the
+non-fatal closure warning emitted by `wl close` and excludes the item from the
+`wl doctor audit-gaps` flagged set. The record is stored in the nullable
+`workitems.auditWaiver` column, surfaced by `wl show --json`, and round-trips through
+JSONL sync. Absence is fail-safe: a missing waiver never suppresses a flag.
+
+Behavior:
+
+- Requires a non-empty `--reason` (a waiver must record why the gap is accepted).
+- `--author` defaults to the current user (`WL_USER` / `USER` / `USERNAME`).
+- Records `{ reason, author, waivedAt }` on the work item.
+
+Options:
+
+- `-r, --reason <reason>` — Why the audit gap is deliberately accepted (required).
+- `-a, --author <author>` — Who recorded the waiver (defaults to the current user).
+- `--prefix <prefix>` — Override default ID prefix (optional).
+- `--json` — Output in JSON format.
+
+Examples:
+
+```sh
+wl audit-waive WL-ABC123 --reason "Legacy item completed before audits were enforced"
+wl audit-waive WL-ABC123 --reason "Accepted by producer" --author "producer" --json
+```
+
+### `audit-unwaive` [options] <id>
+
+Remove an explicit audit-gap waiver from a work item. Idempotent: an item that is not
+waived is left unchanged.
+
+Options:
+
+- `--prefix <prefix>` — Override default ID prefix (optional).
+- `--json` — Output in JSON format.
+
+Examples:
+
+```sh
+wl audit-unwaive WL-ABC123
+wl audit-unwaive WL-ABC123 --json
+```
+
 ### `delete` [options] <id>
 
 Delete a work item (marks as deleted): this sets the work item status to `deleted` in the local database. If you prefer to set the status explicitly, use `wl update <id> -s deleted` instead.
@@ -363,6 +410,22 @@ are closed deepest-first so that leaf items are completed before their parents.
 - The `--force` flag unconditionally closes all descendants and then the parent,
   bypassing the audit/stage checks. For items without children, `--force` behaves
   identically to a standard close.
+
+**Non-fatal audit-gap warning (WL-0MUBVH9FV0027COG):** When the non-force close path
+closes an item from the `in_review` stage whose audit is absent or stale (per the shared
+`isAuditFresh` predicate), and the item is not covered by a fresh-audited direct parent
+and has no waiver, a clear non-fatal warning is printed to stderr (and returned in the
+`auditGapWarnings` array in `--json` mode). The close still succeeds. To silence the
+warning, re-audit the item or record a deliberate exception:
+
+```
+Warning: WL-ABC123 (root) is being closed from in_review with a missing audit and no waiver.
+This is an audit gate leak; re-audit it or record a deliberate exception with
+`wl audit-waive WL-ABC123 --reason "<why>"`.
+```
+
+`wl close --force` bypasses the warning and records a durable waiver on an uncovered
+`in_review` root, so the bypass is auditable.
 
 **Output format (recursive close):** When the audit-gated recursive close path is triggered:
 
@@ -970,6 +1033,7 @@ Subcommands:
 - `prune [options]` — Prune soft-deleted work items older than a specified age. Options: `--days <n>` (age threshold in days), `--dry-run` (show what would be pruned).
 - `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
 - `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
+- `audit-gaps [options]` — Read-only report of every `completed`/`in_review` item with **no audit record**, showing root vs `child of <parent-id>`, age (from `activityAt`/`updatedAt`), and coverage/waiver status (`uncovered` / `covered` / `waived`). Omits items with a fresh audit; a child covered by a fresh-audited direct parent is reported as `covered`, not flagged. Options: `--prefix <prefix>`. No `--apply` (read-only).
 
 Examples:
 
@@ -989,6 +1053,8 @@ wl doctor foreign-items                  # Report foreign-prefix work items (rea
 wl doctor foreign-items --dry-run --json # JSON report of foreign items
 wl doctor foreign-items --apply          # Hard-delete foreign items (destructive)
 wl doctor foreign-items --apply --push  # Clean DB and rewrite remote worklog ref
+wl doctor audit-gaps                    # Report completed/in_review items with no audit (read-only)
+wl doctor audit-gaps --json             # Machine-readable audit-gap report
 
 Known stale combinations detected by `stage-sync`:
 

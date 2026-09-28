@@ -19,6 +19,8 @@
  * No external dependencies — pure data + functions.
  */
 
+import type { AuditWaiver } from './types.js';
+
 // ── Options ───────────────────────────────────────────────────────────
 
 export interface IconOptions {
@@ -395,6 +397,64 @@ export function isCoveredByParent(
 ): boolean {
   if (!item.parentId || !parent) return false;
   return isAuditFresh(parent.auditedAt, parent.updatedAt, parent.fingerprint, parent.currentFingerprint);
+}
+
+/**
+ * Classification of an item against the no-audit gate
+ * (WL-0MUBVH9FV0027COG).
+ *
+ * - `none` — no gap: the item's own audit is fresh.
+ * - `covered` — child with no fresh own audit whose DIRECT parent has a fresh
+ *   audit (derived depth-1 coverage, WL-0MUBVH8QG0020H9L).
+ * - `waived` — an explicit, durable waiver is recorded (takes precedence).
+ * - `uncovered` — the item is a genuine audit gap and must be flagged.
+ */
+export type AuditGapStatus = 'none' | 'covered' | 'waived' | 'uncovered';
+
+/**
+ * Inputs for {@link classifyAuditGap}. All freshness decisions are delegated
+ * to the single shared {@link isAuditFresh} predicate (via the direct own-audit
+ * fields and {@link isCoveredByParent}) — no competing `auditedAt` vs
+ * `updatedAt` comparison may be introduced here.
+ */
+export interface AuditGapInput {
+  /** The item's own audit state (from the `audit_results` table), if any. */
+  ownAudit?: { auditedAt?: string | null; fingerprint?: string | null } | null;
+  /** The item's audit-relevant content timestamp. */
+  updatedAt?: string;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
+  /** The item's direct parent id (`null` for a root item). */
+  parentId?: string | null;
+  /** The explicit waiver recorded on the item, if any. */
+  auditWaiver?: AuditWaiver | null;
+  /** The direct parent's audit state, when known (for derived coverage). */
+  parentAudit?: ParentAuditState | null;
+}
+
+/**
+ * Classify an item against the no-audit gate without persisting anything.
+ *
+ * Precedence: an explicit waiver always wins (it is a deliberate operator
+ * decision); otherwise a fresh own audit means no gap; otherwise a child
+ * covered by a fresh-audited direct parent is `covered`; otherwise the item
+ * is `uncovered`.
+ *
+ * This is the single source of truth consumed by both the CLI closure guard
+ * (`src/commands/close.ts`) and the `wl doctor audit-gaps` report, keeping
+ * the CLI and herdr display paths aligned (WL-0MUBVH9FV0027COG AC3).
+ */
+export function classifyAuditGap(input: AuditGapInput): AuditGapStatus {
+  if (input.auditWaiver) return 'waived';
+  const fresh = isAuditFresh(
+    input.ownAudit?.auditedAt,
+    input.updatedAt,
+    input.ownAudit?.fingerprint,
+    input.currentFingerprint,
+  );
+  if (fresh) return 'none';
+  if (isCoveredByParent({ parentId: input.parentId }, input.parentAudit)) return 'covered';
+  return 'uncovered';
 }
 
 /**

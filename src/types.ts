@@ -9,6 +9,7 @@ export {
   type WorkItemRiskLevel,
   type WorkItemEffortLevel,
   type AuditResult,
+  type AuditWaiver,
   type WorkItemDependency,
   type WorkItem,
   type CreateWorkItemInput,

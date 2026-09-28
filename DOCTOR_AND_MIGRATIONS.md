@@ -12,6 +12,7 @@ This document describes the `wl doctor` command and the migration policy for Wor
 - **Dependency edges** — checks that all dependency edges reference existing work items.
 - **Pending migrations** — the `upgrade` subcommand detects and applies schema migrations.
 - **Stale deleted items** — the `prune` subcommand removes soft-deleted items older than a configurable threshold.
+- **Audit gaps** — the `audit-gaps` subcommand reports `completed`/`in_review` items with no audit record (read-only).
 
 ## Running `wl doctor`
 
@@ -99,6 +100,40 @@ The report includes total items scanned, the foreign count, counts grouped by pr
 See [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) for the full usage guide, recommended workflow, and the pollution-source sweep findings.
 
 Adding `--push` rewrites the project's remote worklog ref (`origin refs/worklog/data`, or the configured `syncBranch`) so it contains only the project's own items, bypassing the polluted remote history entirely (a fresh orphan commit is force-pushed and the local tracking ref is updated to match). `--push` requires `--apply` — rewriting the ref without cleaning the DB would publish foreign items. After the push, a subsequent `wl sync` pulls the clean ref and cannot re-import foreign items.
+
+### Reporting audit gaps (`wl doctor audit-gaps`)
+
+Work items can reach `completed`/`in_review` — and ship — without an audit record. `wl doctor audit-gaps` is a **read-only** report of every such item (WL-0MUBVH9FV0027COG):
+
+```bash
+# Report completed/in_review items with no audit record (read-only)
+wl doctor audit-gaps
+
+# Machine-readable report
+wl doctor audit-gaps --json
+```
+
+Each reported row shows:
+
+- **relationship** — `root` or `child of <parent-id>`.
+- **age** — derived from `activityAt` (falling back to `updatedAt`), in milliseconds and whole days.
+- **classification** — one of:
+  - `uncovered` — a genuine gap (flagged);
+  - `covered` — a child whose **direct** parent has a fresh audit (derived depth-1 coverage; never dispatched independently);
+  - `waived` — an explicit, durable waiver is recorded.
+
+Items with a *fresh* audit are omitted; stale-but-present audits are handled by the closure guard and the icon surfaces. The report has **no** `--apply`: it never mutates the database. The JSON payload exposes `items` (all no-audit items with their classification) and `flagged` (the `uncovered` subset), plus `noAuditCount`, `flaggedCount`, `coveredCount`, and `waivedCount`.
+
+#### Recording a waiver (`wl audit-waive` / `wl audit-unwaive`)
+
+To deliberately accept an audit gap, record a waiver with a reason:
+
+```bash
+wl audit-waive WL-ABC123 --reason "Legacy item completed before audits were enforced"
+wl audit-unwaive WL-ABC123   # remove the waiver
+```
+
+The waiver is stored durably in the nullable `workitems.auditWaiver` JSON column (`{ reason, author, waivedAt }`), surfaced by `wl show --json`, and round-trips through JSONL sync. A waived item is excluded from the `audit-gaps` flagged set and produces no closure warning. Absence of a waiver is fail-safe: it never suppresses a flag. This is the only schema addition made by WL-0MUBVH9FV0027COG, applied through `wl doctor upgrade` (migration `20260928-add-audit-waiver`).
 
 ## Backups
 

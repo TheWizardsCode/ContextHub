@@ -48,6 +48,7 @@ import unlockCommand from '../../src/commands/unlock.js';
 import searchCommand from '../../src/commands/search.js';
 import auditCommand from '../../src/commands/audit.js';
 import auditResultCommand from '../../src/commands/audit-result.js';
+import auditWaiveCommand from '../../src/commands/audit-waive.js';
 import completionCommand from '../../src/commands/completion.js';
 
 const builtInCommands = [
@@ -77,6 +78,7 @@ const builtInCommands = [
   searchCommand,
   auditCommand,
   auditResultCommand,
+  auditWaiveCommand,
   completionCommand,
 ];
 

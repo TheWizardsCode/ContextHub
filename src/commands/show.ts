@@ -90,6 +90,9 @@ export default function register(ctx: PluginContext): void {
         const result: ShowJsonOutput = { success: true, workItem: item };
         // Include structured audit result from the dedicated table
         (result as any).auditResult = auditResult;
+        // Surface the explicit audit-gap waiver (WL-0MUBVH9FV0027COG) both on
+        // the work item and as a top-level field for machine consumers.
+        (result as any).auditWaiver = item.auditWaiver ?? null;
         // For backwards compatibility, also populate workItem.audit from audit_results
         if (auditResult) {
           (result.workItem as any).audit = {

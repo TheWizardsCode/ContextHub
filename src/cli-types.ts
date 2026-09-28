@@ -74,6 +74,18 @@ export interface ShowOptions { children?: boolean; prefix?: string; noPager?: bo
 
 export interface AuditOptions { prefix?: string }
 
+/** Options for `wl audit-waive` (WL-0MUBVH9FV0027COG). */
+export interface AuditWaiveOptions {
+  reason?: string;
+  author?: string;
+  prefix?: string;
+}
+
+/** Options for `wl audit-unwaive` (WL-0MUBVH9FV0027COG). */
+export interface AuditUnwaiveOptions {
+  prefix?: string;
+}
+
 export interface UpdateOptions {
   title?: string;
   description?: string;

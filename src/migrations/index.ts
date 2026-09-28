@@ -188,6 +188,18 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
         db.exec(`ALTER TABLE workitems ADD COLUMN activityAt TEXT`);
       }
     }
+  },
+  {
+    id: '20260928-add-audit-waiver',
+    description: 'Add nullable auditWaiver JSON column to workitems for the explicit no-audit gate waiver (WL-0MUBVH9FV0027COG)',
+    safe: true,
+    requiredColumn: 'auditWaiver',
+    apply: (db: Database.Database) => {
+      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+      if (!cols.some(c => String(c.name) === 'auditWaiver')) {
+        db.exec(`ALTER TABLE workitems ADD COLUMN auditWaiver TEXT`);
+      }
+    }
   }
 ];
 
