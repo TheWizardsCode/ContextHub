@@ -13,8 +13,10 @@
  *
  * Classification outcomes:
  *  - `marker`        — the final assistant message ends with `</end_session>`
+ *  - `dead-agent`     — the agent process is gone (crashed / killed) — no close;
+ *    operator may need to read final output.
  *  - `idle-threshold` — the agent is alive but idle beyond the threshold
- *  - `dead-agent`     — the agent process is gone (crashed / killed)
+ *    (disabled when threshold ≤ 0)
  *  - `active`         — still working / within threshold (no close)
  *  - `implement`      — never close an implement pane (AC4)
  *  - `producer-review` — awaiting producer input (never auto-close)
@@ -27,6 +29,7 @@
 /**
  * Default idle threshold: 30 minutes in milliseconds.
  * Overridable via options passed to `classifySession`.
+ * A value of `<= 0` means "never close on idle" (handled by the caller).
  */
 export const DEFAULT_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
 
@@ -102,9 +105,11 @@ function endsWithMarker(text: string): boolean {
  * Classification order (first match wins):
  *  1. Never-close guards (in order: implement, producer-review, invoking-pane, live-children)
  *  2. Marker at end of final assistant message
- *  3. Agent process is dead
- *  4. Agent alive but idle beyond threshold
- *  5. Still active (within threshold, agent alive)
+ *  3. Dead agent — the process is gone (no close; operator may need to read
+ *     final output).
+ *  4. Idle beyond threshold — agent alive but not responding (only when
+ *     threshold > 0).
+ *  5. Still active (within threshold, agent alive).
  */
 export function classifySession(
   sample: SessionSample,
@@ -131,13 +136,14 @@ export function classifySession(
     return { close: true, reasonCode: 'marker' };
   }
 
-  // 3. Dead agent — the process is gone, session cannot continue.
+  // 3. Dead agent — the process is gone; operator may still need to read
+  //    the final output. No close.
   if (!sample.agentProcessAlive) {
-    return { close: true, reasonCode: 'dead-agent' };
+    return { close: false, reasonCode: 'dead-agent' };
   }
 
-  // 4. Idle beyond threshold — agent is alive but not responding.
-  if (sample.idleMs > threshold) {
+  // 4. Idle threshold — only reap when the threshold is positive.
+  if (threshold > 0 && sample.idleMs > threshold) {
     return { close: true, reasonCode: 'idle-threshold' };
   }
 

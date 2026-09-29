@@ -18,11 +18,11 @@ import type { ReaperDeps, ReaperResult } from './pane-close-reaper.js';
 /** Reaper is on by default (an operator can disable it via settings). */
 export const DEFAULT_PANE_CLOSE_ENABLED = true;
 
-/** Default marker-less idle threshold: 30 minutes (producer decision, Q6). */
-export const DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES = 30;
+/** Default marker-less idle threshold: 0 minutes — idle-based closing disabled by default. */
+export const DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES = 0;
 
-/** Minimum idle threshold in minutes (1 minute). */
-export const MIN_PANE_CLOSE_IDLE_THRESHOLD_MINUTES = 1;
+/** Minimum idle threshold in minutes (0 = never close on idle). */
+export const MIN_PANE_CLOSE_IDLE_THRESHOLD_MINUTES = 0;
 
 /** Maximum idle threshold in minutes (24 hours). */
 export const MAX_PANE_CLOSE_IDLE_THRESHOLD_MINUTES = 24 * 60;
@@ -50,8 +50,9 @@ export function paneCloseReaperDue(
 }
 
 /**
- * Clamp a pane-close idle threshold (minutes) into [1, 1440].
- * Non-finite values fall back to the default (30).
+ * Clamp a pane-close idle threshold (minutes) into [0, 1440].
+ * Non-finite values fall back to the default (0).  A value of 0 means
+ * "never close on idle" — idle-based auto-close is disabled.
  */
 export function clampPaneCloseIdleThresholdMinutes(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES;

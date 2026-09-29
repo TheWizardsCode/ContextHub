@@ -1,22 +1,23 @@
 /**
  * packages/herdr/src/pane-close.test.ts — table-driven tests for the shared
- * pane-closure classifier (WL-0MUJW9CV5005XAZX / WL-0MUJL1NAH0042GOS).
+ * pane-closure classifier (WL-0MUJW9CV5005XAZX / WL-0MUJL1NAH0042GOS / WL-0MUMEJHT9004EQPI).
  *
  * These tests pin down the `classifySession` contract before the
  * implementation exists (TDD). They import the pure interface and assert on
  * `CloseDecision { close, reasonCode }` for every classification row.
  *
- * Classification cases (parent AC1-AC4):
+ * Classification cases (parent AC1-AC4, WL-0MUMEJHT9004EQPI AC1-AC2):
  *  1. `</end_session>` marker at the very end → close, reason `marker`
  *  2. `</end_session>` quoted mid-message → no close
  *  3. `</end_session>` followed only by whitespace/newlines → close
  *  4. No marker, agent alive, idle < 30 min → no close, reason `active`
  *  5. No marker, agent alive, idle >= 30 min → close, reason `idle-threshold`
- *  6. No marker, agent process gone → close, reason `dead-agent`
+ *  6. No marker, agent process gone → **no close**, reason `dead-agent` (AC1)
  *  7. `kind: 'implement'` → never close, reason `implement`
  *  8. `needsProducerReview: true` → never close, reason `producer-review`
  *  9. `isInvokingPane: true` → never close, reason `invoking-pane`
  * 10. `childProcessCount > 0` → never close, reason `live-children`
+ * 11. idle threshold ≤ 0 → never close on idle (AC2)
  */
 import { describe, expect, it } from 'vitest';
 
@@ -119,22 +120,65 @@ describe('classifySession — idle threshold (AC3, parent)', () => {
   });
 });
 
-describe('classifySession — dead agent (AC3, parent)', () => {
-  it('closes when the agent process is gone', () => {
+describe('classifySession — idle threshold <= 0 never closes (WL-0MUMEJHT9004EQPI AC2)', () => {
+  it('does not close when idleThresholdMs is 0, regardless of idleMs', () => {
+    const result = classifySession(
+      sample({ lastAssistantText: '', agentProcessAlive: true, idleMs: 999999999 }),
+      { idleThresholdMs: 0 },
+    );
+    expect(result).toEqual({ close: false, reasonCode: 'active' });
+  });
+
+  it('does not close when idleThresholdMs is negative, regardless of idleMs', () => {
+    const result = classifySession(
+      sample({ lastAssistantText: '', agentProcessAlive: true, idleMs: 999999999 }),
+      { idleThresholdMs: -1 },
+    );
+    expect(result).toEqual({ close: false, reasonCode: 'active' });
+  });
+
+  it('does not close when idleThresholdMs is 0 and idleMs is also 0', () => {
+    const result = classifySession(
+      sample({ lastAssistantText: '', agentProcessAlive: true, idleMs: 0 }),
+      { idleThresholdMs: 0 },
+    );
+    expect(result).toEqual({ close: false, reasonCode: 'active' });
+  });
+
+  it('does not close when idleThresholdMs is negative even if idleMs is zero', () => {
+    const result = classifySession(
+      sample({ lastAssistantText: '', agentProcessAlive: true, idleMs: 0 }),
+      { idleThresholdMs: -5 },
+    );
+    expect(result).toEqual({ close: false, reasonCode: 'active' });
+  });
+});
+
+describe('classifySession — dead agent (WL-0MUMEJHT9004EQPI AC1)', () => {
+  it('does NOT close when the agent process is gone (operator may need output)', () => {
     const result = classifySession(sample({
       lastAssistantText: '',
       agentProcessAlive: false,
     }));
-    expect(result).toEqual({ close: true, reasonCode: 'dead-agent' });
+    expect(result).toEqual({ close: false, reasonCode: 'dead-agent' });
   });
 
-  it('closes a dead agent even if idle is zero', () => {
+  it('does NOT close a dead agent even if idle is zero', () => {
     const result = classifySession(sample({
       lastAssistantText: '',
       agentProcessAlive: false,
       idleMs: 0,
     }));
-    expect(result).toEqual({ close: true, reasonCode: 'dead-agent' });
+    expect(result).toEqual({ close: false, reasonCode: 'dead-agent' });
+  });
+
+  it('does NOT close a dead agent even if idle is very large', () => {
+    const result = classifySession(sample({
+      lastAssistantText: '',
+      agentProcessAlive: false,
+      idleMs: 999999999,
+    }));
+    expect(result).toEqual({ close: false, reasonCode: 'dead-agent' });
   });
 });
 
@@ -224,12 +268,12 @@ describe('classifySession — kind variants', () => {
       expect(result).toEqual({ close: true, reasonCode: 'marker' });
     });
 
-    it(`closes a ${kind} pane when agent is dead`, () => {
+    it(`does NOT close a ${kind} pane when agent is dead`, () => {
       const result = classifySession(sample({
         kind,
         agentProcessAlive: false,
       }));
-      expect(result).toEqual({ close: true, reasonCode: 'dead-agent' });
+      expect(result).toEqual({ close: false, reasonCode: 'dead-agent' });
     });
   }
 });

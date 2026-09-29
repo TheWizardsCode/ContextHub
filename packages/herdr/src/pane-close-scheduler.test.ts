@@ -55,12 +55,12 @@ function makeDeps(panes: PaneStatus[]): {
 }
 
 describe('pane-close defaults and clamps', () => {
-  it('is enabled by default with a 30-minute idle threshold', () => {
+  it('is enabled by default with a 0-minute idle threshold (idle closing disabled)', () => {
     expect(DEFAULT_PANE_CLOSE_ENABLED).toBe(true);
-    expect(DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES).toBe(30);
+    expect(DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES).toBe(0);
   });
 
-  it('clamps the threshold into [1, 1440] minutes', () => {
+  it('clamps the threshold into [0, 1440] minutes', () => {
     expect(clampPaneCloseIdleThresholdMinutes(0)).toBe(MIN_PANE_CLOSE_IDLE_THRESHOLD_MINUTES);
     expect(clampPaneCloseIdleThresholdMinutes(-5)).toBe(MIN_PANE_CLOSE_IDLE_THRESHOLD_MINUTES);
     expect(clampPaneCloseIdleThresholdMinutes(2000)).toBe(MAX_PANE_CLOSE_IDLE_THRESHOLD_MINUTES);

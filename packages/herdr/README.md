@@ -754,8 +754,10 @@ mechanisms cannot diverge:
 1. Never-close guards — `implement` pane, `needsProducerReview`, invoking
    pane, live children.
 2. Marker at the end of the final assistant message → close (`marker`).
-3. Agent process gone → close (`dead-agent`).
-4. Agent alive but idle beyond the threshold → close (`idle-threshold`).
+3. Agent process gone → **no close** (`dead-agent`) — operator may need to
+   read final output.
+4. Agent alive but idle beyond the threshold → close (`idle-threshold`);
+   disabled when threshold ≤ 0.
 5. Otherwise → keep (`active`).
 
 **Reaper orchestration (`pane-close-reaper.ts`).** `runReaper(deps, options)`
@@ -777,7 +779,7 @@ never crash the worker.
 | Key | Default | Meaning |
 |-----|---------|---------|
 | `paneCloseEnabled` | `true` | Master on/off switch for automatic pane closure. |
-| `paneCloseIdleThresholdMinutes` | `30` | Marker-less idle threshold in minutes (clamped [1, 1440]). |
+| `paneCloseIdleThresholdMinutes` | `0` | Marker-less idle threshold in minutes; `0` = never close on idle (clamped [0, 1440]). |
 
 **Child processes (`process-group.ts`).** On close, the pane's session-scoped
 process group is torn down (SIGTERM → grace → SIGKILL) so spawned children

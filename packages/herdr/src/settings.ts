@@ -107,7 +107,7 @@ export interface PluginSettings {
   paneCloseEnabled: boolean;
   /**
    * Marker-less idle threshold, in minutes, after which an agent pane with no
-   * `</end_session>` marker is reaped. Default 30 minutes; clamped to [1, 1440].
+   * `</end_session>` marker is reaped. 0 = never close on idle; clamped to [0, 1440].
    */
   paneCloseIdleThresholdMinutes: number;
   /**
