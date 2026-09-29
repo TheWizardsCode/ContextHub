@@ -213,6 +213,85 @@ describe('reaper — already-closed pane is idempotent', () => {
   });
 });
 
+describe('reaper — idempotent close via alreadyClosedPaneIds (AC1.5)', () => {
+  // Regression: the reaper and lifecycle monitor must not race; a pane can be
+  // closed at most once. The alreadyClosedPaneIds guard prevents the reaper
+  // from closing a pane it has already handled in a previous run.
+  it('skips a pane whose id is in alreadyClosedPaneIds', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [
+      pane({ id: 'pane-001', lastAssistantText: '</end_session>', agentProcessAlive: false }),
+      pane({ id: 'pane-002', lastAssistantText: '</end_session>', agentProcessAlive: false }),
+    ];
+    const deps = makeDeps(panes);
+
+    // First run — both panes are eligible
+    const results1 = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(results1).toHaveLength(2);
+    expect(deps.closePane).toHaveBeenCalledTimes(2);
+
+    // Collect the pane IDs that were closed
+    const closedPaneIds = new Set(
+      results1.filter((r) => r.success).map((r) => r.paneId),
+    );
+
+    // Second run with alreadyClosedPaneIds — both panes are skipped entirely:
+    // no results are emitted and closePane is not called again.
+    deps.closePane.mockClear();
+    const results2 = await runReaper(deps, {
+      idleThresholdMs: THRESHOLD_MS,
+      alreadyClosedPaneIds: closedPaneIds,
+    });
+    expect(results2).toHaveLength(0);
+    expect(deps.closePane).not.toHaveBeenCalled();
+  });
+
+  it('processes only panes absent from alreadyClosedPaneIds', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [
+      pane({ id: 'pane-001', lastAssistantText: '</end_session>', agentProcessAlive: false }),
+      pane({ id: 'pane-002', lastAssistantText: '</end_session>', agentProcessAlive: false }),
+    ];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, {
+      idleThresholdMs: THRESHOLD_MS,
+      alreadyClosedPaneIds: new Set(['pane-001']),
+    });
+    expect(results).toHaveLength(1);
+    expect(results[0].paneId).toBe('pane-002');
+    expect(results[0].decision.close).toBe(true);
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(deps.closePane).toHaveBeenCalledWith('pane-002');
+  });
+
+  it('empty alreadyClosedPaneIds has no effect — all panes processed', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({ id: 'pane-001', lastAssistantText: '</end_session>', agentProcessAlive: false })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, {
+      idleThresholdMs: THRESHOLD_MS,
+      alreadyClosedPaneIds: new Set<string>(),
+    });
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(results).toHaveLength(1);
+    expect(results[0].decision.close).toBe(true);
+  });
+
+  it('a non-closeable pane in alreadyClosedPaneIds is still skipped without closing', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({ id: 'pane-001', kind: 'implement' })];
+    const deps = makeDeps(panes);
+    // Even if an implement pane id is (wrongly) in the closed set, the reaper
+    // must not close it — it is skipped before classification.
+    const results = await runReaper(deps, {
+      idleThresholdMs: THRESHOLD_MS,
+      alreadyClosedPaneIds: new Set(['pane-001']),
+    });
+    expect(results).toHaveLength(0);
+    expect(deps.closePane).not.toHaveBeenCalled();
+  });
+});
+
 describe('reaper — close failure does not abort other panes', () => {
   it('records a per-pane result and continues processing other panes', async () => {
     const { runReaper } = await import('./pane-close-reaper');

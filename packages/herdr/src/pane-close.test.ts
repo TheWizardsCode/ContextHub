@@ -278,6 +278,138 @@ describe('classifySession — kind variants', () => {
   }
 });
 
+describe('classifySession — producer-review per kind (AC1.1)', () => {
+  // Regression: the false-positive closes were observed for intake, plan, audit
+  // and risk-effort panes. Each kind must return producer-review even when the
+  // pane also has a marker, is dead, and is deeply idle.
+  for (const kind of ['intake', 'plan', 'audit', 'risk-effort'] as const) {
+    it(`never closes a ${kind} pane with producer-review, even with marker+dead+idle`, () => {
+      const result = classifySession(sample({
+        kind,
+        needsProducerReview: true,
+        lastAssistantText: '</end_session>',
+        agentProcessAlive: false,
+        idleMs: 999999999,
+      }));
+      expect(result).toEqual({ close: false, reasonCode: 'producer-review' });
+    });
+  }
+});
+
+describe('classifySession — implement pane never closes (AC1.2)', () => {
+  it('never closes an implement pane with marker+idle>threshold', () => {
+    const result = classifySession(sample({
+      kind: 'implement',
+      lastAssistantText: '</end_session>',
+      agentProcessAlive: true,
+      idleMs: 999999999,
+    }));
+    expect(result).toEqual({ close: false, reasonCode: 'implement' });
+  });
+
+  it('never closes an implement pane with marker+dead', () => {
+    const result = classifySession(sample({
+      kind: 'implement',
+      lastAssistantText: '</end_session>',
+      agentProcessAlive: false,
+      idleMs: 0,
+    }));
+    expect(result).toEqual({ close: false, reasonCode: 'implement' });
+  });
+});
+
+describe('classifySession — invoking-pane and live-children guards (AC1.3)', () => {
+  it('invoking-pane never closes even with idle>threshold', () => {
+    const result = classifySession(sample({
+      isInvokingPane: true,
+      idleMs: 999999999,
+      lastAssistantText: '</end_session>',
+    }));
+    expect(result).toEqual({ close: false, reasonCode: 'invoking-pane' });
+  });
+
+  it('live-children never closes even with idle>threshold', () => {
+    const result = classifySession(sample({
+      childProcessCount: 5,
+      idleMs: 999999999,
+      lastAssistantText: '</end_session>',
+    }));
+    expect(result).toEqual({ close: false, reasonCode: 'live-children' });
+  });
+});
+
+describe('classifySession — table-driven coverage of every classification path (AC1.6)', () => {
+  interface Row {
+    name: string;
+    sample: Partial<SessionSample>;
+    opts?: { idleThresholdMs?: number };
+    expected: CloseDecision;
+  }
+
+  const rows: Row[] = [
+    // Close paths
+    {
+      name: 'marker at end → marker',
+      sample: { lastAssistantText: 'Done\n\n</end_session>' },
+      expected: { close: true, reasonCode: 'marker' },
+    },
+    {
+      name: 'alive + idle beyond threshold → idle-threshold',
+      sample: { agentProcessAlive: true, idleMs: THRESHOLD_MS + 1 },
+      expected: { close: true, reasonCode: 'idle-threshold' },
+    },
+    // No-close paths
+    {
+      name: 'marker quoted mid-message → active',
+      sample: { lastAssistantText: 'see </end_session> here' },
+      expected: { close: false, reasonCode: 'active' },
+    },
+    {
+      name: 'marker followed by non-whitespace → active',
+      sample: { lastAssistantText: 'Done</end_session> more' },
+      expected: { close: false, reasonCode: 'active' },
+    },
+    {
+      name: 'dead agent → dead-agent',
+      sample: { agentProcessAlive: false, idleMs: 999999999 },
+      expected: { close: false, reasonCode: 'dead-agent' },
+    },
+    {
+      name: 'idle threshold 0 → active (idle disabled)',
+      sample: { agentProcessAlive: true, idleMs: 999999999 },
+      opts: { idleThresholdMs: 0 },
+      expected: { close: false, reasonCode: 'active' },
+    },
+    {
+      name: 'implement kind → implement',
+      sample: { kind: 'implement', lastAssistantText: '</end_session>', agentProcessAlive: false },
+      expected: { close: false, reasonCode: 'implement' },
+    },
+    {
+      name: 'needsProducerReview → producer-review',
+      sample: { needsProducerReview: true, lastAssistantText: '</end_session>', agentProcessAlive: false },
+      expected: { close: false, reasonCode: 'producer-review' },
+    },
+    {
+      name: 'invoking pane → invoking-pane',
+      sample: { isInvokingPane: true, idleMs: THRESHOLD_MS + 1 },
+      expected: { close: false, reasonCode: 'invoking-pane' },
+    },
+    {
+      name: 'live children → live-children',
+      sample: { childProcessCount: 1, lastAssistantText: '</end_session>' },
+      expected: { close: false, reasonCode: 'live-children' },
+    },
+  ];
+
+  for (const row of rows) {
+    it(row.name, () => {
+      const result = classifySession(sample(row.sample), row.opts);
+      expect(result).toEqual(row.expected);
+    });
+  }
+});
+
 describe('classifySession — extractFinalAssistantText', () => {
   it('returns the final assistant message text, trimEnd-ed (rstrip semantics)', () => {
     const entries = [
