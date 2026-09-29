@@ -326,13 +326,13 @@ describe('removed downtime pane limit (WL-0MU2EP6JL006A1U3)', () => {
 });
 
 describe('paneClose settings (WL-0MUJL1NAH0042GOS)', () => {
-  it('defaults to enabled with a 30-minute threshold', () => {
+  it('defaults to enabled with idle-based close disabled (threshold 0)', () => {
     expect(defaultSettings.paneCloseEnabled).toBe(true);
-    expect(defaultSettings.paneCloseIdleThresholdMinutes).toBe(30);
+    expect(defaultSettings.paneCloseIdleThresholdMinutes).toBe(0);
     const path = tempSettingsPath();
     const settings = loadSettings(path);
     expect(settings.paneCloseEnabled).toBe(true);
-    expect(settings.paneCloseIdleThresholdMinutes).toBe(30);
+    expect(settings.paneCloseIdleThresholdMinutes).toBe(0);
   });
 
   it('accepts a persisted enabled=false', () => {
@@ -341,10 +341,14 @@ describe('paneClose settings (WL-0MUJL1NAH0042GOS)', () => {
     expect(loadSettings(path).paneCloseEnabled).toBe(false);
   });
 
-  it('accepts a persisted threshold and clamps into [1, 1440] minutes', () => {
+  it('accepts a persisted threshold and clamps into [0, 1440] minutes', () => {
     const path = tempSettingsPath();
+    // 0 means "never close on idle" and is a valid value (not clamped up to 1).
     saveSettings(path, { ...defaultSettings, paneCloseIdleThresholdMinutes: 0 });
-    expect(loadSettings(path).paneCloseIdleThresholdMinutes).toBe(1);
+    expect(loadSettings(path).paneCloseIdleThresholdMinutes).toBe(0);
+
+    saveSettings(path, { ...defaultSettings, paneCloseIdleThresholdMinutes: -5 });
+    expect(loadSettings(path).paneCloseIdleThresholdMinutes).toBe(0);
 
     saveSettings(path, { ...defaultSettings, paneCloseIdleThresholdMinutes: 5000 });
     expect(loadSettings(path).paneCloseIdleThresholdMinutes).toBe(1440);
@@ -356,6 +360,6 @@ describe('paneClose settings (WL-0MUJL1NAH0042GOS)', () => {
   it('falls back to the default when the persisted threshold is not a number', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, paneCloseIdleThresholdMinutes: 'later' }), 'utf-8');
-    expect(loadSettings(path).paneCloseIdleThresholdMinutes).toBe(30);
+    expect(loadSettings(path).paneCloseIdleThresholdMinutes).toBe(0);
   });
 });
