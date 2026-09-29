@@ -870,13 +870,21 @@ Consequences of the removal:
 ### Pane-closure reaper (WL-0MUJL1NAH0042GOS)
 
 Dispatched panes should not linger once their agent has finished or died.
-Two mechanisms close panes, and both are idempotent:
+Two mechanisms were built; only the scheduled reaper is active, and it is
+idempotent:
 
-- **Dispatch monitor (`pane-lifecycle.ts`, WL-0MU308WSF0002JWN)** — closes
-  *dispatched* panes recorded in the rolling dispatch log
-  (`.worklog/downtime-dispatches.log`) once their item reaches a terminal or
-  attention state. `implement` panes are never auto-closed (AC6).
-- **Scheduled pane-closure reaper** — covers panes the monitor never sees
+- **Dispatch monitor (`pane-lifecycle.ts`, WL-0MU308WSF0002JWN) — DISABLED
+  (WL-0MUMEKDK0008LKH8).** It closed *dispatched* panes recorded in the
+  rolling dispatch log (`.worklog/downtime-dispatches.log`) once their item
+  reached a terminal or attention state, but was observed to close panes
+  prematurely (stage-propagation lag; `requires-attention` outcomes still
+  closing) and to race with the reaper (the two share only a non-atomic
+  idempotency key). The worker therefore no longer invokes it
+  (`PANE_LIFECYCLE_MONITOR_ENABLED` is `false`). The classifier and its unit
+  tests are retained pending a redesign — do not re-enable it without first
+  reworking the double-close race.
+- **Scheduled pane-closure reaper — the only active auto-close path** — covers
+  panes the monitor never saw
   (manually opened panes, and marker-less panes whose agent died). It runs
   on the downtime-worker tick at most once per `PANE_CLOSE_REAPER_INTERVAL_MS`
   (default 60 s), gated by the `paneCloseEnabled` setting (default on), with
@@ -892,9 +900,10 @@ pane with live children. A close failure for one pane is recorded and the
 run continues; a reaper throw is caught and logged so it can never crash the
 worker.
 
-**Coexistence.** The reaper skips pane ids already recorded as handled in
-the rolling dispatch log, and a pane the monitor closed is absent from
-`herdr pane list` — so the two mechanisms cannot double-close.
+**Coexistence.** With Mechanism B disabled there is a single active closer,
+so the previous non-atomic double-close race is gone. The reaper still skips
+pane ids already recorded as handled in the rolling dispatch log, so any
+historical monitor entries remain honoured.
 Session-scoped child processes are torn down on close
 (`packages/herdr/src/process-group.ts`), so spawned audit/plan runners are
 not reparented to PID 1.

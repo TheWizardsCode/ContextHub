@@ -10650,13 +10650,18 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
   });
 });
 
-// ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN, child WL-0MU4URK4H006OFCE) ──
+// ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) — DISABLED ─────────
 //
-// The monitor inspects every dispatched pane recorded in the rolling log
-// (marker + post-spawn enrichment), classifies its lifecycle outcome, logs a
-// pane-close entry, and closes the pane — EXCEPT `implement` panes, which are
-// never auto-closed (AC6). Every boundary is fail-closed (AC7).
-describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
+// Mechanism B is switched off in the worker (WL-0MUMEKDK0008LKH8):
+// `PANE_LIFECYCLE_MONITOR_ENABLED` is false, so the tick never calls
+// `monitorDispatchedPanes` (pinned by the tick integration suite below).
+// These unit tests are RETAINED to pin the pure classifier contract — what
+// the monitor WOULD do if re-enabled: it inspects every dispatched pane
+// recorded in the rolling log (marker + post-spawn enrichment), classifies
+// its lifecycle outcome, logs a pane-close entry, and closes the pane —
+// EXCEPT `implement` panes, which are never auto-closed (AC6). Every boundary
+// is fail-closed (AC7).
+describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', () => {
   const roots: string[] = [];
 
   function makeRoot(): string {
@@ -10997,10 +11002,11 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
 
 // ── Worker tick ↔ pane-lifecycle integration (WL-0MU4US5MP001JFEN) ────
 //
-// The worker tick invokes the pane-lifecycle monitor (fire-and-forget, so it
-// never perturbs the dispatch single-flight ordering). These tests pin the
-// end-to-end auto-close path and the mandatory implement exception (AC6).
-describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN)', () => {
+// Mechanism B is DISABLED (WL-0MUMEKDK0008LKH8): the worker tick must NOT
+// invoke the dispatch monitor, so the scheduled reaper (Mechanism A) is the
+// only active auto-close path. These tests pin that disabled behaviour and
+// that Mechanism A still runs from the tick.
+describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN) [disabled]', () => {
   const roots: string[] = [];
 
   afterEach(() => {
@@ -11021,7 +11027,11 @@ describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN)', () => {
     await appendDowntimeLogEntry(root, JSON.stringify({ ...marker, paneId, enrichment: true }));
   }
 
-  function makeMonitorWorker(root: string, deps: Partial<DowntimeWorkerDeps>) {
+  function makeMonitorWorker(
+    root: string,
+    deps: Partial<DowntimeWorkerDeps>,
+    paneClose?: { enabled: boolean; idleThresholdMinutes: number },
+  ) {
     const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
     const poller = createDowntimePoller('http://proxy:8000', fetcher);
     const worker = createDowntimeWorker({
@@ -11035,51 +11045,52 @@ describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN)', () => {
         cwd: root,
         noCandidateCooldownMs: 3_600_000,
         paneLifecycleIntervalMs: 0,
+        ...(paneClose ? { paneClose } : {}),
       }),
     });
     return worker;
   }
 
-  it('closes a completed non-implement pane from the worker tick (AC1/AC2)', async () => {
+  it('does NOT invoke the dispatch monitor from the worker tick (Mechanism B disabled, WL-0MUMEKDK0008LKH8)', async () => {
     const root = makeRoot();
     await seedDispatch(root, 'WL-TICK', 'plan', 'w9:p1');
     const closePane = vi.fn().mockResolvedValue(true);
+    const getItemLifecycleState = vi.fn().mockResolvedValue({ id: 'WL-TICK', stage: 'plan_complete' });
     const worker = makeMonitorWorker(root, {
-      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-TICK', stage: 'plan_complete' }),
+      getItemLifecycleState,
       getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w9:p1' }] }),
       closePane,
     });
 
     await worker.tick();
+    // Give a hypothetically-enabled (fire-and-forget) monitor time to act
+    // before asserting the negative, so the assertion is meaningful.
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
-    await vi.waitFor(() => expect(closePane).toHaveBeenCalledWith(
-      'w9:p1', root, { itemId: 'WL-TICK', kind: 'plan' },
-    ));
+    expect(getItemLifecycleState).not.toHaveBeenCalled();
+    expect(closePane).not.toHaveBeenCalled();
     const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
-    expect(pc).toHaveLength(1);
-    expect(pc[0]).toMatchObject({ outcome: 'closed-as-plan-complete', closed: true });
+    expect(pc).toHaveLength(0);
   });
 
-  it('never auto-closes an implement pane from the worker tick (AC6)', async () => {
+  it('still runs the scheduled reaper (Mechanism A) from the worker tick', async () => {
     const root = makeRoot();
-    await seedDispatch(root, 'WL-IMPL', 'implement', 'w9:p2');
-    const closePane = vi.fn().mockResolvedValue(true);
-    const worker = makeMonitorWorker(root, {
-      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-IMPL', stage: 'in_review' }),
-      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w9:p2' }] }),
-      closePane,
-    });
+    const getItemLifecycleState = vi.fn().mockResolvedValue({ id: 'WL-TICK', stage: 'plan_complete' });
+    const runPaneCloseReaper = vi.fn().mockResolvedValue(undefined);
+    const worker = makeMonitorWorker(
+      root,
+      { getItemLifecycleState, runPaneCloseReaper },
+      { enabled: true, idleThresholdMinutes: 30 },
+    );
 
     await worker.tick();
 
-    // Wait for the (fire-and-forget) monitor to record the in_review event.
-    await vi.waitFor(async () => {
-      const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
-      expect(pc).toHaveLength(1);
-    });
-    expect(closePane).not.toHaveBeenCalled();
-    const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
-    expect(pc[0]).toMatchObject({ outcome: 'requires-attention', reasonCode: 'reached-in-review', closed: false });
+    await vi.waitFor(() => expect(runPaneCloseReaper).toHaveBeenCalledWith(
+      root,
+      { idleThresholdMinutes: 30, ledgerPath: undefined },
+    ));
+    // Mechanism B remains off — the reaper is the only active auto-close path.
+    expect(getItemLifecycleState).not.toHaveBeenCalled();
   });
 });
 

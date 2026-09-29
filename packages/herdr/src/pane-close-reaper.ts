@@ -10,7 +10,10 @@
  * The reaper is idempotent against the existing `pane-lifecycle.ts` dispatch
  * monitor: a pane already closed by the dispatch monitor is simply gone from
  * `listPanes()` and is skipped. Both mechanisms use the same classifier,
- * so decisions cannot diverge (parent AC6).
+ * so decisions cannot diverge (parent AC6). The dispatch monitor itself is
+ * currently DISABLED (WL-0MUMEKDK0008LKH8), so the reaper is the only active
+ * auto-close path; the `alreadyClosedPaneIds` guard remains for historical
+ * monitor entries and a possible future re-enable.
  */
 
 import { classifySession, extractFinalAssistantText } from './pane-close.js';
@@ -86,9 +89,11 @@ export interface ReaperOptions {
    */
   ledgerPath?: string;
   /**
-   * Pane ids already closed by the existing dispatch monitor
+   * Pane ids already recorded as closed by the dispatch monitor
    * (`pane-lifecycle.ts`) — skipped so the two mechanisms never double-handle
-   * the same pane (parent constraint).
+   * the same pane (parent constraint). The monitor is currently disabled
+   * (WL-0MUMEKDK0008LKH8), so this normally stays empty; it remains for
+   * historical entries and a possible future re-enable.
    */
   alreadyClosedPaneIds?: ReadonlySet<string>;
 }
@@ -183,7 +188,9 @@ export async function runReaper(
 
   for (const pane of panes) {
     // Coexistence with the dispatch monitor (parent constraint): a pane the
-    // `pane-lifecycle.ts` monitor already closed is never handled again.
+    // `pane-lifecycle.ts` monitor already recorded as closed is never handled
+    // again. The monitor is currently disabled (WL-0MUMEKDK0008LKH8); the
+    // guard is retained for historical entries.
     if (options.alreadyClosedPaneIds?.has(pane.id)) {
       continue;
     }

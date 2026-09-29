@@ -321,8 +321,27 @@ export const DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS = 24 * 60 * 60 * 1000;
  * bounding the per-tick worklog queries ("reasonable polling cadence" —
  * parent Constraint) while still closing completed panes promptly. Overridable
  * per tick via the optional `paneLifecycleIntervalMs` config field.
+ *
+ * NOTE: the monitor itself is currently DISABLED — see
+ * `PANE_LIFECYCLE_MONITOR_ENABLED` below.
  */
 export const DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS = 30_000;
+
+/**
+ * Mechanism B (dispatch-monitor pane auto-close, `pane-lifecycle.ts`) is
+ * DISABLED (WL-0MUMEKDK0008LKH8).
+ *
+ * The classifier was observed to close panes prematurely (stage-propagation
+ * lag; `requires-attention` outcomes still closing) and to race with the
+ * scheduled reaper (Mechanism A) — the two mechanisms share only a
+ * non-atomic idempotency key, so a pane could be closed twice. It is switched
+ * off here until its design is revisited; the scheduled reaper
+ * (`pane-close-scheduler.ts`) is the only active auto-close path. The
+ * classifier and its unit tests are retained for that future redesign — do
+ * not re-enable without reworking the double-close race. See
+ * `docs/dev/downtime-dispatcher.md` and `packages/herdr/README.md`.
+ */
+export const PANE_LIFECYCLE_MONITOR_ENABLED: boolean = false;
 
 /**
  * Hard floor for the success-marker staleness window (1 h): below this the
@@ -5501,8 +5520,15 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         }
       }
 
-      // ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) ──────────────────
-      // Runs on the LEADER (legacy mode: always) and BEFORE the cooldown
+      // ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) — DISABLED ────────
+      // Mechanism B is switched off (WL-0MUMEKDK0008LKH8):
+      // `PANE_LIFECYCLE_MONITOR_ENABLED` is false, so the guard below never
+      // runs the monitor and the scheduled reaper further down is the only
+      // active auto-close path. The block is retained (and the pure
+      // classifier + its tests kept) so the design can be revisited.
+      //
+      // When enabled it would run on the LEADER (legacy mode: always) and
+      // BEFORE the cooldown
       // gate, so completed dispatched panes are tidied even while dispatch
       // is paused in a no-candidate cooldown. Cadence-bounded (default 30 s)
       // so the ~10 s tick does not re-query the worklog for every open pane
@@ -5517,7 +5543,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // concurrently is safe; the `.catch` is belt-and-braces.
       const paneMonitorIntervalMs =
         cfg.paneLifecycleIntervalMs ?? DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS;
-      if (tickNow - lastPaneMonitorAt >= paneMonitorIntervalMs) {
+      if (
+        PANE_LIFECYCLE_MONITOR_ENABLED &&
+        tickNow - lastPaneMonitorAt >= paneMonitorIntervalMs
+      ) {
         lastPaneMonitorAt = tickNow;
         void monitorDispatchedPanes(opts.deps, cfg.cwd).catch((err) => {
           // fail-closed: pane-lifecycle monitoring must never crash the worker

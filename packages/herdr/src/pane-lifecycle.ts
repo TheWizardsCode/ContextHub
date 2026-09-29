@@ -1,6 +1,14 @@
 /**
  * packages/herdr/src/pane-lifecycle.ts — Pane-lifecycle monitor (pure logic)
  *
+ * DISABLED (WL-0MUMEKDK0008LKH8). Mechanism B — the dispatch-monitor pane
+ * auto-close driven by this classifier — is switched off in the downtime
+ * worker (`PANE_LIFECYCLE_MONITOR_ENABLED` in `downtime-worker.ts`). It was
+ * observed to close panes prematurely and to race with the scheduled reaper
+ * (Mechanism A), which is now the only active auto-close path. The classifier
+ * and its tests are retained for a future redesign — do not re-enable without
+ * first reworking the double-close race. See `docs/dev/downtime-dispatcher.md`.
+ *
  * Supporting logic for the downtime worker's automatic pane lifecycle
  * management (WL-0MU308WSF0002JWN): dispatched panes stay open forever
  * unless an operator closes them manually. This module classifies each

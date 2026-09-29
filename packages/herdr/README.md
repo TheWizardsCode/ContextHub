@@ -783,15 +783,19 @@ never crash the worker.
 process group is torn down (SIGTERM → grace → SIGKILL) so spawned children
 (audit/plan runners) are never reparented to PID 1.
 
-**Interaction with the dispatch monitor (`pane-lifecycle.ts`).** The
-dispatch monitor (`WL-0MU308WSF0002JWN`) closes *dispatched* panes recorded
-in `.worklog/downtime-dispatches.log` and already excludes `implement`
-panes. The reaper covers panes the monitor never sees (manually opened,
-marker-less) and reuses the same classifier. Both are idempotent: the reaper
-skips pane ids already recorded as handled in the dispatch log, and a pane
-the monitor closed is gone from `herdr pane list`, so it cannot be
-double-closed. Headless (JSON/RPC) modes are unaffected — closure is only
-performed by the scheduled reaper over Herdr panes.
+**Interaction with the dispatch monitor (`pane-lifecycle.ts`) — DISABLED
+(WL-0MUMEKDK0008LKH8).** The dispatch monitor (`WL-0MU308WSF0002JWN`) used to
+close *dispatched* panes recorded in `.worklog/downtime-dispatches.log` and
+already excluded `implement` panes. It was observed to close panes prematurely
+and to race with the reaper — the two share only a non-atomic idempotency key,
+so a pane could be closed twice — so it is switched off
+(`PANE_LIFECYCLE_MONITOR_ENABLED` is `false`) and the scheduled reaper is the
+only active auto-close path. The classifier and its unit tests are retained
+for a future redesign; do not re-enable it without first reworking the
+double-close race. The reaper still skips pane ids already recorded as handled
+in the dispatch log, so any historical monitor entries remain honoured.
+Headless (JSON/RPC) modes are unaffected — closure is only performed by the
+scheduled reaper over Herdr panes.
 
 **`pane-triage` skill reuse.** The approval-gated `pane-triage` skill
 (`WL-0MUJMXVPO0016DZM`) consumes `classifySession` / `extractFinalAssistantText`
