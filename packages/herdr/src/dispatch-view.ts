@@ -10,27 +10,31 @@
  * formatter and metadata panel without any live `wl` fetch.
  *
  * Synthetic rows are DISPLAY-ONLY: they are never written back to `wl` and are
- * marked with `isLogDerived: true` so the renderer can show `—` for absent
- * live fields (priority/risk/effort) and annotate the dispatch kind/outcome
- * instead of pretending to have full work-item metadata. The log-derived
- * `stage` (and, for an audit outcome, the audit verdict) IS carried so the row
- * renders the same stage/audit icons as every other view (WL-0MUGLL9SS002E1D2).
+ * marked with `isLogDerived: true` so the renderer can annotate the dispatch
+ * kind/outcome. When the work item still exists in `wl` the row is instead
+ * built by {@link mergeDispatchRow}, which renders the LIVE item (so status/
+ * stage/audit/review/priority icons are byte-for-byte the same as every other
+ * view) and only adds the dispatch annotations; {@link buildDispatchWorkItem}
+ * is the fallback for an item that is now closed/deleted (WL-0MUGLL9SS002E1D2
+ * audit fix).
  */
 
 import type { WorkItem } from './fetcher.js';
 import type { RecentDispatchRow } from './downtime-log.js';
 
 /**
- * Build a synthetic {@link WorkItem} from one projection row. The id and
- * title come from the log (never from `wl list`), so an item that has since
- * been closed or deleted still appears. Live-only fields (priority, risk,
- * effort, audit state, parent, timestamps) are deliberately left unset — the
- * renderer degrades them to `—` for log-derived rows.
+ * Build a synthetic {@link WorkItem} from one projection row. Used ONLY when
+ * the item is absent from `wl` (closed/deleted): the id and title come from the
+ * log so the item still appears, and live-only fields (priority, risk, effort,
+ * audit state, parent, timestamps) are left unset — the renderer degrades them
+ * to `—` because `isLogOnly` is set. When the item still exists,
+ * {@link mergeDispatchRow} is preferred so the row renders exactly like every
+ * other view.
  *
  * The dispatch metadata is carried on `dispatchKind`/`dispatchOutcome`/
  * `dispatchedAt` for the renderer and metadata panel, and mirrored into the
  * description so the detail fallback has something to show even when the item
- * no longer exists in `wl` (parent AC5; wired in a later slice).
+ * no longer exists in `wl` (parent AC5).
  */
 export function buildDispatchWorkItem(row: RecentDispatchRow): WorkItem {
   const outcome = row.latestOutcome;
@@ -68,9 +72,34 @@ export function buildDispatchWorkItem(row: RecentDispatchRow): WorkItem {
     auditResult: row.auditResult,
     ...auditTimestamps,
     isLogDerived: true,
+    // No live item available — the renderer shows `—` for absent fields.
+    isLogOnly: true,
     dispatchKind: row.kind,
     dispatchOutcome: outcome,
     dispatchedAt: row.latestTimestamp,
     description,
   };
+}
+
+/**
+ * A log-derived row for a work item that STILL EXISTS in `wl`, rendered from
+ * the LIVE item so the list row and metadata panel show the exact same status/
+ * stage/audit/review/priority icons as every other view (WL-0MUGLL9SS002E1D2
+ * audit fix). Only the dispatch provenance (`dispatchKind`/`dispatchOutcome`/
+ * `dispatchedAt` + `isLogDerived`) is overlaid. `isLogOnly` is deliberately
+ * NOT set, so {@link buildMetaRows} renders the live fields normally rather
+ * than degrading them to `—`.
+ */
+export function mergeDispatchRow(live: WorkItem, row: RecentDispatchRow): WorkItem {
+  const merged: WorkItem = { ...live };
+  // Strip the live browse list's grouping so the dispatches view stays a flat,
+  // newest-first list in log order; interleaving live groups would repeat
+  // headings (getDisplayRows emits one whenever `group` changes).
+  delete merged.group;
+  delete merged.groupLabel;
+  merged.isLogDerived = true;
+  merged.dispatchKind = row.kind;
+  merged.dispatchOutcome = row.latestOutcome;
+  merged.dispatchedAt = row.latestTimestamp;
+  return merged;
 }

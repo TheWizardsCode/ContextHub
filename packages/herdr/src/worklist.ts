@@ -49,7 +49,7 @@ import { loadSettings } from './settings.js';
 import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
 import { recentDispatchedItems } from './downtime-log.js';
-import { buildDispatchWorkItem } from './dispatch-view.js';
+import { buildDispatchWorkItem, mergeDispatchRow } from './dispatch-view.js';
 import {
   createHydratorRunner,
   createProductionHydratorDeps,
@@ -1692,11 +1692,14 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
       metaRows.push([label, value]);
     }
   };
-  // Log-derived dispatch rows (WL-0MUL2IY8L009S3PQ) have no live
-  // priority/risk/effort/audit state; render an explicit `—` instead of
-  // silently dropping the row, so the panel never looks blank or broken.
+  // Log-derived dispatch rows (WL-0MUL2IY8L009S3PQ) that have no live `wl`
+  // counterpart (`isLogOnly`) render an explicit `—` for priority/risk/effort
+  // instead of silently dropping the row, so the panel never looks blank or
+  // broken. A dispatch row ENRICHED from the live item (`mergeDispatchRow`)
+  // leaves `isLogOnly` unset and renders exactly like any other live row
+  // (WL-0MUGLL9SS002E1D2 audit fix).
   const addMetaOrDash = (label: string, value: string | undefined | null): void => {
-    if (item.isLogDerived) {
+    if (item.isLogOnly) {
       metaRows.push([label, value != null && value !== '' ? value : '—']);
     } else {
       addMeta(label, value);
@@ -1767,8 +1770,8 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
   addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
   addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
-  if (item.isLogDerived && item.auditResult == null) {
-    // No live audit state on a synthetic row — show `—` (WL-0MUL2IY8L009S3PQ).
+  if (item.isLogOnly && item.auditResult == null) {
+    // No live audit state on a log-only row — show `—` (WL-0MUL2IY8L009S3PQ).
     addMeta('Audit', '—');
   } else {
     addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
@@ -4214,12 +4217,25 @@ export function fetchItemsForView(
   cwd: string = process.cwd(),
 ): Promise<WorkItem[]> {
   if (activeDispatchFilter) {
-    // Recent-dispatches view (WL-0MUL2IZLF002S9X5): project the LOCAL
-    // rolling dispatch log into synthetic rows. Fail-safe — the reader
-    // already returns [] for a missing/unreadable/malformed log, and the
-    // catch keeps a surprise error from blanking the TUI.
-    return recentDispatchedItems(cwd)
-      .then((rows) => rows.map(buildDispatchWorkItem))
+    // Recent-dispatches view (WL-0MUL2IZLF002S9X5): the log decides WHICH items
+    // appear and their order, but each row is rendered from the LIVE work item
+    // (the same `defaultFetcher` every other view uses) so the status/stage/
+    // audit/review/priority icons are identical to other views
+    // (WL-0MUGLL9SS002E1D2 audit fix). An item no longer present in `wl` falls
+    // back to the log-derived synthetic row so closed/deleted work still
+    // appears. Fail-safe — a missing/unreadable log yields []; a live-fetch
+    // error degrades to log-only rows rather than blanking the TUI.
+    return Promise.all([
+      recentDispatchedItems(cwd),
+      defaultFetcher().catch(() => [] as WorkItem[]),
+    ])
+      .then(([rows, liveItems]) => {
+        const liveById = new Map(liveItems.map((item) => [item.id, item]));
+        return rows.map((row) => {
+          const live = liveById.get(row.itemId);
+          return live ? mergeDispatchRow(live, row) : buildDispatchWorkItem(row);
+        });
+      })
       .catch(() => []);
   }
   if (activeFilter) {

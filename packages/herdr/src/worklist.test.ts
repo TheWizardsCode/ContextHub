@@ -913,12 +913,104 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
 
     const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
 
+    // The log still decides which items appear and their order (WL-OLD/
+    // WL-NEW are absent from the live list, so they stay log-derived).
     expect(items.map((i) => i.id)).toEqual(['WL-NEW', 'WL-OLD']);
     expect(items[0].title).toBe('Newer dispatch');
     expect(items[0].isLogDerived).toBe(true);
+    expect(items[0].isLogOnly).toBe(true);
     expect(items[0].dispatchKind).toBe('implement');
-    // The default (live) fetcher is never consulted for the dispatches view.
-    expect(defaultFetcher).not.toHaveBeenCalled();
+    // The live fetcher (the same one other views use) IS consulted so
+    // surviving items can be rendered with identical icons
+    // (WL-0MUGLL9SS002E1D2 audit fix).
+    expect(defaultFetcher).toHaveBeenCalled();
+  });
+
+  it('renders a surviving dispatch row from the LIVE item so icons match other views (WL-0MUGLL9SS002E1D2)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-LIVE',
+      kind: 'plan',
+      title: 'Log title',
+      stage: 'intake_complete',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    // The live item has advanced since dispatch — its icons must win.
+    const live: WorkItem = {
+      ...makeItem('WL-LIVE'),
+      title: 'Live title',
+      status: 'open',
+      stage: 'plan_complete',
+      priority: 'high',
+      needsProducerReview: false,
+    };
+    const defaultFetcher = vi.fn().mockResolvedValue([live]);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+
+    expect(items).toHaveLength(1);
+    // Live fields win, so the row renders the same icons as every other view.
+    expect(items[0].title).toBe('Live title');
+    expect(items[0].status).toBe('open');
+    expect(items[0].stage).toBe('plan_complete');
+    expect(items[0].priority).toBe('high');
+    expect(items[0].needsProducerReview).toBe(false);
+    // …with the dispatch annotation overlaid, and NOT marked log-only.
+    expect(items[0].isLogDerived).toBe(true);
+    expect(items[0].isLogOnly).toBeFalsy();
+    expect(items[0].dispatchKind).toBe('plan');
+  });
+
+  it('an enriched dispatch row has the same icon prefix as the live row (WL-0MUGLL9SS002E1D2)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-ICON',
+      kind: 'audit',
+      title: 'Log title',
+      stage: 'in_review',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const live: WorkItem = {
+      ...makeItem('WL-ICON'),
+      status: 'completed',
+      stage: 'in_review',
+      priority: 'high',
+      needsProducerReview: false,
+    };
+    const defaultFetcher = vi.fn().mockResolvedValue([live]);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+    const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const liveLine = strip(formatItemLine(live, 200));
+    const dispatchLine = strip(formatItemLine(items[0], 200));
+    const prefixOf = (line: string): string => line.slice(0, line.indexOf('WL-ICON'));
+
+    // Identical live icon prefix (status/stage/audit/review); the dispatches
+    // view only appends its provenance tag.
+    expect(prefixOf(dispatchLine)).toBe(prefixOf(liveLine));
+    expect(dispatchLine).toContain('[audit]');
+  });
+
+  it('keeps the log-derived fallback for an item absent from the live list (WL-0MUGLL9SS002E1D2)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-GONE',
+      kind: 'plan',
+      title: 'Deleted title',
+      stage: 'plan_complete',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('OTHER')]);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+
+    expect(items).toHaveLength(1);
+    expect(items[0].id).toBe('WL-GONE');
+    expect(items[0].title).toBe('Deleted title');
+    expect(items[0].isLogOnly).toBe(true);
+    // The log-derived stage still renders a real stage icon.
+    const line = formatItemLine(items[0], 160).replace(/\x1b\[[0-9;]*m/g, '');
+    expect(line).toContain('\u{1F4CB}');
   });
 
   it('renders dispatch rows with the same stage icon as other views (WL-0MUGLL9SS002E1D2 audit fix)', async () => {
@@ -938,7 +1030,7 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
       entryType: 'pane-close',
       timestamp: '2026-01-02T00:00:00.000Z',
     });
-    const items = await fetchItemsForView(null, null, vi.fn(), true, root);
+    const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
     expect(items[0].stage).toBe('plan_complete');
     const line = formatItemLine(items[0], 160).replace(/\x1b\[[0-9;]*m/g, '');
     // The real stage glyph, never the ❓ unknown-stage fallback.
@@ -970,7 +1062,7 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
       title: 'Item 0',
       dispatchedAt: '2026-01-01T00:00:00.000Z',
     });
-    const items = await fetchItemsForView(null, null, vi.fn(), true, root);
+    const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
     expect(items).toHaveLength(20);
     expect(new Set(items.map((i) => i.id)).size).toBe(20);
   });

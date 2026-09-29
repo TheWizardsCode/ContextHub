@@ -202,6 +202,15 @@ export interface WorkItem {
    */
   isLogDerived?: boolean;
   /**
+   * True only for a log-derived row whose work item is absent from `wl` (so
+   * no live fields are available). Such rows render `—` for the absent
+   * priority/risk/effort/audit fields (WL-0MUL2IY8L009S3PQ). A log-derived
+   * row that was ENRICHED from the live item (`mergeDispatchRow`) leaves this
+   * unset, so it renders exactly like any other live row
+   * (WL-0MUGLL9SS002E1D2 audit fix).
+   */
+  isLogOnly?: boolean;
+  /**
    * Dispatch kind carried by a log-derived row (plan/intake/audit/
    * risk-effort/implement). Unset on live items (WL-0MUL2IY8L009S3PQ).
    */

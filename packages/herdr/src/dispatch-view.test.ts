@@ -11,8 +11,9 @@
 
 import { describe, it, expect } from 'vitest';
 import { stageIcon, auditIcon } from '@worklog/shared/icons';
-import { buildDispatchWorkItem } from './dispatch-view.js';
+import { buildDispatchWorkItem, mergeDispatchRow } from './dispatch-view.js';
 import type { RecentDispatchRow } from './downtime-log.js';
+import type { WorkItem } from './fetcher.js';
 import { formatItemLine, formatMetadataPanel, buildMetaRows } from './worklist.js';
 
 const baseRow: RecentDispatchRow = {
@@ -38,6 +39,7 @@ describe('buildDispatchWorkItem (synthetic log-derived row)', () => {
   it('marks the row log-derived and exposes the dispatch metadata', () => {
     const item = buildDispatchWorkItem(baseRow);
     expect(item.isLogDerived).toBe(true);
+    expect(item.isLogOnly).toBe(true);
     expect(item.dispatchKind).toBe('plan');
     expect(item.dispatchOutcome).toBe('closed-as-plan-complete');
     expect(item.dispatchedAt).toBe('2026-01-02T00:00:00.000Z');
@@ -178,5 +180,73 @@ describe('buildDispatchWorkItem — stage/audit icons match other views', () => 
     const rows = buildMetaRows(buildDispatchWorkItem({ ...baseRow, stage: 'plan_complete' }));
     const auditRow = rows.find(([label]) => label === 'Audit');
     expect(auditRow?.[1]).toBe('—');
+  });
+});
+
+// ── Surviving items are rendered from the LIVE work item ─────────────────────
+// The first cut built a bespoke synthetic row for every dispatch, so the row
+// icons diverged from every other view (status/review/priority). A surviving
+// item is now rendered from the live `WorkItem` with only the dispatch
+// provenance overlaid (WL-0MUGLL9SS002E1D2 audit fix).
+describe('mergeDispatchRow — surviving items render exactly like live rows', () => {
+  const live: WorkItem = {
+    id: 'WL-DISP1',
+    title: 'Live title',
+    status: 'completed',
+    stage: 'in_review',
+    priority: 'high',
+    risk: 'Medium',
+    effort: 'Small',
+    needsProducerReview: false,
+    auditResult: true,
+    auditedAt: '2026-01-03T00:00:00.000Z',
+    updatedAt: '2026-01-03T00:00:00.000Z',
+  };
+
+  it('keeps every live field so the icons match other views', () => {
+    const merged = mergeDispatchRow(live, baseRow);
+    expect(merged.title).toBe('Live title');
+    expect(merged.status).toBe('completed');
+    expect(merged.stage).toBe('in_review');
+    expect(merged.priority).toBe('high');
+    expect(merged.risk).toBe('Medium');
+    expect(merged.effort).toBe('Small');
+    expect(merged.needsProducerReview).toBe(false);
+    expect(merged.auditResult).toBe(true);
+  });
+
+  it('overlays the dispatch provenance and marks the row log-derived but not log-only', () => {
+    const merged = mergeDispatchRow(live, baseRow);
+    expect(merged.isLogDerived).toBe(true);
+    expect(merged.isLogOnly).toBeFalsy();
+    expect(merged.dispatchKind).toBe('plan');
+    expect(merged.dispatchOutcome).toBe('closed-as-plan-complete');
+    expect(merged.dispatchedAt).toBe('2026-01-02T00:00:00.000Z');
+  });
+
+  it('renders the identical live icon prefix, adding only the dispatch tag', () => {
+    const merged = mergeDispatchRow(live, baseRow);
+    const liveLine = visible(formatItemLine(live, 200));
+    const mergedLine = visible(formatItemLine(merged, 200));
+    const prefixOf = (line: string): string => line.slice(0, line.indexOf('WL-DISP1'));
+    expect(prefixOf(mergedLine)).toBe(prefixOf(liveLine));
+    expect(mergedLine).toContain('[plan]');
+  });
+
+  it('strips the live browse grouping so the view stays a flat newest-first list', () => {
+    const grouped: WorkItem = { ...live, group: 2, groupLabel: 'In Review' };
+    const merged = mergeDispatchRow(grouped, baseRow);
+    expect(merged.group).toBeUndefined();
+    expect(merged.groupLabel).toBeUndefined();
+  });
+
+  it('renders live metadata instead of — (only the provenance rows are added)', () => {
+    const joined = visible(formatMetadataPanel(mergeDispatchRow(live, baseRow), 100, 30, 0).join('\n'));
+    expect(joined).toMatch(/Priority\s+.*high/);
+    expect(joined).toMatch(/Risk\s+.*Medium/);
+    expect(joined).toMatch(/Effort\s+.*Small/);
+    expect(joined).not.toMatch(/Priority\s+—/);
+    expect(joined).toContain('Dispatch');
+    expect(joined).toContain('closed-as-plan-complete');
   });
 });
