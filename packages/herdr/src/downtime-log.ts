@@ -25,6 +25,8 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
+import type { CloseReasonSnapshot } from './pane-close.js';
+
 /** File name of the downtime dispatch audit log inside `.worklog/`. */
 export const DOWNTIME_LOG_FILE = 'downtime-dispatches.log';
 
@@ -149,6 +151,12 @@ export interface PaneCloseLogEntry {
   reasonCode?: string;
   /** Whether the pane was actually closed (false for informational log-only). */
   closed: boolean;
+  /**
+   * Optional full close-decision state snapshot (parent AC6 /
+   * WL-0MUMM5M22006HDPY AC4.1). Absent on legacy entries — readers ignore
+   * unknown/absent fields.
+   */
+  reasonSnapshot?: CloseReasonSnapshot;
 }
 
 /**
@@ -223,6 +231,11 @@ export interface DowntimeLogEntry {
    * legacy/other entries.
    */
   reasonCode?: string;
+  /**
+   * Optional full close-decision state snapshot on a pane-close entry
+   * (parent AC6 / WL-0MUMM5M22006HDPY AC4.1). Absent on legacy/other entries.
+   */
+  reasonSnapshot?: CloseReasonSnapshot;
   /**
    * ISO-8601 timestamp of a pane-close entry (WL-0MU308WSF0002JWN). Absent on
    * dispatch markers (which carry `dispatchedAt` instead) and legacy entries.

@@ -741,7 +741,11 @@ programmatically.
 that both the reaper and the `pane-triage` skill consume, so the two
 mechanisms cannot diverge:
 
-- `classifySession(sample, opts?) → { close, reasonCode }`
+- `classifySession(sample, opts?) → { close, reasonCode, reasonSnapshot }`
+  — `reasonSnapshot` is a full state snapshot (kind, agent state, idle
+  duration, item stage, `needsProducerReview`, invoking-pane/live-children
+  flags, activity signals, grace-period status, idle threshold) captured for
+  every outcome so a close can be explained from the log alone.
 - `extractFinalAssistantText(entries) → string` — the `.trimEnd()`-ed final
   assistant text; marker detection requires `</end_session>` at the very end
   (a marker quoted mid-message does not match)
@@ -770,8 +774,9 @@ mechanisms cannot diverge:
 
 **Reaper orchestration (`pane-close-reaper.ts`).** `runReaper(deps, options)`
 scans panes, classifies each, closes eligible panes, and appends one JSONL
-row per pane to the ledger (default `.worklog/pane-close-ledger.jsonl`). I/O
-is injected via `ReaperDeps` (`listPanes`, `closePane`,
+row per pane to the ledger (default `.worklog/pane-close-ledger.jsonl`); each
+row carries the decision's `reasonSnapshot` alongside the decision and
+timestamp. I/O is injected via `ReaperDeps` (`listPanes`, `closePane`,
 `terminateProcessGroup`) so the orchestration is fully testable.
 `runReaperCli(deps, argv)` is the CLI entrypoint and accepts `--dry-run`,
 `--threshold-minutes <n>` and `--ledger <path>`.

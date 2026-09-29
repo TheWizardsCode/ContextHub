@@ -306,7 +306,7 @@ describe('reaper — grace period (parent AC5)', () => {
     const deps = makeDeps(panes);
     const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, gracePeriodMs: GRACE_MS });
     expect(deps.closePane).not.toHaveBeenCalled();
-    expect(results[0].decision).toEqual({ close: false, reasonCode: 'grace-period' });
+    expect(results[0].decision).toMatchObject({ close: false, reasonCode: 'grace-period' });
   });
 
   it('does not close exactly at the grace boundary', async () => {
@@ -388,7 +388,7 @@ describe('reaper — active-agent signal pass-through (parent AC3.3)', () => {
     const deps = makeDeps(panes);
     const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
     expect(deps.closePane).not.toHaveBeenCalled();
-    expect(results[0].decision).toEqual({ close: false, reasonCode: 'active' });
+    expect(results[0].decision).toMatchObject({ close: false, reasonCode: 'active' });
   });
 
   it('keeps a pane open when it has active network connections', async () => {
@@ -535,6 +535,87 @@ describe('runReaper — ledger writing', () => {
       expect(lines[0].decision.reasonCode).toBe('marker');
       expect(lines[1].paneId).toBe('p2');
       expect(lines[1].decision.reasonCode).toBe('dead-agent');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('runReaper — detailed reason snapshot in the ledger (parent AC4.1/AC4.2/AC4.3)', () => {
+  it('writes the reasonSnapshot alongside the decision and timestamp', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const dir = mkdtempSync(join(tmpdir(), 'reaper-snapshot-'));
+    const ledgerPath = join(dir, 'ledger.jsonl');
+    try {
+      const panes = [pane({
+        id: 'p1',
+        kind: 'plan',
+        lastAssistantText: '</end_session>',
+        agentProcessAlive: false,
+        idleMs: 1234,
+        itemStage: 'plan_complete',
+      })];
+      const deps = makeDeps(panes);
+      await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, ledgerPath });
+      const row = JSON.parse(readFileSync(ledgerPath, 'utf8').trim());
+      expect(typeof row.timestamp).toBe('string');
+      expect(row.decision.reasonCode).toBe('marker');
+      expect(row.reasonSnapshot).toMatchObject({
+        kind: 'plan',
+        agentProcessAlive: false,
+        idleMs: 1234,
+        itemStage: 'plan_complete',
+        needsProducerReview: false,
+        childProcessCount: 0,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('never throws and still writes rows for malformed or absent snapshots', async () => {
+    const { writeLedgerRow } = await import('./pane-close-reaper');
+    type CloseDecisionShape = import('./pane-close').CloseDecision;
+    const { mkdtempSync, readFileSync, rmSync } = await import('node:fs');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+
+    const dir = mkdtempSync(join(tmpdir(), 'reaper-snapshot-bad-'));
+    const ledgerPath = join(dir, 'ledger.jsonl');
+    try {
+      // A deliberately malformed snapshot (not an object) must be dropped
+      // without throwing.
+      writeLedgerRow(ledgerPath, {
+        paneId: 'p1',
+        paneTitle: 'T',
+        decision: {
+          close: true,
+          reasonCode: 'marker',
+          reasonSnapshot: 'garbage',
+        } as unknown as CloseDecisionShape,
+        success: true,
+      });
+      // An absent snapshot is omitted entirely.
+      writeLedgerRow(ledgerPath, {
+        paneId: 'p2',
+        paneTitle: 'T2',
+        decision: { close: false, reasonCode: 'active' },
+        success: true,
+      });
+
+      const rows = readFileSync(ledgerPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      expect(rows).toHaveLength(2);
+      expect(rows[0].paneId).toBe('p1');
+      expect(rows[0].reasonSnapshot).toBeUndefined();
+      expect(rows[1].paneId).toBe('p2');
+      expect(rows[1].reasonSnapshot).toBeUndefined();
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

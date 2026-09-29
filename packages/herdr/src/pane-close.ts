@@ -48,6 +48,8 @@ export interface SessionSample {
   agentProcessAlive: boolean;
   /** Idle time in milliseconds (time since last activity). */
   idleMs: number;
+  /** Work-item stage at decision time, when known (logging snapshot). */
+  itemStage?: string;
   /** Pane kind — determines which close policies apply. */
   kind: 'plan' | 'intake' | 'audit' | 'risk-effort' | 'implement' | 'unknown';
   /** Whether the work item has needsProducerReview set. */
@@ -75,6 +77,41 @@ export interface SessionSample {
 }
 
 /**
+ * The full state snapshot captured with every close decision (parent AC6 /
+ * WL-0MUMM5M22006HDPY AC4.1). Every field is derived from the input sample and
+ * options, so a decision can be explained after the fact from the log alone.
+ * `undefined` optional fields are omitted by JSON serialisation.
+ */
+export interface CloseReasonSnapshot {
+  /** Pane kind at decision time. */
+  kind: string;
+  /** Whether the agent process was alive at decision time. */
+  agentProcessAlive: boolean;
+  /** Idle duration in milliseconds at decision time. */
+  idleMs: number;
+  /** Work-item stage, when known. */
+  itemStage?: string;
+  /** Whether the item needs producer review. */
+  needsProducerReview: boolean;
+  /** Whether this pane is the invoking / current operator pane. */
+  isInvokingPane: boolean;
+  /** Number of live child processes. */
+  childProcessCount: number;
+  /** Recent file-modification activity signal. */
+  hasRecentFileModifications?: boolean;
+  /** Active network-connection activity signal. */
+  hasActiveNetworkConnections?: boolean;
+  /** Pane age since first dispatch (ms), when known. */
+  ageSinceDispatchMs?: number;
+  /** Configured grace period (ms); `0` = disabled. */
+  gracePeriodMs: number;
+  /** Whether the pane is within the grace window. */
+  withinGracePeriod: boolean;
+  /** Configured idle threshold (ms). */
+  idleThresholdMs: number;
+}
+
+/**
  * The classification decision for one session.
  */
 export interface CloseDecision {
@@ -82,6 +119,12 @@ export interface CloseDecision {
   close: boolean;
   /** Stable machine-readable reason code. */
   reasonCode: string;
+  /**
+   * Full state snapshot explaining the decision (parent AC6 / AC4.1).
+   * `classifySession` populates this for every outcome; it is optional so
+   * hand-built decisions and legacy persisted rows remain valid.
+   */
+  reasonSnapshot?: CloseReasonSnapshot;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -140,43 +183,71 @@ export function classifySession(
 ): CloseDecision {
   const threshold = opts?.idleThresholdMs ?? DEFAULT_IDLE_THRESHOLD_MS;
   const gracePeriodMs = opts?.gracePeriodMs ?? 0;
+  const age = sample.ageSinceDispatchMs;
+  const withinGracePeriod =
+    gracePeriodMs > 0 &&
+    typeof age === 'number' &&
+    Number.isFinite(age) &&
+    age <= gracePeriodMs;
+
+  // Full state snapshot (parent AC6 / AC4.1): attached to every decision so
+  // the reason can be reconstructed from the log alone.
+  const reasonSnapshot: CloseReasonSnapshot = {
+    kind: sample.kind,
+    agentProcessAlive: sample.agentProcessAlive === true,
+    idleMs: typeof sample.idleMs === 'number' && Number.isFinite(sample.idleMs) ? sample.idleMs : 0,
+    itemStage: typeof sample.itemStage === 'string' ? sample.itemStage : undefined,
+    needsProducerReview: sample.needsProducerReview === true,
+    isInvokingPane: sample.isInvokingPane === true,
+    childProcessCount:
+      typeof sample.childProcessCount === 'number' && Number.isFinite(sample.childProcessCount)
+        ? sample.childProcessCount
+        : 0,
+    hasRecentFileModifications: sample.hasRecentFileModifications === true,
+    hasActiveNetworkConnections: sample.hasActiveNetworkConnections === true,
+    ageSinceDispatchMs: typeof age === 'number' && Number.isFinite(age) ? age : undefined,
+    gracePeriodMs,
+    withinGracePeriod,
+    idleThresholdMs: threshold,
+  };
+
+  const decide = (close: boolean, reasonCode: string): CloseDecision => ({
+    close,
+    reasonCode,
+    reasonSnapshot,
+  });
 
   // 1. Never-close guards (highest precedence).
   if (sample.kind === 'implement') {
-    return { close: false, reasonCode: 'implement' };
+    return decide(false, 'implement');
   }
   if (sample.needsProducerReview) {
-    return { close: false, reasonCode: 'producer-review' };
+    return decide(false, 'producer-review');
   }
   if (sample.isInvokingPane) {
-    return { close: false, reasonCode: 'invoking-pane' };
+    return decide(false, 'invoking-pane');
   }
   if (sample.childProcessCount > 0) {
-    return { close: false, reasonCode: 'live-children' };
+    return decide(false, 'live-children');
   }
 
   // 2. Grace period (parent AC5): a pane younger than (or exactly at) the
   //    grace window is never eligible for close, regardless of marker, idle
   //    or dead-agent state. An unknown age (`undefined`/non-finite) cannot be
   //    compared, so the guard does not apply.
-  if (
-    gracePeriodMs > 0 &&
-    typeof sample.ageSinceDispatchMs === 'number' &&
-    Number.isFinite(sample.ageSinceDispatchMs) &&
-    sample.ageSinceDispatchMs <= gracePeriodMs
-  ) {
-    return { close: false, reasonCode: 'grace-period' };
+  if (withinGracePeriod) {
+    return decide(false, 'grace-period');
   }
 
   // 3. Marker at end of final assistant message.
   if (typeof sample.lastAssistantText === 'string' && endsWithMarker(sample.lastAssistantText)) {
-    return { close: true, reasonCode: 'marker' };
+    return decide(true, 'marker');
   }
 
   // 4. Dead agent — the process is gone; operator may still need to read
   //    the final output. No close.
   if (!sample.agentProcessAlive) {
-    return { close: false, reasonCode: 'dead-agent' };
+    return decide(false, 'dead-agent');
   }
 
   // 5. Active-agent signals (parent AC3): a pane showing recent file or
@@ -187,14 +258,14 @@ export function classifySession(
     sample.hasRecentFileModifications === true ||
     sample.hasActiveNetworkConnections === true
   ) {
-    return { close: false, reasonCode: 'active' };
+    return decide(false, 'active');
   }
 
   // 6. Idle threshold — only reap when the threshold is positive.
   if (threshold > 0 && sample.idleMs > threshold) {
-    return { close: true, reasonCode: 'idle-threshold' };
+    return decide(true, 'idle-threshold');
   }
 
   // 7. Still active.
-  return { close: false, reasonCode: 'active' };
+  return decide(false, 'active');
 }

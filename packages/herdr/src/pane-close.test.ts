@@ -21,7 +21,7 @@
  */
 import { describe, expect, it } from 'vitest';
 
-import type { SessionSample, CloseDecision } from './pane-close';
+import type { SessionSample, CloseDecision, CloseReasonSnapshot } from './pane-close';
 import { classifySession, extractFinalAssistantText } from './pane-close';
 
 // ── Fixture helpers ───────────────────────────────────────────────────
@@ -48,35 +48,35 @@ describe('classifySession — marker detection (AC1, AC2)', () => {
     const result = classifySession(sample({
       lastAssistantText: 'All done here.\n\n</end_session>',
     }));
-    expect(result).toEqual({ close: true, reasonCode: 'marker' });
+    expect(result).toMatchObject({ close: true, reasonCode: 'marker' });
   });
 
   it('closes when the marker is followed only by whitespace / newlines', () => {
     const result = classifySession(sample({
       lastAssistantText: 'Session complete.\n\n</end_session>\n\n',
     }));
-    expect(result).toEqual({ close: true, reasonCode: 'marker' });
+    expect(result).toMatchObject({ close: true, reasonCode: 'marker' });
   });
 
   it('does NOT close when the marker is quoted mid-message', () => {
     const result = classifySession(sample({
       lastAssistantText: 'I wrote the report (see </end_session> example) and saved it.',
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 
   it('does NOT close when non-whitespace follows the marker', () => {
     const result = classifySession(sample({
       lastAssistantText: 'Done</end_session> please review my work',
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 
   it('does NOT close when there is no marker at all', () => {
     const result = classifySession(sample({
       lastAssistantText: 'I am still working on this task...',
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 });
 
@@ -87,7 +87,7 @@ describe('classifySession — live agent, below threshold (AC3, parent)', () => 
       agentProcessAlive: true,
       idleMs: 60 * 1000, // 1 minute
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 });
 
@@ -98,7 +98,7 @@ describe('classifySession — idle threshold (AC3, parent)', () => {
       agentProcessAlive: true,
       idleMs: THRESHOLD_MS + 1,
     }));
-    expect(result).toEqual({ close: true, reasonCode: 'idle-threshold' });
+    expect(result).toMatchObject({ close: true, reasonCode: 'idle-threshold' });
   });
 
   it('does not close when the agent is alive and idle is exactly at the threshold', () => {
@@ -107,7 +107,7 @@ describe('classifySession — idle threshold (AC3, parent)', () => {
       agentProcessAlive: true,
       idleMs: THRESHOLD_MS,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 
   it('does not close when the agent is alive and idle is just below the threshold', () => {
@@ -116,7 +116,7 @@ describe('classifySession — idle threshold (AC3, parent)', () => {
       agentProcessAlive: true,
       idleMs: THRESHOLD_MS - 1,
     })));
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 });
 
@@ -126,7 +126,7 @@ describe('classifySession — idle threshold <= 0 never closes (WL-0MUMEJHT9004E
       sample({ lastAssistantText: '', agentProcessAlive: true, idleMs: 999999999 }),
       { idleThresholdMs: 0 },
     );
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 
   it('does not close when idleThresholdMs is negative, regardless of idleMs', () => {
@@ -134,7 +134,7 @@ describe('classifySession — idle threshold <= 0 never closes (WL-0MUMEJHT9004E
       sample({ lastAssistantText: '', agentProcessAlive: true, idleMs: 999999999 }),
       { idleThresholdMs: -1 },
     );
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 
   it('does not close when idleThresholdMs is 0 and idleMs is also 0', () => {
@@ -142,7 +142,7 @@ describe('classifySession — idle threshold <= 0 never closes (WL-0MUMEJHT9004E
       sample({ lastAssistantText: '', agentProcessAlive: true, idleMs: 0 }),
       { idleThresholdMs: 0 },
     );
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 
   it('does not close when idleThresholdMs is negative even if idleMs is zero', () => {
@@ -150,7 +150,7 @@ describe('classifySession — idle threshold <= 0 never closes (WL-0MUMEJHT9004E
       sample({ lastAssistantText: '', agentProcessAlive: true, idleMs: 0 }),
       { idleThresholdMs: -5 },
     );
-    expect(result).toEqual({ close: false, reasonCode: 'active' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'active' });
   });
 });
 
@@ -160,7 +160,7 @@ describe('classifySession — dead agent (WL-0MUMEJHT9004EQPI AC1)', () => {
       lastAssistantText: '',
       agentProcessAlive: false,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'dead-agent' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'dead-agent' });
   });
 
   it('does NOT close a dead agent even if idle is zero', () => {
@@ -169,7 +169,7 @@ describe('classifySession — dead agent (WL-0MUMEJHT9004EQPI AC1)', () => {
       agentProcessAlive: false,
       idleMs: 0,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'dead-agent' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'dead-agent' });
   });
 
   it('does NOT close a dead agent even if idle is very large', () => {
@@ -178,7 +178,7 @@ describe('classifySession — dead agent (WL-0MUMEJHT9004EQPI AC1)', () => {
       agentProcessAlive: false,
       idleMs: 999999999,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'dead-agent' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'dead-agent' });
   });
 });
 
@@ -189,7 +189,7 @@ describe('classifySession — never-close guards (AC4, AC3, parent)', () => {
       lastAssistantText: '</end_session>',
       agentProcessAlive: false,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'implement' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'implement' });
   });
 
   it('never closes a pane with needsProducerReview = true', () => {
@@ -198,7 +198,7 @@ describe('classifySession — never-close guards (AC4, AC3, parent)', () => {
       lastAssistantText: '</end_session>',
       agentProcessAlive: false,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'producer-review' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'producer-review' });
   });
 
   it('never closes the invoking pane', () => {
@@ -207,7 +207,7 @@ describe('classifySession — never-close guards (AC4, AC3, parent)', () => {
       lastAssistantText: '</end_session>',
       agentProcessAlive: false,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'invoking-pane' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'invoking-pane' });
   });
 
   it('never closes a pane with live child processes (AC5)', () => {
@@ -216,7 +216,7 @@ describe('classifySession — never-close guards (AC4, AC3, parent)', () => {
       lastAssistantText: '</end_session>',
       agentProcessAlive: false,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'live-children' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'live-children' });
   });
 });
 
@@ -265,7 +265,7 @@ describe('classifySession — kind variants', () => {
         kind,
         lastAssistantText: 'Done\n\n</end_session>',
       }));
-      expect(result).toEqual({ close: true, reasonCode: 'marker' });
+      expect(result).toMatchObject({ close: true, reasonCode: 'marker' });
     });
 
     it(`does NOT close a ${kind} pane when agent is dead`, () => {
@@ -273,7 +273,7 @@ describe('classifySession — kind variants', () => {
         kind,
         agentProcessAlive: false,
       }));
-      expect(result).toEqual({ close: false, reasonCode: 'dead-agent' });
+      expect(result).toMatchObject({ close: false, reasonCode: 'dead-agent' });
     });
   }
 });
@@ -291,7 +291,7 @@ describe('classifySession — producer-review per kind (AC1.1)', () => {
         agentProcessAlive: false,
         idleMs: 999999999,
       }));
-      expect(result).toEqual({ close: false, reasonCode: 'producer-review' });
+      expect(result).toMatchObject({ close: false, reasonCode: 'producer-review' });
     });
   }
 });
@@ -304,7 +304,7 @@ describe('classifySession — implement pane never closes (AC1.2)', () => {
       agentProcessAlive: true,
       idleMs: 999999999,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'implement' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'implement' });
   });
 
   it('never closes an implement pane with marker+dead', () => {
@@ -314,7 +314,7 @@ describe('classifySession — implement pane never closes (AC1.2)', () => {
       agentProcessAlive: false,
       idleMs: 0,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'implement' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'implement' });
   });
 });
 
@@ -325,7 +325,7 @@ describe('classifySession — invoking-pane and live-children guards (AC1.3)', (
       idleMs: 999999999,
       lastAssistantText: '</end_session>',
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'invoking-pane' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'invoking-pane' });
   });
 
   it('live-children never closes even with idle>threshold', () => {
@@ -334,7 +334,7 @@ describe('classifySession — invoking-pane and live-children guards (AC1.3)', (
       idleMs: 999999999,
       lastAssistantText: '</end_session>',
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'live-children' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'live-children' });
   });
 });
 
@@ -405,7 +405,7 @@ describe('classifySession — table-driven coverage of every classification path
   for (const row of rows) {
     it(row.name, () => {
       const result = classifySession(sample(row.sample), row.opts);
-      expect(result).toEqual(row.expected);
+      expect(result).toMatchObject(row.expected);
     });
   }
 });
@@ -490,7 +490,7 @@ describe('classifySession — grace period table (parent AC5)', () => {
 
   for (const row of rows) {
     it(row.name, () => {
-      expect(classifySession(sample(row.sample), row.opts)).toEqual(row.expected);
+      expect(classifySession(sample(row.sample), row.opts)).toMatchObject(row.expected);
     });
   }
 });
@@ -573,7 +573,7 @@ describe('classifySession — active-agent signals table (parent AC3)', () => {
 
   for (const row of rows) {
     it(row.name, () => {
-      expect(classifySession(sample(row.sample), row.opts)).toEqual(row.expected);
+      expect(classifySession(sample(row.sample), row.opts)).toMatchObject(row.expected);
     });
   }
 });
@@ -586,7 +586,7 @@ describe('classifySession — never-close guards beat activity signals (parent A
       hasRecentFileModifications: true,
       hasActiveNetworkConnections: true,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'implement' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'implement' });
   });
 
   it('producer-review guard beats activity signals', () => {
@@ -596,7 +596,7 @@ describe('classifySession — never-close guards beat activity signals (parent A
       hasRecentFileModifications: true,
       hasActiveNetworkConnections: true,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'producer-review' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'producer-review' });
   });
 
   it('invoking-pane guard beats activity signals', () => {
@@ -606,7 +606,7 @@ describe('classifySession — never-close guards beat activity signals (parent A
       hasRecentFileModifications: true,
       hasActiveNetworkConnections: true,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'invoking-pane' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'invoking-pane' });
   });
 
   it('live-children guard beats activity signals', () => {
@@ -616,8 +616,128 @@ describe('classifySession — never-close guards beat activity signals (parent A
       hasRecentFileModifications: true,
       hasActiveNetworkConnections: true,
     }));
-    expect(result).toEqual({ close: false, reasonCode: 'live-children' });
+    expect(result).toMatchObject({ close: false, reasonCode: 'live-children' });
   });
+});
+
+describe('classifySession — reasonSnapshot (parent AC6 / AC4.1)', () => {
+  it('captures the complete state snapshot for a marker close', () => {
+    const result = classifySession(
+      sample({
+        kind: 'plan',
+        lastAssistantText: 'Done\n\n</end_session>',
+        agentProcessAlive: false,
+        idleMs: 1234,
+        itemStage: 'plan_complete',
+        needsProducerReview: false,
+        isInvokingPane: false,
+        childProcessCount: 0,
+      }),
+      { idleThresholdMs: 600_000, gracePeriodMs: 300_000 },
+    );
+    expect(result.reasonSnapshot).toEqual({
+      kind: 'plan',
+      agentProcessAlive: false,
+      idleMs: 1234,
+      itemStage: 'plan_complete',
+      needsProducerReview: false,
+      isInvokingPane: false,
+      childProcessCount: 0,
+      hasRecentFileModifications: false,
+      hasActiveNetworkConnections: false,
+      ageSinceDispatchMs: undefined,
+      gracePeriodMs: 300_000,
+      withinGracePeriod: false,
+      idleThresholdMs: 600_000,
+    });
+  });
+
+  interface SnapRow {
+    name: string;
+    sample: Partial<SessionSample>;
+    opts?: { idleThresholdMs?: number; gracePeriodMs?: number };
+    reasonCode: string;
+    expected: Partial<CloseReasonSnapshot>;
+  }
+
+  const rows: SnapRow[] = [
+    {
+      name: 'marker close',
+      sample: { kind: 'plan', lastAssistantText: '</end_session>', idleMs: 999, itemStage: 'plan_complete' },
+      opts: { idleThresholdMs: 600_000 },
+      reasonCode: 'marker',
+      expected: { kind: 'plan', idleMs: 999, itemStage: 'plan_complete', idleThresholdMs: 600_000, withinGracePeriod: false },
+    },
+    {
+      name: 'idle-threshold close',
+      sample: { agentProcessAlive: true, idleMs: 700_000 },
+      opts: { idleThresholdMs: 600_000 },
+      reasonCode: 'idle-threshold',
+      expected: { agentProcessAlive: true, idleMs: 700_000, idleThresholdMs: 600_000 },
+    },
+    {
+      name: 'dead-agent',
+      sample: { agentProcessAlive: false, idleMs: 50 },
+      reasonCode: 'dead-agent',
+      expected: { agentProcessAlive: false, idleMs: 50 },
+    },
+    {
+      name: 'implement guard',
+      sample: { kind: 'implement', childProcessCount: 2 },
+      reasonCode: 'implement',
+      expected: { kind: 'implement', childProcessCount: 2 },
+    },
+    {
+      name: 'producer-review guard',
+      sample: { needsProducerReview: true },
+      reasonCode: 'producer-review',
+      expected: { needsProducerReview: true },
+    },
+    {
+      name: 'invoking-pane guard',
+      sample: { isInvokingPane: true },
+      reasonCode: 'invoking-pane',
+      expected: { isInvokingPane: true },
+    },
+    {
+      name: 'live-children guard',
+      sample: { childProcessCount: 3 },
+      reasonCode: 'live-children',
+      expected: { childProcessCount: 3 },
+    },
+    {
+      name: 'grace-period guard',
+      sample: { ageSinceDispatchMs: 60_000 },
+      opts: { gracePeriodMs: 300_000, idleThresholdMs: 600_000 },
+      reasonCode: 'grace-period',
+      expected: {
+        ageSinceDispatchMs: 60_000,
+        gracePeriodMs: 300_000,
+        withinGracePeriod: true,
+        idleThresholdMs: 600_000,
+      },
+    },
+    {
+      name: 'active via recent file modifications',
+      sample: { hasRecentFileModifications: true },
+      reasonCode: 'active',
+      expected: { hasRecentFileModifications: true, hasActiveNetworkConnections: false },
+    },
+    {
+      name: 'active via network connections',
+      sample: { hasActiveNetworkConnections: true },
+      reasonCode: 'active',
+      expected: { hasRecentFileModifications: false, hasActiveNetworkConnections: true },
+    },
+  ];
+
+  for (const row of rows) {
+    it(`populates the snapshot for ${row.name} (${row.reasonCode})`, () => {
+      const result = classifySession(sample(row.sample), row.opts);
+      expect(result.reasonCode).toBe(row.reasonCode);
+      expect(result.reasonSnapshot).toMatchObject(row.expected);
+    });
+  }
 });
 
 describe('classifySession — extractFinalAssistantText', () => {

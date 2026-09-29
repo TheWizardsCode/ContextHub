@@ -738,6 +738,73 @@ describe('pane-close lifecycle entries (WL-0MU308WSF0002JWN)', () => {
     });
   });
 
+  it('round-trips an optional reasonSnapshot and tolerates absent/malformed snapshots (AC4.3)', async () => {
+    const cwd = makeTempCwd();
+    const snapshot = {
+      kind: 'plan',
+      agentProcessAlive: false,
+      idleMs: 1234,
+      itemStage: 'plan_complete',
+      needsProducerReview: false,
+      isInvokingPane: false,
+      childProcessCount: 0,
+      hasRecentFileModifications: false,
+      hasActiveNetworkConnections: false,
+      gracePeriodMs: 300_000,
+      withinGracePeriod: false,
+      idleThresholdMs: 600_000,
+    };
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:00.000Z',
+      itemId: 'WL-1',
+      itemTitle: 'with snapshot',
+      paneId: 'w1:p1',
+      kind: 'plan',
+      outcome: 'closed-as-plan-complete',
+      reasonCode: 'marker',
+      reasonSnapshot: snapshot,
+      closed: true,
+    });
+    await appendPaneCloseLogEntry(cwd, {
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:01.000Z',
+      itemId: 'WL-2',
+      itemTitle: 'no snapshot',
+      paneId: 'w1:p2',
+      kind: 'plan',
+      outcome: 'closed-as-plan-complete',
+      closed: true,
+    });
+    // A malformed snapshot written directly (bypassing the typed API) must
+    // never break the reader.
+    await appendDowntimeLogEntry(
+      cwd,
+      JSON.stringify({
+        entryType: 'pane-close',
+        timestamp: '2026-01-02T00:00:02.000Z',
+        itemId: 'WL-3',
+        itemTitle: 'malformed snapshot',
+        paneId: 'w1:p3',
+        kind: 'plan',
+        outcome: 'closed-as-plan-complete',
+        reasonSnapshot: 'not-an-object',
+        closed: true,
+      }),
+    );
+
+    const entries = await readDowntimeLogEntries(cwd);
+    expect(entries).toHaveLength(3);
+    expect(entries[0].reasonSnapshot).toMatchObject({
+      kind: 'plan',
+      idleMs: 1234,
+      itemStage: 'plan_complete',
+      withinGracePeriod: false,
+    });
+    expect(entries[1].reasonSnapshot).toBeUndefined();
+    expect(entries[2].reasonSnapshot).toBe('not-an-object');
+  });
+
   it('never throws when the worklog dir is unwritable (fail-closed, AC7)', async () => {
     const cwd = '/nonexistent/path/' + Math.random().toString(36).slice(2);
     await expect(

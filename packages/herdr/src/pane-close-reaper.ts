@@ -17,7 +17,7 @@
  */
 
 import { classifySession, extractFinalAssistantText } from './pane-close.js';
-import type { CloseDecision, SessionSample } from './pane-close.js';
+import type { CloseDecision, CloseReasonSnapshot, SessionSample } from './pane-close.js';
 import type { TerminateResult } from './process-group.js';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -45,6 +45,8 @@ export interface PaneStatus {
   id: string;
   kind: 'plan' | 'intake' | 'audit' | 'risk-effort' | 'implement' | 'unknown';
   itemId: string;
+  /** Work-item stage at decision time, when known (logging snapshot). */
+  itemStage?: string;
   title: string;
   /** Concatenated text of the final assistant message. */
   lastAssistantText: string;
@@ -131,8 +133,25 @@ export interface LedgerEntry {
   paneId: string;
   paneTitle: string;
   decision: CloseDecision;
+  /**
+   * Detailed close-decision state snapshot (parent AC6 / AC4.1). Optional so
+   * legacy rows and hand-built decisions remain valid.
+   */
+  reasonSnapshot?: CloseReasonSnapshot;
   success: boolean;
   error?: string;
+}
+
+/**
+ * Defensive snapshot normaliser (AC4.3): returns the snapshot only when it is
+ * a plain object, otherwise `undefined`. Never throws, so a malformed or
+ * hand-built snapshot can never break the ledger write.
+ */
+function normaliseReasonSnapshot(value: unknown): CloseReasonSnapshot | undefined {
+  if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+    return value as CloseReasonSnapshot;
+  }
+  return undefined;
 }
 
 /**
@@ -142,11 +161,20 @@ export interface LedgerEntry {
 export function writeLedgerRow(ledgerPath: string, result: ReaperResult): void {
   try {
     mkdirSync(dirname(ledgerPath), { recursive: true });
+    const decision: CloseDecision = result.decision;
+    // The snapshot is recorded once, at the row level, alongside the
+    // decision and timestamp (AC4.2) — the nested copy is dropped to keep the
+    // ledger compact.
+    const reasonSnapshot = normaliseReasonSnapshot(decision?.reasonSnapshot);
     const entry: LedgerEntry = {
       timestamp: new Date().toISOString(),
       paneId: result.paneId,
       paneTitle: result.paneTitle,
-      decision: result.decision,
+      decision: {
+        close: decision?.close === true,
+        reasonCode: typeof decision?.reasonCode === 'string' ? decision.reasonCode : 'unknown',
+      },
+      reasonSnapshot,
       success: result.success,
       error: result.error,
     };
@@ -188,6 +216,7 @@ function toSessionSample(ps: PaneStatus): SessionSample {
     ageSinceDispatchMs: ps.ageSinceDispatchMs,
     hasRecentFileModifications: ps.hasRecentFileModifications,
     hasActiveNetworkConnections: ps.hasActiveNetworkConnections,
+    itemStage: ps.itemStage,
   };
 }
 
