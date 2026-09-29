@@ -87,8 +87,8 @@ describe('reaper — marker idle pane closes once', () => {
   });
 });
 
-describe('reaper — marker-less, dead agent closes', () => {
-  it('reaps a session whose agent process is gone (AC3)', async () => {
+describe('reaper — dead agent does not close (WL-0MUMEJHT9004EQPI)', () => {
+  it('keeps a session whose agent process is gone (operator may need output)', async () => {
     const { runReaper } = await import('./pane-close-reaper');
     const panes = [pane({
       kind: 'intake',
@@ -98,7 +98,8 @@ describe('reaper — marker-less, dead agent closes', () => {
     })];
     const deps = makeDeps(panes);
     const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
-    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(deps.closePane).not.toHaveBeenCalled();
+    expect(results[0].decision.close).toBe(false);
     expect(results[0].decision.reasonCode).toBe('dead-agent');
   });
 });
