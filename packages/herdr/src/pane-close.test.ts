@@ -410,6 +410,91 @@ describe('classifySession — table-driven coverage of every classification path
   }
 });
 
+describe('classifySession — grace period table (parent AC5)', () => {
+  const GRACE_MS = 5 * 60 * 1000;
+
+  interface Row {
+    name: string;
+    sample: Partial<SessionSample>;
+    opts?: { idleThresholdMs?: number; gracePeriodMs?: number };
+    expected: CloseDecision;
+  }
+
+  const rows: Row[] = [
+    {
+      name: 'within grace blocks a marker close',
+      sample: { lastAssistantText: '</end_session>', ageSinceDispatchMs: 60_000 },
+      opts: { gracePeriodMs: GRACE_MS },
+      expected: { close: false, reasonCode: 'grace-period' },
+    },
+    {
+      name: 'within grace blocks a dead-agent close',
+      sample: { agentProcessAlive: false, ageSinceDispatchMs: 0 },
+      opts: { gracePeriodMs: GRACE_MS },
+      expected: { close: false, reasonCode: 'grace-period' },
+    },
+    {
+      name: 'within grace blocks an idle-threshold close',
+      sample: { agentProcessAlive: true, idleMs: THRESHOLD_MS + 1, ageSinceDispatchMs: 60_000 },
+      opts: { idleThresholdMs: THRESHOLD_MS, gracePeriodMs: GRACE_MS },
+      expected: { close: false, reasonCode: 'grace-period' },
+    },
+    {
+      name: 'exactly at the grace boundary still blocks (age == grace)',
+      sample: { lastAssistantText: '</end_session>', ageSinceDispatchMs: GRACE_MS },
+      opts: { gracePeriodMs: GRACE_MS },
+      expected: { close: false, reasonCode: 'grace-period' },
+    },
+    {
+      name: 'past grace closes on the marker',
+      sample: { lastAssistantText: '</end_session>', ageSinceDispatchMs: GRACE_MS + 1 },
+      opts: { gracePeriodMs: GRACE_MS },
+      expected: { close: true, reasonCode: 'marker' },
+    },
+    {
+      name: 'past grace closes on the idle threshold',
+      sample: { agentProcessAlive: true, idleMs: THRESHOLD_MS + 1, ageSinceDispatchMs: GRACE_MS + 1 },
+      opts: { idleThresholdMs: THRESHOLD_MS, gracePeriodMs: GRACE_MS },
+      expected: { close: true, reasonCode: 'idle-threshold' },
+    },
+    {
+      name: 'grace 0 (disabled) does not block a marker close',
+      sample: { lastAssistantText: '</end_session>', ageSinceDispatchMs: 1 },
+      opts: { gracePeriodMs: 0 },
+      expected: { close: true, reasonCode: 'marker' },
+    },
+    {
+      name: 'absent grace option does not block a marker close',
+      sample: { lastAssistantText: '</end_session>', ageSinceDispatchMs: 1 },
+      expected: { close: true, reasonCode: 'marker' },
+    },
+    {
+      name: 'unknown pane age does not block a marker close',
+      sample: { lastAssistantText: '</end_session>' },
+      opts: { gracePeriodMs: GRACE_MS },
+      expected: { close: true, reasonCode: 'marker' },
+    },
+    {
+      name: 'never-close guards take precedence over the grace window',
+      sample: { kind: 'implement', ageSinceDispatchMs: 0 },
+      opts: { gracePeriodMs: GRACE_MS },
+      expected: { close: false, reasonCode: 'implement' },
+    },
+    {
+      name: 'a grace longer than the idle threshold still blocks an idle close',
+      sample: { agentProcessAlive: true, idleMs: 6 * 60 * 1000, ageSinceDispatchMs: 10 * 60 * 1000 },
+      opts: { idleThresholdMs: 5 * 60 * 1000, gracePeriodMs: 60 * 60 * 1000 },
+      expected: { close: false, reasonCode: 'grace-period' },
+    },
+  ];
+
+  for (const row of rows) {
+    it(row.name, () => {
+      expect(classifySession(sample(row.sample), row.opts)).toEqual(row.expected);
+    });
+  }
+});
+
 describe('classifySession — extractFinalAssistantText', () => {
   it('returns the final assistant message text, trimEnd-ed (rstrip semantics)', () => {
     const entries = [

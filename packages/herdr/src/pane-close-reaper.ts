@@ -64,6 +64,11 @@ export interface PaneStatus {
   isInvokingPane: boolean;
   /** Number of child processes spawned by this session. */
   childProcessCount: number;
+  /**
+   * Age since the pane's first dispatch, in milliseconds (parent AC5).
+   * Optional/tolerant: when absent the grace-period guard cannot apply.
+   */
+  ageSinceDispatchMs?: number;
   /** The PID of the agent process (for process-group teardown). */
   pid?: number;
 }
@@ -81,6 +86,11 @@ export interface ReaperResult {
 export interface ReaperOptions {
   /** Idle threshold in milliseconds (default: 30 minutes). */
   idleThresholdMs?: number;
+  /**
+   * Grace period in milliseconds (parent AC5): no pane is eligible for close
+   * within this window of its first dispatch. `0`/absent disables the guard
+   * (backwards compatible). */
+  gracePeriodMs?: number;
   /** If true, report decisions but do not close any panes. */
   dryRun?: boolean;
   /**
@@ -143,6 +153,7 @@ export function writeLedgerRow(ledgerPath: string, result: ReaperResult): void {
 
 const DEFAULT_OPTIONS: ReaperOptions = {
   idleThresholdMs: 30 * 60 * 1000,
+  gracePeriodMs: 0,
   dryRun: false,
 };
 
@@ -164,6 +175,7 @@ function toSessionSample(ps: PaneStatus): SessionSample {
     needsProducerReview: ps.needsProducerReview,
     isInvokingPane: ps.isInvokingPane,
     childProcessCount: ps.childProcessCount,
+    ageSinceDispatchMs: ps.ageSinceDispatchMs,
   };
 }
 
@@ -198,6 +210,7 @@ export async function runReaper(
     const sample = toSessionSample(pane);
     const decision = classifySession(sample, {
       idleThresholdMs: options.idleThresholdMs,
+      gracePeriodMs: options.gracePeriodMs,
     });
 
     let success = true;

@@ -269,10 +269,18 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
 
         const entries = readFinalAssistantEntries(pane.sessionPath);
         let idleMs = 0;
+        let ageSinceDispatchMs: number | undefined;
         try {
-          idleMs = Math.max(0, now() - statSync(pane.sessionPath).mtimeMs);
+          const st = statSync(pane.sessionPath);
+          idleMs = Math.max(0, now() - st.mtimeMs);
+          // The session file is created when the pane is first dispatched, so
+          // its birthtime is the best available "first dispatch" proxy (fall
+          // back to ctime on filesystems that do not expose birthtime).
+          const bornMs = st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs;
+          ageSinceDispatchMs = Math.max(0, now() - bornMs);
         } catch {
           idleMs = 0;
+          ageSinceDispatchMs = undefined;
         }
 
         const itemId = paneItemIdFromLabel(pane.label);
@@ -302,6 +310,7 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
           needsProducerReview,
           isInvokingPane: pane.paneId === io.invokingPaneId,
           childProcessCount: io.childProcessCount?.(pane.paneId) ?? 0,
+          ageSinceDispatchMs,
         });
       }
       return result;

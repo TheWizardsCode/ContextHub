@@ -362,4 +362,25 @@ describe('paneClose settings (WL-0MUJL1NAH0042GOS)', () => {
     writeFileSync(path, JSON.stringify({ ...defaultSettings, paneCloseIdleThresholdMinutes: 'later' }), 'utf-8');
     expect(loadSettings(path).paneCloseIdleThresholdMinutes).toBe(0);
   });
+
+  it('defaults the grace period to 5 minutes and clamps into [1, 1440]', () => {
+    expect(defaultSettings.paneCloseGracePeriodMinutes).toBe(5);
+    const path = tempSettingsPath();
+    expect(loadSettings(path).paneCloseGracePeriodMinutes).toBe(5);
+
+    saveSettings(path, { ...defaultSettings, paneCloseGracePeriodMinutes: 0 });
+    expect(loadSettings(path).paneCloseGracePeriodMinutes).toBe(1);
+
+    saveSettings(path, { ...defaultSettings, paneCloseGracePeriodMinutes: 5000 });
+    expect(loadSettings(path).paneCloseGracePeriodMinutes).toBe(1440);
+
+    saveSettings(path, { ...defaultSettings, paneCloseGracePeriodMinutes: 10 });
+    expect(loadSettings(path).paneCloseGracePeriodMinutes).toBe(10);
+  });
+
+  it('falls back to the grace-period default when the persisted value is not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, paneCloseGracePeriodMinutes: 'soon' }), 'utf-8');
+    expect(loadSettings(path).paneCloseGracePeriodMinutes).toBe(5);
+  });
 });

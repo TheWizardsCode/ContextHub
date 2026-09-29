@@ -746,19 +746,23 @@ mechanisms cannot diverge:
   assistant text; marker detection requires `</end_session>` at the very end
   (a marker quoted mid-message does not match)
 - `SessionSample` fields: `lastAssistantText`, `agentProcessAlive`, `idleMs`,
-  `kind`, `needsProducerReview`, `isInvokingPane`, `childProcessCount`
+  `kind`, `needsProducerReview`, `isInvokingPane`, `childProcessCount`,
+  `ageSinceDispatchMs` (optional; age since first dispatch)
 - `DEFAULT_IDLE_THRESHOLD_MS = 30 min`
 
 **Decision order (first match wins):**
 
 1. Never-close guards — `implement` pane, `needsProducerReview`, invoking
    pane, live children.
-2. Marker at the end of the final assistant message → close (`marker`).
-3. Agent process gone → **no close** (`dead-agent`) — operator may need to
+2. Within the grace window since first dispatch → **no close**
+   (`grace-period`); disabled when the grace period is `0` or the pane age is
+   unknown.
+3. Marker at the end of the final assistant message → close (`marker`).
+4. Agent process gone → **no close** (`dead-agent`) — operator may need to
    read final output.
-4. Agent alive but idle beyond the threshold → close (`idle-threshold`);
+5. Agent alive but idle beyond the threshold → close (`idle-threshold`);
    disabled when threshold ≤ 0.
-5. Otherwise → keep (`active`).
+6. Otherwise → keep (`active`).
 
 **Reaper orchestration (`pane-close-reaper.ts`).** `runReaper(deps, options)`
 scans panes, classifies each, closes eligible panes, and appends one JSONL
@@ -780,6 +784,7 @@ never crash the worker.
 |-----|---------|---------|
 | `paneCloseEnabled` | `true` | Master on/off switch for automatic pane closure. |
 | `paneCloseIdleThresholdMinutes` | `0` | Marker-less idle threshold in minutes; `0` = never close on idle (clamped [0, 1440]). |
+| `paneCloseGracePeriodMinutes` | `5` | Minimum pane age in minutes since first dispatch before it is eligible for auto-close (clamped [1, 1440]). Gives the agent time to start working. |
 
 **Child processes (`process-group.ts`).** On close, the pane's session-scoped
 process group is torn down (SIGTERM → grace → SIGKILL) so spawned children

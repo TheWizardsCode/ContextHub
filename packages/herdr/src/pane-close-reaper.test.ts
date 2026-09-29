@@ -292,6 +292,91 @@ describe('reaper — idempotent close via alreadyClosedPaneIds (AC1.5)', () => {
   });
 });
 
+describe('reaper — grace period (parent AC5)', () => {
+  const GRACE_MS = 5 * 60 * 1000;
+
+  it('does not close a pane within its grace window (marker)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      kind: 'plan',
+      lastAssistantText: '</end_session>',
+      agentProcessAlive: false,
+      ageSinceDispatchMs: 60_000,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, gracePeriodMs: GRACE_MS });
+    expect(deps.closePane).not.toHaveBeenCalled();
+    expect(results[0].decision).toEqual({ close: false, reasonCode: 'grace-period' });
+  });
+
+  it('does not close exactly at the grace boundary', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      lastAssistantText: '</end_session>',
+      agentProcessAlive: false,
+      ageSinceDispatchMs: GRACE_MS,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, gracePeriodMs: GRACE_MS });
+    expect(deps.closePane).not.toHaveBeenCalled();
+    expect(results[0].decision.reasonCode).toBe('grace-period');
+  });
+
+  it('closes normally once past the grace window', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      lastAssistantText: '</end_session>',
+      agentProcessAlive: false,
+      ageSinceDispatchMs: GRACE_MS + 1,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, gracePeriodMs: GRACE_MS });
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(results[0].decision.reasonCode).toBe('marker');
+  });
+
+  it('an absent pane age cannot trigger the grace guard (closes on marker)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      lastAssistantText: '</end_session>',
+      agentProcessAlive: false,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, gracePeriodMs: GRACE_MS });
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(results[0].decision.reasonCode).toBe('marker');
+  });
+
+  it('grace 0 disables the guard (marker closes)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      lastAssistantText: '</end_session>',
+      agentProcessAlive: false,
+      ageSinceDispatchMs: 1,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS, gracePeriodMs: 0 });
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(results[0].decision.reasonCode).toBe('marker');
+  });
+
+  it('grace longer than the idle threshold still blocks an idle close', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      agentProcessAlive: true,
+      idleMs: 6 * 60 * 1000,
+      ageSinceDispatchMs: 10 * 60 * 1000,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, {
+      idleThresholdMs: 5 * 60 * 1000,
+      gracePeriodMs: 60 * 60 * 1000,
+    });
+    expect(deps.closePane).not.toHaveBeenCalled();
+    expect(results[0].decision.reasonCode).toBe('grace-period');
+  });
+});
+
 describe('reaper — close failure does not abort other panes', () => {
   it('records a per-pane result and continues processing other panes', async () => {
     const { runReaper } = await import('./pane-close-reaper');

@@ -28,6 +28,19 @@ export const MIN_PANE_CLOSE_IDLE_THRESHOLD_MINUTES = 0;
 export const MAX_PANE_CLOSE_IDLE_THRESHOLD_MINUTES = 24 * 60;
 
 /**
+ * Default grace period (minutes) since a pane's first dispatch before it is
+ * eligible for auto-close (parent AC5). Gives the agent time to start working
+ * and producer-review state time to propagate.
+ */
+export const DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES = 5;
+
+/** Minimum grace period in minutes (1 minute). */
+export const MIN_PANE_CLOSE_GRACE_PERIOD_MINUTES = 1;
+
+/** Maximum grace period in minutes (24 hours). */
+export const MAX_PANE_CLOSE_GRACE_PERIOD_MINUTES = 24 * 60;
+
+/**
  * Default reaper cadence on the worker tick: 60 s. The reaper is heavier
  * than the pane-lifecycle monitor (it must read every session log), so it
  * runs less often than the ~10 s dispatch tick.
@@ -62,6 +75,18 @@ export function clampPaneCloseIdleThresholdMinutes(value: number): number {
   );
 }
 
+/**
+ * Clamp a pane-close grace period (minutes) into [1, 1440]. Non-finite values
+ * fall back to the default (5 minutes).
+ */
+export function clampPaneCloseGracePeriodMinutes(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES;
+  return Math.min(
+    Math.max(Math.round(value), MIN_PANE_CLOSE_GRACE_PERIOD_MINUTES),
+    MAX_PANE_CLOSE_GRACE_PERIOD_MINUTES,
+  );
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 /** The subset of plugin settings the reaper scheduler consults. */
@@ -70,6 +95,11 @@ export interface PaneCloseSettings {
   paneCloseEnabled: boolean;
   /** Marker-less idle threshold in minutes. */
   paneCloseIdleThresholdMinutes: number;
+  /**
+   * Grace period in minutes since a pane's first dispatch (parent AC5).
+   * Optional for backwards compatibility: when absent the default (5) applies.
+   */
+  paneCloseGracePeriodMinutes?: number;
 }
 
 /** Injectable options for one scheduled pass. */
@@ -130,10 +160,14 @@ export async function runScheduledPaneClose(
   const idleThresholdMinutes = clampPaneCloseIdleThresholdMinutes(
     settings.paneCloseIdleThresholdMinutes,
   );
+  const gracePeriodMinutes = clampPaneCloseGracePeriodMinutes(
+    settings.paneCloseGracePeriodMinutes ?? DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
+  );
 
   try {
     const results: ReaperResult[] = await runReaper(deps, {
       idleThresholdMs: idleThresholdMinutes * 60 * 1000,
+      gracePeriodMs: gracePeriodMinutes * 60 * 1000,
       dryRun: opts?.dryRun,
       ledgerPath: opts?.ledgerPath,
       alreadyClosedPaneIds: opts?.alreadyClosedPaneIds,

@@ -3,7 +3,7 @@
  * herdr/session reaper deps (WL-0MUJW9FFW009008M / WL-0MUJL1NAH0042GOS).
  */
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -189,5 +189,36 @@ describe('createHerdrReaperDeps', () => {
       closePane: vi.fn().mockRejectedValue(new Error('close broke')),
     });
     await expect(deps.closePane('p1')).resolves.toMatchObject({ success: false });
+  });
+
+  it('derives ageSinceDispatchMs from the session file creation time (parent AC5)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-reaper-age-'));
+    const sessionPath = join(dir, 'session.jsonl');
+    try {
+      writeFileSync(sessionPath, '{}\n');
+      const st = statSync(sessionPath);
+      const bornMs = st.birthtimeMs > 0 ? st.birthtimeMs : st.ctimeMs;
+      const raw = JSON.stringify({
+        panes: [
+          {
+            pane_id: 'w1:p1',
+            label: 'Downtime triggered plan Foo - WL-0ABC123',
+            agent: 'pi',
+            agent_status: 'idle',
+            agent_session: { value: sessionPath },
+          },
+        ],
+      });
+      const deps = createHerdrReaperDeps({
+        listPanesRaw: vi.fn().mockResolvedValue(raw),
+        closePane: vi.fn().mockResolvedValue(true),
+        now: () => bornMs + 60_000,
+      });
+      const panes = await deps.listPanes();
+      expect(panes).toHaveLength(1);
+      expect(panes[0].ageSinceDispatchMs).toBe(60_000);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

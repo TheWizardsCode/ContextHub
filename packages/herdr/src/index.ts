@@ -1580,6 +1580,7 @@ export function createDowntimeDeps(
         {
           paneCloseEnabled: true,
           paneCloseIdleThresholdMinutes: opts.idleThresholdMinutes,
+          paneCloseGracePeriodMinutes: settings.paneCloseGracePeriodMinutes,
         },
         {
           ledgerPath: opts.ledgerPath ?? join(cwd, '.worklog', 'pane-close-ledger.jsonl'),

@@ -22,6 +22,8 @@
  *  - `producer-review` — awaiting producer input (never auto-close)
  *  - `invoking-pane`  — the pane that launched the session (never auto-close)
  *  - `live-children`  — has spawned children that must not be orphaned (AC5)
+ *  - `grace-period`   — within the configured grace window since first
+ *    dispatch (never auto-close; parent AC5)
  */
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -54,6 +56,12 @@ export interface SessionSample {
   isInvokingPane: boolean;
   /** Number of child processes spawned by this session. */
   childProcessCount: number;
+  /**
+   * Age since the pane's first dispatch, in milliseconds. Optional and
+   * tolerant: when absent (unknown) the grace-period guard cannot apply and
+   * the pane is classified by the remaining rules.
+   */
+  ageSinceDispatchMs?: number;
 }
 
 /**
@@ -104,18 +112,21 @@ function endsWithMarker(text: string): boolean {
  *
  * Classification order (first match wins):
  *  1. Never-close guards (in order: implement, producer-review, invoking-pane, live-children)
- *  2. Marker at end of final assistant message
- *  3. Dead agent — the process is gone (no close; operator may need to read
+ *  2. Grace period — no pane is eligible for close within `gracePeriodMs` of
+ *     its first dispatch (parent AC5)
+ *  3. Marker at end of final assistant message
+ *  4. Dead agent — the process is gone (no close; operator may need to read
  *     final output).
- *  4. Idle beyond threshold — agent alive but not responding (only when
+ *  5. Idle beyond threshold — agent alive but not responding (only when
  *     threshold > 0).
- *  5. Still active (within threshold, agent alive).
+ *  6. Still active (within threshold, agent alive).
  */
 export function classifySession(
   sample: SessionSample,
-  opts?: { idleThresholdMs?: number },
+  opts?: { idleThresholdMs?: number; gracePeriodMs?: number },
 ): CloseDecision {
   const threshold = opts?.idleThresholdMs ?? DEFAULT_IDLE_THRESHOLD_MS;
+  const gracePeriodMs = opts?.gracePeriodMs ?? 0;
 
   // 1. Never-close guards (highest precedence).
   if (sample.kind === 'implement') {
@@ -131,22 +142,35 @@ export function classifySession(
     return { close: false, reasonCode: 'live-children' };
   }
 
-  // 2. Marker at end of final assistant message.
+  // 2. Grace period (parent AC5): a pane younger than (or exactly at) the
+  //    grace window is never eligible for close, regardless of marker, idle
+  //    or dead-agent state. An unknown age (`undefined`/non-finite) cannot be
+  //    compared, so the guard does not apply.
+  if (
+    gracePeriodMs > 0 &&
+    typeof sample.ageSinceDispatchMs === 'number' &&
+    Number.isFinite(sample.ageSinceDispatchMs) &&
+    sample.ageSinceDispatchMs <= gracePeriodMs
+  ) {
+    return { close: false, reasonCode: 'grace-period' };
+  }
+
+  // 3. Marker at end of final assistant message.
   if (typeof sample.lastAssistantText === 'string' && endsWithMarker(sample.lastAssistantText)) {
     return { close: true, reasonCode: 'marker' };
   }
 
-  // 3. Dead agent — the process is gone; operator may still need to read
+  // 4. Dead agent — the process is gone; operator may still need to read
   //    the final output. No close.
   if (!sample.agentProcessAlive) {
     return { close: false, reasonCode: 'dead-agent' };
   }
 
-  // 4. Idle threshold — only reap when the threshold is positive.
+  // 5. Idle threshold — only reap when the threshold is positive.
   if (threshold > 0 && sample.idleMs > threshold) {
     return { close: true, reasonCode: 'idle-threshold' };
   }
 
-  // 5. Still active.
+  // 6. Still active.
   return { close: false, reasonCode: 'active' };
 }

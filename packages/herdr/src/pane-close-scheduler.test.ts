@@ -11,9 +11,13 @@ import { describe, expect, it, vi } from 'vitest';
 import type { ReaperDeps, PaneStatus } from './pane-close-reaper';
 import {
   DEFAULT_PANE_CLOSE_ENABLED,
+  DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
   DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
+  MIN_PANE_CLOSE_GRACE_PERIOD_MINUTES,
+  MAX_PANE_CLOSE_GRACE_PERIOD_MINUTES,
   MIN_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
   MAX_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
+  clampPaneCloseGracePeriodMinutes,
   clampPaneCloseIdleThresholdMinutes,
   runScheduledPaneClose,
 } from './pane-close-scheduler';
@@ -71,6 +75,96 @@ describe('pane-close defaults and clamps', () => {
     expect(clampPaneCloseIdleThresholdMinutes(Number.NaN)).toBe(
       DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
     );
+  });
+});
+
+describe('pane-close grace-period defaults and clamps (parent AC5)', () => {
+  it('defaults the grace period to 5 minutes', () => {
+    expect(DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES).toBe(5);
+  });
+
+  it('clamps the grace period into [1, 1440] minutes', () => {
+    expect(clampPaneCloseGracePeriodMinutes(0)).toBe(MIN_PANE_CLOSE_GRACE_PERIOD_MINUTES);
+    expect(clampPaneCloseGracePeriodMinutes(-5)).toBe(MIN_PANE_CLOSE_GRACE_PERIOD_MINUTES);
+    expect(clampPaneCloseGracePeriodMinutes(2000)).toBe(MAX_PANE_CLOSE_GRACE_PERIOD_MINUTES);
+    expect(clampPaneCloseGracePeriodMinutes(45)).toBe(45);
+  });
+
+  it('falls back to the default for a non-finite value', () => {
+    expect(clampPaneCloseGracePeriodMinutes(Number.NaN)).toBe(
+      DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
+    );
+  });
+});
+
+describe('runScheduledPaneClose — grace period pass-through (parent AC5)', () => {
+  it('does not close a pane within the configured grace window', async () => {
+    const { deps, closePane } = makeDeps([
+      pane({
+        id: 'p1',
+        lastAssistantText: '</end_session>',
+        agentProcessAlive: false,
+        ageSinceDispatchMs: 60_000,
+      }),
+    ]);
+    const result = await runScheduledPaneClose(deps, {
+      paneCloseEnabled: true,
+      paneCloseIdleThresholdMinutes: 0,
+      paneCloseGracePeriodMinutes: 10,
+    });
+    expect(closePane).not.toHaveBeenCalled();
+    expect(result.closed).toBe(0);
+  });
+
+  it('closes a pane past the configured grace window', async () => {
+    const { deps, closePane } = makeDeps([
+      pane({
+        id: 'p1',
+        lastAssistantText: '</end_session>',
+        agentProcessAlive: false,
+        ageSinceDispatchMs: 11 * 60 * 1000,
+      }),
+    ]);
+    const result = await runScheduledPaneClose(deps, {
+      paneCloseEnabled: true,
+      paneCloseIdleThresholdMinutes: 0,
+      paneCloseGracePeriodMinutes: 10,
+    });
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(result.closed).toBe(1);
+  });
+
+  it('applies the 5-minute default when the setting is absent', async () => {
+    const { deps, closePane } = makeDeps([
+      pane({
+        id: 'p1',
+        lastAssistantText: '</end_session>',
+        agentProcessAlive: false,
+        ageSinceDispatchMs: 60_000,
+      }),
+    ]);
+    await runScheduledPaneClose(deps, {
+      paneCloseEnabled: true,
+      paneCloseIdleThresholdMinutes: 0,
+    });
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('a grace longer than the idle threshold still blocks an idle close', async () => {
+    const { deps, closePane } = makeDeps([
+      pane({
+        id: 'p1',
+        agentProcessAlive: true,
+        idleMs: 6 * 60 * 1000,
+        ageSinceDispatchMs: 10 * 60 * 1000,
+      }),
+    ]);
+    await runScheduledPaneClose(deps, {
+      paneCloseEnabled: true,
+      paneCloseIdleThresholdMinutes: 5,
+      paneCloseGracePeriodMinutes: 60,
+    });
+    expect(closePane).not.toHaveBeenCalled();
   });
 });
 
