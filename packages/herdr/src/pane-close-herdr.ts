@@ -234,6 +234,17 @@ export interface HerdrReaperIo {
   getNeedsProducerReview?(itemId: string): Promise<boolean>;
   /** Count session-scoped child processes; absent → 0. */
   childProcessCount?(paneId: string): number;
+  /**
+   * Recent file-modification probe (parent AC3); absent → false (no
+   * activity). Kept injectable because workspace scanning is platform- and
+   * cost-sensitive.
+   */
+  hasRecentFileModifications?(paneId: string): boolean;
+  /**
+   * Active network-connection probe (parent AC3); absent → false (no
+   * activity). Kept injectable for the same reason.
+   */
+  hasActiveNetworkConnections?(paneId: string): boolean;
   /** Clock (injectable for tests). */
   now?(): number;
 }
@@ -311,6 +322,8 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
           isInvokingPane: pane.paneId === io.invokingPaneId,
           childProcessCount: io.childProcessCount?.(pane.paneId) ?? 0,
           ageSinceDispatchMs,
+          hasRecentFileModifications: io.hasRecentFileModifications?.(pane.paneId) ?? false,
+          hasActiveNetworkConnections: io.hasActiveNetworkConnections?.(pane.paneId) ?? false,
         });
       }
       return result;

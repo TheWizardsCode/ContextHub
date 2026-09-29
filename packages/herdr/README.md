@@ -747,7 +747,9 @@ mechanisms cannot diverge:
   (a marker quoted mid-message does not match)
 - `SessionSample` fields: `lastAssistantText`, `agentProcessAlive`, `idleMs`,
   `kind`, `needsProducerReview`, `isInvokingPane`, `childProcessCount`,
-  `ageSinceDispatchMs` (optional; age since first dispatch)
+  `ageSinceDispatchMs` (optional; age since first dispatch),
+  `hasRecentFileModifications` / `hasActiveNetworkConnections` (optional;
+  active-agent signals)
 - `DEFAULT_IDLE_THRESHOLD_MS = 30 min`
 
 **Decision order (first match wins):**
@@ -760,9 +762,11 @@ mechanisms cannot diverge:
 3. Marker at the end of the final assistant message → close (`marker`).
 4. Agent process gone → **no close** (`dead-agent`) — operator may need to
    read final output.
-5. Agent alive but idle beyond the threshold → close (`idle-threshold`);
+5. Recent file modifications or active network connections → **no close**
+   (`active`), even when idle exceeds the threshold.
+6. Agent alive but idle beyond the threshold → close (`idle-threshold`);
    disabled when threshold ≤ 0.
-6. Otherwise → keep (`active`).
+7. Otherwise → keep (`active`).
 
 **Reaper orchestration (`pane-close-reaper.ts`).** `runReaper(deps, options)`
 scans panes, classifies each, closes eligible panes, and appends one JSONL

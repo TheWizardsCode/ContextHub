@@ -495,6 +495,131 @@ describe('classifySession — grace period table (parent AC5)', () => {
   }
 });
 
+describe('classifySession — active-agent signals table (parent AC3)', () => {
+  interface Row {
+    name: string;
+    sample: Partial<SessionSample>;
+    opts?: { idleThresholdMs?: number };
+    expected: CloseDecision;
+  }
+
+  const rows: Row[] = [
+    {
+      name: 'recent file modifications keep an over-threshold pane active',
+      sample: {
+        agentProcessAlive: true,
+        idleMs: THRESHOLD_MS + 1,
+        hasRecentFileModifications: true,
+      },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: false, reasonCode: 'active' },
+    },
+    {
+      name: 'active network connections keep an over-threshold pane active',
+      sample: {
+        agentProcessAlive: true,
+        idleMs: THRESHOLD_MS + 1,
+        hasActiveNetworkConnections: true,
+      },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: false, reasonCode: 'active' },
+    },
+    {
+      name: 'both signals together keep the pane active',
+      sample: {
+        agentProcessAlive: true,
+        idleMs: THRESHOLD_MS + 1,
+        hasRecentFileModifications: true,
+        hasActiveNetworkConnections: true,
+      },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: false, reasonCode: 'active' },
+    },
+    {
+      name: 'explicitly false signals fall through to the idle-threshold close',
+      sample: {
+        agentProcessAlive: true,
+        idleMs: THRESHOLD_MS + 1,
+        hasRecentFileModifications: false,
+        hasActiveNetworkConnections: false,
+      },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: true, reasonCode: 'idle-threshold' },
+    },
+    {
+      name: 'absent signals fall through to the idle-threshold close',
+      sample: { agentProcessAlive: true, idleMs: THRESHOLD_MS + 1 },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: true, reasonCode: 'idle-threshold' },
+    },
+    {
+      name: 'an activity signal below the threshold stays active',
+      sample: { agentProcessAlive: true, idleMs: 1_000, hasRecentFileModifications: true },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: false, reasonCode: 'active' },
+    },
+    {
+      name: 'an explicit marker still closes despite an activity signal',
+      sample: {
+        agentProcessAlive: true,
+        idleMs: THRESHOLD_MS + 1,
+        lastAssistantText: '</end_session>',
+        hasRecentFileModifications: true,
+      },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: true, reasonCode: 'marker' },
+    },
+  ];
+
+  for (const row of rows) {
+    it(row.name, () => {
+      expect(classifySession(sample(row.sample), row.opts)).toEqual(row.expected);
+    });
+  }
+});
+
+describe('classifySession — never-close guards beat activity signals (parent AC3.4)', () => {
+  it('implement guard beats activity signals', () => {
+    const result = classifySession(sample({
+      kind: 'implement',
+      idleMs: THRESHOLD_MS + 1,
+      hasRecentFileModifications: true,
+      hasActiveNetworkConnections: true,
+    }));
+    expect(result).toEqual({ close: false, reasonCode: 'implement' });
+  });
+
+  it('producer-review guard beats activity signals', () => {
+    const result = classifySession(sample({
+      needsProducerReview: true,
+      idleMs: THRESHOLD_MS + 1,
+      hasRecentFileModifications: true,
+      hasActiveNetworkConnections: true,
+    }));
+    expect(result).toEqual({ close: false, reasonCode: 'producer-review' });
+  });
+
+  it('invoking-pane guard beats activity signals', () => {
+    const result = classifySession(sample({
+      isInvokingPane: true,
+      idleMs: THRESHOLD_MS + 1,
+      hasRecentFileModifications: true,
+      hasActiveNetworkConnections: true,
+    }));
+    expect(result).toEqual({ close: false, reasonCode: 'invoking-pane' });
+  });
+
+  it('live-children guard beats activity signals', () => {
+    const result = classifySession(sample({
+      childProcessCount: 1,
+      idleMs: THRESHOLD_MS + 1,
+      hasRecentFileModifications: true,
+      hasActiveNetworkConnections: true,
+    }));
+    expect(result).toEqual({ close: false, reasonCode: 'live-children' });
+  });
+});
+
 describe('classifySession — extractFinalAssistantText', () => {
   it('returns the final assistant message text, trimEnd-ed (rstrip semantics)', () => {
     const entries = [

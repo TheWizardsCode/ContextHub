@@ -221,4 +221,53 @@ describe('createHerdrReaperDeps', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('passes activity probes through to PaneStatus (parent AC3.3)', async () => {
+    const raw = JSON.stringify({
+      panes: [
+        {
+          pane_id: 'w1:p1',
+          label: 'Downtime triggered plan Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_status: 'idle',
+          agent_session: { value: '/tmp/activity-probe.jsonl' },
+        },
+      ],
+    });
+    const recent = vi.fn().mockReturnValue(true);
+    const network = vi.fn().mockReturnValue(true);
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn(),
+      hasRecentFileModifications: recent,
+      hasActiveNetworkConnections: network,
+    });
+    const panes = await deps.listPanes();
+    expect(panes).toHaveLength(1);
+    expect(panes[0].hasRecentFileModifications).toBe(true);
+    expect(panes[0].hasActiveNetworkConnections).toBe(true);
+    expect(recent).toHaveBeenCalledWith('w1:p1');
+    expect(network).toHaveBeenCalledWith('w1:p1');
+  });
+
+  it('defaults activity probes to false when absent (backwards compatible)', async () => {
+    const raw = JSON.stringify({
+      panes: [
+        {
+          pane_id: 'w1:p1',
+          label: 'Downtime triggered plan Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_status: 'idle',
+          agent_session: { value: '/tmp/activity-probe.jsonl' },
+        },
+      ],
+    });
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn(),
+    });
+    const panes = await deps.listPanes();
+    expect(panes[0].hasRecentFileModifications).toBe(false);
+    expect(panes[0].hasActiveNetworkConnections).toBe(false);
+  });
 });

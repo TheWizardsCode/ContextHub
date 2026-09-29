@@ -62,6 +62,16 @@ export interface SessionSample {
    * the pane is classified by the remaining rules.
    */
   ageSinceDispatchMs?: number;
+  /**
+   * Active-agent signal (parent AC3): the pane shows recent file
+   * modifications. Optional/tolerant: absent or `false` = no activity.
+   */
+  hasRecentFileModifications?: boolean;
+  /**
+   * Active-agent signal (parent AC3): the pane has active network
+   * connections. Optional/tolerant: absent or `false` = no activity.
+   */
+  hasActiveNetworkConnections?: boolean;
 }
 
 /**
@@ -117,9 +127,12 @@ function endsWithMarker(text: string): boolean {
  *  3. Marker at end of final assistant message
  *  4. Dead agent — the process is gone (no close; operator may need to read
  *     final output).
- *  5. Idle beyond threshold — agent alive but not responding (only when
+ *  5. Active-agent signals — recent file modifications or active network
+ *     connections keep the pane open (`active`), even when idleMs exceeds
+ *     the threshold (parent AC3).
+ *  6. Idle beyond threshold — agent alive but not responding (only when
  *     threshold > 0).
- *  6. Still active (within threshold, agent alive).
+ *  7. Still active (within threshold, agent alive).
  */
 export function classifySession(
   sample: SessionSample,
@@ -166,11 +179,22 @@ export function classifySession(
     return { close: false, reasonCode: 'dead-agent' };
   }
 
-  // 5. Idle threshold — only reap when the threshold is positive.
+  // 5. Active-agent signals (parent AC3): a pane showing recent file or
+  //    network activity is still working even when its idle time exceeds the
+  //    threshold. This guards the idle-threshold path only — an explicit
+  //    `</end_session>` marker (above) still closes the pane.
+  if (
+    sample.hasRecentFileModifications === true ||
+    sample.hasActiveNetworkConnections === true
+  ) {
+    return { close: false, reasonCode: 'active' };
+  }
+
+  // 6. Idle threshold — only reap when the threshold is positive.
   if (threshold > 0 && sample.idleMs > threshold) {
     return { close: true, reasonCode: 'idle-threshold' };
   }
 
-  // 6. Still active.
+  // 7. Still active.
   return { close: false, reasonCode: 'active' };
 }

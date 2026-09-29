@@ -377,6 +377,43 @@ describe('reaper — grace period (parent AC5)', () => {
   });
 });
 
+describe('reaper — active-agent signal pass-through (parent AC3.3)', () => {
+  it('keeps a pane open when it has recent file modifications', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      agentProcessAlive: true,
+      idleMs: THRESHOLD_MS + 1,
+      hasRecentFileModifications: true,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.closePane).not.toHaveBeenCalled();
+    expect(results[0].decision).toEqual({ close: false, reasonCode: 'active' });
+  });
+
+  it('keeps a pane open when it has active network connections', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({
+      agentProcessAlive: true,
+      idleMs: THRESHOLD_MS + 1,
+      hasActiveNetworkConnections: true,
+    })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.closePane).not.toHaveBeenCalled();
+    expect(results[0].decision.reasonCode).toBe('active');
+  });
+
+  it('closes on the idle threshold when no activity signal is present (backwards compatible)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({ agentProcessAlive: true, idleMs: THRESHOLD_MS + 1 })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { idleThresholdMs: THRESHOLD_MS });
+    expect(deps.closePane).toHaveBeenCalledTimes(1);
+    expect(results[0].decision.reasonCode).toBe('idle-threshold');
+  });
+});
+
 describe('reaper — close failure does not abort other panes', () => {
   it('records a per-pane result and continues processing other panes', async () => {
     const { runReaper } = await import('./pane-close-reaper');

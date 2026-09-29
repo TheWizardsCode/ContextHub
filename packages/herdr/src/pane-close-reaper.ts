@@ -69,6 +69,16 @@ export interface PaneStatus {
    * Optional/tolerant: when absent the grace-period guard cannot apply.
    */
   ageSinceDispatchMs?: number;
+  /**
+   * Active-agent signal (parent AC3): the pane shows recent file
+   * modifications. Optional/tolerant: absent = no activity.
+   */
+  hasRecentFileModifications?: boolean;
+  /**
+   * Active-agent signal (parent AC3): the pane has active network
+   * connections. Optional/tolerant: absent = no activity.
+   */
+  hasActiveNetworkConnections?: boolean;
   /** The PID of the agent process (for process-group teardown). */
   pid?: number;
 }
@@ -176,6 +186,8 @@ function toSessionSample(ps: PaneStatus): SessionSample {
     isInvokingPane: ps.isInvokingPane,
     childProcessCount: ps.childProcessCount,
     ageSinceDispatchMs: ps.ageSinceDispatchMs,
+    hasRecentFileModifications: ps.hasRecentFileModifications,
+    hasActiveNetworkConnections: ps.hasActiveNetworkConnections,
   };
 }
 
