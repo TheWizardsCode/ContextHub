@@ -67,7 +67,7 @@ import {
 } from './form-dialog.js';
 import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
-import { extractFilePaths } from './grouping.js';
+import { extractFilePaths, regroupWorkItems } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 import {
   findNoteInParagraph,
@@ -4218,22 +4218,33 @@ export function fetchItemsForView(
 ): Promise<WorkItem[]> {
   if (activeDispatchFilter) {
     // Recent-dispatches view (WL-0MUL2IZLF002S9X5): the log decides WHICH items
-    // appear and their order, but each row is rendered from the LIVE work item
-    // (the same `defaultFetcher` every other view uses) so the status/stage/
-    // audit/review/priority icons are identical to other views
-    // (WL-0MUGLL9SS002E1D2 audit fix). An item no longer present in `wl` falls
-    // back to the log-derived synthetic row so closed/deleted work still
-    // appears. Fail-safe — a missing/unreadable log yields []; a live-fetch
-    // error degrades to log-only rows rather than blanking the TUI.
+    // appear, but each row is rendered from the LIVE work item (the same
+    // `defaultFetcher` every other view uses) so the status/stage/audit/
+    // review/priority icons are identical to other views, and the rows are
+    // ordered exactly like the main selection list (WL-0MUGLL9SS002E1D2).
+    // An item no longer present in `wl` falls back to the log-derived
+    // synthetic row so closed/deleted work still appears. Fail-safe — a
+    // missing/unreadable log yields []; a live-fetch error degrades to
+    // log-only rows rather than blanking the TUI.
     return Promise.all([
       recentDispatchedItems(cwd),
       defaultFetcher().catch(() => [] as WorkItem[]),
     ])
       .then(([rows, liveItems]) => {
         const liveById = new Map(liveItems.map((item) => [item.id, item]));
-        return rows.map((row) => {
+        const projected = rows.map((row) => {
           const live = liveById.get(row.itemId);
           return live ? mergeDispatchRow(live, row) : buildDispatchWorkItem(row);
+        });
+        // Reuse the canonical main-list ordering (Critical → Group N → Idea →
+        // Other → In Review, with the shared within-group comparator). The
+        // dispatch view stays a flat list, so the computed group stamps are
+        // dropped — only their ordering effect is kept.
+        return regroupWorkItems(projected).map((item) => {
+          const flat: WorkItem = { ...item };
+          delete flat.group;
+          delete flat.groupLabel;
+          return flat;
         });
       })
       .catch(() => []);

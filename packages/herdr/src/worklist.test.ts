@@ -913,8 +913,9 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
 
     const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
 
-    // The log still decides which items appear and their order (WL-OLD/
-    // WL-NEW are absent from the live list, so they stay log-derived).
+    // The log still decides which items appear (WL-OLD/WL-NEW are absent from
+    // the live list, so they stay log-derived) and the rows follow the main
+    // selection-list ordering (WL-0MUGLL9SS002E1D2 follow-up).
     expect(items.map((i) => i.id)).toEqual(['WL-NEW', 'WL-OLD']);
     expect(items[0].title).toBe('Newer dispatch');
     expect(items[0].isLogDerived).toBe(true);
@@ -989,6 +990,38 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
     // view only appends its provenance tag.
     expect(prefixOf(dispatchLine)).toBe(prefixOf(liveLine));
     expect(dispatchLine).toContain('[audit]');
+  });
+
+  it('orders rows like the main selection list (Critical → plan/intake → Idea → In Review), flat (WL-0MUGLL9SS002E1D2 follow-up)', async () => {
+    const root = makeTempRoot();
+    const ids: Array<[string, string, string]> = [
+      ['WL-REVIEW', 'in_review', 'high'],
+      ['WL-IDEA', 'idea', 'medium'],
+      ['WL-PLAN', 'plan_complete', 'high'],
+      ['WL-CRIT', 'plan_complete', 'critical'],
+    ];
+    for (const [id] of ids) {
+      await writeDispatch(root, {
+        itemId: id,
+        kind: 'implement',
+        title: id,
+        dispatchedAt: '2026-01-01T00:00:00.000Z',
+      });
+    }
+    const live = ids.map(([id, stage, priority]) => ({
+      ...makeItem(id),
+      id,
+      title: id,
+      stage,
+      priority,
+    })) as WorkItem[];
+    const defaultFetcher = vi.fn().mockResolvedValue(live);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+
+    expect(items.map((i) => i.id)).toEqual(['WL-CRIT', 'WL-PLAN', 'WL-IDEA', 'WL-REVIEW']);
+    // Flat list — no group stamps remain (no headings rendered).
+    expect(items.every((i) => i.group === undefined && i.groupLabel === undefined)).toBe(true);
   });
 
   it('keeps the log-derived fallback for an item absent from the live list (WL-0MUGLL9SS002E1D2)', async () => {

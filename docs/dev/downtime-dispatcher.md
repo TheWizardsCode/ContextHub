@@ -1161,10 +1161,13 @@ trace.
   `DOWNTIME_LOG_MAX_ENTRIES` (100) entries, so a very busy period can push an
   older candidate out of the retained window; the view therefore shows at most
   the 20 most recent items that are still present in the log.
-- **Projection semantics.** Rows are deduplicated by work item id, ordered
-  newest-first by the item's most recent log entry, and annotated with the
-  dispatch `kind` and the latest pane-close `outcome` where available. The
-  id and title come from the log, so closed/deleted items still appear.
+- **Projection semantics.** Rows are deduplicated by work item id, and the
+  20 most recently active items are selected; the visible list is then
+  ordered exactly like the main selection list (Critical → plan/intake →
+  Idea → In Review, with the same within-group comparator). Each row is
+  annotated with the dispatch `kind` and the latest pane-close `outcome`
+  where available. The id and title come from the log for items absent from
+  `wl`, so closed/deleted items still appear.
 - **Same icons as the live views.** The log decides which items appear and
   their order, but a row for an item that still exists in `wl` is rendered
   from the **live work item** (the same data the other Herdr views use), so

@@ -169,11 +169,13 @@ Semantics:
   since been **closed or deleted** still appears. The view never mutates the
   log or any work item; it is display-only and spawns no `wl` processes
   beyond the existing refresh (and the detail fetch below).
-- **Up to 20 rows, newest first** — rows are deduplicated by work item id
-  (one row per id) and ordered by that item's most recent log entry. The log
-  itself is bounded to the most recent 100 entries
-  (`DOWNTIME_LOG_MAX_ENTRIES`), so the 20 most recent items normally fall
-  inside the retained window.
+- **Up to 20 rows, main-list order** — rows are deduplicated by work item id
+  (one row per id) and the 20 most recently active items are selected; the
+  visible list is then ordered exactly like the main selection list
+  (Critical → plan/intake → Idea → In Review, using the same within-group
+  comparator), but without group headings. The log itself is bounded to the
+  most recent 100 entries (`DOWNTIME_LOG_MAX_ENTRIES`), so the 20 most recent
+  items normally fall inside the retained window.
 - **Kind and outcome annotations** — where the log carries them, each row
   also shows the dispatch `kind` (`plan`/`intake`/`audit`/`risk-effort`/
   `implement`) and the latest pane-close **outcome** (e.g.
@@ -1273,11 +1275,12 @@ only one axis is ever active; the header shows which one
 (`(filtered: stage <stage>)` or `(filtered: priority <priority>)`).
 
 The **dispatches** view (press `f` + `d`, or `/wl dispatches`) is the third
-filter axis and does **not** read `wl` for its rows: it projects the local
-rolling dispatch log into up to 20 synthetic, read-only rows —
-deduplicated by work item id, newest first, with the id/title from the log
-so closed/deleted items still appear (WL-0MUGLL9SS002E1D2). It is mutually
-exclusive with the stage and priority filters (the header shows
+filter axis. It uses the local rolling dispatch log to choose up to 20
+read-only rows (deduplicated by work item id) and renders each surviving item
+from the live work item so its icons match the other views, ordered like the
+main selection list; an item no longer in `wl` falls back to the log-derived
+id/title so closed/deleted items still appear (WL-0MUGLL9SS002E1D2). It is
+mutually exclusive with the stage and priority filters (the header shows
 `(filtered: dispatches)`), and a missing/malformed log renders an empty list
 rather than an error. See [Recent dispatches view](#recent-dispatches-view).
 

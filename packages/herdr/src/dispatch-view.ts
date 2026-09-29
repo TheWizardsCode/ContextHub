@@ -92,9 +92,10 @@ export function buildDispatchWorkItem(row: RecentDispatchRow): WorkItem {
  */
 export function mergeDispatchRow(live: WorkItem, row: RecentDispatchRow): WorkItem {
   const merged: WorkItem = { ...live };
-  // Strip the live browse list's grouping so the dispatches view stays a flat,
-  // newest-first list in log order; interleaving live groups would repeat
-  // headings (getDisplayRows emits one whenever `group` changes).
+  // Strip the live browse list's grouping so the dispatches view stays a flat
+  // list; ordering is applied by the caller (fetchItemsForView) using the
+  // canonical main-list comparator. Interleaving live groups here would emit
+  // repeated headings (getDisplayRows emits one whenever `group` changes).
   delete merged.group;
   delete merged.groupLabel;
   merged.isLogDerived = true;
