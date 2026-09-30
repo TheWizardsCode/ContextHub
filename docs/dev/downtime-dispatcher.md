@@ -1168,15 +1168,19 @@ trace.
   is a separate effort (`/skill:dispatch-logs`, WL-0MTJQOZ0K007KD40).
 - **Bounded window.** The log keeps only the most recent
   `DOWNTIME_LOG_MAX_ENTRIES` (100) entries, so a very busy period can push an
-  older candidate out of the retained window; the view therefore shows at most
-  the 20 most recent items that are still present in the log.
-- **Projection semantics.** Rows are deduplicated by work item id, and the
-  20 most recently active items are selected; the visible list is then
-  ordered exactly like the main selection list (Critical → plan/intake →
-  Idea → In Review, with the same within-group comparator). Each row is
-  annotated with the dispatch `kind` and the latest pane-close `outcome`
-  where available. The id and title come from the log for items absent from
-  `wl`, so closed/deleted items still appear.
+  older candidate out of the retained window. There is no separate result cap:
+  the view shows every item still present in the log.
+- **Projection semantics.** Rows are deduplicated by work item id (one row
+  per id) and grouped into 4-hour **UTC** time blocks by each item's most
+  recent log timestamp (e.g. `00:00–04:00`, `04:00–08:00`, …,
+  `20:00–24:00`). Blocks are ordered **oldest first**, and within each block
+  items stay **newest-first**; a heading (`29 Sep 2026, 00:00–04:00`) is
+  rendered before each block through the existing group-heading path. Rows
+  whose timestamp is missing or unparseable collect into a trailing
+  **`Unknown time`** block. Each row is annotated with the dispatch `kind`
+  and the latest pane-close `outcome` where available. The id and title come
+  from the log for items absent from `wl`, so closed/deleted items still
+  appear.
 - **Same icons as the live views.** The log decides which items appear and
   their order, but a row for an item that still exists in `wl` is rendered
   from the **live work item** (the same data the other Herdr views use), so

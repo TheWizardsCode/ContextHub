@@ -91,8 +91,15 @@ export async function appendCoordinationLogEntry(
 /** Rolling bound: keep at most this many entries in the log file. */
 export const DOWNTIME_LOG_MAX_ENTRIES = 100;
 
-/** Default cap for `recentDispatchedItems` (WL-0MUL2IX6H001YHDO). */
-export const RECENT_DISPATCH_LIMIT = 20;
+/**
+ * Hours per recent-dispatch time block (WL-0MUMM9NED009TLL3). The recent
+ * dispatches view groups items into 4-hour UTC blocks per day, labelled
+ * `HH:00–HH:00` (00:00–04:00, 04:00–08:00, …, 20:00–24:00).
+ */
+export const DISPATCH_TIME_BLOCK_HOURS = 4;
+
+/** Heading label for recent-dispatch rows with no parseable timestamp. */
+export const UNKNOWN_TIME_BLOCK_LABEL = 'Unknown time';
 
 /** Placeholder title for a log-derived row whose entry carried no title. */
 export const UNKNOWN_DISPATCH_TITLE = '[unknown]';
@@ -397,8 +404,8 @@ function dispatchTimestampValue(ts: string | undefined): number {
 }
 
 /**
- * Project the rolling dispatch log into up to `limit` recent dispatched
- * work items (WL-0MUL2IX6H001YHDO). Reads the LOCAL log via the fail-safe
+ * Project the rolling dispatch log into recent dispatched work items
+ * (WL-0MUL2IX6H001YHDO). Reads the LOCAL log via the fail-safe
  * `readDowntimeLogEntries(cwd)` — a missing/unreadable/empty/malformed log
  * yields `[]` and this function never throws.
  *
@@ -406,13 +413,12 @@ function dispatchTimestampValue(ts: string | undefined): number {
  * most recent log entry for ordering and metadata; pane-close lifecycle
  * entries annotate an existing row's `latestOutcome`/timestamp (a pane-close
  * for an item that was never dispatched does not create a row). Rows are
- * ordered newest-first by their latest timestamp and capped at `limit`
- * (default `RECENT_DISPATCH_LIMIT`). The projection is read-only.
+ * ordered newest-first by their latest timestamp. There is no result cap
+ * (WL-0MUMM9NED009TLL3): the log itself is bounded to
+ * `DOWNTIME_LOG_MAX_ENTRIES`, so every item retained in the log is shown.
+ * The projection is read-only.
  */
-export async function recentDispatchedItems(
-  cwd: string,
-  limit: number = RECENT_DISPATCH_LIMIT,
-): Promise<RecentDispatchRow[]> {
+export async function recentDispatchedItems(cwd: string): Promise<RecentDispatchRow[]> {
   const entries = await readDowntimeLogEntries(cwd);
   const rows = new Map<string, RecentDispatchRow>();
 
@@ -481,7 +487,108 @@ export async function recentDispatchedItems(
   list.sort(
     (a, b) => dispatchTimestampValue(b.latestTimestamp) - dispatchTimestampValue(a.latestTimestamp),
   );
-  return list.slice(0, Math.max(0, limit));
+  return list;
+}
+
+/**
+ * One 4-hour UTC time block of recent-dispatch rows
+ * (WL-0MUMM9NED009TLL3). Blocks are produced by
+ * `groupRecentDispatchesByTimeBlock`, ordered chronologically (oldest first)
+ * with the synthetic "Unknown time" block always last.
+ */
+export interface DispatchTimeBlock {
+  /**
+   * UTC start of the block as ms since epoch (e.g. 00:00/04:00/…/20:00 UTC),
+   * used for chronological ordering. `Number.NEGATIVE_INFINITY` for the
+   * unknown-time block so it never sorts ahead of a real block.
+   */
+  startMs: number;
+  /** True for the trailing block holding rows without a parseable timestamp. */
+  unknownTime: boolean;
+  /** Heading label, e.g. `29 Sep 2026, 00:00–04:00` or `Unknown time`. */
+  label: string;
+  /** Rows in the block, preserving the projection's newest-first ordering. */
+  rows: RecentDispatchRow[];
+}
+
+/** UTC month abbreviations for the time-block heading (day month year). */
+const TIME_BLOCK_MONTHS = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+/** Two-digit zero-pad for a block boundary hour. */
+function padHour(hour: number): string {
+  return String(hour).padStart(2, '0');
+}
+
+/**
+ * Heading label for the 4-hour UTC block a timestamp belongs to
+ * (WL-0MUMM9NED009TLL3), e.g. `29 Sep 2026, 00:00–04:00`. The end of the
+ * day's last block renders as `20:00–24:00`. A missing or unparseable
+ * timestamp maps to {@link UNKNOWN_TIME_BLOCK_LABEL}.
+ */
+export function dispatchTimeBlockLabel(ts: string | undefined): string {
+  if (ts === undefined) return UNKNOWN_TIME_BLOCK_LABEL;
+  const t = Date.parse(ts);
+  if (Number.isNaN(t)) return UNKNOWN_TIME_BLOCK_LABEL;
+  const d = new Date(t);
+  const startHour =
+    Math.floor(d.getUTCHours() / DISPATCH_TIME_BLOCK_HOURS) * DISPATCH_TIME_BLOCK_HOURS;
+  const endHour = startHour + DISPATCH_TIME_BLOCK_HOURS;
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  const month = TIME_BLOCK_MONTHS[d.getUTCMonth()];
+  const year = d.getUTCFullYear();
+  return `${day} ${month} ${year}, ${padHour(startHour)}:00–${padHour(endHour)}:00`;
+}
+
+/**
+ * Group projected recent-dispatch rows into 4-hour UTC time blocks
+ * (WL-0MUMM9NED009TLL3). Each row is classified by its `latestTimestamp`
+ * into the block that starts on the hour boundary (`00:00`, `04:00`, …,
+ * `20:00` UTC) on the row's UTC calendar day, so blocks never merge across
+ * midnight. Blocks are returned oldest-first; rows within a block keep the
+ * projection's newest-first order. Rows with a missing or unparseable
+ * timestamp are collected into a single trailing `Unknown time` block.
+ *
+ * Pure and total: an empty input yields `[]` and the function never throws.
+ */
+export function groupRecentDispatchesByTimeBlock(rows: RecentDispatchRow[]): DispatchTimeBlock[] {
+  const known = new Map<number, DispatchTimeBlock>();
+  const unknown: DispatchTimeBlock = {
+    startMs: Number.NEGATIVE_INFINITY,
+    unknownTime: true,
+    label: UNKNOWN_TIME_BLOCK_LABEL,
+    rows: [],
+  };
+
+  for (const row of rows) {
+    const ts = row.latestTimestamp;
+    const t = ts === undefined ? NaN : Date.parse(ts);
+    if (Number.isNaN(t)) {
+      unknown.rows.push(row);
+      continue;
+    }
+    const d = new Date(t);
+    const startHour =
+      Math.floor(d.getUTCHours() / DISPATCH_TIME_BLOCK_HOURS) * DISPATCH_TIME_BLOCK_HOURS;
+    const startMs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), startHour);
+    let block = known.get(startMs);
+    if (block === undefined) {
+      block = {
+        startMs,
+        unknownTime: false,
+        label: dispatchTimeBlockLabel(ts),
+        rows: [],
+      };
+      known.set(startMs, block);
+    }
+    block.rows.push(row);
+  }
+
+  const blocks = [...known.values()].sort((a, b) => a.startMs - b.startMs);
+  if (unknown.rows.length > 0) blocks.push(unknown);
+  return blocks;
 }
 
 /**

@@ -233,7 +233,10 @@ describe('mergeDispatchRow — surviving items render exactly like live rows', (
     expect(mergedLine).toContain('[plan]');
   });
 
-  it('strips the live browse grouping so the view stays a flat newest-first list', () => {
+  it('strips the live browse grouping so the caller can stamp time-block groups', () => {
+    // The dispatches view assigns its own 4-hour time-block group/label in
+    // fetchItemsForView (WL-0MUMM9NED009TLL3); a stale live browse group must
+    // not leak through and emit a spurious heading.
     const grouped: WorkItem = { ...live, group: 2, groupLabel: 'In Review' };
     const merged = mergeDispatchRow(grouped, baseRow);
     expect(merged.group).toBeUndefined();

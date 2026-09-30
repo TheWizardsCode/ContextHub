@@ -34,11 +34,15 @@ import {
   markerStillExcludes,
   readDowntimeLogEntries,
   recentDispatchedItems,
+  groupRecentDispatchesByTimeBlock,
+  dispatchTimeBlockLabel,
+  UNKNOWN_TIME_BLOCK_LABEL,
   DOWNTIME_LOG_FILE,
   COORDINATION_LOG_FILE,
   DOWNTIME_LOG_MAX_ENTRIES,
   recentAuditDispatchedItemIds,
 } from './downtime-log.js';
+import type { RecentDispatchRow } from './downtime-log.js';
 
 const tempDirs: string[] = [];
 
@@ -852,12 +856,12 @@ describe('pane-close lifecycle entries (WL-0MU308WSF0002JWN)', () => {
 
 // ── Recent dispatched items projection (WL-0MUL2IX6H001YHDO) ───────────
 //
-// `recentDispatchedItems(cwd, limit)` projects the rolling dispatch log into
-// up to `limit` synthetic rows (default 20), one per work item id, ordered by
-// that item's most recent log entry (newest first). It reads only the local
-// fail-safe `readDowntimeLogEntries` reader, ignores pane-close lifecycle
-// entries, and never throws — a missing/unreadable/empty/malformed log yields
-// `[]`.
+// `recentDispatchedItems(cwd)` projects the rolling dispatch log into one
+// synthetic row per work item id (no result cap; the log itself is bounded by
+// `DOWNTIME_LOG_MAX_ENTRIES`), ordered by that item's most recent log entry
+// (newest first). It reads only the local fail-safe `readDowntimeLogEntries`
+// reader, ignores pane-close lifecycle entries, and never throws — a
+// missing/unreadable/empty/malformed log yields `[]`.
 describe('recentDispatchedItems (log projection, WL-0MUL2IX6H001YHDO)', () => {
   it('returns [] for a missing log (fail-safe)', async () => {
     const cwd = makeTempCwd();
@@ -1014,7 +1018,7 @@ describe('recentDispatchedItems (log projection, WL-0MUL2IX6H001YHDO)', () => {
     expect(rows.find((r) => r.itemId === 'WL-EMPTY')?.title).toBe('[unknown]');
   });
 
-  it('caps the result at 20 rows by default (newest first)', async () => {
+  it('shows every dispatched item with no cap (newest first)', async () => {
     const cwd = makeTempCwd();
     for (let i = 0; i < 25; i++) {
       await appendDowntimeLogEntry(
@@ -1028,23 +1032,11 @@ describe('recentDispatchedItems (log projection, WL-0MUL2IX6H001YHDO)', () => {
       );
     }
     const rows = await recentDispatchedItems(cwd);
-    expect(rows).toHaveLength(20);
-    // Newest is the last dispatched (i = 24), oldest retained is i = 5.
+    // The 20-item cap is removed (WL-0MUMM9NED009TLL3) — all 25 distinct ids
+    // retained in the log are projected, still newest-first.
+    expect(rows).toHaveLength(25);
     expect(rows[0].itemId).toBe('WL-24');
-    expect(rows[19].itemId).toBe('WL-05');
-  });
-
-  it('honours an explicit limit argument', async () => {
-    const cwd = makeTempCwd();
-    for (let i = 0; i < 5; i++) {
-      await appendDowntimeLogEntry(
-        cwd,
-        JSON.stringify({ itemId: `WL-${i}`, kind: 'plan', title: `Item ${i}`, dispatchedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString() }),
-      );
-    }
-    const rows = await recentDispatchedItems(cwd, 2);
-    expect(rows).toHaveLength(2);
-    expect(rows.map((r) => r.itemId)).toEqual(['WL-4', 'WL-3']);
+    expect(rows[24].itemId).toBe('WL-00');
   });
 
   it('backfills a placeholder title from a pane-close itemTitle', async () => {
@@ -1179,5 +1171,136 @@ describe('recentDispatchedItems (log projection, WL-0MUL2IX6H001YHDO)', () => {
     const rows = await recentDispatchedItems(cwd);
     expect(rows.find((r) => r.itemId === 'WL-EMPTY')?.stage).toBeUndefined();
     expect(rows.find((r) => r.itemId === 'WL-BAD')?.stage).toBeUndefined();
+  });
+});
+
+// ── 4-hour time-block grouping (WL-0MUMM9NED009TLL3) ───────────────────
+//
+// The recent-dispatches view groups its semantically newest-first rows into
+// 4-hour UTC blocks per day, ordered chronologically (oldest block first) with
+// a trailing "Unknown time" block for rows with no parseable timestamp. These
+// helpers are pure so the boundary/wrap/ordering rules are unit-testable
+// without touching the filesystem or the renderer.
+describe('groupRecentDispatchesByTimeBlock (4-hour UTC blocks, WL-0MUMM9NED009TLL3)', () => {
+  function row(id: string, latestTimestamp?: string): RecentDispatchRow {
+    return { itemId: id, title: id, latestTimestamp };
+  }
+
+  it('formats the heading label with a UTC date and HH:00–HH:00 boundaries', () => {
+    expect(dispatchTimeBlockLabel('2026-09-29T13:45:00.000Z')).toBe('29 Sep 2026, 12:00–16:00');
+    expect(dispatchTimeBlockLabel('2026-01-02T00:00:00.000Z')).toBe('02 Jan 2026, 00:00–04:00');
+  });
+
+  it('classifies boundary hours into the correct block', () => {
+    expect(dispatchTimeBlockLabel('2026-09-29T03:59:59.999Z')).toBe('29 Sep 2026, 00:00–04:00');
+    expect(dispatchTimeBlockLabel('2026-09-29T04:00:00.000Z')).toBe('29 Sep 2026, 04:00–08:00');
+    expect(dispatchTimeBlockLabel('2026-09-29T07:59:59.000Z')).toBe('29 Sep 2026, 04:00–08:00');
+    expect(dispatchTimeBlockLabel('2026-09-29T08:00:00.000Z')).toBe('29 Sep 2026, 08:00–12:00');
+    expect(dispatchTimeBlockLabel('2026-09-29T23:59:59.000Z')).toBe('29 Sep 2026, 20:00–24:00');
+  });
+
+  it('labels a missing or unparseable timestamp as Unknown time', () => {
+    expect(dispatchTimeBlockLabel(undefined)).toBe(UNKNOWN_TIME_BLOCK_LABEL);
+    expect(dispatchTimeBlockLabel('not-a-date')).toBe(UNKNOWN_TIME_BLOCK_LABEL);
+    expect(dispatchTimeBlockLabel('')).toBe(UNKNOWN_TIME_BLOCK_LABEL);
+  });
+
+  it('returns [] for an empty input', () => {
+    expect(groupRecentDispatchesByTimeBlock([])).toEqual([]);
+  });
+
+  it('groups rows sharing a 4-hour window into one block', () => {
+    const blocks = groupRecentDispatchesByTimeBlock([
+      row('WL-D', '2026-09-29T03:00:00.000Z'),
+      row('WL-C', '2026-09-29T00:30:00.000Z'),
+      row('WL-B', '2026-09-29T05:00:00.000Z'),
+      row('WL-A', '2026-09-29T04:15:00.000Z'),
+    ]);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].label).toBe('29 Sep 2026, 00:00–04:00');
+    expect(blocks[0].rows.map((r) => r.itemId)).toEqual(['WL-D', 'WL-C']);
+    expect(blocks[1].label).toBe('29 Sep 2026, 04:00–08:00');
+    expect(blocks[1].rows.map((r) => r.itemId)).toEqual(['WL-B', 'WL-A']);
+  });
+
+  it('orders blocks chronologically oldest-first regardless of input order', () => {
+    // Input is newest-first (as the projection returns it).
+    const blocks = groupRecentDispatchesByTimeBlock([
+      row('WL-NEW', '2026-09-29T18:00:00.000Z'),
+      row('WL-MID', '2026-09-29T09:00:00.000Z'),
+      row('WL-OLD', '2026-09-29T01:00:00.000Z'),
+    ]);
+    expect(blocks.map((b) => b.label)).toEqual([
+      '29 Sep 2026, 00:00–04:00',
+      '29 Sep 2026, 08:00–12:00',
+      '29 Sep 2026, 16:00–20:00',
+    ]);
+    expect(blocks[0].startMs).toBeLessThan(blocks[1].startMs);
+    expect(blocks[1].startMs).toBeLessThan(blocks[2].startMs);
+  });
+
+  it('preserves the per-block newest-first item order', () => {
+    const blocks = groupRecentDispatchesByTimeBlock([
+      row('WL-LATE', '2026-09-29T03:30:00.000Z'),
+      row('WL-MID', '2026-09-29T02:00:00.000Z'),
+      row('WL-EARLY', '2026-09-29T00:10:00.000Z'),
+    ]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].rows.map((r) => r.itemId)).toEqual(['WL-LATE', 'WL-MID', 'WL-EARLY']);
+  });
+
+  it('keeps blocks on either side of midnight separate (cross-day wrap)', () => {
+    const blocks = groupRecentDispatchesByTimeBlock([
+      row('WL-NEXT-DAY', '2026-09-30T00:30:00.000Z'),
+      row('WL-LATE', '2026-09-29T21:00:00.000Z'),
+    ]);
+    expect(blocks).toHaveLength(2);
+    // Oldest first: the previous day's 20:00 block precedes the new day's 00:00.
+    expect(blocks[0].label).toBe('29 Sep 2026, 20:00–24:00');
+    expect(blocks[1].label).toBe('30 Sep 2026, 00:00–04:00');
+  });
+
+  it('does not merge the same hour on different days', () => {
+    const blocks = groupRecentDispatchesByTimeBlock([
+      row('WL-D2', '2026-09-30T08:30:00.000Z'),
+      row('WL-D1', '2026-09-29T08:30:00.000Z'),
+    ]);
+    expect(blocks.map((b) => b.label)).toEqual([
+      '29 Sep 2026, 08:00–12:00',
+      '30 Sep 2026, 08:00–12:00',
+    ]);
+  });
+
+  it('collects rows without a parseable timestamp into one trailing Unknown time block', () => {
+    const blocks = groupRecentDispatchesByTimeBlock([
+      row('WL-DATED', '2026-09-29T05:00:00.000Z'),
+      row('WL-NO-TS'),
+      row('WL-BAD', 'garbage'),
+    ]);
+    expect(blocks).toHaveLength(2);
+    expect(blocks[0].label).toBe('29 Sep 2026, 04:00–08:00');
+    const unknown = blocks[blocks.length - 1];
+    expect(unknown.unknownTime).toBe(true);
+    expect(unknown.label).toBe(UNKNOWN_TIME_BLOCK_LABEL);
+    expect(unknown.startMs).toBe(Number.NEGATIVE_INFINITY);
+    expect(unknown.rows.map((r) => r.itemId)).toEqual(['WL-NO-TS', 'WL-BAD']);
+  });
+
+  it('keeps the Unknown time block last even when only unknown rows exist', () => {
+    const blocks = groupRecentDispatchesByTimeBlock([row('WL-A'), row('WL-B', 'nope')]);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0].label).toBe(UNKNOWN_TIME_BLOCK_LABEL);
+  });
+
+  it('round-trips a real projection: groups all rows without dropping any', async () => {
+    const cwd = makeTempCwd();
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-A', kind: 'plan', title: 'A', dispatchedAt: '2026-09-29T01:00:00.000Z' }));
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-B', kind: 'plan', title: 'B', dispatchedAt: '2026-09-29T02:00:00.000Z' }));
+    await appendDowntimeLogEntry(cwd, JSON.stringify({ itemId: 'WL-C', kind: 'plan', title: 'C', dispatchedAt: '2026-09-29T09:00:00.000Z' }));
+    const rows = await recentDispatchedItems(cwd);
+    const blocks = groupRecentDispatchesByTimeBlock(rows);
+    expect(blocks).toHaveLength(2);
+    const flat = blocks.flatMap((b) => b.rows.map((r) => r.itemId)).sort();
+    expect(flat).toEqual(['WL-A', 'WL-B', 'WL-C']);
   });
 });

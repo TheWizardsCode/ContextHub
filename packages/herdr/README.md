@@ -5,7 +5,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 ## Features
 
 - **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
-- **Filter by stage, priority, or recent dispatches** — Press `f` then an axis key (`s`=stage, `p`=priority, `d`=dispatches), then a value key, or type `/wl <stage>` / `/wl --priority <priority>` / `/wl dispatches`. Stage axis: `f s i`=idea, `f s n`=intake, `f s p`=plan, `f s r`=review, `f s s`=sprint back to the default view. Priority axis: `f p l`=low, `f p m`=medium, `f p h`=high, `f p c`=critical, `f p s`=clear the priority filter. Dispatches axis: `f d` shows the most recent downtime dispatches from the local rolling log (see [Recent dispatches view](#recent-dispatches-view)). Stage, priority, and dispatches filters are **mutually exclusive** (replace semantics — applying one clears the others); sprint (`f s s`, `f p s`, or bare `/wl`) clears all three. Filtered views show every root item matching the filter's rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage; log-derived rows for the dispatches view) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW, WL-0MSKC8T46006999S, WL-0MUGLL9SS002E1D2)
+- **Filter by stage, priority, or recent dispatches** — Press `f` then an axis key (`s`=stage, `p`=priority, `d`=dispatches), then a value key, or type `/wl <stage>` / `/wl --priority <priority>` / `/wl dispatches`. Stage axis: `f s i`=idea, `f s n`=intake, `f s p`=plan, `f s r`=review, `f s s`=sprint back to the default view. Priority axis: `f p l`=low, `f p m`=medium, `f p h`=high, `f p c`=critical, `f p s`=clear the priority filter. Dispatches axis: `f d` shows the downtime dispatches from the local rolling log grouped into 4-hour time blocks (see [Recent dispatches view](#recent-dispatches-view)). Stage, priority, and dispatches filters are **mutually exclusive** (replace semantics — applying one clears the others); sprint (`f s s`, `f p s`, or bare `/wl`) clears all three. Filtered views show every root item matching the filter's rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage; log-derived rows for the dispatches view) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW, WL-0MSKC8T46006999S, WL-0MUGLL9SS002E1D2)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The metadata section (list-mode panel and detail view) mirrors the list's icons with text labels — the selected item's Stage row uses the same audit-aware `in_review` icon (✅/❌/❓ fresh, ⏳ stale-passed, 🔍 otherwise), and the Audit/Reviewed rows pair their icons with text (e.g. `✅ ready to close`, `❌ needs review`). The detail view additionally shows the last audit timestamp. **Child coverage (WL-0MUBVH8QG0020H9L):** a `completed`/`in_review` child whose direct parent has a fresh audit is *covered* — its list row and metadata Stage row show the parent's audit-result symbol in a dimmed/grey style (visually distinct from a bright own-audit icon) and the metadata panel adds a `Covered by <parent-id>` row. Coverage is **derived at read time** (`isCoveredByParent` over the parent's audit freshness inputs via the shared `isAuditFresh` predicate) — nothing is persisted and there is no schema migration. A child with its own audit always shows its own verdict; an uncovered child (no own audit, parent demoted/stale) keeps the plain `🔍` stage icon and is never dispatched (see [audit-tier selection](#audit-tier-dispatch)). In text-only (`noIcons`) mode the covered indicator renders as `[COVERED]`.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
@@ -109,7 +109,7 @@ The plugin pane will then be available via the Herdr plugin system.
      - `f`, `p`, `h` — high priority items
      - `f`, `p`, `c` — critical priority items
      - `f`, `p`, `s` — Clear the priority filter (return to the unfiltered browse list)
-   - Press `f`, `d` — Show the most recent downtime dispatches (see [Recent dispatches view](#recent-dispatches-view))
+   - Press `f`, `d` — Show the downtime dispatches grouped into 4-hour time blocks (see [Recent dispatches view](#recent-dispatches-view))
    - Stage, priority, and dispatches filters are **mutually exclusive**: applying one replaces whichever other axis was active (single filter slot, replace semantics). Sprint (`f s s`, `f p s`, or `/wl` with no arguments) clears **all** of them.
    - Type `/wl dispatches` directly to activate the dispatches view (equivalent to `f d`).
    - `/wl <stage>` accepts shorthand aliases (`idea`, `intake`, `plan`, `progress`, `review`) and canonical stage names (`intake_complete`, `plan_complete`, `in_progress`, `in_review`)
@@ -169,13 +169,16 @@ Semantics:
   since been **closed or deleted** still appears. The view never mutates the
   log or any work item; it is display-only and spawns no `wl` processes
   beyond the existing refresh (and the detail fetch below).
-- **Up to 20 rows, main-list order** — rows are deduplicated by work item id
-  (one row per id) and the 20 most recently active items are selected; the
-  visible list is then ordered exactly like the main selection list
-  (Critical → plan/intake → Idea → In Review, using the same within-group
-  comparator), but without group headings. The log itself is bounded to the
-  most recent 100 entries (`DOWNTIME_LOG_MAX_ENTRIES`), so the 20 most recent
-  items normally fall inside the retained window.
+- **4-hour time blocks, oldest first** — rows are deduplicated by work item id
+  (one row per id), then grouped into 4-hour **UTC** time blocks by each item's
+  most recent log timestamp (e.g. `00:00–04:00`, `04:00–08:00`, …,
+  `20:00–24:00`). Each block renders a heading (`29 Sep 2026, 00:00–04:00`)
+  through the existing group-heading path; blocks are ordered **oldest first**
+  while items inside a block stay **newest-first**. There is no result cap —
+  every item still retained in the log is shown. A row whose timestamp is
+  missing or unparseable is collected into a trailing **`Unknown time`** block.
+  The log itself is bounded to the most recent 100 entries
+  (`DOWNTIME_LOG_MAX_ENTRIES`), which is the effective upper bound on rows.
 - **Kind and outcome annotations** — where the log carries them, each row
   also shows the dispatch `kind` (`plan`/`intake`/`audit`/`risk-effort`/
   `implement`) and the latest pane-close **outcome** (e.g.
@@ -1295,11 +1298,12 @@ only one axis is ever active; the header shows which one
 (`(filtered: stage <stage>)` or `(filtered: priority <priority>)`).
 
 The **dispatches** view (press `f` + `d`, or `/wl dispatches`) is the third
-filter axis. It uses the local rolling dispatch log to choose up to 20
-read-only rows (deduplicated by work item id) and renders each surviving item
-from the live work item so its icons match the other views, ordered like the
-main selection list; an item no longer in `wl` falls back to the log-derived
-id/title so closed/deleted items still appear (WL-0MUGLL9SS002E1D2). It is
+filter axis. It uses the local rolling dispatch log to choose read-only rows
+(deduplicated by work item id, grouped into 4-hour UTC time blocks ordered
+oldest-first) and renders each surviving item from the live work item so its
+icons match the other views; an item no longer in `wl` falls back to the
+log-derived id/title so closed/deleted items still appear
+(WL-0MUGLL9SS002E1D2, WL-0MUMM9NED009TLL3). It is
 mutually exclusive with the stage and priority filters (the header shows
 `(filtered: dispatches)`), and a missing/malformed log renders an empty list
 rather than an error. See [Recent dispatches view](#recent-dispatches-view).

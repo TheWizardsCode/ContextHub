@@ -48,7 +48,7 @@ import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
 import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
-import { recentDispatchedItems } from './downtime-log.js';
+import { groupRecentDispatchesByTimeBlock, recentDispatchedItems } from './downtime-log.js';
 import { buildDispatchWorkItem, mergeDispatchRow } from './dispatch-view.js';
 import {
   createHydratorRunner,
@@ -67,7 +67,7 @@ import {
 } from './form-dialog.js';
 import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
-import { extractFilePaths, regroupWorkItems } from './grouping.js';
+import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 import {
   findNoteInParagraph,
@@ -4232,20 +4232,21 @@ export function fetchItemsForView(
     ])
       .then(([rows, liveItems]) => {
         const liveById = new Map(liveItems.map((item) => [item.id, item]));
-        const projected = rows.map((row) => {
-          const live = liveById.get(row.itemId);
-          return live ? mergeDispatchRow(live, row) : buildDispatchWorkItem(row);
+        // Group the log rows into 4-hour UTC time blocks, oldest block first
+        // (WL-0MUMM9NED009TLL3). Each block becomes a numbered group so the
+        // existing display-rows model interleaves a heading row before the
+        // block's items; within a block the projection's newest-first order
+        // is preserved. Group numbers are assigned in block order so no
+        // duplicate headings render.
+        const projected: WorkItem[] = [];
+        groupRecentDispatchesByTimeBlock(rows).forEach((block, index) => {
+          for (const row of block.rows) {
+            const live = liveById.get(row.itemId);
+            const item = live ? mergeDispatchRow(live, row) : buildDispatchWorkItem(row);
+            projected.push({ ...item, group: index + 1, groupLabel: block.label });
+          }
         });
-        // Reuse the canonical main-list ordering (Critical → Group N → Idea →
-        // Other → In Review, with the shared within-group comparator). The
-        // dispatch view stays a flat list, so the computed group stamps are
-        // dropped — only their ordering effect is kept.
-        return regroupWorkItems(projected).map((item) => {
-          const flat: WorkItem = { ...item };
-          delete flat.group;
-          delete flat.groupLabel;
-          return flat;
-        });
+        return projected;
       })
       .catch(() => []);
   }
