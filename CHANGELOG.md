@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.17 (2026-09-30)
+### Features
+- Press r then i to start an interview on the selected work item. (WL-0MU95SGEB006HQAM)
+- Downtime work now always picks the top item from your Herdr list, so automated choices match what you see. (WL-0MTK1ILM2009QYB2)
+- Completed agent sessions now close automatically, freeing up your machine's resources. (WL-0MUJL1NAH0042GOS)
+- Audited child items now show a dimmed "covered" icon so the queue accurately reflects their audit status. (WL-0MUBVH8QG0020H9L)
+- Audit freshness now works consistently everywhere, so items no longer show as fresh in one view and stale in another. (WL-0MUBVH7ZR009PP80)
+- Automated work panes now appear in your project's own workspace, grouped by work item. (WL-0MU321YK70035AYT)
+- Completed work is now checked for proper review, with warnings and a report to catch anything missed. (WL-0MUBVH9FV0027COG)
+- Audits no longer reset for harmless edits like comments or assignee changes. (WL-0MU1EWMHN000YUCG)
+- Audits now run one at a time per machine, so they finish reliably instead of failing when busy. (WL-0MUIVE0YG000UVIA)
+- Press f d to see the 20 most recent auto-dispatched items and their outcomes. (WL-0MUGLL9SS002E1D2)
+### Bug Fixes
+- Fixed a broken internal test so updates can be delivered more reliably. (WL-0MUJTF9SA0034BSP)
+- Help info now stays visible even when text wraps. (WL-0MTV979LK005YB1B)
+- Rejection reasons with apostrophes no longer break the audit reject shortcut. (WL-0MU7KEX65004X0U9)
+- Shortcut commands with special characters now run correctly. (WL-0MUKH3DVA00488U0)
+- Long-running sessions no longer crash from a stale recovery notification. (WL-0MUIV50EJ007VH9B)
+- Panes will no longer close unexpectedly while you're still working. (WL-0MUMEKDK0008LKH8)
+- Panes no longer close when an agent stops, and idle auto-close is off by default. (WL-0MUMEJHT9004EQPI)
+- The review queue banner now tells you whether to keep auditing or ship. (WL-0MUJQFXYC009CFRJ)
+- Fixed a test that expected an outdated keyboard shortcut in the review worklist. (WL-0MUKDNC7L000I1JO)
+### Other
+- Test runs now stay properly paced, so your game sessions won't be slowed by overloaded servers. (WL-0MUL1DSEF004IJU9)
+- Old debug logs are now cleaned up automatically, keeping the game running fast and smooth. (WL-0MUJL0PTS009MC8F)
+
 ## v1.0.16 (2026-09-27)
 ### Features
 - Projects now take turns getting work done, and urgent tasks jump to the front. (WL-0MTJ7IEI80055V2V)
