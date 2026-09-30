@@ -14,6 +14,7 @@ import { mergeWorkItems, mergeComments, mergeAuditResults, rewriteAndForcePushDa
 import { getSyncDefaults } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
 import { buildForeignItemReport, applyForeignItemCleanup } from '../doctor/foreign-items-check.js';
+import { buildAuditGapReport } from '../doctor/audit-gaps-check.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, CANONICAL_PRIORITIES } from '../validators/priority.js';
@@ -581,6 +582,44 @@ export default function register(ctx: PluginContext): void {
       }
       console.log(`\nTotal: ${report.deletedForeignCount} deleted, ${report.nonDeletedForeignCount} non-deleted foreign item(s).`);
       console.log('Dry-run only; nothing was modified. Use --apply to hard-delete foreign items.');
+    });
+
+  doctor
+    .command('audit-gaps')
+    .description(
+      'Report completed/in_review items with no audit record (read-only; shows ' +
+      'root/child relationship, age, and covered/waived/uncovered status)',
+    )
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action((opts: { prefix?: string }) => {
+      utils.requireInitialized();
+      const db = utils.getDatabase(opts.prefix);
+      const report = buildAuditGapReport(db.getAll(), db.getAllAuditResults());
+
+      if (utils.isJsonMode()) {
+        output.json(report);
+        return;
+      }
+
+      console.log(
+        `Doctor audit-gaps: ${report.noAuditCount} of ${report.totalScanned} item(s) completed/in_review with no audit record ` +
+        `(${report.flaggedCount} uncovered, ${report.coveredCount} covered, ${report.waivedCount} waived).`,
+      );
+      if (report.noAuditCount === 0) {
+        console.log('No audit gaps found.');
+        return;
+      }
+      console.log('');
+      for (const item of report.items) {
+        const relationship = item.relationship === 'root' ? 'root' : `child of ${item.parentId}`;
+        const age = `${item.ageDays}d`;
+        console.log(`  [${item.classification}] ${item.id} (${relationship}, age ${age}) ${item.title}`);
+        if (item.classification === 'waived' && item.waiver) {
+          console.log(`      waived by ${item.waiver.author}: ${item.waiver.reason}`);
+        }
+      }
+      console.log('');
+      console.log('Read-only report. Use `wl audit-waive <id> --reason "..."` to record a deliberate exception.');
     });
 
   doctor

@@ -429,6 +429,8 @@ export function seedWorkItems(
     githubIssueNumber?: number;
     githubIssueId?: number;
     githubIssueUpdatedAt?: string;
+    /** Explicit audit-gap waiver (WL-0MUBVH9FV0027COG). */
+    auditWaiver?: { reason: string; author: string; waivedAt: string } | null;
     audit?: {
       time: string;
       author: string;
@@ -462,6 +464,7 @@ export function seedWorkItems(
       githubIssueId: item.githubIssueId,
       githubIssueUpdatedAt: item.githubIssueUpdatedAt,
       needsProducerReview: item.needsProducerReview ?? false,
+      auditWaiver: item.auditWaiver ?? null,
       audit: item.audit,
     }));
 

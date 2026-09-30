@@ -5,7 +5,7 @@
  * Run: npx vitest run packages/herdr/src/index.test.ts
  */
 
-import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import {
   stripCommandPrefix,
   routeCommand,
@@ -22,6 +22,12 @@ import {
   CAPTURE_TIMEOUT_MS,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
+import {
+  writeActiveAuditMarker,
+  removeActiveAuditMarker,
+  readActiveAuditMarker,
+  isHostAuditActive,
+} from './machine-coordination.js';
 import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork, type ScheduledPrompt } from './downtime-worker.js';
 import { SCHEDULED_PROMPTS_FILE, scheduledPromptsPath } from './scheduled-prompts.js';
 import {
@@ -631,9 +637,29 @@ describe('configureWorklogTarget', () => {
 // ---------------------------------------------------------------------------
 
 describe('createDowntimeDeps', () => {
+  // Isolate the machine-wide coordination dir from the developer's live
+  // `~/.herdr/downtime/` (WL-0MUIVE0YG000UVIA): the host-wide audit
+  // serialisation marker must never leak to/from real state during a test.
+  // Tests that need a specific dir override it themselves and restore here.
+  const savedCoordinationDir = process.env.HERDR_COORDINATION_DIR;
+  let isolationCoordDir: string;
+
+  beforeEach(() => {
+    isolationCoordDir = mkdtempSync(join(tmpdir(), 'herdr-coord-test-'));
+    process.env.HERDR_COORDINATION_DIR = isolationCoordDir;
+  });
+
   afterEach(() => {
     resetExecFileAsync();
     resetWorklogDir();
+    if (savedCoordinationDir !== undefined) {
+      process.env.HERDR_COORDINATION_DIR = savedCoordinationDir;
+    } else {
+      delete process.env.HERDR_COORDINATION_DIR;
+    }
+    if (isolationCoordDir) {
+      try { rmSync(isolationCoordDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
   });
 
   // Herdr list head wiring + extended dispatch window (WL-0MU6UL3GQ0015AA5):
@@ -870,6 +896,9 @@ describe('createDowntimeDeps', () => {
         success: true,
         count: 2,
         workItems: [
+          // Fresh per the one-sided isAuditFresh gate: the audit (30 min ago)
+          // postdates the item's last update (1 h ago), so it covers the
+          // current content (WL-0MUBVH7ZR009PP80).
           { id: 'WL-FRESH', title: 'Fresh audit', auditedAt: new Date(now - 30 * 60 * 1000).toISOString(), updatedAt: new Date(now - HOUR_MS).toISOString(), sortIndex: 100 },
           { id: 'WL-STALE', title: 'Stale audit', auditedAt: new Date(now - 2 * HOUR_MS).toISOString(), updatedAt: new Date(now - HOUR_MS).toISOString(), sortIndex: 200 },
         ],
@@ -927,6 +956,60 @@ describe('createDowntimeDeps', () => {
     );
     // Only root-level items (no parentId) can ever be candidates.
     expect(result).toEqual({ ok: true, candidate: { id: 'WL-PARENT', title: 'Parent epic', stage: 'audit' } });
+  });
+
+  it('never dispatches a covered or uncovered child even if a leaking response includes one (AC2, WL-0MUBVH8QG0020H9L)', async () => {
+    // Belt-and-suspenders: the query is root-only, but a faulty/legacy
+    // response could still include a child. Neither a covered child (parent
+    // has a fresh audit) nor an uncovered child (parent demoted/stale) may
+    // ever be selected as an independent audit candidate.
+    const now = Date.now();
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 3,
+        workItems: [
+          {
+            id: 'WL-PARENT',
+            title: 'Parent',
+            auditedAt: null,
+            updatedAt: new Date(now - 60_000).toISOString(),
+            sortIndex: 100,
+          },
+          {
+            id: 'WL-COVERED-CHILD',
+            title: 'Covered child',
+            parentId: 'WL-PARENT',
+            auditedAt: null,
+            updatedAt: new Date(now - 60_000).toISOString(),
+            sortIndex: 50,
+          },
+          {
+            id: 'WL-UNCOVERED-CHILD',
+            title: 'Uncovered child',
+            parentId: 'WL-DEMOTED-PARENT',
+            auditedAt: null,
+            updatedAt: new Date(now - 60_000).toISOString(),
+            sortIndex: 10,
+          },
+        ],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getNextAuditCandidate('/repo');
+
+    // The query must stay root-only...
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json'],
+      expect.anything(),
+    );
+    // ...and the child candidates (lowest sortIndex, so they'd win without the
+    // guard) are excluded client-side too.
+    expect(result).toEqual({ ok: true, candidate: { id: 'WL-PARENT', title: 'Parent', stage: 'audit' } });
   });
 
   it('getNextAuditCandidate returns ok:true with no candidate when no stale/missing-audit item exists', async () => {
@@ -1596,13 +1679,13 @@ describe('createDowntimeDeps', () => {
   it('end-to-end: two consecutive idle windows dispatch a single unaudited candidate exactly once', async () => {
     // AC5 (parent): with one unaudited completed/in_review candidate and two
     // consecutive idle windows (no audit recorded between), the worker
-    // dispatches exactly once. The first dispatch writes the durable marker
-    // (kind:audit) to the shared log. The second window's ACTIVE-AUDIT
-    // single-flight check (WL-0MT3PHW4I002SNOV) then sees the non-stale
-    // marker mapping to the still-in_progress item and skips the audit tier
-    // outright — reporting reason 'audit-in-flight' (never 'no-candidate',
-    // so the no-candidate cooldown is not entered while the audit runs) —
-    // so no second dispatch.
+    // dispatches exactly once. The first dispatch writes BOTH the durable
+    // per-worklog marker (kind:audit) and the machine-wide active-audit
+    // marker (WL-0MUIVE0YG000UVIA). The second window's HOST-WIDE audit
+    // serialisation check sees the non-stale machine-wide marker and skips
+    // the audit tier outright — reporting reason 'audit-host-saturated'
+    // (never 'no-candidate', so the no-candidate cooldown is not entered
+    // while the audit runs) — so no second dispatch.
     const now = Date.now();
     const candidate = {
       id: 'WL-ONCE',
@@ -1635,23 +1718,28 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
-    // The real deps resolve the Dispatcher anchor via the herdr CLI, which is
-    // absent in tests — inject stub anchors so the anchored spawn path is
-    // exercised without a live herdr session (WL-0MTR2HLLJ009PTPJ). Per-prefix
-    // tabs (C1, WL-0MTRQT482001SNXC): the worklog dispatch path resolves the
-    // candidate's prefix via getDispatcherTabAnchor (the legacy single anchor
-    // is retained only for scheduled-prompt spawns).
-    const anchorResolver = vi.fn().mockResolvedValue({ paneId: 'wD:pTEST', workspaceId: 'wD' });
-    const tabAnchorResolver = vi
+    // The real deps resolve the project workspace / Dispatcher anchor via the
+    // herdr CLI, which is absent in tests — inject stub resolvers so the
+    // anchored spawn path is exercised without a live herdr session. Project
+    // workspace + item-ID tab (WL-0MU321YK70035AYT): the worklog dispatch path
+    // resolves the project workspace then the exact item-ID tab; the legacy
+    // single anchor is retained only for the AC4 fallback and scheduled
+    // prompts.
+    const anchorResolver = vi.fn().mockResolvedValue({ paneId: 'wD:FALLBACK', workspaceId: 'wD' });
+    const projectWorkspaceResolver = vi
       .fn()
-      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:pTEST' });
+      .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' });
+    const itemTabAnchorResolver = vi
+      .fn()
+      .mockResolvedValue({ tabId: 'wC:tWL-ONCE', paneId: 'wC:pTEST' });
     const deps = createDowntimeDeps(
       '/path/to/send-to-pi.sh',
       'Map',
       spawnFn,
       anchorResolver as never,
       undefined,
-      tabAnchorResolver as never,
+      projectWorkspaceResolver as never,
+      itemTabAnchorResolver as never,
     );
     const cwd = makeTempDir();
 
@@ -1660,24 +1748,25 @@ describe('createDowntimeDeps', () => {
     expect(first.dispatched).toBe(true);
     expect(first.kind).toBe('audit');
     expect(first.candidate?.id).toBe('WL-ONCE');
-    // The resolved per-prefix tab anchor pane id is forwarded to send-to-pi.sh
-    // as --anchor (C1): the pane lands in the WL tab of the Dispatcher
-    // workspace. The legacy single anchor is NOT used on this path.
-    expect(tabAnchorResolver).toHaveBeenCalledWith(cwd, 'WL');
+    // The resolved item-ID tab anchor pane id is forwarded to send-to-pi.sh as
+    // --anchor: the pane lands in the project workspace's WL-ONCE tab. The
+    // legacy single anchor is NOT used on this path.
+    expect(projectWorkspaceResolver).toHaveBeenCalledWith(cwd);
+    expect(itemTabAnchorResolver).toHaveBeenCalledWith(cwd, 'wC', 'WL-ONCE');
     expect(anchorResolver).not.toHaveBeenCalled();
     const spawnArgs = (spawnFn as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string[] | undefined;
     expect(spawnArgs).toContain('--anchor');
-    expect(spawnArgs).toContain('wD:pTEST');
+    expect(spawnArgs).toContain('wC:pTEST');
 
     // The durable marker landed in the shared log (kind:audit).
     const entries = await readDowntimeLogEntries(cwd);
     expect(entries.some((e) => e.itemId === 'WL-ONCE' && e.kind === 'audit')).toBe(true);
 
-    // Idle window 2: the active-audit check skips the audit tier
-    // (audit-in-flight); nothing else to dispatch.
+    // Idle window 2: the host-wide audit serialisation check skips the audit
+    // tier (audit-host-saturated); nothing else to dispatch.
     const second = await dispatchDowntimeWork(deps, { model: 'plan', cwd });
     expect(second.dispatched).toBe(false);
-    expect(second.reason).toBe('audit-in-flight');
+    expect(second.reason).toBe('audit-host-saturated');
     expect(second.kind).toBeUndefined();
     expect(spawnFn).toHaveBeenCalledTimes(1);
   });
@@ -1836,6 +1925,228 @@ describe('createDowntimeDeps', () => {
       ],
       { cwd: '/repo' },
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Host-wide audit serialisation (WL-0MUIVE0YG000UVIA)
+//
+// End-to-end coverage of the real `createDowntimeDeps` wiring: a machine-wide
+// active-audit marker at `~/.herdr/downtime/active-audit` (resolved via
+// HERDR_COORDINATION_DIR) must make `getActiveAudit` report host-wide
+// saturation for ANY project on the host, and the marker must be written on
+// an audit dispatch and released when the audit pane completes.
+// ---------------------------------------------------------------------------
+
+describe('host-wide audit serialisation (WL-0MUIVE0YG000UVIA)', () => {
+  const originalCoordinationDir = process.env.HERDR_COORDINATION_DIR;
+
+  afterEach(() => {
+    resetExecFileAsync();
+    resetWorklogDir();
+    if (originalCoordinationDir !== undefined) {
+      process.env.HERDR_COORDINATION_DIR = originalCoordinationDir;
+    } else {
+      delete process.env.HERDR_COORDINATION_DIR;
+    }
+    for (const dir of tempDirs) {
+      try { rmSync(dir, { recursive: true }); } catch { /* ignore */ }
+    }
+    tempDirs.length = 0;
+  });
+
+  it('getActiveAudit reports host-wide saturation when the machine-wide marker is present (AC1)', async () => {
+    // Simulates a SECOND dispatcher instance on the same host: another
+    // project dispatched an audit, so the machine-wide marker is present.
+    // This project's getActiveAudit must see it WITHOUT consulting the
+    // per-worklog log or issuing any wl query.
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    expect(writeActiveAuditMarker(coordinationDir, 'other-instance')).toBe(true);
+
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getActiveAudit(cwd);
+
+    expect(result).toEqual({ ok: true, active: true, source: 'host-wide' });
+    // The host-wide fast path short-circuits before any wl query.
+    expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  it('getActiveAudit falls back to the per-worklog check when the host-wide marker is absent (AC1, backward compatible)', async () => {
+    // No machine-wide marker: the legacy per-worklog check still runs and
+    // reports its own source, so existing single-project behaviour is intact.
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+
+    const cwd = makeTempDir();
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      JSON.stringify({
+        itemId: 'WL-AUD',
+        kind: 'audit',
+        dispatchedAt: new Date().toISOString(),
+        cwd,
+      }) + '\n',
+      'utf8',
+    );
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        count: 1,
+        workItems: [{ id: 'WL-AUD', title: 'audited', status: 'in_progress' }],
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getActiveAudit(cwd);
+
+    expect(result).toEqual({ ok: true, active: true, source: 'per-worklog' });
+  });
+
+  it('a stale host-wide marker is ignored and the audit slot is released (AC1)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    // Write a marker far in the past (simulating a crashed audit pane whose
+    // cleanup never ran); it must be treated as released.
+    const markerPath = join(coordinationDir, 'active-audit');
+    mkdirSync(coordinationDir, { recursive: true });
+    writeFileSync(
+      markerPath,
+      JSON.stringify({
+        instanceId: 'crashed-instance',
+        dispatchedAt: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
+      }),
+      'utf8',
+    );
+
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const result = await deps.getActiveAudit(cwd);
+
+    // No in_progress item either → no active audit, and source is the
+    // per-worklog fallback (the stale host marker was released).
+    expect(result).toEqual({ ok: true, active: false, source: 'per-worklog' });
+    expect(isHostAuditActive(coordinationDir)).toBe(false);
+  });
+
+  it('recordDispatch writes the host-wide marker for an audit dispatch (AC1)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordDispatch({
+      itemId: 'WL-AUD',
+      kind: 'audit',
+      dispatchedAt: new Date().toISOString(),
+      cwd,
+    });
+
+    const marker = readActiveAuditMarker(coordinationDir);
+    expect(marker).not.toBeNull();
+    expect(typeof marker?.instanceId).toBe('string');
+    expect((marker?.instanceId.length ?? 0) > 0).toBe(true);
+  });
+
+  it('recordDispatch does NOT write the host-wide marker for a non-audit dispatch', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: '{}', stderr: '' }) as never);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordDispatch({
+      itemId: 'WL-PLAN',
+      kind: 'plan',
+      dispatchedAt: new Date().toISOString(),
+      cwd,
+    });
+
+    expect(readActiveAuditMarker(coordinationDir)).toBeNull();
+  });
+
+  it('recordPaneClose releases the host-wide marker when an audit pane completes (AC1)', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    expect(writeActiveAuditMarker(coordinationDir, 'this-instance')).toBe(true);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordPaneClose(
+      {
+        entryType: 'pane-close',
+        timestamp: new Date().toISOString(),
+        itemId: 'WL-AUD',
+        itemTitle: 'Audited item',
+        paneId: 'w1:p2',
+        kind: 'audit',
+        outcome: 'audit-passed',
+        reasonCode: 'none',
+        closed: true,
+      },
+      cwd,
+    );
+
+    expect(isHostAuditActive(coordinationDir)).toBe(false);
+  });
+
+  it('recordPaneClose does NOT release the host-wide marker for a non-audit pane close', async () => {
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    expect(writeActiveAuditMarker(coordinationDir, 'this-instance')).toBe(true);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordPaneClose(
+      {
+        entryType: 'pane-close',
+        timestamp: new Date().toISOString(),
+        itemId: 'WL-PLAN',
+        itemTitle: 'Planned item',
+        paneId: 'w1:p3',
+        kind: 'plan',
+        outcome: 'closed-as-plan-complete',
+        reasonCode: 'none',
+        closed: true,
+      },
+      cwd,
+    );
+
+    // The audit marker is untouched — only an audit completion releases it.
+    expect(isHostAuditActive(coordinationDir)).toBe(true);
+  });
+
+  it('recordDispatchFailure releases the host-wide marker after a failed audit spawn (AC1)', async () => {
+    // A failed audit spawn never produced a running audit; the marker must
+    // be released immediately rather than stranding the host slot for the
+    // full stale window.
+    const coordinationDir = makeTempDir();
+    process.env.HERDR_COORDINATION_DIR = coordinationDir;
+    expect(writeActiveAuditMarker(coordinationDir, 'this-instance')).toBe(true);
+    const cwd = makeTempDir();
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    await deps.recordDispatchFailure({
+      itemId: 'WL-AUD',
+      kind: 'audit',
+      dispatchedAt: new Date().toISOString(),
+      cwd,
+      error: 'spawn ENOENT',
+      exitCode: null,
+    });
+
+    expect(isHostAuditActive(coordinationDir)).toBe(false);
   });
 });
 

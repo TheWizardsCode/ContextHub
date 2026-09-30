@@ -17,7 +17,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ShortcutRegistry, parseShortcutEntry, loadShortcutConfig } from './shortcut-config.js';
+import { ShortcutRegistry, parseShortcutEntry, loadShortcutConfig, formatChordHints } from './shortcut-config.js';
 import type { ShortcutEntry } from './shortcut-config.js';
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
@@ -126,9 +126,39 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
       expect(entry?.workItemTypes).toEqual(codeTypes);
     }
     // Generic chords stay untyped.
-    expect(registry.lookupChordEntry(['r'], 'list')?.workItemTypes).toBeUndefined();
+    expect(registry.lookupChordEntry(['r', 'p'], 'list')?.workItemTypes).toBeUndefined();
     expect(registry.lookupChordEntry(['c'], 'list')?.workItemTypes).toBeUndefined();
     expect(registry.lookupChordEntry(['a', 'a'], 'list')?.workItemTypes).toBeUndefined();
+  });
+
+  it('registers r-p Producer Review and r-i interview under the r prefix, removing the single-key r shortcut (WL-0MU95SGEB006HQAM)', () => {
+    const registry = loadShortcutConfig();
+
+    // The old single-key `r` shortcut is gone — `r` is now a pure chord
+    // prefix (axis leader) for the review workflow family.
+    expect(registry.lookupChordEntry(['r'], 'list', undefined, false)).toBeUndefined();
+
+    const producerReview = registry.lookupChordEntry(['r', 'p'], 'list', undefined, false);
+    expect(producerReview).toBeDefined();
+    expect(producerReview?.command).toBe(
+      "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>' --author <author>",
+    );
+    expect(producerReview?.label).toBe('Producer Review');
+
+    const interview = registry.lookupChordEntry(['r', 'i'], 'list', undefined, false);
+    expect(interview).toBeDefined();
+    expect(interview?.command).toBe('!!wl interview <id>');
+    expect(interview?.label).toBe('interview');
+  });
+
+  it('shows the r-p and r-i hints when r is pressed as a prefix (WL-0MU95SGEB006HQAM)', () => {
+    const registry = loadShortcutConfig();
+    const nextChords = registry.getChordByLeader('r', 'list', false);
+    expect(nextChords).toHaveLength(2);
+
+    const hints = formatChordHints(nextChords, ['r']);
+    expect(hints).toContain('p:Review');
+    expect(hints).toContain('i:interview');
   });
 
   it('registers the f s s sprint chord to return to the default view (WL-0MSGSE15000746F7, WL-0MSKC8T46006999S)', () => {
@@ -172,6 +202,17 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
       expect(entry?.command).toBe(command);
       expect(entry?.label).toBe(label);
     }
+  });
+
+  it('registers the f d chord for the recent-dispatches view (WL-0MUL2J15W00277XH)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['f', 'd'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe('/wl dispatches');
+    expect(entry?.label).toBe('filter dispatches');
+    expect(entry?.view).toBe('both');
+    // `f d` is a complete chord, not a prefix — it must resolve directly.
+    expect(registry.lookupChordEntry(['f', 'd'], 'both', undefined, false)).toBeDefined();
   });
 
   it('no longer registers the old single-key stage filter chords (f i, f n, f p, f r) or the single f s sprint chord (WL-0MSKC8T46006999S)', () => {

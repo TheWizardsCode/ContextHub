@@ -29,6 +29,77 @@ import type { WorkItem } from '../types.js';
 import type { PluginContext } from '../plugin-types.js';
 import type { CloseOptions } from '../cli-types.js';
 import { submitToOpenBrain } from '../openbrain.js';
+import { classifyAuditGap, type ParentAuditState } from '@worklog/shared/icons';
+
+/**
+ * Build the direct parent's audit state for derived child coverage
+ * (WL-0MUBVH8QG0020H9L); reuses the shared freshness predicate downstream.
+ */
+function parentAuditState(item: WorkItem, db: any): ParentAuditState | null {
+  if (!item.parentId) return null;
+  const parent = db.get(item.parentId);
+  if (!parent) return null;
+  const audit = db.getAuditResult(item.parentId);
+  return {
+    auditResult: audit ? audit.readyToClose : null,
+    auditedAt: audit?.auditedAt ?? null,
+    updatedAt: parent.updatedAt,
+    fingerprint: audit?.fingerprint ?? null,
+  };
+}
+
+/**
+ * Non-fatal audit-gap warning for an item about to be closed
+ * (WL-0MUBVH9FV0027COG AC2/AC3).
+ *
+ * Returns `null` unless the item is being closed from `in_review` (the
+ * review→done completion transition) AND is genuinely uncovered per the
+ * shared classifier: no fresh own audit, no waiver, and no fresh-audited
+ * direct parent. Never blocks the close.
+ */
+function auditGapWarningFor(item: WorkItem, db: any): string | null {
+  // Only completion-from-review is the audited gate; closing a never-reviewed
+  // open item is not an audit-gap concern.
+  if (item.stage !== 'in_review') return null;
+  const audit = db.getAuditResult(item.id);
+  const status = classifyAuditGap({
+    ownAudit: audit ? { auditedAt: audit.auditedAt, fingerprint: audit.fingerprint ?? null } : null,
+    updatedAt: item.updatedAt,
+    parentId: item.parentId,
+    auditWaiver: item.auditWaiver ?? null,
+    parentAudit: parentAuditState(item, db),
+  });
+  if (status !== 'uncovered') return null;
+
+  const relationship = item.parentId ? `child of ${item.parentId}` : 'root';
+  const auditState = audit ? 'stale' : 'missing';
+  return (
+    `Warning: ${item.id} (${relationship}) is being closed from in_review with a ${auditState} audit and no waiver. `
+    + 'This is an audit gate leak; re-audit it or record a deliberate exception with '
+    + `\`wl audit-waive ${item.id} --reason "<why>"\`.`
+  );
+}
+
+/**
+ * Record a durable waiver for a `--force` close that bypasses the audit gate
+ * (AC2: `--force` is the explicit escape hatch and records the bypass).
+ * Best-effort: never blocks the force close. Only records when the item would
+ * otherwise be uncovered (no existing waiver, no fresh audit).
+ */
+function recordForceWaiver(item: WorkItem, reason: string, author: string, db: any): void {
+  if (item.auditWaiver) return;
+  if (!auditGapWarningFor(item, db)) return;
+  try {
+    const suffix = reason && reason.trim() ? `: ${reason.trim()}` : '';
+    db.setAuditWaiver(item.id, {
+      reason: `Force close via wl close --force${suffix}`,
+      author,
+      waivedAt: new Date().toISOString(),
+    });
+  } catch (_err) {
+    // Never block a force close because waiver recording failed.
+  }
+}
 
 /**
  * Determine whether an item qualifies for recursive close.
@@ -124,24 +195,27 @@ function closeDescendants(
   reason: string | undefined,
   author: string,
   db: any
-): { errors: Array<{ id: string; error: string }>; childrenClosed: number } {
+): { errors: Array<{ id: string; error: string }>; childrenClosed: number; auditGapWarnings: string[] } {
   const errors: Array<{ id: string; error: string }> = [];
+  const auditGapWarnings: string[] = [];
 
   // Get all descendants (DFS order: parents before children in each branch)
   const descendants = db.getDescendants(parentId);
-  if (!descendants || descendants.length === 0) return { errors, childrenClosed: 0 };
+  if (!descendants || descendants.length === 0) return { errors, childrenClosed: 0, auditGapWarnings };
 
   // Reverse to close deepest items first
   const deepestFirst = [...descendants].reverse();
 
   for (const descendant of deepestFirst) {
+    const warning = auditGapWarningFor(descendant, db);
+    if (warning) auditGapWarnings.push(warning);
     const updated = closeSingle(descendant.id, reason, author, db);
     if (!updated) {
       errors.push({ id: descendant.id, error: 'Failed to close descendant' });
     }
   }
 
-  return { errors, childrenClosed: descendants.length - errors.length };
+  return { errors, childrenClosed: descendants.length - errors.length, auditGapWarnings };
 }
 
 export default function register(ctx: PluginContext): void {
@@ -170,7 +244,7 @@ export default function register(ctx: PluginContext): void {
       const author = options.author || 'worklog';
       const force = options.force === true;
 
-      const results: Array<{ id: string; success: boolean; error?: string; childrenClosed?: number; recovered?: boolean; childErrors?: Array<{ id: string; error: string }> }> = [];
+      const results: Array<{ id: string; success: boolean; error?: string; childrenClosed?: number; recovered?: boolean; childErrors?: Array<{ id: string; error: string }>; auditGapWarnings?: string[] }> = [];
 
       for (const rawId of ids) {
         const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
@@ -186,8 +260,11 @@ export default function register(ctx: PluginContext): void {
         if (force) {
           const children = db.getChildren(id);
           if (children && children.length > 0) {
+            // AC2: --force is the explicit escape hatch; record a durable
+            // waiver for an uncovered in_review root so the bypass is auditable.
+            recordForceWaiver(item, reason, author, db);
             // Close all descendants first (deepest first), collecting errors
-            const { errors: childErrors, childrenClosed } = closeDescendants(id, reason, author, db);
+            const { errors: childErrors, childrenClosed, auditGapWarnings } = closeDescendants(id, reason, author, db);
 
             // Now close the parent itself
             const updated = closeSingle(id, reason, author, db);
@@ -206,6 +283,9 @@ export default function register(ctx: PluginContext): void {
             if (childErrors.length > 0) {
               result.childErrors = childErrors;
             }
+            if (auditGapWarnings.length > 0) {
+              result.auditGapWarnings = auditGapWarnings;
+            }
             results.push(result);
 
             // Fire-and-forget: submit a summary to OpenBrain if enabled.
@@ -218,6 +298,7 @@ export default function register(ctx: PluginContext): void {
             }
           } else {
             // No children — standard single-item close (flag is a no-op)
+            recordForceWaiver(item, reason, author, db);
             const updated = closeSingle(id, reason, author, db);
             if (!updated) {
               results.push({ id, success: false, error: 'Failed to close item' });
@@ -236,7 +317,7 @@ export default function register(ctx: PluginContext): void {
         // ── Audit-gated recursive close ──
         } else if (shouldCloseRecursively(item, db)) {
           // Close descendants first (deepest first), collecting errors without aborting
-          const { errors: childErrors, childrenClosed } = closeDescendants(id, reason, author, db);
+          const { errors: childErrors, childrenClosed, auditGapWarnings } = closeDescendants(id, reason, author, db);
 
           // Now close the parent itself
           const updated = closeSingle(id, reason, author, db);
@@ -256,6 +337,9 @@ export default function register(ctx: PluginContext): void {
           if (childErrors.length > 0) {
             result.childErrors = childErrors;
           }
+          if (auditGapWarnings.length > 0) {
+            result.auditGapWarnings = auditGapWarnings;
+          }
           results.push(result);
 
           // Fire-and-forget: submit a summary to OpenBrain if enabled.
@@ -270,7 +354,7 @@ export default function register(ctx: PluginContext): void {
         } else if (shouldRecoverOpenChildren(item, db)) {
           // Recovery path: parent is already completed/done but has open children.
           // Close descendants only — the parent itself is already closed.
-          const { errors: childErrors, childrenClosed } = closeDescendants(id, reason, author, db);
+          const { errors: childErrors, childrenClosed, auditGapWarnings } = closeDescendants(id, reason, author, db);
 
           const result: any = {
             id,
@@ -281,6 +365,9 @@ export default function register(ctx: PluginContext): void {
           if (childErrors.length > 0) {
             result.childErrors = childErrors;
           }
+          if (auditGapWarnings.length > 0) {
+            result.auditGapWarnings = auditGapWarnings;
+          }
           results.push(result);
 
           // No OpenBrain submission for the recovery path: the parent was
@@ -289,12 +376,15 @@ export default function register(ctx: PluginContext): void {
           // trigger OpenBrain (consistent with the recursive close pattern).
         } else {
           // Standard (non-recursive) close — existing behaviour
+          const auditGapWarning = auditGapWarningFor(item, db);
           const updated = closeSingle(id, reason, author, db);
           if (!updated) {
             results.push({ id, success: false, error: 'Failed to close item' });
             continue;
           }
-          results.push({ id, success: true });
+          const result: any = { id, success: true };
+          if (auditGapWarning) result.auditGapWarnings = [auditGapWarning];
+          results.push(result);
 
           // Warning: parent has orphaned children — determine reason
           const children = db.getChildren(id);
@@ -333,8 +423,9 @@ export default function register(ctx: PluginContext): void {
       if (isJsonMode) {
         const closed = results.filter(r => r.success).length;
         const failed = results.filter(r => !r.success).length;
+        const auditGapWarnings = results.flatMap(r => r.auditGapWarnings ?? []);
         // If only child errors exist, the close is still considered successful
-        output.json({ results, closed, failed });
+        output.json({ results, closed, failed, auditGapWarnings });
       } else {
         for (const r of results) {
           if (r.success) {
@@ -353,6 +444,12 @@ export default function register(ctx: PluginContext): void {
             }
           } else {
             console.error(`Failed to close ${r.id}: ${r.error}`);
+          }
+          // Non-fatal audit-gap warnings (never block the close, AC2)
+          if (r.auditGapWarnings && r.auditGapWarnings.length > 0) {
+            for (const warning of r.auditGapWarnings) {
+              console.error(warning);
+            }
           }
           // Report per-child errors — recursive / recovery close path only
           if (r.childErrors && r.childErrors.length > 0) {

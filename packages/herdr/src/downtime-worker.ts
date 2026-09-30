@@ -19,7 +19,8 @@
  *  - `dispatchDowntimeWork` — Herdr-list-head dispatch (WL-0MTK1ILM2009QYB2): consumes the Herdr selection list head
  *    (`deps.getHerdrListHead` = fetcher → smart-selection → grouping, the sole ranking path) and applies
  *    every remaining safety gate as a sequential FILTER on that ordered sequence (scheduled prompt first,
- *    then code-freeze, dispatched-marker, free-slot minimums, active-audit single-flight, freshness/recency,
+ *    then code-freeze, dispatched-marker, free-slot minimums, active-audit single-flight (per-worklog
+ *    AND host-wide machine marker, WL-0MUIVE0YG000UVIA — reason 'audit-host-saturated'), freshness/recency,
  *    pre-dispatch CAS claim + per-process single-flight, then spawn). No second ranking implementation remains
  *    on the dispatch path (AC1–2). The former audit/implement/plan/intake tier ordering is retired.
  *    Code-freeze gate
@@ -64,20 +65,19 @@
  *    deep-analysis strictly sequential so a parent audit needs exactly
  *    2 local slots (parent + one child), fitting cheap mode's capacity
  *    (WL-0MSORQ1RG005DGUS). Dispatcher anchor (C0 WL-0MTR01EU7005SYZG):
- *    every spawn resolves the dedicated machine-wide Dispatcher anchor pane
- *    (`deps.getDispatcherAnchor`, F1 WL-0MTR2CD4X006XI7U) and forwards it as
- *    `--anchor <id>` so send-to-pi.sh splits from THAT pane — dispatched
- *    panes always land in the Dispatcher workspace regardless of which
- *    instance holds the leader lease. Anchor provisioning failure degrades
- *    to reason 'anchor-unavailable' (neutral "no dispatch this cycle", never
- *    a fallback to the leader's pane). Per-prefix tabs (C1, parent
- *    WL-0MTRQT482001SNXC): the worklog dispatch path resolves the candidate's
- *    prefix (`candidate.id.split('-', 1)[0]` → `WL`/`TCE`/`CG`) via
- *    `deps.getDispatcherTabAnchor` instead of the legacy single anchor, so
- *    each project's panes land in their own tab inside the Dispatcher
- *    workspace; the per-prefix resolver replaces the legacy anchor (null →
- *    'anchor-unavailable', never a fallback). Scheduled-prompt spawns keep
- *    the legacy single anchor (no work-item prefix).
+ *    pane placement (WL-0MU321YK70035AYT): the worklog dispatch path resolves
+ *    the candidate's project workspace from its worklog root
+ *    (`deps.resolveProjectWorkspace` — the herdr plugin pane whose logical
+ *    root equals `opts.cwd`), ensures/reuses a tab labelled with the exact
+ *    work-item id (`deps.getItemTabAnchor`), and forwards that tab's root
+ *    pane as `--anchor <id>` so send-to-pi.sh splits from THAT pane. Each
+ *    project's automated panes therefore land in the project's own workspace
+ *    grouped per item. When no plugin pane resolves, the path falls back to
+ *    the retained machine-wide Dispatcher anchor (`deps.getDispatcherAnchor`,
+ *    C0 WL-0MTR01EU7005SYZG). Anchor provisioning failure degrades to reason
+ *    'anchor-unavailable' (neutral "no dispatch this cycle", never a fallback
+ *    to the leader's pane). Scheduled-prompt spawns keep the Dispatcher
+ *    anchor (no work-item id).
  *  - `createDowntimeWorker` — per-tick orchestrator (poll → evaluate →
  *    track → dispatch) with settings re-read each tick, plus the
  *    no-candidate cooldown (WL-0MSI7DQL10016QYX): a genuine empty backlog
@@ -159,8 +159,13 @@ import {
   type DispatchedPane,
   type PaneItemState,
 } from './pane-lifecycle.js';
+import { paneCloseReaperDue } from './pane-close-scheduler.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
-import type { DispatcherAnchor, DispatcherTabAnchorEntry } from './dispatcher-anchor.js';
+import type {
+  DispatcherAnchor,
+  ItemTabAnchor,
+  ProjectWorkspaceTarget,
+} from './dispatcher-anchor.js';
 
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 export type { CoordinationEntry } from './coordination.js';
@@ -316,8 +321,27 @@ export const DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS = 24 * 60 * 60 * 1000;
  * bounding the per-tick worklog queries ("reasonable polling cadence" —
  * parent Constraint) while still closing completed panes promptly. Overridable
  * per tick via the optional `paneLifecycleIntervalMs` config field.
+ *
+ * NOTE: the monitor itself is currently DISABLED — see
+ * `PANE_LIFECYCLE_MONITOR_ENABLED` below.
  */
 export const DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS = 30_000;
+
+/**
+ * Mechanism B (dispatch-monitor pane auto-close, `pane-lifecycle.ts`) is
+ * DISABLED (WL-0MUMEKDK0008LKH8).
+ *
+ * The classifier was observed to close panes prematurely (stage-propagation
+ * lag; `requires-attention` outcomes still closing) and to race with the
+ * scheduled reaper (Mechanism A) — the two mechanisms share only a
+ * non-atomic idempotency key, so a pane could be closed twice. It is switched
+ * off here until its design is revisited; the scheduled reaper
+ * (`pane-close-scheduler.ts`) is the only active auto-close path. The
+ * classifier and its unit tests are retained for that future redesign — do
+ * not re-enable without reworking the double-close race. See
+ * `docs/dev/downtime-dispatcher.md` and `packages/herdr/README.md`.
+ */
+export const PANE_LIFECYCLE_MONITOR_ENABLED: boolean = false;
 
 /**
  * Hard floor for the success-marker staleness window (1 h): below this the
@@ -1304,6 +1328,13 @@ export interface AuditCandidate {
    * exclude from audit-tier selection (AC1).
    */
   needsProducerReview?: boolean;
+  /**
+   * Parent work item id when present. The audit-tier query is root-only
+   * (`--root-only`, WL-0MSTLFW14000KPEC) so children never reach selection;
+   * this field powers a belt-and-suspenders client-side guard that excludes
+   * any child that would otherwise slip through (WL-0MUBVH8QG0020H9L AC2).
+   */
+  parentId?: string | null;
 }
 
 /**
@@ -1429,7 +1460,7 @@ export type DowntimeClaimResult =
  *    unanswerable check.
  */
 export type DowntimeActiveAuditResult =
-  | { ok: true; active: boolean }
+  | { ok: true; active: boolean; source?: 'host-wide' | 'per-worklog' }
   | { ok: false; error?: string };
 
 /**
@@ -1958,20 +1989,30 @@ export interface DowntimeWorkerDeps {
    */
   getDispatcherAnchor?(cwd: string): Promise<DispatcherAnchor | null>;
   /**
-   * Resolve the per-prefix tab anchor pane inside the single Dispatcher
-   * workspace (C1, parent WL-0MTRQT482001SNXC): routes `<PREFIX>` (the
-   * work-item id before the first `-`) to its own tab, creating the tab on
-   * first use and persisting the mapping. When supplied it REPLACES
-   * {@link getDispatcherAnchor} on the worklog dispatch path
-   * (audit/implement/plan/intake/risk-effort): a null result degrades to
-   * 'anchor-unavailable' — never a legacy single-anchor or leader-pane
-   * fallback. Optional for backward compatibility with pre-C1 callers/tests;
-   * production wiring (`createDowntimeDeps`) always provides it.
+   * Resolve the project workspace hosting the worklog plugin pane for the
+   * worklog root `cwd` (WL-0MU321YK70035AYT, AC1/AC3). When it resolves, the
+   * worklog dispatch path places the pane in that workspace (via
+   * {@link getItemTabAnchor}) instead of the machine-wide Dispatcher anchor.
+   * A `null` result (no plugin pane, or an unreadable/ambiguous one) falls
+   * back to {@link getDispatcherAnchor} (AC4). Optional for backward
+   * compatibility with pre-change callers/tests; production wiring
+   * (`createDowntimeDeps`) always provides it.
    */
-  getDispatcherTabAnchor?(
+  resolveProjectWorkspace?(cwd: string): Promise<ProjectWorkspaceTarget | null>;
+  /**
+   * Ensure/reuse the tab labelled with the exact work-item id `itemId` inside
+   * the resolved project `workspaceId`, returning its anchor (root) pane
+   * (WL-0MU321YK70035AYT, AC2). A second dispatch for the same item reuses the
+   * same tab. A `null` result fails the dispatch closed with
+   * 'anchor-unavailable' — never a wrong-workspace placement. Optional for
+   * backward compatibility with pre-change callers/tests; production wiring
+   * (`createDowntimeDeps`) always provides it.
+   */
+  getItemTabAnchor?(
     cwd: string,
-    prefix: string,
-  ): Promise<(DispatcherTabAnchorEntry & { workspaceId: string }) | null>;
+    workspaceId: string,
+    itemId: string,
+  ): Promise<ItemTabAnchor | null>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
@@ -2045,6 +2086,17 @@ export interface DowntimeWorkerDeps {
     cwd: string,
     expected?: { itemId: string; kind: PaneLifecycleKind },
   ): Promise<boolean>;
+  /**
+   * Pane-close reaper runner (WL-0MUJL1NAH0042GOS). OPTIONAL — when absent
+   * the periodic reaper does not run (legacy/test callers). Production wires
+   * this to `runScheduledPaneClose` over the real herdr/session-log I/O.
+   * Fail-closed: must never throw (the worker catches and logs a throw);
+   * disabled settings must result in zero close calls.
+   */
+  runPaneCloseReaper?(
+    cwd: string,
+    opts: { idleThresholdMinutes: number; ledgerPath?: string },
+  ): Promise<void>;
   /**
    * Record a pane-close lifecycle entry in the rolling dispatch log
    * (WL-0MU308WSF0002JWN). OPTIONAL — when absent the monitor falls back to
@@ -2218,7 +2270,10 @@ export interface DowntimeDispatchOutcome {
    * machine-wide Dispatcher anchor pane could not be provisioned — neutral
    * "no dispatch this cycle", never a fallback to the leader's pane) |
    * 'audit-in-flight' (WL-0MT3PHW4I002SNOV: an audit is
-   * in flight) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
+   * in flight) | 'audit-host-saturated' (WL-0MUIVE0YG000UVIA: the
+   * machine-wide active-audit marker shows an audit running on this host —
+   * dispatched by ANY project/instance — so the audit tier is deferred
+   * host-wide) | 'fresh-audit-skip' (WL-0MT8KSTOE00871E7: a fresh audit
    * was recorded during interim). When `reason` is 'wl-error', `error`
    * may carry the underlying wl/CLI error details (timeout, SQLITE_BUSY,
    * parse failure, stderr) for the three-strike pause log.
@@ -2453,7 +2508,7 @@ async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
   ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -2553,7 +2608,7 @@ async function dispatchFromHerdrList(
     // still be the active-audit item that should cause the skip).
     if (k === 'audit') {
       const active = await deps.getActiveAudit(ctx.cwd);
-      if (active.ok) { if (active.active) { flags.auditInFlight = true; continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
+      if (active.ok) { if (active.active) { flags.auditInFlight = true; if (active.source === 'host-wide') { flags.auditHostSaturated = true; } continue; } } else { flags.auditCheckFailed = true; flags.auditCheckError = (active as { error?: string }).error ?? 'active-audit check failed'; continue; }
       try { if (await deps.hasFreshAudit(item.id, ctx.cwd)) { flags.freshnessSkip = true; continue; } } catch { /* fail-open */ }
     }
     // Dispatched-marker exclusion per kind — mirrors legacy tier exclusion
@@ -2652,17 +2707,18 @@ async function rollbackClaimForFailure(
 
 /**
  * Dispatch one already-selected candidate through the fixed pipeline:
- * per-prefix anchor resolution → CAS claim → marker write (before spawn) → spawn.
+ * project-workspace anchor resolution → CAS claim → marker write (before
+ * spawn) → spawn.
  *
- *  - Per-prefix tab anchor (C1, parent WL-0MTRQT482001SNXC): BEFORE the claim,
- *    resolve the candidate's prefix (`candidate.id.split('-', 1)[0]` →
- *    `WL`/`TCE`/`CG`) to its own tab anchor inside the single Dispatcher
- *    workspace via `deps.getDispatcherTabAnchor`, forwarding the tab's anchor
- *    pane id as `anchorId` so the pane lands in that tab. When that dep is
- *    wired it REPLACES the legacy `deps.getDispatcherAnchor` path (retained
- *    for scheduled-prompt spawns and pre-C1 callers); a null/failed
- *    resolution aborts with reason 'anchor-unavailable' — never a legacy
- *    anchor, another tab, or the leader's pane.
+ *  - Project workspace + item-ID tab (WL-0MU321YK70035AYT): BEFORE the claim,
+ *    resolve the candidate's project workspace from `opts.cwd` via
+ *    `deps.resolveProjectWorkspace`, ensure/reuse the tab labelled with the
+ *    exact work-item id via `deps.getItemTabAnchor`, and forward that tab's
+ *    root pane as `anchorId` so the pane lands in the project workspace under
+ *    the item's tab. When no project workspace resolves, fall back to the
+ *    retained machine-wide `deps.getDispatcherAnchor` (AC4). A null/failed
+ *    resolution aborts with reason 'anchor-unavailable' — never the leader's
+ *    pane and never another project's workspace.
  *  - Claim (compare-and-swap): exactly one concurrent pane wins; a loser
  *    (or a wl claim failure) ABORTS the dispatch — no pane, no marker, no
  *    success record. A lost race resolves reason 'claim-failed' (neutral,
@@ -2712,19 +2768,43 @@ async function dispatchClaimedTier(
   // 'anchor-unavailable' and NEVER falls back to the legacy anchor or the
   // leader's pane.
   let anchorId: string | undefined;
-  if (typeof deps.getDispatcherTabAnchor === 'function') {
-    const prefix = candidate.id.split('-', 1)[0];
-    let tabAnchor: (DispatcherTabAnchorEntry & { workspaceId: string }) | null = null;
+  // True when `anchorId` is a PROJECT-WORKSPACE item-tab anchor (the primary
+  // path). Those tabs are provisioned with herdr's initial root pane (an
+  // empty bash pane) which is only needed as the split anchor for the FIRST
+  // dispatch — after the dispatch pane spawns it is closed so the tab shows
+  // only the productive pane (WL-0MU2EOHK900425VU). The Dispatcher fallback
+  // anchor is deliberately exempt: its root pane is the persisted dispatch
+  // anchor and closing it would trigger a blank re-provision loop.
+  let anchorIsTabRoot = false;
+  // Primary path (AC1/AC3): resolve the project workspace that hosts the
+  // worklog plugin pane for this item's root, then ensure/reuse the tab
+  // labelled with the exact work-item id and anchor the pane there (AC2).
+  let projectTarget: ProjectWorkspaceTarget | null = null;
+  if (typeof deps.resolveProjectWorkspace === 'function') {
     try {
-      tabAnchor = await deps.getDispatcherTabAnchor(opts.cwd, prefix);
+      projectTarget = await deps.resolveProjectWorkspace(opts.cwd);
     } catch {
-      tabAnchor = null; // fail-closed on any anchor error
+      projectTarget = null; // fail-closed on any resolver error
+    }
+  }
+  if (projectTarget !== null && typeof deps.getItemTabAnchor === 'function') {
+    let tabAnchor: ItemTabAnchor | null = null;
+    try {
+      tabAnchor = await deps.getItemTabAnchor(opts.cwd, projectTarget.workspaceId, candidate.id);
+    } catch {
+      tabAnchor = null; // fail-closed
     }
     if (tabAnchor === null) {
+      // The workspace resolved but its item tab could not be provisioned:
+      // fail closed rather than place a project pane in the Dispatcher
+      // workspace (never a wrong placement).
       return { dispatched: false, reason: 'anchor-unavailable' };
     }
     anchorId = tabAnchor.paneId;
+    anchorIsTabRoot = true;
   } else if (typeof deps.getDispatcherAnchor === 'function') {
+    // Fallback (AC4): no project plugin pane resolved → the retained
+    // machine-wide Dispatcher anchor.
     let anchor: DispatcherAnchor | null = null;
     try {
       anchor = await deps.getDispatcherAnchor(opts.cwd);
@@ -2890,6 +2970,44 @@ async function dispatchClaimedTier(
       error: spawn.error,
       exitCode: spawn.exitCode,
     };
+  }
+
+  // Root-pane cleanup (WL-0MU2EOHK900425VU): a project-workspace item tab is
+  // provisioned with herdr's initial root pane (an empty bash pane) that is
+  // only used as the split anchor for the FIRST dispatch. Once the dispatch
+  // pane has spawned, close that root pane so the tab shows only the
+  // productive pane. Only ever close a ROOT pane: an anchor pane already
+  // carrying a downtime dispatch label is a live agent session and must stay
+  // open. Best-effort — cleanup must never block or fail the dispatch
+  // outcome.
+  if (
+    anchorIsTabRoot &&
+    anchorId !== undefined &&
+    typeof deps.closePane === 'function'
+  ) {
+    try {
+      // Fail-safe: the anchor is only closed when liveness POSITIVELY
+      // confirms it is not a live dispatch pane. An absent/failed liveness
+      // query leaves it open rather than risk closing a running agent pane.
+      let confirmedRootPane = false;
+      if (typeof deps.getRunningDowntimePanes === 'function') {
+        const running = await deps.getRunningDowntimePanes(opts.cwd);
+        if (running.ok) {
+          const liveIds =
+            running.records !== undefined
+              ? running.records.map((rec) => rec.paneId)
+              : Array.isArray(running.paneIds)
+                ? running.paneIds
+                : null;
+          if (liveIds !== null) confirmedRootPane = !liveIds.includes(anchorId);
+        }
+      }
+      if (confirmedRootPane) {
+        await deps.closePane(anchorId, opts.cwd);
+      }
+    } catch {
+      // fail-open: root-pane cleanup must never block the dispatch outcome
+    }
   }
 
   // Post-spawn enrichment (WL-0MUBVL251006JAQ0 / F6 AC6.2/AC6.3): best-effort
@@ -3780,6 +3898,33 @@ export async function runCoordinationCheckIn(
 }
 
 /**
+ * Observability for host-wide audit saturation (WL-0MUIVE0YG000UVIA AC3):
+ * emit a clear skip/defer line that names the condition and includes the
+ * audit-runner queue state and free-slot contention so an operator can tell
+ * infrastructure saturation from content problems. The machine-wide marker
+ * guarantees at most one active audit per host, so the concurrent-audit
+ * count is 1 by construction; the free-slot and contention figures are the
+ * live slot state captured at the poll.
+ *
+ * Fail-closed: logging must never crash the worker.
+ */
+function logHostAuditSaturation(
+  freeSlots: number | undefined,
+  contentionQueueDepth: number | undefined,
+): void {
+  try {
+    const slots = typeof freeSlots === 'number' ? freeSlots : 'unknown';
+    const contention = typeof contentionQueueDepth === 'number' ? contentionQueueDepth : 'unknown';
+    process.stderr.write(
+      `[worklog-plugin] Downtime audit tier skipped: audit-host-saturated ` +
+        `(concurrentAudits=1, freeSlots=${slots}, contentionQueueDepth=${contention})\n`,
+    );
+  } catch {
+    // fail-closed: logging must never crash the worker
+  }
+}
+
+/**
  * dispatch one downtime work item. Selection priority: FIRST the
  * scheduled-prompts tier (WL-0MSS1Q5ER007QDKX) — a due scheduled prompt
  * (e.g. `/skill:refactor` every 3 days) dispatches its prompt text before
@@ -3869,6 +4014,7 @@ export async function runCoordinationCheckIn(
  * met (AC1); a dispatch consumes the local slot, so the proxy reports busy
  * and the tracker requires a fresh full idle period before the next dispatch.
  */
+
 export async function dispatchDowntimeWork(
   deps: DowntimeWorkerDeps,
   opts: {
@@ -3951,6 +4097,11 @@ export async function dispatchDowntimeWork(
     let auditInFlight = false;
     let auditCheckFailed = false;
     let freshnessSkip = false;
+    // Host-wide audit saturation (WL-0MUIVE0YG000UVIA): true when the
+    // machine-wide active-audit marker (another project/instance on this
+    // host) caused the audit-tier skip, as opposed to a per-worklog
+    // in-flight audit. Drives the 'audit-host-saturated' reason/log token.
+    let auditHostSaturated = false;
 
     // Code-freeze gate (WL-0MSQ0RPQP00636JY): re-read the marker fresh on
     // every dispatch — never cached, so a freeze that starts or ends
@@ -3993,7 +4144,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, auditHostSaturated };
       const head = await deps.getHerdrListHead(opts.cwd);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -4026,6 +4177,7 @@ export async function dispatchDowntimeWork(
         }
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
+        auditHostSaturated = flags.auditHostSaturated;
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
@@ -4034,7 +4186,19 @@ export async function dispatchDowntimeWork(
         // chain (AC2 — gates are filters, not a fallback ranking).
         if (frozen) return { dispatched: false, reason: 'code-freeze' };
         if (freshnessSkip) return { dispatched: false, reason: 'fresh-audit-skip' };
-        if (auditInFlight) return { dispatched: false, reason: 'audit-in-flight' };
+        if (auditInFlight) {
+          // Host-wide saturation (WL-0MUIVE0YG000UVIA) vs per-worklog:
+          // distinct reason strings for observability. 'audit-host-saturated'
+          // means the machine-wide marker (another project/instance on this
+          // host) held the audit slot; 'audit-in-flight' is a per-worklog
+          // in-flight audit. auditInFlight keeps its original priority over
+          // auditCheckFailed (a mixed tick still reports the audit skip).
+          if (auditHostSaturated) {
+            logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth);
+            return { dispatched: false, reason: 'audit-host-saturated' };
+          }
+          return { dispatched: false, reason: 'audit-in-flight' };
+        }
         if (auditCheckFailed) return { dispatched: false, reason: 'wl-error', error: auditCheckError };
         // Deep review queue held the only remaining (non-critical implement)
         // candidates: neutral 'review-queue-hold', NEVER 'no-candidate' — no
@@ -4046,6 +4210,7 @@ export async function dispatchDowntimeWork(
       // legacy chain (test-compat path; flags still drive the terminal reason).
       auditInFlight = flags.auditInFlight;
       auditCheckFailed = flags.auditCheckFailed;
+      auditHostSaturated = flags.auditHostSaturated;
       freshnessSkip = flags.freshnessSkip;
     }
 
@@ -4094,9 +4259,23 @@ export async function dispatchDowntimeWork(
         if (activeAudit.ok) {
           if (activeAudit.active) {
             auditInFlight = true;
-            process.stderr.write(
-              `[worklog-plugin] Downtime audit tier skipped: audit-in-flight\n`,
-            );
+            auditHostSaturated = activeAudit.source === 'host-wide';
+            // Host-wide saturation (WL-0MUIVE0YG000UVIA) vs per-worklog:
+            // use distinct reason strings for observability. The `source`
+            // field is set by getActiveAudit: 'host-wide' when the machine-
+            // wide marker is active (cross-project serialisation),
+            // 'per-worklog' when a per-worklog dispatch marker maps to an
+            // in_progress item (single-project serialisation).
+            const skipReason = activeAudit.source === 'host-wide'
+              ? 'audit-host-saturated'
+              : 'audit-in-flight';
+            if (activeAudit.source === 'host-wide') {
+              logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth);
+            } else {
+              process.stderr.write(
+                `[worklog-plugin] Downtime audit tier skipped: ${skipReason}\n`,
+              );
+            }
           } else {
             // No active audit: proceed with the candidate lookup unchanged.
             const audit = await deps.getNextAuditCandidate(opts.cwd);
@@ -4295,7 +4474,10 @@ export async function dispatchDowntimeWork(
         : freshnessSkip
           ? { dispatched: false, reason: 'fresh-audit-skip' }
           : auditInFlight
-            ? { dispatched: false, reason: 'audit-in-flight' }
+            ? {
+                dispatched: false,
+                reason: auditHostSaturated ? 'audit-host-saturated' : 'audit-in-flight',
+              }
             : auditCheckFailed
               ? { dispatched: false, reason: 'wl-error', error: tier2ErrorDetail }
               : { dispatched: false, reason: 'no-candidate' };
@@ -4763,6 +4945,19 @@ export interface DowntimeWorkerConfig {
      * pass 0 to run the monitor on every tick.
      */
     paneLifecycleIntervalMs?: number;
+    /**
+     * Pane-close reaper scheduling (WL-0MUJL1NAH0042GOS). Optional — when
+     * absent the reaper does not run. `enabled` gates the pass, `intervalMs`
+     * overrides the cadence, and `ledgerPath` overrides the ledger location.
+     * The reaper is fail-closed: a throw is caught and never crashes the
+     * worker.
+     */
+    paneClose?: {
+      enabled: boolean;
+      idleThresholdMinutes: number;
+      intervalMs?: number;
+      ledgerPath?: string;
+    };
   };
   /**
    * Optional shared round-robin registry (WL-0MSSRED76008LGB6) used for
@@ -4918,6 +5113,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // Pane-lifecycle monitor cadence gate (WL-0MU308WSF0002JWN): the timestamp
   // of the last monitor pass. 0 forces a pass on the first tick.
   let lastPaneMonitorAt = 0;
+  // Pane-close reaper cadence gate (WL-0MUJL1NAH0042GOS): timestamp of the
+  // last scheduled reaper pass. 0 forces a pass on the first tick.
+  let lastPaneCloseReaperAt = 0;
   // No-candidate cooldown (WL-0MSI7DQL10016QYX): timestamp until which the
   // worker is fully paused (no poll, no idle tracking, no dispatch) after a
   // genuine empty backlog OR three consecutive CLI errors. Cancelled early
@@ -5322,8 +5520,15 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         }
       }
 
-      // ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) ──────────────────
-      // Runs on the LEADER (legacy mode: always) and BEFORE the cooldown
+      // ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) — DISABLED ────────
+      // Mechanism B is switched off (WL-0MUMEKDK0008LKH8):
+      // `PANE_LIFECYCLE_MONITOR_ENABLED` is false, so the guard below never
+      // runs the monitor and the scheduled reaper further down is the only
+      // active auto-close path. The block is retained (and the pure
+      // classifier + its tests kept) so the design can be revisited.
+      //
+      // When enabled it would run on the LEADER (legacy mode: always) and
+      // BEFORE the cooldown
       // gate, so completed dispatched panes are tidied even while dispatch
       // is paused in a no-candidate cooldown. Cadence-bounded (default 30 s)
       // so the ~10 s tick does not re-query the worklog for every open pane
@@ -5338,12 +5543,45 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // concurrently is safe; the `.catch` is belt-and-braces.
       const paneMonitorIntervalMs =
         cfg.paneLifecycleIntervalMs ?? DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS;
-      if (tickNow - lastPaneMonitorAt >= paneMonitorIntervalMs) {
+      if (
+        PANE_LIFECYCLE_MONITOR_ENABLED &&
+        tickNow - lastPaneMonitorAt >= paneMonitorIntervalMs
+      ) {
         lastPaneMonitorAt = tickNow;
         void monitorDispatchedPanes(opts.deps, cfg.cwd).catch((err) => {
           // fail-closed: pane-lifecycle monitoring must never crash the worker
           paneLifecycleWarn(`monitor pass threw: ${paneLifecycleErrMsg(err)}`);
         });
+      }
+
+      // ── Pane-close reaper (WL-0MUJL1NAH0042GOS) ────────────────────────
+      // Scheduled, out-of-process closure of settled/abandoned panes.
+      // Cadence-bounded (default 60 s) and gated by `paneClose.enabled`.
+      // FIRE-AND-FORGET (like the monitor) so an extra await never lets a
+      // concurrent tick win the single-flight dispatch race; the reaper is
+      // internally fail-closed and idempotent, and its throw is caught here
+      // so the worker continues. A pane already handled by the dispatch
+      // monitor above is skipped by the reaper (shared classifier +
+      // already-closed set), so the two mechanisms never double-close.
+      if (paneCloseReaperDue(cfg.paneClose, lastPaneCloseReaperAt, tickNow)) {
+        lastPaneCloseReaperAt = tickNow;
+        const paneClose = cfg.paneClose!;
+        if (typeof opts.deps.runPaneCloseReaper === 'function') {
+          try {
+            void opts.deps
+              .runPaneCloseReaper(cfg.cwd, {
+                idleThresholdMinutes: paneClose.idleThresholdMinutes,
+                ledgerPath: paneClose.ledgerPath,
+              })
+              .catch((err) => {
+                // fail-closed: the reaper must never crash the worker
+                paneLifecycleWarn(`pane-close reaper pass threw: ${paneLifecycleErrMsg(err)}`);
+              });
+          } catch (err) {
+            // Synchronous throw from the injected runner — swallow and log.
+            paneLifecycleWarn(`pane-close reaper pass threw synchronously: ${paneLifecycleErrMsg(err)}`);
+          }
+        }
       }
 
       // Cooldown gate (WL-0MTEZ4XZJ006Y9U7 AC2 — ordering): the check-in
@@ -5978,6 +6216,7 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       currentFingerprint: typeof o.currentFingerprint === 'string' ? o.currentFingerprint : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      parentId: o.parentId == null ? (o.parentId as null | undefined) : String(o.parentId),
       needsProducerReview:
         o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
@@ -6062,6 +6301,11 @@ export function selectAuditCandidate(
   const recencyCutoff = now - DOWNTIME_AUDIT_RECENCY_WINDOW_MS;
   const filtered = candidates
     .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt, c.fingerprint, c.currentFingerprint))
+    // Belt-and-suspenders child exclusion (WL-0MUBVH8QG0020H9L AC2): the
+    // audit-tier query is root-only, so children are already excluded
+    // server-side; this guard ensures a child can NEVER be dispatched as an
+    // audit candidate even if a non-root-only/faulty response leaks one.
+    .filter((c) => !c.parentId)
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
     .filter((c) => c.needsProducerReview !== true)

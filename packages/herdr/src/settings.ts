@@ -27,6 +27,13 @@ import {
   DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
 } from './mode-switch-worker.js';
+import {
+  clampPaneCloseGracePeriodMinutes,
+  clampPaneCloseIdleThresholdMinutes,
+  DEFAULT_PANE_CLOSE_ENABLED,
+  DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
+  DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
+} from './pane-close-scheduler.js';
 import { dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -95,6 +102,24 @@ export interface PluginSettings {
    * cadence as the downtime poller; clamped to a sensible range. */
   modeSwitchPollIntervalMs: number;
   /**
+   * Enable periodic auto-close of settled/abandoned agent panes
+   * (WL-0MUJL1NAH0042GOS). Default `true`; disable to turn off the reaper
+   * without editing code.
+   */
+  paneCloseEnabled: boolean;
+  /**
+   * Marker-less idle threshold, in minutes, after which an agent pane with no
+   * `</end_session>` marker is reaped. 0 = never close on idle; clamped to [0, 1440].
+   */
+  paneCloseIdleThresholdMinutes: number;
+  /**
+   * Grace period, in minutes, since a pane's first dispatch before it is
+   * eligible for auto-close (parent AC5). No pane is closed within this
+   * window, giving the agent time to start working and producer-review state
+   * time to propagate. Default 5; clamped to [1, 1440].
+   */
+  paneCloseGracePeriodMinutes: number;
+  /**
    * Maximum acceptable staleness (ms) for the last successful `wl sync` before
    * forcing a sync even when the DB hasn't changed locally. Bounded by the
    * auto-sync interval so remote changes are pulled at least once per interval.
@@ -124,6 +149,9 @@ export const defaultSettings: PluginSettings = {
   modeSwitchEnabled: true,
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
+  paneCloseEnabled: DEFAULT_PANE_CLOSE_ENABLED,
+  paneCloseIdleThresholdMinutes: DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
+  paneCloseGracePeriodMinutes: DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
   maxSyncStalenessMs: 60_000,
 };
 
@@ -236,6 +264,14 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       modeSwitchPollIntervalMs: typeof parsed.modeSwitchPollIntervalMs === 'number'
         ? clampModeSwitchPollIntervalMs(parsed.modeSwitchPollIntervalMs)
         : defaultSettings.modeSwitchPollIntervalMs,
+      paneCloseEnabled: typeof parsed.paneCloseEnabled === 'boolean'
+        ? parsed.paneCloseEnabled : defaultSettings.paneCloseEnabled,
+      paneCloseIdleThresholdMinutes: typeof parsed.paneCloseIdleThresholdMinutes === 'number'
+        ? clampPaneCloseIdleThresholdMinutes(parsed.paneCloseIdleThresholdMinutes)
+        : defaultSettings.paneCloseIdleThresholdMinutes,
+      paneCloseGracePeriodMinutes: typeof parsed.paneCloseGracePeriodMinutes === 'number'
+        ? clampPaneCloseGracePeriodMinutes(parsed.paneCloseGracePeriodMinutes)
+        : defaultSettings.paneCloseGracePeriodMinutes,
       maxSyncStalenessMs: typeof parsed.maxSyncStalenessMs === 'number'
         ? clampMaxSyncStalenessMs(parsed.maxSyncStalenessMs)
         : defaultSettings.maxSyncStalenessMs,

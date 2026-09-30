@@ -33,6 +33,8 @@ import {
   formatDetailContent,
   formatDetailView,
   fetchItemsForView,
+  isWlViewCommand,
+  resolveDispatchDetail,
   formatChordHintsForHelp,
   resolvePodcastTarget,
   clearDescriptionPreviewCache,
@@ -41,6 +43,7 @@ import {
   isInputActive,
   formatBlockedShipDialog,
   createGatedTick,
+  reviewQueueBannerText,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
@@ -51,6 +54,8 @@ import { TaskScheduler } from './scheduler.js';
 import { loadShortcutConfig, ShortcutRegistry, type ShortcutEntry } from './shortcut-config.js';
 import { regroupWorkItems, extractFilePaths } from './grouping.js';
 import { setWorklogDir, resetWorklogDir, setExecFileAsync, resetExecFileAsync, type WorkItem } from './fetcher.js';
+import { appendDowntimeLogEntry } from './downtime-log.js';
+import { buildDispatchWorkItem } from './dispatch-view.js';
 
 // ── ANSI helpers ───────────────────────────────────────────────────────
 // Regression test: the sync-failed status indicator uses ANSI.yellow
@@ -153,6 +158,128 @@ describe('createListRenderer — line-count invariant', () => {
     // In Review heading appears after the Other heading in the rendered output.
     expect(output.indexOf('Other (')).toBeGreaterThan(-1);
     expect(output.indexOf('── In Review (')).toBeGreaterThan(output.indexOf('Other ('));
+  });
+});
+
+// ── Review-queue depth banner copy (AH-0MUDYTQ55002NUSJ) ──────────────
+// The footer banner is display-only (WL-0MTTSWC1X005P4VD) and must reflect
+// the actual audit state: while any root in_review item still has an
+// outstanding audit it says "— focus on audits"; once every item has a
+// current audit it says "Ready to Ship (shortcut 'S')".
+
+describe('reviewQueueBannerText — copy selection', () => {
+  it('deep + outstanding audit → exact focus-on-audits copy (AC1)', () => {
+    expect(reviewQueueBannerText({
+      queueDeep: true,
+      completedCount: 25,
+      browseItemCount: 20,
+      auditsOutstanding: true,
+    })).toBe('Review queue deep (25 of 20 completed/in_review) — focus on audits');
+  });
+
+  it('deep + no outstanding audit → exact Ready to Ship copy (AC2)', () => {
+    expect(reviewQueueBannerText({
+      queueDeep: true,
+      completedCount: 20,
+      browseItemCount: 20,
+      auditsOutstanding: false,
+    })).toBe("Ready to Ship (shortcut 'S')");
+  });
+
+  it('shallow queue → null (banner not rendered)', () => {
+    expect(reviewQueueBannerText({
+      queueDeep: false, completedCount: 3, browseItemCount: 20, auditsOutstanding: true,
+    })).toBeNull();
+    expect(reviewQueueBannerText({
+      queueDeep: false, completedCount: 3, browseItemCount: 20, auditsOutstanding: false,
+    })).toBeNull();
+  });
+
+  it('omits the count display when browseItemCount is unavailable', () => {
+    expect(reviewQueueBannerText({
+      queueDeep: true, completedCount: 25, auditsOutstanding: true,
+    })).toBe('Review queue deep — focus on audits');
+  });
+});
+
+describe('createListRenderer — review-queue depth banner (AH-0MUDYTQ55002NUSJ)', () => {
+  const renderer = createListRenderer();
+
+  /**
+   * Invoke the renderer with the banner-state seam (params 27–30); the
+   * intermediate optional params are left undefined so the banner branch is
+   * exercised exactly as the TUI does.
+   */
+  function renderBanner(state: {
+    queueDeep: boolean;
+    completedCount: number;
+    browseItemCount?: number;
+    auditsOutstanding: boolean;
+    helpText?: boolean;
+  }): string {
+    return renderer(
+      [makeItem('A')],        // displayRows
+      0,                      // selectedIndex
+      0,                      // scrollOffset
+      TERM_80x24,             // termSize
+      null,                   // activeFilter
+      'list',                 // mode
+      null,                   // detailItem
+      undefined,              // totalCount
+      undefined,              // chordState
+      undefined,              // detailScrollOffset
+      undefined,              // autoRefresh
+      undefined,              // expandedItems
+      undefined,              // chordHelpHints
+      undefined,              // navStackDepth
+      undefined,              // panePaused
+      undefined,              // codeFreezeActive
+      undefined,              // metaScrollOffset
+      undefined,              // metaLastCommand
+      undefined,              // readFile
+      undefined,              // downtimeStatus
+      undefined,              // detailToCIndex
+      undefined,              // detailToCFocus
+      undefined,              // detailRenderedIndex
+      state.helpText,         // showHelpText (undefined → enabled)
+      undefined,              // codeFreezeAmbiguous
+      undefined,              // hoverTooltip
+      state.queueDeep,        // sprintComplete
+      state.completedCount,   // sprintCompletedCount
+      state.browseItemCount,  // browseItemCount
+      state.auditsOutstanding, // sprintAuditsOutstanding
+    );
+  }
+
+  it('renders the focus-on-audits copy while an audit is outstanding', () => {
+    const output = renderBanner({
+      queueDeep: true, completedCount: 25, browseItemCount: 20, auditsOutstanding: true,
+    });
+    expect(output).toContain('Review queue deep (25 of 20 completed/in_review) — focus on audits');
+    expect(output).not.toContain("Ready to Ship (shortcut 'S')");
+  });
+
+  it('renders the Ready to Ship copy once every audit is current', () => {
+    const output = renderBanner({
+      queueDeep: true, completedCount: 20, browseItemCount: 20, auditsOutstanding: false,
+    });
+    expect(output).toContain("Ready to Ship (shortcut 'S')");
+    expect(output).not.toContain('focus on audits');
+  });
+
+  it('renders no banner for a shallow queue', () => {
+    const output = renderBanner({
+      queueDeep: false, completedCount: 3, browseItemCount: 20, auditsOutstanding: true,
+    });
+    expect(output).not.toContain('Review queue deep');
+    expect(output).not.toContain("Ready to Ship (shortcut 'S')");
+  });
+
+  it('hides the banner when help text is disabled', () => {
+    const output = renderBanner({
+      queueDeep: true, completedCount: 25, browseItemCount: 20, auditsOutstanding: true, helpText: false,
+    });
+    expect(output).not.toContain('Review queue deep');
   });
 });
 
@@ -680,6 +807,364 @@ describe('WorkItemListState — priority filter slot (WL-0MSKC8T46006999S)', () 
     state.refreshItems(items);
     expect(state.activePriorityFilter).toBe('critical');
     expect(state.items.map((i) => i.id)).toEqual(['A']);
+  });
+});
+
+describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
+  const TERM = { rows: 24, cols: 80 };
+  const tempDirs: string[] = [];
+
+  function makeTempRoot(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'worklist-dispatches-'));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) {
+      rmSync(dir, { recursive: true, force: true });
+    }
+    resetExecFileAsync();
+  });
+
+  async function writeDispatch(root: string, entry: Record<string, unknown>): Promise<void> {
+    await appendDowntimeLogEntry(root, JSON.stringify(entry));
+  }
+
+  it('applyDispatchFilter activates the dispatches axis and clears stage/priority', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM);
+    state.applyFilter('idea');
+    state.applyDispatchFilter();
+    expect(state.activeDispatchFilter).toBe(true);
+    expect(state.activeFilter).toBeNull();
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('applyFilter replaces (clears) the dispatch filter', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM);
+    state.applyDispatchFilter();
+    state.applyFilter('idea');
+    expect(state.activeDispatchFilter).toBe(false);
+    expect(state.activeFilter).toBe('idea');
+  });
+
+  it('applyPriorityFilter replaces (clears) the dispatch filter', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    state.applyDispatchFilter();
+    state.applyPriorityFilter('critical');
+    expect(state.activeDispatchFilter).toBe(false);
+    expect(state.activePriorityFilter).toBe('critical');
+  });
+
+  it('clearFilter clears the dispatch axis too (sprint)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    state.applyDispatchFilter();
+    state.clearFilter();
+    expect(state.activeDispatchFilter).toBe(false);
+    expect(state.activeFilter).toBeNull();
+    expect(state.activePriorityFilter).toBeNull();
+  });
+
+  it('activeFilterLabel returns dispatches for the dispatch axis', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    expect(state.activeFilterLabel).toBeNull();
+    state.applyDispatchFilter();
+    expect(state.activeFilterLabel).toBe('dispatches');
+  });
+
+  it('renders the dispatches filter label and the item count in the header', () => {
+    const renderer = createListRenderer();
+    const state = new WorkItemListState([makeItem('A'), makeItem('B')], TERM);
+    state.applyDispatchFilter();
+    const output = renderer(state.getDisplayRows(), 0, 0, TERM, state.activeFilterLabel, 'list', null);
+    const firstLine = output.split('\n')[0];
+    expect(firstLine).toContain('(filtered: dispatches)');
+    expect(firstLine).toContain('2 item(s)');
+  });
+
+  it('dispatchChordCommand recognises /wl dispatches and applies the filter', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    const handled = dispatchChordCommand('/wl dispatches', state);
+    expect(handled).toBe(true);
+    expect(state.activeDispatchFilter).toBe(true);
+  });
+
+  it('dispatchChordCommand leaves an unknown /wl value unhandled', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM);
+    expect(dispatchChordCommand('/wl bogus', state)).toBe(false);
+    expect(state.activeDispatchFilter).toBe(false);
+  });
+
+  it('fetchItemsForView returns log-derived synthetic rows for the dispatches view', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-OLD',
+      kind: 'plan',
+      title: 'Older dispatch',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    await writeDispatch(root, {
+      itemId: 'WL-NEW',
+      kind: 'implement',
+      title: 'Newer dispatch',
+      dispatchedAt: '2026-01-02T00:00:00.000Z',
+    });
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('LIVE')]);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+
+    // The log still decides which items appear (WL-OLD/WL-NEW are absent from
+    // the live list, so they stay log-derived) and the rows follow the main
+    // selection-list ordering (WL-0MUGLL9SS002E1D2 follow-up).
+    expect(items.map((i) => i.id)).toEqual(['WL-NEW', 'WL-OLD']);
+    expect(items[0].title).toBe('Newer dispatch');
+    expect(items[0].isLogDerived).toBe(true);
+    expect(items[0].isLogOnly).toBe(true);
+    expect(items[0].dispatchKind).toBe('implement');
+    // The live fetcher (the same one other views use) IS consulted so
+    // surviving items can be rendered with identical icons
+    // (WL-0MUGLL9SS002E1D2 audit fix).
+    expect(defaultFetcher).toHaveBeenCalled();
+  });
+
+  it('renders a surviving dispatch row from the LIVE item so icons match other views (WL-0MUGLL9SS002E1D2)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-LIVE',
+      kind: 'plan',
+      title: 'Log title',
+      stage: 'intake_complete',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    // The live item has advanced since dispatch — its icons must win.
+    const live: WorkItem = {
+      ...makeItem('WL-LIVE'),
+      title: 'Live title',
+      status: 'open',
+      stage: 'plan_complete',
+      priority: 'high',
+      needsProducerReview: false,
+    };
+    const defaultFetcher = vi.fn().mockResolvedValue([live]);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+
+    expect(items).toHaveLength(1);
+    // Live fields win, so the row renders the same icons as every other view.
+    expect(items[0].title).toBe('Live title');
+    expect(items[0].status).toBe('open');
+    expect(items[0].stage).toBe('plan_complete');
+    expect(items[0].priority).toBe('high');
+    expect(items[0].needsProducerReview).toBe(false);
+    // …with the dispatch annotation overlaid, and NOT marked log-only.
+    expect(items[0].isLogDerived).toBe(true);
+    expect(items[0].isLogOnly).toBeFalsy();
+    expect(items[0].dispatchKind).toBe('plan');
+  });
+
+  it('an enriched dispatch row has the same icon prefix as the live row (WL-0MUGLL9SS002E1D2)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-ICON',
+      kind: 'audit',
+      title: 'Log title',
+      stage: 'in_review',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const live: WorkItem = {
+      ...makeItem('WL-ICON'),
+      status: 'completed',
+      stage: 'in_review',
+      priority: 'high',
+      needsProducerReview: false,
+    };
+    const defaultFetcher = vi.fn().mockResolvedValue([live]);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+    const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const liveLine = strip(formatItemLine(live, 200));
+    const dispatchLine = strip(formatItemLine(items[0], 200));
+    const prefixOf = (line: string): string => line.slice(0, line.indexOf('WL-ICON'));
+
+    // Identical live icon prefix (status/stage/audit/review); the dispatches
+    // view only appends its provenance tag.
+    expect(prefixOf(dispatchLine)).toBe(prefixOf(liveLine));
+    expect(dispatchLine).toContain('[audit]');
+  });
+
+  it('orders rows like the main selection list (Critical → plan/intake → Idea → In Review), flat (WL-0MUGLL9SS002E1D2 follow-up)', async () => {
+    const root = makeTempRoot();
+    const ids: Array<[string, string, string]> = [
+      ['WL-REVIEW', 'in_review', 'high'],
+      ['WL-IDEA', 'idea', 'medium'],
+      ['WL-PLAN', 'plan_complete', 'high'],
+      ['WL-CRIT', 'plan_complete', 'critical'],
+    ];
+    for (const [id] of ids) {
+      await writeDispatch(root, {
+        itemId: id,
+        kind: 'implement',
+        title: id,
+        dispatchedAt: '2026-01-01T00:00:00.000Z',
+      });
+    }
+    const live = ids.map(([id, stage, priority]) => ({
+      ...makeItem(id),
+      id,
+      title: id,
+      stage,
+      priority,
+    })) as WorkItem[];
+    const defaultFetcher = vi.fn().mockResolvedValue(live);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+
+    expect(items.map((i) => i.id)).toEqual(['WL-CRIT', 'WL-PLAN', 'WL-IDEA', 'WL-REVIEW']);
+    // Flat list — no group stamps remain (no headings rendered).
+    expect(items.every((i) => i.group === undefined && i.groupLabel === undefined)).toBe(true);
+  });
+
+  it('keeps the log-derived fallback for an item absent from the live list (WL-0MUGLL9SS002E1D2)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-GONE',
+      kind: 'plan',
+      title: 'Deleted title',
+      stage: 'plan_complete',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('OTHER')]);
+
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+
+    expect(items).toHaveLength(1);
+    expect(items[0].id).toBe('WL-GONE');
+    expect(items[0].title).toBe('Deleted title');
+    expect(items[0].isLogOnly).toBe(true);
+    // The log-derived stage still renders a real stage icon.
+    const line = formatItemLine(items[0], 160).replace(/\x1b\[[0-9;]*m/g, '');
+    expect(line).toContain('\u{1F4CB}');
+  });
+
+  it('renders dispatch rows with the same stage icon as other views (WL-0MUGLL9SS002E1D2 audit fix)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, {
+      itemId: 'WL-PLAN',
+      kind: 'plan',
+      title: 'Plan dispatch',
+      stage: 'intake_complete',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    await writeDispatch(root, {
+      itemId: 'WL-PLAN',
+      kind: 'plan',
+      itemTitle: 'Plan dispatch',
+      outcome: 'closed-as-plan-complete',
+      entryType: 'pane-close',
+      timestamp: '2026-01-02T00:00:00.000Z',
+    });
+    const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
+    expect(items[0].stage).toBe('plan_complete');
+    const line = formatItemLine(items[0], 160).replace(/\x1b\[[0-9;]*m/g, '');
+    // The real stage glyph, never the ❓ unknown-stage fallback.
+    expect(line).toContain('\u{1F4CB}');
+    expect(line).not.toContain('\u{2753}');
+  });
+
+  it('fetchItemsForView dispatches view is fail-safe for a missing log', async () => {
+    const root = makeTempRoot();
+    const defaultFetcher = vi.fn().mockResolvedValue([makeItem('LIVE')]);
+    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+    expect(items).toEqual([]);
+  });
+
+  it('fetchItemsForView dispatches view caps rows and dedups by id via the projection', async () => {
+    const root = makeTempRoot();
+    for (let i = 0; i < 25; i++) {
+      await writeDispatch(root, {
+        itemId: `WL-${String(i).padStart(2, '0')}`,
+        kind: 'plan',
+        title: `Item ${i}`,
+        dispatchedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString(),
+      });
+    }
+    // A later pane-close for the same id must not add a duplicate row.
+    await writeDispatch(root, {
+      itemId: 'WL-00',
+      kind: 'plan',
+      title: 'Item 0',
+      dispatchedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
+    expect(items).toHaveLength(20);
+    expect(new Set(items.map((i) => i.id)).size).toBe(20);
+  });
+});
+
+describe('dispatch view refetch trigger and detail fallback (WL-0MUL2J15W00277XH)', () => {
+  const TERM = { rows: 24, cols: 80 };
+
+  it('isWlViewCommand recognises /wl dispatches as a view command (refetch trigger)', () => {
+    expect(isWlViewCommand('/wl dispatches')).toBe(true);
+    // Existing view commands stay recognised.
+    expect(isWlViewCommand('/wl')).toBe(true);
+    expect(isWlViewCommand('/wl idea')).toBe(true);
+    expect(isWlViewCommand('/wl --priority critical')).toBe(true);
+    // Non-view commands are not.
+    expect(isWlViewCommand('/wl bogus')).toBe(false);
+    expect(isWlViewCommand('/skill:implement WL-1')).toBe(false);
+  });
+
+  it('upgrades a log-derived detail item to the live item when it still exists', async () => {
+    const state = new WorkItemListState([], TERM);
+    state.detailItem = buildDispatchWorkItem({
+      itemId: 'WL-1',
+      title: 'Log title',
+      kind: 'plan',
+      latestOutcome: 'closed-as-plan-complete',
+      latestTimestamp: '2026-01-01T00:00:00.000Z',
+    });
+    const fresh = { id: 'WL-1', title: 'Live title', status: 'completed' } as WorkItem;
+    const fetchDetails = vi.fn().mockResolvedValue(fresh);
+
+    await resolveDispatchDetail(state, fetchDetails);
+
+    expect(fetchDetails).toHaveBeenCalledWith('WL-1');
+    expect(state.detailItem).toBe(fresh);
+  });
+
+  it('falls back to the log-derived metadata when the item no longer exists', async () => {
+    const state = new WorkItemListState([], TERM);
+    const synthetic = buildDispatchWorkItem({ itemId: 'WL-GONE', title: 'Deleted title' });
+    state.detailItem = synthetic;
+    const fetchDetails = vi.fn().mockResolvedValue(null);
+
+    await resolveDispatchDetail(state, fetchDetails);
+
+    expect(state.detailItem).toBe(synthetic);
+    expect(state.detailItem?.title).toBe('Deleted title');
+    expect(state.detailItem?.isLogDerived).toBe(true);
+  });
+
+  it('falls back (no crash) when the detail fetch throws', async () => {
+    const state = new WorkItemListState([], TERM);
+    const synthetic = buildDispatchWorkItem({ itemId: 'WL-ERR', title: 'Error title' });
+    state.detailItem = synthetic;
+    const fetchDetails = vi.fn().mockRejectedValue(new Error('wl failed'));
+
+    await expect(resolveDispatchDetail(state, fetchDetails)).resolves.toBeUndefined();
+    expect(state.detailItem).toBe(synthetic);
+  });
+
+  it('never fetches for a non-log-derived detail item', async () => {
+    const state = new WorkItemListState([], TERM);
+    state.detailItem = makeItem('WL-LIVE');
+    const fetchDetails = vi.fn().mockResolvedValue(null);
+
+    await resolveDispatchDetail(state, fetchDetails);
+
+    expect(fetchDetails).not.toHaveBeenCalled();
+    expect(state.detailItem?.id).toBe('WL-LIVE');
   });
 });
 
@@ -1761,7 +2246,12 @@ describe('issue-type shortcut filtering — worklist integration', () => {
     expect(chords).toContain('aa');
     expect(chords).toContain('ay');
     expect(chords).toContain('ar');
-    expect(chords).toContain('r');
+    // Producer Review is the generic housekeeping chord; its binding is `r p`
+    // (WL-0MU95SGEB006HQAM) — the former single-key `r` chord was split into
+    // `r p` (producer review, WL-0MU95SGEB006HQAM) and `r i` (interview),
+    // which is why this expects the joined two-key chord here
+    // (WL-0MUKDBVFP008ARY6).
+    expect(chords).toContain('rp');
   });
 
   it('excludes a type-gated local chord on non-matching types via the merged registry', () => {
@@ -5255,6 +5745,141 @@ describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () =>
       const visible = stripAnsi(lines[i]);
       expect(visible.length).toBeLessThanOrEqual(cols);
     }
+  });
+});
+
+// ── Footer help-line wrap guard (WL-0MTV979LK005YB1B) ─────────────────
+// In narrow panes the (dynamic) footer help line can exceed `cols`. An
+// untruncated footer wraps onto a second physical row; because the safety
+// clamp counts array elements (logical rows), not physical rows, the wrapped
+// line pushes the header off the top of the pane. Truncating the footer to
+// `cols` guarantees it occupies exactly one output row and the header stays
+// visible. "If I make the pane wider so that it unwraps the line comes back"
+// is the observed symptom this guards against.
+
+describe('createListRenderer — footer help-line wrap guard (WL-0MTV979LK005YB1B)', () => {
+  const renderer = createListRenderer();
+  const items: WorkItem[] = [makeItem('A'), makeItem('B'), makeItem('C')];
+
+  // A realistic long help line: the dynamic hints + the alt+m mouse toggle.
+  const LONG_HINTS =
+    'u:update  e:edit  s:ship  a:audit  p:plan  i:implement  c:comment  ' +
+    'd:delete  m:metadata  r:refresh  alt+m mouse off';
+
+  const visualWidth = (s: string): number => {
+    let w = 0;
+    for (let i = 0; i < s.length; i++) {
+      const cp = s.charCodeAt(i);
+      if (cp >= 0x2300 && cp < 0x2400) w += 2;
+      else if (cp >= 0x2600 && cp < 0x2700) w += 2;
+      else if (cp >= 0x1f000) w += 2;
+      else w += 1;
+    }
+    return w;
+  };
+
+  // AC1: no rendered line exceeds `cols` (so nothing wraps onto a second
+  // physical row) when the help line is longer than the pane width.
+  it('truncates an over-long help line so no line exceeds cols at 40 cols', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      LONG_HINTS, // chordHelpHints → the help line
+    );
+    const lines = output.split('\n');
+    for (const line of lines) {
+      expect(visualWidth(stripAnsi(line))).toBeLessThanOrEqual(cols);
+    }
+    // The over-long help line must be truncated with an ellipsis.
+    expect(output).toContain('…');
+  });
+
+  // AC2: the header stays on the first line and the `rows - 1` invariant
+  // holds with an over-long help line (the original off-screen symptom).
+  it('keeps the header on row 0 and holds rows - 1 at 40×24', () => {
+    const cols = 40;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      LONG_HINTS,
+    );
+    expect(output.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    expect(stripAnsi(output.split('\n')[0])).toContain('Work Items');
+  });
+
+  // AC3: the chord-in-progress footer is truncated the same way.
+  it('truncates an over-long chord-in-progress footer', () => {
+    const cols = 30;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const chordState = createChordState();
+    chordState.pendingKeys = ['u'];
+    chordState.hints = 'update  everything  everywhere  repeatedly';
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      chordState,
+    );
+    const lines = output.split('\n');
+    for (const line of lines) {
+      expect(visualWidth(stripAnsi(line))).toBeLessThanOrEqual(cols);
+    }
+    expect(output).toContain('chord:');
+  });
+
+  // AC4 (no over-truncation): a help line that fits is rendered intact.
+  it('renders a short help line intact on a wide pane', () => {
+    const cols = 120;
+    const rows = 24;
+    const termSize = { rows, cols };
+    const shortHints = 'u:update  alt+m mouse off';
+    const output = renderer(
+      items,
+      0,
+      0,
+      termSize,
+      null,
+      'list',
+      null,
+      undefined,
+      null,
+      0,
+      false,
+      undefined,
+      shortHints,
+    );
+    expect(output).toContain('u:update  alt+m mouse off');
   });
 });
 

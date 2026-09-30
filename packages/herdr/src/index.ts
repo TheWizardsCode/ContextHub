@@ -53,8 +53,15 @@ import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
-import { getMachineCoordinationDir } from './machine-coordination.js';
+import {
+  getMachineCoordinationDir,
+  isHostAuditActive,
+  writeActiveAuditMarker,
+  removeActiveAuditMarker,
+} from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
+import { createHerdrReaperDeps } from './pane-close-herdr.js';
+import { runScheduledPaneClose } from './pane-close-scheduler.js';
 import {
   createDowntimeWorker,
   createDowntimePoller,
@@ -129,10 +136,12 @@ import {
 } from './scheduled-prompts.js';
 import {
   getDispatcherAnchor as resolveDispatcherAnchor,
-  getDispatcherTabAnchor as resolveDispatcherTabAnchor,
+  getItemTabAnchor as resolveItemTabAnchor,
+  resolveProjectWorkspace as resolveProjectWorkspaceForRoot,
   createDispatcherAnchorDeps,
   type DispatcherAnchor,
-  type DispatcherTabAnchorEntry,
+  type ItemTabAnchor,
+  type ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
 
 // Resolve path to the send-to-pi.sh script (relative to this source file)
@@ -664,24 +673,48 @@ async function defaultDispatcherAnchorResolver(
 }
 
 /**
- * Default per-prefix Dispatcher tab-anchor resolver used by
- * {@link createDowntimeDeps} (C1, parent WL-0MTRQT482001SNXC): resolves (or
- * creates) the tab labelled with the work-item prefix inside the single
- * machine-wide Dispatcher workspace, via the herdr CLI. Null on any failure —
- * dispatch degrades to "no dispatch this cycle" (never a legacy/leader
- * fallback). Injectable for tests that build real deps without a live herdr
- * session.
+ * Default project-workspace resolver used by {@link createDowntimeDeps}
+ * (WL-0MU321YK70035AYT): resolves the herdr plugin pane/workspace whose
+ * logical root (`HERDR_RESOLVED_CWD`) equals the worklog root `cwd`, via the
+ * herdr CLI. Null on any failure — dispatch falls back to the retained
+ * Dispatcher anchor (AC4). Injectable for tests that build real deps without
+ * a live herdr session.
  */
-async function defaultDispatcherTabAnchorResolver(
+async function defaultProjectWorkspaceResolver(
   cwd: string,
-  prefix: string,
-): Promise<(DispatcherTabAnchorEntry & { workspaceId: string }) | null> {
+): Promise<ProjectWorkspaceTarget | null> {
   try {
     const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveDispatcherTabAnchor(
+    return await resolveProjectWorkspaceForRoot(
       cwd,
       createDispatcherAnchorDeps(cwd, herdrBin),
-      prefix,
+      cwd,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Default item-ID tab-anchor resolver used by {@link createDowntimeDeps}
+ * (WL-0MU321YK70035AYT): ensures/reuses the tab labelled with the exact
+ * work-item id inside the resolved project workspace and returns its root
+ * pane, via the herdr CLI. Null on any failure — the dispatch fails closed
+ * ('anchor-unavailable'). Injectable for tests that build real deps without
+ * a live herdr session.
+ */
+async function defaultItemTabAnchorResolver(
+  cwd: string,
+  workspaceId: string,
+  itemId: string,
+): Promise<ItemTabAnchor | null> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    return await resolveItemTabAnchor(
+      cwd,
+      createDispatcherAnchorDeps(cwd, herdrBin),
+      workspaceId,
+      itemId,
     );
   } catch {
     return null;
@@ -725,6 +758,32 @@ export async function defaultRunningDowntimePanesResolver(
 }
 
 /**
+ * Collect the pane ids already handled by the dispatch monitor
+ * (WL-0MU308WSF0002JWN) from the rolling dispatch log. Used to keep the
+ * scheduled pane-close reaper from double-handling a pane the monitor has
+ * already processed (parent constraint). Fail-safe: an unreadable log
+ * yields an empty set.
+ */
+async function readClosedPaneIds(cwd: string): Promise<Set<string>> {
+  try {
+    const entries = await readDowntimeLogEntries(cwd);
+    const ids = new Set<string>();
+    for (const entry of entries) {
+      if (
+        entry.entryType === 'pane-close' &&
+        typeof entry.paneId === 'string' &&
+        entry.paneId !== ''
+      ) {
+        ids.add(entry.paneId);
+      }
+    }
+    return ids;
+  } catch {
+    return new Set<string>();
+  }
+}
+
+/**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
  * `wl next --stage <stage> --json` for dispatch selection, `wl update
  * <id> --status in_progress` for the pre-dispatch claim, and
@@ -734,7 +793,14 @@ export async function defaultRunningDowntimePanesResolver(
  *
  * @param anchorResolver Dispatcher-anchor resolver (C0 WL-0MTR01EU7005SYZG).
  *   Defaults to the real herdr-CLI-backed resolver; injectable for tests that
- *   build real deps without a live herdr session.
+ *   build real deps without a live herdr session. Retained as the AC4
+ *   fallback (no project workspace) and for scheduled-prompt spawns.
+ * @param projectWorkspaceResolver Project-workspace resolver
+ *   (WL-0MU321YK70035AYT). Defaults to the real herdr-CLI-backed resolver;
+ *   injectable for tests.
+ * @param itemTabAnchorResolver Item-ID tab-anchor resolver
+ *   (WL-0MU321YK70035AYT). Defaults to the real herdr-CLI-backed resolver;
+ *   injectable for tests.
  */
 export function createDowntimeDeps(
   scriptPath: string,
@@ -743,8 +809,10 @@ export function createDowntimeDeps(
   anchorResolver: DowntimeWorkerDeps['getDispatcherAnchor'] = defaultDispatcherAnchorResolver,
   runningPanesResolver: NonNullable<DowntimeWorkerDeps['getRunningDowntimePanes']> =
     defaultRunningDowntimePanesResolver,
-  tabAnchorResolver: DowntimeWorkerDeps['getDispatcherTabAnchor'] =
-    defaultDispatcherTabAnchorResolver,
+  projectWorkspaceResolver: DowntimeWorkerDeps['resolveProjectWorkspace'] =
+    defaultProjectWorkspaceResolver,
+  itemTabAnchorResolver: DowntimeWorkerDeps['getItemTabAnchor'] =
+    defaultItemTabAnchorResolver,
 ): DowntimeWorkerDeps {
   // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
   // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
@@ -805,19 +873,20 @@ export function createDowntimeDeps(
   };
   return {
     // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): the machine-wide dedicated
-    // Dispatcher workspace/pane resolver (F1 WL-0MTR2CD4X006XI7U). Every
-    // downtime pane spawn resolves this anchor so panes land in the Dispatcher
-    // workspace regardless of leadership. Null → dispatch degrades to "no
-    // dispatch this cycle". Injected (default = real herdr CLI) so tests that
-    // build real deps without a live herdr session can stub it. Retained for
-    // scheduled-prompt spawns (no work-item prefix) and legacy callers.
+    // Dispatcher workspace/pane resolver. Retained ONLY as the AC4 fallback
+    // (no resolvable project plugin pane for the item's root,
+    // WL-0MU321YK70035AYT) and for scheduled-prompt spawns (no work-item id).
+    // Null → dispatch degrades to "no dispatch this cycle". Injected
+    // (default = real herdr CLI) so tests can stub it.
     getDispatcherAnchor: anchorResolver,
-    // Per-prefix Dispatcher tab anchor (C1, parent WL-0MTRQT482001SNXC): the
-    // worklog dispatch path routes each candidate's prefix (`WL`/`TCE`/…) to
-    // its own tab inside the single Dispatcher workspace. When wired it
-    // replaces `getDispatcherAnchor` on that path; null → 'anchor-unavailable'
-    // (never a legacy/leader fallback). Injected (default = real herdr CLI).
-    getDispatcherTabAnchor: tabAnchorResolver,
+    // Project workspace + item-ID tab (WL-0MU321YK70035AYT): the worklog
+    // dispatch path resolves the project workspace hosting the item's root,
+    // then ensures/reuses the tab labelled with the exact work-item id and
+    // anchors the pane to that tab's root pane. A null workspace falls back to
+    // `getDispatcherAnchor`; a null item tab fails closed ('anchor-unavailable').
+    // Injected (default = real herdr CLI).
+    resolveProjectWorkspace: projectWorkspaceResolver,
+    getItemTabAnchor: itemTabAnchorResolver,
     // Running-downtime-panes liveness (AC1/AC3, WL-0MTYZXSLN008HZOW): counts
     // live dispatched downtime panes from `herdr pane list` so the
     // running-pane bound is enforced machine-wide (across roots and
@@ -893,7 +962,12 @@ export function createDowntimeDeps(
         // (WL-0MSTLFW14000KPEC): only PARENT items are audit candidates —
         // completed/in_review children (sub-tasks) are never dispatched
         // independently; the producer reviews deliverable units (parents),
-        // whose audits cover their children. Same fail-closed semantics as
+        // whose audits cover their children. Derived coverage
+        // (WL-0MUBVH8QG0020H9L) is display-only and computed at read time by
+        // isCoveredByParent/stageDisplayIcon; it never relaxes this root-only
+        // dispatch contract. selectAuditCandidate adds a belt-and-suspenders
+        // parentId exclusion so a leaking response can never dispatch a
+        // child either. Same fail-closed semantics as
         // getNextItem, with the same error channel
         // (WL-0MSLWJ2KP0002SV0): a wl/parse failure resolves {ok:false} — a
         // CLI-error strike — NOT a null that is indistinguishable from a
@@ -933,6 +1007,25 @@ export function createDowntimeDeps(
     },
     async getActiveAudit(cwd: string): Promise<DowntimeActiveAuditResult> {
       try {
+        // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): FIRST check
+        // the machine-wide active-audit marker at
+        // `~/.herdr/downtime/active-audit`. This coordinates audits ACROSS
+        // projects and herdr instances on the same host — the per-worklog
+        // check below cannot see audits dispatched by other projects'
+        // dispatchers, which is what allowed host-wide saturation
+        // (2026-09-26 incident). A non-stale marker means an audit is
+        // running somewhere on this host; defer this audit. A stale marker
+        // (older than DOWNTIME_AUDIT_HOST_STALE_WINDOW_MS) is treated as
+        // released. Fail-open: if the coordination dir cannot be resolved
+        // the host-wide check is skipped and the per-worklog check below
+        // still runs (the legacy behaviour is preserved).
+        const coordinationDir = getMachineCoordinationDir();
+        if (coordinationDir !== null && isHostAuditActive(coordinationDir)) {
+          // Host-wide saturation: an audit is active on this host
+          // (dispatched by another instance/project). Report with source
+          // so the worker can log 'audit-host-saturated' specifically.
+          return { ok: true, active: true, source: 'host-wide' };
+        }
         // Active-audit single-flight (WL-0MT3PHW4I002SNOV): does any
         // non-stale kind=audit dispatch marker map to an item still
         // `in_progress`? Dispatch-log-first (per plan decision Q2): read the
@@ -951,8 +1044,8 @@ export function createDowntimeDeps(
         );
         if (auditCandidateIds.size === 0) {
           // Cheap fast-path: no non-stale audit markers → no active audit
-          // (no worklog query needed).
-          return { ok: true, active: false };
+          // (no worklog query needed). Source is per-worklog.
+          return { ok: true, active: false, source: 'per-worklog' };
         }
         // Intersect with the worklog's in_progress items: a marker only
         // counts as an ACTIVE audit while its item is still in_progress
@@ -970,7 +1063,7 @@ export function createDowntimeDeps(
           return { ok: false, error: 'in_progress parse error' } as const;
         }
         const active = [...auditCandidateIds].some((id) => inProgress.has(id));
-        return { ok: true, active };
+        return { ok: true, active, source: 'per-worklog' };
       } catch (err) {
         // Fail-open: a wl failure yields {ok:false} — the dispatcher skips
         // the audit tier and falls through to the next tier; dispatch is
@@ -1267,11 +1360,32 @@ export function createDowntimeDeps(
       // than dispatching an unmarked item.
       try {
         await appendDowntimeLogEntry(event.cwd, JSON.stringify(event));
-        return true;
       } catch {
         // fail-closed: the marker could not be written → abort the dispatch
         return false;
       }
+      // 3. Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): write the
+      // machine-wide active-audit marker when the durable per-worklog marker
+      // landed. This coordinates audit serialisation ACROSS projects and
+      // herdr instances on the same host. Fail-safe: the write is
+      // best-effort — a failure does NOT abort the dispatch (the per-worklog
+      // marker and stale window still protect against double-dispatch within
+      // this project). Written AFTER the marker write so a failed marker
+      // never leaves a host-wide lock behind with no corresponding dispatch;
+      // a spawn failure releases it via `recordDispatchFailure`.
+      if (event.kind === 'audit') {
+        try {
+          const coordinationDir = getMachineCoordinationDir();
+          if (coordinationDir !== null) {
+            // Identify the dispatching plugin process for diagnostics; the
+            // marker's single-flight semantics do not depend on the id.
+            writeActiveAuditMarker(coordinationDir, `herdr:${process.pid}`);
+          }
+        } catch {
+          // fail-safe: marker write failure must never abort dispatch
+        }
+      }
+      return true;
     },
     async recordError(event: DowntimeErrorEvent): Promise<void> {
       // Persistent CLI-error trail (three-strike rule): rolling JSONL log
@@ -1300,6 +1414,20 @@ export function createDowntimeDeps(
         );
       } catch {
         // fail-closed: audit logging must never crash the worker
+      }
+      // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): a failed audit
+      // spawn never produced a running audit, so release the machine-wide
+      // marker immediately instead of stranding the host slot for the full
+      // stale window. Best-effort — the stale window remains the backstop.
+      if (event.kind === 'audit') {
+        try {
+          const coordinationDir = getMachineCoordinationDir();
+          if (coordinationDir !== null) {
+            removeActiveAuditMarker(coordinationDir);
+          }
+        } catch {
+          // fail-safe: marker removal failure must never crash the worker
+        }
       }
     },
     async recordDispatchEnrichment(event: DowntimeDispatchEnrichmentEvent): Promise<void> {
@@ -1384,7 +1512,88 @@ export function createDowntimeDeps(
     // (WL-0MU308WSF0002JWN). Fail-closed: `appendPaneCloseLogEntry` never
     // throws.
     async recordPaneClose(entry, cwd: string): Promise<void> {
+      // Host-wide audit serialisation (WL-0MUIVE0YG000UVIA): when an audit
+      // pane completes (audit-passed or audit-failed), release the
+      // machine-wide active-audit marker so other instances can dispatch.
+      // Fail-safe: best-effort only — a removal failure must never crash the
+      // worker. The stale window provides a safety net if the removal fails.
+      if (
+        entry.kind === 'audit' &&
+        (entry.outcome === 'audit-passed' || entry.outcome === 'audit-failed')
+      ) {
+        try {
+          const coordinationDir = getMachineCoordinationDir();
+          if (coordinationDir !== null) {
+            removeActiveAuditMarker(coordinationDir);
+          }
+        } catch {
+          // fail-safe: marker removal failure must never crash worker
+        }
+      }
       await appendPaneCloseLogEntry(cwd, entry);
+    },
+    // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): classify and close
+    // settled/abandoned pi panes out-of-process. Fail-closed: the runner
+    // never throws (the worker catches anyway); settings gate it upstream.
+    async runPaneCloseReaper(
+      cwd: string,
+      opts: { idleThresholdMinutes: number; ledgerPath?: string },
+    ): Promise<void> {
+      const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+      const invokingPaneId =
+        process.env.HERDR_PANE_ID ?? process.env.HERDR_PANE ?? undefined;
+      const deps = createHerdrReaperDeps({
+        listPanesRaw: async () => {
+          const { stdout } = await getExecFileAsync()(herdrBin, ['pane', 'list'], {
+            encoding: 'utf8',
+            timeout: DOWNTIME_WL_TIMEOUT_MS,
+            maxBuffer: 8 * 1024 * 1024,
+          });
+          return stdout;
+        },
+        closePane: async (paneId: string) => {
+          try {
+            await getExecFileAsync()(herdrBin, ['pane', 'close', paneId], {
+              encoding: 'utf8',
+              timeout: DOWNTIME_WL_TIMEOUT_MS,
+            });
+            return true;
+          } catch {
+            return false; // fail-closed: a failed close is recorded, never thrown
+          }
+        },
+        invokingPaneId,
+        getNeedsProducerReview: async (itemId: string) => {
+          const { stdout } = await getExecFileAsync()(
+            'wl',
+            ['show', itemId, '--json'],
+            { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, cwd },
+          );
+          const parsed = extractJson(stdout) as {
+            workItem?: { needsProducerReview?: boolean };
+          };
+          return parsed?.workItem?.needsProducerReview === true;
+        },
+      });
+      const result = await runScheduledPaneClose(
+        deps,
+        {
+          paneCloseEnabled: true,
+          paneCloseIdleThresholdMinutes: opts.idleThresholdMinutes,
+          paneCloseGracePeriodMinutes: settings.paneCloseGracePeriodMinutes,
+        },
+        {
+          ledgerPath: opts.ledgerPath ?? join(cwd, '.worklog', 'pane-close-ledger.jsonl'),
+          // Coexistence with the dispatch monitor (WL-0MU308WSF0002JWN): a
+          // pane the monitor already closed (recorded in the rolling log with
+          // `closed:true`) is never handled a second time. `readDowntimeLogEntries`
+          // is fail-safe (returns [] on any error).
+          alreadyClosedPaneIds: await readClosedPaneIds(cwd),
+        },
+      );
+      if (result.error) {
+        process.stderr.write(`[worklog-plugin] Pane-close reaper: ${result.error}\n`);
+      }
     },
     async rollbackClaim(
       itemId: string,
@@ -1622,6 +1831,14 @@ async function main(): Promise<void> {
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
         browseItemCount: s.browseItemCount,
+        // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
+        // `paneCloseEnabled` setting (default on) with a configurable
+        // `paneCloseIdleThresholdMinutes` (default 30). The worker only
+        // invokes the reaper when enabled; disabling yields zero closes.
+        paneClose: {
+          enabled: s.paneCloseEnabled ?? true,
+          idleThresholdMinutes: s.paneCloseIdleThresholdMinutes ?? 30,
+        },
       };
     },
     onProxyIdle,

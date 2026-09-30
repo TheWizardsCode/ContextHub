@@ -70,10 +70,110 @@ export function getUnknownIdentifiers(command: string): ExtractedIdentifier[] {
 // ── Substitution ──────────────────────────────────────────────────────
 
 /**
+ * Quote a value for safe interpolation into a POSIX shell command.
+ *
+ * The value is wrapped in single quotes, and every embedded single quote is
+ * closed, escaped and reopened (`'\''`). Inside single quotes the shell
+ * treats every other character — `"`, `$`, backticks, `$(...)`, `|`, `&`,
+ * `;`, `\`, newlines, … — literally, so a user-entered value can never
+ * terminate the surrounding command or trigger expansion.
+ *
+ * This form is used for placeholders that are NOT already inside a quoted
+ * segment (e.g. `--title <title>`). For a placeholder sitting inside an
+ * existing single- or double-quoted segment the context-aware
+ * {@link escapeShellValue} must be used instead — wrapping a value there
+ * would unbalance the template's quotes.
+ *
+ * Shell-route commands are always executed by `bash -c`
+ * (`packages/herdr/scripts/run-in-pane.sh`), so POSIX quoting applies on
+ * every platform, including Windows via Git Bash/WSL.
+ *
+ * @param value - Raw user-entered value
+ * @returns The value wrapped in a single shell-quoted segment
+ */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+/** Shell quoting context at a placeholder's position in a template. */
+type ShellQuoteContext = 'single' | 'double' | 'none';
+
+/**
+ * Determine the shell quoting context at `offset` in a command template by
+ * scanning the preceding text with a minimal POSIX quote state machine.
+ *
+ * Placeholder syntax (`<name …>`) in the prefix is stripped before scanning
+ * so quoted inline defaults cannot perturb the quote state. State persists
+ * across `&&`/`;` as it does in a real shell; unterminated quotes fall back
+ * to the context they are in (the matching template's closing quote is later
+ * in the string).
+ */
+function shellQuoteContextAt(command: string, offset: number): ShellQuoteContext {
+  const prefix = command.slice(0, offset).replace(/<[^>]*>/g, '');
+  let state: ShellQuoteContext = 'none';
+  for (let i = 0; i < prefix.length; i++) {
+    const ch = prefix[i];
+    if (state === 'single') {
+      if (ch === "'") state = 'none';
+    } else if (state === 'double') {
+      if (ch === '\\') i++;
+      else if (ch === '"') state = 'none';
+    } else if (ch === "'") {
+      state = 'single';
+    } else if (ch === '"') {
+      state = 'double';
+    } else if (ch === '\\') {
+      i++;
+    }
+  }
+  return state;
+}
+
+/**
+ * Escape a value for the shell-quoting context it is inserted into.
+ *
+ * - Inside an open single-quoted segment, only `'` is special: close the
+ *   quote, emit an escaped apostrophe and reopen (`'\''`).
+ * - Inside an open double-quoted segment, escape `\`, `"`, `$` and backticks.
+ * - Otherwise emit a fully single-quoted segment ({@link shellQuote}).
+ *
+ * Handling the surrounding-quote case is essential: the `a-r` template embeds
+ * `<reason>` inside `'Rejected by manual review. <reason>'`, so wrapping the
+ * value again would unbalance the quotes (WL-0MU7KEX65004X0U9).
+ */
+function escapeShellValue(command: string, offset: number, value: string): string {
+  switch (shellQuoteContextAt(command, offset)) {
+    case 'single':
+      return value.replace(/'/g, `'\\''`);
+    case 'double':
+      return value.replace(/[\\"$`]/g, (ch) => `\\${ch}`);
+    default:
+      return shellQuote(value);
+  }
+}
+
+/**
+ * A command template is a shell command when it is routed through the shell
+ * path (`!`/`!!` prefix — see `routeCommand` in index.ts). Agent-prompt
+ * templates (`/skill:*`, `/intake`, `/plan`, `/prompt:`, `/herdr:*`) are NOT
+ * shell commands and must receive raw values.
+ */
+function isShellCommandTemplate(command: string): boolean {
+  return command.trimStart().startsWith('!');
+}
+
+/**
  * Substitute all <identifier> placeholders in a command with provided values.
  *
  * Identifiers with an inline default (`<name default="value">`) fall back to
  * their default when no explicit value is supplied.
+ *
+ * Shell-route templates (`!`/`!!` prefix) have their substituted values
+ * shell-escaped for the quoting context of each placeholder so user text
+ * containing apostrophes or other shell metacharacters cannot break or inject
+ * into the command (WL-0MU7KEX65004X0U9). Agent-prompt templates keep raw
+ * substitution — the value is passed as a single argv element, never parsed
+ * by a shell.
  *
  * @param command - The command template with <identifier> placeholders
  * @param values - Map of identifier name to replacement value (explicit values
@@ -84,11 +184,14 @@ export function substituteIdentifiers(
   command: string,
   values: Record<string, string>,
 ): string {
+  const isShell = isShellCommandTemplate(command);
   return command.replace(
     /<([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+default\s*=\s*["']([^"']*)["'])?\s*>/g,
-    (_, name: string, def: string | undefined) => {
-      if (name in values) return values[name];
-      if (def !== undefined) return def;
+    (_, name: string, def: string | undefined, offset: number) => {
+      const escape = (value: string): string =>
+        isShell ? escapeShellValue(command, offset, value) : value;
+      if (name in values) return escape(values[name]);
+      if (def !== undefined) return escape(def);
       return `<${name}>`;
     },
   );

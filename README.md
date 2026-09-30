@@ -121,6 +121,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [API.md](API.md) | REST API endpoints and usage |
 | [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) | File path convention for work item descriptions |
 | [docs/CROSS_PROJECT_POLLUTION_CLEANUP.md](docs/CROSS_PROJECT_POLLUTION_CLEANUP.md) | Detecting and removing cross-project worklog pollution (`wl doctor foreign-items`) |
+| [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md#reporting-audit-gaps-wl-doctor-audit-gaps) | Reporting and waiving audit gaps: `wl doctor audit-gaps`, `wl audit-waive` / `wl audit-unwaive` |
 | [docs/SYNC_IDENTITY_GATE.md](docs/SYNC_IDENTITY_GATE.md) | Refusing foreign/empty-author commits on sync (`--allow-foreign-author`, polluted-ref recovery) |
 | [docs/AGENTS-INSTALL.md](docs/AGENTS-INSTALL.md) | How `wl init` installs AGENTS.md / workflow guidance and how local rules relate to the global agent file |
 
@@ -145,6 +146,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [docs/validation/status-stage-inventory.md](docs/validation/status-stage-inventory.md) | Status/stage validation rules |
 | [docs/SKILL_AUTHORING.md](docs/SKILL_AUTHORING.md) | Skill authoring guide with script best practices |
 | [docs/dev/wl-process-healthcheck.md](docs/dev/wl-process-healthcheck.md) | wl process healthcheck watchdog usage (cron/systemd, thresholds) |
+| [docs/dev/audit-debug-log-retention.md](docs/dev/audit-debug-log-retention.md) | Audit debug log retention policy + runbook: sweep locations/thresholds, dry-run/`--apply`/`--check`, cron install/removal, safety guarantees |
 | [docs/dev/downtime-dispatcher.md](docs/dev/downtime-dispatcher.md) | Leader-election + shared-coordination downtime dispatcher architecture (herdr); critical-first dispatch tier + freeze split-by-skill; dedicated Dispatcher workspace with per-project tabs (one tab per work-item prefix) |
 
 ## Tutorials

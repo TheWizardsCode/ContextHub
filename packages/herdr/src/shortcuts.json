@@ -65,12 +65,23 @@
   },
   {
     "chord": [
-      "r"
+      "r",
+      "p"
     ],
     "command": "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>' --author <author>",
     "view": "both",
     "label": "Producer Review",
-    "description": "Toggle the 'Needs Producer Review' flag."
+    "description": "Toggle the 'Needs Producer Review' flag (r p)."
+  },
+  {
+    "chord": [
+      "r",
+      "i"
+    ],
+    "command": "!!wl interview <id>",
+    "view": "both",
+    "label": "interview",
+    "description": "Walk through outstanding interview questions on the selected work item (r i)."
   },
   {
     "chord": [
@@ -365,6 +376,13 @@
     "view": "both",
     "label": "clear priority",
     "description": "Clear the active priority filter and return to the unfiltered browse list (WL-0MSKC8T46006999S)."
+  },
+  {
+    "chord": ["f", "d"],
+    "command": "/wl dispatches",
+    "view": "both",
+    "label": "filter dispatches",
+    "description": "Show the most recent downtime dispatches from the local rolling log, newest first (WL-0MUL2J15W00277XH). Replaces any active stage/priority filter."
   },
   {
     "chord": ["n", "e"],
