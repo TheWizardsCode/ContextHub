@@ -213,6 +213,34 @@ export interface EmbeddingConfig {
 }
 
 /**
+ * Configuration for the LLM (chat) provider used by the LLM-assisted
+ * producer-review explanation feature.
+ *
+ * Fields can be set in `.worklog/config.yaml` under the `llm` key,
+ * or via environment variables as fallbacks. Config values take precedence
+ * over environment variables. Mirrors `EmbeddingConfig` but adds `timeoutMs`.
+ *
+ * Example:
+ * ```yaml
+ * llm:
+ *   baseUrl: http://localhost:8000/v1
+ *   model: compact
+ *   apiKey: my-key
+ *   timeoutMs: 15000
+ * ```
+ */
+export interface LlmConfig {
+  /** API base URL (default: http://192.168.0.199:8000/v1) */
+  baseUrl?: string;
+  /** Model name (default: compact) */
+  model?: string;
+  /** API key (optional — local providers like Ollama don't need one) */
+  apiKey?: string;
+  /** Request timeout in milliseconds (default: 15000) */
+  timeoutMs?: number;
+}
+
+/**
  * Configuration for a worklog project
  */
 export interface WorklogConfig {
@@ -290,6 +318,19 @@ export interface WorklogConfig {
    * ```
    */
   embedding?: EmbeddingConfig;
+  /**
+   * LLM (chat) provider configuration for LLM-assisted features.
+   * Mirrors `EmbeddingConfig` but adds a `timeoutMs` field.
+   *
+   * Example:
+   * ```yaml
+   * llm:
+   *   baseUrl: http://localhost:8000/v1
+   *   model: compact
+   *   timeoutMs: 15000
+   * ```
+   */
+  llm?: LlmConfig;
 }
 
 /**
