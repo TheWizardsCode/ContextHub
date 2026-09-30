@@ -394,9 +394,9 @@ simulates a 6-pane refresh and asserts ≥60% fewer work spawns.
 
 `wl next` and `wl re-sort`/`reSort` apply a hard audit-not-ready tier second only to `critical`:
 
-- Any **fresh** non-critical audit with `readyToClose === false` and `auditedAt >= updatedAt` outranks **any** unaudited / `readyToClose === true` / stale (`auditedAt < updatedAt`) non-critical item regardless of base priority (high/medium/low) or age/effort/recency.
+- Any **fresh** non-critical audit with `readyToClose === false` outranks **any** unaudited / `readyToClose === true` / stale non-critical item regardless of base priority (high/medium/low) or age/effort/recency.
 - `critical` is a hard boundary that no audit-not-ready boost can overtake.
-- Missing/`true`/stale audits receive no boost; stale is defined as `auditedAt < updatedAt`.
+- Missing/`true`/stale audits receive no boost. Freshness is delegated to the single shared predicate `isAuditFresh` (`packages/shared/src/icons.ts`); the ordering tier passes no fingerprints, so the one-sided fallback time gate applies — fresh iff `auditedAt > updatedAt - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s), i.e. an audit at or after the content timestamp is fresh, and an audit older than a later content edit is stale. There is no competing `auditedAt`-vs-`updatedAt` comparison in `packages/shared/src/database.ts` (WL-0MUBVH7ZR009PP80).
 - The same tier is enforced in `packages/shared/src/database.ts` in `sortItemsByScore`/`computeScore` (batch audit `Map<id,AuditResult>` + tiered comparator) and in `selectBySortIndex` both when all `sortIndex` coincide (before effective-priority/age) and when they diverge (tier prefix before `sortIndex`), so `wl next --no-re-sort` and `wl next --json` preserve boosted order without requiring a prior `reSort`.
 - `src/commands/grouping.ts` Critical Group placement is unchanged by design.
 

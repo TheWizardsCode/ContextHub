@@ -56,7 +56,8 @@ Worklog uses a **dual-storage model** to combine the benefits of persistent data
   "activityAt": "2024-01-01T00:00:00.000Z",
   "tags": ["feature", "backend"],
   "assignee": "john.doe",
-  "stage": "development"
+  "stage": "development",
+  "auditWaiver": null
 }
 ```
 
@@ -79,6 +80,7 @@ Worklog uses a **dual-storage model** to combine the benefits of persistent data
 - **createdBy**: Optional interoperability field for imported creator/actor
 - **deletedBy**: Optional interoperability field for imported deleter/actor
 - **deleteReason**: Optional interoperability field for imported deletion reason
+- **auditWaiver** (optional, nullable): Explicit audit-gap waiver record `{ reason, author, waivedAt }`, or `null`/absent when the item is not waived. Suppresses the non-fatal closure warning and excludes the item from `wl doctor audit-gaps`; absence is fail-safe (never suppresses a flag). Managed with `wl audit-waive` / `wl audit-unwaive` (WL-0MUBVH9FV0027COG)
 
 ## Comment Structure
 

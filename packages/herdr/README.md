@@ -5,9 +5,9 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 ## Features
 
 - **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
-- **Filter by stage and priority** — Press `f` then an axis key (`s`=stage, `p`=priority), then a value key, or type `/wl <stage>` / `/wl --priority <priority>`. Stage axis: `f s i`=idea, `f s n`=intake, `f s p`=plan, `f s r`=review, `f s s`=sprint back to the default view. Priority axis: `f p l`=low, `f p m`=medium, `f p h`=high, `f p c`=critical, `f p s`=clear the priority filter. Stage and priority filters are **mutually exclusive** (replace semantics — applying one clears the other); sprint clears both. Filtered views show every root item matching the filter's rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW, WL-0MSKC8T46006999S)
+- **Filter by stage, priority, or recent dispatches** — Press `f` then an axis key (`s`=stage, `p`=priority, `d`=dispatches), then a value key, or type `/wl <stage>` / `/wl --priority <priority>` / `/wl dispatches`. Stage axis: `f s i`=idea, `f s n`=intake, `f s p`=plan, `f s r`=review, `f s s`=sprint back to the default view. Priority axis: `f p l`=low, `f p m`=medium, `f p h`=high, `f p c`=critical, `f p s`=clear the priority filter. Dispatches axis: `f d` shows the most recent downtime dispatches from the local rolling log (see [Recent dispatches view](#recent-dispatches-view)). Stage, priority, and dispatches filters are **mutually exclusive** (replace semantics — applying one clears the others); sprint (`f s s`, `f p s`, or bare `/wl`) clears all three. Filtered views show every root item matching the filter's rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage; log-derived rows for the dispatches view) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW, WL-0MSKC8T46006999S, WL-0MUGLL9SS002E1D2)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
-- **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The metadata section (list-mode panel and detail view) mirrors the list's icons with text labels — the selected item's Stage row uses the same audit-aware `in_review` icon (✅/❌/❓ fresh, ⏳ stale-passed, 🔍 otherwise), and the Audit/Reviewed rows pair their icons with text (e.g. `✅ ready to close`, `❌ needs review`). The detail view additionally shows the last audit timestamp.
+- **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The metadata section (list-mode panel and detail view) mirrors the list's icons with text labels — the selected item's Stage row uses the same audit-aware `in_review` icon (✅/❌/❓ fresh, ⏳ stale-passed, 🔍 otherwise), and the Audit/Reviewed rows pair their icons with text (e.g. `✅ ready to close`, `❌ needs review`). The detail view additionally shows the last audit timestamp. **Child coverage (WL-0MUBVH8QG0020H9L):** a `completed`/`in_review` child whose direct parent has a fresh audit is *covered* — its list row and metadata Stage row show the parent's audit-result symbol in a dimmed/grey style (visually distinct from a bright own-audit icon) and the metadata panel adds a `Covered by <parent-id>` row. Coverage is **derived at read time** (`isCoveredByParent` over the parent's audit freshness inputs via the shared `isAuditFresh` predicate) — nothing is persisted and there is no schema migration. A child with its own audit always shows its own verdict; an uncovered child (no own audit, parent demoted/stale) keeps the plain `🔍` stage icon and is never dispatched (see [audit-tier selection](#audit-tier-dispatch)). In text-only (`noIcons`) mode the covered indicator renders as `[COVERED]`.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`. Panes spawned from the selection list open **without stealing focus**: the list keeps the keyboard focus while the command-output pane opens in the background (see [Design decisions](#design-decisions)).
 - **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The form is a full-pane page (no border/centering) that wraps text at the pane width and grows downward as content is entered. See [Command input form](#command-input-form).
@@ -96,7 +96,7 @@ The plugin pane will then be available via the Herdr plugin system.
    - `Tab` — Toggle expand/collapse a parent item with children (at any depth)
    - `Escape` — Go back (from detail or filter mode); in a child list, return to the parent level at the previous scroll position. When inside a child list the footer shows a `[esc] back` hint (with `(N levels)` when nested deeper than one level).
 
-3. Filter by stage or priority using chord shortcuts (or type `/wl <stage>` / `/wl --priority <priority>`):
+3. Filter by stage, priority, or recent dispatches using chord shortcuts (or type `/wl <stage>` / `/wl --priority <priority>` / `/wl dispatches`):
    - Press `f`, `s`, then a stage key — Filter to a stage:
      - `f`, `s`, `i` — idea-stage items
      - `f`, `s`, `n` — intake_complete items
@@ -109,7 +109,9 @@ The plugin pane will then be available via the Herdr plugin system.
      - `f`, `p`, `h` — high priority items
      - `f`, `p`, `c` — critical priority items
      - `f`, `p`, `s` — Clear the priority filter (return to the unfiltered browse list)
-   - Stage and priority filters are **mutually exclusive**: applying a priority filter replaces the active stage filter and vice versa (single filter slot, replace semantics). Sprint (`f s s`, `f p s`, or `/wl` with no arguments) clears **both**.
+   - Press `f`, `d` — Show the most recent downtime dispatches (see [Recent dispatches view](#recent-dispatches-view))
+   - Stage, priority, and dispatches filters are **mutually exclusive**: applying one replaces whichever other axis was active (single filter slot, replace semantics). Sprint (`f s s`, `f p s`, or `/wl` with no arguments) clears **all** of them.
+   - Type `/wl dispatches` directly to activate the dispatches view (equivalent to `f d`).
    - `/wl <stage>` accepts shorthand aliases (`idea`, `intake`, `plan`, `progress`, `review`) and canonical stage names (`intake_complete`, `plan_complete`, `in_progress`, `in_review`)
    - `/wl --priority <priority>` accepts the canonical priority names `critical`, `high`, `medium`, `low`; unknown values fall back gracefully (no crash, no filter change)
    - `/wl` with no stage/priority argument returns to the default unfiltered browse list
@@ -125,8 +127,9 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `s` — Insert a search command
    - Press `S` (Shift+s) — **Ship It**: run the dev→main release. A pre-dialog guard first checks that no other live agent pane is working on a project work item; if one is, a blocked notice lists the offending panes and nothing is dispatched. Otherwise a typed-confirmation dialog anchored to the bottom of the list (the list stays visible above it) asks you to type `ship` (case-insensitive) and press Enter to dispatch `/skill:ship release`; Esc cancels. The release is a global command — no work item id is involved. `S` is distinct from lowercase `s` (Search). See [Ship It confirmation dialog](#ship-it-confirmation-dialog).
 
-5. Producer review shortcut:
-   - Press `r` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
+5. Review chords (press `r` then a key):
+   - Press `r`, `p` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
+   - Press `r`, `i` — Walk through outstanding interview questions on the selected item (`wl interview`)
 
 6. Priority update chords (press `u` then `p` then a priority key):
    - Press `u`, `p`, `l` — Set priority to low
@@ -149,6 +152,57 @@ The plugin pane will then be available via the Herdr plugin system.
 
 10. Quit:
    - Press `q` to close the worklist pane
+
+### Recent dispatches view
+
+Press `f` then `d` (or type `/wl dispatches`) to switch the list into a
+**recent dispatches** view. This view restores visibility of work the
+downtime worker auto-dispatched after it completed, since those panes are
+auto-closed and their items then disappear from the active worklist
+(WL-0MUGLL9SS002E1D2).
+
+Semantics:
+
+- **Source of truth is the local log only** — rows are projected from
+  `<worklog-root>/.worklog/downtime-dispatches.log`, not from `wl list`.
+  The id and title come from the log entry itself, so an item that has
+  since been **closed or deleted** still appears. The view never mutates the
+  log or any work item; it is display-only and spawns no `wl` processes
+  beyond the existing refresh (and the detail fetch below).
+- **Up to 20 rows, main-list order** — rows are deduplicated by work item id
+  (one row per id) and the 20 most recently active items are selected; the
+  visible list is then ordered exactly like the main selection list
+  (Critical → plan/intake → Idea → In Review, using the same within-group
+  comparator), but without group headings. The log itself is bounded to the
+  most recent 100 entries (`DOWNTIME_LOG_MAX_ENTRIES`), so the 20 most recent
+  items normally fall inside the retained window.
+- **Kind and outcome annotations** — where the log carries them, each row
+  also shows the dispatch `kind` (`plan`/`intake`/`audit`/`risk-effort`/
+  `implement`) and the latest pane-close **outcome** (e.g.
+  `closed-as-plan-complete`, `audit-passed`, `requires-attention`).
+- **Rendered from the live item** — the log decides which items appear and
+  their order, but when the item still exists in `wl` the row is rendered from
+  that live work item (the same data source the other views use), so every
+  icon — status, stage, audit verdict, producer-review flag and priority — is
+  identical to every other view (WL-0MUGLL9SS002E1D2). Only an item that is no
+  longer in `wl` (closed/deleted) falls back to log-derived metadata: it
+  renders the dispatch marker's stage icon and shows `—` for fields the log
+  does not carry.
+- **Selectable** — pressing Enter on a row opens the detail view. The plugin
+  makes a best-effort `wl show <id>` fetch so a still-existing item shows
+  fresh metadata; a closed/deleted item gracefully falls back to the
+  log-derived metadata rather than showing a blank item.
+- **Fail-safe empty state** — a missing, unreadable, empty, or malformed log
+  yields an empty list (header shows `0 item(s)`) with no crash and no error
+  banner. The view participates in the normal auto-refresh cadence, so a
+  newly appended log entry appears on the next refresh.
+- **Single filter slot** — activating the dispatches view clears any active
+  stage/priority filter, and activating a stage/priority filter (or sprint /
+  bare `/wl`) clears the dispatches view. The header shows
+  `(filtered: dispatches)` and the actual row count.
+
+This view is **per-worklog-root**; machine-wide cross-project aggregation is
+out of scope here and tracked separately (WL-0MTJQOZ0K007KD40).
 
 ### Agent status icons
 
@@ -299,6 +353,21 @@ dispatches; the other herdr instances coordinate instead of polling:
   election degrades to the pre-refactor behavior for that instance (no
   dispatch from it); the existing dispatched-marker exclusion and CAS
   claim guards are preserved unchanged.
+- **Pane placement (WL-0MU321YK70035AYT)** — automated downtime panes for a
+  work item spawn in the **project's own herdr workspace** — the workspace
+  hosting the `Work Items` plugin pane whose `HERDR_RESOLVED_CWD` equals the
+  item's worklog root — inside a **tab labelled with the exact work-item id**,
+  created on first use and reused thereafter. The pane is split from that
+  tab's root pane (`send-to-pi.sh --anchor <tabRootPaneId>`), so a second
+  dispatch for the same item adds a pane to the same tab. When no plugin pane
+  resolves for the root, the dispatcher falls back to the retained
+  machine-wide `Dispatcher` anchor
+  (`~/.herdr/downtime/downtime-dispatch-anchor.json`); scheduled prompts (no
+  work-item id) always use that anchor. Resolution is fail-closed (never
+  another project's workspace, never the leader's pane); the rejected
+  per-prefix tab routing (`downtime-dispatch-tab-anchors.json`) is retired.
+  See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#project-workspace-placement--item-id-tabs-wl-0mu321yk70035ayt).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
@@ -343,9 +412,10 @@ returns `true`. Since WL-0MUBVH5S0008NQ9K freshness is **content-based**: when
 both fingerprints are available a match is fresh regardless of `updatedAt`
 churn (comment, sync-merge re-timestamp, re-sort), and a mismatch is stale. When
 no fingerprint is available (legacy audits, or a TUI render that cannot compute
-the current fingerprint) the legacy rule applies — `auditedAt` within the 60 s
-staleness buffer of `updatedAt`. Missing audit timestamps are treated as
-not-fresh and therefore selected.
+the current fingerprint) the legacy time gate applies — the audit is fresh iff
+`auditedAt > updatedAt - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s,
+one-sided: an audit at or after `updatedAt` is fresh). Missing audit
+timestamps are treated as not-fresh and therefore selected.
 
 Guarantee (WL-0MSN6ZCTN0027U2R): `updatedAt` is bumped only on **content**
 changes (title, description, status, stage, priority, tags, assignee, etc.).
@@ -467,7 +537,7 @@ log is treated as empty (fail-safe), so audit dispatch keeps working on a
 fresh worklog. Every dispatch tier — audit, critical, implement, plan,
 and intake — additionally excludes items with `needsProducerReview === true`
 (WL-0MTIAL65N004T22F): items flagged for producer review are never
-auto-dispatched (the `r` shortcut / `wl update --needs-producer-review true`),
+auto-dispatched (the `r p` chord / `wl update --needs-producer-review true`),
 so the worker never consumes local slots on items awaiting a human decision.
 Absent/false/undefined → dispatchable (`=== true` only). Clearing the flag
 makes the item dispatchable again on the next idle poll.
@@ -561,6 +631,9 @@ makes the item dispatchable again on the next idle poll.
 > children). This reverses the earlier WL-0MSMAIP5F003WAGG decision to
 > include completed children in the audit tier. `wl next` conversion remains
 > scoped to the implement tier only (AC5 escape hatch — decision recorded).
+> As a belt-and-suspenders guard (WL-0MUBVH8QG0020H9L), `selectAuditCandidate`
+> also drops any candidate carrying a `parentId`, so even a leaking or faulty
+> non-root-only response can never dispatch a child independently.
 
 If no scheduled prompt is due, it runs the **critical-first tier** (see below);
 if no critical candidate, it runs `wl next --stage intake_complete
@@ -655,6 +728,94 @@ reschedule (the scheduler's `getIntervalMs` hook recomputes a fresh value per
 tick), so two instances with identical configuration do not probe in
 lockstep — other machines get a fair chance to win the dispatch race. The
 jitter factor is clamped to `[0.5×, 1.5×]` of the configured interval.
+
+### Pane-closure reaper (WL-0MUJL1NAH0042GOS)
+
+Agent panes launched in Herdr run `pi` in interactive mode. A skill that
+finishes emits a `</end_session>` marker in its final report, but nothing
+consumed it, so completed panes (and their ~200 MB `pi` processes) lingered
+indefinitely. The pane-closure reaper closes settled or abandoned panes
+programmatically.
+
+**Shared classifier (`packages/herdr/src/pane-close.ts`).** A pure module
+that both the reaper and the `pane-triage` skill consume, so the two
+mechanisms cannot diverge:
+
+- `classifySession(sample, opts?) → { close, reasonCode, reasonSnapshot }`
+  — `reasonSnapshot` is a full state snapshot (kind, agent state, idle
+  duration, item stage, `needsProducerReview`, invoking-pane/live-children
+  flags, activity signals, grace-period status, idle threshold) captured for
+  every outcome so a close can be explained from the log alone.
+- `extractFinalAssistantText(entries) → string` — the `.trimEnd()`-ed final
+  assistant text; marker detection requires `</end_session>` at the very end
+  (a marker quoted mid-message does not match)
+- `SessionSample` fields: `lastAssistantText`, `agentProcessAlive`, `idleMs`,
+  `kind`, `needsProducerReview`, `isInvokingPane`, `childProcessCount`,
+  `ageSinceDispatchMs` (optional; age since first dispatch),
+  `hasRecentFileModifications` / `hasActiveNetworkConnections` (optional;
+  active-agent signals)
+- `DEFAULT_IDLE_THRESHOLD_MS = 30 min`
+
+**Decision order (first match wins):**
+
+1. Never-close guards — `implement` pane, `needsProducerReview`, invoking
+   pane, live children.
+2. Within the grace window since first dispatch → **no close**
+   (`grace-period`); disabled when the grace period is `0` or the pane age is
+   unknown.
+3. Marker at the end of the final assistant message → close (`marker`).
+4. Agent process gone → **no close** (`dead-agent`) — operator may need to
+   read final output.
+5. Recent file modifications or active network connections → **no close**
+   (`active`), even when idle exceeds the threshold.
+6. Agent alive but idle beyond the threshold → close (`idle-threshold`);
+   disabled when threshold ≤ 0.
+7. Otherwise → keep (`active`).
+
+**Reaper orchestration (`pane-close-reaper.ts`).** `runReaper(deps, options)`
+scans panes, classifies each, closes eligible panes, and appends one JSONL
+row per pane to the ledger (default `.worklog/pane-close-ledger.jsonl`); each
+row carries the decision's `reasonSnapshot` alongside the decision and
+timestamp. I/O is injected via `ReaperDeps` (`listPanes`, `closePane`,
+`terminateProcessGroup`) so the orchestration is fully testable.
+`runReaperCli(deps, argv)` is the CLI entrypoint and accepts `--dry-run`,
+`--threshold-minutes <n>` and `--ledger <path>`.
+
+**Scheduling (`pane-close-scheduler.ts`).** The downtime worker runs the
+reaper on its tick at most once per `PANE_CLOSE_REAPER_INTERVAL_MS`
+(default 60 s), gated by `paneCloseEnabled`. `runScheduledPaneClose` is a
+complete no-op when disabled; a throw is caught and logged so the reaper can
+never crash the worker.
+
+**Configuration** (`~/.config/herdr/worklog-plugin.json`):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `paneCloseEnabled` | `true` | Master on/off switch for automatic pane closure. |
+| `paneCloseIdleThresholdMinutes` | `0` | Marker-less idle threshold in minutes; `0` = never close on idle (clamped [0, 1440]). |
+| `paneCloseGracePeriodMinutes` | `5` | Minimum pane age in minutes since first dispatch before it is eligible for auto-close (clamped [1, 1440]). Gives the agent time to start working. |
+
+**Child processes (`process-group.ts`).** On close, the pane's session-scoped
+process group is torn down (SIGTERM → grace → SIGKILL) so spawned children
+(audit/plan runners) are never reparented to PID 1.
+
+**Interaction with the dispatch monitor (`pane-lifecycle.ts`) — DISABLED
+(WL-0MUMEKDK0008LKH8).** The dispatch monitor (`WL-0MU308WSF0002JWN`) used to
+close *dispatched* panes recorded in `.worklog/downtime-dispatches.log` and
+already excluded `implement` panes. It was observed to close panes prematurely
+and to race with the reaper — the two share only a non-atomic idempotency key,
+so a pane could be closed twice — so it is switched off
+(`PANE_LIFECYCLE_MONITOR_ENABLED` is `false`) and the scheduled reaper is the
+only active auto-close path. The classifier and its unit tests are retained
+for a future redesign; do not re-enable it without first reworking the
+double-close race. The reaper still skips pane ids already recorded as handled
+in the dispatch log, so any historical monitor entries remain honoured.
+Headless (JSON/RPC) modes are unaffected — closure is only performed by the
+scheduled reaper over Herdr panes.
+
+**`pane-triage` skill reuse.** The approval-gated `pane-triage` skill
+(`WL-0MUJMXVPO0016DZM`) consumes `classifySession` / `extractFinalAssistantText`
+from this module rather than re-deriving idle state from the session log.
 
 ### Mode-switch worker (activity-gated proxy mode switching, WL-0MSN3FWV5008KQE9)
 
@@ -1133,6 +1294,16 @@ stage and priority filters are mutually exclusive (replace semantics), so
 only one axis is ever active; the header shows which one
 (`(filtered: stage <stage>)` or `(filtered: priority <priority>)`).
 
+The **dispatches** view (press `f` + `d`, or `/wl dispatches`) is the third
+filter axis. It uses the local rolling dispatch log to choose up to 20
+read-only rows (deduplicated by work item id) and renders each surviving item
+from the live work item so its icons match the other views, ordered like the
+main selection list; an item no longer in `wl` falls back to the log-derived
+id/title so closed/deleted items still appear (WL-0MUGLL9SS002E1D2). It is
+mutually exclusive with the stage and priority filters (the header shows
+`(filtered: dispatches)`), and a missing/malformed log renders an empty list
+rather than an error. See [Recent dispatches view](#recent-dispatches-view).
+
 The default (unfiltered) worklist is unaffected — `/wl` with no
 stage/priority argument keeps the smart-selection behaviour described
 above.
@@ -1253,7 +1424,8 @@ safety net for unknown/custom stages.
 | 5      | passed audit, stale                |
 | 6      | passed audit, fresh                |
 
-A "fresh" audit has `auditedAt > updatedAt - 60 s`; otherwise it is stale.
+A "fresh" audit satisfies `auditedAt > updatedAt - 60 s` (one-sided, via the
+shared `isAuditFresh` predicate); otherwise it is stale.
 Within the same bucket items are ordered by priority (high → medium → low),
 then by `updatedAt` (older first), then by `id` as a tie-break.  The same
 predicate is shared by the Herdr worklist, `wl next --groups`, and
@@ -1604,7 +1776,7 @@ Semantics:
   and `i` (implement) carry `work_item_types: ["bug","docs","feature",
   "task","chore","epic"]`, so they are hidden on non-code and non-docs types
   (e.g. `podcast`). All other bundled shortcuts (audit `a-*`, producer review
-  `r`, housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
+  `r-p`/`r-i`, housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
   available on all types. Consumer projects can add their own type-gated
   chords (e.g. a `w` chord leader → `wiki-podcast-script` for `podcast`
   items) via the project-local `shortcuts.json` mechanism above.

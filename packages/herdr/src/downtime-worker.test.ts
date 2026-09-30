@@ -641,9 +641,9 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
   });
 });
 
-// ── Per-prefix Dispatcher tab wiring (C1, parent WL-0MTRQT482001SNXC; TC3 WL-0MU2LFC1Y0077U1U) ──
+// ── Project workspace + item-ID tab dispatch wiring (WL-0MU321YK70035AYT) ──
 
-describe('per-prefix dispatcher tab wiring (C1)', () => {
+describe('project workspace + item-ID tab dispatch wiring', () => {
   const candidate = {
     id: 'WL-ABC',
     title: 'Some task',
@@ -651,55 +651,71 @@ describe('per-prefix dispatcher tab wiring (C1)', () => {
     status: 'open',
   };
 
-  it('AC2: dispatchDowntimeWork resolves the per-prefix tab anchor and forwards its paneId', async () => {
-    const getDispatcherTabAnchor = vi
+  it('AC1/AC2: resolves the project workspace, ensures the item-ID tab and forwards its anchor pane', async () => {
+    const resolveProjectWorkspace = vi
       .fn()
-      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
-    const deps = makeDeps({
-      getDispatcherTabAnchor,
-      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
-    });
-
-    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
-
-    expect(outcome.dispatched).toBe(true);
-    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
-    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
-      expect.stringContaining('/skill:plan WL-ABC'),
-      expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
-    );
-  });
-
-  it('AC2: the per-prefix resolver REPLACES the legacy anchor (legacy never called)', async () => {
+      .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' });
+    const getItemTabAnchor = vi
+      .fn()
+      .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
     const getDispatcherAnchor = vi
       .fn()
       .mockResolvedValue({ paneId: 'wD:LEGACY', workspaceId: 'wD' });
-    const getDispatcherTabAnchor = vi
-      .fn()
-      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
     const deps = makeDeps({
+      resolveProjectWorkspace,
+      getItemTabAnchor,
       getDispatcherAnchor,
-      getDispatcherTabAnchor,
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
     });
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.dispatched).toBe(true);
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
+    expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
+      expect.stringContaining('/skill:plan WL-ABC'),
+      expect.objectContaining({ anchorId: 'wC:tWL-ABC:p1' }),
     );
   });
 
-  it('AC4 fail-safe: a null per-prefix anchor aborts with anchor-unavailable and NO legacy fallback', async () => {
+  it('AC4: no project workspace → falls back to the Dispatcher anchor', async () => {
+    const resolveProjectWorkspace = vi.fn().mockResolvedValue(null);
+    const getItemTabAnchor = vi.fn();
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:pFALLBACK', workspaceId: 'wD' });
+    const deps = makeDeps({
+      resolveProjectWorkspace,
+      getItemTabAnchor,
+      getDispatcherAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(getDispatcherAnchor).toHaveBeenCalledWith('/repo');
+    expect(getItemTabAnchor).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:pFALLBACK' }),
+    );
+  });
+
+  it('AC4 fail-safe: workspace resolves but item tab fails → anchor-unavailable, no Dispatcher fallback', async () => {
+    const resolveProjectWorkspace = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:t1' });
+    const getItemTabAnchor = vi.fn().mockResolvedValue(null);
     const getDispatcherAnchor = vi
       .fn()
       .mockResolvedValue({ paneId: 'wD:LEGACY', workspaceId: 'wD' });
     const deps = makeDeps({
+      resolveProjectWorkspace,
+      getItemTabAnchor,
       getDispatcherAnchor,
-      getDispatcherTabAnchor: vi.fn().mockResolvedValue(null),
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
     });
 
@@ -713,9 +729,48 @@ describe('per-prefix dispatcher tab wiring (C1)', () => {
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 
-  it('AC4 fail-safe: a throwing per-prefix resolver aborts with anchor-unavailable', async () => {
+  it('AC4 fail-safe: no project workspace and Dispatcher anchor null → anchor-unavailable, no marker/spawn', async () => {
     const deps = makeDeps({
-      getDispatcherTabAnchor: vi.fn().mockRejectedValue(new Error('herdr down')),
+      resolveProjectWorkspace: vi.fn().mockResolvedValue(null),
+      getDispatcherAnchor: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC4 fail-safe: a throwing project-workspace resolver falls back to the Dispatcher anchor', async () => {
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:pFALLBACK', workspaceId: 'wD' });
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi.fn().mockRejectedValue(new Error('herdr down')),
+      getDispatcherAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(getDispatcherAnchor).toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:pFALLBACK' }),
+    );
+  });
+
+  it('AC4 fail-safe: a throwing item-tab resolver aborts with anchor-unavailable', async () => {
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:t1' }),
+      getItemTabAnchor: vi.fn().mockRejectedValue(new Error('tab create blew up')),
       getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
     });
 
@@ -726,15 +781,67 @@ describe('per-prefix dispatcher tab wiring (C1)', () => {
     expect(deps.claimItem).not.toHaveBeenCalled();
   });
 
-  it('scheduled-prompt spawns keep the legacy single anchor (no work-item prefix)', async () => {
-    const getDispatcherTabAnchor = vi
-      .fn()
-      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+  it('AC5 retirement: the full item id (not a prefix) is forwarded; no retired dep key', async () => {
+    const getItemTabAnchor = vi.fn().mockResolvedValue({ tabId: 'wC:tX', paneId: 'wC:tX:p1' });
     const deps = makeDeps({
-      getDispatcherAnchor: vi
+      resolveProjectWorkspace: vi
         .fn()
-        .mockResolvedValue({ paneId: 'wD:pSCHED', workspaceId: 'wD' }),
-      getDispatcherTabAnchor,
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:t1' }),
+      getItemTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
+    expect('getDispatcherTabAnchor' in deps).toBe(false);
+  });
+
+  it('AC1/AC2 per-project separation: each root resolves its own workspace and tab', async () => {
+    const wl = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:t1' }),
+      getItemTabAnchor: vi.fn().mockResolvedValue({ tabId: 'wC:tWL-1', paneId: 'wC:tWL-1:p1' }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-1', title: 'wl', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+    const tce = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wY:pW', workspaceId: 'wY', tabId: 'wY:t1' }),
+      getItemTabAnchor: vi.fn().mockResolvedValue({ tabId: 'wY:tTCE-2', paneId: 'wY:tTCE-2:p1' }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'TCE-2', title: 'tce', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    const first = await dispatchDowntimeWork(wl, { model: 'plan', cwd: '/repo-wl' });
+    const second = await dispatchDowntimeWork(tce, { model: 'plan', cwd: '/repo-tce' });
+
+    expect(first.dispatched).toBe(true);
+    expect(second.dispatched).toBe(true);
+    expect(wl.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wC:tWL-1:p1', cwd: '/repo-wl' }),
+    );
+    expect(tce.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wY:tTCE-2:p1', cwd: '/repo-tce' }),
+    );
+  });
+
+  it('scheduled-prompt spawns keep the Dispatcher anchor (no work-item id)', async () => {
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:pSCHED', workspaceId: 'wD' });
+    const resolveProjectWorkspace = vi.fn();
+    const deps = makeDeps({
+      getDispatcherAnchor,
+      resolveProjectWorkspace,
       getDueScheduledPrompt: vi
         .fn()
         .mockResolvedValue({ id: 'prompt-1', prompt: 'Run the nightly sweep', frequencyMinutes: 60 }),
@@ -744,96 +851,20 @@ describe('per-prefix dispatcher tab wiring (C1)', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('scheduled');
-    expect(getDispatcherTabAnchor).not.toHaveBeenCalled();
+    expect(resolveProjectWorkspace).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       'Run the nightly sweep',
       expect.objectContaining({ anchorId: 'wD:pSCHED' }),
     );
   });
-});
 
-// ── Per-prefix tab routing integration (C1 TC4 WL-0MU2LFHBH004VF48) ────
-
-describe('per-prefix tab routing integration (C1)', () => {
-  it.each([
-    ['WL-0MTRQT482001SNXC', 'WL'],
-    ['TCE-0MTR0001', 'TCE'],
-    ['CG-0MTR0002', 'CG'],
-    ['NODASH', 'NODASH'],
-  ])('AC3: candidate %s routes to tab prefix %s', async (id, expectedPrefix) => {
-    const getDispatcherTabAnchor = vi
-      .fn()
-      .mockResolvedValue({
-        workspaceId: 'wD',
-        tabId: `wD:t${expectedPrefix}`,
-        paneId: `wD:t${expectedPrefix}:p1`,
-      });
-    const deps = makeDeps({
-      getDispatcherTabAnchor,
-      getNextItem: vi.fn().mockResolvedValue({
-        ok: true,
-        candidate: { id, title: id, stage: 'intake_complete', status: 'open' },
-      }),
-    });
-
-    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
-
-    expect(outcome.dispatched).toBe(true);
-    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', expectedPrefix);
-    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
-      expect.stringContaining(id),
-      expect.objectContaining({
-        anchorId: `wD:t${expectedPrefix}:p1`,
-        cwd: '/repo',
-      }),
-    );
-  });
-
-  it('AC1/AC2 per-project separation: WL and TCE candidates resolve their own tab anchors and cwd', async () => {
-    const makeScenario = (id: string, prefix: string, cwd: string) => {
-      const getDispatcherTabAnchor = vi.fn().mockResolvedValue({
-        workspaceId: 'wD',
-        tabId: `wD:t${prefix}`,
-        paneId: `wD:t${prefix}:p1`,
-      });
-      const deps = makeDeps({
-        getDispatcherTabAnchor,
-        getNextItem: vi.fn().mockResolvedValue({
-          ok: true,
-          candidate: { id, title: id, stage: 'intake_complete', status: 'open' },
-        }),
-      });
-      return { deps, getDispatcherTabAnchor, cwd };
-    };
-
-    const wl = makeScenario('WL-1', 'WL', '/repo-wl');
-    const tce = makeScenario('TCE-2', 'TCE', '/repo-tce');
-
-    const first = await dispatchDowntimeWork(wl.deps, { model: 'plan', cwd: wl.cwd });
-    const second = await dispatchDowntimeWork(tce.deps, { model: 'plan', cwd: tce.cwd });
-
-    expect(first.dispatched).toBe(true);
-    expect(second.dispatched).toBe(true);
-    // Each prefix resolves its own tab anchor and never the other's.
-    expect(wl.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-wl', 'WL');
-    expect(tce.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-tce', 'TCE');
-    expect(wl.deps.spawnAgentPane).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ anchorId: 'wD:tWL:p1', cwd: '/repo-wl' }),
-    );
-    expect(tce.deps.spawnAgentPane).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ anchorId: 'wD:tTCE:p1', cwd: '/repo-tce' }),
-    );
-  });
-
-  it('AC2 audit-log context: the dispatch marker records the item and its project root before the spawn', async () => {
-    const getDispatcherTabAnchor = vi
-      .fn()
-      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tTCE', paneId: 'wD:tTCE:p1' });
+  it('AC2 audit-log context: the marker records the item and its project root before the spawn', async () => {
     const recordDispatch = vi.fn().mockResolvedValue(true);
     const deps = makeDeps({
-      getDispatcherTabAnchor,
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wY:pW', workspaceId: 'wY', tabId: 'wY:t1' }),
+      getItemTabAnchor: vi.fn().mockResolvedValue({ tabId: 'wY:tTCE-9', paneId: 'wY:tTCE-9:p1' }),
       recordDispatch,
       getNextItem: vi.fn().mockResolvedValue({
         ok: true,
@@ -847,18 +878,123 @@ describe('per-prefix tab routing integration (C1)', () => {
     expect(recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({ itemId: 'TCE-9', kind: 'plan', cwd: '/repo-tce' }),
     );
-    // The same project root is forwarded to the pane, so it lands in the TCE
-    // tab's grid with the correct cwd.
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
-      expect.objectContaining({ cwd: '/repo-tce', anchorId: 'wD:tTCE:p1' }),
+      expect.objectContaining({ cwd: '/repo-tce', anchorId: 'wY:tTCE-9:p1' }),
     );
-    // Marker is written before the spawn (fail-closed ordering).
     const markerOrder = recordDispatch.mock.invocationCallOrder[0];
     const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(markerOrder).toBeLessThan(spawnOrder);
   });
+
+  // ── Root-pane cleanup (WL-0MU2EOHK900425VU) ────────────────────────
+
+  it('AC1: closes the project-workspace item tab root pane after a successful dispatch', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // No live downtime pane carries the anchor id → the anchor IS the root
+      // pane and must be closed.
+      getRunningDowntimePanes: vi
+        .fn()
+        .mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith('wC:tWL-ABC:p1', '/repo');
+  });
+
+  it('AC2: NEVER closes the Dispatcher-fallback anchor (would re-provision a blank pane)', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi.fn().mockResolvedValue(null),
+      getDispatcherAnchor: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wD:pFALLBACK', workspaceId: 'wD' }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC2: NEVER closes an anchor that is itself a live downtime dispatch pane', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // The anchor id is a recorded downtime pane → it is a previous
+      // dispatch's agent pane and must stay open.
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 1,
+        paneIds: ['wC:tWL-ABC:p1'],
+        records: [{ paneId: 'wC:tWL-ABC:p1', label: 'Downtime triggered plan X - WL-ABC' }],
+      }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC5 fail-safe: a throwing closePane never blocks the dispatch outcome', async () => {
+    const closePane = vi.fn().mockRejectedValue(new Error('herdr close blew up'));
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC5 backward-compat: without the closePane dep no cleanup call is attempted', async () => {
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.closePane).toBeUndefined();
+  });
 });
+
 
 // ── Audit-tier dispatch (WL-0MSI8H3HP000K0RG) ─────────────────────────
 
@@ -1328,6 +1464,130 @@ describe('dispatch active-audit single-flight (parent WL-0MT3PHW4I002SNOV)', () 
     expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
+  });
+});
+
+// ── Host-wide audit saturation (WL-0MUIVE0YG000UVIA) ──────────────────
+//
+// The per-worklog active-audit check (WL-0MT3PHW4I002SNOV) only sees audits
+// dispatched by THIS project's dispatcher. The 2026-09-26 incident ran four
+// downtime audits concurrently on one host — dispatched by DIFFERENT
+// projects — saturating the shared Local Proxy and the audit runner's
+// host-wide slot. These tests pin the host-wide serialisation gate: when a
+// machine-wide active-audit marker is present (`source: 'host-wide'`), a
+// second audit is NOT started; the candidate falls through/deferred.
+describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
+  const auditCandidate: DowntimeCandidate = {
+    id: 'WL-AUD',
+    title: 'Audit me',
+    stage: 'audit',
+  };
+  const implementCandidate: DowntimeCandidate = {
+    id: 'WL-IMP',
+    title: 'Implement me',
+    stage: 'implement',
+  };
+
+  const hostSaturated: DowntimeActiveAuditResult = {
+    ok: true,
+    active: true,
+    source: 'host-wide',
+  };
+  const perWorklogActive: DowntimeActiveAuditResult = {
+    ok: true,
+    active: true,
+    source: 'per-worklog',
+  };
+
+  it('a host-wide active audit skips the audit tier and falls through to the implement tier (AC1/AC2)', async () => {
+    // A second instance/project on the same host sees the machine-wide
+    // marker and must NOT start another audit. The audit candidate lookup is
+    // never consulted and dispatch falls through to the next tier.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(hostSaturated),
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: auditCandidate }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(deps.getActiveAudit).toHaveBeenCalledWith('/repo');
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('WL-IMP');
+  });
+
+  it('host-wide saturation with an empty remaining backlog reports audit-host-saturated (never no-candidate)', async () => {
+    // A host-wide skip is NOT a genuine empty backlog: it must never enter
+    // the no-candidate cooldown — polling continues and the next idle tick
+    // re-checks while the remote audit is still running.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(hostSaturated),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-host-saturated');
+    expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+  });
+
+  it('distinguishes host-wide from per-worklog saturation: a per-worklog active audit still reports audit-in-flight', async () => {
+    // The reason string must not regress the existing per-worklog semantics:
+    // only `source: 'host-wide'` produces 'audit-host-saturated'.
+    const deps = makeDeps({
+      getActiveAudit: vi.fn().mockResolvedValue(perWorklogActive),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('audit-in-flight');
+  });
+
+  it('logs audit-host-saturated with the concurrent-audit count and slot state (AC3)', async () => {
+    // Contention must be visible: the skip line names the condition and
+    // carries the concurrent-audit count (1 — host-wide single-flight) plus
+    // the live free-slot / contention queue state so an operator can tell
+    // infra saturation from a content problem.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const deps = makeDeps({
+        getActiveAudit: vi.fn().mockResolvedValue(hostSaturated),
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      });
+
+      const outcome = await dispatchDowntimeWork(deps, {
+        model: 'plan',
+        cwd: '/repo',
+        freeSlots: 2,
+        contentionQueueDepth: 0,
+      });
+
+      expect(outcome.kind).toBe('implement');
+      expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Downtime audit tier skipped: audit-host-saturated'),
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('concurrentAudits=1'),
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('contentionQueueDepth=0'),
+      );
+      expect(stderrSpy).toHaveBeenCalledWith(
+        expect.stringContaining('freeSlots=2'),
+      );
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 });
 
@@ -2273,6 +2533,35 @@ describe('audit selection (selectAuditCandidate)', () => {
     expect(selectAuditCandidate([], NOW)).toBeNull();
   });
 
+  it('never selects a covered child — children are never dispatched independently (AC2)', () => {
+    // A covered child: completed/in_review, no own fresh audit, parent has the
+    // fresh covering audit. The audit tier is root-only, and this client-side
+    // guard is belt-and-suspenders for a leaking/faulty response.
+    const coveredChild: AuditCandidate = {
+      id: 'WL-COVERED-CHILD',
+      title: 'Covered child',
+      parentId: 'WL-PARENT',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortIndex: 1,
+    };
+    expect(selectAuditCandidate([coveredChild, unaudited], NOW)?.id).toBe('NOAUDIT');
+    expect(selectAuditCandidate([coveredChild], NOW)).toBeNull();
+  });
+
+  it('never selects an uncovered child either (AC2)', () => {
+    // Uncovered child: parent demoted/stale, so no covering audit — it must
+    // still never enter the audit dispatch tier (flagged, not dispatched;
+    // WL-0MUBVH9FV0027COG owns durable uncovered reporting).
+    const uncoveredChild: AuditCandidate = {
+      id: 'WL-UNCOVERED-CHILD',
+      title: 'Uncovered child',
+      parentId: 'WL-DEMOTED-PARENT',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      sortIndex: 1,
+    };
+    expect(selectAuditCandidate([uncoveredChild], NOW)).toBeNull();
+  });
+
   it('classifies the 60s freshness boundary correctly', () => {
     // auditedAt exactly 60s before updatedAt -> stale (selected)
     const boundaryStale: AuditCandidate = {
@@ -2470,6 +2759,18 @@ describe('parseAuditCandidatesOutput', () => {
 
   it('returns an empty array for an empty workItems list', () => {
     expect(parseAuditCandidatesOutput(JSON.stringify({ workItems: [] }))).toEqual([]);
+  });
+
+  it('parses parentId so child candidates can be excluded client-side (AC2)', () => {
+    const stdout = JSON.stringify({
+      workItems: [
+        { id: 'WL-ROOT', title: 'Root', sortIndex: 1 },
+        { id: 'WL-CHILD', title: 'Child', parentId: 'WL-ROOT', sortIndex: 2 },
+      ],
+    });
+    const parsed = parseAuditCandidatesOutput(stdout);
+    expect(parsed?.[0].parentId).toBeUndefined();
+    expect(parsed?.[1].parentId).toBe('WL-ROOT');
   });
 });
 
@@ -10349,13 +10650,18 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
   });
 });
 
-// ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN, child WL-0MU4URK4H006OFCE) ──
+// ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) — DISABLED ─────────
 //
-// The monitor inspects every dispatched pane recorded in the rolling log
-// (marker + post-spawn enrichment), classifies its lifecycle outcome, logs a
-// pane-close entry, and closes the pane — EXCEPT `implement` panes, which are
-// never auto-closed (AC6). Every boundary is fail-closed (AC7).
-describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
+// Mechanism B is switched off in the worker (WL-0MUMEKDK0008LKH8):
+// `PANE_LIFECYCLE_MONITOR_ENABLED` is false, so the tick never calls
+// `monitorDispatchedPanes` (pinned by the tick integration suite below).
+// These unit tests are RETAINED to pin the pure classifier contract — what
+// the monitor WOULD do if re-enabled: it inspects every dispatched pane
+// recorded in the rolling log (marker + post-spawn enrichment), classifies
+// its lifecycle outcome, logs a pane-close entry, and closes the pane —
+// EXCEPT `implement` panes, which are never auto-closed (AC6). Every boundary
+// is fail-closed (AC7).
+describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', () => {
   const roots: string[] = [];
 
   function makeRoot(): string {
@@ -10696,10 +11002,11 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN)', () => {
 
 // ── Worker tick ↔ pane-lifecycle integration (WL-0MU4US5MP001JFEN) ────
 //
-// The worker tick invokes the pane-lifecycle monitor (fire-and-forget, so it
-// never perturbs the dispatch single-flight ordering). These tests pin the
-// end-to-end auto-close path and the mandatory implement exception (AC6).
-describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN)', () => {
+// Mechanism B is DISABLED (WL-0MUMEKDK0008LKH8): the worker tick must NOT
+// invoke the dispatch monitor, so the scheduled reaper (Mechanism A) is the
+// only active auto-close path. These tests pin that disabled behaviour and
+// that Mechanism A still runs from the tick.
+describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN) [disabled]', () => {
   const roots: string[] = [];
 
   afterEach(() => {
@@ -10720,7 +11027,11 @@ describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN)', () => {
     await appendDowntimeLogEntry(root, JSON.stringify({ ...marker, paneId, enrichment: true }));
   }
 
-  function makeMonitorWorker(root: string, deps: Partial<DowntimeWorkerDeps>) {
+  function makeMonitorWorker(
+    root: string,
+    deps: Partial<DowntimeWorkerDeps>,
+    paneClose?: { enabled: boolean; idleThresholdMinutes: number },
+  ) {
     const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
     const poller = createDowntimePoller('http://proxy:8000', fetcher);
     const worker = createDowntimeWorker({
@@ -10734,51 +11045,52 @@ describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN)', () => {
         cwd: root,
         noCandidateCooldownMs: 3_600_000,
         paneLifecycleIntervalMs: 0,
+        ...(paneClose ? { paneClose } : {}),
       }),
     });
     return worker;
   }
 
-  it('closes a completed non-implement pane from the worker tick (AC1/AC2)', async () => {
+  it('does NOT invoke the dispatch monitor from the worker tick (Mechanism B disabled, WL-0MUMEKDK0008LKH8)', async () => {
     const root = makeRoot();
     await seedDispatch(root, 'WL-TICK', 'plan', 'w9:p1');
     const closePane = vi.fn().mockResolvedValue(true);
+    const getItemLifecycleState = vi.fn().mockResolvedValue({ id: 'WL-TICK', stage: 'plan_complete' });
     const worker = makeMonitorWorker(root, {
-      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-TICK', stage: 'plan_complete' }),
+      getItemLifecycleState,
       getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w9:p1' }] }),
       closePane,
     });
 
     await worker.tick();
+    // Give a hypothetically-enabled (fire-and-forget) monitor time to act
+    // before asserting the negative, so the assertion is meaningful.
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
-    await vi.waitFor(() => expect(closePane).toHaveBeenCalledWith(
-      'w9:p1', root, { itemId: 'WL-TICK', kind: 'plan' },
-    ));
+    expect(getItemLifecycleState).not.toHaveBeenCalled();
+    expect(closePane).not.toHaveBeenCalled();
     const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
-    expect(pc).toHaveLength(1);
-    expect(pc[0]).toMatchObject({ outcome: 'closed-as-plan-complete', closed: true });
+    expect(pc).toHaveLength(0);
   });
 
-  it('never auto-closes an implement pane from the worker tick (AC6)', async () => {
+  it('still runs the scheduled reaper (Mechanism A) from the worker tick', async () => {
     const root = makeRoot();
-    await seedDispatch(root, 'WL-IMPL', 'implement', 'w9:p2');
-    const closePane = vi.fn().mockResolvedValue(true);
-    const worker = makeMonitorWorker(root, {
-      getItemLifecycleState: vi.fn().mockResolvedValue({ id: 'WL-IMPL', stage: 'in_review' }),
-      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 1, records: [{ paneId: 'w9:p2' }] }),
-      closePane,
-    });
+    const getItemLifecycleState = vi.fn().mockResolvedValue({ id: 'WL-TICK', stage: 'plan_complete' });
+    const runPaneCloseReaper = vi.fn().mockResolvedValue(undefined);
+    const worker = makeMonitorWorker(
+      root,
+      { getItemLifecycleState, runPaneCloseReaper },
+      { enabled: true, idleThresholdMinutes: 30 },
+    );
 
     await worker.tick();
 
-    // Wait for the (fire-and-forget) monitor to record the in_review event.
-    await vi.waitFor(async () => {
-      const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
-      expect(pc).toHaveLength(1);
-    });
-    expect(closePane).not.toHaveBeenCalled();
-    const pc = (await readDowntimeLogEntries(root)).filter((e) => e.entryType === 'pane-close');
-    expect(pc[0]).toMatchObject({ outcome: 'requires-attention', reasonCode: 'reached-in-review', closed: false });
+    await vi.waitFor(() => expect(runPaneCloseReaper).toHaveBeenCalledWith(
+      root,
+      { idleThresholdMinutes: 30, ledgerPath: undefined },
+    ));
+    // Mechanism B remains off — the reaper is the only active auto-close path.
+    expect(getItemLifecycleState).not.toHaveBeenCalled();
   });
 });
 

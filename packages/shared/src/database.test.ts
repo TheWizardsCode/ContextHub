@@ -547,7 +547,8 @@ describe('reSort does NOT bump updatedAt on audit-fresh items (WL-0MU2QKB98007BK
     const storedA = db.get('WI-A');
     expect(storedA?.updatedAt).toBe(updatedAtBefore);
 
-    // The audit should still be considered fresh (auditedAt >= updatedAt).
+    // The audit should still be considered fresh (auditedAt ≈ updatedAt,
+    // within the shared `isAuditFresh` 60 s at-or-near tolerance).
     const audit = db.getAuditResult('WI-A');
     expect(audit?.readyToClose).toBe(true);
   });

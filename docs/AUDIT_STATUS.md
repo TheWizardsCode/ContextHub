@@ -193,7 +193,16 @@ the TUI icon path (`stageDisplayIcon`), the `in_review` ordering predicate
    working-tree state`).
 2. **Time gate (legacy fallback).** When no stored fingerprint is present
    (legacy audits) or the caller cannot supply a current fingerprint (e.g. a TUI
-   render), the original `auditedAt > updatedAt - 60s` floor applies unchanged.
+   render), the audit is fresh iff `auditedAt > updatedAt -
+   AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` (60 s, one-sided; WL-0MUBVH7ZR009PP80).
+   That is: an audit at or after the item's content timestamp is always fresh
+   (it covers the content), and an audit that precedes a later content edit is
+   stale once the gap exceeds the tolerance. The ordering tier, the icon path
+   and the dispatcher all share this single comparison — the earlier competing
+   `auditedAt >= updatedAt` (no tolerance) form in the ordering tier has been
+   removed. (SorraAgents' runner uses a stricter `updatedAt + 60 s` reuse gate;
+   that is a different, pipeline-skip decision and is deliberately not used as
+   the currency predicate here.)
 
 Freshness is **atomic**: `saveAuditResult` — the path behind `wl audit-set`,
 `wl update --audit-text`, and the audit runner's `persist_audit.py` (see
@@ -201,6 +210,27 @@ Freshness is **atomic**: `saveAuditResult` — the path behind `wl audit-set`,
 (including the optional `fingerprint`) and sets `workitems.updatedAt = auditedAt`
 in the same transaction, so `isAuditFresh` is true immediately after an audit
 (WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51).
+
+**Smart re-instatement (WL-0MU1EWMHN000YUCG).** When an audit is stale by the
+*time gate*, `assessAuditInvalidate({ auditedAt, updatedAt, fingerprint,
+currentFingerprint })` in `packages/shared/src/icons.ts` decides between
+treating it as fresh, **re-instating** it, or flagging it for re-audit:
+
+- `fresh` — already current by the time gate; no action.
+- `reinstate` — time-stale, but `fingerprint === currentFingerprint`, i.e. the
+  change since the audit was non-semantic (a comment/metadata/sync re-timestamp,
+  or any edit that did not alter the audited content).
+  `WorklogDatabase.reconcileAuditInvalidation(id, currentFingerprint)` then
+  resets `workitems.updatedAt = auditedAt` (the `saveAuditResult` pattern,
+  preserving `activityAt`), so consumers that cannot compute the current
+  fingerprint — notably the `wl next` ordering tier — no longer treat the
+  unchanged audit as stale.
+- `re-audit` — no prior audit, a changed fingerprint (semantic change), or no
+  fingerprints available to prove the content is unchanged (fail-safe).
+
+The decision delegates the timestamp comparison to `isAuditFresh` itself (its
+fingerprint-less path), so exactly one `auditedAt`-vs-`updatedAt` comparison
+exists in the codebase.
 
 Fingerprint sources: `wl audit-set --fingerprint <hex>`, or an
 `Audit content fingerprint: <hex>` line embedded in `--summary`/`--raw-output`

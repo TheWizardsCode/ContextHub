@@ -5,11 +5,19 @@
  * Handles:
  * - agent_end → error detection → category dispatch
  * - turn_end → state management (reset on success, abort flag)
- * - session_start → state reset
+ * - session_start → state reset (including _notifyFn re-bind)
  * - session_compact → auto-continue after mid-session compaction
  * - agent_end COMPACTION_GATE → /compact + auto-retry (proxy hard cap 4xx)
  * - Built-in retry suppression (monkey-patching _prepareRetry)
  * - /retry command registration
+ *
+ * Notify/ctx lifecycle:
+ *   _notifyFn is captured from ctx.ui.notify in agent_end, turn_end, and
+ *   session_compact handlers. It is cleared (set to null) on session_start
+ *   so that a replaced/reloaded session never retains a stale reference.
+ *   All calls to _notifyFn go through _safeNotify, which wraps the dispatch
+ *   in a try/catch: if the ctx is stale the notification is skipped
+ *   silently rather than throwing an uncaught exception that crashes pi.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext, SessionCompactEvent } from '@earendil-works/pi-coding-agent';
@@ -253,6 +261,9 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
 
   // ── session_start: reset state for new session ─────────────────
   pi.on('session_start', async () => {
+    // Clear the captured notify function so a replaced/reloaded session
+    // never retains a stale ExtensionContext reference (WL-0MUIV50EJ007VH9B).
+    _notifyFn = null;
     interruptibleState.sessionGeneration++;
     for (const state of Object.values(retryStates)) {
       state.reset();
@@ -459,9 +470,7 @@ async function triggerCompactionContinue(): Promise<void> {
   })) return;
 
   continuationState.startContinuation();
-  if (_notifyFn) {
-    _notifyFn('Compaction complete — continuing automatically...', 'info');
-  }
+  _safeNotify('Compaction complete — continuing automatically...', 'info');
   continuationState.endContinuation();
 
   void triggerInvisibleContinue();
@@ -489,9 +498,7 @@ async function triggerCompactionGateRecovery(ctx: { compact(options?: { onComple
     continuationCount: continuationState.getCount(),
   })) return;
 
-  if (_notifyFn) {
-    _notifyFn(`Proxy context limit reached — compacting session (attempt ${continuationState.getCount() + 1}/${MAX_COMPACTION_GATE_RETRIES})...`, 'info');
-  }
+  _safeNotify(`Proxy context limit reached — compacting session (attempt ${continuationState.getCount() + 1}/${MAX_COMPACTION_GATE_RETRIES})...`, 'info');
 
   const result = await executeCompactAndContinue(continuationState, {
     // ctx.compact() is fire-and-forget; the callbacks resolve the promise.
@@ -507,16 +514,12 @@ async function triggerCompactionGateRecovery(ctx: { compact(options?: { onComple
   if (!result.success) {
     // Explicit guidance — never silently drop the gated request (AC4).
     const reason = result.error ?? COMPACTION_GATE_FALLBACK_MESSAGE;
-    if (_notifyFn) {
-      _notifyFn(reason, 'error');
-    }
+    _safeNotify(reason, 'error');
     return;
   }
 
   // Compaction succeeded — auto-retry the original request invisibly.
-  if (_notifyFn) {
-    _notifyFn('Compaction complete — retrying your request automatically...', 'info');
-  }
+  _safeNotify('Compaction complete — retrying your request automatically...', 'info');
   void triggerInvisibleContinue();
 }
 
@@ -559,11 +562,30 @@ async function triggerParseErrorContinue(): Promise<void> {
   }
 }
 
+/**
+ * Safely dispatch a notification via the captured _notifyFn.
+ *
+ * Wraps the call in a try/catch so that a stale ExtensionContext
+ * (e.g. after session replacement/reload) never throws an uncaught
+ * exception that crashes the pi process. On failure the notification
+ * is silently skipped — the retry loop and compaction flow continue
+ * unaffected.
+ */
+function _safeNotify(message: string, level: 'info' | 'warning' | 'error'): void {
+  try {
+    if (_notifyFn) {
+      _notifyFn(message, level);
+    }
+  } catch {
+    // ctx is stale (session replaced/reloaded) — skip silently.
+  }
+}
+
 /** Notify user about a retry attempt */
 function _notifyRetryAttempt(attempt: number, duration: string, serverHintMs?: number): void {
   if (_notifyFn) {
     const source = serverHintMs !== undefined ? ' — server-requested' : '';
-    _notifyFn(`Retry attempt ${attempt} (backoff ${duration}${source})...`, 'info');
+    _safeNotify(`Retry attempt ${attempt} (backoff ${duration}${source})...`, 'info');
   }
 }
 

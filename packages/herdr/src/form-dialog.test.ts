@@ -12,11 +12,13 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import {
   FormState,
   extractIdentifiers,
   getUnknownIdentifiers,
   substituteIdentifiers,
+  shellQuote,
   unwrapBracketedPaste,
   BRACKETED_PASTE_START,
   BRACKETED_PASTE_END,
@@ -487,5 +489,142 @@ describe('identifier helpers', () => {
         priority: 'high',
       }),
     ).toBe('wl create A new item --priority high');
+  });
+});
+
+// ── Shell-escaping of user-provided values (WL-0MU7KEX65004X0U9) ──────
+
+/** Execute `command` through bash and return its stdout (verbatim `%s`). */
+function bashPrint(command: string): { stdout: string; status: number | null } {
+  const result = spawnSync('bash', ['-c', command], { encoding: 'utf8' });
+  return { stdout: result.stdout, status: result.status };
+}
+
+describe('shellQuote', () => {
+  it('wraps a plain value in single quotes', () => {
+    expect(shellQuote('in_progress')).toBe("'in_progress'");
+  });
+
+  it('escapes embedded single quotes', () => {
+    expect(shellQuote("don't")).toBe("'don'\\''t'");
+  });
+
+  it('leaves double quotes, dollars and backticks literal (single-quoted)', () => {
+    expect(shellQuote('$HOME `id` "x"')).toBe("'$HOME `id` \"x\"'");
+  });
+
+  it('preserves an empty value as an empty quoted segment', () => {
+    expect(shellQuote('')).toBe("''");
+  });
+});
+
+describe('substituteIdentifiers — shell-route escaping', () => {
+  const AR_TEMPLATE =
+    "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete --priority medium && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'";
+
+  it('escapes only the apostrophe inside the existing single-quoted summary', () => {
+    const out = substituteIdentifiers(AR_TEMPLATE, { reason: "don't" });
+    expect(out).toContain("--summary 'Rejected by manual review. don'\\''t'");
+    // <id> is known and must remain a placeholder for later resolution.
+    expect(out).toContain('<id>');
+  });
+
+  it('escapes an apostrophe inside a producer-comment quoted body', () => {
+    const template =
+      "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>' --author <author>";
+    const out = substituteIdentifiers(template, {
+      producer_comment: "it's a comment; rm -rf /",
+      author: 'Map',
+    });
+    expect(out).toContain("--body 'it'\\''s a comment; rm -rf /'");
+    expect(out).toContain('--author \'Map\'');
+  });
+
+  it('shell-quotes a bare placeholder value', () => {
+    expect(
+      substituteIdentifiers('!!wl update <id> --title <title>', {
+        title: "Bob's work; rm -rf / #",
+      }),
+    ).toBe("!!wl update <id> --title 'Bob'\\''s work; rm -rf / #'");
+  });
+
+  it('does not shell-quote agent-prompt values (raw argv, no shell)', () => {
+    expect(
+      substituteIdentifiers('/herdr:note-edit <note_text>', {
+        note_text: "don't shell-escape me",
+      }),
+    ).toBe("/herdr:note-edit don't shell-escape me");
+  });
+
+  it('ignores quoted inline defaults when detecting the quoting context', () => {
+    // The `'x'` default before <b> must not be mistaken for an open quote
+    // around <b>; <b> sits inside the following single quotes.
+    expect(
+      substituteIdentifiers("!!cmd <a default='x'> '<b>'", { b: "y'z" }),
+    ).toBe("!!cmd 'x' 'y'\\''z'");
+  });
+
+  it('keeps valid simple input functional for update and search', () => {
+    expect(
+      substituteIdentifiers('!!wl update <id> --status <status> --stage <stage>', {
+        status: 'open',
+        stage: 'plan_complete',
+      }),
+    ).toBe("!!wl update <id> --status 'open' --stage 'plan_complete'");
+    expect(
+      substituteIdentifiers('!!wl search <search_term>', { search_term: 'apostrophe' }),
+    ).toBe("!!wl search 'apostrophe'");
+  });
+});
+
+// End-to-end: the generated command must parse in bash and deliver the
+// user's text verbatim. `printf '%s'` echoes back exactly what the shell
+// passed, so an injection or a premature quote-termination would show up as
+// different stdout (or a non-zero status).
+describe.skipIf(process.platform === 'win32')('substituteIdentifiers — bash round-trip', () => {
+  it("preserves a reason containing an apostrophe (regression WL-0MU7KEX65004X0U9)", () => {
+    const { stdout, status } = bashPrint(
+      substituteIdentifiers("!!printf '%s' 'Rejected by manual review. <reason>'", {
+        reason: "Why don't we just do this?",
+      }).replace(/^!+/, ''),
+    );
+    expect(status).toBe(0);
+    expect(stdout).toBe("Rejected by manual review. Why don't we just do this?");
+  });
+
+  it('preserves the full metacharacter set verbatim', () => {
+    const malicious = `don't $(whoami) \`id\` "quoted" ; rm -rf / | cat & echo \\ end`;
+    const { stdout, status } = bashPrint(
+      substituteIdentifiers("!!printf '%s' '<reason>'", { reason: malicious }).replace(/^!+/, ''),
+    );
+    expect(status).toBe(0);
+    expect(stdout).toBe(malicious);
+  });
+
+  it('preserves newlines inside the value', () => {
+    const value = 'line one\nline two';
+    const { stdout, status } = bashPrint(
+      substituteIdentifiers("!!printf '%s' '<reason>'", { reason: value }).replace(/^!+/, ''),
+    );
+    expect(status).toBe(0);
+    expect(stdout).toBe(value);
+  });
+
+  it('escapes values inside a double-quoted template segment', () => {
+    const value = 'a "b" $HOME `id` \\ end';
+    const { stdout, status } = bashPrint(
+      substituteIdentifiers('!!printf "%s" "<reason>"', { reason: value }).replace(/^!+/, ''),
+    );
+    expect(status).toBe(0);
+    expect(stdout).toBe(value);
+  });
+
+  it('does not execute an injected command substituted as a value', () => {
+    const injection = "'; echo INJECTED; '";
+    const { stdout, status } = bashPrint(
+      substituteIdentifiers("!!printf '%s' '<reason>'", { reason: injection }).replace(/^!+/, ''),
+    );
+    expect(status).toBe(0);
+    expect(stdout).toBe(injection);
   });
 });

@@ -3,6 +3,12 @@
  * rolling-log collectors for the downtime worker's auto-close monitor
  * (WL-0MU308WSF0002JWN, child WL-0MU4URK4H006OFCE).
  *
+ * NOTE (WL-0MUMEKDK0008LKH8): Mechanism B (the dispatch monitor) is currently
+ * DISABLED in the worker — `PANE_LIFECYCLE_MONITOR_ENABLED` is false, so the
+ * tick never invokes `monitorDispatchedPanes`. These tests are retained to pin
+ * the pure classifier contract for a future redesign; they cover disabled
+ * behaviour (what the classifier WOULD decide if re-enabled), not a live path.
+ *
  * These tests pin the decision contract: which outcomes are produced, which
  * kinds are auto-closed (everything except `implement` — AC6), and the
  * idempotency keys that stop duplicate log entries.

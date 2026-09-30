@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchCompletedItemCount, fetchItemsByStage, fetchItemsByPriority, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
@@ -31,7 +31,8 @@ import {
   auditIcon,
   needsProducerReviewIcon,
   stageDisplayIcon,
-  getIconPrefix,
+  getIconPrefixParts,
+  isCoveredByParent,
   applyStageColour,
   stageColor,
   applyPriorityColour,
@@ -47,6 +48,8 @@ import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
 import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
+import { recentDispatchedItems } from './downtime-log.js';
+import { buildDispatchWorkItem, mergeDispatchRow } from './dispatch-view.js';
 import {
   createHydratorRunner,
   createProductionHydratorDeps,
@@ -64,7 +67,7 @@ import {
 } from './form-dialog.js';
 import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
-import { extractFilePaths } from './grouping.js';
+import { extractFilePaths, regroupWorkItems } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 import {
   findNoteInParagraph,
@@ -534,13 +537,24 @@ export class WorkItemListState {
   activePriorityFilter: string | null = null;
 
   /**
+   * Active recent-dispatches filter (WL-0MUL2IZLF002S9X5). The third
+   * mutually-exclusive filter axis: when true the list shows log-derived
+   * synthetic rows from `.worklog/downtime-dispatches.log` instead of live
+   * `wl` items. Applying a stage/priority filter clears it and vice versa,
+   * and `clearFilter()` clears all three axes.
+   */
+  activeDispatchFilter = false;
+
+  /**
    * Display label for the active filter, axis-qualified, or null when no
-   * filter is active (e.g. `stage in_review`, `priority critical`). The
-   * list header renders `(filtered: <label>)` from this value.
+   * filter is active (e.g. `stage in_review`, `priority critical`,
+   * `dispatches`). The list header renders `(filtered: <label>)` from this
+   * value.
    */
   get activeFilterLabel(): string | null {
     if (this.activeFilter) return `stage ${this.activeFilter}`;
     if (this.activePriorityFilter) return `priority ${this.activePriorityFilter}`;
+    if (this.activeDispatchFilter) return 'dispatches';
     return null;
   }
 
@@ -769,7 +783,7 @@ export class WorkItemListState {
 
     let lastGroup: number | undefined;
 
-    const appendItem = (item: WorkItem, depth: number): void => {
+    const appendItem = (item: WorkItem, depth: number, parent: WorkItem | null): void => {
       // Insert a heading row when the group changes between consecutive
       // items. Items without a group field (e.g. children, ungrouped items)
       // never trigger a new heading.
@@ -796,20 +810,24 @@ export class WorkItemListState {
         return;
       }
 
+      // Enrich nested items with their direct parent's audit state so the
+      // render layer can derive coverage at read time
+      // (WL-0MUBVH8QG0020H9L). Root rows pass through unchanged.
+      const node = depth > 0 ? withParentAudit(item, parent) : item;
       if (depth === 0) {
-        result.push(item);
+        result.push(node);
       } else {
-        result.push(item.depth === depth ? item : { ...item, depth });
+        result.push(node.depth === depth ? node : { ...node, depth });
       }
       if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
         for (const child of item.children) {
-          appendItem(child, depth + 1);
+          appendItem(child, depth + 1, item);
         }
       }
     };
 
     for (const item of this.items) {
-      appendItem(item, 0);
+      appendItem(item, 0, null);
     }
 
     return result;
@@ -826,25 +844,30 @@ export class WorkItemListState {
    */
   getFlattenedItems(): WorkItem[] {
     const result: WorkItem[] = [];
-    const appendItem = (item: WorkItem, depth: number): void => {
+    const appendItem = (item: WorkItem, depth: number, parent: WorkItem | null): void => {
+      // Enrich nested items with their direct parent's audit state so derived
+      // coverage is available on the flattened rows as well as the display
+      // rows (WL-0MUBVH8QG0020H9L).
+      const node = depth > 0 ? withParentAudit(item, parent) : item;
       // Top-level items are pushed as-is (no depth field, matching the
-      // pre-hierarchy shape). Nested items keep their object reference when
-      // their stored depth already matches the hierarchy position (so
-      // on-demand child fetches mutate the live tree object), otherwise the
-      // depth is corrected with a shallow copy.
+      // pre-hierarchy shape). Nested items are always shallow copies: the
+      // coverage enrichment above adds `parentAudit`, and a stored depth that
+      // does not match the hierarchy position is additionally corrected.
+      // On-demand child fetches mutate the LIVE tree (attachChildren), which
+      // the next flatten picks up — the copy is display-only.
       if (depth === 0) {
-        result.push(item);
+        result.push(node);
       } else {
-        result.push(item.depth === depth ? item : { ...item, depth });
+        result.push(node.depth === depth ? node : { ...node, depth });
       }
       if (item.childCount && item.children && item.children.length > 0 && this.expandedItems.has(item.id)) {
         for (const child of item.children) {
-          appendItem(child, depth + 1);
+          appendItem(child, depth + 1, item);
         }
       }
     };
     for (const item of this.items) {
-      appendItem(item, 0);
+      appendItem(item, 0, null);
     }
     return result;
   }
@@ -1003,6 +1026,7 @@ export class WorkItemListState {
   applyFilter(stage: string): void {
     this.activeFilter = stage;
     this.activePriorityFilter = null; // replace semantics: one axis at a time
+    this.activeDispatchFilter = false; // replace semantics: one axis at a time
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -1020,6 +1044,27 @@ export class WorkItemListState {
   applyPriorityFilter(priority: string): void {
     this.activePriorityFilter = priority;
     this.activeFilter = null; // replace semantics: one axis at a time
+    this.activeDispatchFilter = false; // replace semantics: one axis at a time
+    this._applyFilters();
+    this.selectedIndex = 0;
+    this.scrollOffset = 0;
+    this.mode = 'list';
+    this._resetMetaScroll();
+    // Filter changes the visible item set — invalidate cached previews.
+    clearDescriptionPreviewCache();
+  }
+
+  /**
+   * Apply the recent-dispatches filter (replace semantics,
+   * WL-0MUL2IZLF002S9X5): clears any active stage/priority filter so the
+   * dispatch axis is mutually exclusive with the other two. The dispatch
+   * rows are supplied by `fetchItemsForView` (sourced from the local rolling
+   * dispatch log), so `_applyFilters` passes them through unchanged.
+   */
+  applyDispatchFilter(): void {
+    this.activeDispatchFilter = true;
+    this.activeFilter = null; // replace semantics: one axis at a time
+    this.activePriorityFilter = null; // replace semantics: one axis at a time
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -1032,6 +1077,7 @@ export class WorkItemListState {
   clearFilter(): void {
     this.activeFilter = null;
     this.activePriorityFilter = null;
+    this.activeDispatchFilter = false;
     this._applyFilters();
     this.selectedIndex = 0;
     this.scrollOffset = 0;
@@ -1128,6 +1174,10 @@ export class WorkItemListState {
     } else if (this.activePriorityFilter) {
       filtered = filtered.filter((item) => item.priority === this.activePriorityFilter);
     }
+    // The dispatches axis is applied at FETCH time (fetchItemsForView
+    // returns exactly the log-derived rows); there is nothing further to
+    // filter here, so every fetched row passes through unchanged
+    // (WL-0MUL2IZLF002S9X5).
     this.items = filtered;
   }
 
@@ -1224,6 +1274,30 @@ export class StageFilter {
 // ── Formatting functions ──────────────────────────────────────────────
 
 /**
+ * Return a shallow copy of a nested item carrying its DIRECT parent's audit
+ * state, so the render layer can derive child coverage at read time
+ * (WL-0MUBVH8QG0020H9L). Coverage is derived, never persisted: the copy's
+ * `parentAudit` is consumed by the shared `isCoveredByParent` /
+ * `stageDisplayIcon` helpers. A root item (parent === null) is returned
+ * unchanged. Depth is limited to the direct parent (depth 1); transitive
+ * coverage is intentionally out of scope.
+ */
+function withParentAudit(item: WorkItem, parent: WorkItem | null): WorkItem {
+  if (!parent) return item;
+  return {
+    ...item,
+    parentId: item.parentId ?? parent.id,
+    parentAudit: {
+      auditResult: parent.auditResult,
+      auditedAt: parent.auditedAt,
+      updatedAt: parent.updatedAt,
+      fingerprint: parent.fingerprint,
+      currentFingerprint: parent.currentFingerprint,
+    },
+  };
+}
+
+/**
  * Format a single item line for the list display.
  *
  * Includes icon prefix, stage colouring, and group markers.
@@ -1246,8 +1320,22 @@ export function formatItemLine(
     : '  ';
 
   const prefix = isSelected ? '▸ ' : '  ';
-  const iconPrefix = getIconPrefix(item, { noIcons });
-  const iconStr = iconPrefix.length > 0 ? `${iconPrefix}` : '';
+  // Derived child coverage (WL-0MUBVH8QG0020H9L): a child whose direct parent
+  // has a fresh audit shows the parent's audit-result symbol. The shared,
+  // dependency-free icon helper returns the plain glyph; the ANSI dim styling
+  // is applied HERE, around the stage/audit icon only, so the prefix's
+  // display-width alignment (computed on the plain string) is never corrupted
+  // and other icons are not dimmed.
+  const parts = getIconPrefixParts(item, { noIcons });
+  let iconStr = parts.text;
+  if (!noIcons && parts.stageEnd > parts.stageStart && isCoveredByParent(item, item.parentAudit)) {
+    iconStr =
+      parts.text.slice(0, parts.stageStart) +
+      ANSI.dim +
+      parts.text.slice(parts.stageStart, parts.stageEnd) +
+      ANSI.reset +
+      parts.text.slice(parts.stageEnd);
+  }
 
   // Apply priority colouring to both title and ID (same colour)
   const colouredTitle = applyPriorityColour(item.title, item.priority);
@@ -1261,7 +1349,15 @@ export function formatItemLine(
     ? ` [${item.stage}]`
     : '';
 
-  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}`;
+  // Log-derived dispatch rows (WL-0MUL2IY8L009S3PQ): annotate the list row
+  // with the dispatch kind and latest pane-close outcome so an operator can
+  // triage without opening the detail view. Live items never carry these
+  // fields, so existing rows are unchanged.
+  const dispatchTag = item.isLogDerived
+    ? `${item.dispatchKind ? ` [${item.dispatchKind}]` : ''}${item.dispatchOutcome ? ` ${item.dispatchOutcome}` : ''}`
+    : '';
+
+  let line = `${depthIndent}${prefix}${expandIcon}${iconStr}${priorityColouredId} ${colouredTitle}${stageTag}${priorityStr}${dispatchTag}`;
 
   // Truncate to fit terminal width, accounting for ANSI codes and
   // multi-width characters (CJK, emoji, fullwidth forms). Reuses the
@@ -1596,6 +1692,19 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
       metaRows.push([label, value]);
     }
   };
+  // Log-derived dispatch rows (WL-0MUL2IY8L009S3PQ) that have no live `wl`
+  // counterpart (`isLogOnly`) render an explicit `—` for priority/risk/effort
+  // instead of silently dropping the row, so the panel never looks blank or
+  // broken. A dispatch row ENRICHED from the live item (`mergeDispatchRow`)
+  // leaves `isLogOnly` unset and renders exactly like any other live row
+  // (WL-0MUGLL9SS002E1D2 audit fix).
+  const addMetaOrDash = (label: string, value: string | undefined | null): void => {
+    if (item.isLogOnly) {
+      metaRows.push([label, value != null && value !== '' ? value : '—']);
+    } else {
+      addMeta(label, value);
+    }
+  };
 
   // Prefix a display value with its icon (`icon + text`, e.g. `🔄
   // in_progress`). Unknown icon keys return '' (e.g. free-form effort `3`),
@@ -1622,14 +1731,37 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('Title', item.title);
   addMeta('Status', iconText(noIcons ? '' : statusIcon(item.status), item.status));
   // Stage mirrors the list's audit-aware in_review icon via the shared
-  // stageDisplayIcon helper (AC2).
-  addMeta('Stage', iconText(noIcons ? '' : stageDisplayIcon(item), item.stage));
-  addMeta('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
+  // stageDisplayIcon helper (AC2). A covered child's inherited parent-audit
+  // symbol is dimmed to match the list row; the `Covered by` row that follows
+  // names the covering parent so coverage is explicit and never silently
+  // dropped (WL-0MUBVH8QG0020H9L AC3). The row is omitted when the parent's
+  // audit state is unavailable (e.g. the detail view may not have the parent
+  // loaded) — coverage is never guessed.
+  const coveredByParent = isCoveredByParent(item, item.parentAudit);
+  const stageGlyph = noIcons ? '' : stageDisplayIcon(item);
+  addMeta(
+    'Stage',
+    noIcons
+      ? item.stage
+      : coveredByParent
+        ? `${ANSI.dim}${stageGlyph}${ANSI.reset} ${item.stage}`
+        : iconText(stageGlyph, item.stage),
+  );
+  if (coveredByParent && item.parentId) {
+    addMeta('Covered by', item.parentId);
+  }
+  addMetaOrDash('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
   // Type shows the epic icon (⊙) for epic items only, matching the list;
   // non-epic types remain text-only (AC3).
   addMeta('Type', iconText(noIcons ? '' : (item.issueType === 'epic' ? epicIcon() : ''), item.issueType));
-  addMeta('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
-  addMeta('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
+  addMetaOrDash('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
+  addMetaOrDash('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
+  // Dispatch provenance for log-derived rows (WL-0MUL2IY8L009S3PQ).
+  if (item.isLogDerived) {
+    addMeta('Dispatch', item.dispatchKind);
+    addMeta('Outcome', item.dispatchOutcome);
+    addMeta('Dispatched', item.dispatchedAt ? formatTimestamp(item.dispatchedAt) : undefined);
+  }
   addMeta('Children', item.childCount !== undefined ? String(item.childCount) : undefined);
   addMeta('Parent', item.parentId);
   if (item.tags && item.tags.length > 0) {
@@ -1638,7 +1770,12 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   addMeta('GitHub Issue', item.githubIssueNumber ? `#${item.githubIssueNumber}` : undefined);
   addMeta('Created', item.createdAt ? formatTimestamp(item.createdAt) : undefined);
   addMeta('Updated', item.updatedAt ? formatTimestamp(item.updatedAt) : undefined);
-  addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
+  if (item.isLogOnly && item.auditResult == null) {
+    // No live audit state on a log-only row — show `—` (WL-0MUL2IY8L009S3PQ).
+    addMeta('Audit', '—');
+  } else {
+    addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
+  }
   addMeta('Reviewed', iconText(noIcons ? '' : needsProducerReviewIcon(item.needsProducerReview), reviewLabel(item.needsProducerReview)));
   addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
 
@@ -3334,6 +3471,44 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
   return ` ${ANSI.dim}[downtime busy]${ANSI.reset}`;
 }
 
+/**
+ * Review-queue banner state for the footer (parent WL-0MTHSHN5V008R5L0).
+ */
+export interface ReviewQueueBannerState {
+  /** True when the root-only completed/in_review count ≥ browseItemCount. */
+  queueDeep: boolean;
+  /** Number of root-level completed/in_review items counted. */
+  completedCount: number;
+  /** browseItemCount threshold (undefined when the setting is unavailable). */
+  browseItemCount?: number;
+  /** True when at least one root in_review item has an outstanding audit. */
+  auditsOutstanding: boolean;
+}
+
+/**
+ * Choose the review-queue-depth footer banner copy, or `null` when the banner
+ * must not render (the queue is not deep).
+ *
+ * Copy (AH-0MUDYTQ55002NUSJ):
+ *  - deep queue + an outstanding audit →
+ *    `Review queue deep (<n> of <browseItemCount> completed/in_review) — focus on audits`;
+ *  - deep queue + every root in_review item freshly audited →
+ *    `Ready to Ship (shortcut 'S')`.
+ *
+ * Display-only: callers must NEVER gate downtime dispatch on this signal
+ * (WL-0MTTSWC1X005P4VD). A fresh (current) audit of any result counts as
+ * "not outstanding" — only a missing or non-current audit keeps "focus on
+ * audits" (AC3).
+ */
+export function reviewQueueBannerText(state: ReviewQueueBannerState): string | null {
+  if (!state.queueDeep) return null;
+  if (!state.auditsOutstanding) return "Ready to Ship (shortcut 'S')";
+  const countDisplay = state.browseItemCount !== undefined
+    ? ` (${state.completedCount} of ${state.browseItemCount} completed/in_review)`
+    : '';
+  return `Review queue deep${countDisplay} — focus on audits`;
+}
+
 export function createListRenderer(getShowIcons?: () => boolean): (
   displayRows: DisplayRow[],
   selectedIndex: number,
@@ -3371,6 +3546,13 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   sprintCompletedCount?: number,
   /** browseItemCount threshold for the review-queue-depth banner. (parent WL-0MTHSHN5V008R5L0) */
   browseItemCount?: number,
+  /**
+   * True when at least one root-level in_review item still has an outstanding
+   * audit (no stored audit, or a non-current/stale audit). Drives the banner
+   * copy: outstanding → "focus on audits"; none → "Ready to Ship".
+   * (AH-0MUDYTQ55002NUSJ)
+   */
+  sprintAuditsOutstanding?: boolean,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -3405,6 +3587,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     sprintComplete?: boolean,
     sprintCompletedCount?: number,
     browseItemCount?: number,
+    sprintAuditsOutstanding?: boolean,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -3602,18 +3785,24 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     // count is at/over browseItemCount. Green background, white text. This is
     // a REVIEW-QUEUE DEPTH indicator (the producer's distinct "queue is deep"
     // signal) — it is display-only and NEVER disables dispatch: audits keep
-    // draining the queue and check-ins continue (RCA root cause A). The
-    // former "Sprint Complete, hit S to ship" copy was the queue-depth
-    // masquerade; a genuine sprint-complete signal would be a separate,
-    // explicit mechanism (out of scope). Only shown when help text is
-    // enabled (`showHelpText: true`); does NOT interfere with code-freeze
-    // banners (those render above the list).
+    // draining the queue and check-ins continue (RCA root cause A). Copy is
+    // chosen by `reviewQueueBannerText` (AH-0MUDYTQ55002NUSJ): while any root
+    // in_review item still has an outstanding audit the banner says
+    // `— focus on audits`; once every one has a current audit it says
+    // `Ready to Ship (shortcut 'S')` (see `sprintAuditsOutstanding`). The former
+    // "Sprint Complete, hit S to ship" copy was the queue-depth masquerade.
+    // Only shown when help text is enabled (`showHelpText: true`); does NOT
+    // interfere with code-freeze banners (those render above the list).
     const isSprintComplete = sprintComplete ?? false;
     const completedCount = sprintCompletedCount ?? 0;
     const helpEnabled = showHelpText ?? true;
-    if (isSprintComplete && helpEnabled) {
-      const countDisplay = browseItemCount !== undefined ? ` (${completedCount} of ${browseItemCount} completed/in_review)` : '';
-      const bannerText = `Review queue deep${countDisplay} — audits will drain it`;
+    const bannerText = reviewQueueBannerText({
+      queueDeep: isSprintComplete,
+      completedCount,
+      browseItemCount,
+      auditsOutstanding: sprintAuditsOutstanding ?? false,
+    });
+    if (bannerText !== null && helpEnabled) {
       const bannerLine = `${ANSI.bg(40)}${ANSI.fg(255)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
     } else if (hoverTooltip && hoverTooltip.length > 0) {
@@ -3629,14 +3818,23 @@ export function createListRenderer(getShowIcons?: () => boolean): (
           ? `  ${ANSI.dim}${chordState!.hints}${ANSI.reset}`
           : '';
         const footerLine = ` ${ANSI.reverse} chord: ${pendingStr} _ ${ANSI.reset}${hintStr}`;
-        output.push(footerLine);
+        output.push(truncateLine(footerLine, cols));
       } else {
         const navHint = (navStackDepth && navStackDepth > 0)
           ? ` ${ANSI.dim}[esc] back${navStackDepth > 1 ? ` (${navStackDepth} levels)` : ''}${ANSI.reset}`
           : '';
         const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
         const footerLine = navHint + chordHelpSuffix || ' ';
-        output.push(footerLine);
+        // ── Footer wrap guard (WL-0MTV979LK005YB1B) ──────────────
+        // In narrow panes the dynamic help line can exceed `cols`,
+        // causing the terminal to wrap it onto a second physical row.
+        // The safety clamp below counts array elements (logical rows),
+        // not physical rows, so the wrapped footer pushed the header
+        // off the top of the pane (mirrors the header guard,
+        // WL-0MSNI6TQ5003JY1Z). Truncating to exactly `cols` visible
+        // characters guarantees the footer occupies one output row
+        // and preserves the `rows - 1` invariant.
+        output.push(truncateLine(footerLine, cols));
       }
     }
 
@@ -4006,12 +4204,51 @@ export function createProductionShipGuardQuery(
  *   priority filter). Mutually exclusive with `activeFilter` (replace
  *   semantics, WL-0MSKC8T46006999S): at most one is set.
  * @param defaultFetcher - The default fetcher for the unfiltered view
+ * @param activeDispatchFilter - When true, return the log-derived recent
+ *   dispatch rows instead of live `wl` items (WL-0MUL2IZLF002S9X5).
+ * @param cwd - Project root containing `.worklog/` for the dispatch-log read
+ *   (defaults to `process.cwd()`).
  */
 export function fetchItemsForView(
   activeFilter: string | null,
   activePriorityFilter: string | null,
   defaultFetcher: () => Promise<WorkItem[]>,
+  activeDispatchFilter = false,
+  cwd: string = process.cwd(),
 ): Promise<WorkItem[]> {
+  if (activeDispatchFilter) {
+    // Recent-dispatches view (WL-0MUL2IZLF002S9X5): the log decides WHICH items
+    // appear, but each row is rendered from the LIVE work item (the same
+    // `defaultFetcher` every other view uses) so the status/stage/audit/
+    // review/priority icons are identical to other views, and the rows are
+    // ordered exactly like the main selection list (WL-0MUGLL9SS002E1D2).
+    // An item no longer present in `wl` falls back to the log-derived
+    // synthetic row so closed/deleted work still appears. Fail-safe — a
+    // missing/unreadable log yields []; a live-fetch error degrades to
+    // log-only rows rather than blanking the TUI.
+    return Promise.all([
+      recentDispatchedItems(cwd),
+      defaultFetcher().catch(() => [] as WorkItem[]),
+    ])
+      .then(([rows, liveItems]) => {
+        const liveById = new Map(liveItems.map((item) => [item.id, item]));
+        const projected = rows.map((row) => {
+          const live = liveById.get(row.itemId);
+          return live ? mergeDispatchRow(live, row) : buildDispatchWorkItem(row);
+        });
+        // Reuse the canonical main-list ordering (Critical → Group N → Idea →
+        // Other → In Review, with the shared within-group comparator). The
+        // dispatch view stays a flat list, so the computed group stamps are
+        // dropped — only their ordering effect is kept.
+        return regroupWorkItems(projected).map((item) => {
+          const flat: WorkItem = { ...item };
+          delete flat.group;
+          delete flat.groupLabel;
+          return flat;
+        });
+      })
+      .catch(() => []);
+  }
   if (activeFilter) {
     // Fail-open: a wl error must never blank the list — fall back to the
     // default fetcher (which itself fails open in index.ts).
@@ -4024,6 +4261,56 @@ export function fetchItemsForView(
   // Unfiltered: delegate straight to the default fetcher so the refresh
   // cadence is byte-for-byte unchanged (single-flight timing preserved).
   return defaultFetcher();
+}
+
+/**
+ * True when a resolved command is a `/wl` view command — a stage filter
+ * (`/wl <stage>`, shorthand alias or canonical name), a priority filter
+ * (`/wl --priority <p>`, canonical name), the recent-dispatches view
+ * (`/wl dispatches`, WL-0MUL2J15W00277XH), or the clear-filter `/wl` with no
+ * arguments.
+ *
+ * Used after dispatch to trigger an immediate view refetch: filtered views
+ * show every root item matching the filter's rule (`wl list --status <status>
+ * --stage <stage> --root-only` / `--priority <p>`; see STAGE_STATUS in
+ * fetcher.ts) — most stages show `open`-status items only, while the in_review
+ * stage additionally includes `completed` and `in-progress` items
+ * (WL-0MSKCRX730052IIW); the dispatches view refetches the log-derived rows;
+ * clearing the filter restores the default view (WL-0MSGSE15000746F7).
+ */
+export function isWlViewCommand(cmd: string): boolean {
+  if (/^\/wl\s*$/.test(cmd)) return true;
+  if (/^\/wl\s+dispatches$/.test(cmd)) return true;
+  const stageMatch = cmd.match(/^\/wl\s+(\S+)$/);
+  if (stageMatch !== null && STAGE_MAP[stageMatch[1]] !== undefined) return true;
+  const priorityMatch = cmd.match(/^\/wl\s+--priority\s+(\S+)$/);
+  return priorityMatch !== null && PRIORITY_MAP[priorityMatch[1]] !== undefined;
+}
+
+/**
+ * Best-effort upgrade of a log-derived detail item to the live `wl` item
+ * (WL-0MUL2J15W00277XH): when a recent-dispatch row is opened (Enter),
+ * `state.detailItem` starts as the synthetic row. This fetches the live item
+ * by id and, if it still exists, replaces the detail item so the view shows
+ * fresh live metadata; a closed/deleted item (or a fetch error) leaves the
+ * log-derived metadata in place — the view never blanks or crashes.
+ *
+ * @param state - The list state whose `detailItem` is upgraded in place.
+ * @param fetchDetails - Injectable single-item fetcher (defaults to the
+ *   production `fetchItemDetails`, which already returns null on failure).
+ */
+export async function resolveDispatchDetail(
+  state: WorkItemListState,
+  fetchDetails: (id: string) => Promise<WorkItem | null> = fetchItemDetails,
+): Promise<void> {
+  const item = state.detailItem;
+  if (item === null || item === undefined || item.isLogDerived !== true) return;
+  const fresh = await fetchDetails(item.id).catch(() => null);
+  // Only upgrade when the user has not navigated away in the meantime — the
+  // same synthetic object is still the detail item.
+  if (fresh !== null && state.detailItem === item) {
+    state.detailItem = fresh;
+  }
 }
 
 /**
@@ -4084,6 +4371,14 @@ export function dispatchChordCommand(
       state.applyPriorityFilter(internalPriority);
       return true;
     }
+  }
+
+  // ── /wl dispatches (internal action, WL-0MUL2IZLF002S9X5) ─────
+  // Recent-dispatches view: fully internal — no pane spawned, no stdout
+  // write, no <id> substitution. Bound to the `f d` chord via shortcuts.json.
+  if (/^\/wl\s+dispatches$/.test(command.trim())) {
+    state.applyDispatchFilter();
+    return true;
   }
 
   // ── /wl <stage> commands (internal dispatch) ──────────────
@@ -4540,20 +4835,23 @@ export async function runWorklistTui(
   // toggle in the downtime worker.
   let sprintComplete = false;
   let sprintCompletedCount = 0;
+  let sprintAuditsOutstanding = false;
 
   /**
    * Refresh the review-queue-depth indicator by counting completed/
-   * in_review ROOT items. Fail-closed: a query failure leaves
-   * `sprintComplete` unchanged (conservative). Display-only — NEVER
-   * writes/removes the disable marker (WL-0MTTSWC1X005P4VD).
+   * in_review ROOT items and recording whether any still has an outstanding
+   * audit (drives the banner copy — AH-0MUDYTQ55002NUSJ). Fail-closed: a
+   * query failure leaves the state unchanged (conservative). Display-only —
+   * NEVER writes/removes the disable marker (WL-0MTTSWC1X005P4VD).
    */
   const refreshSprintState = async (): Promise<void> => {
-    const count = await fetchCompletedItemCount();
-    if (count === undefined) return; // fail-closed: unknown count → no state change
-    sprintCompletedCount = count;
+    const state = await fetchReviewQueueState();
+    if (state === undefined) return; // fail-closed: unknown state → no change
+    sprintCompletedCount = state.count;
+    sprintAuditsOutstanding = state.auditsOutstanding;
     // Re-read browseItemCount live so a settings change applies without a plugin restart.
     const liveBrowseCount = loadSettings().browseItemCount ?? opts.browseItemCount;
-    sprintComplete = count >= liveBrowseCount;
+    sprintComplete = state.count >= liveBrowseCount;
   };
 
   // Pane-visibility gating (pause-when-hidden). When the pane's tab is not
@@ -4826,7 +5124,13 @@ export async function runWorklistTui(
           }
         };
         const [newItems] = await Promise.all([
-          fetchItemsForView(state.activeFilter, state.activePriorityFilter, fetcher),
+          fetchItemsForView(
+            state.activeFilter,
+            state.activePriorityFilter,
+            fetcher,
+            state.activeDispatchFilter,
+            opts.cwd,
+          ),
           ...expanded.map(fetchExpandedChildren),
         ]);
         const oldLen = state.items.length;
@@ -4859,9 +5163,11 @@ export async function runWorklistTui(
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
         // Refresh the review-queue-depth banner indicator (display-only;
-        // completed+in_review root count vs browseItemCount). Fail-closed:
-        // query failure leaves state unchanged. Queue depth never writes the
-        // disable marker (WL-0MTTSWC1X005P4VD).
+        // completed+in_review root count vs browseItemCount, plus whether any
+        // of those items still has an outstanding audit — this drives the
+        // banner copy; AH-0MUDYTQ55002NUSJ). Fail-closed: query failure leaves
+        // state unchanged. Queue depth never writes the disable marker
+        // (WL-0MTTSWC1X005P4VD).
         await refreshSprintState();
         // Merge agent-status state into the refreshed items (top-level +
         // expanded children) so the agent icons reflect the latest tracker
@@ -4912,25 +5218,9 @@ export async function runWorklistTui(
   // global watcher, no cross-instance effects).
   opts.onRefresh = opts.onRefresh ?? (() => doRefresh(false));
 
-  /**
-   * True when the resolved command is a `/wl` view command — a stage filter
-   * (`/wl <stage>`, shorthand alias or canonical name), a priority filter
-   * (`/wl --priority <p>`, canonical name), or the clear-filter `/wl` with
-   * no arguments. Used after dispatch to trigger a view refetch: filtered
-   * views show every root item matching the filter's rule (`wl list --status
-   * <status> --stage <stage> --root-only` / `--priority <p>`; see
-   * STAGE_STATUS in fetcher.ts) — most stages show `open`-status items only,
-   * while the in_review stage additionally includes `completed` and
-   * `in-progress` items (WL-0MSKCRX730052IIW); clearing the filter restores
-   * the default view (WL-0MSGSE15000746F7).
-   */
-  const isWlViewCommand = (cmd: string): boolean => {
-    if (/^\/wl\s*$/.test(cmd)) return true;
-    const stageMatch = cmd.match(/^\/wl\s+(\S+)$/);
-    if (stageMatch !== null && STAGE_MAP[stageMatch[1]] !== undefined) return true;
-    const priorityMatch = cmd.match(/^\/wl\s+--priority\s+(\S+)$/);
-    return priorityMatch !== null && PRIORITY_MAP[priorityMatch[1]] !== undefined;
-  };
+  // `isWlViewCommand` is the module-level exported helper (see above); it
+  // recognises the stage/priority/dispatches view commands and the bare
+  // clear-filter `/wl`.
 
   // True when a command modifies the work-item data set (close, delete,
   // update, reviewed, search), warranting an immediate list refresh so the
@@ -5642,6 +5932,17 @@ export async function runWorklistTui(
       return;
     }
 
+    if (action === 'select' && prevMode === 'list' && state.detailItem?.isLogDerived) {
+      // Enter on a log-derived dispatch row (WL-0MUL2J15W00277XH): open the
+      // detail view immediately from the log metadata, then best-effort
+      // fetch the live item and upgrade in place when it still exists. A
+      // closed/deleted item keeps the log-derived metadata — never blank.
+      render();
+      await resolveDispatchDetail(state);
+      render();
+      return;
+    }
+
     if (action === 'select' && prevMode === 'detail') {
       cleanup();
       resolve(state.detailItem ?? undefined);
@@ -5899,10 +6200,12 @@ export async function runWorklistTui(
       codeFreezeAmbiguous,
       // Hover tooltip lines for the footer overlay (WL-0MT9XRZDK006GMUH).
       hoverTooltipLines,
-      // Sprint-complete banner state (parent WL-0MTHSHN5V008R5L0).
+      // Review-queue-depth banner state (parent WL-0MTHSHN5V008R5L0).
       sprintComplete,
       sprintCompletedCount,
       loadSettings().browseItemCount ?? opts.browseItemCount,
+      // Outstanding-audit flag driving the banner copy (AH-0MUDYTQ55002NUSJ).
+      sprintAuditsOutstanding,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

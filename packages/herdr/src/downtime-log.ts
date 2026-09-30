@@ -25,6 +25,8 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
+import type { CloseReasonSnapshot } from './pane-close.js';
+
 /** File name of the downtime dispatch audit log inside `.worklog/`. */
 export const DOWNTIME_LOG_FILE = 'downtime-dispatches.log';
 
@@ -89,6 +91,12 @@ export async function appendCoordinationLogEntry(
 /** Rolling bound: keep at most this many entries in the log file. */
 export const DOWNTIME_LOG_MAX_ENTRIES = 100;
 
+/** Default cap for `recentDispatchedItems` (WL-0MUL2IX6H001YHDO). */
+export const RECENT_DISPATCH_LIMIT = 20;
+
+/** Placeholder title for a log-derived row whose entry carried no title. */
+export const UNKNOWN_DISPATCH_TITLE = '[unknown]';
+
 // ── Pane-close lifecycle entries (WL-0MU308WSF0002JWN) ─────────────────
 
 /**
@@ -143,6 +151,12 @@ export interface PaneCloseLogEntry {
   reasonCode?: string;
   /** Whether the pane was actually closed (false for informational log-only). */
   closed: boolean;
+  /**
+   * Optional full close-decision state snapshot (parent AC6 /
+   * WL-0MUMM5M22006HDPY AC4.1). Absent on legacy entries — readers ignore
+   * unknown/absent fields.
+   */
+  reasonSnapshot?: CloseReasonSnapshot;
 }
 
 /**
@@ -217,6 +231,22 @@ export interface DowntimeLogEntry {
    * legacy/other entries.
    */
   reasonCode?: string;
+  /**
+   * Optional full close-decision state snapshot on a pane-close entry
+   * (parent AC6 / WL-0MUMM5M22006HDPY AC4.1). Absent on legacy/other entries.
+   */
+  reasonSnapshot?: CloseReasonSnapshot;
+  /**
+   * ISO-8601 timestamp of a pane-close entry (WL-0MU308WSF0002JWN). Absent on
+   * dispatch markers (which carry `dispatchedAt` instead) and legacy entries.
+   */
+  timestamp?: string;
+  /**
+   * Item title captured on a pane-close entry (WL-0MU308WSF0002JWN); parallels
+   * the dispatch marker's `title`. Absent on dispatch markers and legacy
+   * entries.
+   */
+  itemTitle?: string;
 }
 
 /**
@@ -293,6 +323,165 @@ export async function readCoordinationLogEntries(cwd: string): Promise<Coordinat
  */
 function isDispatchMarkerEntry(e: DowntimeLogEntry): boolean {
   return e.entryType === undefined;
+}
+
+/**
+ * One synthetic work-item row projected from the rolling dispatch log for the
+ * Herdr "recent dispatches" view (WL-0MUL2IX6H001YHDO, parent
+ * WL-0MUGLL9SS002E1D2). Rows are derived from the LOCAL log only — never from
+ * `wl list` — so an item that has since been auto-closed or deleted still
+ * appears with its id/title.
+ */
+export interface RecentDispatchRow {
+  /** Work item id the log entries refer to. */
+  itemId: string;
+  /** Title from the log; `[unknown]` when the log carried none. */
+  title: string;
+  /** Dispatch kind (plan/intake/audit/risk-effort/implement) when present. */
+  kind?: string;
+  /**
+   * Worklog stage the item reached, derived from the log: the dispatch
+   * marker's dispatched-at `stage`, overridden by a stage-advancing
+   * pane-close outcome (see `PANE_CLOSE_OUTCOME_STAGE`). Rendered through the
+   * same stage/audit icon logic as a live row so the dispatches view shows the
+   * SAME icons as every other view (WL-0MUGLL9SS002E1D2 audit fix). Unset when
+   * the log carried no usable stage.
+   */
+  stage?: string;
+  /**
+   * Audit verdict implied by an audit pane-close outcome
+   * (`audit-passed` → `true`, `audit-failed` → `false`). Unset for non-audit
+   * outcomes.
+   */
+  auditResult?: boolean;
+  /** Latest pane-close outcome, when a pane-close entry exists for the item. */
+  latestOutcome?: string;
+  /**
+   * ISO-8601 timestamp of the item's most recent log entry (dispatch marker
+   * `dispatchedAt`, or pane-close `timestamp`). `undefined` when no entry
+   * carried a parseable timestamp.
+   */
+  latestTimestamp?: string;
+}
+
+/**
+ * Stage a pane-close outcome indicates the item reached
+ * (WL-0MUGLL9SS002E1D2 audit fix). Outcomes that do not imply a canonical
+ * stage (`requires-attention`) are absent so the row keeps the marker's
+ * dispatched-at stage. `audit-passed`/`audit-failed` are audit-tier closes on
+ * `in_review` items, so they map to `in_review`.
+ */
+const PANE_CLOSE_OUTCOME_STAGE: Record<string, string> = {
+  'closed-as-intake-complete': 'intake_complete',
+  'closed-as-plan-complete': 'plan_complete',
+  'audit-passed': 'in_review',
+  'audit-failed': 'in_review',
+};
+
+/**
+ * Audit verdict implied by an audit pane-close outcome, or `undefined` for a
+ * non-audit outcome. Drives the audit-aware `in_review` icon so a log-derived
+ * audit row renders ✅/❌ exactly like a freshly audited live row.
+ */
+function paneCloseAuditResult(outcome: string | undefined): boolean | undefined {
+  if (outcome === 'audit-passed') return true;
+  if (outcome === 'audit-failed') return false;
+  return undefined;
+}
+
+/** Numeric sort key for a row timestamp; missing/unparseable sorts oldest. */
+function dispatchTimestampValue(ts: string | undefined): number {
+  if (ts === undefined) return Number.NEGATIVE_INFINITY;
+  const t = Date.parse(ts);
+  return Number.isNaN(t) ? Number.NEGATIVE_INFINITY : t;
+}
+
+/**
+ * Project the rolling dispatch log into up to `limit` recent dispatched
+ * work items (WL-0MUL2IX6H001YHDO). Reads the LOCAL log via the fail-safe
+ * `readDowntimeLogEntries(cwd)` — a missing/unreadable/empty/malformed log
+ * yields `[]` and this function never throws.
+ *
+ * Rows are deduplicated by work item id (one row per id), using that item's
+ * most recent log entry for ordering and metadata; pane-close lifecycle
+ * entries annotate an existing row's `latestOutcome`/timestamp (a pane-close
+ * for an item that was never dispatched does not create a row). Rows are
+ * ordered newest-first by their latest timestamp and capped at `limit`
+ * (default `RECENT_DISPATCH_LIMIT`). The projection is read-only.
+ */
+export async function recentDispatchedItems(
+  cwd: string,
+  limit: number = RECENT_DISPATCH_LIMIT,
+): Promise<RecentDispatchRow[]> {
+  const entries = await readDowntimeLogEntries(cwd);
+  const rows = new Map<string, RecentDispatchRow>();
+
+  for (const e of entries) {
+    if (typeof e.itemId !== 'string' || e.itemId.length === 0) continue;
+
+    if (e.entryType === 'pane-close') {
+      // Pane-close entries annotate an EXISTING dispatched row; they never
+      // introduce a row of their own (an item that was never dispatched is
+      // not a recent dispatch).
+      const row = rows.get(e.itemId);
+      if (row === undefined) continue;
+      if (typeof e.outcome === 'string' && e.outcome.length > 0) {
+        row.latestOutcome = e.outcome;
+        // A stage-advancing close overrides the dispatched-at stage so the
+        // row's stage icon reflects where the item ended up, not where it
+        // started (WL-0MUGLL9SS002E1D2 audit fix).
+        const reachedStage = PANE_CLOSE_OUTCOME_STAGE[e.outcome];
+        if (reachedStage !== undefined) {
+          row.stage = reachedStage;
+        }
+        const auditResult = paneCloseAuditResult(e.outcome);
+        if (auditResult !== undefined) {
+          row.auditResult = auditResult;
+        }
+      }
+      if (typeof e.timestamp === 'string' && e.timestamp.length > 0) {
+        row.latestTimestamp = e.timestamp;
+      }
+      // Backfill a placeholder title from the pane-close itemTitle.
+      if (
+        row.title === UNKNOWN_DISPATCH_TITLE &&
+        typeof e.itemTitle === 'string' &&
+        e.itemTitle.length > 0
+      ) {
+        row.title = e.itemTitle;
+      }
+      continue;
+    }
+
+    if (!isDispatchMarkerEntry(e)) continue; // future typed entries are not dispatch markers
+
+    const existing = rows.get(e.itemId);
+    const title =
+      typeof e.title === 'string' && e.title.length > 0
+        ? e.title
+        : existing?.title ?? UNKNOWN_DISPATCH_TITLE;
+    const kind = typeof e.kind === 'string' ? e.kind : existing?.kind;
+    const stage =
+      (typeof e.stage === 'string' && e.stage.length > 0 ? e.stage : undefined) ?? existing?.stage;
+    const latestTimestamp =
+      (typeof e.dispatchedAt === 'string' ? e.dispatchedAt : undefined) ?? existing?.latestTimestamp;
+
+    rows.set(e.itemId, {
+      itemId: e.itemId,
+      title,
+      kind,
+      stage,
+      auditResult: existing?.auditResult,
+      latestOutcome: existing?.latestOutcome,
+      latestTimestamp,
+    });
+  }
+
+  const list = [...rows.values()];
+  list.sort(
+    (a, b) => dispatchTimestampValue(b.latestTimestamp) - dispatchTimestampValue(a.latestTimestamp),
+  );
+  return list.slice(0, Math.max(0, limit));
 }
 
 /**

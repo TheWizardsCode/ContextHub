@@ -5,8 +5,9 @@
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, Comment, DependencyEdge, AuditResult } from './types.js';
+import { WorkItem, Comment, DependencyEdge, AuditResult, AuditWaiver } from './types.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
+import { assessAuditInvalidate, type AuditInvalidationVerdict } from '@worklog/shared/icons';
 
 /**
  * Info about a pending schema migration.
@@ -107,6 +108,14 @@ const REQUIRED_COLUMNS: RequiredColumn[] = [
     column: 'activityAt',
     ddl: 'ALTER TABLE workitems ADD COLUMN activityAt TEXT',
   },
+  // auditWaiver (WL-0MUBVH9FV0027COG): nullable JSON waiver record for the
+  // no-audit gate. Additive-only, nullable, and idempotent so older databases
+  // keep working; no sentinel (plain column check on workitems).
+  {
+    table: 'workitems',
+    column: 'auditWaiver',
+    ddl: 'ALTER TABLE workitems ADD COLUMN auditWaiver TEXT',
+  },
 ];
 
 // ── In-memory cache types (Phase 5) ────────────────────────────────
@@ -195,6 +204,32 @@ export function normalizeSqliteBindings(values: unknown[]): Array<number | strin
 export function unescapeText(s: string): string {
   const map: Record<string, string> = { '\\': '\\', n: '\n', t: '\t', r: '\r' };
   return s.replace(/\\(\\|n|t|r)/g, (_, c: string) => map[c]);
+}
+
+/**
+ * Parse the nullable JSON `auditWaiver` column into an {@link AuditWaiver}.
+ *
+ * Defensive: a missing/blank column or malformed JSON yields `null` (not
+ * waived) so a corrupt value can never accidentally suppress the no-audit
+ * gate (fail-safe). A value is only accepted when it carries a `reason`
+ * string; `author`/`waivedAt` are normalised to strings.
+ */
+export function parseAuditWaiver(value: unknown): AuditWaiver | null {
+  if (value === null || value === undefined || value === '') return null;
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    if (parsed && typeof parsed === 'object' && typeof (parsed as any).reason === 'string') {
+      const obj = parsed as any;
+      return {
+        reason: String(obj.reason),
+        author: obj.author === undefined || obj.author === null ? '' : String(obj.author),
+        waivedAt: obj.waivedAt === undefined || obj.waivedAt === null ? '' : String(obj.waivedAt),
+      };
+    }
+  } catch (_err) {
+    // fall through to null (fail-safe)
+  }
+  return null;
 }
 
 export class SqlitePersistentStore {
@@ -304,6 +339,7 @@ export class SqlitePersistentStore {
         githubIssueId INTEGER,
         githubIssueUpdatedAt TEXT
         ,needsProducerReview INTEGER NOT NULL DEFAULT 0
+        ,auditWaiver TEXT
        )
     `);
 
@@ -582,8 +618,8 @@ export class SqlitePersistentStore {
     // Use INSERT ... ON CONFLICT DO UPDATE to avoid triggering DELETE (which would cascade and remove comments)
     const stmt = this.db.prepare(`
       INSERT INTO workitems
-      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview, auditWaiver)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -606,7 +642,8 @@ export class SqlitePersistentStore {
         githubIssueNumber = excluded.githubIssueNumber,
         githubIssueId = excluded.githubIssueId,
         githubIssueUpdatedAt = excluded.githubIssueUpdatedAt,
-        needsProducerReview = excluded.needsProducerReview
+        needsProducerReview = excluded.needsProducerReview,
+        auditWaiver = excluded.auditWaiver
     `);
 
     // Normalize status to canonical hyphenated form on write (e.g. in_progress -> in-progress).
@@ -632,6 +669,9 @@ export class SqlitePersistentStore {
     const activityAtVal = item.activityAt && item.activityAt > item.updatedAt
       ? item.activityAt
       : item.updatedAt;
+    // The waiver is stored as a JSON object (machine-readable) in a single
+    // nullable column; absent = null = not waived (fail-safe).
+    const auditWaiverVal = item.auditWaiver ? JSON.stringify(item.auditWaiver) : null;
     const values: any[] = [
       item.id,
       titleVal,
@@ -656,6 +696,7 @@ export class SqlitePersistentStore {
       item.githubIssueId ?? null,
       item.githubIssueUpdatedAt ?? null,
       item.needsProducerReview ? 1 : 0,
+      auditWaiverVal,
     ];
 
     const normalized = normalizeSqliteBindings(values);
@@ -1361,6 +1402,62 @@ export class SqlitePersistentStore {
   }
 
   /**
+   * Smart audit re-instatement (WL-0MU1EWMHN000YUCG): decide whether a stored
+   * audit should be re-instated or re-run, and *automatically* re-instate it
+   * when the only change since the audit was non-semantic.
+   *
+   * A stale-by-timestamp audit whose stored content fingerprint still matches
+   * the item's current content fingerprint (supplied by the caller when it can
+   * compute one — description/ACs/Key Files + touched-file git state) is
+   * re-instated by resetting `updatedAt = auditedAt`, exactly like
+   * {@link saveAuditResult}. This keeps consumers that lack the current
+   * fingerprint (e.g. the `wl next` ordering path) from treating an unchanged
+   * audit as stale after comment/metadata/sync timestamp churn.
+   *
+   * Returns the {@link AuditInvalidationVerdict} so callers can act on a
+   * `re-audit` verdict (queue the item for re-audit) without a second read.
+   *
+   * Fail-safe: when there is no prior audit, or the content changed, or no
+   * fingerprints are available to prove the content is unchanged, the verdict
+   * is `re-audit` and nothing is written — an unchanged audit is never
+   * claimed without evidence.
+   *
+   * @param workItemId The work item whose audit is being reconciled.
+   * @param currentFingerprint The item's current content fingerprint, when the
+   *   caller can compute it. Omit when unavailable (verdict degrades to
+   *   `re-audit` for a stale timestamp gate).
+   * @returns The invalidation verdict.
+   */
+  reconcileAuditInvalidation(
+    workItemId: string,
+    currentFingerprint?: string | null,
+  ): AuditInvalidationVerdict {
+    const audit = this.getAuditResult(workItemId);
+    const item = this.getWorkItem(workItemId);
+    if (!audit || !item) return 're-audit';
+
+    const verdict = assessAuditInvalidate({
+      auditedAt: audit.auditedAt,
+      updatedAt: item.updatedAt,
+      fingerprint: audit.fingerprint,
+      currentFingerprint,
+    });
+
+    if (verdict === 'reinstate') {
+      // Atomic with the read decision: reset the content timestamp to the
+      // audit and keep activityAt >= it (same MAX pattern as saveAuditResult).
+      const updateWorkItemUpdatedAt = this.db.prepare(
+        `UPDATE workitems SET updatedAt = ?, activityAt = MAX(COALESCE(activityAt, ''), ?) WHERE id = ?`
+      );
+      updateWorkItemUpdatedAt.run(audit.auditedAt, audit.auditedAt, workItemId);
+      this.invalidateWorkItemCaches();
+      this.cacheInvalidate(`workitem_${workItemId}`);
+    }
+
+    return verdict;
+  }
+
+  /**
    * Get the audit result for a work item.
    * Returns null if no audit result exists.
    */
@@ -2051,6 +2148,7 @@ export class SqlitePersistentStore {
         githubIssueId: row.githubIssueId ?? undefined,
         githubIssueUpdatedAt: row.githubIssueUpdatedAt || undefined,
         needsProducerReview: Boolean(row.needsProducerReview),
+        auditWaiver: parseAuditWaiver(row.auditWaiver),
       };
     } catch (error) {
       console.error(`Error parsing work item ${row.id}:`, error);
@@ -2080,6 +2178,7 @@ export class SqlitePersistentStore {
         githubIssueId: row.githubIssueId ?? undefined,
         githubIssueUpdatedAt: row.githubIssueUpdatedAt || undefined,
         needsProducerReview: Boolean(row.needsProducerReview),
+        auditWaiver: parseAuditWaiver(row.auditWaiver),
       };
     }
   }

@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
 import type { AgentState } from './agent-tracker.js';
+import { isAuditFresh, type ParentAuditState } from '@worklog/shared/icons';
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -172,6 +173,12 @@ export interface WorkItem {
   fingerprint?: string | null;
   /** Current content fingerprint for the item, when the caller can compute it. */
   currentFingerprint?: string | null;
+  /**
+   * The direct parent's audit state, populated by the worklist render layer
+   * when nesting children so derived coverage can be computed at read time
+   * (WL-0MUBVH8QG0020H9L). Never persisted.
+   */
+  parentAudit?: ParentAuditState | null;
   /** Child work items (populated on expand). */
   children?: WorkItem[];
   /** Depth in hierarchy (0 = top-level, 1 = child, etc.). Used by renderer. */
@@ -184,6 +191,34 @@ export interface WorkItem {
    * render an icon; `done`/`unknown`/absent render none (WL-0MSBQUJQX005RAT9).
    */
   agentState?: AgentState;
+  /**
+   * True when the row is a synthetic, log-derived "recent dispatch" row
+   * rather than a live `wl` work item (WL-0MUL2IY8L009S3PQ). Synthetic rows
+   * have no live priority/risk/effort state; the renderer shows `—` for those
+   * fields and annotates the row with the dispatch metadata below. A stage
+   * (and, for an audit outcome, a fresh audit verdict) IS carried so the row
+   * renders the same stage/audit icons as the live views
+   * (WL-0MUGLL9SS002E1D2).
+   */
+  isLogDerived?: boolean;
+  /**
+   * True only for a log-derived row whose work item is absent from `wl` (so
+   * no live fields are available). Such rows render `—` for the absent
+   * priority/risk/effort/audit fields (WL-0MUL2IY8L009S3PQ). A log-derived
+   * row that was ENRICHED from the live item (`mergeDispatchRow`) leaves this
+   * unset, so it renders exactly like any other live row
+   * (WL-0MUGLL9SS002E1D2 audit fix).
+   */
+  isLogOnly?: boolean;
+  /**
+   * Dispatch kind carried by a log-derived row (plan/intake/audit/
+   * risk-effort/implement). Unset on live items (WL-0MUL2IY8L009S3PQ).
+   */
+  dispatchKind?: string;
+  /** Latest pane-close outcome carried by a log-derived row, when present. */
+  dispatchOutcome?: string;
+  /** ISO-8601 timestamp of the log-derived row's most recent log entry. */
+  dispatchedAt?: string;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -586,19 +621,33 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
  * `in-progress` while it is being re-worked after review feedback), so
  * restricting to `status=open` would hide the entire review queue. `open`
  * is included for robustness (no in_review item carries it today).
+ *
+ * plan_complete and intake_complete are also exceptions (WL-0MUIB7D30009KG00):
+ * after WL-0MTOHS5B4001Y9FX removed the in_progress stage, actively-worked
+ * items retain their pipeline stage (`plan_complete`/`intake_complete`) and
+ * only flip `status` to `in-progress`. Excluding `in-progress` from these
+ * stages would make actively-worked items invisible in their corresponding
+ * stage-filtered worklists.
  */
 const STAGE_STATUS: Record<string, string> = {
   in_review: 'completed,in-progress,open',
+  plan_complete: 'open,in-progress',
+  intake_complete: 'open,in-progress',
 };
 
 /**
  * Fetch work items filtered by stage (via `wl list`).
- * Status per stage (WL-0MSKCRX730052IIW): the in_review stage fetches items
- * with status `completed`, `in-progress`, or `open` — in_review items carry
- * `completed`/`in-progress` status per the project workflow. All other
- * stages fetch open items only (WL-0MSDT8X1V003206G): items with status
- * `blocked`, `in-progress`, or `completed` are excluded even when their
- * stage matches.
+ * Status per stage:
+ * - `in_review` (WL-0MSKCRX730052IIW): `completed`, `in-progress`, `open` —
+ *   in_review items carry `completed`/`in-progress` status per the project
+ *   workflow.
+ * - `plan_complete` / `intake_complete` (WL-0MUIB7D30009KG00): `open`,
+ *   `in-progress` — actively-worked items retain their pipeline stage and
+ *   flip `status` to `in-progress` (WL-0MTOHS5B4001Y9FX removed the
+ *   in_progress stage).
+ * - All other stages: `open` only (WL-0MSDT8X1V003206G): items with status
+ *   `blocked`, `in-progress`, or `completed` are excluded even when their
+ *   stage matches.
  * Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
  * child items; children remain reachable via expand (wl list --parent).
  * Results are regrouped priority-first (WL-0MSOPHLD1000EWNN): priority
@@ -678,26 +727,65 @@ export async function runWlSync(): Promise<{ success: boolean; error?: string }>
 }
 
 /**
- * Count completed + in_review work items (root-only) for the sprint-complete
- * check (parent WL-0MTHSHN5V008R5L0). Returns the count, or undefined on
- * failure — callers treat undefined as "unknown" and must NOT auto-disable
- * on a query failure (fail-closed, AC1).
+ * Review-queue state for the footer banner (AH-0MUDYTQ55002NUSJ): the
+ * root-only completed/in_review count plus whether at least one of those
+ * items still has an OUTSTANDING audit (no stored audit, or a stored audit
+ * that is not current per `isAuditFresh`).
+ */
+export interface ReviewQueueState {
+  /** Number of root-level completed/in_review items. */
+  count: number;
+  /** True when any of those items lacks a current (fresh) audit. */
+  auditsOutstanding: boolean;
+}
+
+/**
+ * Fetch the review-queue state (root-only completed/in_review items) for
+ * the sprint-complete / queue-depth banner (parent WL-0MTHSHN5V008R5L0;
+ * banner copy selection AH-0MUDYTQ55002NUSJ). Returns the count and whether
+ * an outstanding audit remains, or undefined on failure — callers treat
+ * undefined as "unknown" and leave state unchanged (fail-closed, AC1).
  *
  * Uses `wl list --status completed --stage in_review --root-only --json`
- * and counts the resulting items. A CLI error or unparseable output
- * resolves to undefined (never throws).
+ * (the same query as the former `fetchCompletedItemCount`). "Outstanding
+ * audit" reuses the shared `isAuditFresh` predicate: a missing `auditedAt`
+ * or a stored audit that is not current counts as outstanding; a fresh
+ * audit (passed or failed) does not. `wl list --json` does not expose
+ * `currentFingerprint`, so the predicate degrades to the 60 s time gate for
+ * these items — the same semantics the audit-dispatch tier uses for a
+ * non-hydrated list (AC3). A CLI error or unparseable output resolves to
+ * undefined (never throws).
+ *
+ * Root-only is intentional (WL-0MSTLFW14000KPEC): children are not counted as
+ * independent review-queue entries — a completed/in_review child is covered by
+ * its parent's audit (derived at read time for display, WL-0MUBVH8QG0020H9L)
+ * and is never dispatched for audit independently.
  */
-export async function fetchCompletedItemCount(): Promise<number | undefined> {
+export async function fetchReviewQueueState(): Promise<ReviewQueueState | undefined> {
   try {
     const output = await runWl(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']);
     const payload = extractJson(output);
     const items = extractItems(payload);
-    return items.length;
+    const auditsOutstanding = items.some((item) =>
+      !isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint),
+    );
+    return { count: items.length, auditsOutstanding };
   } catch {
-    // Fail-closed: a query failure means we cannot determine completion status
-    // — the conservative default is to NOT auto-disable (AC1).
+    // Fail-closed: a query failure means we cannot determine queue state
+    // — the conservative default is to leave the banner state unchanged (AC1).
     return undefined;
   }
+}
+
+/**
+ * Count completed + in_review work items (root-only) for the sprint-complete
+ * check (parent WL-0MTHSHN5V008R5L0). Returns the count, or undefined on
+ * failure. Thin wrapper over {@link fetchReviewQueueState}, retained for
+ * existing callers.
+ */
+export async function fetchCompletedItemCount(): Promise<number | undefined> {
+  const state = await fetchReviewQueueState();
+  return state?.count;
 }
 
 /**
@@ -712,6 +800,11 @@ export async function fetchCompletedItemCount(): Promise<number | undefined> {
  * Results are regrouped priority-first (WL-0MSOPHLD1000EWNN): priority
  * bucket sections, then stage, then id — same ordering as the default
  * worklist.
+ *
+ * The returned children are NOT enriched with parent-audit state here; the
+ * worklist render layer does that at read time (withParentAudit) when it
+ * nests a child under its parent, so derived coverage
+ * (WL-0MUBVH8QG0020H9L) never leaks into the fetch/model layer.
  */
 export async function fetchChildrenForItem(parentId: string, depth = 1): Promise<WorkItem[]> {
   const output = await runWl(['list', '--parent', parentId]);

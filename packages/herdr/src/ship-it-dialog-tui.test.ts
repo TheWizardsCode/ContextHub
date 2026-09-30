@@ -370,14 +370,30 @@ describe('Ship It shortcut (S) — typed confirmation dialog (WL-0MSGG5N5Z0074TL
   });
 
   it('shows the S ship-it shortcut in the dynamic footer hints', async () => {
-    const p = startTui(() => {}, [makeItem('WL-TEST-1', 'plan_complete')], { showHelpText: true });
-    await tick();
+    // Render in a wide pane: the footer wrap guard (WL-0MTV979LK005YB1B)
+    // truncates an over-long help line to the pane width, so at the default
+    // 80 cols the trailing hints would be clipped. A wide pane keeps the
+    // full help line visible and tests the shortcut's presence, not its
+    // truncation (which has its own coverage in worklist.test.ts).
+    const colDesc = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+    const rowDesc = Object.getOwnPropertyDescriptor(process.stdout, 'rows');
+    Object.defineProperty(process.stdout, 'columns', { value: 200, configurable: true });
+    Object.defineProperty(process.stdout, 'rows', { value: 40, configurable: true });
+    try {
+      const p = startTui(() => {}, [makeItem('WL-TEST-1', 'plan_complete')], { showHelpText: true });
+      await tick();
 
-    const out = stripAnsi(lastRender());
-    expect(out).toContain('S:ship it');
-    expect(out).toContain('s:Search');
+      const out = stripAnsi(lastRender());
+      expect(out).toContain('S:ship it');
+      expect(out).toContain('s:Search');
 
-    dataHandler?.(Buffer.from('q'));
-    await p;
+      dataHandler?.(Buffer.from('q'));
+      await p;
+    } finally {
+      if (colDesc) Object.defineProperty(process.stdout, 'columns', colDesc);
+      else delete (process.stdout as any).columns;
+      if (rowDesc) Object.defineProperty(process.stdout, 'rows', rowDesc);
+      else delete (process.stdout as any).rows;
+    }
   });
 });

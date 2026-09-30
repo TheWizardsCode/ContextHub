@@ -5,7 +5,7 @@
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, Comment, DependencyEdge, AuditResult } from './types.js';
+import { WorkItem, Comment, DependencyEdge, AuditResult, AuditWaiver } from './types.js';
 import { listPendingMigrations } from './migrations/index.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 
@@ -85,6 +85,30 @@ export function normalizeSqliteBindings(values: unknown[]): Array<number | strin
 export function unescapeText(s: string): string {
   const map: Record<string, string> = { '\\': '\\', n: '\n', t: '\t', r: '\r' };
   return s.replace(/\\(\\|n|t|r)/g, (_, c: string) => map[c]);
+}
+
+/**
+ * Parse the nullable JSON `auditWaiver` column into an {@link AuditWaiver}.
+ *
+ * Defensive: missing/blank/malformed values yield `null` (not waived) so a
+ * corrupt column can never suppress the no-audit gate (WL-0MUBVH9FV0027COG).
+ */
+export function parseAuditWaiver(value: unknown): AuditWaiver | null {
+  if (value === null || value === undefined || value === '') return null;
+  try {
+    const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+    if (parsed && typeof parsed === 'object' && typeof (parsed as any).reason === 'string') {
+      const obj = parsed as any;
+      return {
+        reason: String(obj.reason),
+        author: obj.author === undefined || obj.author === null ? '' : String(obj.author),
+        waivedAt: obj.waivedAt === undefined || obj.waivedAt === null ? '' : String(obj.waivedAt),
+      };
+    }
+  } catch (_err) {
+    // fall through to null (fail-safe)
+  }
+  return null;
 }
 
 export class SqlitePersistentStore {
@@ -179,6 +203,7 @@ export class SqlitePersistentStore {
         githubIssueId INTEGER,
         githubIssueUpdatedAt TEXT
         ,needsProducerReview INTEGER NOT NULL DEFAULT 0
+        ,auditWaiver TEXT
        )
     `);
 
@@ -351,8 +376,8 @@ export class SqlitePersistentStore {
     // Use INSERT ... ON CONFLICT DO UPDATE to avoid triggering DELETE (which would cascade and remove comments)
     const stmt = this.db.prepare(`
       INSERT INTO workitems
-      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview, auditWaiver)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -375,7 +400,8 @@ export class SqlitePersistentStore {
         githubIssueNumber = excluded.githubIssueNumber,
         githubIssueId = excluded.githubIssueId,
         githubIssueUpdatedAt = excluded.githubIssueUpdatedAt,
-        needsProducerReview = excluded.needsProducerReview
+        needsProducerReview = excluded.needsProducerReview,
+        auditWaiver = excluded.auditWaiver
     `);
 
     // Normalize status to canonical hyphenated form on write (e.g. in_progress -> in-progress).
@@ -399,6 +425,7 @@ export class SqlitePersistentStore {
     const activityAtVal = item.activityAt && item.activityAt > item.updatedAt
       ? item.activityAt
       : item.updatedAt;
+    const auditWaiverVal = item.auditWaiver ? JSON.stringify(item.auditWaiver) : null;
     const values: any[] = [
       item.id,
       titleVal,
@@ -423,6 +450,7 @@ export class SqlitePersistentStore {
       item.githubIssueId ?? null,
       item.githubIssueUpdatedAt ?? null,
       item.needsProducerReview ? 1 : 0,
+      auditWaiverVal,
     ];
 
     const normalized = normalizeSqliteBindings(values);
@@ -1548,6 +1576,7 @@ export class SqlitePersistentStore {
         githubIssueId: row.githubIssueId ?? undefined,
         githubIssueUpdatedAt: row.githubIssueUpdatedAt || undefined,
         needsProducerReview: Boolean(row.needsProducerReview),
+        auditWaiver: parseAuditWaiver(row.auditWaiver),
       };
     } catch (error) {
       console.error(`Error parsing work item ${row.id}:`, error);
@@ -1577,6 +1606,7 @@ export class SqlitePersistentStore {
         githubIssueId: row.githubIssueId ?? undefined,
         githubIssueUpdatedAt: row.githubIssueUpdatedAt || undefined,
         needsProducerReview: Boolean(row.needsProducerReview),
+        auditWaiver: parseAuditWaiver(row.auditWaiver),
       };
     }
   }

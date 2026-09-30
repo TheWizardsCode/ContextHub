@@ -5,9 +5,13 @@
 import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, DemotedParent, RevertedItem } from './types.js';
+import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, AuditWaiver, DemotedParent, RevertedItem } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
+// Self-referencing package export (WL-0MSJ4BT4Z002HH9B grep guard forbids a
+// relative `icons.js` import; `@worklog/shared/icons` is the canonical path
+// even from within the shared package).
+import { isAuditFresh, type AuditInvalidationVerdict } from '@worklog/shared/icons';
 
 /**
  * Return the later of two ISO-8601 timestamps (undefined/null-safe).
@@ -649,16 +653,21 @@ export class WorklogDatabase {
   }
 
   /**
-   * Freshness rule (WL-0MTH7G2O1004BHN5): only audits with `auditedAt >= updatedAt`
-   * qualify for the audit-not-ready boost. Stale audits (edited after the last
-   * audit) are treated as no audit for ordering. Only `readyToClose === false`
-   * qualifies; `true` or absent audits receive no boost. Critical items are
-   * never boosted past by the audit tier (hard boundary).
+   * Ordering-tier gate (WL-0MTH7G2O1004BHN5): only an audit that exists,
+   * is not ready to close (`readyToClose === false`), and is fresh per the
+   * shared `isAuditFresh` predicate qualifies for the audit-not-ready boost.
+   * Stale audits (content edited more than the 60 s at-or-near tolerance
+   * after the audit) are treated as no audit for ordering. The timestamp
+   * comparison is delegated to the single source of
+   * truth in `@worklog/shared/icons` (WL-0MUBVH7ZR009PP80) — no competing
+   * `auditedAt`-vs-`updatedAt` comparison lives here. No fingerprints are
+   * passed: the ordering path has no per-item current fingerprint, so the
+   * shared helper applies its time-gate fallback. Critical items are never
+   * boosted past by the audit tier (hard boundary, enforced by callers).
    */
   private isAuditNotReadyFresh(audit: AuditResult | null | undefined, itemUpdatedAt: string | undefined): boolean {
     if (!audit || audit.readyToClose) return false;
-    if (!itemUpdatedAt || !audit.auditedAt) return false;
-    return new Date(audit.auditedAt).getTime() >= new Date(itemUpdatedAt).getTime();
+    return isAuditFresh(audit.auditedAt, itemUpdatedAt);
   }
 
   /**
@@ -1054,6 +1063,28 @@ export class WorklogDatabase {
   }
 
   /**
+   * Decide whether a stored audit is fresh, should be re-instated, or must be
+   * re-run — and automatically re-instate it when the only change since the
+   * audit was non-semantic (WL-0MU1EWMHN000YUCG).
+   *
+   * Delegates to {@link SqlitePersistentStore.reconcileAuditInvalidation}, so
+   * the automatic `updatedAt = auditedAt` reset and the decision live in the
+   * store. Callers that can compute the item's current content fingerprint
+   * pass it in; callers without git access omit it and get a fail-safe
+   * `re-audit` verdict for any timestamp-stale audit.
+   *
+   * @param workItemId The work item whose audit is being reconciled.
+   * @param currentFingerprint The item's current content fingerprint, when known.
+   * @returns The invalidation verdict (`fresh` | `reinstate` | `re-audit`).
+   */
+  reconcileAuditInvalidation(
+    workItemId: string,
+    currentFingerprint?: string | null,
+  ): AuditInvalidationVerdict {
+    return this.store.reconcileAuditInvalidation(workItemId, currentFingerprint);
+  }
+
+  /**
    * Get the audit result for a work item.
    * Returns null if no audit result exists.
    */
@@ -1066,6 +1097,56 @@ export class WorklogDatabase {
    */
   deleteAuditResult(workItemId: string): boolean {
     return this.store.deleteAuditResult(workItemId);
+  }
+
+  /**
+   * Record an explicit, durable audit-gap waiver on a work item
+   * (WL-0MUBVH9FV0027COG).
+   *
+   * The waiver is persisted in the nullable `workitems.auditWaiver` JSON
+   * column, surfaced by `wl show --json`, and round-trips through JSONL sync.
+   * `updatedAt` is bumped so delta sync exports the change; a waiver is an
+   * audit-relevant state change, so a previously fresh audit becomes stale —
+   * the waiver still wins in {@link classifyAuditGap}, so the item is not
+   * flagged.
+   *
+   * @returns the updated item, or `null` when the id does not exist.
+   */
+  setAuditWaiver(id: string, waiver: AuditWaiver): WorkItem | null {
+    const item = this.store.getWorkItem(id);
+    if (!item) return null;
+    const now = new Date().toISOString();
+    const updated: WorkItem = {
+      ...item,
+      auditWaiver: {
+        reason: waiver.reason,
+        author: waiver.author ?? '',
+        waivedAt: waiver.waivedAt || now,
+      },
+      updatedAt: now,
+    };
+    this.store.saveWorkItem(updated);
+    this.store.upsertFtsEntry(updated);
+    this.triggerAutoSync();
+    return updated;
+  }
+
+  /**
+   * Remove an explicit audit-gap waiver from a work item. Idempotent: an
+   * item that is not waived is returned unchanged (no write).
+   *
+   * @returns the updated item, or `null` when the id does not exist.
+   */
+  clearAuditWaiver(id: string): WorkItem | null {
+    const item = this.store.getWorkItem(id);
+    if (!item) return null;
+    if (!item.auditWaiver) return item;
+    const now = new Date().toISOString();
+    const updated: WorkItem = { ...item, auditWaiver: null, updatedAt: now };
+    this.store.saveWorkItem(updated);
+    this.store.upsertFtsEntry(updated);
+    this.triggerAutoSync();
+    return updated;
   }
 
   /**

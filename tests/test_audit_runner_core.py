@@ -29,6 +29,12 @@ PI_SKILLS_ROOT = Path("/home/rgardler/.pi/agent/skills")
 if str(PI_SKILLS_ROOT) not in sys.path:
     sys.path.insert(0, str(PI_SKILLS_ROOT))
 
+# Ensure the parent of the skill package is on sys.path for skill.scripts.* imports
+# (e.g. skill.scripts.failure_notice — needed by test_parses_with_wrapped_failure_notice)
+SKILL_PARENT = Path("/home/rgardler/projects/SorraAgents")
+if str(SKILL_PARENT) not in sys.path:
+    sys.path.insert(0, str(SKILL_PARENT))
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

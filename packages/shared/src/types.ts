@@ -25,6 +25,23 @@ export interface AuditResult {
 }
 
 /**
+ * Explicit, durable audit-gap waiver (WL-0MUBVH9FV0027COG).
+ *
+ * Records that a producer deliberately accepted an item reaching
+ * `completed`/`in_review` without a fresh audit. A waiver suppresses the
+ * closure warning and excludes the item from the `wl doctor audit-gaps`
+ * flagged set. Absence is fail-safe: it never suppresses a flag.
+ */
+export interface AuditWaiver {
+  /** Why the audit gap was deliberately accepted (free text). */
+  reason: string;
+  /** Who recorded the waiver (identity / agent name). */
+  author: string;
+  /** ISO 8601 timestamp when the waiver was recorded. */
+  waivedAt: string;
+}
+
+/**
  * JSONL dependency edge representation
  */
 export interface WorkItemDependency {
@@ -81,6 +98,12 @@ export interface WorkItem {
   githubIssueUpdatedAt?: string;
   // Indicates whether the item needs a Producer to review/sign-off. Default: false
   needsProducerReview?: boolean;
+  /**
+   * Explicit audit-gap waiver (WL-0MUBVH9FV0027COG). Null/absent means
+   * "not waived"; a waiver exempts the item from the no-audit closure guard
+   * and the `audit-gaps` report's flagged set.
+   */
+  auditWaiver?: AuditWaiver | null;
 }
 
 /**
@@ -131,6 +154,13 @@ export interface UpdateWorkItemInput {
   effort?: WorkItemEffortLevel | '';
   /** When present, sets the needsProducerReview flag */
   needsProducerReview?: boolean;
+  /**
+   * Explicit audit-gap waiver (WL-0MUBVH9FV0027COG). Set to an
+   * `AuditWaiver` to waive, or `null` to clear. Prefer the dedicated
+   * `WorklogDatabase.setAuditWaiver`/`clearAuditWaiver` helpers so the
+   * audit-relevant timestamp is updated atomically.
+   */
+  auditWaiver?: AuditWaiver | null;
   /**
    * CAS guard (compare-and-swap claim, RCA WL-0MSRBFFLN005W3VT design point 1):
    * when present, the update only applies if the item's CURRENT status matches

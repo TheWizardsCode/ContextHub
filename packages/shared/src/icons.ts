@@ -19,6 +19,8 @@
  * No external dependencies — pure data + functions.
  */
 
+import type { AuditWaiver } from './types.js';
+
 // ── Options ───────────────────────────────────────────────────────────
 
 export interface IconOptions {
@@ -103,6 +105,13 @@ const AUDIT_UNKNOWN = '\u{2753}';     // ❓
 
 const AUDIT_STALE_PASSED = '\u{23F3}';  // ⏳
 const AUDIT_STALE_FAILED = '\u{26A0}';   // ⚠️
+
+/**
+ * Text fallback for the derived child-coverage indicator (`noIcons` mode) so
+ * a covered child is never silently dropped from the list row
+ * (WL-0MUBVH8QG0020H9L).
+ */
+const AUDIT_COVERED_FALLBACK = '[COVERED]';
 
 const NEEDS_REVIEW_ICON = '\u{274C}';  // ❌
 const REVIEW_DONE_ICON = '\u{2705}';    // ✅
@@ -259,17 +268,33 @@ export function needsProducerReviewIcon(
 // ── Audit freshness ───────────────────────────────────────────────────
 
 /**
- * Named tolerance (ms) for treating an audit as fresh when `auditedAt` and
- * `updatedAt` are within the same atomic persistence window.  Covers the
- * just-persisted case where `auditedAt ≈ updatedAt` (delta well under 1 s)
- * as well as brief comment-only bumps that stay within the 60 s window.
+ * Named tolerance (ms) for treating an audit as fresh when `auditedAt` is at
+ * or near `updatedAt`. Covers the just-persisted case where
+ * `auditedAt ≈ updatedAt` (delta well under 1 s) and allows for a brief
+ * content edit shortly *before* the audit is persisted (delta slightly
+ * positive) — see {@link isAuditFresh} for the one-sided comparison.
  *
- * Single source of truth: the icon path (`stageDisplayIcon` / `auditIcon`) and
- * the audit-dispatch path (`selectAuditCandidate` / `classifyItemForDispatch`)
- * both import this predicate — no competing comparison is added anywhere.
- * (WL-0MSIAOFI70075REE)
+ * Single source of truth: the icon path (`stageDisplayIcon` / `auditIcon`), the
+ * audit-dispatch path (`selectAuditCandidate` / `classifyItemForDispatch`) and
+ * the ordering path (`sortItemsByScore` / `computeScore` /
+ * `compareAuditNotReadyTier` via `isAuditNotReadyFresh`) all import this
+ * predicate — no competing `auditedAt`-vs-`updatedAt` comparison exists
+ * anywhere (WL-0MSIAOFI70075REE, WL-0MUBVH7ZR009PP80).
  */
 export const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 60000;
+
+/**
+ * The direct parent's audit state, supplied to the display helpers to derive
+ * child coverage at read time (WL-0MUBVH8QG0020H9L). Mirrors the audit
+ * freshness inputs consumed by {@link isAuditFresh}; no new persisted state.
+ */
+export interface ParentAuditState {
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  updatedAt?: string;
+  fingerprint?: string | null;
+  currentFingerprint?: string | null;
+}
 
 /**
  * Determine whether an audit result is fresh (not stale).
@@ -280,8 +305,26 @@ export const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 60000;
  * regardless of `updatedAt` movement caused by comments, sync merges, or
  * lifecycle transitions.
  *
- * Fallback (legacy time gate): When the stored fingerprint is absent, the
- * existing 60 s floor (`AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS`) is used.
+ * Fallback (legacy time gate): When the stored fingerprint is absent, an
+ * audit is fresh unless the item's content was updated after the audit by
+ * more than `AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS` — fresh iff
+ * `auditedAt > updatedAt - tolerance` (i.e. delta = `auditedAt - updatedAt`
+ * is greater than -60 s). This is the long-standing ContextHub currency
+ * predicate (WL-0MSIAOFI70075REE), restored as the single comparison shared
+ * by the icon, dispatch and ordering paths (WL-0MUBVH7ZR009PP80). It is
+ * deliberately one-sided: an audit at or AFTER `updatedAt` is always fresh
+ * (it covers the content, even if it is far in the future), while an audit
+ * that precedes a later content edit is stale once the gap exceeds the
+ * tolerance.
+ *
+ * The SorraAgents runner uses a different, stricter gate for its
+ * pipeline-reuse decision (`auditedAt > updatedAt + 60 s`, plus a 30 s
+ * reverse persistence window; SA-0MRJBEJGY0095XAY, patched by
+ * SA-0MSI3XH34001LLU4 / SA-0MTHC710X003ORZM). That gate answers "is it safe
+ * to skip re-auditing?" and rejects audits that are only slightly newer than
+ * the update; it must not be conflated with this currency predicate. A
+ * symmetric or `updatedAt + 60 s` form would wrongly mark a valid,
+ * clearly-newer audit as stale and trigger redundant re-audits.
  *
  * Guarantees:
  *   • `updatedAt` churn alone (post-audit comment, sync merge re-timestamp,
@@ -296,9 +339,10 @@ export const AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS = 60000;
  * Atomic freshness (WL-0MT8KTE3E001Q1D9 / WL-0MTHRW3770014H51): `saveAuditResult`
  * (and therefore `wl audit-set` and `wl update --audit-text`) atomically sets
  * `updatedAt = auditedAt` in the same transaction that writes the
- * `audit_results` row. Subsequent comments do bump `updatedAt`, but the
- * fingerprint gate keeps fingerprinted audits fresh, and the legacy time gate
- * keeps non-fingerprinted audits fresh within the 60 s window.
+ * `audit_results` row. Subsequent comments bump `activityAt`, not
+ * `updatedAt`, so they never invalidate a legacy audit; the time gate keeps
+ * non-fingerprinted audits fresh within the 60 s window after a content
+ * edit.
  * The audit record in `audit_results` is the canonical source of truth;
  * audit-content comments are deprecated and not consumed by any flow
  * (ship/heartbeat/TUI/implement).
@@ -311,7 +355,7 @@ export function isAuditFresh(
 ): boolean {
   if (!auditedAt || !updatedAt) return false;
 
-  // ── Primary gate: content-fingerprint match ───────────────────────────
+  // ── Primary gate: content-fingerprint match ──────────────────────────
   // Only usable when BOTH fingerprints are present. A match → fresh
   // regardless of updatedAt; a mismatch → stale (content changed). When
   // either side is unavailable the gate degrades to the legacy time floor
@@ -320,11 +364,181 @@ export function isAuditFresh(
     return storedFingerprint === currentFingerprint;
   }
 
-  // ── Fallback: legacy 60 s time gate ───────────────────────────────────
+  // ── Fallback: legacy 60 s time gate ──────────────────────────────
   const auditTime = new Date(auditedAt).getTime();
   const updateTime = new Date(updatedAt).getTime();
   if (isNaN(auditTime) || isNaN(updateTime)) return false;
+  // One-sided at-or-near: fresh unless the item's content was updated more
+  // than the tolerance AFTER the audit (delta <= -tolerance is stale). An
+  // audit at or after `updatedAt` is always fresh.
   return auditTime > updateTime - AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS;
+}
+
+// ── Smart audit re-instatement (WL-0MU1EWMHN000YUCG) ──────────────────
+
+/**
+ * Verdict returned by {@link assessAuditInvalidate} for a stored audit.
+ *
+ * - `fresh`      — the audit is current by the timestamp gate; no action.
+ * - `reinstate`  — the timestamp gate is stale, but the audit's stored
+ *                  content fingerprint matches the item's current content, so
+ *                  the audit still covers the item and is re-instated by
+ *                  resetting `updatedAt = auditedAt` (the `saveAuditResult`
+ *                  pattern). No re-run is required.
+ * - `re-audit`   — the content changed (fingerprint mismatch) or cannot be
+ *                  proven unchanged (no fingerprints); the audit must be
+ *                  re-run (existing fail-safe behaviour).
+ */
+export type AuditInvalidationVerdict = 'fresh' | 'reinstate' | 're-audit';
+
+/**
+ * Inputs for {@link assessAuditInvalidate}. Mirrors the freshness inputs of
+ * {@link isAuditFresh} so the two decisions stay aligned on one comparison.
+ */
+export interface AuditInvalidationInput {
+  /** Timestamp the audit was persisted. Missing → no prior audit. */
+  auditedAt?: string | null;
+  /** The item's current content timestamp (`updatedAt`). */
+  updatedAt?: string;
+  /** The content fingerprint stored with the audit, when present. */
+  fingerprint?: string | null;
+  /**
+   * The item's current content fingerprint, when the caller can compute it
+   * (description/ACs/Key Files + touched-file git state, per the audit skill).
+   * Callers without git access may omit it; the verdict then fails safe to
+   * `re-audit` when the timestamp gate is stale.
+   */
+  currentFingerprint?: string | null;
+}
+
+/**
+ * Decide whether a stored audit is fresh, should be re-instated, or must be
+ * re-run — the "smart re-instatement" used when the timestamp gate flags an
+ * audit as stale (WL-0MU1EWMHN000YUCG).
+ *
+ * The timestamp comparison is delegated to the single shared
+ * {@link isAuditFresh} predicate (its fingerprint-less time-gate path); no
+ * competing `auditedAt`-vs-`updatedAt` comparison is introduced here
+ * (WL-0MUBVH7ZR009PP80). The distinction from {@link isAuditFresh} is
+ * deliberate: this helper answers the *action* question (re-instate vs
+ * re-run) using the **timestamp gate** as the staleness trigger, then uses the
+ * content fingerprint to prove the change was non-semantic. An audit whose
+ * fingerprint matches is fresh to {@link isAuditFresh} regardless of
+ * `updatedAt`, so without this reconciliation a consumer that lacks the
+ * current fingerprint (e.g. the ordering path) would still treat the item as
+ * stale.
+ *
+ * Rules:
+ *   1. No prior audit (`auditedAt` missing) → `re-audit` (unchanged
+ *      no-audit behaviour; there is nothing to re-instate).
+ *   2. Timestamp gate fresh → `fresh` (no action).
+ *   3. Timestamp-stale but `fingerprint === currentFingerprint` → `reinstate`
+ *      (description/comments/dependency/commit churn that did not change the
+ *      audited content).
+ *   4. Otherwise → `re-audit` (content changed, or no fingerprints to prove
+ *      it did not — fail-safe, never claim an unchanged audit).
+ */
+export function assessAuditInvalidate(
+  input: AuditInvalidationInput,
+): AuditInvalidationVerdict {
+  const { auditedAt, updatedAt, fingerprint, currentFingerprint } = input;
+  // 1. No prior audit → must run (preserve existing no-audit behaviour).
+  if (!auditedAt) return 're-audit';
+  // 2. Fresh by the shared timestamp gate → nothing to do. Delegates to
+  //    isAuditFresh's fingerprint-less path so there is exactly one
+  //    auditedAt/updatedAt comparison in the codebase.
+  if (isAuditFresh(auditedAt, updatedAt)) return 'fresh';
+  // 3. Stale by timestamp but the audited content is unchanged → re-instate.
+  //    Both fingerprints must be present: a missing either side is not proof
+  //    of equality (fail-safe, mirrors isAuditFresh's primary gate).
+  if (fingerprint && currentFingerprint && fingerprint === currentFingerprint) {
+    return 'reinstate';
+  }
+  // 4. Content changed or unprovable → re-run.
+  return 're-audit';
+}
+
+/**
+ * Derived child coverage (WL-0MUBVH8QG0020H9L): a child (`parentId` set) is
+ * covered iff its DIRECT parent (depth 1 only) has a fresh audit, decided by
+ * the single shared {@link isAuditFresh} predicate over the parent's
+ * `auditedAt`/`updatedAt`/`fingerprint`/`currentFingerprint`. That predicate
+ * is the only freshness comparison in the codebase — this helper must never
+ * introduce a competing `auditedAt` vs `updatedAt` check
+ * (WL-0MUBVH7ZR009PP80).
+ *
+ * Coverage is derived at read time for DISPLAY only; nothing is persisted,
+ * there is no `audit_results` coverage column, and no schema migration. The
+ * audit-dispatch path stays root-only (WL-0MSTLFW14000KPEC), so a covered
+ * child is never dispatched independently.
+ *
+ * Returns `false` for a root item (no `parentId`) or when the parent audit
+ * state is unavailable (fail-safe: never claim covered without evidence).
+ */
+export function isCoveredByParent(
+  item: { parentId?: string | null },
+  parent: ParentAuditState | null | undefined,
+): boolean {
+  if (!item.parentId || !parent) return false;
+  return isAuditFresh(parent.auditedAt, parent.updatedAt, parent.fingerprint, parent.currentFingerprint);
+}
+
+/**
+ * Classification of an item against the no-audit gate
+ * (WL-0MUBVH9FV0027COG).
+ *
+ * - `none` — no gap: the item's own audit is fresh.
+ * - `covered` — child with no fresh own audit whose DIRECT parent has a fresh
+ *   audit (derived depth-1 coverage, WL-0MUBVH8QG0020H9L).
+ * - `waived` — an explicit, durable waiver is recorded (takes precedence).
+ * - `uncovered` — the item is a genuine audit gap and must be flagged.
+ */
+export type AuditGapStatus = 'none' | 'covered' | 'waived' | 'uncovered';
+
+/**
+ * Inputs for {@link classifyAuditGap}. All freshness decisions are delegated
+ * to the single shared {@link isAuditFresh} predicate (via the direct own-audit
+ * fields and {@link isCoveredByParent}) — no competing `auditedAt` vs
+ * `updatedAt` comparison may be introduced here.
+ */
+export interface AuditGapInput {
+  /** The item's own audit state (from the `audit_results` table), if any. */
+  ownAudit?: { auditedAt?: string | null; fingerprint?: string | null } | null;
+  /** The item's audit-relevant content timestamp. */
+  updatedAt?: string;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
+  /** The item's direct parent id (`null` for a root item). */
+  parentId?: string | null;
+  /** The explicit waiver recorded on the item, if any. */
+  auditWaiver?: AuditWaiver | null;
+  /** The direct parent's audit state, when known (for derived coverage). */
+  parentAudit?: ParentAuditState | null;
+}
+
+/**
+ * Classify an item against the no-audit gate without persisting anything.
+ *
+ * Precedence: an explicit waiver always wins (it is a deliberate operator
+ * decision); otherwise a fresh own audit means no gap; otherwise a child
+ * covered by a fresh-audited direct parent is `covered`; otherwise the item
+ * is `uncovered`.
+ *
+ * This is the single source of truth consumed by both the CLI closure guard
+ * (`src/commands/close.ts`) and the `wl doctor audit-gaps` report, keeping
+ * the CLI and herdr display paths aligned (WL-0MUBVH9FV0027COG AC3).
+ */
+export function classifyAuditGap(input: AuditGapInput): AuditGapStatus {
+  if (input.auditWaiver) return 'waived';
+  const fresh = isAuditFresh(
+    input.ownAudit?.auditedAt,
+    input.updatedAt,
+    input.ownAudit?.fingerprint,
+    input.currentFingerprint,
+  );
+  if (fresh) return 'none';
+  if (isCoveredByParent({ parentId: input.parentId }, input.parentAudit)) return 'covered';
+  return 'uncovered';
 }
 
 /**
@@ -334,12 +548,27 @@ export function isAuditFresh(
  * (⏳), a stale or missing audit on an `in_review` item falls back to the
  * plain stage icon (🔍), and every other stage shows the plain stage icon.
  *
+ * Derived child coverage (WL-0MUBVH8QG0020H9L): when the item is a child
+ * (`parentId` set) with no own audit and its direct parent has a fresh audit
+ * (per the shared {@link isAuditFresh} predicate over the supplied
+ * `parentAudit`), the parent's audit-result symbol is returned instead of the
+ * plain stage icon. In `noIcons` mode the covered indicator renders as the
+ * `[COVERED]` text fallback so it is never silently dropped. Coverage is
+ * display-only and derived at read time; an item's OWN audit result always
+ * wins over inherited coverage.
+ *
+ * The caller applies the dim/grey styling around the covered indicator
+ * (the list row and metadata panel use `ANSI.dim`); this dependency-free
+ * helper returns the plain glyph only so display-width maths is never
+ * corrupted by ANSI escapes.
+ *
  * Shared by the list row prefix (`getIconPrefix`) and the metadata Stage
  * row so the two sections can never diverge (WL-0MSGIXHHI009KFW9 AC2).
  */
 export function stageDisplayIcon(
   item: {
     stage?: string;
+    parentId?: string | null;
     auditResult?: boolean | null;
     auditedAt?: string | null;
     updatedAt?: string;
@@ -347,6 +576,8 @@ export function stageDisplayIcon(
     fingerprint?: string | null;
     /** Current content fingerprint for the item, when the caller can compute it. */
     currentFingerprint?: string | null;
+    /** The direct parent's audit state, when the caller has it (derived coverage). */
+    parentAudit?: ParentAuditState | null;
   },
   opts?: IconOptions,
 ): string {
@@ -358,6 +589,12 @@ export function stageDisplayIcon(
     }
     if (item.auditResult === true) {
       return auditStaleIcon(item.auditResult, { noIcons });
+    }
+    // A child's own (non-fresh) audit result wins over inherited coverage;
+    // only a child with NO own audit can inherit the parent's verdict.
+    if (item.auditResult == null && isCoveredByParent(item, item.parentAudit)) {
+      if (noIcons) return AUDIT_COVERED_FALLBACK;
+      return auditIcon(item.parentAudit?.auditResult, { noIcons: false });
     }
   }
   return stageIcon(item.stage, { noIcons });
@@ -469,22 +706,51 @@ const ICON_PREFIX_WIDTH = 12;
 // ── Icon prefix composition ───────────────────────────────────────────
 
 /**
- * Compute the icon prefix string for a work item (just icon characters,
- * no trailing space).  Icons are concatenated without spaces and padded
- * to a fixed display width so the item-ID column aligns vertically
- * regardless of how many icon fields are present.
- *
- * Column layout (left to right):
- *   0. Agent status (fixed-width reserved slot, WL-0MSBQUJQX005RAT9)
- *   1. Status icon
- *   2. Stage icon (for in_review items, shows audit-aware icon instead)
- *   3. Producer review flag
- *   4. Optional epic icon + child count
+ * The item fields consumed by {@link getIconPrefix} / {@link getIconPrefixParts}.
+ * `parentId` / `parentAudit` carry the derived coverage inputs
+ * (WL-0MUBVH8QG0020H9L); they are optional so existing root-item callers are
+ * unaffected.
  */
-export function getIconPrefix(
-  item: { status: string; stage?: string; priority?: string; auditResult?: boolean | null; auditedAt?: string | null; needsProducerReview?: boolean; updatedAt?: string; issueType?: string; childCount?: number; agentState?: string },
+export interface IconPrefixItem {
+  status: string;
+  stage?: string;
+  priority?: string;
+  auditResult?: boolean | null;
+  auditedAt?: string | null;
+  needsProducerReview?: boolean;
+  updatedAt?: string;
+  issueType?: string;
+  childCount?: number;
+  agentState?: string;
+  parentId?: string | null;
+  fingerprint?: string | null;
+  currentFingerprint?: string | null;
+  parentAudit?: ParentAuditState | null;
+}
+
+/**
+ * The composed icon prefix plus the location of the stage/audit icon inside
+ * it, so the renderer can apply dim/grey styling to the covered indicator
+ * only (WL-0MUBVH8QG0020H9L). `stageStart`/`stageEnd` are JS string indices
+ * into `text` (surrogate-pair safe for slicing).
+ */
+export interface IconPrefixParts {
+  /** Full prefix string (no ANSI styling), padded to the fixed width. */
+  text: string;
+  /** JS string index where the stage/audit icon starts within `text`. */
+  stageStart: number;
+  /** JS string index just past the stage/audit icon within `text`. */
+  stageEnd: number;
+}
+
+/**
+ * Compose the icon prefix and expose the stage/audit icon's range so a caller
+ * can dim just that icon (see {@link getIconPrefixParts}).
+ */
+export function getIconPrefixParts(
+  item: IconPrefixItem,
   opts?: IconOptions,
-): string {
+): IconPrefixParts {
   const noIcons = opts?.noIcons ?? false;
 
   // Column 0: agent status — fixed-width reserved slot so rows with and
@@ -515,9 +781,29 @@ export function getIconPrefix(
   let prefix = [agentSlot, coreIcons, epicSuffix].filter(Boolean).join('');
   const width = stringDisplayWidth(prefix);
   if (width < ICON_PREFIX_WIDTH) {
-    const padCount = ICON_PREFIX_WIDTH - width;
-    prefix = prefix.padEnd(prefix.length + padCount, ' ');
+    prefix = prefix.padEnd(prefix.length + (ICON_PREFIX_WIDTH - width), ' ');
   }
 
-  return prefix;
+  // `sIcon` and `secondIcon` are always non-empty (status/stage icons have
+  // fallbacks), so these indices are always valid and point at the stage
+  // icon the coverage dimming wraps.
+  const stageStart = agentSlot.length + sIcon.length;
+  return { text: prefix, stageStart, stageEnd: stageStart + secondIcon.length };
+}
+
+/**
+ * Compute the icon prefix string for a work item (just icon characters,
+ * no trailing space).  Icons are concatenated without spaces and padded
+ * to a fixed display width so the item-ID column aligns vertically
+ * regardless of how many icon fields are present.
+ *
+ * Column layout (left to right):
+ *   0. Agent status (fixed-width reserved slot, WL-0MSBQUJQX005RAT9)
+ *   1. Status icon
+ *   2. Stage icon (for in_review items, shows audit-aware icon instead)
+ *   3. Producer review flag
+ *   4. Optional epic icon + child count
+ */
+export function getIconPrefix(item: IconPrefixItem, opts?: IconOptions): string {
+  return getIconPrefixParts(item, opts).text;
 }
