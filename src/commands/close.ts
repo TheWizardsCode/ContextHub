@@ -28,7 +28,7 @@
 import type { WorkItem } from '../types.js';
 import type { PluginContext } from '../plugin-types.js';
 import type { CloseOptions } from '../cli-types.js';
-import { submitToOpenBrain } from '../openbrain.js';
+
 import { classifyAuditGap, type ParentAuditState } from '@worklog/shared/icons';
 
 /**
@@ -287,15 +287,6 @@ export default function register(ctx: PluginContext): void {
               result.auditGapWarnings = auditGapWarnings;
             }
             results.push(result);
-
-            // Fire-and-forget: submit a summary to OpenBrain if enabled.
-            const config = utils.getConfig();
-            if (config?.openBrainEnabled) {
-              submitToOpenBrain(updated).catch(() => {
-                // Errors are already logged inside submitToOpenBrain; swallow here
-                // so the close command is never blocked or aborted.
-              });
-            }
           } else {
             // No children — standard single-item close (flag is a no-op)
             recordForceWaiver(item, reason, author, db);
@@ -305,14 +296,6 @@ export default function register(ctx: PluginContext): void {
               continue;
             }
             results.push({ id, success: true });
-
-            const config = utils.getConfig();
-            if (config?.openBrainEnabled) {
-              submitToOpenBrain(updated).catch(() => {
-                // Errors are already logged inside submitToOpenBrain; swallow here
-                // so the close command is never blocked or aborted.
-              });
-            }
           }
         // ── Audit-gated recursive close ──
         } else if (shouldCloseRecursively(item, db)) {
@@ -341,15 +324,6 @@ export default function register(ctx: PluginContext): void {
             result.auditGapWarnings = auditGapWarnings;
           }
           results.push(result);
-
-          // Fire-and-forget: submit a summary to OpenBrain if enabled.
-          const config = utils.getConfig();
-          if (config?.openBrainEnabled) {
-            submitToOpenBrain(updated).catch(() => {
-              // Errors are already logged inside submitToOpenBrain; swallow here
-              // so the close command is never blocked or aborted.
-            });
-          }
         // ── Recovery path ──
         } else if (shouldRecoverOpenChildren(item, db)) {
           // Recovery path: parent is already completed/done but has open children.
@@ -370,10 +344,6 @@ export default function register(ctx: PluginContext): void {
           }
           results.push(result);
 
-          // No OpenBrain submission for the recovery path: the parent was
-          // already done and presumably submitted to OpenBrain previously.
-          // Children were closed individually but each closeSingle does not
-          // trigger OpenBrain (consistent with the recursive close pattern).
         } else {
           // Standard (non-recursive) close — existing behaviour
           const auditGapWarning = auditGapWarningFor(item, db);
@@ -409,14 +379,6 @@ export default function register(ctx: PluginContext): void {
             }
           }
 
-          // Fire-and-forget: submit a summary to OpenBrain if enabled.
-          const config = utils.getConfig();
-          if (config?.openBrainEnabled) {
-            submitToOpenBrain(updated).catch(() => {
-              // Errors are already logged inside submitToOpenBrain; swallow here
-              // so the close command is never blocked or aborted.
-            });
-          }
         }
       }
 

@@ -13,7 +13,6 @@ import { canValidateStatusStage, validateStatusStageCompatibility, validateStatu
 import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { loadStatusStageRules, normalizeStatusValue } from '../status-stage-rules.js';
-import { submitToOpenBrain } from '../openbrain.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 
 export default function register(ctx: PluginContext): void {
@@ -542,18 +541,6 @@ export default function register(ctx: PluginContext): void {
         // included in this per-id update.
         if (updates.status || updates.priority || updates.risk || updates.effort || updates.stage) {
           impactfulChange = true;
-        }
-
-        // Fire-and-forget: submit a summary to OpenBrain when the item
-        // transitions to completed, if the feature is enabled.
-        if (updates.status === 'completed') {
-          const config = utils.getConfig();
-          if (config?.openBrainEnabled) {
-            submitToOpenBrain(item).catch(() => {
-              // Errors are already logged inside submitToOpenBrain; swallow here
-              // so the update command is never blocked or aborted.
-            });
-          }
         }
 
         // Include audit data in JSON output when audit was written
