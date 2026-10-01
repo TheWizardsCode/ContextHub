@@ -1,6 +1,6 @@
 ---
 name: pane-triage
-description: "Approval-gated close of idle panes in the current herdr workspace. Scans the invoking workspace, classifies each pane via the shared pane-close classifier, shows work-item context and log tails, and closes only panes the producer explicitly approves. Trigger on queries like: 'pane triage', 'pane-triage', 'close idle panes', 'triage panes'"
+description: "Approval-gated close of idle panes in the current herdr workspace. Scans the invoking workspace via the shared pane-close classifier and closes only panes the producer explicitly approves. Trigger on: 'pane triage', 'close idle panes'"
 ---
 
 # Pane-Triage Skill
