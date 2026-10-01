@@ -58,6 +58,18 @@ const ANSWER_LINE_RE =
 
 /** An explicit "awaiting producer" placeholder. */
 const PLACEHOLDER_RE = /^\*{0,2}\(?\s*awaiting producer\s*\)?\*{0,2}/i;
+/**
+ * An explicit "OPEN QUESTION" placeholder used by the intake/plan skills
+ * to mark a question that the producer has not yet answered, e.g.
+ * `— **OPEN QUESTION**, context: ...`.
+ */
+const OPEN_QUESTION_RE = /^\*{0,2}\(?OPEN\s+QUESTION\)?\*{0,2}/i;
+/**
+ * An inline `— **OPEN QUESTION**` answer marker on a continuation line,
+ * capturing the placeholder token itself in group 1.
+ */
+const INLINE_OPEN_QUESTION_RE =
+  /\s*[—–-]\s*(\*{0,2}\(?OPEN\s+QUESTION\)?\*{0,2})/i;
 /** A "TBD" answer is treated as outstanding. */
 const TBD_RE = /^\*{0,2}(?:tbd|to be determined)\b/i;
 /** Trailing attribution metadata that shares the answer line. */
@@ -211,7 +223,7 @@ function parseQuestionStart(
     pos += paren[0].length;
     rest = rest.slice(paren[0].length);
   }
-  const dash = rest.match(/^\s*[—–-]\s*[^*>:(]+?(?=\*{0,2}\s*:)/);
+  const dash = rest.match(/^\s*[—–-]\s*[^*:]+?(?=\*{0,2}\s*:)/);
   if (dash) {
     pos += dash[0].length;
     rest = rest.slice(dash[0].length);
@@ -250,7 +262,7 @@ function computeAnswerRegion(
   // Detect placeholders before stripping bold markers so the whole token is
   // replaced when the producer answers.
   const raw = content.slice(s, e);
-  const placeholder = raw.match(PLACEHOLDER_RE);
+  const placeholder = raw.match(PLACEHOLDER_RE) ?? raw.match(OPEN_QUESTION_RE);
   if (placeholder) {
     return {
       start: s,
@@ -281,7 +293,8 @@ function computeAnswerRegion(
 
   // Placeholders/TBD may sit inside quotes.
   const inner = content.slice(s, e);
-  const innerPlaceholder = inner.match(PLACEHOLDER_RE);
+  const innerPlaceholder =
+    inner.match(PLACEHOLDER_RE) ?? inner.match(OPEN_QUESTION_RE);
   if (innerPlaceholder) {
     return {
       start: s,
@@ -358,12 +371,21 @@ export function parseQAPairs(content: string): ClarifyingQAPair[] {
     let answerLine = cur.line;
 
     const inline = cur.remainder.match(INLINE_ANSWER_RE);
-    if (inline) {
-      question = cleanQuestion(cur.remainder.slice(0, inline.index));
-      const tail = inline[2] ?? '';
+    const inlineOpen = inline ? null : cur.remainder.match(INLINE_OPEN_QUESTION_RE);
+    if (inline || inlineOpen) {
+      const isOpen = !inline;
+      const match = (inline ?? inlineOpen)!;
+      const markerIdx = match.index ?? 0;
+      const markerLen = match[0].length;
+      const placeholder = isOpen ? (match[1] ?? '') : '';
+      const tail = isOpen ? '' : (match[2] ?? '');
+      question = cleanQuestion(cur.remainder.slice(0, markerIdx));
       const rawStart =
-        cur.remainderStart + (inline.index ?? 0) + inline[0].length - tail.length;
-      const rawEnd = cur.remainderStart + (inline.index ?? 0) + inline[0].length;
+        cur.remainderStart +
+        markerIdx +
+        markerLen -
+        (isOpen ? placeholder.length : tail.length);
+      const rawEnd = cur.remainderStart + markerIdx + markerLen;
       region = computeAnswerRegion(content, rawStart, rawEnd);
     } else {
       let found: {
@@ -402,6 +424,20 @@ export function parseQAPairs(content: string): ClarifyingQAPair[] {
           };
           break;
         }
+        // An unresolved question uses an inline `— **OPEN QUESTION**`
+        // placeholder, which may sit on a continuation line.
+        const om = lines[j].match(INLINE_OPEN_QUESTION_RE);
+        if (om) {
+          const placeholder = om[1] ?? '';
+          const idx = om.index ?? 0;
+          found = {
+            line: j,
+            start: lineStart[j] + idx + om[0].length - placeholder.length,
+            end: lineStart[j] + idx + om[0].length,
+            before: lines[j].slice(0, idx),
+          };
+          break;
+        }
       }
 
       if (found) {
@@ -411,7 +447,12 @@ export function parseQAPairs(content: string): ClarifyingQAPair[] {
         region = computeAnswerRegion(content, found.start, found.end);
         answerLine = found.line;
       } else {
-        question = cleanQuestion(cur.remainder);
+        // No answer marker: treat every line up to the next question as part
+        // of the question so multi-line questions are not truncated.
+        const endLine =
+          idx + 1 < starts.length ? starts[idx + 1].line : lines.length;
+        const continuation = lines.slice(cur.line + 1, endLine).join(' ');
+        question = cleanQuestion(`${cur.remainder} ${continuation}`);
         region = {
           start: sliceEnd,
           end: sliceEnd,
@@ -550,7 +591,7 @@ export async function runInterview(
   let interrupted = false;
 
   for (const pair of unanswered) {
-    const answer = await io.prompt(`${pair.number}. ${pair.question}\n   → `);
+    const answer = await io.prompt(`${pair.number}. ${pair.question}\n   →`);
     const cleaned = answer.replace(/\s+/g, ' ').trim();
     if (cleaned === '') {
       // EOF / empty response — session interrupted; stop asking.
@@ -601,13 +642,13 @@ function createPromptLoop(): {
     input: process.stdin,
     output: process.stdout,
   });
+  const iterator = rl[Symbol.asyncIterator]();
   return {
     next: async (message: string) => {
-      return new Promise((resolve) => {
-        rl.question(message, (answer) => {
-          resolve(String(answer ?? '').trim());
-        });
-      });
+      process.stdout.write(message + ' ');
+      const { value, done } = await iterator.next();
+      if (done) return '';
+      return String(value ?? '').trim();
     },
     close: () => rl.close(),
   };

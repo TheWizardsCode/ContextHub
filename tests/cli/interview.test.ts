@@ -236,6 +236,42 @@ describe('parseQAPairs (canonical bullet appendix)', () => {
     expect(pairs[0].unanswered).toBe(true);
   });
 
+  it('captures the full multi-line question ending in an OPEN QUESTION marker (WL-0MUKCGV3X0030W6K)', () => {
+    // Reproduces the intake appendix from AH-0MUAYB2XR007N10W, where the
+    // answer placeholder sits on a continuation line and the question spans
+    // two lines. Previously only the first line was surfaced.
+    const content = `- **Q (round 1 follow-up):** Crash behaviour — destroyed and respawn (like enemy
+  collisions) or something else? — **OPEN QUESTION**, context: not yet answered.
+  Interim assumption: destroy + reuse the shared player-hit lifecycle (see
+  Assumptions). Source: wl comment \`AH-C0MUB8JD13004UD9E\`.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      'Crash behaviour — destroyed and respawn (like enemy collisions) or something else?',
+    );
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('round-trips a multi-line OPEN QUESTION appendix losslessly', () => {
+    const content = `- **Q (round 1 follow-up):** Crash behaviour — destroyed and respawn (like enemy
+  collisions) or something else? — **OPEN QUESTION**, context: not yet answered.
+  Interim assumption: destroy + reuse the shared player-hit lifecycle. Source: reply.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(rebuildQAPairs(pairs)).toBe(content);
+  });
+
+  it('captures a multi-line question with no answer marker at all', () => {
+    const content = `- **Q:** A question that spans
+  several lines with no marker?`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      'A question that spans several lines with no marker?',
+    );
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
   it('parses inline-numbered Q markers with bold answer attribution', () => {
     const content = `- **Q1**: "What is the timeout?" — **Answer** (user): "120s". Source: reply.
 - **Q2:** "And the scope?"`;
@@ -566,6 +602,35 @@ No clarifying questions were asked; the brief was sufficient.`;
     const updated = store.current();
     expect(updated.description).toContain('A question with no recorded answer marker?');
     expect(updated.description).toContain('Yes');
+    expect(updated.needsProducerReview).toBe(false);
+  });
+
+  it('prompts with the full multi-line question and answers an OPEN QUESTION placeholder (WL-0MUKCGV3X0030W6K)', async () => {
+    const desc = `## Appendix: Clarifying questions
+
+- **Q (round 1 follow-up):** Crash behaviour — destroyed and respawn (like enemy
+  collisions) or something else? — **OPEN QUESTION**, context: not yet answered.
+  Interim assumption: destroy + reuse the shared player-hit lifecycle.
+  Source: wl comment \`AH-C0MUB8JD13004UD9E\`.`;
+    const store = makeStore(makeItem(desc, true));
+    const prompts: string[] = [];
+    const outcome = await runInterview(store.current(), store, {
+      prompt: async (m: string) => {
+        prompts.push(m);
+        return 'Destroyed and respawn like enemy collisions';
+      },
+    });
+    expect(prompts).toHaveLength(1);
+    // The full question text must be visible in the prompt, not just line 1.
+    expect(prompts[0]).toContain('destroyed and respawn (like enemy collisions)');
+    expect(prompts[0]).toContain('or something else?');
+    expect(outcome.recorded).toBe(1);
+    expect(outcome.allAnswered).toBe(true);
+    const updated = store.current();
+    expect(updated.description).toContain('Destroyed and respawn like enemy collisions');
+    expect(updated.description).not.toContain('OPEN QUESTION');
+    // Metadata after the placeholder is preserved for the audit trail.
+    expect(updated.description).toContain('Source: wl comment');
     expect(updated.needsProducerReview).toBe(false);
   });
 });
