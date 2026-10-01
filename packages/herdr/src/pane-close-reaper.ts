@@ -48,6 +48,15 @@ export interface PaneStatus {
   /** Work-item stage at decision time, when known (logging snapshot). */
   itemStage?: string;
   title: string;
+  /**
+   * The herdr workspace this pane belongs to, when known. Used by the
+   * pane-triage skill to scope its report to the invoking workspace
+   * (`WL-0MUJMXVPO0016DZM` AC1). Optional/tolerant: absent panes are not
+   * filtered out.
+   */
+  workspaceId?: string;
+  /** The herdr tab this pane belongs to, when known (AC3 report). */
+  tabId?: string;
   /** Concatenated text of the final assistant message. */
   lastAssistantText: string;
   /**
@@ -92,6 +101,17 @@ export interface ReaperResult {
   decision: CloseDecision;
   success: boolean;
   error?: string;
+  /**
+   * Trailing work-item id parsed from the pane label, when present
+   * (`WL-0MUJMXVPO0016DZM` AC3). Additive: legacy callers may ignore it.
+   */
+  itemId?: string;
+  /** The herdr workspace the pane belongs to, when known (AC1). */
+  workspaceId?: string;
+  /** The herdr tab the pane belongs to, when known (AC3). */
+  tabId?: string;
+  /** The pane kind (plan/intake/audit/implement/unknown), when known. */
+  kind?: PaneStatus['kind'];
 }
 
 /** Options for the reaper run. */
@@ -118,6 +138,15 @@ export interface ReaperOptions {
    * historical entries and a possible future re-enable.
    */
   alreadyClosedPaneIds?: ReadonlySet<string>;
+  /**
+   * Output results as JSON to stdout (for consumption by external tools).
+   */
+  json?: boolean;
+  /**
+   * Filter panes to the specified workspace id only. When absent, all
+   * workspaces are included.
+   */
+  workspace?: string;
 }
 
 // ── Ledger ────────────────────────────────────────────────────────────
@@ -240,6 +269,17 @@ export async function runReaper(
   const panes = await deps.listPanes();
 
   for (const pane of panes) {
+    // Workspace scoping (`WL-0MUJMXVPO0016DZM` AC1): when a workspace filter
+    // is set, panes belonging to a different workspace are skipped. Panes
+    // with an unknown workspace are retained (tolerant).
+    if (
+      options.workspace !== undefined &&
+      pane.workspaceId !== undefined &&
+      pane.workspaceId !== options.workspace
+    ) {
+      continue;
+    }
+
     // Coexistence with the dispatch monitor (parent constraint): a pane the
     // `pane-lifecycle.ts` monitor already recorded as closed is never handled
     // again. The monitor is currently disabled (WL-0MUMEKDK0008LKH8); the
@@ -273,6 +313,10 @@ export async function runReaper(
     const result: ReaperResult = {
       paneId: pane.id,
       paneTitle: pane.title,
+      itemId: pane.itemId,
+      workspaceId: pane.workspaceId,
+      tabId: pane.tabId,
+      kind: pane.kind,
       decision,
       success,
       error,
@@ -296,6 +340,8 @@ export async function runReaper(
  *  - `--dry-run`                report only, close nothing
  *  - `--threshold-minutes <n>`  idle threshold in minutes (default 30)
  *  - `--ledger <path>`          ledger output path (default `.worklog/pane-close-ledger.jsonl`)
+ *  - `--json`                   output classification results as JSON (for external tools)
+ *  - `--workspace <id>`         scope results to the given workspace id
  */
 export function parseReaperArgs(argv: string[]): ReaperOptions {
   const options: ReaperOptions = {};
@@ -310,6 +356,10 @@ export function parseReaperArgs(argv: string[]): ReaperOptions {
       }
     } else if (arg === '--ledger') {
       options.ledgerPath = argv[++i];
+    } else if (arg === '--json') {
+      options.json = true;
+    } else if (arg === '--workspace') {
+      options.workspace = argv[++i];
     }
   }
   return options;
@@ -319,6 +369,11 @@ export function parseReaperArgs(argv: string[]): ReaperOptions {
  * CLI entrypoint. Wires the real `ReaperDeps` (herdr pane listing, pane
  * close, process-group teardown) and runs the reaper. Returns the process
  * exit code: 0 on success, 1 on any partial failure.
+ *
+ * In `--json` mode a single JSON document is written to stdout describing
+ * every evaluated pane (decision + reason snapshot + success). This is the
+ * cross-language bridge consumed by the Python `pane-triage` skill; the
+ * human-readable output is suppressed so stdout stays machine-parseable.
  *
  * The real `ReaperDeps` implementation lives in the scheduling/wiring item
  * (WL-0MUJW9FFW009008M); this entrypoint accepts deps so the caller can
@@ -334,7 +389,33 @@ export async function runReaperCli(
   const results = await runReaper(deps, { ...options, ledgerPath });
 
   const failures = results.filter((r) => !r.success);
-  if (options.dryRun) {
+  if (options.json) {
+    console.log(
+      JSON.stringify(
+        {
+          panes: results.map((r) => ({
+            paneId: r.paneId,
+            paneTitle: r.paneTitle,
+            itemId: r.itemId ?? '',
+            workspaceId: r.workspaceId,
+            tabId: r.tabId,
+            kind: r.kind ?? 'unknown',
+            close: r.decision.close === true,
+            reasonCode: r.decision.reasonCode,
+            reasonSnapshot: r.decision.reasonSnapshot,
+            success: r.success,
+            error: r.error,
+          })),
+          evaluated: results.length,
+          closeCount: results.filter((r) => r.decision.close).length,
+          failureCount: failures.length,
+          dryRun: options.dryRun === true,
+        },
+        null,
+        2,
+      ),
+    );
+  } else if (options.dryRun) {
     console.log(`reaper (dry-run): ${results.length} pane(s) evaluated, ${results.filter((r) => r.decision.close).length} would close`);
   } else {
     console.log(`reaper: ${results.length} pane(s) evaluated, ${results.filter((r) => r.decision.close).length} closed, ${failures.length} failed`);

@@ -47,6 +47,20 @@ describe('parseHerdrPaneCloseList', () => {
     expect(parseHerdrPaneCloseList(raw)![0].paneId).toBe('p1');
   });
 
+  it('parses workspace_id (WL-0MUJMXVPO0016DZM AC1)', () => {
+    const raw = JSON.stringify({
+      panes: [{ pane_id: 'w2V:p1', label: 'x', workspace_id: 'w2V' }],
+    });
+    expect(parseHerdrPaneCloseList(raw)![0].workspaceId).toBe('w2V');
+  });
+
+  it('parses tab_id (WL-0MUJMXVPO0016DZM AC3)', () => {
+    const raw = JSON.stringify({
+      panes: [{ pane_id: 'w2V:p1', label: 'x', tab_id: 'w2V:tT' }],
+    });
+    expect(parseHerdrPaneCloseList(raw)![0].tabId).toBe('w2V:tT');
+  });
+
   it('tolerates log lines before the JSON envelope', () => {
     const raw = 'some log line\n' + JSON.stringify({ panes: [{ pane_id: 'p1' }] });
     expect(parseHerdrPaneCloseList(raw)![0].paneId).toBe('p1');
@@ -160,6 +174,27 @@ describe('createHerdrReaperDeps', () => {
       itemId: 'WL-0ABC123',
       agentProcessAlive: true,
     });
+  });
+
+  it('maps workspace_id into PaneStatus.workspaceId (WL-0MUJMXVPO0016DZM AC1)', async () => {
+    const raw = JSON.stringify({
+      panes: [
+        {
+          pane_id: 'w2V:p1',
+          label: 'Downtime triggered plan Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_status: 'idle',
+          workspace_id: 'w2V',
+          agent_session: { value: '/tmp/nonexistent-but-mapped.jsonl' },
+        },
+      ],
+    });
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+    const panes = await deps.listPanes();
+    expect(panes[0].workspaceId).toBe('w2V');
   });
 
   it('treats an unreadable producer-review lookup as review-blocked (fail-closed)', async () => {

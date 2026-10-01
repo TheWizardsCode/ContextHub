@@ -32,6 +32,10 @@ export interface HerdrPaneCloseRecord {
   agent?: string;
   agent_status?: string;
   agentStatus?: string;
+  workspace_id?: string;
+  workspaceId?: string;
+  tab_id?: string;
+  tabId?: string;
   agent_session?: HerdrAgentSession;
   agentSession?: HerdrAgentSession;
 }
@@ -43,6 +47,8 @@ export interface ParsedHerdrPane {
   agent?: string;
   agentStatus?: string;
   sessionPath?: string;
+  workspaceId?: string;
+  tabId?: string;
 }
 
 /**
@@ -101,6 +107,18 @@ export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
       agent: typeof rec.agent === 'string' ? rec.agent : undefined,
       agentStatus,
       sessionPath,
+      workspaceId:
+        typeof rec.workspace_id === 'string'
+          ? rec.workspace_id
+          : typeof rec.workspaceId === 'string'
+            ? rec.workspaceId
+            : undefined,
+      tabId:
+        typeof rec.tab_id === 'string'
+          ? rec.tab_id
+          : typeof rec.tabId === 'string'
+            ? rec.tabId
+            : undefined,
     });
   }
   return parsed;
@@ -314,6 +332,8 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
           kind: paneKindFromLabel(pane.label),
           itemId,
           title: pane.label || pane.paneId,
+          workspaceId: pane.workspaceId,
+          tabId: pane.tabId,
           lastAssistantText: '',
           sessionEntries: entries,
           agentProcessAlive,

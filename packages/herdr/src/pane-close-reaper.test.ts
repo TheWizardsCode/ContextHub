@@ -507,6 +507,37 @@ describe('parseReaperArgs', () => {
       ledgerPath: '/tmp/l.jsonl',
     });
   });
+
+  it('parses --json (WL-0MUJMXVPO0016DZM)', async () => {
+    const { parseReaperArgs } = await import('./pane-close-reaper');
+    expect(parseReaperArgs(['--json'])).toEqual({ json: true });
+  });
+
+  it('parses --workspace <id> (WL-0MUJMXVPO0016DZM AC1)', async () => {
+    const { parseReaperArgs } = await import('./pane-close-reaper');
+    expect(parseReaperArgs(['--workspace', 'w2V'])).toEqual({ workspace: 'w2V' });
+  });
+});
+
+describe('runReaper — workspace scoping (WL-0MUJMXVPO0016DZM AC1)', () => {
+  it('excludes panes belonging to a different workspace', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [
+      pane({ id: 'w1:p1', workspaceId: 'w1', lastAssistantText: '</end_session>', agentProcessAlive: false }),
+      pane({ id: 'w2:p2', workspaceId: 'w2', lastAssistantText: '</end_session>', agentProcessAlive: false }),
+    ];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { workspace: 'w1', dryRun: true });
+    expect(results.map((r) => r.paneId)).toEqual(['w1:p1']);
+  });
+
+  it('retains panes with an unknown workspace (tolerant)', async () => {
+    const { runReaper } = await import('./pane-close-reaper');
+    const panes = [pane({ id: 'w9:p9', workspaceId: undefined })];
+    const deps = makeDeps(panes);
+    const results = await runReaper(deps, { workspace: 'w1', dryRun: true });
+    expect(results.map((r) => r.paneId)).toEqual(['w9:p9']);
+  });
 });
 
 describe('runReaper — ledger writing', () => {
@@ -623,6 +654,41 @@ describe('runReaper — detailed reason snapshot in the ledger (parent AC4.1/AC4
 });
 
 describe('runReaperCli', () => {
+  it('emits a JSON document on stdout in --json mode (WL-0MUJMXVPO0016DZM)', async () => {
+    const { runReaperCli } = await import('./pane-close-reaper');
+    const panes = [
+      pane({
+        id: 'w1:p1',
+        itemId: 'WL-0ABC123',
+        workspaceId: 'w1',
+        lastAssistantText: '</end_session>',
+        agentProcessAlive: false,
+      }),
+    ];
+    const deps = makeDeps(panes);
+    const logged: string[] = [];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((line: string) => {
+      logged.push(line);
+    });
+    try {
+      const code = await runReaperCli(deps, ['--json']);
+      expect(code).toBe(0);
+    } finally {
+      logSpy.mockRestore();
+    }
+    const output = JSON.parse(logged.join('\n'));
+    expect(output.evaluated).toBe(1);
+    expect(output.dryRun).toBe(false);
+    expect(output.panes[0]).toMatchObject({
+      paneId: 'w1:p1',
+      itemId: 'WL-0ABC123',
+      workspaceId: 'w1',
+      kind: 'plan',
+      close: true,
+      reasonCode: 'marker',
+    });
+  });
+
   it('returns exit code 0 when all closes succeed', async () => {
     const { runReaperCli } = await import('./pane-close-reaper');
     const { mkdtempSync, rmSync } = await import('node:fs');
