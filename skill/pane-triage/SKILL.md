@@ -57,9 +57,12 @@ record per pane:
       "close": false,
       "reasonCode": "implement",
       "reasonSnapshot": { "needsProducerReview": false, "isInvokingPane": false },
+      "sessionTail": ["...last 20 session lines..."],
       "success": true
     }
   ],
+  "invokingPaneId": "w2V:p7H",
+  "timestamp": "2026-10-01T11:04:05.000Z",
   "evaluated": 1,
   "closeCount": 0,
   "failureCount": 0,

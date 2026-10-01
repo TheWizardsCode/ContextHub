@@ -82,6 +82,39 @@ describe('main — fixture mode', () => {
       workspaceId: 'w1',
       kind: 'plan',
     });
+    // The invoking pane id from the environment is surfaced in the envelope.
+    expect(output.invokingPaneId).toBe(null);
+    expect(typeof output.timestamp).toBe('string');
+  });
+
+  it('surfaces HERDR_PANE_ID as the invoking pane in the JSON envelope', async () => {
+    const fixture = JSON.stringify({
+      panes: [
+        {
+          pane_id: 'w1:p1',
+          label: 'Downtime triggered plan Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_status: 'idle',
+          workspace_id: 'w1',
+          agent_session: { value: '/tmp/nonexistent.jsonl' },
+        },
+      ],
+    });
+    const logged: string[] = [];
+    const logSpy = vi.spyOn(console, 'log').mockImplementation((line: string) => {
+      logged.push(line);
+    });
+    try {
+      await main(['--fixture', '/tmp/f.json', '--json'], {
+        readFile: () => fixture,
+        env: { HERDR_PANE_ID: 'w1:pZ' },
+        cwd: '/tmp',
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+    const output = JSON.parse(logged.join('\n'));
+    expect(output.invokingPaneId).toBe('w1:pZ');
   });
 
   it('applies the --workspace filter to fixture panes', async () => {

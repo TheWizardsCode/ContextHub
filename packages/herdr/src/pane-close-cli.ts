@@ -142,8 +142,15 @@ export async function main(
     cwd: io?.cwd ?? process.cwd(),
   };
   const fixtureRaw = fixture !== undefined ? resolvedIo.readFile(fixture) : undefined;
+  // Surface the invoking pane id in the JSON envelope so the Python skill can
+  // exclude it even though the classifier also computes `isInvokingPane`.
+  const invoking = resolvedIo.env.HERDR_PANE_ID ?? resolvedIo.env.HERDR_PANE;
+  const args = [...rest];
+  if (invoking && !args.includes('--invoking-pane')) {
+    args.push('--invoking-pane', invoking);
+  }
   const deps = createPaneCloseCliDeps(resolvedIo, fixtureRaw);
-  return runReaperCli(deps, rest);
+  return runReaperCli(deps, args);
 }
 
 const invokedDirectly =

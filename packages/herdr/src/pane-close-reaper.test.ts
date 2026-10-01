@@ -679,6 +679,10 @@ describe('runReaperCli', () => {
     const output = JSON.parse(logged.join('\n'));
     expect(output.evaluated).toBe(1);
     expect(output.dryRun).toBe(false);
+    // Bridge envelope fields required by the pane-triage skill
+    // (WL-0MUJMXVPO0016DZM child AC2).
+    expect(output).toHaveProperty('invokingPaneId');
+    expect(typeof output.timestamp).toBe('string');
     expect(output.panes[0]).toMatchObject({
       paneId: 'w1:p1',
       itemId: 'WL-0ABC123',
@@ -686,7 +690,9 @@ describe('runReaperCli', () => {
       kind: 'plan',
       close: true,
       reasonCode: 'marker',
+      needsProducerReview: false,
     });
+    expect(Array.isArray(output.panes[0].sessionTail)).toBe(true);
   });
 
   it('returns exit code 0 when all closes succeed', async () => {

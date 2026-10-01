@@ -64,6 +64,7 @@ def _pane(
     success=True,
     needs_producer_review=False,
     is_invoking=False,
+    session_tail=None,
 ):
     """Build one bridge-output pane record."""
     return {
@@ -80,6 +81,7 @@ def _pane(
             "needsProducerReview": needs_producer_review,
             "isInvokingPane": is_invoking,
         },
+        "sessionTail": session_tail or [],
         "success": success,
     }
 
@@ -379,6 +381,14 @@ class TestClassifyViaBridge(unittest.TestCase):
             classify_via_bridge(workspace="w7X")
         self.assertIn("--workspace", captured["args"])
         self.assertIn("w7X", captured["args"])
+
+    def test_session_tail_is_preserved_from_bridge(self):
+        pane = _pane(close=True, reason_code="marker",
+                     session_tail=["line 1", "line 2"])
+        payload = json.dumps(_bridge_doc([pane]))
+        with mock.patch("pane_triage._run_bridge", return_value=payload):
+            panes = classify_via_bridge(workspace="w1")
+        self.assertEqual(panes[0]["sessionTail"], ["line 1", "line 2"])
 
 
 if __name__ == "__main__":

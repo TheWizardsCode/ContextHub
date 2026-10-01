@@ -65,6 +65,11 @@ export interface PaneStatus {
    * (parent AC6) instead of trusting `lastAssistantText`.
    */
   sessionEntries?: { type?: string; text?: string }[];
+  /**
+   * Last ~20 human-readable session lines, surfaced to the pane-triage skill
+   * (`WL-0MUJMXVPO0016DZM`). Optional/tolerant: absent means no tail.
+   */
+  sessionTail?: string[];
   /** Whether the agent process is alive. */
   agentProcessAlive: boolean;
   /** Idle time in milliseconds. */
@@ -112,6 +117,8 @@ export interface ReaperResult {
   tabId?: string;
   /** The pane kind (plan/intake/audit/implement/unknown), when known. */
   kind?: PaneStatus['kind'];
+  /** Last ~20 session lines for the report's log tail (AC4). */
+  sessionTail?: string[];
 }
 
 /** Options for the reaper run. */
@@ -147,6 +154,11 @@ export interface ReaperOptions {
    * workspaces are included.
    */
   workspace?: string;
+  /**
+   * The invoking pane id (`HERDR_PANE_ID`), surfaced in the JSON envelope so
+   * the pane-triage skill can exclude it (`WL-0MUJMXVPO0016DZM` AC5).
+   */
+  invokingPaneId?: string;
 }
 
 // ── Ledger ────────────────────────────────────────────────────────────
@@ -317,6 +329,7 @@ export async function runReaper(
       workspaceId: pane.workspaceId,
       tabId: pane.tabId,
       kind: pane.kind,
+      sessionTail: Array.isArray(pane.sessionTail) ? pane.sessionTail : [],
       decision,
       success,
       error,
@@ -342,6 +355,7 @@ export async function runReaper(
  *  - `--ledger <path>`          ledger output path (default `.worklog/pane-close-ledger.jsonl`)
  *  - `--json`                   output classification results as JSON (for external tools)
  *  - `--workspace <id>`         scope results to the given workspace id
+ *  - `--invoking-pane <id>`     invoking pane id (echoed in JSON; never closed)
  */
 export function parseReaperArgs(argv: string[]): ReaperOptions {
   const options: ReaperOptions = {};
@@ -360,6 +374,8 @@ export function parseReaperArgs(argv: string[]): ReaperOptions {
       options.json = true;
     } else if (arg === '--workspace') {
       options.workspace = argv[++i];
+    } else if (arg === '--invoking-pane') {
+      options.invokingPaneId = argv[++i];
     }
   }
   return options;
@@ -403,9 +419,13 @@ export async function runReaperCli(
             close: r.decision.close === true,
             reasonCode: r.decision.reasonCode,
             reasonSnapshot: r.decision.reasonSnapshot,
+            needsProducerReview: r.decision.reasonSnapshot?.needsProducerReview === true,
+            sessionTail: Array.isArray(r.sessionTail) ? r.sessionTail : [],
             success: r.success,
             error: r.error,
           })),
+          invokingPaneId: options.invokingPaneId ?? null,
+          timestamp: new Date().toISOString(),
           evaluated: results.length,
           closeCount: results.filter((r) => r.decision.close).length,
           failureCount: failures.length,

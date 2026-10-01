@@ -168,6 +168,9 @@ export interface SessionEntry {
 /** Default tail window when reading a session log (512 KiB). */
 export const SESSION_TAIL_BYTES = 512 * 1024;
 
+/** Default number of tail lines surfaced to the pane-triage skill. */
+export const DEFAULT_SESSION_TAIL_LINES = 20;
+
 /**
  * Read the final assistant message from a pi session JSONL file by reading
  * only the tail of the file. Parses the pi entry shape: each line is a JSON
@@ -238,6 +241,72 @@ export function readFinalAssistantEntries(
   return entries;
 }
 
+/**
+ * Read the last *tailLines* human-readable lines from a pi session JSONL file.
+ *
+ * Populates the per-pane `sessionTail` in the JSON report so the pane-triage
+ * skill can show the producer the last 20 lines under the
+ * "<pane title> Needs Review <true|false>" heading
+ * (`WL-0MUJMXVPO0016DZM`). Fail-closed: an unreadable file yields `[]`.
+ */
+export function readSessionTailLines(
+  sessionPath: string,
+  tailLines = DEFAULT_SESSION_TAIL_LINES,
+  maxBytes = SESSION_TAIL_BYTES,
+): string[] {
+  let raw: string;
+  try {
+    const size = statSync(sessionPath).size;
+    const start = Math.max(0, size - maxBytes);
+    const length = size - start;
+    const fd = openSync(sessionPath, 'r');
+    try {
+      const buffer = Buffer.alloc(length);
+      readSync(fd, buffer, 0, length, start);
+      raw = buffer.toString('utf-8');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return []; // fail-closed
+  }
+
+  const lines = raw.split('\n');
+  const startIndex = raw.length >= maxBytes ? 1 : 0;
+  const output: string[] = [];
+  for (let i = startIndex; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === '') continue;
+    let obj: unknown;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue; // skip partial/malformed lines
+    }
+    if (!obj || typeof obj !== 'object') continue;
+    const rec = obj as Record<string, unknown>;
+    if (typeof rec.type === 'string' && typeof rec.text === 'string') {
+      output.push(rec.text);
+      continue;
+    }
+    const message = rec.message;
+    if (!message || typeof message !== 'object') continue;
+    const msg = message as Record<string, unknown>;
+    const content = msg.content;
+    if (!Array.isArray(content)) continue;
+    const text = content
+      .filter(
+        (c): c is { type?: string; text?: string } =>
+          !!c && typeof c === 'object' && typeof (c as { text?: unknown }).text === 'string',
+      )
+      .map((c) => c.text ?? '')
+      .join('')
+      .trim();
+    if (text !== '') output.push(text);
+  }
+  return output.slice(-tailLines);
+}
+
 // ── Production deps factory ───────────────────────────────────────────
 
 /** Injectable I/O for the production deps (tests/other callers may override). */
@@ -297,6 +366,7 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
         if (!pane.sessionPath) continue;
 
         const entries = readFinalAssistantEntries(pane.sessionPath);
+        const sessionTail = readSessionTailLines(pane.sessionPath);
         let idleMs = 0;
         let ageSinceDispatchMs: number | undefined;
         try {
@@ -336,6 +406,7 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
           tabId: pane.tabId,
           lastAssistantText: '',
           sessionEntries: entries,
+          sessionTail,
           agentProcessAlive,
           idleMs,
           needsProducerReview,

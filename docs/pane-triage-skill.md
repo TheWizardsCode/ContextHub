@@ -28,6 +28,8 @@ gap without duplicating logic:
 - `--json` emits a single machine-parseable document for every evaluated
   pane (classification, reason snapshot, work-item id, workspace, tab).
 - `--workspace <id>` scopes evaluation to one workspace.
+- `--invoking-pane <id>` echoes the invoking pane id (auto-populated from
+  `HERDR_PANE_ID`) so the skill can exclude it.
 - `--fixture <path>` classifies offline from a raw `herdr pane list` document
   — no herdr or `wl` subprocesses — so the skill's fixture tests exercise the
   shared classifier end-to-end.
@@ -55,9 +57,12 @@ The `bin` entry `worklog-pane-close` is registered in `packages/herdr/package.js
       "close": false,
       "reasonCode": "implement",
       "reasonSnapshot": { "needsProducerReview": false, "isInvokingPane": false },
+      "sessionTail": ["...last 20 session lines..."],
       "success": true
     }
   ],
+  "invokingPaneId": "w2V:p7H",
+  "timestamp": "2026-10-01T11:04:05.000Z",
   "evaluated": 1,
   "closeCount": 0,
   "failureCount": 0,

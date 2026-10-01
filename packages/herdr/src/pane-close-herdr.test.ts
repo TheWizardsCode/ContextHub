@@ -12,6 +12,7 @@ import {
   paneKindFromLabel,
   paneItemIdFromLabel,
   readFinalAssistantEntries,
+  readSessionTailLines,
   createHerdrReaperDeps,
 } from './pane-close-herdr';
 
@@ -140,6 +141,41 @@ describe('readFinalAssistantEntries', () => {
 
   it('returns [] for an unreadable file', () => {
     expect(readFinalAssistantEntries('/nonexistent/path/session.jsonl')).toEqual([]);
+  });
+});
+
+describe('readSessionTailLines (WL-0MUJMXVPO0016DZM AC4)', () => {
+  function withTempFile(contents: string, fn: (path: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), 'pane-tail-'));
+    const path = join(dir, 'session.jsonl');
+    try {
+      writeFileSync(path, contents, 'utf-8');
+      fn(path);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('returns the last N assistant lines', () => {
+    const lines: string[] = [];
+    for (let i = 1; i <= 30; i++) {
+      lines.push(
+        JSON.stringify({
+          type: 'message',
+          message: { role: 'assistant', content: [{ type: 'text', text: `line ${i}` }] },
+        }),
+      );
+    }
+    withTempFile(lines.join('\n') + '\n', (path) => {
+      const tail = readSessionTailLines(path, 20);
+      expect(tail).toHaveLength(20);
+      expect(tail[0]).toBe('line 11');
+      expect(tail[19]).toBe('line 30');
+    });
+  });
+
+  it('returns [] for an unreadable file', () => {
+    expect(readSessionTailLines('/nonexistent/session.jsonl')).toEqual([]);
   });
 });
 

@@ -88,7 +88,9 @@ def _print_report(
         for pane in idle:
             snapshot = pane.get("reasonSnapshot") or {}
             needs_review = bool(snapshot.get("needsProducerReview"))
-            tail = _read_pane_tail(pane.get("paneId", ""))
+            # Prefer the tail supplied by the bridge (it read the session log
+            # with the shared reader); fall back to `herdr pane read`.
+            tail = pane.get("sessionTail") or _read_pane_tail(pane.get("paneId", ""))
             print(render_log_tail(pane.get("paneTitle", ""), needs_review, tail))
             print()
 
