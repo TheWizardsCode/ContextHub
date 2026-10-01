@@ -266,6 +266,65 @@ coordination check-in. The legacy per-tier lookup chain in
 the Herdr head is genuinely empty — production-unreachable, see
 downtime-worker.ts) keeps the historical change-guard semantics unchanged.
 
+### Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5)
+
+A dispatched session can end **without reaching a terminal stage** — the
+agent exits, the pane is closed by the reaper, or the audit ends with no
+recorded result. Those closes are recorded in the rolling dispatch log as
+`entryType: 'pane-close'` entries carrying a `reasonCode`
+(`agent-ended-no-terminal`, `audit-ended-no-result`, `producer-review`,
+`risk-effort-incomplete`, …). Before this control, such an item became
+re-eligible as soon as the dispatched success-marker was released, so a
+repeatedly failing session could be re-selected on the very next idle cycle
+and burn local-LLM slots in a tight loop.
+
+`isNonTerminalCooldownActive` (`packages/herdr/src/downtime-log.ts`) is a
+**neutral, sequential filter** that excludes an item from re-dispatch of the
+**same kind** for a minimum cooldown after its most recent pane closed
+non-terminally. It is applied at the same point as the other non-safety
+filters — after the dispatched-marker exclusion and before the code-freeze
+gate — on every dispatch path:
+
+- `dispatchFromHerdrList` (direct Herdr-head dispatch),
+- `computeMostImportantItem` (coordination offer computation),
+- `dispatchFromCoordination` (leader dispatch of a remote offer).
+
+The filter consults the **most recent** `pane-close` entry for the
+`(itemId, kind)` pair and holds the item only while **all** of the following
+hold:
+
+1. the close was **non-terminal** — its `reasonCode` is not in the terminal
+   set `{none, reached-in-review}` (`none` covers
+   `closed-as-intake-complete` / `closed-as-plan-complete` / `audit-passed` /
+   `audit-failed`; `reached-in-review` is the implement-pane success close).
+   Any other/absent code is treated as non-terminal (fail-closed);
+2. the item has **not advanced past the close's dispatched-at stage** — the
+   `stage` recorded on the close entry (written from the dispatched-at
+   marker). A genuinely progressed item is released immediately (parent AC4);
+3. the close is **younger than the cooldown** — `now − closeTimestamp <
+   cooldownMs`.
+
+A later terminal close supersedes an earlier failure (most-recent wins), and
+a later failure re-arms the cooldown. A missing or unparseable close
+timestamp **fails closed** (skip), bounded by the stage-advancement release.
+
+**Neutral semantics.** A cooldown skip is **not** a strike and **not** a
+`no-candidate`: it never counts towards the three-strike CLI-error rule and
+never enters the no-candidate cooldown. The dispatch outcome carries the
+distinct reason `non-terminal-cooldown` (`MostImportantItemResult` gains a
+`{ok:true, nonTerminalCooldownHold:true}` variant), so a cooldown-held
+backlog keeps polling rather than pausing.
+
+**Configuration.** `downtimeNonTerminalCooldownMs` is a plugin setting
+(default **30 min**, `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`), clamped by
+`clampDowntimeNonTerminalCooldownMs` to **[1 min, 24 h]**
+(`DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS` / `..._MAX_MS`): the floor
+prevents immediate retry, the ceiling prevents indefinite stranding. It is
+re-read from settings every tick (live) and wired through
+`DowntimeWorkerConfig.config().nonTerminalCooldownMs` into
+`dispatchDowntimeWork`, `computeMostImportantItem`, `runCoordinationCheckIn`
+and `dispatchFromCoordination`.
+
 ### Per-prefix tabs in the Dispatcher workspace (C1, WL-0MTRQT482001SNXC)
 
 Automated downtime panes spawn **inside the machine-wide `Dispatcher`
@@ -960,6 +1019,7 @@ status refresh unchanged at 30s.**
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
+| Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
 | Pane-closure idle threshold | **30 min** (`paneCloseIdleThresholdMinutes`; clamped to 1 min – 24 h) | `pane-close-scheduler.ts` |
 | (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
@@ -970,7 +1030,9 @@ settings file (`~/.config/herdr/worklog-plugin.json`,
 load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 `downtime-worker.ts`). The success-marker staleness window
 (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped on load
-(`clampDowntimeMarkerStaleWindowMs`).
+(`clampDowntimeMarkerStaleWindowMs`). The non-terminal pane-close cooldown
+(`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
+(`clampDowntimeNonTerminalCooldownMs`).
 
 ## Files & runtime artifacts
 

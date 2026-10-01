@@ -454,6 +454,13 @@ without per-slot data it fails closed to all-slots-free for `0 < N < total`
   tracking, no dispatch) after the worker finds no candidate in either
   stage — a genuine empty backlog (default: `3600000` = 60 minutes, floor
   60s so the pause cannot be disabled or set trivially small)
+- `downtimeNonTerminalCooldownMs` — Minimum cooldown between successive
+  downtime dispatches of the same item/kind after its pane closes without
+  reaching a terminal stage (`agent-ended-no-terminal`,
+  `audit-ended-no-result`) — a neutral skip (never a strike, never a
+  no-candidate) released early when the item advances past its
+  dispatched-at stage (default: `1800000` = 30 minutes, clamped to 1 min –
+  24 h)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (when the proxy
@@ -976,6 +983,18 @@ falls through to the plan/intake tiers unchanged. A due prompt dispatches
 instead of reaching the backlog tiers, so it never triggers the no-candidate
 cooldown; when none are due and the backlog is genuinely empty, the existing
 no-candidate cooldown applies unchanged.
+
+**Non-terminal cooldown (WL-0MUKYERLZ006ELL5)** — an item whose previous
+pane of the same kind (plan/intake/audit/risk-effort/implement) closed
+without reaching a terminal stage (`agent-ended-no-terminal`,
+`audit-ended-no-result`, …) is held out of re-dispatch for
+`downtimeNonTerminalCooldownMs` (default 30 min, clamped to 1 min – 24 h) so
+a repeatedly failing session cannot consume another local-LLM slot
+immediately. Stage advancement releases the hold at once. The skip is
+neutral — reason `non-terminal-cooldown`, never a strike and never
+`no-candidate`, so it does not enter the empty-backlog pause. The same
+filter runs on the direct Herdr-head path, the coordination offer
+computation, and leader dispatch of a remote offer.
 
 **Empty-backlog cooldown** — when the implement, plan, and intake `wl next`
 lookups and the critical-tier lookup genuinely return no candidate (the

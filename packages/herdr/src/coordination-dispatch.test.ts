@@ -866,6 +866,89 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
 
 // ── runCoordinationCheckIn ────────────────────────────────────────────
 
+// ── Non-terminal pane-close cooldown on the coordination path ─────────
+// (WL-0MUKYERLZ006ELL5)
+
+describe('dispatchFromCoordination non-terminal cooldown (WL-0MUKYERLZ006ELL5)', () => {
+  const COOLDOWN_MS = 30 * 60 * 1000;
+
+  /** A temp worklog root carrying one non-terminal plan pane-close entry. */
+  function rootWithClose(timestamp: string): string {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-cooldown-root-'));
+    mkdirSync(join(root, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(root, '.worklog', 'downtime-dispatches.log'),
+      JSON.stringify({
+        entryType: 'pane-close',
+        itemId: 'WL-COOL',
+        kind: 'plan',
+        stage: 'intake_complete',
+        reasonCode: 'agent-ended-no-terminal',
+        outcome: 'requires-attention',
+        timestamp,
+        closed: true,
+      }) + '\n',
+      'utf8',
+    );
+    return root;
+  }
+
+  it('keeps the offer but skips it with the neutral cooldown reason', async () => {
+    const root = rootWithClose(new Date().toISOString());
+    try {
+      const entry = makeEntry('inst-cool', 'WL-COOL', root);
+      writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+      const deps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockResolvedValue({
+          ok: true,
+          info: itemInfo({ id: 'WL-COOL', status: 'open', stage: 'intake_complete' }),
+        }),
+      });
+
+      const outcome = await dispatchFromCoordination(deps, [entry], {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+        nonTerminalCooldownMs: COOLDOWN_MS,
+      });
+
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('non-terminal-cooldown');
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      // The offer is KEPT (still valid) — it dispatches once the cooldown ends.
+      expect(getEntry(testDir, 'inst-cool')).not.toBeNull();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('dispatches a cooldown-elapsed offer normally', async () => {
+    const root = rootWithClose(new Date(Date.now() - COOLDOWN_MS - 1_000).toISOString());
+    try {
+      const entry = makeEntry('inst-cool2', 'WL-COOL', root);
+      writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+      const deps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockResolvedValue({
+          ok: true,
+          info: itemInfo({ id: 'WL-COOL', status: 'open', stage: 'intake_complete' }),
+        }),
+      });
+
+      const outcome = await dispatchFromCoordination(deps, [entry], {
+        model: 'plan',
+        cwd: '/repo',
+        coordinationDir: testDir,
+        nonTerminalCooldownMs: COOLDOWN_MS,
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('plan');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('runCoordinationCheckIn', () => {
   it('upserts the instance most-important item on first check-in (Herdr head offer)', async () => {
     const deps = makeCoordinationDeps({

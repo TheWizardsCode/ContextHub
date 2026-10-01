@@ -10184,6 +10184,165 @@ describe('dispatched success-marker staleness on the live path (WL-0MU6UL0RJ008I
   });
 });
 
+// ── Non-terminal pane-close cooldown — live paths (WL-0MUKYERLZ006ELL5) ──
+
+describe('non-terminal pane-close cooldown on the live paths (WL-0MUKYERLZ006ELL5)', () => {
+  const COOLDOWN_MS = DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const tempCwds: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempCwds.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeCwd(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'dt-nonterminal-cooldown-'));
+    tempCwds.push(dir);
+    return dir;
+  }
+
+  function writeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      'utf8',
+    );
+  }
+
+  const planHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'intake_complete',
+    priority: 'medium',
+    sortIndex: 30,
+  });
+
+  /** A non-terminal pane-close entry for the plan candidate. */
+  function closeEntry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      entryType: 'pane-close',
+      itemId: 'PLN-1',
+      kind: 'plan',
+      stage: 'intake_complete',
+      reasonCode: 'agent-ended-no-terminal',
+      outcome: 'requires-attention',
+      timestamp: ago(60_000),
+      closed: true,
+      ...overrides,
+    };
+  }
+
+  it('AC1: a recent non-terminal close holds re-dispatch with the neutral cooldown reason', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry()]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(false);
+    // Distinguishable from 'no-candidate' so the no-candidate cooldown is
+    // not entered and no strike is recorded (AC3/AC5).
+    expect(outcome.reason).toBe('non-terminal-cooldown');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.recordError).not.toHaveBeenCalled();
+    expect(deps.recordDispatchFailure).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a close older than cooldownMs releases the item (dispatches normally)', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry({ timestamp: ago(COOLDOWN_MS + 1) })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('PLN-1');
+  });
+
+  it('AC3: stage advancement mid-cooldown releases the item immediately', async () => {
+    const cwd = makeCwd();
+    // Dispatched at `idea`; the item has since advanced to `intake_complete`.
+    writeLog(cwd, [closeEntry({ stage: 'idea' })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('PLN-1');
+  });
+
+  it('AC4: a terminal close (reasonCode none) does not apply the cooldown', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry({ reasonCode: 'none', outcome: 'closed-as-plan-complete' })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(true);
+  });
+
+  it('applies the cooldown per-kind: an intake close does not hold a plan re-dispatch', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry({ kind: 'intake', itemId: 'PLN-1' })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('AC7: computeMostImportantItem reports a distinct cooldown hold, never noCandidate', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry()]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, undefined, COOLDOWN_MS);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect('nonTerminalCooldownHold' in result).toBe(true);
+      expect('noCandidate' in result).toBe(false);
+      // The offer-computation hold is NOT a candidate offer.
+      expect('candidate' in result).toBe(false);
+    }
+  });
+
+  it('AC7: computeMostImportantItem offers a cooldown-elapsed item normally', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry({ timestamp: ago(COOLDOWN_MS + 1) })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, undefined, COOLDOWN_MS);
+
+    expect(result.ok).toBe(true);
+    if (result.ok && 'candidate' in result) {
+      expect(result.candidate.id).toBe('PLN-1');
+      expect(result.kind).toBe('plan');
+    } else {
+      throw new Error(`expected a candidate offer, got ${JSON.stringify(result)}`);
+    }
+  });
+});
+
 // ── clampDowntimeMarkerStaleWindowMs (WL-0MU6UL0RJ008IHGT AC3) ────────
 
 describe('clampDowntimeMarkerStaleWindowMs', () => {
