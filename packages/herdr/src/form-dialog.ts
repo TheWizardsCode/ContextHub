@@ -7,6 +7,8 @@
  * trigger an interactive full-pane form page in the TUI.
  */
 
+import { splitKeypresses } from './key-input.js';
+
 // ── Identifier extraction ─────────────────────────────────────────────
 
 /**
@@ -458,15 +460,36 @@ export class FormState {
   }
 
   /**
-   * Process a single keypress in form mode.
+   * Process a raw stdin chunk in form mode.
    *
-   * @param key - The raw keypress string
+   * A single `data` event may carry SEVERAL coalesced keystrokes when the
+   * user types quickly (the PTY batches bytes) — each token is processed in
+   * order so no character is dropped (WL-0MTV67MZU003H7SH). Single-key
+   * callers are unaffected: the tokeniser returns their key unchanged.
+   *
+   * @param chunk - The raw keypress chunk (one or more keys)
    * @returns A {@link FormInputResult} describing the outcome. `submitted` /
    *          `cancelled` are terminal; `paste`/`cut` signal the caller to
    *          perform an async OS-clipboard operation; `none` means the
-   *          key was consumed by editing/navigation.
+   *          key was consumed by editing/navigation. When a chunk contains a
+   *          terminal key, the preceding keys are applied first and the
+   *          terminal result is returned.
    */
-  handleInput(key: string): FormInputResult {
+  handleInput(chunk: string): FormInputResult {
+    // Split a coalesced chunk into individual keys and process each in
+    // order. A single-token chunk (the common case) falls straight through
+    // to the existing single-key logic below.
+    const keys = splitKeypresses(chunk);
+    if (keys.length > 1) {
+      let last: FormInputResult = { type: 'none' };
+      for (const token of keys) {
+        last = this.handleInput(token);
+        if (last.type !== 'none') return last;
+      }
+      return last;
+    }
+    const key = keys[0] ?? '';
+
     // ── Bracketed-paste unwrapping (WL-0MSW6KCTA0092DCV) ──────────
     // When a chunk arrives inside an open bracketed-paste region — or the
     // whole chunk is a self-contained bracketed paste — insert the inner

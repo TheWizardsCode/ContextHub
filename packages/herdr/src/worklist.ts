@@ -96,6 +96,12 @@ import {
  * Design decision — skip, don't coalesce: ticks while typing are silently
  * dropped; the next regular tick after close fires normally. No queued
  * immediate refresh is emitted on close (avoids infinite-refresh loops).
+ *
+ * NOTE: this gate stops background re-render contention but does NOT by
+ * itself prevent dropped keystrokes when the user types fast — the PTY can
+ * coalesce several keys into one stdin chunk. The text-input handlers run
+ * every chunk through `splitKeypresses()` (`key-input.ts`) so no character
+ * is discarded (WL-0MTV67MZU003H7SH).
  */
 export function isInputActive(
   formState: FormState | null,

@@ -5282,6 +5282,23 @@ describe('isInputActive — note-edit coverage and keystroke preservation (WL-0M
     // After submission, ensure no character was dropped from the buffer prior to confirm.
     // The buffer was verified above; a skipped scheduler tick never truncates it.
   });
+
+  it('fast-typing chunks lose no keystrokes into FormState across a skipped tick', async () => {
+    // Fast typing coalesces several keystrokes into one stdin chunk; the
+    // form must apply every character (WL-0MTV67MZU003H7SH).
+    const { FormState: Fs } = await import('./form-dialog.js');
+    const state = new Fs('cmd <x>', 'Test', [{ name: 'x', default: '' }], () => {}, () => {});
+    for (const chunk of ['the ', 'quick ', 'brown ', 'fox']) state.handleInput(chunk);
+    expect(state.fields[0].value).toBe('the quick brown fox');
+  });
+
+  it('fast-typing chunks lose no keystrokes into ShipItDialogState across a skipped tick', async () => {
+    const { ShipItDialogState: SDS } = await import('./ship-it-dialog.js');
+    const onConfirm = vi.fn();
+    const state = new SDS(onConfirm, () => {});
+    expect(state.handleInput('ship\r')).toBe('submitted');
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
 });
 
 // ── Header truncation guard (WL-0MSNI6TQ5003JY1Z) ─────────────────────

@@ -1241,16 +1241,26 @@ keypresses mid-keystroke (WL-0MTV67MZU003H7SH). There is no user value in
 syncing or refreshing the list while a form is active, so the work is
 deferred until typing finishes.
 
-- **Shared predicate** — `isInputActive(formState, shipItDialog)` in
-  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null`.
+- **Shared predicate** — `isInputActive(formState, shipItDialog,
+  blockedNoticeActive)` in `worklist.ts` returns `true` when
+  `formState !== null || shipItDialog !== null || blockedNoticeActive`.
   Both scheduler ticks (the 30s `refresh` and the 60s `sync`) check it
   alongside the existing `paneGate.visible()` check and return early when it
   is true. The guard is defined once and shared — future text-input overlays
   are covered by extending the single predicate, not per-screen copies.
 - **All text-input sites covered** — the command-parameter form
-  (`FormState`), the Ship It confirmation dialog (`ShipItDialogState`), and
-  `md-note-edit` (which opens a `FormState`) are all covered. There is no
-  separate note-edit state to gate.
+  (`FormState`), the Ship It confirmation dialog (`ShipItDialogState`), the
+  Ship-mode blocked notice, and `md-note-edit` (which opens a `FormState`)
+  are all covered. There is no separate note-edit state to gate.
+- **Fast typing never drops characters** — a raw stdin `data` event may
+  carry **several coalesced keystrokes** when the user types quickly (the
+  PTY batches bytes). Both text-input handlers run every chunk through the
+  shared `splitKeypresses()` tokeniser (`key-input.ts`) so each key is
+  applied in order; escape sequences (arrows, Ctrl+Enter, bracketed paste)
+  stay intact as one token. Previously a multi-character chunk was silently
+  discarded because only `key.length === 1` was accepted — the residual
+  "missing keystrokes when typing fast" bug that the tick gate alone could
+  not fix.
 - **Resume contract: skip, don't coalesce** — ticks are silently dropped
   while typing; the next regular tick after the overlay closes fires
   normally. No queued or immediate post-close refresh is emitted (this

@@ -305,6 +305,66 @@ describe('FormState interactions', () => {
   });
 });
 
+// ── Coalesced chunk handling — fast typing (WL-0MTV67MZU003H7SH) ──────
+// Fast typing delivers several keystrokes in one stdin chunk; every
+// character must be preserved (previously the whole chunk was dropped).
+
+describe('FormState coalesced chunk handling (fast typing)', () => {
+  it('appends every character from a single multi-character chunk', () => {
+    const state = makeForm({ fields: [{ name: 'status' }] });
+    state.handleInput('hello');
+    expect(state.fields[0].value).toBe('hello');
+  });
+
+  it('preserves characters across many coalesced chunks (no drops)', () => {
+    const state = makeForm({ fields: [{ name: 'status' }] });
+    for (const chunk of ['the ', 'quick ', 'brown ', 'fox']) state.handleInput(chunk);
+    expect(state.fields[0].value).toBe('the quick brown fox');
+  });
+
+  it('applies printable characters before an escape sequence in the same chunk', () => {
+    const state = makeForm({ fields: [{ name: 'a' }, { name: 'b' }] });
+    state.handleInput('ab\x1b[B');
+    expect(state.fields[0].value).toBe('ab');
+    expect(state.activeFieldIndex).toBe(1);
+  });
+
+  it('submits when a candidate chunk ends with Enter, keeping preceding characters', () => {
+    let submitted: string | null = null;
+    const state = new FormState('cmd <x>', 'd', [{ name: 'x', default: '' }],
+      (r) => { submitted = r; }, () => {});
+    state.handleInput('value\r');
+    expect(submitted).toBe('cmd value');
+  });
+
+  it('applies Backspace inside a coalesced chunk', () => {
+    const state = makeForm({ fields: [{ name: 'status' }] });
+    state.handleInput('abc\x7f');
+    expect(state.fields[0].value).toBe('ab');
+  });
+
+  it('navigates fields with Tab inside a coalesced chunk', () => {
+    const state = makeForm({ fields: [{ name: 'a' }, { name: 'b' }] });
+    state.handleInput('a\tb');
+    expect(state.fields[0].value).toBe('a');
+    expect(state.fields[1].value).toBe('b');
+  });
+
+  it('cancels when a chunk contains Esc (terminal result)', () => {
+    let cancelled = false;
+    const state = new FormState('cmd <x>', 'd', [{ name: 'x', default: '' }],
+      () => {}, () => { cancelled = true; });
+    state.handleInput('\x1b');
+    expect(cancelled).toBe(true);
+  });
+
+  it('still inserts a full self-contained bracketed paste verbatim', () => {
+    const state = makeForm({ fields: [{ name: 'status' }] });
+    state.handleInput(`${BRACKETED_PASTE_START}multi\nline${BRACKETED_PASTE_END}`);
+    expect(state.fields[0].value).toBe('multi\nline');
+  });
+});
+
 // ── Paste / cut / newline / bracketed-paste (WL-0MSW6KCTA0092DCV) ────
 
 describe('FormState paste & cut', () => {
