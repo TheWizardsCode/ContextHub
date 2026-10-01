@@ -1718,13 +1718,13 @@ describe('createDowntimeDeps', () => {
     });
     setExecFileAsync(mockExec as never);
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
-    // The real deps resolve the project workspace / Dispatcher anchor via the
+    // The real deps resolve the per-prefix tab / Dispatcher anchor via the
     // herdr CLI, which is absent in tests — inject stub resolvers so the
-    // anchored spawn path is exercised without a live herdr session. Project
-    // workspace + item-ID tab (WL-0MU321YK70035AYT): the worklog dispatch path
-    // resolves the project workspace then the exact item-ID tab; the legacy
-    // single anchor is retained only for the AC4 fallback and scheduled
-    // prompts.
+    // anchored spawn path is exercised without a live herdr session.
+    // Per-prefix tab (C1, WL-0MTRQT482001SNXC): the worklog dispatch path
+    // resolves the Dispatcher tab labelled with the item's prefix (`WL`);
+    // the legacy single anchor is retained only for scheduled prompts and
+    // the pre-C1 fallback.
     const anchorResolver = vi.fn().mockResolvedValue({ paneId: 'wD:FALLBACK', workspaceId: 'wD' });
     const projectWorkspaceResolver = vi
       .fn()
@@ -1732,6 +1732,9 @@ describe('createDowntimeDeps', () => {
     const itemTabAnchorResolver = vi
       .fn()
       .mockResolvedValue({ tabId: 'wC:tWL-ONCE', paneId: 'wC:pTEST' });
+    const dispatcherTabAnchorResolver = vi
+      .fn()
+      .mockResolvedValue({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:pTEST' });
     const deps = createDowntimeDeps(
       '/path/to/send-to-pi.sh',
       'Map',
@@ -1740,6 +1743,7 @@ describe('createDowntimeDeps', () => {
       undefined,
       projectWorkspaceResolver as never,
       itemTabAnchorResolver as never,
+      dispatcherTabAnchorResolver as never,
     );
     const cwd = makeTempDir();
 
@@ -1748,15 +1752,16 @@ describe('createDowntimeDeps', () => {
     expect(first.dispatched).toBe(true);
     expect(first.kind).toBe('audit');
     expect(first.candidate?.id).toBe('WL-ONCE');
-    // The resolved item-ID tab anchor pane id is forwarded to send-to-pi.sh as
-    // --anchor: the pane lands in the project workspace's WL-ONCE tab. The
-    // legacy single anchor is NOT used on this path.
-    expect(projectWorkspaceResolver).toHaveBeenCalledWith(cwd);
-    expect(itemTabAnchorResolver).toHaveBeenCalledWith(cwd, 'wC', 'WL-ONCE');
+    // The resolved per-prefix tab anchor pane id is forwarded to send-to-pi.sh
+    // as --anchor: the pane lands in the Dispatcher workspace's `WL` tab. The
+    // project-workspace path and the legacy single anchor are NOT used.
+    expect(dispatcherTabAnchorResolver).toHaveBeenCalledWith(cwd, 'WL');
+    expect(projectWorkspaceResolver).not.toHaveBeenCalled();
+    expect(itemTabAnchorResolver).not.toHaveBeenCalled();
     expect(anchorResolver).not.toHaveBeenCalled();
     const spawnArgs = (spawnFn as ReturnType<typeof vi.fn>).mock.calls[0]?.[1] as string[] | undefined;
     expect(spawnArgs).toContain('--anchor');
-    expect(spawnArgs).toContain('wC:pTEST');
+    expect(spawnArgs).toContain('wD:tWL:pTEST');
 
     // The durable marker landed in the shared log (kind:audit).
     const entries = await readDowntimeLogEntries(cwd);

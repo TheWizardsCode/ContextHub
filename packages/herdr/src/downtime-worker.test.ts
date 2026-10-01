@@ -641,9 +641,136 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
   });
 });
 
+// ── Per-prefix tab dispatch wiring (C1, WL-0MTRQT482001SNXC) ─────────────
+
+describe('per-prefix Dispatcher tab dispatch wiring (C1)', () => {
+  const candidate = {
+    id: 'WL-ABC',
+    title: 'Some task',
+    stage: 'intake_complete' as const,
+    status: 'open',
+  };
+
+  it('AC1: resolves the per-prefix tab and forwards its anchor pane (primary path)', async () => {
+    const getDispatcherTabAnchor = vi.fn().mockResolvedValue({
+      workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
+    });
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-ABC'),
+      expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
+    );
+  });
+
+  it('AC1: each prefix routes to its own tab (WL vs TCE)', async () => {
+    const wlDeps = makeDeps({
+      getDispatcherTabAnchor: vi.fn().mockResolvedValue({
+        workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-1', title: 'wl', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+    const tceDeps = makeDeps({
+      getDispatcherTabAnchor: vi.fn().mockResolvedValue({
+        workspaceId: 'wD', tabId: 'wD:tTCE', paneId: 'wD:tTCE:p1',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'TCE-2', title: 'tce', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    await dispatchDowntimeWork(wlDeps, { model: 'plan', cwd: '/repo-wl' });
+    await dispatchDowntimeWork(tceDeps, { model: 'plan', cwd: '/repo-tce' });
+
+    expect(wlDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-wl', 'WL');
+    expect(tceDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-tce', 'TCE');
+    expect(wlDeps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:tWL:p1', cwd: '/repo-wl' }),
+    );
+    expect(tceDeps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:tTCE:p1', cwd: '/repo-tce' }),
+    );
+  });
+
+  it('AC1: the per-prefix dep takes precedence over the project-workspace path', async () => {
+    const getDispatcherTabAnchor = vi.fn().mockResolvedValue({
+      workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
+    });
+    const resolveProjectWorkspace = vi.fn();
+    const getItemTabAnchor = vi.fn();
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      resolveProjectWorkspace,
+      getItemTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
+    expect(resolveProjectWorkspace).not.toHaveBeenCalled();
+    expect(getItemTabAnchor).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
+    );
+  });
+
+  it('AC1 fail-safe: a null per-prefix anchor aborts with anchor-unavailable (no fallback)', async () => {
+    const getDispatcherTabAnchor = vi.fn().mockResolvedValue(null);
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:LEGACY', workspaceId: 'wD' });
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      getDispatcherAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(getDispatcherAnchor).not.toHaveBeenCalled();
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC1 fail-safe: a throwing per-prefix resolver aborts with anchor-unavailable', async () => {
+    const deps = makeDeps({
+      getDispatcherTabAnchor: vi.fn().mockRejectedValue(new Error('herdr down')),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+  });
+});
+
 // ── Project workspace + item-ID tab dispatch wiring (WL-0MU321YK70035AYT) ──
 
-describe('project workspace + item-ID tab dispatch wiring', () => {
+// These tests exercise the LEGACY fallback path (no getDispatcherTabAnchor
+// dep wired) retained for pre-C1 callers. Production always wires the
+// per-prefix resolver (createDowntimeDeps), so the per-prefix path above is
+// the live behaviour.
+describe('project workspace + item-ID tab dispatch wiring (legacy fallback)', () => {
   const candidate = {
     id: 'WL-ABC',
     title: 'Some task',
@@ -781,7 +908,7 @@ describe('project workspace + item-ID tab dispatch wiring', () => {
     expect(deps.claimItem).not.toHaveBeenCalled();
   });
 
-  it('AC5 retirement: the full item id (not a prefix) is forwarded; no retired dep key', async () => {
+  it('legacy wiring: without the per-prefix dep the item-ID tab path is used (backward compat)', async () => {
     const getItemTabAnchor = vi.fn().mockResolvedValue({ tabId: 'wC:tX', paneId: 'wC:tX:p1' });
     const deps = makeDeps({
       resolveProjectWorkspace: vi

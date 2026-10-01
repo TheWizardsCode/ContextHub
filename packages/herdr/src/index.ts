@@ -136,10 +136,12 @@ import {
 } from './scheduled-prompts.js';
 import {
   getDispatcherAnchor as resolveDispatcherAnchor,
+  getDispatcherTabAnchor as resolveDispatcherTabAnchor,
   getItemTabAnchor as resolveItemTabAnchor,
   resolveProjectWorkspace as resolveProjectWorkspaceForRoot,
   createDispatcherAnchorDeps,
   type DispatcherAnchor,
+  type DispatcherPrefixTabAnchor,
   type ItemTabAnchor,
   type ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
@@ -696,6 +698,31 @@ async function defaultProjectWorkspaceResolver(
 }
 
 /**
+ * Default per-prefix Dispatcher tab-anchor resolver used by
+ * {@link createDowntimeDeps} (C1, parent WL-0MTRQT482001SNXC): resolves or
+ * creates the tab labelled with the work-item id prefix (e.g. `WL`, `TCE`)
+ * inside the machine-wide Dispatcher workspace and returns its root pane.
+ * Null on any failure — the dispatch fails closed ('anchor-unavailable'),
+ * never a wrong-tab/workspace placement. Injectable for tests that build
+ * real deps without a live herdr session.
+ */
+async function defaultDispatcherTabAnchorResolver(
+  cwd: string,
+  prefix: string,
+): Promise<DispatcherPrefixTabAnchor | null> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    return await resolveDispatcherTabAnchor(
+      cwd,
+      createDispatcherAnchorDeps(cwd, herdrBin),
+      prefix,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Default item-ID tab-anchor resolver used by {@link createDowntimeDeps}
  * (WL-0MU321YK70035AYT): ensures/reuses the tab labelled with the exact
  * work-item id inside the resolved project workspace and returns its root
@@ -801,6 +828,10 @@ async function readClosedPaneIds(cwd: string): Promise<Set<string>> {
  * @param itemTabAnchorResolver Item-ID tab-anchor resolver
  *   (WL-0MU321YK70035AYT). Defaults to the real herdr-CLI-backed resolver;
  *   injectable for tests.
+ * @param dispatcherTabAnchorResolver Per-prefix Dispatcher tab-anchor
+ *   resolver (C1, WL-0MTRQT482001SNXC). Defaults to the real herdr-CLI-backed
+ *   resolver; injectable for tests. This is the PRIMARY placement path for
+ *   worklog dispatches.
  */
 export function createDowntimeDeps(
   scriptPath: string,
@@ -813,6 +844,8 @@ export function createDowntimeDeps(
     defaultProjectWorkspaceResolver,
   itemTabAnchorResolver: DowntimeWorkerDeps['getItemTabAnchor'] =
     defaultItemTabAnchorResolver,
+  dispatcherTabAnchorResolver: DowntimeWorkerDeps['getDispatcherTabAnchor'] =
+    defaultDispatcherTabAnchorResolver,
 ): DowntimeWorkerDeps {
   // Shared round-robin registry (WL-0MSSRED76008LGB6): one per worklog root
   // (`<cwd>/.worklog/downtime-round-robin.json`), created lazily so each
@@ -879,11 +912,16 @@ export function createDowntimeDeps(
     // Null → dispatch degrades to "no dispatch this cycle". Injected
     // (default = real herdr CLI) so tests can stub it.
     getDispatcherAnchor: anchorResolver,
-    // Project workspace + item-ID tab (WL-0MU321YK70035AYT): the worklog
-    // dispatch path resolves the project workspace hosting the item's root,
-    // then ensures/reuses the tab labelled with the exact work-item id and
-    // anchors the pane to that tab's root pane. A null workspace falls back to
-    // `getDispatcherAnchor`; a null item tab fails closed ('anchor-unavailable').
+    // Per-prefix Dispatcher tab (C1, WL-0MTRQT482001SNXC): the PRIMARY
+    // worklog placement path. Resolves/creates the tab labelled with the
+    // work-item id prefix (`WL`, `TCE`) inside the machine-wide Dispatcher
+    // workspace and anchors the pane to that tab's root pane. A null result
+    // fails closed ('anchor-unavailable') — never a legacy fallback. Injected
+    // (default = real herdr CLI).
+    getDispatcherTabAnchor: dispatcherTabAnchorResolver,
+    // Project workspace + item-ID tab (WL-0MU321YK70035AYT): retained as a
+    // fallback for callers that do NOT wire `getDispatcherTabAnchor`; the
+    // production primary path above takes precedence when present.
     // Injected (default = real herdr CLI).
     resolveProjectWorkspace: projectWorkspaceResolver,
     getItemTabAnchor: itemTabAnchorResolver,

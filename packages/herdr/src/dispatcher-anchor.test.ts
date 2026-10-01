@@ -1,10 +1,11 @@
 /**
- * packages/herdr/src/dispatcher-anchor.test.ts — Dispatcher anchors and
- * project-workspace + item-ID tab resolution
- * (WL-0MU321YK70035AYT, superseding the retired C1 per-prefix routing).
+ * packages/herdr/src/dispatcher-anchor.test.ts — Dispatcher anchors, per-prefix
+ * tab routing and project-workspace + item-ID tab resolution.
  *
  * Coverage:
  *  - C0 `getDispatcherAnchor` provisioning (retained as the AC4 fallback).
+ *  - C1 `getDispatcherTabAnchor` — per-prefix tab routing inside the
+ *    Dispatcher workspace (WL-0MTRQT482001SNXC).
  *  - machine-wide / process-info / proc-environ parsers.
  *  - `resolveProjectWorkspace` — project root → plugin workspace (AC1/AC3).
  *  - `getItemTabAnchor` — create-or-reuse the exact item-ID tab (AC2/AC5).
@@ -16,15 +17,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   getDispatcherAnchor,
+  getDispatcherTabAnchor,
   getItemTabAnchor,
   resolveProjectWorkspace,
   createDispatcherAnchorDeps,
   DISPATCHER_ANCHOR_FILE,
+  DISPATCHER_TAB_ANCHORS_FILE,
   DISPATCHER_WORKSPACE_LABEL,
   DISPATCHER_ROOT_TAB_LABEL,
   PLUGIN_PANE_LABEL,
   type DispatcherAnchor,
   type DispatcherAnchorDeps,
+  type DispatcherTabAnchors,
   type DispatcherTabInfo,
   type DispatcherPaneInfo,
   type MachinePaneInfo,
@@ -68,6 +72,13 @@ function readPersisted(): DispatcherAnchor | null {
 
 function writePersisted(a: DispatcherAnchor): void {
   fs.writeFileSync(path.join(tmpDir, DISPATCHER_ANCHOR_FILE), JSON.stringify(a), 'utf-8');
+}
+
+function readTabAnchorsPersisted(): DispatcherTabAnchors | null {
+  try {
+    const raw = fs.readFileSync(path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE), 'utf-8');
+    return JSON.parse(raw) as DispatcherTabAnchors;
+  } catch { return null; }
 }
 
 describe('getDispatcherAnchor ACs (C0 fallback, retained)', () => {
@@ -568,6 +579,237 @@ describe('getItemTabAnchor ACs (AC2/AC5)', () => {
     process.env.HERDR_COORDINATION_DIR = fileAsDir;
     const deps = makeTabDeps();
     expect(await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC')).toBeNull();
+  });
+});
+
+// ── getDispatcherTabAnchor (C1, WL-0MTRQT482001SNXC) ─────────────────────
+
+describe('getDispatcherTabAnchor ACs (per-prefix tabs in Dispatcher workspace)', () => {
+  it('AC1: first dispatch for a prefix creates the labelled tab and persists the mapping', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeTabDeps({ createTab });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(got).toEqual({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    expect(createTab).toHaveBeenCalledWith('wD', 'WL');
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'wD',
+      byPrefix: { WL: { tabId: 'wD:tWL', paneId: 'wD:tWL:p1' } },
+    });
+  });
+
+  it('AC1: second dispatch for the same prefix REUSES the tab (no duplicate create)', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({
+      createTab,
+      listTabs: async () => [{ tabId: 'wD:tWL', label: 'WL' }],
+      listPanes: async () => [{ paneId: 'wD:tWL:p1', tabId: 'wD:tWL' }],
+      isPaneAlive: async () => true,
+    });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(got).toEqual({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    expect(createTab).not.toHaveBeenCalled();
+    expect(readTabAnchorsPersisted()).toEqual({
+      workspaceId: 'wD',
+      byPrefix: { WL: { tabId: 'wD:tWL', paneId: 'wD:tWL:p1' } },
+    });
+  });
+
+  it('AC1: distinct prefixes get distinct tabs (WL and TCE do not collapse)', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeTabDeps({ createTab });
+
+    const wl = await getDispatcherTabAnchor('/repo', deps, 'WL');
+    const tce = await getDispatcherTabAnchor('/repo', deps, 'TCE');
+
+    expect(wl?.tabId).toBe('wD:tWL');
+    expect(tce?.tabId).toBe('wD:tTCE');
+    expect(createTab).toHaveBeenNthCalledWith(1, 'wD', 'WL');
+    expect(createTab).toHaveBeenNthCalledWith(2, 'wD', 'TCE');
+    const persisted = readTabAnchorsPersisted();
+    expect(persisted?.byPrefix.WL).toEqual({ tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    expect(persisted?.byPrefix.TCE).toEqual({ tabId: 'wD:tTCE', paneId: 'wD:tTCE:p1' });
+  });
+
+  it('AC1: prefix is case-preserved (raw prefix, no normalisation)', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeTabDeps({ createTab });
+
+    await getDispatcherTabAnchor('/repo', deps, 'wl');
+    await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(createTab).toHaveBeenNthCalledWith(1, 'wD', 'wl');
+    expect(createTab).toHaveBeenNthCalledWith(2, 'wD', 'WL');
+  });
+
+  it('AC2: a persisted anchor with a live pane is adopted without listing tabs', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({ workspaceId: 'wD', byPrefix: { WL: { tabId: 'wD:tWL', paneId: 'wD:tWL:p1' } } }),
+      'utf-8',
+    );
+    const listTabs = vi.fn(async () => [] as DispatcherTabInfo[]);
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({ listTabs, createTab, isPaneAlive: async () => true });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(got).toEqual({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    expect(listTabs).not.toHaveBeenCalled();
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a persisted anchor with a DEAD pane is re-provisioned', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    fs.writeFileSync(
+      path.join(tmpDir, DISPATCHER_TAB_ANCHORS_FILE),
+      JSON.stringify({ workspaceId: 'wD', byPrefix: { WL: { tabId: 'wD:tOLD', paneId: 'wD:tOLD:p1' } } }),
+      'utf-8',
+    );
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}NEW`,
+      paneId: `${ws}:t${label}NEW:p1`,
+    }));
+    const deps = makeTabDeps({ createTab, isPaneAlive: async () => false });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(got).toEqual({ workspaceId: 'wD', tabId: 'wD:tWLNEW', paneId: 'wD:tWLNEW:p1' });
+    expect(createTab).toHaveBeenCalledWith('wD', 'WL');
+    expect(readTabAnchorsPersisted()?.byPrefix.WL).toEqual({
+      tabId: 'wD:tWLNEW', paneId: 'wD:tWLNEW:p1',
+    });
+  });
+
+  it('AC2: a tab existing in herdr but not in the map is adopted and persisted', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({
+      createTab,
+      listTabs: async () => [{ tabId: 'wD:tWL', label: 'WL' }],
+      listPanes: async () => [{ paneId: 'wD:tWL:p1', tabId: 'wD:tWL' }],
+      isPaneAlive: async () => true,
+    });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(got).toEqual({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    expect(createTab).not.toHaveBeenCalled();
+    expect(readTabAnchorsPersisted()?.byPrefix.WL).toEqual({
+      tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
+    });
+  });
+
+  it('AC2: a matching tab with a dead pane is replaced (stale-tab re-provision)', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const createTab = vi.fn(async (ws: string) => ({ tabId: `${ws}:tNEW`, paneId: `${ws}:tNEW:p1` }));
+    const deps = makeTabDeps({
+      createTab,
+      listTabs: async () => [{ tabId: 'wD:tDEAD', label: 'WL' }],
+      listPanes: async () => [{ paneId: 'wD:tDEAD:p1', tabId: 'wD:tDEAD' }],
+      isPaneAlive: async () => false,
+    });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(got).toEqual({ workspaceId: 'wD', tabId: 'wD:tNEW', paneId: 'wD:tNEW:p1' });
+    expect(createTab).toHaveBeenCalledWith('wD', 'WL');
+  });
+
+  it('AC2 fail-closed: unparseable tab list → null, never creates (no duplicate)', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({ listTabs: async () => null, createTab });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it('AC2 fail-closed: unreadable pane list (unknown) → null, never creates', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({
+      listTabs: async () => [{ tabId: 'wD:tWL', label: 'WL' }],
+      listPanes: async () => null,
+      createTab,
+    });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+    expect(createTab).not.toHaveBeenCalled();
+  });
+
+  it('AC2 fail-closed: tab create returns null (malformed CLI output) → null', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const deps = makeTabDeps({ createTab: async () => null });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+    expect(readTabAnchorsPersisted()).toBeNull();
+  });
+
+  it('AC2 guard: empty prefix → null without touching the CLI', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const listTabs = vi.fn(async () => [] as DispatcherTabInfo[]);
+    const deps = makeTabDeps({ listTabs });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, '')).toBeNull();
+    expect(listTabs).not.toHaveBeenCalled();
+  });
+
+  it('AC2 concurrent: lock held with no existing tab → fail closed (no duplicate)', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const lockPath = path.join(tmpDir, 'downtime-coordination.lock');
+    fs.writeFileSync(lockPath, '');
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({ createTab });
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
+    expect(createTab).not.toHaveBeenCalled();
+    try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
+  });
+
+  it('AC2 concurrent: lock held but the winner already created the tab → adopt it', async () => {
+    writePersisted({ paneId: 'wD:pRoot', workspaceId: 'wD' });
+    const lockPath = path.join(tmpDir, 'downtime-coordination.lock');
+    fs.writeFileSync(lockPath, '');
+    const createTab = vi.fn(async () => null);
+    const deps = makeTabDeps({
+      createTab,
+      listTabs: async () => [{ tabId: 'wD:tWL', label: 'WL' }],
+      listPanes: async () => [{ paneId: 'wD:tWL:p1', tabId: 'wD:tWL' }],
+      isPaneAlive: async () => true,
+    });
+
+    const got = await getDispatcherTabAnchor('/repo', deps, 'WL');
+
+    expect(got).toEqual({ workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1' });
+    expect(createTab).not.toHaveBeenCalled();
+    try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
+  });
+
+  it('machine dir unresolvable → null', async () => {
+    const fileAsDir = path.join(tmpDir, 'not-a-dir');
+    fs.writeFileSync(fileAsDir, 'x');
+    process.env.HERDR_COORDINATION_DIR = fileAsDir;
+    const deps = makeTabDeps();
+
+    expect(await getDispatcherTabAnchor('/repo', deps, 'WL')).toBeNull();
   });
 });
 

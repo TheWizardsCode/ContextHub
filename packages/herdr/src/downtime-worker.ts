@@ -163,6 +163,7 @@ import { paneCloseReaperDue } from './pane-close-scheduler.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 import type {
   DispatcherAnchor,
+  DispatcherPrefixTabAnchor,
   ItemTabAnchor,
   ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
@@ -2014,6 +2015,19 @@ export interface DowntimeWorkerDeps {
     itemId: string,
   ): Promise<ItemTabAnchor | null>;
   /**
+   * Resolve or create the per-prefix tab anchor inside the Dispatcher
+   * workspace (C1, parent WL-0MTRQT482001SNXC). Given a work-item id
+   * prefix (e.g. `WL`, `TCE`), returns the tab+pane for routing the dispatch
+   * into a per-project tab. A `null` result degrades to 'anchor-unavailable'
+   * — the caller NEVER falls back to the legacy Dispatcher anchor or the
+   * leader's pane when this dep is wired. Optional for test callers that
+   * inject mocks; production wiring provides it.
+   */
+  getDispatcherTabAnchor?(
+    cwd: string,
+    prefix: string,
+  ): Promise<DispatcherPrefixTabAnchor | null>;
+  /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
    * MARKER was written (the dispatched-marker source); a comment failure is
@@ -2761,50 +2775,82 @@ async function dispatchClaimedTier(
   // claiming/marking an item that can never spawn a pane. Absent dep
   // (legacy/test callers) → no anchor, legacy current-pane behavior.
   //
-  // Per-prefix tab anchor (C1, parent WL-0MTRQT482001SNXC): the primary path
+  // Per-prefix tab anchor (C1, parent WL-0MTRQT482001SNXC): the PRIMARY path
   // routes the candidate's work-item prefix (`<PREFIX>` before the first `-`)
   // to its own tab inside the single Dispatcher workspace. When wired, the
   // per-prefix resolver REPLACES the legacy single anchor — a null result is
   // 'anchor-unavailable' and NEVER falls back to the legacy anchor or the
   // leader's pane.
   let anchorId: string | undefined;
-  // True when `anchorId` is a PROJECT-WORKSPACE item-tab anchor (the primary
-  // path). Those tabs are provisioned with herdr's initial root pane (an
-  // empty bash pane) which is only needed as the split anchor for the FIRST
-  // dispatch — after the dispatch pane spawns it is closed so the tab shows
-  // only the productive pane (WL-0MU2EOHK900425VU). The Dispatcher fallback
-  // anchor is deliberately exempt: its root pane is the persisted dispatch
-  // anchor and closing it would trigger a blank re-provision loop.
+  // True when `anchorId` is a per-prefix Dispatcher tab anchor (C1).
+  // Per-prefix tab anchors are provisioned with herdr's initial root pane
+  // (an empty bash pane) which is only needed as the split anchor for the
+  // FIRST dispatch — after the dispatch pane spawns it is closed so the tab
+  // shows only the productive pane. The Dispatcher fallback anchor is
+  // deliberately exempt: its root pane is the persisted dispatch anchor and
+  // closing it would trigger a blank re-provision loop.
   let anchorIsTabRoot = false;
-  // Primary path (AC1/AC3): resolve the project workspace that hosts the
-  // worklog plugin pane for this item's root, then ensure/reuse the tab
-  // labelled with the exact work-item id and anchor the pane there (AC2).
-  let projectTarget: ProjectWorkspaceTarget | null = null;
-  if (typeof deps.resolveProjectWorkspace === 'function') {
+  // Extract the work-item id prefix (e.g. `WL-0MTO…` → `WL`, `TCE-…` → `TCE`).
+  const prefix = candidate.id.split('-', 1)[0];
+
+  // ── Primary path: per-prefix tab in Dispatcher workspace (C1) ─────────
+  // When wired, the per-prefix resolver REPLACES every legacy placement:
+  // a null/failed resolution is 'anchor-unavailable' (no dispatch this
+  // cycle) and NEVER falls back to the legacy Dispatcher anchor or the
+  // leader's pane (constraint: fail-safe, never a wrong-tab placement).
+  if (typeof deps.getDispatcherTabAnchor === 'function') {
+    if (!prefix) {
+      // No prefix extractable (empty/invalid id) → cannot route by prefix.
+      return { dispatched: false, reason: 'anchor-unavailable' };
+    }
+    let prefixAnchor: DispatcherPrefixTabAnchor | null = null;
+    try {
+      prefixAnchor = await deps.getDispatcherTabAnchor(opts.cwd, prefix);
+    } catch {
+      prefixAnchor = null; // fail-closed
+    }
+    if (prefixAnchor === null) {
+      return { dispatched: false, reason: 'anchor-unavailable' };
+    }
+    anchorId = prefixAnchor.paneId;
+    // Per-prefix Dispatcher tabs use herdr's initial root pane as anchor.
+    anchorIsTabRoot = true;
+  }
+
+  // ── Fallback: project workspace + item-ID tab ─────────────────────────
+  // Only reached by legacy/test callers that do NOT wire the per-prefix
+  // resolver (production always wires it — see createDowntimeDeps).
+  if (anchorId === undefined && typeof deps.resolveProjectWorkspace === 'function') {
+    let projectTarget: ProjectWorkspaceTarget | null = null;
     try {
       projectTarget = await deps.resolveProjectWorkspace(opts.cwd);
     } catch {
       projectTarget = null; // fail-closed on any resolver error
     }
+    if (projectTarget !== null && typeof deps.getItemTabAnchor === 'function') {
+      let tabAnchor: ItemTabAnchor | null = null;
+      try {
+        tabAnchor = await deps.getItemTabAnchor(opts.cwd, projectTarget.workspaceId, candidate.id);
+      } catch {
+        tabAnchor = null; // fail-closed
+      }
+      if (tabAnchor === null) {
+        // The workspace resolved but its item tab could not be provisioned:
+        // fail closed rather than place a project pane in the Dispatcher
+        // workspace (never a wrong placement).
+        return { dispatched: false, reason: 'anchor-unavailable' };
+      }
+      anchorId = tabAnchor.paneId;
+      anchorIsTabRoot = true;
+    }
   }
-  if (projectTarget !== null && typeof deps.getItemTabAnchor === 'function') {
-    let tabAnchor: ItemTabAnchor | null = null;
-    try {
-      tabAnchor = await deps.getItemTabAnchor(opts.cwd, projectTarget.workspaceId, candidate.id);
-    } catch {
-      tabAnchor = null; // fail-closed
-    }
-    if (tabAnchor === null) {
-      // The workspace resolved but its item tab could not be provisioned:
-      // fail closed rather than place a project pane in the Dispatcher
-      // workspace (never a wrong placement).
-      return { dispatched: false, reason: 'anchor-unavailable' };
-    }
-    anchorId = tabAnchor.paneId;
-    anchorIsTabRoot = true;
-  } else if (typeof deps.getDispatcherAnchor === 'function') {
-    // Fallback (AC4): no project plugin pane resolved → the retained
-    // machine-wide Dispatcher anchor.
+
+  // ── Fallback: legacy Dispatcher single anchor (AC4) ───────────────────
+  // When this dep IS wired, a null/failed resolution fails closed
+  // ('anchor-unavailable') — never a current-pane placement. When it is NOT
+  // wired (pre-C0 / legacy/test callers), no anchor is set and the spawn
+  // uses the legacy current-pane behaviour.
+  if (anchorId === undefined && typeof deps.getDispatcherAnchor === 'function') {
     let anchor: DispatcherAnchor | null = null;
     try {
       anchor = await deps.getDispatcherAnchor(opts.cwd);
@@ -2815,7 +2861,11 @@ async function dispatchClaimedTier(
       return { dispatched: false, reason: 'anchor-unavailable' };
     }
     anchorId = anchor.paneId;
+    // The legacy Dispatcher anchor is NOT a tab root — it is the persisted
+    // dispatch pane and must never be closed.
+    anchorIsTabRoot = false;
   }
+
   // Cross-root claim (WL-0MTQ14W7L003II5A): opts.cwd is the item's worklog
   // root — the coordination leader passes the OFFER's root so the CAS claim
   // lands in the item's own database (never the leader's module override).
