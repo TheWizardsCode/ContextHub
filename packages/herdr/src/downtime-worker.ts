@@ -39,7 +39,18 @@
  *    additionally excludes items with `needsProducerReview === true`
  *    (parent WL-0MTIAL65N004T22F): items flagged for producer review are
  *    never auto-dispatched, preventing the worker from consuming local
- *    slots on items awaiting a human decision. A tier-2 CLI error does
+ *    slots on items awaiting a human decision.
+ *    A NON-TERMINAL pane-close cooldown (WL-0MUKYERLZ006ELL5) is applied as
+ *    a sequential filter after the dispatched-marker exclusion and before
+ *    the code-freeze gate: an item whose previous pane of the SAME kind
+ *    closed without reaching a terminal stage (`agent-ended-no-terminal`,
+ *    `audit-ended-no-result`, ...) is skipped until
+ *    `downtimeNonTerminalCooldownMs` has elapsed, or the item advances past
+ *    its dispatched-at stage. It is neutral — never a strike, never
+ *    `no-candidate` (distinct reason `non-terminal-cooldown`) — so it never
+ *    enters the no-candidate cooldown; the same filter is applied on the
+ *    coordination offer path (`computeMostImportantItem` /
+ *    `dispatchFromCoordination`). A tier-2 CLI error does
  *    NOT short-circuit: the idea tier is still attempted so a tier-3
  *    candidate can still dispatch.
  *    `wl next` failures are reported as `{ok:false}` (fail closed to busy)
@@ -146,8 +157,10 @@ import {
   readDowntimeLogEntries as _readDowntimeEntries,
   dispatchedItemMarkers as _dispatchedMarkers,
   markerStillExcludes as _markerStillExcludes,
+  isNonTerminalCooldownActive as _isNonTerminalCooldownActive,
   appendPaneCloseLogEntry as _appendPaneCloseLogEntry,
   type DispatchMarker,
+  type DowntimeLogEntry,
   type PaneCloseLogEntry,
   type PaneLifecycleKind,
 } from './downtime-log.js';
@@ -1440,6 +1453,8 @@ export type MostImportantItemResult =
   | { ok: true; reviewQueueHold: true }
   /** Every remaining offerable candidate is a critical item already in flight (live working pane): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry (WL-0MUBVKYH5009CGBI / F4). */
   | { ok: true; inFlightHold: true }
+  /** The only remaining offerable candidates are held by the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
+  | { ok: true; nonTerminalCooldownHold: true }
   | { ok: false; error?: string };
 
 
@@ -2542,8 +2557,8 @@ export function selectCriticalFirstCandidates(
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; auditHostSaturated: boolean },
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -2668,6 +2683,15 @@ async function dispatchFromHerdrList(
         k === 'audit' || k === 'implement' ? 'id-guard' : 'stage-guard',
       )
     ) {
+      continue;
+    }
+    // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): a neutral
+    // sequential filter — hold an item whose previous same-kind pane closed
+    // without reaching a terminal stage until the cooldown elapses (or the
+    // item advances past its dispatched-at stage). Never a strike, never
+    // 'no-candidate'.
+    if (_isNonTerminalCooldownActive(entries, item.id, k, item.stage, ctx.nonTerminalCooldownMs, now)) {
+      flags.cooldownHeld = true;
       continue;
     }
     // Code-freeze split-by-skill: audit+implement dispatch pauses during
@@ -3400,6 +3424,12 @@ export function toCoordinationCandidate(info: DowntimeItemInfo): DowntimeCandida
  *    implements remain the result is `{ok:true, reviewQueueHold:true}`
  *    (never `noCandidate`), so the no-candidate cooldown is not entered
  *    while the queue drains.
+ *  - the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5) holds an
+ *    item whose previous same-kind pane closed without reaching a terminal
+ *    stage until `downtimeNonTerminalCooldownMs` elapses (or the item
+ *    advances past its dispatched-at stage); when ONLY cooldown-held items
+ *    remain the result is `{ok:true, nonTerminalCooldownHold:true}` (never
+ *    `noCandidate`), so the no-candidate cooldown is not entered.
  *
  * Active-audit single-flight and the free-slot minimums are
  * dispatch-time gates, so they are NOT applied to an offer.
@@ -3416,6 +3446,7 @@ export async function computeMostImportantItem(
   now: number = Date.now(),
   browseItemCount: number = DEFAULT_BROWSE_ITEM_COUNT,
   markerStaleWindowMs: number = DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+  nonTerminalCooldownMs: number = DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
 ): Promise<MostImportantItemResult> {
   // The check-in (and the worker's no-candidate probe) requires the Herdr
   // head lookup: without it there is no canonical ranking to offer from —
@@ -3461,6 +3492,9 @@ export async function computeMostImportantItem(
     return reviewGate;
   };
   let heldByReviewQueue = false;
+  // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral hold —
+  // the backlog is not empty, so the caller must not pause.
+  let heldByCooldown = false;
 
   // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F4
   // WL-0MUBVKYH5009CGBI): resolved for THIS instance's OWN root (`cwd`) —
@@ -3539,6 +3573,12 @@ export async function computeMostImportantItem(
       ) {
         continue;
       }
+      // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
+      // sequential filter (same placement as the dispatch path).
+      if (_isNonTerminalCooldownActive(entries, item.id, k, item.stage, nonTerminalCooldownMs, now)) {
+        heldByCooldown = true;
+        continue;
+      }
       // Code-freeze split-by-skill: audit+implement+risk-effort offers pause
       // during a freeze/ambiguous marker (plan/intake still offer).
       if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) continue;
@@ -3600,9 +3640,11 @@ export async function computeMostImportantItem(
   // resumes immediately when the queue drains below the threshold).
   return heldByReviewQueue
     ? { ok: true, reviewQueueHold: true }
-    : heldByInFlight
-      ? { ok: true, inFlightHold: true }
-      : { ok: true, noCandidate: true };
+    : heldByCooldown
+      ? { ok: true, nonTerminalCooldownHold: true }
+      : heldByInFlight
+        ? { ok: true, inFlightHold: true }
+        : { ok: true, noCandidate: true };
 }
 
 /**
@@ -3634,7 +3676,13 @@ export async function computeMostImportantItem(
  *    implements flow unconditionally; when every surviving offer is held,
  *    the outcome reason is the neutral 'review-queue-hold' (never
  *    'no-candidate' / cooldown);
- *  - per-tier free-slot minimums (audit ≥ 2, single-pane ≥ 1).
+ *  - per-tier free-slot minimums (audit ≥ 2, single-pane ≥ 1);
+ *  - non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): an offer whose
+ *    previous same-kind pane closed without reaching a terminal stage is
+ *    KEPT but skipped this cycle until `downtimeNonTerminalCooldownMs`
+ *    elapses (or the item advances past its dispatched-at stage); when every
+ *    surviving offer is cooldown-held the outcome is the neutral
+ *    'non-terminal-cooldown' (never 'no-candidate').
  *
  * The first offer that passes every filter dispatches via the existing
  * `dispatchClaimedTier` pipeline (CAS claim → marker write → spawn); its
@@ -3650,7 +3698,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; spawnConfig?: DowntimeSpawnConfig },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; spawnConfig?: DowntimeSpawnConfig },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -3707,6 +3755,19 @@ export async function dispatchFromCoordination(
     return inFlightCache.get(root) ?? { available: false, itemIds: new Set() };
   };
   let inFlightHold = false;
+
+  // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): read the rolling
+  // dispatch log ONCE per OFFER root (cached) — the log is per-worklog-root,
+  // like the review gate and in-flight caches above.
+  const cooldownEntriesCache = new Map<string, DowntimeLogEntry[]>();
+  const cooldownEntriesForRoot = async (root: string): Promise<DowntimeLogEntry[]> => {
+    if (!cooldownEntriesCache.has(root)) {
+      cooldownEntriesCache.set(root, await _readDowntimeEntries(root));
+    }
+    return cooldownEntriesCache.get(root) ?? [];
+  };
+  const cooldownMs = opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
+  let cooldownHold = false;
 
   // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
   // gated by the SAME fresh-read code-freeze marker as the audit/implement
@@ -3780,6 +3841,23 @@ export async function dispatchFromCoordination(
     const kind = classifyItemForDispatch(result.info, now);
     if (kind === null) {
       removeEntry(opts.coordinationDir, entry.instanceId);
+      continue;
+    }
+    // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
+    // sequential filter — keep the entry (it is still a valid offer) but
+    // skip it this cycle while the cooldown holds. Never a strike, never
+    // 'no-candidate'.
+    if (
+      _isNonTerminalCooldownActive(
+        await cooldownEntriesForRoot(worklogRoot),
+        result.info.id,
+        kind,
+        result.info.stage,
+        cooldownMs,
+        now,
+      )
+    ) {
+      cooldownHold = true;
       continue;
     }
     // Code-freeze split-by-skill: audit/implement/risk-effort offers pause
@@ -3890,9 +3968,11 @@ export async function dispatchFromCoordination(
     ? { dispatched: false, reason: 'code-freeze' }
     : reviewHold
       ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
-      : inFlightHold
-        ? { dispatched: false, reason: 'in-flight-pane' }
-        : { dispatched: false, reason: 'no-candidate' };
+      : cooldownHold
+        ? { dispatched: false, reason: 'non-terminal-cooldown' }
+        : inFlightHold
+          ? { dispatched: false, reason: 'in-flight-pane' }
+          : { dispatched: false, reason: 'no-candidate' };
 }
 
 /**
@@ -3916,11 +3996,13 @@ export async function runCoordinationCheckIn(
     browseItemCount?: number;
     /** Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT); defaults to DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS. */
     markerStaleWindowMs?: number;
+    /** Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5); defaults to DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS. */
+    nonTerminalCooldownMs?: number;
   },
   now: number = Date.now(),
 ): Promise<{ offered: string | null; updated: boolean }> {
   const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
-  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs);
+  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs, coordinator.nonTerminalCooldownMs);
   if (!result.ok) {
     // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
     return { offered: current?.workItemId ?? null, updated: false };
@@ -4118,6 +4200,13 @@ export async function dispatchDowntimeWork(
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`.
      */
     markerStaleWindowMs?: number;
+    /**
+     * Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): an item whose
+     * previous same-kind pane closed without reaching a terminal stage is
+     * skipped until this many ms elapse. Optional — absent falls back to
+     * `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`.
+     */
+    nonTerminalCooldownMs?: number;
     /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
     spawnConfig?: DowntimeSpawnConfig;
   },
@@ -4215,7 +4304,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, auditHostSaturated };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, auditHostSaturated };
       const head = await deps.getHerdrListHead(opts.cwd);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -4225,7 +4314,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, inFlight, spawnConfig: opts.spawnConfig };
+        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, inFlight, spawnConfig: opts.spawnConfig };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return herdrOutcome;
 
@@ -4252,6 +4341,7 @@ export async function dispatchDowntimeWork(
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
+        const cooldownHeld = flags.cooldownHeld;
         // Herdr list had items but every one was filtered by a safety gate:
         // compose the terminal reason and DO NOT fall through to the legacy
         // chain (AC2 — gates are filters, not a fallback ranking).
@@ -4275,6 +4365,11 @@ export async function dispatchDowntimeWork(
         // candidates: neutral 'review-queue-hold', NEVER 'no-candidate' — no
         // cooldown while audits drain the queue (WL-0MTTSWC1X005P4VD AC2).
         if (reviewHeld) return { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON };
+        // Non-terminal cooldown held the only remaining candidates: neutral
+        // 'non-terminal-cooldown', NEVER 'no-candidate' — the backlog is not
+        // empty, so the no-candidate cooldown must not fire
+        // (WL-0MUKYERLZ006ELL5 AC3/AC6).
+        if (cooldownHeld) return { dispatched: false, reason: 'non-terminal-cooldown' };
         return { dispatched: false, reason: 'no-candidate' };
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
@@ -5005,6 +5100,11 @@ export interface DowntimeWorkerConfig {
     concurrentDispatchCap?: number;
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
+    /**
+     * Non-terminal pane-close cooldown, ms (WL-0MUKYERLZ006ELL5). Optional
+     * for backward compat — defaults to DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS.
+     */
+    nonTerminalCooldownMs?: number;
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
     browseItemCount?: number;
     /**
@@ -5557,6 +5657,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
               instanceId,
               browseItemCount: cfg.browseItemCount,
               markerStaleWindowMs: cfg.markerStaleWindowMs,
+              nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
             }, tickNow);
             lastOfferEmpty = checkIn.offered === null;
             // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
@@ -5918,6 +6019,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   coordinationDir: opts.coordinationDir,
                   freeSlots,
                   browseItemCount: cfg.browseItemCount,
+                  nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
@@ -5936,6 +6038,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 contentionQueueDepth,
                 // Success-marker staleness window (WL-0MU6UL0RJ008IHGT).
                 markerStaleWindowMs: cfg.markerStaleWindowMs,
+                // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
+                nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                 spawnConfig,
               });
         // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
@@ -5980,7 +6084,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           //    and reset the idle tracker (fresh full idle period required
           //    after the pause).
           if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
-            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs);
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs);
             if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
               errorStrikes = 0; // the CLI answered — it is healthy
               cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;

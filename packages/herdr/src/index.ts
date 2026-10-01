@@ -1866,6 +1866,8 @@ async function main(): Promise<void> {
         // after, so later ticks read the real mode.
         mode: modeSwitchHolder.worker?.getLastKnownMode() ?? undefined,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
+        // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
+        nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
         browseItemCount: s.browseItemCount,
