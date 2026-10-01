@@ -253,6 +253,27 @@ export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
 export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
 
 /**
+ * Default minimum cooldown (WL-0MUKYERLZ006ELL5) between successive downtime
+ * dispatches of the same `(item, kind)` after a pane closed WITHOUT reaching a
+ * terminal stage (`agent-ended-no-terminal`, `audit-ended-no-result`, or any
+ * future non-terminal code). Prevents a repeatedly failing session from being
+ * re-selected immediately and wasting local-LLM slots. Default 30 minutes.
+ */
+export const DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
+ * Hard floor for the non-terminal cooldown (1 minute): a defensive minimum so
+ * the control cannot be disabled or set trivially small (no immediate retry).
+ */
+export const DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS = 60 * 1000;
+
+/**
+ * Hard ceiling for the non-terminal cooldown (24 hours): above this a
+ * repeatedly-failing item could be stranded indefinitely.
+ */
+export const DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Per-process dispatch-PIPELINE single-flight bound (WL-0MT50LKAK001EF5Q).
  *
  * This bounds PIPELINES (claim → marker → spawn), NOT live panes. There is
@@ -7009,6 +7030,22 @@ export function clampDowntimeRequiredFreeSlots(value: number): number {
 export function clampDowntimeNoCandidateCooldownMs(value: number): number {
   if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS;
   return Math.max(Math.round(value), DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS);
+}
+
+/**
+ * Clamp the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): reject
+ * negative/non-finite (fall back to the 30-minute default) and clamp to
+ * [DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS,
+ * DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS] (1 minute – 24 hours) so the control
+ * can neither be disabled/trivially small (immediate retry) nor set so large
+ * that a repeatedly-failing item is stranded.
+ */
+export function clampDowntimeNonTerminalCooldownMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS),
+    DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS,
+  );
 }
 
 /**

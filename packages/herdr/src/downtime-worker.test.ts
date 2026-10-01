@@ -101,6 +101,7 @@ import {
   clampDowntimeIdleThresholdMs,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeNoCandidateCooldownMs,
+  clampDowntimeNonTerminalCooldownMs,
   clampDowntimeMarkerStaleWindowMs,
   countFreeUnownedSlots,
   isSlotOwned,
@@ -117,6 +118,9 @@ import {
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+  DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+  DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS,
+  DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
@@ -3839,6 +3843,25 @@ describe('downtime settings clamps', () => {
     expect(clampDowntimeNoCandidateCooldownMs(-1)).toBe(DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS);
     expect(clampDowntimeNoCandidateCooldownMs(Number.NaN)).toBe(DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS);
     expect(clampDowntimeNoCandidateCooldownMs(Infinity)).toBe(DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS);
+  });
+
+  it('clampDowntimeNonTerminalCooldownMs keeps valid values and clamps to [60s, 24h]', () => {
+    expect(clampDowntimeNonTerminalCooldownMs(DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS)).toBe(
+      DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+    );
+    // Below the 60s floor → clamped up (no immediate retry).
+    expect(clampDowntimeNonTerminalCooldownMs(1_000)).toBe(DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS);
+    expect(clampDowntimeNonTerminalCooldownMs(60_000)).toBe(60_000);
+    // Above the 24h ceiling → clamped down (cannot strand indefinitely).
+    expect(clampDowntimeNonTerminalCooldownMs(48 * 60 * 60 * 1000)).toBe(
+      DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS,
+    );
+  });
+
+  it('clampDowntimeNonTerminalCooldownMs rejects negative and non-finite values', () => {
+    expect(clampDowntimeNonTerminalCooldownMs(-1)).toBe(DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS);
+    expect(clampDowntimeNonTerminalCooldownMs(Number.NaN)).toBe(DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS);
+    expect(clampDowntimeNonTerminalCooldownMs(Infinity)).toBe(DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS);
   });
 });
 

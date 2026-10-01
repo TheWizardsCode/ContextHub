@@ -141,6 +141,31 @@ describe('downtimeMarkerStaleWindowMs (WL-0MU6UL0RJ008IHGT)', () => {
   });
 });
 
+describe('downtimeNonTerminalCooldownMs (WL-0MUKYERLZ006ELL5)', () => {
+  it('defaults to 1_800_000 ms (30 minutes)', () => {
+    expect(defaultSettings.downtimeNonTerminalCooldownMs).toBe(30 * 60 * 1000);
+  });
+
+  it('loads a persisted value and clamps into the [1m, 24h] range', () => {
+    const path = tempSettingsPath();
+    // Below the 1m floor → clamped up.
+    saveSettings(path, { ...defaultSettings, downtimeNonTerminalCooldownMs: 1_000 });
+    expect(loadSettings(path).downtimeNonTerminalCooldownMs).toBe(60 * 1000);
+    // Above the 24h ceiling → clamped down.
+    saveSettings(path, { ...defaultSettings, downtimeNonTerminalCooldownMs: 48 * 60 * 60 * 1000 });
+    expect(loadSettings(path).downtimeNonTerminalCooldownMs).toBe(24 * 60 * 60 * 1000);
+    // In-range preserved.
+    saveSettings(path, { ...defaultSettings, downtimeNonTerminalCooldownMs: 5 * 60 * 1000 });
+    expect(loadSettings(path).downtimeNonTerminalCooldownMs).toBe(5 * 60 * 1000);
+  });
+
+  it('falls back to the default when the persisted value is not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeNonTerminalCooldownMs: 'soon' }), 'utf-8');
+    expect(loadSettings(path).downtimeNonTerminalCooldownMs).toBe(30 * 60 * 1000);
+  });
+});
+
 describe('modeSwitchEnabled', () => {
   it('defaults to true (activity-gated mode switching is opt-out)', () => {
     expect(defaultSettings.modeSwitchEnabled).toBe(true);
