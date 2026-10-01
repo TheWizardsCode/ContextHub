@@ -211,7 +211,7 @@ function parseQuestionStart(
     pos += paren[0].length;
     rest = rest.slice(paren[0].length);
   }
-  const dash = rest.match(/^\s*[—–-]\s*[^*:]+?(?=\*{0,2}\s*:)/);
+  const dash = rest.match(/^\s*[—–-]\s*[^*>:(]+?(?=\*{0,2}\s*:)/);
   if (dash) {
     pos += dash[0].length;
     rest = rest.slice(dash[0].length);
@@ -550,7 +550,7 @@ export async function runInterview(
   let interrupted = false;
 
   for (const pair of unanswered) {
-    const answer = await io.prompt(`${pair.number}. ${pair.question}\n   →`);
+    const answer = await io.prompt(`${pair.number}. ${pair.question}\n   → `);
     const cleaned = answer.replace(/\s+/g, ' ').trim();
     if (cleaned === '') {
       // EOF / empty response — session interrupted; stop asking.
@@ -601,13 +601,13 @@ function createPromptLoop(): {
     input: process.stdin,
     output: process.stdout,
   });
-  const iterator = rl[Symbol.asyncIterator]();
   return {
     next: async (message: string) => {
-      process.stdout.write(message + ' ');
-      const { value, done } = await iterator.next();
-      if (done) return '';
-      return String(value ?? '').trim();
+      return new Promise((resolve) => {
+        rl.question(message, (answer) => {
+          resolve(String(answer ?? '').trim());
+        });
+      });
     },
     close: () => rl.close(),
   };

@@ -224,6 +224,18 @@ describe('parseQAPairs (canonical bullet appendix)', () => {
     expect(pairs[0].unanswered).toBe(true);
   });
 
+  it('does not truncate question text containing em dashes (WL-0MUKCGV3X0030W6K)', () => {
+    // Question text with em dashes that are part of the content, not qualifiers
+    const content =
+      '- **Q:** 4. Crash behaviour — destroyed and respawn (like enemy) — **Answer:** *(awaiting producer)*.';
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      '4. Crash behaviour — destroyed and respawn (like enemy)',
+    );
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
   it('parses inline-numbered Q markers with bold answer attribution', () => {
     const content = `- **Q1**: "What is the timeout?" — **Answer** (user): "120s". Source: reply.
 - **Q2:** "And the scope?"`;
