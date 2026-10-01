@@ -4937,6 +4937,9 @@ export async function monitorDispatchedPanes(
         outcome: decision.outcome,
         reason: decision.reason,
         reasonCode: decision.reasonCode,
+        // Dispatched-at stage, so the non-terminal cooldown can be released
+        // when the item advances (WL-0MUKYERLZ006ELL5 parent AC4).
+        stage: pane.stage,
         closed,
       };
       try {

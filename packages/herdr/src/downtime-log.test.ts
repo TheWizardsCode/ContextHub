@@ -41,8 +41,9 @@ import {
   COORDINATION_LOG_FILE,
   DOWNTIME_LOG_MAX_ENTRIES,
   recentAuditDispatchedItemIds,
+  isNonTerminalCooldownActive,
 } from './downtime-log.js';
-import type { RecentDispatchRow } from './downtime-log.js';
+import type { DowntimeLogEntry, RecentDispatchRow } from './downtime-log.js';
 
 const tempDirs: string[] = [];
 
@@ -1302,5 +1303,129 @@ describe('groupRecentDispatchesByTimeBlock (4-hour UTC blocks, WL-0MUMM9NED009TL
     expect(blocks).toHaveLength(2);
     const flat = blocks.flatMap((b) => b.rows.map((r) => r.itemId)).sort();
     expect(flat).toEqual(['WL-A', 'WL-B', 'WL-C']);
+  });
+});
+
+// ── Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5) ────────────
+
+describe('isNonTerminalCooldownActive (WL-0MUKYERLZ006ELL5)', () => {
+  const NOW = Date.parse('2026-09-28T08:00:00.000Z');
+  const COOLDOWN_MS = 30 * 60 * 1000;
+
+  /** Build a pane-close entry, defaulting to a recent non-terminal close. */
+  function close(overrides: Partial<DowntimeLogEntry> = {}): DowntimeLogEntry {
+    return {
+      entryType: 'pane-close',
+      itemId: 'WL-A',
+      kind: 'intake',
+      timestamp: new Date(NOW - 60_000).toISOString(),
+      reasonCode: 'agent-ended-no-terminal',
+      outcome: 'requires-attention',
+      closed: true,
+      ...overrides,
+    };
+  }
+
+  function active(
+    entries: DowntimeLogEntry[],
+    itemStage = 'idea',
+    kind = 'intake',
+  ): boolean {
+    return isNonTerminalCooldownActive(entries, 'WL-A', kind, itemStage, COOLDOWN_MS, NOW);
+  }
+
+  it('(a) skips an item after a recent non-terminal close', () => {
+    expect(active([close({ stage: 'idea' })])).toBe(true);
+  });
+
+  it('(b) releases once the close is older than cooldownMs', () => {
+    const stale = new Date(NOW - COOLDOWN_MS - 1).toISOString();
+    expect(active([close({ timestamp: stale, stage: 'idea' })])).toBe(false);
+  });
+
+  it('releases at exactly cooldownMs (the cooldown has elapsed)', () => {
+    const atEdge = new Date(NOW - COOLDOWN_MS).toISOString();
+    expect(active([close({ timestamp: atEdge, stage: 'idea' })])).toBe(false);
+  });
+
+  it('(c) releases immediately when the item advanced past its dispatched-at stage', () => {
+    // Dispatched at plan_complete, now in_review → genuinely progressed.
+    expect(active([close({ stage: 'plan_complete' })], 'in_review')).toBe(false);
+  });
+
+  it('does not release when the item is still at the dispatched-at stage', () => {
+    expect(active([close({ stage: 'plan_complete' })], 'plan_complete')).toBe(true);
+  });
+
+  it('(d) does not apply to a terminal close (reasonCode none)', () => {
+    expect(
+      active([close({ reasonCode: 'none', outcome: 'closed-as-intake-complete' })]),
+    ).toBe(false);
+  });
+
+  it('does not apply to a reached-in-review close (terminal success)', () => {
+    // `reached-in-review` is a successful terminal close (parent AC5): the
+    // implement pane advanced the item, so no cooldown is applied.
+    expect(
+      active(
+        [close({ kind: 'implement', reasonCode: 'reached-in-review', stage: 'plan_complete' })],
+        'in_review',
+        'implement',
+      ),
+    ).toBe(false);
+  });
+
+  it('(e) fails closed (skip) on a missing close timestamp', () => {
+    expect(active([close({ timestamp: undefined, stage: 'idea' })])).toBe(true);
+  });
+
+  it('(e) fails closed (skip) on an unparseable close timestamp', () => {
+    expect(active([close({ timestamp: 'not-a-date', stage: 'idea' })])).toBe(true);
+  });
+
+  it('returns false when there is no pane-close record for the item', () => {
+    expect(active([])).toBe(false);
+    expect(active([close({ itemId: 'WL-OTHER' })])).toBe(false);
+  });
+
+  it('scopes the cooldown to the dispatched kind', () => {
+    // A non-terminal intake close must not hold implement re-dispatch.
+    expect(active([close({ kind: 'intake' })], 'idea', 'implement')).toBe(false);
+  });
+
+  it('keeps kinds independent when the same item closes non-terminally in one kind', () => {
+    const entries = [close({ kind: 'plan' }), close({ kind: 'intake' })];
+    expect(isNonTerminalCooldownActive(entries, 'WL-A', 'intake', 'idea', COOLDOWN_MS, NOW)).toBe(true);
+    expect(isNonTerminalCooldownActive(entries, 'WL-A', 'plan', 'idea', COOLDOWN_MS, NOW)).toBe(true);
+    expect(isNonTerminalCooldownActive(entries, 'WL-A', 'implement', 'idea', COOLDOWN_MS, NOW)).toBe(false);
+  });
+
+  it('uses the most recent close: a later terminal close supersedes an earlier failure', () => {
+    const entries = [
+      close({ timestamp: new Date(NOW - 120_000).toISOString(), reasonCode: 'agent-ended-no-terminal' }),
+      close({ timestamp: new Date(NOW - 30_000).toISOString(), reasonCode: 'none', outcome: 'closed-as-intake-complete' }),
+    ];
+    expect(active(entries)).toBe(false);
+  });
+
+  it('uses the most recent close: a later failure re-arms the cooldown', () => {
+    const entries = [
+      close({ timestamp: new Date(NOW - 30_000).toISOString(), reasonCode: 'none', outcome: 'closed-as-intake-complete' }),
+      close({ timestamp: new Date(NOW - 10_000).toISOString(), reasonCode: 'agent-ended-no-terminal' }),
+    ];
+    expect(active(entries)).toBe(true);
+  });
+
+  it('applies to any non-terminal code (producer-review, risk-effort-incomplete)', () => {
+    expect(active([close({ reasonCode: 'producer-review', stage: 'idea' })])).toBe(true);
+    expect(active([close({ reasonCode: 'risk-effort-incomplete', stage: 'plan_complete' })])).toBe(true);
+    expect(active([close({ reasonCode: 'audit-ended-no-result', stage: 'plan_complete' })])).toBe(true);
+  });
+
+  it('ignores non-pane-close log entries (dispatch markers)', () => {
+    const markers: DowntimeLogEntry[] = [
+      { itemId: 'WL-A', kind: 'intake', dispatchedAt: new Date(NOW - 60_000).toISOString(), stage: 'idea' },
+    ];
+    expect(active(markers)).toBe(false);
   });
 });

@@ -156,6 +156,13 @@ export interface PaneCloseLogEntry {
    * key — see `pane-lifecycle.ts`). `'none'` for clean terminal outcomes.
    */
   reasonCode?: string;
+  /**
+   * Worklog stage the item was at when the pane was closed
+   * (WL-0MUKYERLZ006ELL5), recorded from the dispatched-at marker stage. Lets
+   * the non-terminal cooldown be released when the item has since advanced
+   * past that stage (parent AC4). Optional for legacy entries.
+   */
+  stage?: string;
   /** Whether the pane was actually closed (false for informational log-only). */
   closed: boolean;
   /**
@@ -779,6 +786,95 @@ export function markerStillExcludes(
   const t = Date.parse(marker.dispatchedAt);
   if (Number.isNaN(t)) return true; // unparseable → fail-closed: keep excluding
   return now - t <= stalenessWindowMs;
+}
+
+// ── Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5) ────────────
+
+/**
+ * Worklog stage rank used by the non-terminal pane-close cooldown to detect
+ * stage advancement (WL-0MUKYERLZ006ELL5). Higher means further through the
+ * lifecycle; an unknown stage ranks -1 so it never looks "advanced".
+ */
+const NON_TERMINAL_COOLDOWN_STAGE_RANK: Record<string, number> = {
+  idea: 0,
+  intake_complete: 1,
+  plan_complete: 2,
+  in_review: 3,
+};
+
+/**
+ * Reason codes on a pane-close entry that represent a TERMINAL close — the
+ * item genuinely reached a terminal stage or the pane finished cleanly.
+ * `'none'` covers `closed-as-intake-complete` / `closed-as-plan-complete` /
+ * `audit-passed` / `audit-failed`; `'reached-in-review'` is the implement-pane
+ * success close (parent AC5). Any OTHER code — including future/unknown or
+ * absent ones — is treated as NON-terminal (fail-closed).
+ */
+const TERMINAL_PANE_CLOSE_REASON_CODES: ReadonlySet<string> = new Set([
+  'none',
+  'reached-in-review',
+]);
+
+function cooldownStageRank(stage: string | undefined): number {
+  if (typeof stage !== 'string') return -1;
+  return NON_TERMINAL_COOLDOWN_STAGE_RANK[stage] ?? -1;
+}
+
+/**
+ * Decide whether a MINIMUM COOLDOWN still excludes an item from re-dispatch
+ * after a NON-TERMINAL pane close (WL-0MUKYERLZ006ELL5). Neutral sequential
+ * filter (never a strike, never a `no-candidate`): it consults the most recent
+ * `entryType: 'pane-close'` entry for the `(itemId, kind)` pair and returns
+ * true (skip) while that close:
+ *
+ *  1. is NON-terminal — its `reasonCode` is not in
+ *     {@link TERMINAL_PANE_CLOSE_REASON_CODES} (fail-closed: unknown/absent
+ *     codes are non-terminal), AND
+ *  2. the item has NOT advanced past the close's dispatched-at `stage`
+ *     (parent AC4; a genuinely progressed item is released immediately), AND
+ *  3. is younger than `cooldownMs` (`now - closeTime < cooldownMs`).
+ *
+ * Returns false when there is no close record, the close was terminal, the item
+ * advanced, or the cooldown has elapsed. FAIL-CLOSED: a missing or unparseable
+ * close timestamp returns true (safe no-dispatch), bounded by the
+ * stage-advancement release. The most recent close wins — a later terminal
+ * close supersedes an earlier failure, and a later failure re-arms.
+ */
+export function isNonTerminalCooldownActive(
+  entries: DowntimeLogEntry[],
+  itemId: string,
+  kind: string,
+  itemStage: string | undefined,
+  cooldownMs: number,
+  now: number = Date.now(),
+): boolean {
+  // Most-recent close for this (itemId, kind) wins (append order).
+  let latest: DowntimeLogEntry | undefined;
+  for (const e of entries) {
+    if (e.entryType !== 'pane-close') continue;
+    if (e.itemId !== itemId || e.kind !== kind) continue;
+    latest = e;
+  }
+  if (latest === undefined) return false;
+
+  // Terminal close → no cooldown (parent AC5). Fail-closed: unknown/absent
+  // codes are non-terminal.
+  const reasonCode = typeof latest.reasonCode === 'string' ? latest.reasonCode : '';
+  if (TERMINAL_PANE_CLOSE_REASON_CODES.has(reasonCode)) return false;
+
+  // Stage advancement releases (parent AC4). Only release when the
+  // dispatched-at stage is KNOWN and the current stage is strictly higher —
+  // a close without a recorded stage cannot prove progress, so it stays held
+  // (fail-closed; the age check below still bounds it).
+  const dispatchedRank = cooldownStageRank(latest.stage);
+  const currentRank = cooldownStageRank(itemStage);
+  if (dispatchedRank >= 0 && currentRank > dispatchedRank) return false;
+
+  // Age check. Missing/unparseable timestamp → fail-closed skip.
+  if (typeof latest.timestamp !== 'string') return true;
+  const t = Date.parse(latest.timestamp);
+  if (Number.isNaN(t)) return true;
+  return now - t < cooldownMs;
 }
 
 /**
