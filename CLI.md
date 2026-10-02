@@ -1253,18 +1253,63 @@ Answers are persisted after each response, so an interrupted session can be
 resumed by re-running the command: only the questions that remain outstanding
 are asked. `needsProducerReview` is cleared once every question has an answer.
 
+#### When there are no questions to answer
+
+If no clarifying-questions section is found (or it contains no parseable
+questions) but the item is still flagged for producer review, the command
+explains what the producer must do to clear the flag. The explanation is
+produced by the local LLM proxy's `compact` model, prompted with the
+instruction *"Explain what the producer needs to do in order to remove the
+needsProducerReview flag"* plus item context (the description and the two most
+recent comments). When the LLM is disabled or unreachable the command falls
+back silently to the two most recent comments (`<author>: <first line>`).
+
+The explanation is advisory only — it never mutates the description.
+
+After printing the explanation the command asks whether the flag should be
+cleared (default **No**). This prompt only appears in the
+`noSection`/`noQuestions` cases; the `allAnswered` path keeps its existing
+automatic clear behaviour. No prompt is shown in `--json` mode.
+
 Options:
 
 - `--prefix <prefix>` — Operate on a specific prefix (optional).
+- `--json` — Non-interactive mode: prints JSON with
+  `needsProducerReview` (boolean), `producerReviewExplanation` (string or
+  `null`), `noSection`, `noQuestions`, `total`, `outstanding` and
+  `allAnswered`. Performs no prompts, no mutation and (with `--no-llm`) no
+  LLM call.
+- `--no-llm` — Disable the LLM explanation and use the comment fallback
+  (default: LLM on).
+- `--model <model>` — Override the chat model used for the explanation.
 
-> The command requires interactive (TTY) input; it cannot be used with
-> `--json`.
+> Without `--json`, the command requires interactive (TTY) input.
 
 Examples:
 
 ```sh
 wl interview WL-ABC123
+wl interview WL-ABC123 --no-llm
+wl --json interview WL-ABC123
 ```
+
+#### `llm` configuration
+
+The chat provider used for the explanation is configured under the `llm`
+section of `.worklog/config.yaml`, mirroring `embedding`:
+
+```yaml
+llm:
+  baseUrl: http://192.168.0.199:8000/v1
+  model: compact
+  apiKey: optional-key
+  timeoutMs: 15000
+```
+
+Defaults: `baseUrl` `http://192.168.0.199:8000/v1`, `model` `compact`,
+`timeoutMs` `15000`. Environment variables `LLM_BASE_URL`, `LLM_MODEL`,
+`LLM_API_KEY` and `LLM_TIMEOUT_MS` are used as fallbacks; config values take
+precedence over environment variables.
 
 ### `help` [command]
 

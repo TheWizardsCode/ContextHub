@@ -196,7 +196,17 @@ export interface DeleteOptions { prefix?: string; recursive?: boolean; sync?: bo
 
 export interface ReviewedOptions { prefix?: string }
 
-export interface InterviewOptions { prefix?: string }
+export interface InterviewOptions {
+  prefix?: string;
+  /** Non-interactive JSON output mode (no prompts, no mutation). */
+  json?: boolean;
+  /** Commander maps the `--no-llm` flag to `llm: false`. */
+  llm?: boolean;
+  /** Test-harness spelling of `--no-llm`. */
+  noLlm?: boolean;
+  /** Override the chat model used for the producer-review explanation. */
+  model?: string;
+}
 
 export interface DepOptions {
   prefix?: string;
