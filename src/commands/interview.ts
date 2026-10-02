@@ -686,7 +686,13 @@ export interface InterviewOutcome {
  *
  * Answers are persisted after each response so an interrupted session can be
  * resumed; the producer review flag is only cleared once every question has
- * a non-empty answer.
+ * a non-empty answer (the `allAnswered` auto-clear path, unchanged).
+ *
+ * This function only handles the question walkthrough. The "no questions
+ * detected" edge case (noSection / noQuestions) is handled by the command
+ * registration below, which explains how the producer clears an outstanding
+ * `needsProducerReview` flag and offers to clear it: see
+ * {@link buildProducerReviewExplanation} and `.option('--no-llm')`.
  */
 export async function runInterview(
   item: WorkItem,

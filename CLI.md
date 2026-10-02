@@ -1269,9 +1269,10 @@ The explanation is advisory only — it never mutates the description.
 After printing the explanation the command asks
 `Clear the needsProducerReview flag? (y/N)` (default **No**); answering `y`
 clears the flag via the store, anything else leaves it flagged. This prompt
-only appears in the `noSection`/`noQuestions` cases; the `allAnswered` path
-keeps its existing automatic clear behaviour. No prompt is shown — and the
-flag is never mutated — in `--json` mode or other non-interactive contexts.
+only appears in the `noSection`/`noQuestions` cases; the **`allAnswered`
+path is unchanged** (`WL-0MU55UDBJ008DJ67`) and still clears the flag
+automatically without prompting. No prompt is shown — and the flag is never
+mutated — in `--json` mode or other non-interactive contexts.
 
 Options:
 
