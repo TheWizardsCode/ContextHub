@@ -645,9 +645,9 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
   });
 });
 
-// ── Per-prefix tab dispatch wiring (C1, WL-0MTRQT482001SNXC) ─────────────
+// ── Per-prefix tab dispatch wiring (C1 fallback, WL-0MUR5FUWD00024XN) ───────
 
-describe('per-prefix Dispatcher tab dispatch wiring (C1)', () => {
+describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
   const candidate = {
     id: 'WL-ABC',
     title: 'Some task',
@@ -709,12 +709,16 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1)', () => {
     );
   });
 
-  it('AC1: the per-prefix dep takes precedence over the project-workspace path', async () => {
+  it('AC2/AC4: a resolved project workspace wins and the per-prefix dep is not called', async () => {
+    const resolveProjectWorkspace = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' });
+    const getItemTabAnchor = vi
+      .fn()
+      .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
     const getDispatcherTabAnchor = vi.fn().mockResolvedValue({
       workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
     });
-    const resolveProjectWorkspace = vi.fn();
-    const getItemTabAnchor = vi.fn();
     const deps = makeDeps({
       getDispatcherTabAnchor,
       resolveProjectWorkspace,
@@ -724,9 +728,39 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1)', () => {
 
     await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
-    expect(resolveProjectWorkspace).not.toHaveBeenCalled();
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
+    expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
+    expect(getDispatcherTabAnchor).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wC:tWL-ABC:p1' }),
+    );
+  });
+
+  it('AC5: the per-prefix Dispatcher path is used when the project workspace resolves to null', async () => {
+    const getDispatcherTabAnchor = vi.fn().mockResolvedValue({
+      workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
+    });
+    const resolveProjectWorkspace = vi.fn().mockResolvedValue(null);
+    const getItemTabAnchor = vi.fn();
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:LEGACY', workspaceId: 'wD' });
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      resolveProjectWorkspace,
+      getItemTabAnchor,
+      getDispatcherAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
     expect(getItemTabAnchor).not.toHaveBeenCalled();
+    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
+    expect(getDispatcherAnchor).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
@@ -770,11 +804,11 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1)', () => {
 
 // ── Project workspace + item-ID tab dispatch wiring (WL-0MU321YK70035AYT) ──
 
-// These tests exercise the LEGACY fallback path (no getDispatcherTabAnchor
-// dep wired) retained for pre-C1 callers. Production always wires the
-// per-prefix resolver (createDowntimeDeps), so the per-prefix path above is
-// the live behaviour.
-describe('project workspace + item-ID tab dispatch wiring (legacy fallback)', () => {
+// These tests exercise the PRIMARY project-workspace + item-ID tab path,
+// reaffirmed as primary in WL-0MUR5FUWD00024XN. The per-prefix Dispatcher tab
+// and the legacy single anchor are fallbacks used only when no project
+// workspace resolves for the item's root.
+describe('project workspace + item-ID tab dispatch wiring (primary path)', () => {
   const candidate = {
     id: 'WL-ABC',
     title: 'Some task',

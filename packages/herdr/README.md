@@ -356,26 +356,28 @@ dispatches; the other herdr instances coordinate instead of polling:
   election degrades to the pre-refactor behavior for that instance (no
   dispatch from it); the existing dispatched-marker exclusion and CAS
   claim guards are preserved unchanged.
-- **Pane placement (C1, WL-0MTRQT482001SNXC)** — automated downtime panes
-  spawn in the **machine-wide `Dispatcher` workspace** inside a **tab labelled
-  with the work-item id prefix** (`WL` for ContextHub items, `TCE`/`CG` for
-  Tableau Card Engine items, …), created on first use and reused thereafter.
-  The pane is split from that prefix tab's root pane (`send-to-pi.sh --anchor
-  <prefixTabRootPaneId>`), so every dispatch for the same prefix adds a pane
-  to the same project tab. The per-prefix map
-  (`~/.herdr/downtime/downtime-dispatch-tab-anchors.json`, shape
-  `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }`) is the
-  reuse authority; tab provisioning runs under the coordination lock with a
-  double-check so concurrent first-dispatches never duplicate a tab, and a
-  dead persisted pane is re-provisioned. Resolution is fail-closed (never the
-  legacy anchor, never another project's tab, never the leader's pane): a
+- **Pane placement (WL-0MUR5FUWD00024XN)** — automated downtime panes
+  spawn in the **owning project's herdr workspace** inside a **tab labelled
+  with the exact work-item id**: `resolveProjectWorkspace` finds the `Work
+  Items` plugin pane whose logical root (`HERDR_RESOLVED_CWD`) equals the
+  item's worklog root, `getItemTabAnchor` ensures/reuses the item-ID tab, and
+  the pane is split from that tab's root pane (`send-to-pi.sh --anchor
+  <itemTabRootPaneId>`). The machine-wide `Dispatcher` workspace is the
+  **fallback only**: when no project plugin pane resolves for the item's root,
+  the pane anchors to a **per-prefix tab** (`WL` for ContextHub items,
+  `TCE`/`CG` for Tableau Card Engine items, …), created on first use and
+  reused thereafter (persisted map
+  `~/.herdr/downtime/downtime-dispatch-tab-anchors.json`, shape
+  `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }`; tab
+  provisioning runs under the coordination lock with a double-check, and a
+  dead persisted pane is re-provisioned); when neither yields an anchor the
+  retained single `Dispatcher` anchor is used
+  (`~/.herdr/downtime/downtime-dispatch-anchor.json`). Resolution is
+  fail-closed (never another project's tab, never the leader's pane): a
   null/failed resolution reports `anchor-unavailable` (no dispatch this
-  cycle). Scheduled prompts (no work-item prefix) keep the retained
-  machine-wide `Dispatcher` anchor
-  (`~/.herdr/downtime/downtime-dispatch-anchor.json`). The pre-C1
-  project-workspace + item-ID tab path is retained only as a fallback for
-  callers that do not wire the per-prefix resolver. See
-  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#per-prefix-tabs-in-the-dispatcher-workspace-c1-wl-0mtrqt482001snxc).
+  cycle). Scheduled prompts (no work-item id) keep the `Dispatcher` anchor.
+  See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see

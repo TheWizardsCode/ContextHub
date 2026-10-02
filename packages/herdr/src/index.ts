@@ -702,9 +702,11 @@ async function defaultProjectWorkspaceResolver(
  * {@link createDowntimeDeps} (C1, parent WL-0MTRQT482001SNXC): resolves or
  * creates the tab labelled with the work-item id prefix (e.g. `WL`, `TCE`)
  * inside the machine-wide Dispatcher workspace and returns its root pane.
- * Null on any failure — the dispatch fails closed ('anchor-unavailable'),
- * never a wrong-tab/workspace placement. Injectable for tests that build
- * real deps without a live herdr session.
+ * This is the FALLBACK placement path (AC3, WL-0MUR5FUWD00024XN) — it is only
+ * consulted when no project workspace resolves for the item's root. Null on
+ * any failure — the dispatch fails closed ('anchor-unavailable'), never a
+ * wrong-tab/workspace placement. Injectable for tests that build real deps
+ * without a live herdr session.
  */
 async function defaultDispatcherTabAnchorResolver(
   cwd: string,
@@ -830,8 +832,9 @@ async function readClosedPaneIds(cwd: string): Promise<Set<string>> {
  *   injectable for tests.
  * @param dispatcherTabAnchorResolver Per-prefix Dispatcher tab-anchor
  *   resolver (C1, WL-0MTRQT482001SNXC). Defaults to the real herdr-CLI-backed
- *   resolver; injectable for tests. This is the PRIMARY placement path for
- *   worklog dispatches.
+ *   resolver; injectable for tests. This is the FALLBACK placement path, used
+ *   only when no project workspace resolves for the item's root
+ *   (WL-0MUR5FUWD00024XN).
  */
 export function createDowntimeDeps(
   scriptPath: string,
@@ -912,17 +915,20 @@ export function createDowntimeDeps(
     // Null → dispatch degrades to "no dispatch this cycle". Injected
     // (default = real herdr CLI) so tests can stub it.
     getDispatcherAnchor: anchorResolver,
-    // Per-prefix Dispatcher tab (C1, WL-0MTRQT482001SNXC): the PRIMARY
-    // worklog placement path. Resolves/creates the tab labelled with the
+    // Per-prefix Dispatcher tab (C1, WL-0MTRQT482001SNXC): a FALLBACK worklog
+    // placement path, consulted only when `resolveProjectWorkspace` does not
+    // resolve a project workspace for the item's root (AC3,
+    // WL-0MUR5FUWD00024XN). Resolves/creates the tab labelled with the
     // work-item id prefix (`WL`, `TCE`) inside the machine-wide Dispatcher
     // workspace and anchors the pane to that tab's root pane. A null result
     // fails closed ('anchor-unavailable') — never a legacy fallback. Injected
     // (default = real herdr CLI).
     getDispatcherTabAnchor: dispatcherTabAnchorResolver,
-    // Project workspace + item-ID tab (WL-0MU321YK70035AYT): retained as a
-    // fallback for callers that do NOT wire `getDispatcherTabAnchor`; the
-    // production primary path above takes precedence when present.
-    // Injected (default = real herdr CLI).
+    // Project workspace + item-ID tab (WL-0MU321YK70035AYT): the PRIMARY
+    // worklog placement path (AC2, WL-0MUR5FUWD00024XN). When a project
+    // plugin pane resolves for the item's root, the pane lands in that
+    // project's workspace under the exact work-item id tab; the Dispatcher
+    // workspace is not used. Injected (default = real herdr CLI).
     resolveProjectWorkspace: projectWorkspaceResolver,
     getItemTabAnchor: itemTabAnchorResolver,
     // Running-downtime-panes liveness (AC1/AC3, WL-0MTYZXSLN008HZOW): counts

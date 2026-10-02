@@ -1,16 +1,10 @@
 /**
  * packages/herdr/src/dispatcher-anchor.ts — Dispatcher anchors and project-workspace resolution
  *
- * Three placement strategies live here:
+ * Three placement strategies live here, listed in `dispatchClaimedTier`
+ * precedence order (WL-0MUR5FUWD00024XN):
  *
- * 1. **Per-prefix tab routing inside the Dispatcher workspace (C1).**
- *    `getDispatcherTabAnchor(prefix)` resolves or creates a tab labelled with
- *    the work-item id prefix (e.g. `WL`, `TCE`) inside the machine-wide
- *    Dispatcher workspace and returns its root pane. Automated downtime
- *    dispatches for items sharing the same prefix land in the same tab
- *    (WL-0MTRQT482001SNXC).
- *
- * 2. **Project workspace + item-ID tab (primary path).**
+ * 1. **Project workspace + item-ID tab (primary path).**
  *    `resolveProjectWorkspace` maps a worklog root `R` to the herdr plugin
  *    pane (`label == "Work Items"`) whose logical project root (read from
  *    `HERDR_RESOLVED_CWD` via `herdr pane process-info` + `/proc/<pid>/environ`)
@@ -18,11 +12,19 @@
  *    the exact work-item id inside that workspace and returns its root pane,
  *    so automated panes are co-located with the project and grouped per item.
  *
+ * 2. **Per-prefix tab routing inside the Dispatcher workspace (C1).**
+ *    `getDispatcherTabAnchor(prefix)` resolves or creates a tab labelled with
+ *    the work-item id prefix (e.g. `WL`, `TCE`) inside the machine-wide
+ *    Dispatcher workspace and returns its root pane. Consulted only when no
+ *    project workspace resolves for the item's root (AC3 fallback). Automated
+ *    downtime dispatches for items sharing the same prefix land in the same
+ *    tab (WL-0MTRQT482001SNXC).
+ *
  * 3. **Machine-wide Dispatcher fallback (retained).**
  *    `getDispatcherAnchor` provisions one dedicated "Dispatcher" workspace
  *    with a persisted anchor pane (`downtime-dispatch-anchor.json`), used only
- *    when no project plugin pane can be resolved (AC4) and by scheduled
- *    prompts (which have no work-item id).
+ *    when neither a project plugin pane nor a per-prefix anchor can be
+ *    resolved, and by scheduled prompts (which have no work-item id).
  *
  * Provisioning: workspace create --label Dispatcher (no-focus); the workspace
  *               root pane is then adopted into a "Downtime" tab
@@ -957,6 +959,10 @@ async function resolvePrefixTab(
 /**
  * Resolve or create the tab-anchored pane for a given work-item id prefix
  * inside the Dispatcher workspace (C1, parent WL-0MTRQT482001SNXC).
+ *
+ * FALLBACK placement (AC3, WL-0MUR5FUWD00024XN): `dispatchClaimedTier`
+ * consults this resolver only when `resolveProjectWorkspace` does not resolve
+ * a project workspace for the item's root.
  *
  * Algorithm:
  *  1. Ensure the Dispatcher workspace exists (re-use the legacy single
