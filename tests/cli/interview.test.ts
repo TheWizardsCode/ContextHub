@@ -946,3 +946,158 @@ describe('interview --json (non-interactive)', () => {
     expect(jsonOutput[0].producerReviewExplanation).toBeNull();
   });
 });
+
+// ── Clear-the-flag interactive prompt ────────────────────────────────────
+
+describe('interview clear-the-flag prompt', () => {
+  /**
+   * Register the command for an interactive run with captured output and a
+   * scripted prompt pool. The prompt loop is injected so no real readline
+   * interface is created.
+   */
+  function setupInteractive(options: {
+    description?: string;
+    needsProducerReview?: boolean;
+    answers?: string[];
+    comments?: any[];
+  } = {}) {
+    const ctx = createTestContext();
+    const messages: string[] = [];
+    const answers = [...(options.answers ?? [])];
+    const originalLog = console.log;
+    console.log = (...args: any[]) => { messages.push(args.join(' ')); };
+
+    const id = ctx.utils.createSampleItem({});
+    ctx.utils.db.update(id, {
+      description: options.description ?? '# Task\n\nNo clarifying section here.',
+      title: 'Prompt task',
+      needsProducerReview: options.needsProducerReview ?? true,
+    });
+    const baseGetDatabase = ctx.utils.getDatabase;
+    ctx.utils.getDatabase = (prefix?: string) => ({
+      ...baseGetDatabase(prefix),
+      getCommentsForWorkItem: () => options.comments ?? [],
+    });
+
+    registerInterview(ctx as any, {
+      chatClientFactory: () => null,
+      promptLoopFactory: () => ({
+        next: async (message: string) => {
+          messages.push(message);
+          return answers.shift() ?? '';
+        },
+        close: () => {},
+      }),
+      clearPrompt: async (message: string) => {
+        messages.push(message);
+        return /^y(es)?$/i.test((answers.shift() ?? '').trim());
+      },
+    });
+
+    return {
+      ctx,
+      id,
+      messages,
+      restore: () => { console.log = originalLog; },
+    };
+  }
+
+  it('prompts to clear the flag and clears it on yes', async () => {
+    const t = setupInteractive({ answers: ['y'] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.messages.some(m => /Clear the needsProducerReview flag\? \(y\/N\)/.test(m))).toBe(true);
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('leaves the flag set on an explicit no', async () => {
+    const t = setupInteractive({ answers: ['n'] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(true);
+      expect(t.messages.some(m => /remains flagged/.test(m))).toBe(true);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('leaves the flag set on empty input (default No)', async () => {
+    const t = setupInteractive({ answers: [''] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(true);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('does not prompt when no explanation was shown (unflagged item)', async () => {
+    const t = setupInteractive({ needsProducerReview: false, answers: ['y'] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.messages.some(m => /Clear the needsProducerReview flag/.test(m))).toBe(false);
+      // Unchanged (still false).
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('never prompts or mutates in --json mode', async () => {
+    const ctx = createTestContext();
+    const jsonOutput: any[] = [];
+    const messages: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: any[]) => { messages.push(args.join(' ')); };
+    ctx.output = { json: (d: any) => jsonOutput.push(d), success: () => {}, error: () => {} };
+    const id = ctx.utils.createSampleItem({});
+    ctx.utils.db.update(id, {
+      description: '# Task\n\nNo clarifying section here.',
+      needsProducerReview: true,
+    });
+    registerInterview(ctx as any, { chatClientFactory: () => null });
+
+    try {
+      await ctx.runCli(['interview', id, '--json']);
+      expect(jsonOutput).toHaveLength(1);
+      expect(ctx.utils.db.get(id).needsProducerReview).toBe(true);
+      expect(messages.some(m => /Clear the needsProducerReview flag/.test(m))).toBe(false);
+    } finally {
+      console.log = originalLog;
+    }
+  });
+
+  it('does not prompt when questions remain outstanding', async () => {
+    const desc = `# Task
+
+## Appendix: Clarifying questions
+
+- Q: "Scope?" — Answer: *(awaiting producer)*. Source: reply.`;
+    const t = setupInteractive({ description: desc, answers: ['answer', 'y'] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.messages.some(m => /Clear the needsProducerReview flag/.test(m))).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('preserves the existing allAnswered auto-clear path (no prompt)', async () => {
+    const desc = `# Task
+
+## Appendix: Clarifying questions
+
+- Q: "Scope?" — Answer (user): "Repo-wide". Source: reply.`;
+    const t = setupInteractive({ description: desc, answers: [] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.messages.some(m => /Clear the needsProducerReview flag/.test(m))).toBe(false);
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+});

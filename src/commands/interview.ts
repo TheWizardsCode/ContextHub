@@ -789,6 +789,12 @@ function createPromptLoop(): {
 
 // ── Command registration ─────────────────────────────────────────────────
 
+/** The shape returned by {@link createPromptLoop} — one shared iterator. */
+export interface InterviewPromptLoop {
+  next: (message: string) => Promise<string>;
+  close: () => void;
+}
+
 /** Injectable dependencies for the interview command (used by tests). */
 export interface InterviewCommandDeps {
   /**
@@ -796,6 +802,32 @@ export interface InterviewCommandDeps {
    * LLM path. Defaults to an `OpenAIChatClient` over the resolved LLM config.
    */
   chatClientFactory?: (options: { model?: string }) => ChatClient | null;
+  /**
+   * Create the interactive prompt loop. Overridable so tests never open a
+   * real readline interface (mirrors the {@link InterviewIO} pattern).
+   */
+  promptLoopFactory?: () => InterviewPromptLoop;
+  /**
+   * Confirm whether the `needsProducerReview` flag should be cleared.
+   * Defaults to a `readline` `(y/N)` prompt on stdin/stdout.
+   */
+  clearPrompt?: (message: string) => Promise<boolean>;
+}
+
+/**
+ * Ask a yes/no question on the terminal, defaulting to **No** on anything
+ * other than an explicit `y`/`yes` (parent AC1/AC3).
+ */
+export async function defaultClearPrompt(message: string): Promise<boolean> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await new Promise<string>(resolve => {
+      rl.question(message, resolve);
+    });
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
 }
 
 export default function register(
@@ -814,6 +846,9 @@ export default function register(
         ...(options.model ? { model: options.model } : {}),
       });
     });
+
+  const promptLoopFactory = deps.promptLoopFactory ?? createPromptLoop;
+  const clearPrompt = deps.clearPrompt ?? defaultClearPrompt;
 
   program
     .command('interview <id>')
@@ -887,7 +922,7 @@ export default function register(
       );
 
       // ── Step 2: Interactive walkthrough ──────────────────────────────
-      const prompts = createPromptLoop();
+      const prompts = promptLoopFactory();
       let outcome: InterviewOutcome;
       try {
         outcome = await runInterview(item, db, {
@@ -897,29 +932,38 @@ export default function register(
         prompts.close();
       }
 
+      /**
+       * Print the explanation (when the item is flagged and there is nothing
+       * to interview), then offer to clear the flag. Returns true when the
+       * flag was cleared. Never called in `--json` mode.
+       */
+      const explainAndOfferClear = async (): Promise<void> => {
+        const explanation = await explanationFor();
+        if (!explanation) {
+          console.log('Nothing to interview. Exiting.');
+          return;
+        }
+        console.log('');
+        console.log(explanation);
+        console.log('');
+        const shouldClear = await clearPrompt('Clear the needsProducerReview flag? (y/N)');
+        if (shouldClear) {
+          db.update(item.id, { needsProducerReview: false });
+          console.log('   needsProducerReview cleared.');
+        } else {
+          console.log('   needsProducerReview remains flagged.');
+        }
+      };
+
       // ── Step 3: Report outcome ───────────────────────────────────────
       if (outcome.noSection) {
         console.log('No clarifying-questions section found.');
-        const explanation = await explanationFor();
-        if (explanation) {
-          console.log('');
-          console.log(explanation);
-          console.log('');
-        } else {
-          console.log('Nothing to interview. Exiting.');
-        }
+        await explainAndOfferClear();
         return;
       }
       if (outcome.noQuestions) {
         console.log('No interview questions found in the clarifying section.');
-        const explanation = await explanationFor();
-        if (explanation) {
-          console.log('');
-          console.log(explanation);
-          console.log('');
-        } else {
-          console.log('Nothing to interview. Exiting.');
-        }
+        await explainAndOfferClear();
         return;
       }
       if (outcome.recorded === 0 && outcome.allAnswered) {
