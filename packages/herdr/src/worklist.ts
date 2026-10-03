@@ -2676,6 +2676,63 @@ export function formatChordHintsForHelp(
 }
 
 /**
+ * Build the dynamic footer hint string for the visible shortcut entries.
+ *
+ * Most chord leaders collapse to a single `<leader>:<firstWord>...` hint
+ * (e.g. `u:update...`), which keeps the footer compact for homogeneous
+ * variant families. The podcast-progression family (`w-r`/`w-s`/`w-b`) is
+ * the exception: its sub-chords are distinct, stage-gated steps whose labels
+ * differ after the shared leading word, so collapsing them hid the
+ * sub-options from the producer (OSL-0MUQ59IRF009ICIF AC5).
+ *
+ * A leader is expanded (every sub-chord hinted) only when its entries carry
+ * an explicit work-item-type allowlist — the marker that the entries were
+ * authored as type-specific progression steps rather than generic variants.
+ * Ungated families (`u`, `f`, `a`, `x`, `P`, `r`, `n`) keep the collapsed
+ * form, preserving existing behaviour.
+ *
+ * @param entries - Shortcut entries already filtered by stage/view/issue type.
+ * @returns Space-joined hint string (empty when no entry yields a hint).
+ */
+export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
+  const labelOf = (e: ShortcutEntry): string => e.label ?? e.command
+    .replace(/<[^>]+>/g, '')
+    .split(/\r?\n/)[0]
+    .trim()
+    .replace(/^\/(skill:)?/, '');
+
+  // Group multi-key chords by leader so a family is formatted as a unit.
+  const grouped = new Map<string, ShortcutEntry[]>();
+  const parts: string[] = [];
+  for (const e of entries) {
+    if (e.chord && e.chord.length >= 2) {
+      const leader = e.chord[0];
+      const group = grouped.get(leader) ?? [];
+      group.push(e);
+      grouped.set(leader, group);
+    } else if (e.chord && e.chord.length === 1) {
+      parts.push(`${e.chord[0]}:${labelOf(e)}`);
+    }
+  }
+  for (const [leader, group] of grouped) {
+    const isTypeSpecific = group.every(
+      e => e.workItemTypes !== undefined && e.workItemTypes.length > 0,
+    );
+    if (isTypeSpecific && group.length > 1) {
+      // Distinct, type-gated progression steps: advertise each sub-option
+      // (e.g. `w:write review...  w:write script...  w:write both...`).
+      for (const e of group) {
+        parts.push(`${leader}:${labelOf(e)}...`);
+      }
+    } else {
+      // Homogeneous variant family: one collapsed leader hint as before.
+      parts.push(`${leader}:${labelOf(group[0]).split(/\s+/)[0]}...`);
+    }
+  }
+  return parts.join('  ');
+}
+
+/**
  * Get chord hints for showing in the help bar when in list mode.
  * Shows leader keys and abbreviated labels for all chords.
  */
@@ -4534,7 +4591,13 @@ export async function resolvePodcastTarget(
       }
       resolved = resolved.replace(/<podcast-target>/g, `--doc ${synthesis} --force-single`);
     } else {
-      // Drafted/written episode — rewrite only when open note children exist.
+      // Drafted/written episode — rewrite only when a script exists AND open
+      // note children exist. The missing-script check MUST run first: without
+      // it, a script-less episode at a script-bearing stage reported the
+      // false "podcast script already present" message (OSL-0MUQ59IRF009ICIF).
+      if (!script) {
+        return { error: 'No podcast script found in Key Files: — this episode has not been drafted; add the script path to Key Files, or move the item back to intake_complete to author from the synthesis' };
+      }
       let children: WorkItem[] = [];
       try {
         children = await fetchChildren(item.id);
@@ -4547,9 +4610,6 @@ export async function resolvePodcastTarget(
       });
       if (openNotes.length === 0) {
         return { error: 'podcast script already present, review and edit that rather than author a new one' };
-      }
-      if (!script) {
-        return { error: 'No podcast script found in Key Files:' };
       }
       resolved = resolved.replace(/<podcast-target>/g, `--rewrite ${script}`);
     }
@@ -6093,31 +6153,7 @@ export async function runWorklistTui(
         });
 
       if (relevantEntries.length > 0) {
-        const seenChordLeaders = new Set<string>();
-        const hints = relevantEntries
-          .filter(e => {
-            if (e.chord && e.chord.length >= 2) {
-              const leader = e.chord[0];
-              if (seenChordLeaders.has(leader)) return false;
-              seenChordLeaders.add(leader);
-            }
-            return true;
-          })
-          .map(e => {
-            const label = e.label ?? e.command
-              .replace(/<[^>]+>/g, '')
-              .split(/\r?\n/)[0]
-              .trim()
-              .replace(/^\/(skill:)?/, '');
-            if (e.chord && e.chord.length >= 2) {
-              const leaderKey = e.chord[0];
-              const firstWord = label.split(/\s+/)[0];
-              return `${leaderKey}:${firstWord}...`;
-            }
-            return `${e.chord[0]}:${label}`;
-          })
-          .join('  ');
-        dynamicHints = hints;
+        dynamicHints = formatFooterShortcutHints(relevantEntries);
       }
     }
 

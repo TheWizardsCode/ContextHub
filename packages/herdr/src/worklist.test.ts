@@ -36,6 +36,7 @@ import {
   isWlViewCommand,
   resolveDispatchDetail,
   formatChordHintsForHelp,
+  formatFooterShortcutHints,
   resolvePodcastTarget,
   clearDescriptionPreviewCache,
   isHeadingRow,
@@ -2707,6 +2708,35 @@ describe('w chord split — full chord to dispatch path', () => {
     expect(hints).toContain('r:review');
     expect(hints).toContain('s:script');
     expect(hints).toContain('b:both');
+  });
+
+  // AC5 / fix-child AC8: the idle footer help line (before the leader is
+  // pressed) must advertise all three w sub-options, not just `w:write...`.
+  it('footer help line shows each w sub-option for a podcast item (AC5)', () => {
+    const registry = registryWithLocalWChords();
+    const entries = registry.getEntriesForStage('plan_complete', false, 'podcast')
+      .filter(e => e.view === 'list' || e.view === 'both');
+    const hints = formatFooterShortcutHints(entries);
+    expect(hints).toContain('w:write review...');
+    expect(hints).toContain('w:write script...');
+    expect(hints).toContain('w:write both...');
+    // The bare collapsed form must no longer be the only w hint.
+    expect(hints).not.toBe('w:write...');
+  });
+
+  it('footer help line collapses homogeneous ungated chord families (regression guard)', () => {
+    // `u p l` / `u p m` share the leader `u` but carry NO work-item-type
+    // allowlist, so they must keep the collapsed `u:update...` hint —
+    // proving the fix does not disturb other chord families.
+    const entries: ShortcutEntry[] = [
+      { chord: ['u', 'p', 'l'], command: '/wl update --priority low', view: 'both', label: 'update priority low' },
+      { chord: ['u', 'p', 'm'], command: '/wl update --priority medium', view: 'both', label: 'update priority medium' },
+      { chord: ['c'], command: '/wl create', view: 'both', label: 'create new' },
+    ];
+    const hints = formatFooterShortcutHints(entries);
+    expect(hints).toContain('u:update...');
+    expect(hints).not.toContain('u:update priority');
+    expect(hints).toContain('c:create new');
   });
 });
 
