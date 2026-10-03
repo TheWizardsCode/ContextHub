@@ -2519,6 +2519,197 @@ describe('w chord leader — sub-chord hints and stage gating', () => {
   });
 });
 
+// ── w chord split: full chord → dispatch path (OSL-0MUQ59IRF009ICIF) ────
+//
+// Regression coverage for the reported "w-r / w-s / w-b do not fire on
+// podcast items" bug. The sub-chord visibility/stage-gate and the marker
+// resolution are each covered above in isolation; what was missing is a test
+// that drives the FULL path — chord leader detection → prefix lookup →
+// processChordInput → resolvePodcastTarget → dispatch — because that is where
+// the failure actually surfaces.
+//
+// Root cause (OSL-0MURL1S5O000Z0MH): the chords DO resolve; the drop happens
+// in `resolvePodcastTarget`, which returns an error when the selected item has
+// no `.podcast.md` (or any) Key File, and the caller then shows an error toast
+// and returns without dispatching. On a script-less episode at a script-bearing
+// stage, `w-s` additionally reported the misleading "podcast script already
+// present" message, which is false when no script exists.
+
+describe('w chord split — full chord to dispatch path', () => {
+  // Local shortcuts.json fixture matching the project-local override
+  // (shortcuts.json at the worklog root) so the registry carries the same
+  // entries the operator uses in the TUI.
+  const wChordEntries = [
+    { chord: ['w', 'r'], command: '/skill:wiki-podcast-script --review <podcast-review>', view: 'both', label: 'write review', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 's'], command: '/skill:wiki-podcast-script <podcast-target>', view: 'both', label: 'write script', stages: ['intake_complete', 'plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 'b'], command: '/skill:wiki-podcast-script --review-rewrite <podcast-both>', view: 'both', label: 'write both', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+  ];
+
+  let tempRoot: string | undefined;
+
+  function registryWithLocalWChords(): ShortcutRegistry {
+    tempRoot = mkdtempSync(join(tmpdir(), 'herdr-w-chord-dispatch-'));
+    writeFileSync(join(tempRoot, 'shortcuts.json'), JSON.stringify(wChordEntries));
+    return loadShortcutConfig(tempRoot);
+  }
+
+  afterEach(() => {
+    if (tempRoot) {
+      try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+      tempRoot = undefined;
+    }
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Press the leader then each sub-key through the real chord state machine
+   * and return the resolved command (or null when the chord was dropped or
+   * cancelled before completion).
+   */
+  function pressChord(
+    registry: ShortcutRegistry,
+    leader: string,
+    subKey: string,
+    stage: string,
+    issueType: string,
+    view = 'list',
+  ): string | null {
+    expect(isChordLeader(leader, registry, false, issueType)).toBe(true);
+    const chordState = createChordState();
+    const started = processChordInput(chordState, leader, registry, view, stage, false, issueType);
+    expect(started).toBeNull(); // collecting
+    expect(chordState.pendingKeys).toEqual([leader]);
+    const completed = processChordInput(chordState, subKey, registry, view, stage, false, issueType);
+    return completed === 'chord-complete' ? chordState.resolvedCommand : null;
+  }
+
+  const scriptItem: WorkItem = {
+    id: 'OSL-EP-1',
+    title: 'Episode with script',
+    status: 'open',
+    stage: 'plan_complete',
+    issueType: 'podcast',
+    description: '## Key Files:\n- Ep10/Ep10.podcast.md\n- Ep10/Ep10.md\n',
+  };
+
+  // Mirrors the reported item OSL-0MST3EHT3000M1LR: at a script-bearing stage
+  // (plan_complete) but with NO Key Files section at all.
+  const scriptlessItem: WorkItem = {
+    id: 'OSL-EP-2',
+    title: 'Episode with no script',
+    status: 'open',
+    stage: 'plan_complete',
+    issueType: 'podcast',
+    description: '# Episode 10 — spec only\n\nSee docs/video-series-outline.md for the outline.\n',
+  };
+
+  it('w-r resolves and dispatches --review <script> on a podcast episode with a script', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 'r', 'plan_complete', 'podcast');
+    expect(command).toBe('/skill:wiki-podcast-script --review <podcast-review>');
+
+    const resolved = await resolvePodcastTarget(command!, scriptItem);
+    expect(resolved.error).toBeUndefined();
+    const onCommand = vi.fn();
+    const state = new WorkItemListState([scriptItem], TERM_80x24);
+    executeResolvedCommand(resolved.command!, state, onCommand);
+    // The dispatch callback signature is (command, model, openPane, ...) on
+    // current ContextHub dev; assert the command (first arg) so the test is
+    // robust to additional trailing callback args.
+    expect(onCommand.mock.calls[0][0]).toBe('/skill:wiki-podcast-script --review Ep10/Ep10.podcast.md');
+  });
+
+  it('w-b resolves and dispatches --review-rewrite <script> on a podcast episode with a script', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 'b', 'plan_complete', 'podcast');
+    expect(command).toBe('/skill:wiki-podcast-script --review-rewrite <podcast-both>');
+
+    const resolved = await resolvePodcastTarget(command!, scriptItem);
+    expect(resolved.error).toBeUndefined();
+    const onCommand = vi.fn();
+    const state = new WorkItemListState([scriptItem], TERM_80x24);
+    executeResolvedCommand(resolved.command!, state, onCommand);
+    expect(onCommand.mock.calls[0][0]).toBe('/skill:wiki-podcast-script --review-rewrite Ep10/Ep10.podcast.md');
+  });
+
+  it('w-s resolves and dispatches --rewrite <script> when open editor-note children exist', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 's', 'plan_complete', 'podcast');
+    expect(command).toBe('/skill:wiki-podcast-script <podcast-target>');
+
+    const children = [{ id: 'OSL-EP-1-N1', title: 'Note', status: 'open' } as WorkItem];
+    const resolved = await resolvePodcastTarget(command!, scriptItem, async () => children);
+    expect(resolved.error).toBeUndefined();
+    const onCommand = vi.fn();
+    const state = new WorkItemListState([scriptItem], TERM_80x24);
+    executeResolvedCommand(resolved.command!, state, onCommand);
+    expect(onCommand.mock.calls[0][0]).toBe('/skill:wiki-podcast-script --rewrite Ep10/Ep10.podcast.md');
+  });
+
+  it('w-r does NOT dispatch on a script-less episode (belt-and-braces guard)', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 'r', 'plan_complete', 'podcast');
+    const resolved = await resolvePodcastTarget(command!, scriptlessItem);
+    expect(resolved.error).toMatch(/no podcast script/i);
+    expect(resolved.command).toBeUndefined();
+  });
+
+  it('w-s reports a MISSING-SCRIPT error (not "already present") on a script-less episode', async () => {
+    // This is the reported failure shape: a plan_complete podcast item with no
+    // script Key File and no open note children. The current code reports the
+    // false message "podcast script already present, review and edit that
+    // rather than author a new one"; it must instead name the missing script.
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 's', 'plan_complete', 'podcast');
+    const resolved = await resolvePodcastTarget(command!, scriptlessItem, async () => []);
+    expect(resolved.error).toBeDefined();
+    expect(resolved.error).not.toMatch(/already present/i);
+    expect(resolved.error).toMatch(/no podcast script|not been drafted|Key Files/i);
+    expect(resolved.command).toBeUndefined();
+  });
+
+  it('w-b does NOT dispatch on a script-less episode (belt-and-braces guard)', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 'b', 'plan_complete', 'podcast');
+    const resolved = await resolvePodcastTarget(command!, scriptlessItem);
+    expect(resolved.error).toMatch(/no podcast script/i);
+    expect(resolved.command).toBeUndefined();
+  });
+
+  it('all three sub-chords resolve on a podcast item even with a stage filter active', () => {
+    // state.activeFilter is passed as `stage`; a filter value must not hide
+    // the chords (rules out the stage-gate path).
+    const registry = registryWithLocalWChords();
+    for (const [subKey, expected] of [
+      ['r', '/skill:wiki-podcast-script --review <podcast-review>'],
+      ['s', '/skill:wiki-podcast-script <podcast-target>'],
+      ['b', '/skill:wiki-podcast-script --review-rewrite <podcast-both>'],
+    ] as const) {
+      expect(pressChord(registry, 'w', subKey, 'plan_complete', 'podcast')).toBe(expected);
+    }
+  });
+
+  it('all three sub-chords stay hidden on non-podcast items', () => {
+    const registry = registryWithLocalWChords();
+    for (const subKey of ['r', 's', 'b']) {
+      expect(isChordLeader('w', registry, false, 'bug')).toBe(false);
+      const chordState = createChordState();
+      const result = processChordInput(chordState, 'w', registry, 'list', 'plan_complete', false, 'bug');
+      expect(result).toBe('chord-cancel');
+      expect(chordState.pendingKeys).toEqual([]);
+    }
+  });
+
+  it('footer hints list all three w sub-chords for a podcast item at a script-bearing stage', () => {
+    const registry = registryWithLocalWChords();
+    const nextChords = registry.getChordByPrefix(['w'], 'list', 'plan_complete', false, 'podcast');
+    const hints = formatChordHintsForHelp(nextChords, ['w']);
+    expect(hints).toContain('r:review');
+    expect(hints).toContain('s:script');
+    expect(hints).toContain('b:both');
+  });
+});
+
 // ── Code Freeze: banner rendering ────────────────────────────────────────
 // The banner must appear only when freeze is active and must never break the
 // `rows - 1` line-count invariant (WL-0MSAAON63003N6LO).
