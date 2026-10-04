@@ -3093,19 +3093,23 @@ async function dispatchClaimedTier(
     typeof deps.closePane === 'function'
   ) {
     try {
-      // Fail-safe: the anchor is only closed when liveness POSITIVELY
-      // confirms it is not a live dispatch pane. An absent/failed liveness
-      // query leaves it open rather than risk closing a running agent pane.
+      // Fail-safe: close the anchor unless liveness POSITIVELY confirms it is
+      // a live downtime dispatch pane. The check must use the running DOWNTIME
+      // pane ids (`paneIds`), NEVER the full machine-wide pane set (`records`
+      // contains the anchor itself, so checking it would suppress every
+      // close — the WL-0MU2EOHK900425VU audit regression). A `records`-only
+      // payload is filtered to downtime panes via `countRunningDowntimePanes`.
+      // When liveness cannot be confirmed (query failed/absent) the anchor is
+      // left open (fail-safe), so a live agent pane is never closed.
       let confirmedRootPane = false;
       if (typeof deps.getRunningDowntimePanes === 'function') {
         const running = await deps.getRunningDowntimePanes(opts.cwd);
         if (running.ok) {
-          const liveIds =
-            running.records !== undefined
-              ? running.records.map((rec) => rec.paneId)
-              : Array.isArray(running.paneIds)
-                ? running.paneIds
-                : null;
+          const liveIds = Array.isArray(running.paneIds)
+            ? running.paneIds
+            : running.records !== undefined
+              ? countRunningDowntimePanes(running.records)
+              : null;
           if (liveIds !== null) confirmedRootPane = !liveIds.includes(anchorId);
         }
       }

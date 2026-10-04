@@ -377,6 +377,21 @@ worklog root is `R`:
    via `herdr tab list`, so a second dispatch for the same item reuses the
    same tab (never a duplicate).
 3. **Spawn** — `--anchor <itemTabRootPaneId>`, `--no-focus` preserved.
+4. **Root-pane cleanup** — after the dispatch pane has spawned, the item
+   tab's initial root pane (herdr's automatically-provisioned empty bash
+   pane, used only as the split anchor) is closed, so the tab shows only the
+   productive dispatch pane (WL-0MU2EOHK900425VU). Only the ROOT pane is ever
+   closed: the anchor is closed unless liveness POSITIVELY confirms it is a
+   live downtime dispatch pane. Liveness uses the running **downtime** pane
+   ids (`paneIds`); the full machine-wide `records` set must never be used
+   directly for this check because it always contains the anchor itself and
+   would suppress every close. A `records`-only payload is filtered through
+   `countRunningDowntimePanes`. When liveness cannot be confirmed
+   (query failed/absent) the anchor is left open (fail-safe) so a running
+   agent pane is never closed. On a later dispatch for the same item the
+   surviving dispatch pane is the anchor and is correctly spared. The
+   retained `Dispatcher` fallback anchor is deliberately exempt: closing it
+   would trigger the stale-detection re-provision loop.
 
 When the workspace resolves but the item-ID tab cannot be provisioned, the
 dispatch fails closed with `anchor-unavailable` — it never places the pane in
@@ -439,14 +454,23 @@ Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`):
 - **Project workspace + item-ID tab (primary):** `resolveProjectWorkspace`
   resolves the plugin pane for the item's root; `getItemTabAnchor` returns the
   anchor pane for the exact item-ID tab, creating it on first use under the
-  coordination lock. `dispatchClaimedTier` consults this path first whenever
-  both deps are wired.
+  coordination lock. After the first dispatch the tab's initial root pane is
+  closed (see invariant step 4) so the tab is never left with an empty bash
+  pane; a later dispatch for the same item reuses the surviving dispatch pane
+  as the split anchor (WL-0MU2EOHK900425VU). The cleanup is fail-safe: it
+  closes the anchor only when the running-downtime-pane liveness query
+  succeeds and the anchor is absent from it — never using the full pane list,
+  which would include the anchor and suppress the close. `dispatchClaimedTier`
+  consults this path first whenever both deps are wired.
 - **Per-prefix tab (fallback):** `getDispatcherTabAnchor(cwd, deps, prefix)`
   ensures the `Dispatcher` workspace, fast-paths the persisted live anchor,
   else lists tabs (`herdr tab list --workspace <id>`), else under the
   coordination lock (with a double-check) runs `herdr tab create --workspace
   <id> --label <prefix> --no-focus` and returns the new `tab_id` +
-  `root_pane.pane_id`. Consulted only when no project workspace resolves.
+  `root_pane.pane_id`. Consulted only when no project workspace resolves. Its
+  initial root pane is cleaned up after the first dispatch by the same
+  fail-safe rule as the project item tab (step 4); the fallback
+  `getDispatcherAnchor` pane is never closed.
 - **Fallback anchor:** `getDispatcherAnchor(cwd, deps)` provisions one
   `Dispatcher` workspace + persisted anchor pane in the machine coordination
   dir (`~/.herdr/downtime/downtime-dispatch-anchor.json`, atomic tmp+rename,

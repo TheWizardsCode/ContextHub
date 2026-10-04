@@ -1158,6 +1158,94 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
     expect(outcome.dispatched).toBe(true);
     expect(deps.closePane).toBeUndefined();
   });
+
+  // ── Audit-rejection regressions (WL-0MU2EOHK900425VU) ─────────────────
+  // The producer rejected the first fix because the empty shell pane was
+  // still present after creating a tab in an existing workspace. Root cause:
+  // the cleanup preferred `records` (the FULL machine-wide pane set, which
+  // always contains the anchor itself) over `paneIds` (the running DOWNTIME
+  // panes), so `liveIds.includes(anchorId)` was always true and every close
+  // was suppressed. The cleanup now uses the running-downtime set.
+
+  it('AC1 regression: closes the root pane even when records contains the anchor (full pane set)', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // Production `records` = the FULL pane list: it contains the blank
+      // anchor (which is not a downtime pane). `paneIds` (running downtime
+      // panes) is empty → the anchor must be closed.
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 0,
+        paneIds: [],
+        records: [
+          { paneId: 'wC:tWL-ABC:p1', label: 'bash' },
+          { paneId: 'wC:other', label: 'bash' },
+        ],
+      }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith('wC:tWL-ABC:p1', '/repo');
+  });
+
+  it('AC1 regression: records-only payload is filtered to downtime panes (anchor still closed)', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // Legacy payload without `paneIds`; `records` holds the blank anchor
+      // (not a downtime pane) → filtering yields no live downtime pane.
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 0,
+        records: [{ paneId: 'wC:tWL-ABC:p1', label: 'bash' }],
+      }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith('wC:tWL-ABC:p1', '/repo');
+  });
+
+  it('AC2 fail-safe regression: leaves the anchor open when liveness fails (ok:false)', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // Liveness query FAILED → cannot confirm → leave the anchor open.
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: false, error: 'herdr unavailable' }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).not.toHaveBeenCalled();
+  });
 });
 
 
