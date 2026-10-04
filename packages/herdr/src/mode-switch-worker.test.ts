@@ -586,6 +586,134 @@ describe('drain before cheap switch', () => {
     expect(worker.getIsDraining()).toBe(false);
     expect(setModePosts(api)).toHaveLength(0);
   });
+
+  it('no redundant switching: a persisted cheap mode short-circuits before drain entry', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    // The proxy is already cheap: even with the idle window met and the cheap
+    // budget unmet, the worker must not enter drain nor POST again.
+    api.setGetMode(() => 'cheap');
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotOperatorFree(),
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(false);
+    expect(setModePosts(api)).toHaveLength(0);
+    expect(worker.getLastKnownMode()).toBe('cheap');
+  });
+
+  it('drain completing into a 409 restart no-op leaves the mode fast and retries on a later tick', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotOperatorFree(),
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(true);
+
+    // The proxy reports a mode-switch restart in progress (409) when the
+    // drain completes: treated as a no-op, the mode stays fast.
+    api.setSetMode(() => ({ status: 409, body: { error: 'mode-switch restart in progress' } }));
+    api.reset();
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotDrainComplete(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1); // attempted once
+    expect(worker.getLastKnownMode()).toBe('fast'); // 409 → no mode change
+    expect(worker.getIsDraining()).toBe(false);
+
+    // The next tick retries and succeeds once the restart has settled.
+    api.setSetMode(() => ({ status: 200, body: { ok: true } }));
+    api.reset();
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotDrainComplete(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(worker.getLastKnownMode()).toBe('cheap');
+  });
+
+  it('operator command during drain while already fast follows the normal fast path with no redundant POST', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotOperatorFree(),
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(true);
+    expect(worker.getLastKnownMode()).toBe('fast');
+
+    // The proxy is already fast: the fast path dedups, so cancelling the
+    // drain fires no redundant POST and the tracked mode is unchanged.
+    api.reset();
+    worker.onOperatorCommand('http://proxy');
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(false);
+    expect(setModePosts(api)).toHaveLength(0);
+    expect(worker.getLastKnownMode()).toBe('fast');
+  });
+
+  it('a cross-pane shared activity broadcast during drain cancels it', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wl-mode-drain-activity-'));
+    try {
+      clock = 1_000_000;
+      const api = mockAdminApi();
+      const worker = createModeSwitchWorker({
+        fetcher: api.fetcher,
+        now,
+        isLeader: () => true,
+        coordinationDir: dir,
+      });
+      advance(900_000);
+      await worker.tick({
+        enabled: true,
+        idleThresholdMs: 900_000,
+        proxyUrl: 'http://proxy',
+        proxyStatus: perSlotOperatorFree(),
+      });
+      await flushAsync();
+      expect(worker.getIsDraining()).toBe(true);
+
+      // Another pane receives an operator command and broadcasts its activity:
+      // the idle clock advances, so the next tick cancels the drain.
+      advance(10_000);
+      writeSharedActivity(dir, clock);
+      api.reset();
+      await worker.tick({
+        enabled: true,
+        idleThresholdMs: 900_000,
+        proxyUrl: 'http://proxy',
+        proxyStatus: perSlotOperatorFree(),
+      });
+      await flushAsync();
+      expect(worker.getIsDraining()).toBe(false);
+      expect(setModePosts(api)).toHaveLength(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── Fail-closed paths ────────────────────────────────────────────────
