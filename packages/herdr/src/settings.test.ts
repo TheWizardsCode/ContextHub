@@ -409,3 +409,32 @@ describe('paneClose settings (WL-0MUJL1NAH0042GOS)', () => {
     expect(loadSettings(path).paneCloseGracePeriodMinutes).toBe(5);
   });
 });
+
+// ── downtimeMaxAttempts (WL-0MUKYEXMK0033MFK) ─────────────────────────
+
+describe('downtimeMaxAttempts setting (WL-0MUKYEXMK0033MFK)', () => {
+  it('defaults to 3', () => {
+    expect(defaultSettings.downtimeMaxAttempts).toBe(3);
+  });
+
+  it('a persisted value overrides the default', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeMaxAttempts: 7 });
+    expect(loadSettings(path).downtimeMaxAttempts).toBe(7);
+  });
+
+  it('clamps an out-of-range persisted value into [1, 10]', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeMaxAttempts: 999 });
+    expect(loadSettings(path).downtimeMaxAttempts).toBe(10);
+
+    saveSettings(path, { ...defaultSettings, downtimeMaxAttempts: 0 });
+    expect(loadSettings(path).downtimeMaxAttempts).toBe(1);
+  });
+
+  it('falls back to the default when the persisted value is not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxAttempts: 'lots' }), 'utf-8');
+    expect(loadSettings(path).downtimeMaxAttempts).toBe(3);
+  });
+});

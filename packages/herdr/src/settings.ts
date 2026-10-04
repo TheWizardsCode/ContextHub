@@ -22,12 +22,14 @@ export { clampBrowseItemCount, MIN_BROWSE_ITEM_COUNT, MAX_BROWSE_ITEM_COUNT, DEF
 import {
   clampDowntimeIdleThresholdMs,
   clampDowntimeMarkerStaleWindowMs,
+  clampDowntimeMaxAttempts,
   clampDowntimeNoCandidateCooldownMs,
   clampDowntimeNonTerminalCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+  DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
@@ -99,6 +101,15 @@ export interface PluginSettings {
    */
   downtimeNonTerminalCooldownMs: number;
   /**
+   * Per-item, per-kind dispatch-ATTEMPT cap (WL-0MUKYEXMK0033MFK). Once an
+   * item has been dispatched this many times for a kind at its current
+   * worklog stage (including non-terminal pane closes), it is flagged
+   * `needsProducerReview` and excluded from further automatic dispatch of
+   * that kind. A stage advancement resets the budget. Default 3; clamped to
+   * [1, 10].
+   */
+  downtimeMaxAttempts: number;
+  /**
    * Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT): a
    * SUCCESS dispatch marker whose item is still at the marker's dispatched-at
    * stage is released once its age exceeds this window, so a pane that
@@ -167,6 +178,7 @@ export const defaultSettings: PluginSettings = {
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   downtimeNonTerminalCooldownMs: DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+  downtimeMaxAttempts: DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   modeSwitchEnabled: true,
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
@@ -264,6 +276,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeNonTerminalCooldownMs: typeof parsed.downtimeNonTerminalCooldownMs === 'number'
         ? clampDowntimeNonTerminalCooldownMs(parsed.downtimeNonTerminalCooldownMs)
         : defaultSettings.downtimeNonTerminalCooldownMs,
+      downtimeMaxAttempts: typeof parsed.downtimeMaxAttempts === 'number'
+        ? clampDowntimeMaxAttempts(parsed.downtimeMaxAttempts)
+        : defaultSettings.downtimeMaxAttempts,
       downtimeMarkerStaleWindowMs: typeof parsed.downtimeMarkerStaleWindowMs === 'number'
         ? clampDowntimeMarkerStaleWindowMs(parsed.downtimeMarkerStaleWindowMs)
         : defaultSettings.downtimeMarkerStaleWindowMs,

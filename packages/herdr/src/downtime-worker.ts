@@ -161,6 +161,7 @@ import {
   dispatchedItemMarkers as _dispatchedMarkers,
   markerStillExcludes as _markerStillExcludes,
   isNonTerminalCooldownActive as _isNonTerminalCooldownActive,
+  countAttempts as _countAttempts,
   appendPaneCloseLogEntry as _appendPaneCloseLogEntry,
   type DispatchMarker,
   type DowntimeLogEntry,
@@ -288,6 +289,23 @@ export const DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS = 60 * 1000;
  * repeatedly-failing item could be stranded indefinitely.
  */
 export const DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Default per-item, per-kind dispatch-ATTEMPT cap (WL-0MUKYEXMK0033MFK).
+ *
+ * After this many dispatch attempts (panes opened) for the same `(item,
+ * kind)` at the SAME worklog stage, the item is excluded from further
+ * automatic dispatch of that kind and flagged for producer review. Chosen
+ * from the observed pattern (2–4 non-terminal retries before human
+ * intervention is warranted).
+ */
+export const DEFAULT_DOWNTIME_MAX_ATTEMPTS = 3;
+
+/** Hard floor for `maxAttempts` (1): at least one automatic attempt is always allowed. */
+export const DOWNTIME_MAX_ATTEMPTS_MIN = 1;
+
+/** Hard ceiling for `maxAttempts` (10): above this the cap is effectively disabled. */
+export const DOWNTIME_MAX_ATTEMPTS_MAX = 10;
 
 /**
  * Per-process dispatch-PIPELINE single-flight bound (WL-0MT50LKAK001EF5Q).
@@ -1462,6 +1480,8 @@ export type MostImportantItemResult =
   | { ok: true; inFlightHold: true }
   /** The only remaining offerable candidates are held by the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
   | { ok: true; nonTerminalCooldownHold: true }
+  /** The only remaining offerable candidates have exhausted their per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
+  | { ok: true; attemptBudgetHold: true }
   | { ok: false; error?: string };
 
 
@@ -2189,6 +2209,19 @@ export interface DowntimeWorkerDeps {
     cwd: string,
   ): Promise<boolean>;
   /**
+   * Flag an item for producer review (`needsProducerReview = true`) after its
+   * automatic dispatch budget is exhausted (WL-0MUKYEXMK0033MFK AC3). Called
+   * once when the per-item/per-kind attempt count reaches `maxAttempts`, so a
+   * repeatedly non-terminal item surfaces for human triage instead of
+   * looping through idle cycles forever. `cwd` is the item's worklog root
+   * (cross-root safe). OPTIONAL — when absent the dispatcher still SKIPS the
+   * budget-exhausted item (the cap is enforced) but cannot persist the flag
+   * (legacy/test callers). Must never throw (fail-closed): a flag write
+   * failure must not crash the worker, and the item stays budget-skipped so
+   * the flag is retried on the next cycle.
+   */
+  markNeedsProducerReview?(itemId: string, cwd: string): Promise<boolean>;
+  /**
    * Record a persistent CLI-error event (three consecutive wl failures).
    * Must never throw (fail-closed): logging must not crash the worker.
    */
@@ -2568,14 +2601,59 @@ export function selectCriticalFirstCandidates(
   return out;
 }
 
+/**
+ * True when the per-item, per-kind dispatch-ATTEMPT budget is exhausted
+ * (WL-0MUKYEXMK0033MFK AC1/AC2): the rolling dispatch log records
+ * `maxAttempts` or more dispatch attempts for this `(itemId, kind)` at the
+ * item's CURRENT stage.
+ *
+ * The count is derived from the log (`countAttempts`), scoped to the current
+ * stage so a stage advancement resets the budget (AC4), and fail-open: a
+ * missing/corrupt/empty log yields 0 (AC7e). A non-finite or < 1 cap is
+ * likewise fail-open (never blocks dispatch).
+ */
+export function isAttemptBudgetExhausted(
+  entries: DowntimeLogEntry[],
+  itemId: string,
+  kind: DowntimeSkillKind,
+  itemStage: string | undefined,
+  maxAttempts: number,
+): boolean {
+  if (!Number.isFinite(maxAttempts) || maxAttempts < 1) return false; // fail-open
+  return _countAttempts(entries, itemId, kind, itemStage) >= maxAttempts;
+}
+
+/**
+ * Best-effort producer-review flag for a budget-exhausted item
+ * (WL-0MUKYEXMK0033MFK AC3). Never throws; a missing dep or a failed write is
+ * swallowed — the caller still skips the item via the budget filter, so the
+ * flag is retried on the next cycle (fail-closed).
+ */
+async function flagBudgetExhausted(
+  deps: DowntimeWorkerDeps,
+  itemId: string,
+  cwd: string,
+): Promise<void> {
+  if (typeof deps.markNeedsProducerReview !== 'function') return;
+  try {
+    await deps.markNeedsProducerReview(itemId, cwd);
+  } catch {
+    // fail-closed: a flag write failure must never crash the worker
+  }
+}
+
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; auditHostSaturated: boolean },
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
+  // Item ids already flagged this call so the producer-review flag is set at
+  // most ONCE per dispatch even when the same critical item is visited by
+  // both the critical-first scan and the normal scan (AC7c).
+  const flaggedForBudget = new Set<string>();
   // Staleness-aware success-marker maps (WL-0MU6UL0RJ008IHGT): id → the
   // dispatched-at stage + timestamp, read once per dispatch and consulted
   // below through `markerStillExcludes`.
@@ -2621,6 +2699,20 @@ async function dispatchFromHerdrList(
       ctx.markerStaleWindowMs,
     );
     if (!guard.escalate) continue;
+    // Per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK AC1/AC2/AC3): a
+    // critical item that has exhausted its automatic attempts is flagged for
+    // producer review and skipped — escalation, not starvation. The budget is
+    // a stronger escalation than the in-flight guard, so it is evaluated
+    // after the guard (a genuinely live pane is never pre-empted) but before
+    // the dispatch attempt.
+    if (isAttemptBudgetExhausted(entries, candidate.id, kind, candidate.stage, ctx.maxAttempts)) {
+      if (!flaggedForBudget.has(candidate.id)) {
+        flaggedForBudget.add(candidate.id);
+        await flagBudgetExhausted(deps, candidate.id, ctx.cwd);
+      }
+      flags.budgetExhausted = true;
+      continue;
+    }
     const cand: DowntimeCandidate = {
       id: candidate.id,
       title: candidate.title,
@@ -2697,6 +2789,20 @@ async function dispatchFromHerdrList(
         k === 'audit' || k === 'implement' ? 'id-guard' : 'stage-guard',
       )
     ) {
+      continue;
+    }
+    // Per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK AC1/AC2/AC3):
+    // once the item has been dispatched `maxAttempts` times for this kind at
+    // its current stage (including non-terminal closes — each is a marker),
+    // it is flagged for producer review and excluded from further automatic
+    // dispatch. Neutral sequential filter: never a strike, never
+    // 'no-candidate' (AC5).
+    if (isAttemptBudgetExhausted(entries, item.id, k, item.stage, ctx.maxAttempts)) {
+      if (!flaggedForBudget.has(item.id)) {
+        flaggedForBudget.add(item.id);
+        await flagBudgetExhausted(deps, item.id, ctx.cwd);
+      }
+      flags.budgetExhausted = true;
       continue;
     }
     // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): a neutral
@@ -3470,6 +3576,7 @@ export async function computeMostImportantItem(
   browseItemCount: number = DEFAULT_BROWSE_ITEM_COUNT,
   markerStaleWindowMs: number = DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   nonTerminalCooldownMs: number = DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+  maxAttempts: number = DEFAULT_DOWNTIME_MAX_ATTEMPTS,
 ): Promise<MostImportantItemResult> {
   // The check-in (and the worker's no-candidate probe) requires the Herdr
   // head lookup: without it there is no canonical ranking to offer from —
@@ -3524,6 +3631,12 @@ export async function computeMostImportantItem(
   // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral hold —
   // the backlog is not empty, so the caller must not pause.
   let heldByCooldown = false;
+  // Per-item/per-kind attempt-budget hold (WL-0MUKYEXMK0033MFK): neutral hold
+  // — the backlog is not empty, so the caller must not pause. An item already
+  // flagged this call is recorded so the producer-review flag is set at most
+  // once (AC7c).
+  let heldByBudget = false;
+  const flaggedForBudget = new Set<string>();
 
   // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F4
   // WL-0MUBVKYH5009CGBI): resolved for THIS instance's OWN root (`cwd`) —
@@ -3556,6 +3669,18 @@ export async function computeMostImportantItem(
     );
     if (!guard.escalate) {
       heldByInFlight = true;
+      continue;
+    }
+    // Per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK AC1/AC2/AC3): a
+    // critical item that has exhausted its automatic attempts is flagged and
+    // NOT offered. Evaluated after the in-flight guard so a live pane is
+    // never pre-empted.
+    if (isAttemptBudgetExhausted(entries, criticalFirst.item.id, criticalFirst.kind, criticalFirst.item.stage, maxAttempts)) {
+      if (!flaggedForBudget.has(criticalFirst.item.id)) {
+        flaggedForBudget.add(criticalFirst.item.id);
+        await flagBudgetExhausted(deps, criticalFirst.item.id, cwd);
+      }
+      heldByBudget = true;
       continue;
     }
     const candidate: DowntimeCandidate = {
@@ -3600,6 +3725,17 @@ export async function computeMostImportantItem(
           k === 'audit' || k === 'implement' ? 'id-guard' : 'stage-guard',
         )
       ) {
+        continue;
+      }
+      // Per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK AC1/AC2/AC3):
+      // flag the item for producer review and do not offer it once its
+      // attempts at the current stage reach the cap. Neutral hold (AC5).
+      if (isAttemptBudgetExhausted(entries, item.id, k, item.stage, maxAttempts)) {
+        if (!flaggedForBudget.has(item.id)) {
+          flaggedForBudget.add(item.id);
+          await flagBudgetExhausted(deps, item.id, cwd);
+        }
+        heldByBudget = true;
         continue;
       }
       // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
@@ -3671,9 +3807,11 @@ export async function computeMostImportantItem(
     ? { ok: true, reviewQueueHold: true }
     : heldByCooldown
       ? { ok: true, nonTerminalCooldownHold: true }
-      : heldByInFlight
-        ? { ok: true, inFlightHold: true }
-        : { ok: true, noCandidate: true };
+      : heldByBudget
+        ? { ok: true, attemptBudgetHold: true }
+        : heldByInFlight
+          ? { ok: true, inFlightHold: true }
+          : { ok: true, noCandidate: true };
 }
 
 /**
@@ -3727,7 +3865,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; spawnConfig?: DowntimeSpawnConfig },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; spawnConfig?: DowntimeSpawnConfig },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -3797,6 +3935,13 @@ export async function dispatchFromCoordination(
   };
   const cooldownMs = opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
   let cooldownHold = false;
+  // Per-item/per-kind attempt-budget hold (WL-0MUKYEXMK0033MFK): neutral hold
+  // — the backlog is not empty, so the caller must not pause or drop the
+  // entry. A flagged set keeps the producer-review flag to at most one write
+  // per dispatch (AC7c).
+  const maxAttempts = opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS;
+  let budgetHold = false;
+  const flaggedForBudget = new Set<string>();
 
   // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
   // gated by the SAME fresh-read code-freeze marker as the audit/implement
@@ -3870,6 +4015,18 @@ export async function dispatchFromCoordination(
     const kind = classifyItemForDispatch(result.info, now);
     if (kind === null) {
       removeEntry(opts.coordinationDir, entry.instanceId);
+      continue;
+    }
+    // Per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK AC1/AC2/AC3):
+    // flag the item for producer review and keep the entry (it is still a
+    // valid offer once a human clears the flag) but skip it this cycle.
+    // Neutral — never a strike, never 'no-candidate' (AC5).
+    if (isAttemptBudgetExhausted(await cooldownEntriesForRoot(worklogRoot), result.info.id, kind, result.info.stage, maxAttempts)) {
+      if (!flaggedForBudget.has(result.info.id)) {
+        flaggedForBudget.add(result.info.id);
+        await flagBudgetExhausted(deps, result.info.id, worklogRoot);
+      }
+      budgetHold = true;
       continue;
     }
     // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
@@ -3999,7 +4156,9 @@ export async function dispatchFromCoordination(
       ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
       : cooldownHold
         ? { dispatched: false, reason: 'non-terminal-cooldown' }
-        : inFlightHold
+        : budgetHold
+          ? { dispatched: false, reason: 'attempt-budget-exhausted' }
+          : inFlightHold
           ? { dispatched: false, reason: 'in-flight-pane' }
           : { dispatched: false, reason: 'no-candidate' };
 }
@@ -4027,11 +4186,13 @@ export async function runCoordinationCheckIn(
     markerStaleWindowMs?: number;
     /** Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5); defaults to DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS. */
     nonTerminalCooldownMs?: number;
+    /** Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK); defaults to DEFAULT_DOWNTIME_MAX_ATTEMPTS. */
+    maxAttempts?: number;
   },
   now: number = Date.now(),
 ): Promise<{ offered: string | null; updated: boolean }> {
   const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
-  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs, coordinator.nonTerminalCooldownMs);
+  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs, coordinator.nonTerminalCooldownMs, coordinator.maxAttempts);
   if (!result.ok) {
     // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
     return { offered: current?.workItemId ?? null, updated: false };
@@ -4236,6 +4397,13 @@ export async function dispatchDowntimeWork(
      * `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`.
      */
     nonTerminalCooldownMs?: number;
+    /**
+     * Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK): once an
+     * item has been dispatched this many times for a kind at its current
+     * stage it is flagged for producer review and skipped. Optional — absent
+     * falls back to `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (3).
+     */
+    maxAttempts?: number;
     /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
     spawnConfig?: DowntimeSpawnConfig;
   },
@@ -4339,7 +4507,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, auditHostSaturated };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, auditHostSaturated };
       const head = await deps.getHerdrListHead(opts.cwd, sprintWindow);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -4349,7 +4517,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, inFlight, spawnConfig: opts.spawnConfig };
+        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight, spawnConfig: opts.spawnConfig };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return herdrOutcome;
 
@@ -4377,6 +4545,7 @@ export async function dispatchDowntimeWork(
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
         const cooldownHeld = flags.cooldownHeld;
+        const budgetExhausted = flags.budgetExhausted;
         // Herdr list had items but every one was filtered by a safety gate:
         // compose the terminal reason and DO NOT fall through to the legacy
         // chain (AC2 — gates are filters, not a fallback ranking).
@@ -4405,6 +4574,12 @@ export async function dispatchDowntimeWork(
         // empty, so the no-candidate cooldown must not fire
         // (WL-0MUKYERLZ006ELL5 AC3/AC6).
         if (cooldownHeld) return { dispatched: false, reason: 'non-terminal-cooldown' };
+        // Per-item/per-kind attempt budget exhausted (WL-0MUKYEXMK0033MFK
+        // AC2/AC5): neutral 'attempt-budget-exhausted', NEVER 'no-candidate'
+        // — the backlog is not empty and no strike is recorded; polling
+        // continues so other work still dispatches and the flag write is
+        // retried if it failed.
+        if (budgetExhausted) return { dispatched: false, reason: 'attempt-budget-exhausted' };
         return { dispatched: false, reason: 'no-candidate' };
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
@@ -5151,6 +5326,14 @@ export interface DowntimeWorkerConfig {
      * for backward compat — defaults to DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS.
      */
     nonTerminalCooldownMs?: number;
+    /**
+     * Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK). Optional
+     * for backward compat — defaults to DEFAULT_DOWNTIME_MAX_ATTEMPTS (3).
+     * Once an item reaches the cap for a kind at its current stage it is
+     * flagged for producer review and excluded from further automatic
+     * dispatch of that kind.
+     */
+    maxAttempts?: number;
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
     browseItemCount?: number;
     /**
@@ -5704,6 +5887,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
               browseItemCount: cfg.browseItemCount,
               markerStaleWindowMs: cfg.markerStaleWindowMs,
               nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
+              maxAttempts: cfg.maxAttempts,
             }, tickNow);
             lastOfferEmpty = checkIn.offered === null;
             // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
@@ -6088,6 +6272,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   freeSlots,
                   browseItemCount: cfg.browseItemCount,
                   nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
+                  maxAttempts: cfg.maxAttempts,
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
@@ -6108,6 +6293,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 markerStaleWindowMs: cfg.markerStaleWindowMs,
                 // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
                 nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
+                // Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK).
+                maxAttempts: cfg.maxAttempts,
                 spawnConfig,
               });
         // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
@@ -6152,7 +6339,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           //    and reset the idle tracker (fresh full idle period required
           //    after the pause).
           if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
-            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs);
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs, cfg.maxAttempts);
             if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
               errorStrikes = 0; // the CLI answered — it is healthy
               cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
@@ -7237,6 +7424,21 @@ export function clampDowntimeMarkerStaleWindowMs(value: number): number {
   return Math.min(
     Math.max(Math.round(value), DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS),
     DOWNTIME_MARKER_STALE_WINDOW_MAX_MS,
+  );
+}
+
+/**
+ * Clamp the per-item, per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK):
+ * reject negative/non-finite (fall back to the 3-attempt default) and clamp
+ * to [DOWNTIME_MAX_ATTEMPTS_MIN, DOWNTIME_MAX_ATTEMPTS_MAX] (1–10) so the
+ * control can neither disable retries entirely nor be set so high that a
+ * stuck item loops indefinitely.
+ */
+export function clampDowntimeMaxAttempts(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_MAX_ATTEMPTS;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_MAX_ATTEMPTS_MIN),
+    DOWNTIME_MAX_ATTEMPTS_MAX,
   );
 }
 

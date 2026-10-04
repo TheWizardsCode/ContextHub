@@ -467,6 +467,13 @@ without per-slot data it fails closed to all-slots-free for `0 < N < total`
   no-candidate) released early when the item advances past its
   dispatched-at stage (default: `1800000` = 30 minutes, clamped to 1 min –
   24 h)
+- `downtimeMaxAttempts` — Per-item, per-kind dispatch-attempt cap. Once an
+  item has been dispatched this many times for a kind at its current worklog
+  stage (including non-terminal pane closes), it is flagged
+  `needsProducerReview` and excluded from further automatic dispatch of that
+  kind — a neutral skip (reason `attempt-budget-exhausted`, never a strike,
+  never a no-candidate) reset by a stage advancement (default: `3`, clamped
+  to 1 – 10)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (when the proxy
@@ -1001,6 +1008,19 @@ neutral — reason `non-terminal-cooldown`, never a strike and never
 `no-candidate`, so it does not enter the empty-backlog pause. The same
 filter runs on the direct Herdr-head path, the coordination offer
 computation, and leader dispatch of a remote offer.
+
+**Per-item/per-kind attempt cap (WL-0MUKYEXMK0033MFK)** — the dispatcher
+counts dispatch attempts per `(item, kind)` from the rolling dispatch log
+(`countAttempts`) and, once the count reaches `downtimeMaxAttempts`
+(default 3, clamped to 1 – 10) at the item's current stage, flags the item
+`needsProducerReview` and stops auto-dispatching that kind. Non-terminal
+closes count via their dispatch marker; `spawn-failed` traces and post-spawn
+enrichment entries do not. Stage advancement resets the budget (earlier-stage
+markers no longer count). The skip is neutral — reason
+`attempt-budget-exhausted`, never a strike and never `no-candidate`. The same
+filter runs on the direct Herdr-head path (including the critical-first
+scan), the coordination offer computation, and leader dispatch of a remote
+offer. A missing/unreadable/corrupt log is fail-open (count 0).
 
 **Empty-backlog cooldown** — when the implement, plan, and intake `wl next`
 lookups and the critical-tier lookup genuinely return no candidate (the

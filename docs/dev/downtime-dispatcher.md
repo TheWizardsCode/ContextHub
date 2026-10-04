@@ -348,6 +348,50 @@ re-read from settings every tick (live) and wired through
 `dispatchDowntimeWork`, `computeMostImportantItem`, `runCoordinationCheckIn`
 and `dispatchFromCoordination`.
 
+### Per-item, per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)
+
+The dispatcher enforces a **per-`(item, kind)` attempt budget** derived from
+the rolling dispatch log (`countAttempts`), so an item that repeatedly closes
+non-terminally (`agent-ended-no-terminal`, `audit-ended-no-result`) cannot
+consume local-LLM slots across many idle cycles without escalation.
+
+- **Attempt count (AC1).** An attempt is a dispatch marker for the kind
+  (the same predicate the success-marker readers use). Non-terminal pane
+  closes count once, via the marker that opened their pane; `spawn-failed`
+  traces and post-spawn `enrichment` entries are excluded (they never opened
+  a pane). No new persistent store is introduced — the count is derived from
+  the existing bounded log and is **fail-open**: a missing/unreadable/corrupt
+  log yields 0.
+- **Cap enforced (AC2).** Once the count reaches `maxAttempts`, the item is
+  excluded as a sequential filter on both paths — the Herdr-list-head scan
+  (`dispatchFromHerdrList`, including the critical-first scan) and the
+  coordination offer/leader path (`computeMostImportantItem`,
+  `dispatchFromCoordination`). The cap is evaluated after the
+  duplicate-dispatch marker guard and the in-flight guard, so it never
+  bypasses either.
+- **Escalation (AC3).** Reaching the cap flags the item
+  `needsProducerReview = true` (`markNeedsProducerReview`, backed by
+  `wl reviewed <id> true`) so it surfaces for human triage. The flag is set
+  at most once per dispatch cycle, and once set the existing global
+  producer-review exclusion stops all further automatic dispatch.
+- **Stage advancement resets (AC4).** Only markers whose dispatched-at
+  `stage` equals the item's current stage count. A stage advancement leaves
+  the earlier markers at the old stage, so the item gets a fresh budget at
+  its new stage.
+- **Neutral skip (AC5).** The skip reason is `attempt-budget-exhausted` —
+  distinct from `no-candidate` and never a CLI-error strike (the worker's
+  three-strike rule is unaffected; the offer computation reports the distinct
+  `{ok:true, attemptBudgetHold:true}` variant so a budget-held backlog keeps
+  polling).
+
+**Configuration.** `downtimeMaxAttempts` is a plugin setting
+(default **3**, `DEFAULT_DOWNTIME_MAX_ATTEMPTS`), clamped by
+`clampDowntimeMaxAttempts` to **[1, 10]**
+(`DOWNTIME_MAX_ATTEMPTS_MIN` / `..._MAX`). It is re-read from settings every
+tick (live) and wired through `DowntimeWorkerConfig.config().maxAttempts`
+into `dispatchDowntimeWork`, `computeMostImportantItem`,
+`runCoordinationCheckIn` and `dispatchFromCoordination`.
+
 ### Pane placement: project workspace first, `Dispatcher` fallback (WL-0MUR5FUWD00024XN)
 
 Automated downtime panes spawn **inside the owning project's herdr
@@ -1125,6 +1169,7 @@ status refresh unchanged at 30s.**
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
+| Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
 | Pane-closure idle threshold | **30 min** (`paneCloseIdleThresholdMinutes`; clamped to 1 min – 24 h) | `pane-close-scheduler.ts` |
 | (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
@@ -1137,7 +1182,9 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped on load
 (`clampDowntimeMarkerStaleWindowMs`). The non-terminal pane-close cooldown
 (`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
-(`clampDowntimeNonTerminalCooldownMs`).
+(`clampDowntimeNonTerminalCooldownMs`). The per-item/per-kind attempt cap
+(`downtimeMaxAttempts`) is likewise configurable and clamped on load
+(`clampDowntimeMaxAttempts`).
 
 ## Files & runtime artifacts
 

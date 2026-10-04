@@ -69,6 +69,7 @@ import {
   createPerSlotIdleTracker,
   dispatchDowntimeWork,
   computeMostImportantItem,
+  dispatchFromCoordination,
   fetchExtendedHerdrItems,
   createDowntimeWorker,
   buildDowntimePrompt,
@@ -103,6 +104,10 @@ import {
   clampDowntimeNoCandidateCooldownMs,
   clampDowntimeNonTerminalCooldownMs,
   clampDowntimeMarkerStaleWindowMs,
+  clampDowntimeMaxAttempts,
+  DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+  DOWNTIME_MAX_ATTEMPTS_MIN,
+  DOWNTIME_MAX_ATTEMPTS_MAX,
   countFreeUnownedSlots,
   isSlotOwned,
   parseHerdrPaneListOutput,
@@ -175,6 +180,7 @@ import {
 } from './leader-election.js';
 import {
   writeCoordinationFile,
+  type CoordinationEntry,
 } from './coordination.js';
 import {
   statusFixtures,
@@ -12122,5 +12128,303 @@ describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T20
     expect(outcome.dispatched).toBe(false);
     expect(worker.blockReason).toBe('slot-owner');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});
+
+// ── Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK) ───────
+//
+// A repeatedly non-terminal item must stop consuming dispatch slots. Once
+// the rolling dispatch log records `maxAttempts` attempts for an
+// `(item, kind)` at the item's current stage, the item is flagged
+// `needsProducerReview` and excluded from further automatic dispatch of that
+// kind, with a neutral `attempt-budget-exhausted` reason (never a strike,
+// never `no-candidate`). A stage advancement resets the budget; a
+// missing/corrupt log is fail-open (count 0).
+
+describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
+  // 1s marker-stale window so same-stage markers written in the past are
+  // RELEASED (otherwise the duplicate-dispatch marker guard would skip the
+  // item before the budget filter runs).
+  const WINDOW_MS = 1_000;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeCwd(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'dt-attempt-budget-'));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  function writeRawLog(cwd: string, raw: string): void {
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), raw, 'utf8');
+  }
+
+  function writeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
+    writeRawLog(cwd, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  }
+
+  const implementHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Implement ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'high',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 10,
+  });
+
+  const planHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'intake_complete',
+    priority: 'medium',
+    sortIndex: 30,
+  });
+
+  const marker = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    itemId: 'IMP-1',
+    kind: 'implement',
+    stage: 'plan_complete',
+    dispatchedAt: ago(60_000),
+    ...overrides,
+  });
+
+  function depsFor(items: DowntimeHerdrItem[], overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
+    return makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items }),
+      markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+      ...overrides,
+    });
+  }
+
+  it('AC7a: below the cap the item is eligible for dispatch', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker()]); // 2 attempts < 3
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('IMP-1');
+    expect(deps.markNeedsProducerReview).not.toHaveBeenCalled();
+  });
+
+  it('AC7b: at the cap the item is skipped with the neutral attempt-budget-exhausted reason', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker(), marker()]); // 3 attempts == 3
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('attempt-budget-exhausted');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // Neutral: never a CLI-error strike.
+    expect(deps.recordError).not.toHaveBeenCalled();
+  });
+
+  it('AC7c: the producer-review flag is set exactly once when the cap is reached', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker(), marker()]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledTimes(1);
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
+  });
+
+  it('AC7d: a stage advancement resets the budget (earlier-stage attempts do not count)', async () => {
+    const cwd = makeCwd();
+    // Three attempts recorded at the PRIOR stage; the item has since advanced
+    // to plan_complete, so the earlier attempts no longer count.
+    writeLog(cwd, [
+      marker({ stage: 'intake_complete' }),
+      marker({ stage: 'intake_complete' }),
+      marker({ stage: 'intake_complete' }),
+    ]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('IMP-1');
+    expect(deps.markNeedsProducerReview).not.toHaveBeenCalled();
+  });
+
+  it('AC7e: a corrupt/missing log is fail-open (never blocks all dispatch)', async () => {
+    const cwd = makeCwd();
+    writeRawLog(cwd, '{not valid json}\nalso-not-json\n');
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('IMP-1');
+  });
+
+  it('AC4: the budget is per-kind — attempts of another kind do not exhaust it', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [
+      { itemId: 'IMP-1', kind: 'plan', stage: 'plan_complete', dispatchedAt: ago(60_000) },
+      { itemId: 'IMP-1', kind: 'plan', stage: 'plan_complete', dispatchedAt: ago(60_000) },
+      { itemId: 'IMP-1', kind: 'plan', stage: 'plan_complete', dispatchedAt: ago(60_000) },
+    ]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  it('AC6 (offer path): computeMostImportantItem reports attemptBudgetHold, never noCandidate', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker(), marker()]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, WINDOW_MS, undefined, 3);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect('attemptBudgetHold' in result).toBe(true);
+      expect('noCandidate' in result).toBe(false);
+      expect('candidate' in result).toBe(false);
+    }
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
+  });
+
+  it('AC6 (offer path): below the cap computeMostImportantItem still offers the item', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker()]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, WINDOW_MS, undefined, 3);
+
+    expect(result.ok).toBe(true);
+    if (result.ok && 'candidate' in result) {
+      expect(result.candidate.id).toBe('IMP-1');
+      expect(result.kind).toBe('implement');
+    } else {
+      throw new Error(`expected a candidate offer, got ${JSON.stringify(result)}`);
+    }
+  });
+
+  it('AC6 (leader/coordination path): dispatchFromCoordination enforces the cap and flags the item', async () => {
+    const cwd = makeCwd();
+    const coordinationDir = makeCwd();
+    writeLog(cwd, [marker(), marker(), marker()]);
+    const deps = makeDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: {
+          id: 'IMP-1',
+          title: 'Implement IMP-1',
+          status: 'open',
+          stage: 'plan_complete',
+          priority: 'high',
+          risk: 'Low',
+          effort: 'S',
+          sortIndex: 10,
+        },
+      }),
+      markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+    });
+    const entries: CoordinationEntry[] = [{
+      instanceId: 'inst-1',
+      workItemId: 'IMP-1',
+      directory: cwd,
+      worklogRoot: cwd,
+      assignedAt: ago(60_000),
+      lastUpdated: ago(60_000),
+    }];
+
+    const outcome = await dispatchFromCoordination(deps, entries, {
+      model: 'plan',
+      cwd,
+      coordinationDir,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('attempt-budget-exhausted');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
+  });
+
+  it('plan kind: the cap is enforced for a plan candidate too', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(60_000) },
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(60_000) },
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(60_000) },
+    ]);
+    const deps = depsFor([planHead('PLN-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('attempt-budget-exhausted');
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('PLN-1', cwd);
+  });
+});
+
+describe('clampDowntimeMaxAttempts (WL-0MUKYEXMK0033MFK)', () => {
+  it('defaults on non-finite input', () => {
+    expect(clampDowntimeMaxAttempts(Number.NaN)).toBe(DEFAULT_DOWNTIME_MAX_ATTEMPTS);
+    expect(clampDowntimeMaxAttempts(Number.POSITIVE_INFINITY)).toBe(DEFAULT_DOWNTIME_MAX_ATTEMPTS);
+  });
+
+  it('clamps into the documented [1, 10] range', () => {
+    expect(clampDowntimeMaxAttempts(0)).toBe(DOWNTIME_MAX_ATTEMPTS_MIN);
+    expect(clampDowntimeMaxAttempts(-5)).toBe(DOWNTIME_MAX_ATTEMPTS_MIN);
+    expect(clampDowntimeMaxAttempts(99)).toBe(DOWNTIME_MAX_ATTEMPTS_MAX);
+    expect(clampDowntimeMaxAttempts(4)).toBe(4);
   });
 });

@@ -960,3 +960,28 @@ export async function rollbackClaimWorkItem(
     return false;
   }
 }
+
+/**
+ * Flag a work item as needing producer review (`needsProducerReview = true`)
+ * via `wl reviewed <id> true` (WL-0MUKYEXMK0033MFK AC3). The downtime
+ * dispatcher calls this once an item exhausts its per-item/per-kind attempt
+ * budget so it surfaces for human triage instead of looping through idle
+ * cycles. `worklogRoot` targets that root's database via per-call
+ * `--worklog-dir` (the same cross-root convention as `claimWorkItem`).
+ *
+ * Idempotent: setting the flag true when it is already true is a no-op.
+ * Never throws — a failure resolves `false` (fail-closed: the dispatcher
+ * still skips the budget-exhausted item and retries the flag next cycle).
+ */
+export async function markNeedsProducerReviewWorkItem(
+  id: string,
+  worklogRoot?: string,
+): Promise<boolean> {
+  try {
+    const dirOverride = worklogRoot !== undefined ? join(worklogRoot, '.worklog') : undefined;
+    await runWl(['reviewed', id, 'true'], true, CLAIM_TIMEOUT_MS, dirOverride);
+    return true;
+  } catch {
+    return false;
+  }
+}

@@ -34,6 +34,7 @@ import {
   setWorklogDir,
   claimWorkItem,
   rollbackClaimWorkItem,
+  markNeedsProducerReviewWorkItem,
   getExecFileAsync,
   buildWlArgs,
   buildWlArgsForRoot,
@@ -1652,6 +1653,13 @@ export function createDowntimeDeps(
       // Race-safe (--if-status in_progress) and fail-closed (never throws).
       return rollbackClaimWorkItem(itemId, original, cwd);
     },
+    // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
+    // `needsProducerReview = true` when an item exhausts its automatic
+    // dispatch-attempt budget so it surfaces for human triage. Cross-root
+    // (`cwd` is the item's worklog root) and fail-closed (never throws).
+    async markNeedsProducerReview(itemId: string, cwd: string): Promise<boolean> {
+      return markNeedsProducerReviewWorkItem(itemId, cwd);
+    },
   };
 }
 
@@ -1883,6 +1891,8 @@ async function main(): Promise<void> {
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
         nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,
+        // Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK).
+        maxAttempts: s.downtimeMaxAttempts,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
         browseItemCount: s.browseItemCount,
