@@ -136,6 +136,9 @@ the extraction logic. It is shared between:
 
 - The `wl next --groups/-g` grouping algorithm
 - The `wl doctor file-paths` subcommand
+- The `wl doctor` podcast-script check (`src/doctor/podcast-scripts-check.ts`),
+  which additionally verifies that a podcast item's `.podcast.md` `Key Files:`
+  entry resolves to an existing file (see [DOCTOR_AND_MIGRATIONS.md](../DOCTOR_AND_MIGRATIONS.md))
 - The automatic advisory check on transition to `intake_complete`
 
 ## Related

@@ -9,6 +9,7 @@ import { validateDependencyEdges } from '../doctor/dependency-check.js';
 import { listPendingMigrations, runMigrations } from '../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
 import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
+import { validatePodcastScripts } from '../doctor/podcast-scripts-check.js';
 import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults, rewriteAndForcePushDataFile } from '../sync.js';
 import { getSyncDefaults } from './sync.js';
@@ -1009,6 +1010,7 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
         ...validateStatusStageItems(items, rules),
         ...validateDependencyEdges(items, dependencyEdges),
         ...priorityFindings,
+        ...validatePodcastScripts(items),
       ];
 
       // If --fix was provided, attempt to apply safe fixes and prompt per non-safe finding
@@ -1102,6 +1104,7 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
               if ((f.proposedFix as any).status) update.status = (f.proposedFix as any).status;
               if ((f.proposedFix as any).stage) update.stage = (f.proposedFix as any).stage;
               if ((f.proposedFix as any).priority) update.priority = (f.proposedFix as any).priority;
+              if ((f.proposedFix as any).description) update.description = (f.proposedFix as any).description;
               if (Object.keys(update).length > 0) {
                 try {
                   db.update(itemId, update);
@@ -1145,7 +1148,8 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
           const hasActionableFix = f.proposedFix && typeof f.proposedFix === 'object' && (
             Object.prototype.hasOwnProperty.call(f.proposedFix, 'status') ||
             Object.prototype.hasOwnProperty.call(f.proposedFix, 'stage') ||
-            Object.prototype.hasOwnProperty.call(f.proposedFix, 'priority')
+            Object.prototype.hasOwnProperty.call(f.proposedFix, 'priority') ||
+            Object.prototype.hasOwnProperty.call(f.proposedFix, 'description')
           );
 
           if (!hasActionableFix) {
@@ -1171,6 +1175,7 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
                 if ((f.proposedFix as any).status) update.status = (f.proposedFix as any).status;
                 if ((f.proposedFix as any).stage) update.stage = (f.proposedFix as any).stage;
                 if ((f.proposedFix as any).priority) update.priority = (f.proposedFix as any).priority;
+                if ((f.proposedFix as any).description) update.description = (f.proposedFix as any).description;
                 if (Object.keys(update).length > 0) {
                   try { db.update(f.itemId, update); continue; } catch (err) { /* fall through to keep in report */ }
                 }
@@ -1225,7 +1230,8 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
         const hasActionableFix = proposed && typeof proposed === 'object' && (
           Object.prototype.hasOwnProperty.call(proposed, 'status') ||
           Object.prototype.hasOwnProperty.call(proposed, 'stage') ||
-          Object.prototype.hasOwnProperty.call(proposed, 'priority')
+          Object.prototype.hasOwnProperty.call(proposed, 'priority') ||
+          Object.prototype.hasOwnProperty.call(proposed, 'description')
         );
         return !!ctx.requiresManualFix || !hasActionableFix;
       });
