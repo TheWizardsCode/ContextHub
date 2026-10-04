@@ -20,6 +20,7 @@
  */
 
 import { visibleWidth, truncateToWidth } from './form-dialog.js';
+import { splitKeypresses } from './key-input.js';
 
 // ── ANSI helpers ──────────────────────────────────────────────────────
 
@@ -59,14 +60,33 @@ export class ShipItDialogState {
   }
 
   /**
-   * Process a single keypress while the dialog is open.
+   * Process a raw stdin chunk while the dialog is open.
    *
-   * @param key - The raw keypress string
+   * A single `data` event may carry SEVERAL coalesced keystrokes when the
+   * user types quickly — each token is processed in order so no character is
+   * dropped (WL-0MTV67MZU003H7SH). Single-key callers are unaffected.
+   *
+   * @param chunk - The raw keypress chunk (one or more keys)
    * @returns 'submitted' if the dialog was confirmed (dispatch fired),
    *          'cancelled' if dismissed with Esc, or null while the dialog
-   *          stays open (typed input / non-matching Enter / ignored keys)
+   *          stays open (typed input / non-matching Enter / ignored keys).
+   *          Preceding keys in a chunk are applied before a terminal result.
    */
-  handleInput(key: string): 'submitted' | 'cancelled' | null {
+  handleInput(chunk: string): 'submitted' | 'cancelled' | null {
+    // Split a coalesced chunk into individual keys and process each in
+    // order. A single-token chunk falls straight through to the existing
+    // single-key logic below.
+    const keys = splitKeypresses(chunk);
+    if (keys.length > 1) {
+      let last: 'submitted' | 'cancelled' | null = null;
+      for (const token of keys) {
+        last = this.handleInput(token);
+        if (last !== null) return last;
+      }
+      return last;
+    }
+    const key = keys[0] ?? '';
+
     if (key === '\r' || key === '\n') {
       if (this.buffer.toLowerCase() === 'ship') {
         this.onConfirm();

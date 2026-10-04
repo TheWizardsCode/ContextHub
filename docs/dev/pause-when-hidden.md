@@ -94,16 +94,29 @@ a background `wl sync` / list refresh could fire while the user was typing and
 replace the render state mid-keystroke. The fix defers that background work
 while any text-input overlay is open.
 
-- **Shared predicate** — `isInputActive(formState, shipItDialog)` in
-  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null`.
+- **Shared predicate** — `isInputActive(formState, shipItDialog,
+  blockedNoticeActive)` in `worklist.ts` returns `true` when
+  `formState !== null || shipItDialog !== null || blockedNoticeActive`.
   It is defined once and exported for unit testing; the scheduler checks it at
   the top of both the `refresh` (30s) and `sync` (60s) task callbacks,
   alongside the existing `paneGate.visible()` check, and returns early when
   true.
 - **Coverage** — the command-parameter form (`FormState` in
   `form-dialog.ts`), the Ship It confirmation dialog (`ShipItDialogState` in
-  `ship-it-dialog.ts`), and `md-note-edit` (which opens a `FormState`) are all
-  covered. There is no separate note-edit input state.
+  `ship-it-dialog.ts`), the Ship-mode blocked notice, and `md-note-edit`
+  (which opens a `FormState`) are all covered. There is no separate note-edit
+  input state.
+- **Fast typing: coalesced chunks are tokenised (WL-0MTV67MZU003H7SH)** — the
+  tick gate stops background work, but it cannot prevent the PTY from
+  coalescing several keystrokes into one raw `stdin` `data` event during fast
+  typing. Both `FormState.handleInput` and `ShipItDialogState.handleInput` run
+  each chunk through the shared `splitKeypresses()` tokeniser
+  (`packages/herdr/src/key-input.ts`) and apply every key in order. Escape
+  sequences (arrows, Ctrl+Enter, bracketed-paste markers, SS3, Alt/Meta) stay
+  intact as a single token, so existing whole-chunk checks are unchanged.
+  Before this, `handleInput` only accepted a single character
+  (`key.length === 1`) and silently discarded a multi-character chunk — the
+  residual dropped-keypress bug seen when typing fast.
 - **Resume contract: skip, don't coalesce** — ticks that fall inside a typing
   window are silently dropped; the next regular tick after the overlay closes
   fires normally. No immediate post-close refresh is queued (avoids refresh
@@ -191,7 +204,8 @@ used panes). Before this fix, N idle agents produced dozens of concurrent
    list re-render — `ps -eo args | grep 'wl sync' | grep -v grep` stays empty
    and the form keeps every keystroke.
 4. Type rapidly across a scheduled tick boundary. Expected: **zero dropped
-   characters**.
+   characters**. Fast typing can deliver several keystrokes in one stdin
+   chunk; the shared `splitKeypresses()` tokeniser preserves every one.
 5. Close the overlay. Expected: the next scheduled tick refreshes/syncs
    normally (no queued immediate refresh) and the header returns to its normal
    state.

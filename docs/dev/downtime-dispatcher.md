@@ -266,96 +266,232 @@ coordination check-in. The legacy per-tier lookup chain in
 the Herdr head is genuinely empty — production-unreachable, see
 downtime-worker.ts) keeps the historical change-guard semantics unchanged.
 
-### Project-workspace placement + item-ID tabs (WL-0MU321YK70035AYT)
+### Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5)
 
-Automated downtime panes for a work item spawn **in the project's own herdr
-workspace**, in a **tab labelled with the exact work-item id** — so automated
-work is co-located with the project it belongs to and each item has a reusable
-tab. The machine-wide `Dispatcher` anchor is retained only as the fallback for
-the case where no project plugin pane can be resolved (and for scheduled
-prompts, which have no work-item id).
+A dispatched session can end **without reaching a terminal stage** — the
+agent exits, the pane is closed by the reaper, or the audit ends with no
+recorded result. Those closes are recorded in the rolling dispatch log as
+`entryType: 'pane-close'` entries carrying a `reasonCode`
+(`agent-ended-no-terminal`, `audit-ended-no-result`, `producer-review`,
+`risk-effort-incomplete`, …). Before this control, such an item became
+re-eligible as soon as the dispatched success-marker was released, so a
+repeatedly failing session could be re-selected on the very next idle cycle
+and burn local-LLM slots in a tight loop.
+
+`isNonTerminalCooldownActive` (`packages/herdr/src/downtime-log.ts`) is a
+**neutral, sequential filter** that excludes an item from re-dispatch of the
+**same kind** for a minimum cooldown after its most recent pane closed
+non-terminally. It is applied at the same point as the other non-safety
+filters — after the dispatched-marker exclusion and before the code-freeze
+gate — on every dispatch path:
+
+- `dispatchFromHerdrList` (direct Herdr-head dispatch),
+- `computeMostImportantItem` (coordination offer computation),
+- `dispatchFromCoordination` (leader dispatch of a remote offer).
+
+The filter consults the **most recent** `pane-close` entry for the
+`(itemId, kind)` pair and holds the item only while **all** of the following
+hold:
+
+1. the close was **non-terminal** — its `reasonCode` is not in the terminal
+   set `{none, reached-in-review}` (`none` covers
+   `closed-as-intake-complete` / `closed-as-plan-complete` / `audit-passed` /
+   `audit-failed`; `reached-in-review` is the implement-pane success close).
+   Any other/absent code is treated as non-terminal (fail-closed);
+2. the item has **not advanced past the close's dispatched-at stage** — the
+   `stage` recorded on the close entry (written from the dispatched-at
+   marker). A genuinely progressed item is released immediately (parent AC4);
+3. the close is **younger than the cooldown** — `now − closeTimestamp <
+   cooldownMs`.
+
+A later terminal close supersedes an earlier failure (most-recent wins), and
+a later failure re-arms the cooldown. A missing or unparseable close
+timestamp **fails closed** (skip), bounded by the stage-advancement release.
+
+**Neutral semantics.** A cooldown skip is **not** a strike and **not** a
+`no-candidate`: it never counts towards the three-strike CLI-error rule and
+never enters the no-candidate cooldown. The dispatch outcome carries the
+distinct reason `non-terminal-cooldown` (`MostImportantItemResult` gains a
+`{ok:true, nonTerminalCooldownHold:true}` variant), so a cooldown-held
+backlog keeps polling rather than pausing.
+
+**Configuration.** `downtimeNonTerminalCooldownMs` is a plugin setting
+(default **30 min**, `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`), clamped by
+`clampDowntimeNonTerminalCooldownMs` to **[1 min, 24 h]**
+(`DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS` / `..._MAX_MS`): the floor
+prevents immediate retry, the ceiling prevents indefinite stranding. It is
+re-read from settings every tick (live) and wired through
+`DowntimeWorkerConfig.config().nonTerminalCooldownMs` into
+`dispatchDowntimeWork`, `computeMostImportantItem`, `runCoordinationCheckIn`
+and `dispatchFromCoordination`.
+
+### Pane placement: project workspace first, `Dispatcher` fallback (WL-0MUR5FUWD00024XN)
+
+Automated downtime panes spawn **inside the owning project's herdr
+workspace**, in a **tab labelled with the exact work-item id** (primary
+path). The machine-wide `Dispatcher` workspace is only the fail-closed
+**fallback** when no project plugin pane resolves for the item's root.
+
+`dispatchClaimedTier` evaluates placement in this precedence order
+(WL-0MUR5FUWD00024XN AC1):
+
+1. **Project workspace + item-ID tab** — `resolveProjectWorkspace` resolves
+   the herdr plugin pane whose logical root equals the item's worklog root
+   `R`, then `getItemTabAnchor` ensures/reuses the tab labelled with the exact
+   work-item id. On success the `Dispatcher` workspace is NOT used (AC2).
+2. **Per-prefix tab in the `Dispatcher` workspace** — only when
+   `resolveProjectWorkspace` returns `null` (no plugin pane for `R`) and
+   `getDispatcherTabAnchor` is wired (AC3, AC5).
+3. **Legacy single `Dispatcher` anchor** — only when neither project
+   workspace nor per-prefix resolver produces an anchor (pre-C1/test callers).
+
+A `null`/failed project-workspace resolution does **not** abort when a
+fallback is wired; a project workspace that resolves but whose item-ID tab
+cannot be provisioned aborts with `anchor-unavailable` (never a wrong
+placement). An empty/unparseable per-prefix likewise fails closed. The
+resolved anchor is forwarded as `--anchor <rootPaneId>` to `send-to-pi.sh`
+(`herdr pane split --pane <anchor>`), `--no-focus` preserved; the new pane's
+`workspace_id` is the project workspace (or `Dispatcher` fallback) and its
+`tab_id` equals the item-ID (or prefix) tab.
+
+#### Project workspace + item-ID tab (primary path, WL-0MU321YK70035AYT)
 
 Invariant: for a `dispatchClaimedTier` spawn of `<PREFIX>-<hash>` whose
 worklog root is `R`:
 
-1. **Project workspace resolution** — resolve the herdr plugin pane
-   (`label == "Work Items"`) whose logical project root equals `R` and return
-   `{ paneId, workspaceId, tabId }`. The logical root is read from
-   `HERDR_RESOLVED_CWD` via `herdr pane process-info --pane <id>` +
-   `/proc/<shell_pid>/environ` — NOT the pane's reported `cwd` (which is the
-   plugin directory) and NOT the workspace label.
-2. **Item-ID tab** — ensure/reuse a tab labelled exactly the work-item id in
-   that workspace, then anchor the pane to the tab's root pane.
-3. **Spawn** — `spawnAgentPane` → `buildDowntimePaneArgs` → `--anchor
-   <tabRootPaneId>` → `send-to-pi.sh` (`herdr pane split --pane <anchor>`),
-   `--no-focus` preserved. The new pane's `workspace_id` equals the project
-   workspace and its `tab_id` equals the item tab.
-4. **Root-pane cleanup** — after the dispatch pane has spawned, the item
-   tab's initial root pane (herdr's automatically-provisioned empty bash
-   pane, used only as the split anchor) is closed, so the tab shows only the
-   productive dispatch pane (WL-0MU2EOHK900425VU). Only the ROOT pane is ever
-   closed: the anchor is closed only when live-pane liveness positively
-   confirms it is not itself a downtime dispatch pane (fail-safe — an
-   absent/failed liveness query leaves it open). The retained `Dispatcher`
-   fallback anchor is deliberately exempt: closing it would trigger the
-   stale-detection re-provision loop.
+1. **Project-workspace resolution** — `resolveProjectWorkspace(cwd, deps, R)`
+   enumerates the machine-wide `herdr pane list`, keeps only plugin panes
+   (`label == "Work Items"`), and reads each candidate's logical project root
+   from `HERDR_RESOLVED_CWD` (via `herdr pane process-info --pane <id>` →
+   `shell_pid` → `/proc/<pid>/environ`). Matching is on the logical root
+   ONLY — never the pane's reported `cwd`, never the workspace label.
+   Ambiguity (≥2 matching panes) is deterministic: the focused pane wins, else
+   the lowest pane id. Fail-closed `null` on any unreadable boundary
+   (`pane list`/`process-info` failure, missing `shell_pid`, unreadable
+   `/proc`, missing `HERDR_RESOLVED_CWD`, no match).
+2. **Item-ID tab resolution** — `getItemTabAnchor(cwd, deps, workspaceId,
+   itemId)` fast-paths an existing tab labelled exactly the work-item id
+   whose root pane is alive, else creates it under the coordination lock with
+   a double-check (`herdr tab create --workspace <id> --label <itemId>
+   --no-focus`). No persistence file: the tab label IS the key, discovered
+   via `herdr tab list`, so a second dispatch for the same item reuses the
+   same tab (never a duplicate).
+3. **Spawn** — `--anchor <itemTabRootPaneId>`, `--no-focus` preserved.
 
-If step 1 cannot resolve a project workspace for `R`, the dispatcher falls
-back to the **retained machine-wide `Dispatcher` anchor** (C0
-WL-0MTR01EU7005SYZG). A `null` anchor there degrades to the neutral
+When the workspace resolves but the item-ID tab cannot be provisioned, the
+dispatch fails closed with `anchor-unavailable` — it never places the pane in
+the `Dispatcher` workspace (WL-0MU321YK70035AYT).
+
+#### Per-prefix tabs in the Dispatcher workspace (fallback, C1, WL-0MTRQT482001SNXC)
+
+Retained as the AC3 fallback for roots with no resolvable project workspace
+(and the path used by pre-project-workspace/test callers). For such a
+`<PREFIX>-<hash>` item:
+
+1. **Prefix extraction** — `prefix = candidate.id.split('-', 1)[0]` (the raw
+   substring before the first `-`, case-preserved; `WL-…` → `WL`,
+   `TCE-…` → `TCE`, `CG-…` → `CG`).
+2. **Per-prefix tab resolution** — `getDispatcherTabAnchor(cwd, deps, prefix)`
+   ensures the single `Dispatcher` workspace exists, finds-or-creates a tab
+   labelled exactly `prefix` there, and returns its root (anchor) pane.
+3. **Spawn** — the pane's `workspace_id` is the `Dispatcher` workspace and its
+   `tab_id` equals the prefix tab.
+
+**Fail-safe (no fallback):** when the per-prefix resolver is reached and
+returns `null`/throws, the dispatch degrades to the neutral
 `{ dispatched: false, reason: 'anchor-unavailable' }` — **no pane and no
-marker, never the leader's current pane**. If the project workspace resolves
-but the item tab cannot be provisioned, the dispatch also fails closed
-(`anchor-unavailable`) rather than dropping the pane into the `Dispatcher`
-workspace.
+marker, never the leader's current pane, never the legacy single anchor, and
+never a wrong tab**. An empty/unparseable prefix likewise fails closed.
+
+**Idempotency & concurrency.** The persisted per-prefix map
+(`~/.herdr/downtime/downtime-dispatch-tab-anchors.json`, atomic tmp+rename) is
+the authority for reuse and has the shape:
+
+```json
+{
+  "workspaceId": "w13",
+  "byPrefix": {
+    "WL":  { "tabId": "w13:t5", "paneId": "w13:p23" },
+    "TCE": { "tabId": "w13:t6", "paneId": "w13:p31" }
+  }
+}
+```
+
+- **Fast path:** a persisted entry whose pane is alive is reused directly —
+  no `herdr tab list` round-trip.
+- **Stale entry:** a persisted entry whose pane is dead is ignored and
+  re-provisioned on the next dispatch for that prefix.
+- **Create-or-reuse:** on a cache miss the resolver lists tabs in the
+  `Dispatcher` workspace and adopts a tab labelled exactly `prefix` whose root
+  pane is alive.
+- **Concurrent first-dispatch:** tab creation runs under the coordination
+  lock (`tryAcquireCoordLock` in `~/.herdr/downtime`) with a **double-check
+  inside the lock**, so two leaders racing on a previously unseen prefix
+  produce exactly one tab. A holder that cannot acquire the lock re-checks
+  once and otherwise fails closed (never a duplicate tab).
+- **CLI drift:** `tab list`/`tab create`/`pane list` parsers tolerate the
+  `tab_id`/`tabId`/`id` and `pane_id`/`paneId`/`id` key variants and a nested
+  `result` envelope; an unparseable response is **fail-closed** (`null`) and
+  logs the raw output (never silently treated as "no tab" → duplicate).
 
 Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`):
 
-- **Project resolver:** `resolveProjectWorkspace(cwd, deps, root)` enumerates
-  machine-wide `herdr pane list`, keeps panes with `label == "Work Items"`,
-  reads each candidate's logical root (above), and matches `root`. Ambiguity
-  (≥2 matches) is deterministic — the **focused** matching pane wins, else the
-  **lowest pane id** — and never selects another root's workspace. Fail-closed
-  `null` on any CLI/parse error, missing `shell_pid`, missing/unreadable
-  `/proc/<pid>/environ`, missing `HERDR_RESOLVED_CWD`, or no match.
-- **Item tab:** `getItemTabAnchor(cwd, deps, workspaceId, itemId)` fast-paths
-  an existing tab labelled exactly `itemId` whose root pane is alive; else
-  under the coordination lock (with a double-check) adopts a matching tab or
-  runs `herdr tab create --workspace <id> --label <itemId> --no-focus` and
-  returns the new `tab_id` + `root_pane.pane_id`. A second dispatch for the
-  same item reuses the same tab (never a duplicate); no persistence file is
-  needed — the tab label IS the key, discovered via `herdr tab list`.
-  After the first dispatch the tab's root pane is closed (see invariant
-  step 4) so the tab is never left with an empty bash pane; a later dispatch
-  for the same item reuses the surviving dispatch pane as the split anchor
-  (WL-0MU2EOHK900425VU).
+- **Project workspace + item-ID tab (primary):** `resolveProjectWorkspace`
+  resolves the plugin pane for the item's root; `getItemTabAnchor` returns the
+  anchor pane for the exact item-ID tab, creating it on first use under the
+  coordination lock. `dispatchClaimedTier` consults this path first whenever
+  both deps are wired.
+- **Per-prefix tab (fallback):** `getDispatcherTabAnchor(cwd, deps, prefix)`
+  ensures the `Dispatcher` workspace, fast-paths the persisted live anchor,
+  else lists tabs (`herdr tab list --workspace <id>`), else under the
+  coordination lock (with a double-check) runs `herdr tab create --workspace
+  <id> --label <prefix> --no-focus` and returns the new `tab_id` +
+  `root_pane.pane_id`. Consulted only when no project workspace resolves.
 - **Fallback anchor:** `getDispatcherAnchor(cwd, deps)` provisions one
   `Dispatcher` workspace + persisted anchor pane in the machine coordination
   dir (`~/.herdr/downtime/downtime-dispatch-anchor.json`, atomic tmp+rename,
-  under the coordination lock). The freshly-provisioned root pane is adopted
-  into a `Downtime` tab (`herdr pane move <id> --new-tab --tab-label Downtime
-  --no-focus`, best-effort) so the workspace never shows a blank pane
-  (WL-0MU2EOHK900425VU). `isPaneAlive` (`herdr pane get <id>`) detects a closed
-  anchor and re-provisions.
-- **Wiring:** `createDowntimeDeps` wires `defaultProjectWorkspaceResolver`,
-  `defaultItemTabAnchorResolver`, and (fallback + scheduled)
-  `defaultDispatcherAnchorResolver`.
-- **CLI shape tolerance:** the `pane list` / `pane process-info` / `tab list` /
-  `tab create` / workspace-scoped `pane list` parsers accept a nested `result`
-  envelope, log lines before the JSON, `pane_id`/`paneId`,
-  `workspace_id`/`workspaceId`, `tab_id`/`tabId`, `shell_pid`/`shellPid`,
-  `label`/`title`, and `focused`/`is_focused`. A parse failure is
-  **fail-closed** (`null`) and logs the raw output.
-- **Retired:** per-prefix routing (`getDispatcherTabAnchor`,
-  `candidate.id.split('-')[0]` tab labels) and
-  `downtime-dispatch-tab-anchors.json` are removed. `getDispatcherAnchor` and
-  `downtime-dispatch-anchor.json` remain **only** for the AC4 fallback and
-  scheduled prompts.
+  under the coordination lock). It is used **only** for scheduled prompts
+  (which have no work-item id) and as the final fallback when neither the
+  project workspace nor the per-prefix resolver yields an anchor. The
+  freshly-provisioned root pane is adopted into a `Downtime` tab (`herdr pane
+  move <id> --new-tab --tab-label Downtime --no-focus`, best-effort) so the
+  workspace never shows a blank pane (WL-0MU2EOHK900425VU). `isPaneAlive`
+  (`herdr pane get <id>`) detects a closed anchor and re-provisions.
+- **Wiring:** `createDowntimeDeps` wires `defaultProjectWorkspaceResolver` /
+  `defaultItemTabAnchorResolver` (primary), `defaultDispatcherTabAnchorResolver`
+  (per-prefix fallback), and `defaultDispatcherAnchorResolver` (final fallback
+  + scheduled prompts).
 
-Duplicate `Dispatcher` workspaces are harmless — the anchor file is the
-authority, not the label count; close surplus idle ones one at a time without
-disturbing active `Downtime triggered …` panes. Manual `open-worklist` /
-`open-pi-agent` flows are unaffected.
+#### Troubleshooting: pane landed in the wrong tab/workspace
+
+1. **Confirm the item's root resolves a project plugin pane** — `herdr pane
+   list` must include a pane labelled `Work Items` whose process environ has
+   `HERDR_RESOLVED_CWD` equal to the item's worklog root (`herdr pane
+   process-info --pane <id>` → `shell_pid` → `grep HERDR_RESOLVED_CWD
+   /proc/<pid>/environ`). If it does not, the dispatch intentionally falls
+   back to the `Dispatcher` workspace (per-prefix tab) — run the plugin from
+   the project root so the plugin pane reports the right `HERDR_RESOLVED_CWD`.
+2. **Project path** — `herdr tab list --workspace <project-workspace-id>` must
+   show a tab labelled exactly the work-item id, and the `Downtime triggered …`
+   pane's `tab_id` must equal that tab's `tab_id` (`herdr pane list --workspace
+   <id>`). A missing/wrong tab means the item-ID tab provision failed (check
+   the worker log for `[worklog-plugin] Dispatcher tab create …`).
+3. **Dispatcher fallback path** — when the project workspace did not resolve,
+   `herdr tab list --workspace <Dispatcher-workspace-id>` must show a tab
+   labelled with the item's prefix, and the pane's `tab_id` must equal it.
+   Inspect `~/.herdr/downtime/downtime-dispatch-tab-anchors.json` — a stale
+   `paneId` (dead) is re-provisioned on the next dispatch; a malformed file is
+   treated as "no anchors yet" (tabs are rediscovered via `herdr tab list`).
+4. If a dispatch reports `anchor-unavailable`, the resolved path's anchor
+   could not be provisioned this cycle — the resolver deliberately does **not**
+   fall back to the leader pane or (for the project path) a wrong tab; fix the
+   herdr CLI/parse failure and the next idle window retries.
+
+Duplicate `Dispatcher` workspaces are harmless — the persisted anchor file is
+the authority, not the label count; close surplus idle ones one at a time
+without disturbing active `Downtime triggered …` panes. Manual
+`open-worklist` / `open-pi-agent` flows are unaffected (this placement applies
+only to automated downtime dispatch).
 
 
 ### No-candidate cooldown & the empty offer file
@@ -943,6 +1079,7 @@ status refresh unchanged at 30s.**
 | Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.ts` |
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
+| Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
 | Pane-closure idle threshold | **30 min** (`paneCloseIdleThresholdMinutes`; clamped to 1 min – 24 h) | `pane-close-scheduler.ts` |
 | (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
@@ -953,7 +1090,9 @@ settings file (`~/.config/herdr/worklog-plugin.json`,
 load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 `downtime-worker.ts`). The success-marker staleness window
 (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped on load
-(`clampDowntimeMarkerStaleWindowMs`).
+(`clampDowntimeMarkerStaleWindowMs`). The non-terminal pane-close cooldown
+(`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
+(`clampDowntimeNonTerminalCooldownMs`).
 
 ## Files & runtime artifacts
 
@@ -1168,15 +1307,19 @@ trace.
   is a separate effort (`/skill:dispatch-logs`, WL-0MTJQOZ0K007KD40).
 - **Bounded window.** The log keeps only the most recent
   `DOWNTIME_LOG_MAX_ENTRIES` (100) entries, so a very busy period can push an
-  older candidate out of the retained window; the view therefore shows at most
-  the 20 most recent items that are still present in the log.
-- **Projection semantics.** Rows are deduplicated by work item id, and the
-  20 most recently active items are selected; the visible list is then
-  ordered exactly like the main selection list (Critical → plan/intake →
-  Idea → In Review, with the same within-group comparator). Each row is
-  annotated with the dispatch `kind` and the latest pane-close `outcome`
-  where available. The id and title come from the log for items absent from
-  `wl`, so closed/deleted items still appear.
+  older candidate out of the retained window. There is no separate result cap:
+  the view shows every item still present in the log.
+- **Projection semantics.** Rows are deduplicated by work item id (one row
+  per id) and grouped into 4-hour **UTC** time blocks by each item's most
+  recent log timestamp (e.g. `00:00–04:00`, `04:00–08:00`, …,
+  `20:00–24:00`). Blocks are ordered **oldest first**, and within each block
+  items stay **newest-first**; a heading (`29 Sep 2026, 00:00–04:00`) is
+  rendered before each block through the existing group-heading path. Rows
+  whose timestamp is missing or unparseable collect into a trailing
+  **`Unknown time`** block. Each row is annotated with the dispatch `kind`
+  and the latest pane-close `outcome` where available. The id and title come
+  from the log for items absent from `wl`, so closed/deleted items still
+  appear.
 - **Same icons as the live views.** The log decides which items appear and
   their order, but a row for an item that still exists in `wl` is rendered
   from the **live work item** (the same data the other Herdr views use), so

@@ -43,6 +43,26 @@ presence and proxy idle state, without operator intervention:
   responses yield no switch and never crash or block the plugin. A `409`
   (mode-switch restart in progress) is a no-op, retried on a later tick.
 
+### Drain before switching (WL-0MUL0KO7Q003O7YJ)
+
+When the idle window is met **and** the proxy is idle, the worker enters a
+**draining** state instead of switching immediately: it waits until the active
+session count has fallen to the cheap pool's budget (`freeSlots >=
+DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2`), then switches. In-flight work is never
+killed — draining only delays the switch and blocks *new* dispatches.
+
+While draining:
+
+- The downtime dispatcher pauses **new** dispatches. The mode-switch worker
+  exposes `getIsDraining()`; `index.ts` forwards it to the dispatcher as
+  `config().drainPaused`, and `DowntimeWorker.tick()` refuses to dispatch while
+  it is `true`. The poll and `onProxyIdle` hook still run every tick, so the
+  mode-switch worker keeps observing the live free-slot count.
+- Once the budget frees, the drain completes, the proxy switches to cheap,
+  `getIsDraining()` clears, and dispatch resumes on the next idle tick.
+- An operator agent-route command (`onOperatorCommand`) cancels the drain
+  immediately, resets the idle clock, and keeps the proxy fast.
+
 ### Restart semantics
 
 On plugin/pane restart the idle clock resets to "active now" (construction

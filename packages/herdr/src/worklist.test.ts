@@ -36,6 +36,7 @@ import {
   isWlViewCommand,
   resolveDispatchDetail,
   formatChordHintsForHelp,
+  formatFooterShortcutHints,
   resolvePodcastTarget,
   clearDescriptionPreviewCache,
   isHeadingRow,
@@ -914,13 +915,18 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
     const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
 
     // The log still decides which items appear (WL-OLD/WL-NEW are absent from
-    // the live list, so they stay log-derived) and the rows follow the main
-    // selection-list ordering (WL-0MUGLL9SS002E1D2 follow-up).
-    expect(items.map((i) => i.id)).toEqual(['WL-NEW', 'WL-OLD']);
-    expect(items[0].title).toBe('Newer dispatch');
-    expect(items[0].isLogDerived).toBe(true);
-    expect(items[0].isLogOnly).toBe(true);
-    expect(items[0].dispatchKind).toBe('implement');
+    // the live list, so they stay log-derived). Each lands in its own 4-hour
+    // time block, and blocks render oldest-first (WL-0MUMM9NED009TLL3), so
+    // WL-OLD (1 Jan) precedes WL-NEW (2 Jan).
+    expect(items.map((i) => i.id)).toEqual(['WL-OLD', 'WL-NEW']);
+    expect(items[1].title).toBe('Newer dispatch');
+    expect(items[1].isLogDerived).toBe(true);
+    expect(items[1].isLogOnly).toBe(true);
+    expect(items[1].dispatchKind).toBe('implement');
+    // Every row carries its time-block group so the display model emits a
+    // heading before each block.
+    expect(items[0].groupLabel).toBe('01 Jan 2026, 00:00–04:00');
+    expect(items[1].groupLabel).toBe('02 Jan 2026, 00:00–04:00');
     // The live fetcher (the same one other views use) IS consulted so
     // surviving items can be rendered with identical icons
     // (WL-0MUGLL9SS002E1D2 audit fix).
@@ -992,36 +998,76 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
     expect(dispatchLine).toContain('[audit]');
   });
 
-  it('orders rows like the main selection list (Critical → plan/intake → Idea → In Review), flat (WL-0MUGLL9SS002E1D2 follow-up)', async () => {
+  it('groups rows into 4-hour time blocks, oldest block first, newest item first within a block (WL-0MUMM9NED009TLL3)', async () => {
     const root = makeTempRoot();
-    const ids: Array<[string, string, string]> = [
-      ['WL-REVIEW', 'in_review', 'high'],
-      ['WL-IDEA', 'idea', 'medium'],
-      ['WL-PLAN', 'plan_complete', 'high'],
-      ['WL-CRIT', 'plan_complete', 'critical'],
+    // Two 4-hour blocks on the same day; within each block rows arrive
+    // newest-first.
+    const entries: Array<[string, string]> = [
+      ['WL-LATE-2', '2026-01-01T05:30:00.000Z'],
+      ['WL-LATE-1', '2026-01-01T05:00:00.000Z'],
+      ['WL-EARLY-2', '2026-01-01T01:30:00.000Z'],
+      ['WL-EARLY-1', '2026-01-01T01:00:00.000Z'],
     ];
-    for (const [id] of ids) {
-      await writeDispatch(root, {
-        itemId: id,
-        kind: 'implement',
-        title: id,
-        dispatchedAt: '2026-01-01T00:00:00.000Z',
-      });
+    for (const [id, dispatchedAt] of entries) {
+      await writeDispatch(root, { itemId: id, kind: 'implement', title: id, dispatchedAt });
     }
-    const live = ids.map(([id, stage, priority]) => ({
-      ...makeItem(id),
-      id,
-      title: id,
-      stage,
-      priority,
-    })) as WorkItem[];
-    const defaultFetcher = vi.fn().mockResolvedValue(live);
+    const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
 
-    const items = await fetchItemsForView(null, null, defaultFetcher, true, root);
+    // Oldest block first, and within each block newest item first.
+    expect(items.map((i) => i.id)).toEqual([
+      'WL-EARLY-2', 'WL-EARLY-1',
+      'WL-LATE-2', 'WL-LATE-1',
+    ]);
+    expect(items.map((i) => i.groupLabel)).toEqual([
+      '01 Jan 2026, 00:00–04:00',
+      '01 Jan 2026, 00:00–04:00',
+      '01 Jan 2026, 04:00–08:00',
+      '01 Jan 2026, 04:00–08:00',
+    ]);
+    expect(items.map((i) => i.group)).toEqual([1, 1, 2, 2]);
+  });
 
-    expect(items.map((i) => i.id)).toEqual(['WL-CRIT', 'WL-PLAN', 'WL-IDEA', 'WL-REVIEW']);
-    // Flat list — no group stamps remain (no headings rendered).
-    expect(items.every((i) => i.group === undefined && i.groupLabel === undefined)).toBe(true);
+  it('assigns a distinct group number per chronological block and an Unknown time block last (WL-0MUMM9NED009TLL3)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, { itemId: 'WL-DAY2', kind: 'plan', title: 'Day 2', dispatchedAt: '2026-01-02T09:00:00.000Z' });
+    await writeDispatch(root, { itemId: 'WL-DAY1', kind: 'plan', title: 'Day 1', dispatchedAt: '2026-01-01T09:00:00.000Z' });
+    // Malformed timestamp → Unknown time block, which must be last.
+    await appendDowntimeLogEntry(root, JSON.stringify({ itemId: 'WL-NO-TS', kind: 'plan', title: 'No ts' }));
+
+    const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
+
+    expect(items.map((i) => i.id)).toEqual(['WL-DAY1', 'WL-DAY2', 'WL-NO-TS']);
+    expect(items.map((i) => i.groupLabel)).toEqual([
+      '01 Jan 2026, 08:00–12:00',
+      '02 Jan 2026, 08:00–12:00',
+      'Unknown time',
+    ]);
+    // Blocks are numbered sequentially 1..N in render order.
+    expect(items.map((i) => i.group)).toEqual([1, 2, 3]);
+  });
+
+  it('renders a time-block heading row before each block via the existing heading path (WL-0MUMM9NED009TLL3)', async () => {
+    const root = makeTempRoot();
+    await writeDispatch(root, { itemId: 'WL-A', kind: 'plan', title: 'A', dispatchedAt: '2026-01-01T01:00:00.000Z' });
+    await writeDispatch(root, { itemId: 'WL-B', kind: 'plan', title: 'B', dispatchedAt: '2026-01-01T05:00:00.000Z' });
+    const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
+
+    const state = new WorkItemListState(items, TERM);
+    const rows = state.getDisplayRows();
+    const headings = rows.filter(isHeadingRow);
+
+    expect(headings).toHaveLength(2);
+    expect(headings.map((h) => h.groupLabel)).toEqual([
+      '01 Jan 2026, 00:00–04:00',
+      '01 Jan 2026, 04:00–08:00',
+    ]);
+    // Each heading is immediately followed by its single item row.
+    expect(rows.map((r) => (isHeadingRow(r) ? `H:${r.groupLabel}` : (r as WorkItem).id))).toEqual([
+      'H:01 Jan 2026, 00:00–04:00',
+      'WL-A',
+      'H:01 Jan 2026, 04:00–08:00',
+      'WL-B',
+    ]);
   });
 
   it('keeps the log-derived fallback for an item absent from the live list (WL-0MUGLL9SS002E1D2)', async () => {
@@ -1078,7 +1124,7 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
     expect(items).toEqual([]);
   });
 
-  it('fetchItemsForView dispatches view caps rows and dedups by id via the projection', async () => {
+  it('fetchItemsForView dispatches view shows every row (no 20-item cap) and dedups by id via the projection', async () => {
     const root = makeTempRoot();
     for (let i = 0; i < 25; i++) {
       await writeDispatch(root, {
@@ -1096,8 +1142,9 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
       dispatchedAt: '2026-01-01T00:00:00.000Z',
     });
     const items = await fetchItemsForView(null, null, vi.fn().mockResolvedValue([]), true, root);
-    expect(items).toHaveLength(20);
-    expect(new Set(items.map((i) => i.id)).size).toBe(20);
+    // The cap is removed (WL-0MUMM9NED009TLL3): all 25 distinct ids are shown.
+    expect(items).toHaveLength(25);
+    expect(new Set(items.map((i) => i.id)).size).toBe(25);
   });
 });
 
@@ -2470,6 +2517,226 @@ describe('w chord leader — sub-chord hints and stage gating', () => {
     const registry = new ShortcutRegistry([...wChords]);
     const nextChords = registry.getChordByPrefix(['w'], 'list', 'idea');
     expect(nextChords).toHaveLength(0);
+  });
+});
+
+// ── w chord split: full chord → dispatch path (OSL-0MUQ59IRF009ICIF) ────
+//
+// Regression coverage for the reported "w-r / w-s / w-b do not fire on
+// podcast items" bug. The sub-chord visibility/stage-gate and the marker
+// resolution are each covered above in isolation; what was missing is a test
+// that drives the FULL path — chord leader detection → prefix lookup →
+// processChordInput → resolvePodcastTarget → dispatch — because that is where
+// the failure actually surfaces.
+//
+// Root cause (OSL-0MURL1S5O000Z0MH): the chords DO resolve; the drop happens
+// in `resolvePodcastTarget`, which returns an error when the selected item has
+// no `.podcast.md` (or any) Key File, and the caller then shows an error toast
+// and returns without dispatching. On a script-less episode at a script-bearing
+// stage, `w-s` additionally reported the misleading "podcast script already
+// present" message, which is false when no script exists.
+
+describe('w chord split — full chord to dispatch path', () => {
+  // Local shortcuts.json fixture matching the project-local override
+  // (shortcuts.json at the worklog root) so the registry carries the same
+  // entries the operator uses in the TUI.
+  const wChordEntries = [
+    { chord: ['w', 'r'], command: '/skill:wiki-podcast-script --review <podcast-review>', view: 'both', label: 'write review', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 's'], command: '/skill:wiki-podcast-script <podcast-target>', view: 'both', label: 'write script', stages: ['intake_complete', 'plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 'b'], command: '/skill:wiki-podcast-script --review-rewrite <podcast-both>', view: 'both', label: 'write both', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+  ];
+
+  let tempRoot: string | undefined;
+
+  function registryWithLocalWChords(): ShortcutRegistry {
+    tempRoot = mkdtempSync(join(tmpdir(), 'herdr-w-chord-dispatch-'));
+    writeFileSync(join(tempRoot, 'shortcuts.json'), JSON.stringify(wChordEntries));
+    return loadShortcutConfig(tempRoot);
+  }
+
+  afterEach(() => {
+    if (tempRoot) {
+      try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+      tempRoot = undefined;
+    }
+    vi.restoreAllMocks();
+  });
+
+  /**
+   * Press the leader then each sub-key through the real chord state machine
+   * and return the resolved command (or null when the chord was dropped or
+   * cancelled before completion).
+   */
+  function pressChord(
+    registry: ShortcutRegistry,
+    leader: string,
+    subKey: string,
+    stage: string,
+    issueType: string,
+    view = 'list',
+  ): string | null {
+    expect(isChordLeader(leader, registry, false, issueType)).toBe(true);
+    const chordState = createChordState();
+    const started = processChordInput(chordState, leader, registry, view, stage, false, issueType);
+    expect(started).toBeNull(); // collecting
+    expect(chordState.pendingKeys).toEqual([leader]);
+    const completed = processChordInput(chordState, subKey, registry, view, stage, false, issueType);
+    return completed === 'chord-complete' ? chordState.resolvedCommand : null;
+  }
+
+  const scriptItem: WorkItem = {
+    id: 'OSL-EP-1',
+    title: 'Episode with script',
+    status: 'open',
+    stage: 'plan_complete',
+    issueType: 'podcast',
+    description: '## Key Files:\n- Ep10/Ep10.podcast.md\n- Ep10/Ep10.md\n',
+  };
+
+  // Mirrors the reported item OSL-0MST3EHT3000M1LR: at a script-bearing stage
+  // (plan_complete) but with NO Key Files section at all.
+  const scriptlessItem: WorkItem = {
+    id: 'OSL-EP-2',
+    title: 'Episode with no script',
+    status: 'open',
+    stage: 'plan_complete',
+    issueType: 'podcast',
+    description: '# Episode 10 — spec only\n\nSee docs/video-series-outline.md for the outline.\n',
+  };
+
+  it('w-r resolves and dispatches --review <script> on a podcast episode with a script', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 'r', 'plan_complete', 'podcast');
+    expect(command).toBe('/skill:wiki-podcast-script --review <podcast-review>');
+
+    const resolved = await resolvePodcastTarget(command!, scriptItem);
+    expect(resolved.error).toBeUndefined();
+    const onCommand = vi.fn();
+    const state = new WorkItemListState([scriptItem], TERM_80x24);
+    executeResolvedCommand(resolved.command!, state, onCommand);
+    // The dispatch callback signature is (command, model, openPane, ...) on
+    // current ContextHub dev; assert the command (first arg) so the test is
+    // robust to additional trailing callback args.
+    expect(onCommand.mock.calls[0][0]).toBe('/skill:wiki-podcast-script --review Ep10/Ep10.podcast.md');
+  });
+
+  it('w-b resolves and dispatches --review-rewrite <script> on a podcast episode with a script', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 'b', 'plan_complete', 'podcast');
+    expect(command).toBe('/skill:wiki-podcast-script --review-rewrite <podcast-both>');
+
+    const resolved = await resolvePodcastTarget(command!, scriptItem);
+    expect(resolved.error).toBeUndefined();
+    const onCommand = vi.fn();
+    const state = new WorkItemListState([scriptItem], TERM_80x24);
+    executeResolvedCommand(resolved.command!, state, onCommand);
+    expect(onCommand.mock.calls[0][0]).toBe('/skill:wiki-podcast-script --review-rewrite Ep10/Ep10.podcast.md');
+  });
+
+  it('w-s resolves and dispatches --rewrite <script> when open editor-note children exist', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 's', 'plan_complete', 'podcast');
+    expect(command).toBe('/skill:wiki-podcast-script <podcast-target>');
+
+    const children = [{ id: 'OSL-EP-1-N1', title: 'Note', status: 'open' } as WorkItem];
+    const resolved = await resolvePodcastTarget(command!, scriptItem, async () => children);
+    expect(resolved.error).toBeUndefined();
+    const onCommand = vi.fn();
+    const state = new WorkItemListState([scriptItem], TERM_80x24);
+    executeResolvedCommand(resolved.command!, state, onCommand);
+    expect(onCommand.mock.calls[0][0]).toBe('/skill:wiki-podcast-script --rewrite Ep10/Ep10.podcast.md');
+  });
+
+  it('w-r does NOT dispatch on a script-less episode (belt-and-braces guard)', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 'r', 'plan_complete', 'podcast');
+    const resolved = await resolvePodcastTarget(command!, scriptlessItem);
+    expect(resolved.error).toMatch(/no podcast script/i);
+    expect(resolved.command).toBeUndefined();
+  });
+
+  it('w-s reports a MISSING-SCRIPT error (not "already present") on a script-less episode', async () => {
+    // This is the reported failure shape: a plan_complete podcast item with no
+    // script Key File and no open note children. The current code reports the
+    // false message "podcast script already present, review and edit that
+    // rather than author a new one"; it must instead name the missing script.
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 's', 'plan_complete', 'podcast');
+    const resolved = await resolvePodcastTarget(command!, scriptlessItem, async () => []);
+    expect(resolved.error).toBeDefined();
+    expect(resolved.error).not.toMatch(/already present/i);
+    expect(resolved.error).toMatch(/no podcast script|not been drafted|Key Files/i);
+    expect(resolved.command).toBeUndefined();
+  });
+
+  it('w-b does NOT dispatch on a script-less episode (belt-and-braces guard)', async () => {
+    const registry = registryWithLocalWChords();
+    const command = pressChord(registry, 'w', 'b', 'plan_complete', 'podcast');
+    const resolved = await resolvePodcastTarget(command!, scriptlessItem);
+    expect(resolved.error).toMatch(/no podcast script/i);
+    expect(resolved.command).toBeUndefined();
+  });
+
+  it('all three sub-chords resolve on a podcast item even with a stage filter active', () => {
+    // state.activeFilter is passed as `stage`; a filter value must not hide
+    // the chords (rules out the stage-gate path).
+    const registry = registryWithLocalWChords();
+    for (const [subKey, expected] of [
+      ['r', '/skill:wiki-podcast-script --review <podcast-review>'],
+      ['s', '/skill:wiki-podcast-script <podcast-target>'],
+      ['b', '/skill:wiki-podcast-script --review-rewrite <podcast-both>'],
+    ] as const) {
+      expect(pressChord(registry, 'w', subKey, 'plan_complete', 'podcast')).toBe(expected);
+    }
+  });
+
+  it('all three sub-chords stay hidden on non-podcast items', () => {
+    const registry = registryWithLocalWChords();
+    for (const subKey of ['r', 's', 'b']) {
+      expect(isChordLeader('w', registry, false, 'bug')).toBe(false);
+      const chordState = createChordState();
+      const result = processChordInput(chordState, 'w', registry, 'list', 'plan_complete', false, 'bug');
+      expect(result).toBe('chord-cancel');
+      expect(chordState.pendingKeys).toEqual([]);
+    }
+  });
+
+  it('footer hints list all three w sub-chords for a podcast item at a script-bearing stage', () => {
+    const registry = registryWithLocalWChords();
+    const nextChords = registry.getChordByPrefix(['w'], 'list', 'plan_complete', false, 'podcast');
+    const hints = formatChordHintsForHelp(nextChords, ['w']);
+    expect(hints).toContain('r:review');
+    expect(hints).toContain('s:script');
+    expect(hints).toContain('b:both');
+  });
+
+  // AC5 / fix-child AC8: the idle footer help line (before the leader is
+  // pressed) must advertise all three w sub-options, not just `w:write...`.
+  it('footer help line shows each w sub-option for a podcast item (AC5)', () => {
+    const registry = registryWithLocalWChords();
+    const entries = registry.getEntriesForStage('plan_complete', false, 'podcast')
+      .filter(e => e.view === 'list' || e.view === 'both');
+    const hints = formatFooterShortcutHints(entries);
+    expect(hints).toContain('w:write review...');
+    expect(hints).toContain('w:write script...');
+    expect(hints).toContain('w:write both...');
+    // The bare collapsed form must no longer be the only w hint.
+    expect(hints).not.toBe('w:write...');
+  });
+
+  it('footer help line collapses homogeneous ungated chord families (regression guard)', () => {
+    // `u p l` / `u p m` share the leader `u` but carry NO work-item-type
+    // allowlist, so they must keep the collapsed `u:update...` hint —
+    // proving the fix does not disturb other chord families.
+    const entries: ShortcutEntry[] = [
+      { chord: ['u', 'p', 'l'], command: '/wl update --priority low', view: 'both', label: 'update priority low' },
+      { chord: ['u', 'p', 'm'], command: '/wl update --priority medium', view: 'both', label: 'update priority medium' },
+      { chord: ['c'], command: '/wl create', view: 'both', label: 'create new' },
+    ];
+    const hints = formatFooterShortcutHints(entries);
+    expect(hints).toContain('u:update...');
+    expect(hints).not.toContain('u:update priority');
+    expect(hints).toContain('c:create new');
   });
 });
 
@@ -5235,6 +5502,23 @@ describe('isInputActive — note-edit coverage and keystroke preservation (WL-0M
     expect(onConfirm).toHaveBeenCalledTimes(1);
     // After submission, ensure no character was dropped from the buffer prior to confirm.
     // The buffer was verified above; a skipped scheduler tick never truncates it.
+  });
+
+  it('fast-typing chunks lose no keystrokes into FormState across a skipped tick', async () => {
+    // Fast typing coalesces several keystrokes into one stdin chunk; the
+    // form must apply every character (WL-0MTV67MZU003H7SH).
+    const { FormState: Fs } = await import('./form-dialog.js');
+    const state = new Fs('cmd <x>', 'Test', [{ name: 'x', default: '' }], () => {}, () => {});
+    for (const chunk of ['the ', 'quick ', 'brown ', 'fox']) state.handleInput(chunk);
+    expect(state.fields[0].value).toBe('the quick brown fox');
+  });
+
+  it('fast-typing chunks lose no keystrokes into ShipItDialogState across a skipped tick', async () => {
+    const { ShipItDialogState: SDS } = await import('./ship-it-dialog.js');
+    const onConfirm = vi.fn();
+    const state = new SDS(onConfirm, () => {});
+    expect(state.handleInput('ship\r')).toBe('submitted');
+    expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 });
 

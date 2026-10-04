@@ -4,8 +4,11 @@
   "private": true,
   "description": "Worklog work item selection list for Herdr",
   "type": "module",
+  "bin": {
+    "worklog-pane-close": "dist/pane-close-cli.js"
+  },
   "scripts": {
-    "build": "tsc && cp src/shortcuts.json dist/shortcuts.json",
+    "build": "tsc && cp src/shortcuts.json dist/shortcuts.json && chmod +x dist/pane-close-cli.js",
     "dev": "tsx src/index.ts"
   },
   "dependencies": {

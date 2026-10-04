@@ -48,7 +48,7 @@ import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
 import { DbChangeTracker, resolveCacheDir } from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
-import { recentDispatchedItems } from './downtime-log.js';
+import { groupRecentDispatchesByTimeBlock, recentDispatchedItems } from './downtime-log.js';
 import { buildDispatchWorkItem, mergeDispatchRow } from './dispatch-view.js';
 import {
   createHydratorRunner,
@@ -67,7 +67,7 @@ import {
 } from './form-dialog.js';
 import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
-import { extractFilePaths, regroupWorkItems } from './grouping.js';
+import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 import {
   findNoteInParagraph,
@@ -96,6 +96,12 @@ import {
  * Design decision — skip, don't coalesce: ticks while typing are silently
  * dropped; the next regular tick after close fires normally. No queued
  * immediate refresh is emitted on close (avoids infinite-refresh loops).
+ *
+ * NOTE: this gate stops background re-render contention but does NOT by
+ * itself prevent dropped keystrokes when the user types fast — the PTY can
+ * coalesce several keys into one stdin chunk. The text-input handlers run
+ * every chunk through `splitKeypresses()` (`key-input.ts`) so no character
+ * is discarded (WL-0MTV67MZU003H7SH).
  */
 export function isInputActive(
   formState: FormState | null,
@@ -2670,6 +2676,63 @@ export function formatChordHintsForHelp(
 }
 
 /**
+ * Build the dynamic footer hint string for the visible shortcut entries.
+ *
+ * Most chord leaders collapse to a single `<leader>:<firstWord>...` hint
+ * (e.g. `u:update...`), which keeps the footer compact for homogeneous
+ * variant families. The podcast-progression family (`w-r`/`w-s`/`w-b`) is
+ * the exception: its sub-chords are distinct, stage-gated steps whose labels
+ * differ after the shared leading word, so collapsing them hid the
+ * sub-options from the producer (OSL-0MUQ59IRF009ICIF AC5).
+ *
+ * A leader is expanded (every sub-chord hinted) only when its entries carry
+ * an explicit work-item-type allowlist — the marker that the entries were
+ * authored as type-specific progression steps rather than generic variants.
+ * Ungated families (`u`, `f`, `a`, `x`, `P`, `r`, `n`) keep the collapsed
+ * form, preserving existing behaviour.
+ *
+ * @param entries - Shortcut entries already filtered by stage/view/issue type.
+ * @returns Space-joined hint string (empty when no entry yields a hint).
+ */
+export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
+  const labelOf = (e: ShortcutEntry): string => e.label ?? e.command
+    .replace(/<[^>]+>/g, '')
+    .split(/\r?\n/)[0]
+    .trim()
+    .replace(/^\/(skill:)?/, '');
+
+  // Group multi-key chords by leader so a family is formatted as a unit.
+  const grouped = new Map<string, ShortcutEntry[]>();
+  const parts: string[] = [];
+  for (const e of entries) {
+    if (e.chord && e.chord.length >= 2) {
+      const leader = e.chord[0];
+      const group = grouped.get(leader) ?? [];
+      group.push(e);
+      grouped.set(leader, group);
+    } else if (e.chord && e.chord.length === 1) {
+      parts.push(`${e.chord[0]}:${labelOf(e)}`);
+    }
+  }
+  for (const [leader, group] of grouped) {
+    const isTypeSpecific = group.every(
+      e => e.workItemTypes !== undefined && e.workItemTypes.length > 0,
+    );
+    if (isTypeSpecific && group.length > 1) {
+      // Distinct, type-gated progression steps: advertise each sub-option
+      // (e.g. `w:write review...  w:write script...  w:write both...`).
+      for (const e of group) {
+        parts.push(`${leader}:${labelOf(e)}...`);
+      }
+    } else {
+      // Homogeneous variant family: one collapsed leader hint as before.
+      parts.push(`${leader}:${labelOf(group[0]).split(/\s+/)[0]}...`);
+    }
+  }
+  return parts.join('  ');
+}
+
+/**
  * Get chord hints for showing in the help bar when in list mode.
  * Shows leader keys and abbreviated labels for all chords.
  */
@@ -4232,20 +4295,21 @@ export function fetchItemsForView(
     ])
       .then(([rows, liveItems]) => {
         const liveById = new Map(liveItems.map((item) => [item.id, item]));
-        const projected = rows.map((row) => {
-          const live = liveById.get(row.itemId);
-          return live ? mergeDispatchRow(live, row) : buildDispatchWorkItem(row);
+        // Group the log rows into 4-hour UTC time blocks, oldest block first
+        // (WL-0MUMM9NED009TLL3). Each block becomes a numbered group so the
+        // existing display-rows model interleaves a heading row before the
+        // block's items; within a block the projection's newest-first order
+        // is preserved. Group numbers are assigned in block order so no
+        // duplicate headings render.
+        const projected: WorkItem[] = [];
+        groupRecentDispatchesByTimeBlock(rows).forEach((block, index) => {
+          for (const row of block.rows) {
+            const live = liveById.get(row.itemId);
+            const item = live ? mergeDispatchRow(live, row) : buildDispatchWorkItem(row);
+            projected.push({ ...item, group: index + 1, groupLabel: block.label });
+          }
         });
-        // Reuse the canonical main-list ordering (Critical → Group N → Idea →
-        // Other → In Review, with the shared within-group comparator). The
-        // dispatch view stays a flat list, so the computed group stamps are
-        // dropped — only their ordering effect is kept.
-        return regroupWorkItems(projected).map((item) => {
-          const flat: WorkItem = { ...item };
-          delete flat.group;
-          delete flat.groupLabel;
-          return flat;
-        });
+        return projected;
       })
       .catch(() => []);
   }
@@ -4527,7 +4591,13 @@ export async function resolvePodcastTarget(
       }
       resolved = resolved.replace(/<podcast-target>/g, `--doc ${synthesis} --force-single`);
     } else {
-      // Drafted/written episode — rewrite only when open note children exist.
+      // Drafted/written episode — rewrite only when a script exists AND open
+      // note children exist. The missing-script check MUST run first: without
+      // it, a script-less episode at a script-bearing stage reported the
+      // false "podcast script already present" message (OSL-0MUQ59IRF009ICIF).
+      if (!script) {
+        return { error: 'No podcast script found in Key Files: — this episode has not been drafted; add the script path to Key Files, or move the item back to intake_complete to author from the synthesis' };
+      }
       let children: WorkItem[] = [];
       try {
         children = await fetchChildren(item.id);
@@ -4540,9 +4610,6 @@ export async function resolvePodcastTarget(
       });
       if (openNotes.length === 0) {
         return { error: 'podcast script already present, review and edit that rather than author a new one' };
-      }
-      if (!script) {
-        return { error: 'No podcast script found in Key Files:' };
       }
       resolved = resolved.replace(/<podcast-target>/g, `--rewrite ${script}`);
     }
@@ -6086,31 +6153,7 @@ export async function runWorklistTui(
         });
 
       if (relevantEntries.length > 0) {
-        const seenChordLeaders = new Set<string>();
-        const hints = relevantEntries
-          .filter(e => {
-            if (e.chord && e.chord.length >= 2) {
-              const leader = e.chord[0];
-              if (seenChordLeaders.has(leader)) return false;
-              seenChordLeaders.add(leader);
-            }
-            return true;
-          })
-          .map(e => {
-            const label = e.label ?? e.command
-              .replace(/<[^>]+>/g, '')
-              .split(/\r?\n/)[0]
-              .trim()
-              .replace(/^\/(skill:)?/, '');
-            if (e.chord && e.chord.length >= 2) {
-              const leaderKey = e.chord[0];
-              const firstWord = label.split(/\s+/)[0];
-              return `${leaderKey}:${firstWord}...`;
-            }
-            return `${e.chord[0]}:${label}`;
-          })
-          .join('  ');
-        dynamicHints = hints;
+        dynamicHints = formatFooterShortcutHints(relevantEntries);
       }
     }
 

@@ -11,12 +11,14 @@ import {
   clampDowntimeIdleThresholdMs,
   clampDowntimeMarkerStaleWindowMs,
   clampDowntimeNoCandidateCooldownMs,
+  clampDowntimeNonTerminalCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+  DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_PROXY_URL,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
@@ -77,6 +79,13 @@ export interface PluginSettings {
    * Floor 60s; default 3_600_000 ms (60 min).
    */
   downtimeNoCandidateCooldownMs: number;
+  /**
+   * Minimum cooldown (WL-0MUKYERLZ006ELL5) between successive downtime
+   * dispatches of the same `(item, kind)` after a pane closed without reaching
+   * a terminal stage (`agent-ended-no-terminal`, `audit-ended-no-result`).
+   * Neutral skip, never a strike. Default 30 min; clamped to [1 min, 24 h].
+   */
+  downtimeNonTerminalCooldownMs: number;
   /**
    * Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT): a
    * SUCCESS dispatch marker whose item is still at the marker's dispatched-at
@@ -145,6 +154,7 @@ export const defaultSettings: PluginSettings = {
   downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+  downtimeNonTerminalCooldownMs: DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   modeSwitchEnabled: true,
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
@@ -253,6 +263,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeNoCandidateCooldownMs: typeof parsed.downtimeNoCandidateCooldownMs === 'number'
         ? clampDowntimeNoCandidateCooldownMs(parsed.downtimeNoCandidateCooldownMs)
         : defaultSettings.downtimeNoCandidateCooldownMs,
+      downtimeNonTerminalCooldownMs: typeof parsed.downtimeNonTerminalCooldownMs === 'number'
+        ? clampDowntimeNonTerminalCooldownMs(parsed.downtimeNonTerminalCooldownMs)
+        : defaultSettings.downtimeNonTerminalCooldownMs,
       downtimeMarkerStaleWindowMs: typeof parsed.downtimeMarkerStaleWindowMs === 'number'
         ? clampDowntimeMarkerStaleWindowMs(parsed.downtimeMarkerStaleWindowMs)
         : defaultSettings.downtimeMarkerStaleWindowMs,

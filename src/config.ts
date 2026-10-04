@@ -5,7 +5,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as yaml from 'js-yaml';
-import { WorklogConfig } from './types.js';
+import { WorklogConfig, LlmConfig } from './types.js';
 import * as readline from 'readline';
 import { resolveWorklogDir } from './worklog-paths.js';
 import { theme } from './theme.js';
@@ -14,6 +14,11 @@ const CONFIG_DIR = '.worklog';
 const CONFIG_FILE = 'config.yaml';
 const CONFIG_DEFAULTS_FILE = 'config.defaults.yaml';
 const INIT_SEMAPHORE_FILE = 'initialized';
+
+/** Default LLM provider configuration. */
+const DEFAULT_LLM_BASE_URL = 'http://192.168.0.199:8000/v1';
+const DEFAULT_LLM_MODEL = 'compact';
+const DEFAULT_LLM_TIMEOUT_MS = 15000;
 
 
 
@@ -185,6 +190,16 @@ export function loadConfig(): WorklogConfig | null {
     };
   }
 
+  // Validate the optional LLM config section before resolving it.
+  const llmError = validateLlmConfig(config);
+  if (llmError) {
+    console.error(llmError);
+    return null;
+  }
+
+  // Resolve LLM config section (config → env vars → defaults).
+  config.llm = resolveLlmConfig(config);
+
   // Validate syncAllowedAuthors whitelist (AC1): [], string[], null, true allowed; other types rejected.
   const syncAllowedAuthorsError = validateSyncAllowedAuthors(config);
   if (syncAllowedAuthorsError) {
@@ -197,7 +212,7 @@ export function loadConfig(): WorklogConfig | null {
     console.error(statusStageError);
     return null;
   }
-  
+
   return config;
 }
 
@@ -272,7 +287,51 @@ export function loadConfigRelaxed(): WorklogConfig | null {
     return null;
   }
 
+  // Resolve LLM config section (config → env vars → defaults).
+  config.llm = resolveLlmConfig(config);
+
   return config;
+}
+
+/**
+ * Validate the optional `llm` config section.
+ *
+ * Returns an error message string when the section is present but malformed,
+ * or `null` when it is absent or valid.
+ */
+function validateLlmConfig(config: WorklogConfig): string | null {
+  const llm = (config as { llm?: unknown }).llm;
+  if (llm === undefined || llm === null) return null;
+  if (typeof llm !== 'object' || Array.isArray(llm)) {
+    return 'Invalid config: llm must be an object mapping to baseUrl, model, apiKey, timeoutMs';
+  }
+
+  const section = llm as Record<string, unknown>;
+
+  if (section.baseUrl !== undefined && (typeof section.baseUrl !== 'string' || section.baseUrl.trim() === '')) {
+    return 'Invalid config: llm.baseUrl must be a non-empty string';
+  }
+  if (section.model !== undefined && (typeof section.model !== 'string' || section.model.trim() === '')) {
+    return 'Invalid config: llm.model must be a non-empty string';
+  }
+  if (section.apiKey !== undefined && typeof section.apiKey !== 'string') {
+    return 'Invalid config: llm.apiKey must be a string';
+  }
+  if (section.timeoutMs !== undefined) {
+    const timeout = section.timeoutMs;
+    if (typeof timeout !== 'number' || !Number.isFinite(timeout) || timeout <= 0) {
+      return 'Invalid config: llm.timeoutMs must be a positive finite number';
+    }
+  }
+
+  return null;
+}
+
+/** Parse a positive finite numeric env var, returning undefined otherwise. */
+function parsePositiveNumber(value: string | undefined): number | undefined {
+  if (value === undefined || value === '') return undefined;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 function validateStatusStageConfig(config: WorklogConfig): string | null {
@@ -349,6 +408,56 @@ function validateStatusStageConfig(config: WorklogConfig): string | null {
   }
 
   return null;
+}
+
+/**
+ * Resolve LLM provider configuration.
+ *
+ * Priority: (1) config file `llm.*`, (2) environment variables,
+ * (3) built-in defaults — mirroring the `embedding.*` precedence where
+ * config values win over environment variables, which win over defaults.
+ *
+ * Environment variable overrides:
+ *   - LLM_BASE_URL
+ *   - LLM_MODEL
+ *   - LLM_API_KEY
+ *   - LLM_TIMEOUT_MS
+ *
+ * The built-in default base URL is the local LLM proxy's OpenAI-compatible
+ * endpoint (`http://192.168.0.199:8000/v1` — the herdr
+ * `DEFAULT_DOWNTIME_PROXY_URL` host plus the `/v1` API prefix), the default
+ * model is `compact`, and the default timeout is 15000 ms.
+ *
+ * If neither the config section nor any LLM_* env var is set, returns
+ * `undefined` so downstream callers can detect "not configured" and apply
+ * their own defaults (e.g. the ChatClient's `available` flag). This mirrors
+ * the optional `embedding` section.
+ */
+export function resolveLlmConfig(config: WorklogConfig): LlmConfig | undefined {
+  const configLlm = config.llm;
+
+  const baseUrl = configLlm?.baseUrl ?? process.env.LLM_BASE_URL ?? DEFAULT_LLM_BASE_URL;
+  const model = configLlm?.model ?? process.env.LLM_MODEL ?? DEFAULT_LLM_MODEL;
+  const apiKey = configLlm?.apiKey ?? process.env.LLM_API_KEY ?? '';
+  const timeoutMs =
+    configLlm?.timeoutMs ??
+    parsePositiveNumber(process.env.LLM_TIMEOUT_MS) ??
+    DEFAULT_LLM_TIMEOUT_MS;
+
+  const hasExplicitConfig = configLlm !== undefined && configLlm !== null;
+  const hasEnvVars =
+    process.env.LLM_BASE_URL !== undefined ||
+    process.env.LLM_MODEL !== undefined ||
+    process.env.LLM_API_KEY !== undefined ||
+    process.env.LLM_TIMEOUT_MS !== undefined;
+
+  if (!hasExplicitConfig && !hasEnvVars) {
+    // No explicit configuration at all — return undefined so callers can
+    // detect "not configured" (e.g. the ChatClient's `available` flag).
+    return undefined;
+  }
+
+  return { baseUrl, model, apiKey, timeoutMs };
 }
 
 /**

@@ -55,6 +55,27 @@ describe('ShipItDialogState — typed input', () => {
     expect(state.handleInput('\t')).toBeNull();
     expect(state.buffer).toBe('');
   });
+
+  // Fast typing delivers the whole word in one chunk — every character must
+  // be kept (WL-0MTV67MZU003H7SH).
+  it('appends every character from a coalesced multi-character chunk', () => {
+    const { state } = makeDialog();
+    expect(state.handleInput('ship')).toBeNull();
+    expect(state.buffer).toBe('ship');
+  });
+
+  it('submits a coalesced chunk ending in Enter', () => {
+    const { state, onConfirm } = makeDialog();
+    expect(state.handleInput('ship\r')).toBe('submitted');
+    expect(state.buffer).toBe('ship');
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('applies Backspace inside a coalesced chunk', () => {
+    const { state } = makeDialog();
+    state.handleInput('shipp\x7f');
+    expect(state.buffer).toBe('ship');
+  });
 });
 
 describe('ShipItDialogState — confirmation matching (case-insensitive)', () => {

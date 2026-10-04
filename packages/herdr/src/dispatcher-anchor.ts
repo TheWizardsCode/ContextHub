@@ -1,10 +1,8 @@
 /**
  * packages/herdr/src/dispatcher-anchor.ts — Dispatcher anchors and project-workspace resolution
  *
- * Parent: WL-0MU321YK70035AYT — Downtime dispatcher should dispatch into the
- * project workspace.
- *
- * Two placement strategies live here:
+ * Three placement strategies live here, listed in `dispatchClaimedTier`
+ * precedence order (WL-0MUR5FUWD00024XN):
  *
  * 1. **Project workspace + item-ID tab (primary path).**
  *    `resolveProjectWorkspace` maps a worklog root `R` to the herdr plugin
@@ -14,15 +12,19 @@
  *    the exact work-item id inside that workspace and returns its root pane,
  *    so automated panes are co-located with the project and grouped per item.
  *
- * 2. **Machine-wide Dispatcher fallback (retained).**
+ * 2. **Per-prefix tab routing inside the Dispatcher workspace (C1).**
+ *    `getDispatcherTabAnchor(prefix)` resolves or creates a tab labelled with
+ *    the work-item id prefix (e.g. `WL`, `TCE`) inside the machine-wide
+ *    Dispatcher workspace and returns its root pane. Consulted only when no
+ *    project workspace resolves for the item's root (AC3 fallback). Automated
+ *    downtime dispatches for items sharing the same prefix land in the same
+ *    tab (WL-0MTRQT482001SNXC).
+ *
+ * 3. **Machine-wide Dispatcher fallback (retained).**
  *    `getDispatcherAnchor` provisions one dedicated "Dispatcher" workspace
  *    with a persisted anchor pane (`downtime-dispatch-anchor.json`), used only
- *    when no project plugin pane can be resolved (AC4) and by scheduled
- *    prompts (which have no work-item id).
- *
- * The retired per-prefix routing (`getDispatcherTabAnchor`, `<PREFIX>` tab
- * labels and `downtime-dispatch-tab-anchors.json`) is gone: tabs are keyed by
- * the full work-item id in the resolved project workspace.
+ *    when neither a project plugin pane nor a per-prefix anchor can be
+ *    resolved, and by scheduled prompts (which have no work-item id).
  *
  * Provisioning: workspace create --label Dispatcher (no-focus); the workspace
  *               root pane is then adopted into a "Downtime" tab
@@ -62,11 +64,40 @@ export const PLUGIN_PANE_LABEL = 'Work Items';
  */
 export const DISPATCHER_ROOT_TAB_LABEL = 'Downtime';
 
+/**
+ * Filename for the per-prefix tab-anchors persistence map
+ * (C1, parent WL-0MTRQT482001SNXC). Stored in the machine coordination dir
+ * alongside the legacy single-anchor file.
+ */
+export const DISPATCHER_TAB_ANCHORS_FILE = 'downtime-dispatch-tab-anchors.json';
+
 // ── Types ──────────────────────────────────────────────────────────────
 
 export interface DispatcherAnchor {
   paneId: string;
   workspaceId: string;
+}
+
+/**
+ * Per-prefix tab-anchors map — keyed by work-item id prefix (e.g. `WL`, `TCE`)
+ * so every dispatch for the same prefix reuses the same tab in the Dispatcher
+ * workspace (C1, parent WL-0MTRQT482001SNXC).
+ */
+export interface DispatcherTabAnchors {
+  /** Machine-wide Dispatcher workspace id (shared with the legacy single anchor). */
+  workspaceId: string;
+  /** Prefix → { tabId, paneId } map — one tab per project prefix. */
+  byPrefix: Record<string, { tabId: string; paneId: string }>;
+}
+
+/**
+ * A prefix-aware tab anchor: the Dispatcher workspace id plus the tab and
+ * pane for a specific project prefix (e.g. `WL` → `w13:t5` → `w13:p23`).
+ */
+export interface DispatcherPrefixTabAnchor {
+  workspaceId: string;
+  tabId: string;
+  paneId: string;
 }
 
 export interface DispatcherAnchorDeps {
@@ -633,6 +664,102 @@ function writeAnchor(dir: string, anchor: DispatcherAnchor): boolean {
   }
 }
 
+// ── Per-prefix tab-anchor persistence (C1) ─────────────────────────────
+
+/** Path to the per-prefix tab-anchors persistence file. */
+function tabAnchorsFilePath(dir: string): string {
+  return path.join(dir, DISPATCHER_TAB_ANCHORS_FILE);
+}
+
+/**
+ * Read the per-prefix tab-anchors map. Returns `null` when absent, empty, or
+ * structurally invalid (caller treats as "no anchors yet").
+ */
+function readTabAnchors(dir: string): DispatcherTabAnchors | null {
+  try {
+    const raw = fs.readFileSync(tabAnchorsFilePath(dir), 'utf-8');
+    if (!raw.trim()) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== 'object' || parsed === null) return null;
+    const o = parsed as Record<string, unknown>;
+    const workspaceId = o.workspaceId ?? o.workspace_id;
+    const byPrefix = o.byPrefix;
+    if (typeof workspaceId !== 'string' || !workspaceId) return null;
+    if (
+      byPrefix === undefined ||
+      byPrefix === null ||
+      typeof byPrefix !== 'object' ||
+      Array.isArray(byPrefix)
+    ) {
+      return null;
+    }
+    const out: DispatcherTabAnchors = { workspaceId, byPrefix: {} };
+    for (const [prefix, entry] of Object.entries(byPrefix as Record<string, unknown>)) {
+      if (entry === null || typeof entry !== 'object') continue;
+      const rec = entry as Record<string, unknown>;
+      const tabId = rec.tabId ?? rec.tab_id;
+      const paneId = rec.paneId ?? rec.pane_id;
+      if (typeof tabId === 'string' && tabId !== '' && typeof paneId === 'string' && paneId !== '') {
+        out.byPrefix[prefix] = { tabId, paneId };
+      }
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Atomically persist the per-prefix tab-anchors map (tmp + rename). */
+function writeTabAnchors(dir: string, anchors: DispatcherTabAnchors): boolean {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const fp = tabAnchorsFilePath(dir);
+    const tmp = `${fp}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(anchors), 'utf-8');
+    fs.renameSync(tmp, fp);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Synchronously read the legacy single-anchor file to obtain the Dispatcher
+ * workspace id without launching the herdr CLI. Returns `null` when absent.
+ */
+function readDispatcherWorkspaceId(): string | null {
+  const dir = getMachineCoordinationDir();
+  if (dir === null) return null;
+  const existing = readAnchor(dir);
+  return existing === null ? null : existing.workspaceId;
+}
+
+/**
+ * Ensure the Dispatcher workspace exists and return its workspace id: reuse
+ * the id persisted by the legacy single anchor, else provision a fresh
+ * workspace. Returns `null` on failure (caller fails closed).
+ */
+async function ensureDispatcherWorkspace(
+  deps: DispatcherAnchorDeps,
+): Promise<string | null> {
+  const existing = readDispatcherWorkspaceId();
+  if (existing !== null) return existing;
+  try {
+    const created = await deps.createWorkspace(DISPATCHER_WORKSPACE_LABEL);
+    return created.workspaceId;
+  } catch {
+    return null;
+  }
+}
+
+/** Find the tab labelled exactly `label` (never a substring/prefix match). */
+function findTabByLabel(
+  tabs: DispatcherTabInfo[],
+  label: string,
+): DispatcherTabInfo | null {
+  return tabs.find((tab) => tab.label === label) ?? null;
+}
+
 /**
  * Adopt the workspace's initial root pane into a labelled tab so it is never
  * left blank/unused (WL-0MU2EOHK900425VU). `herdr workspace create` always
@@ -777,6 +904,200 @@ async function resolveLivePaneInTab(
     }
   }
   return { status: 'none' };
+}
+
+// ── Per-prefix tab anchor (C1, parent WL-0MTRQT482001SNXC) ─────────────
+
+/**
+ * Result of resolving a per-prefix tab anchor.
+ *
+ *  - `{ status: 'found', tabId, paneId }` — an existing tab with the prefix
+ *    label, whose root pane is alive.
+ *  - `{ status: 'none' }` — no matching tab exists (or the existing one is
+ *    stale) → the caller provisions a new tab.
+ *  - `{ status: 'unknown' }` — `tab list` / `pane list` could not be read
+ *    → fail closed (never guess, never duplicate).
+ */
+type PrefixTabResolution =
+  | { status: 'found'; tabId: string; paneId: string }
+  | { status: 'none' }
+  | { status: 'unknown' };
+
+/**
+ * Resolve the live anchor pane for the tab labelled exactly `prefix` in
+ * `workspaceId`.
+ *
+ *  - `found` — the tab exists and hosts a live pane (adopt it).
+ *  - `none` — `tab list` was read but no matching tab exists, or the matching
+ *    tab has no live pane → the caller provisions a replacement.
+ *  - `unknown` — `tab list`/`pane list` was unreadable → fail closed.
+ */
+async function resolvePrefixTab(
+  cwd: string,
+  deps: DispatcherAnchorDeps,
+  workspaceId: string,
+  prefix: string,
+  listTabs: (workspaceId: string) => Promise<DispatcherTabInfo[] | null>,
+): Promise<PrefixTabResolution> {
+  let tabs: DispatcherTabInfo[] | null;
+  try {
+    tabs = await listTabs(workspaceId);
+  } catch {
+    return { status: 'unknown' };
+  }
+  if (tabs === null) return { status: 'unknown' };
+  const match = findTabByLabel(tabs, prefix);
+  if (match === null) return { status: 'none' };
+  const resolution = await resolveLivePaneInTab(cwd, deps, workspaceId, match.tabId);
+  if (resolution.status === 'unknown') return { status: 'unknown' };
+  if (resolution.status === 'found') {
+    return { status: 'found', tabId: match.tabId, paneId: resolution.paneId };
+  }
+  return { status: 'none' };
+}
+
+/**
+ * Resolve or create the tab-anchored pane for a given work-item id prefix
+ * inside the Dispatcher workspace (C1, parent WL-0MTRQT482001SNXC).
+ *
+ * FALLBACK placement (AC3, WL-0MUR5FUWD00024XN): `dispatchClaimedTier`
+ * consults this resolver only when `resolveProjectWorkspace` does not resolve
+ * a project workspace for the item's root.
+ *
+ * Algorithm:
+ *  1. Ensure the Dispatcher workspace exists (re-use the legacy single
+ *     anchor's workspace id when available, or provision it).
+ *  2. List tabs in the Dispatcher workspace and look for one labelled with
+ *     the prefix.
+ *  3. If found, validate the root pane is alive (`pane get`); if alive,
+ *     return it.
+ *  4. If absent or stale, provision under the coordination lock:
+ *     a. Double-check `tab list` inside the lock (a racing caller may have
+ *        created the same tab).
+ *     b. If still absent, `herdr tab create --workspace <id> --label <prefix>
+ *        --no-focus`.
+ *     c. Persist the new mapping in `downtime-dispatch-tab-anchors.json`.
+ *  5. Return `{ workspaceId, tabId, paneId }` or `null` on any failure.
+ *
+ * Idempotency: the coordination lock serialises tab creation and the
+ * double-check inside the lock prevents duplicate tabs from concurrent
+ * first-dispatches. Stale panes trigger re-provisioning.
+ *
+ * Fail-safe: a provisioning failure degrades to `null` (caller treats as
+ * 'anchor-unavailable', never falls back to a wrong workspace).
+ */
+export async function getDispatcherTabAnchor(
+  cwd: string,
+  deps: DispatcherAnchorDeps,
+  prefix: string,
+): Promise<DispatcherPrefixTabAnchor | null> {
+  if (prefix === '') return null;
+  const dir = getMachineCoordinationDir();
+  if (dir === null) return null;
+  if (!ensureMachineCoordinationDir(dir)) return null;
+
+  const listTabs = deps.listTabs ?? ((ws: string) => listTabsInWorkspace(cwd, ws));
+
+  // 1. Ensure the Dispatcher workspace exists.
+  let workspaceId: string | null = null;
+  try {
+    workspaceId = await ensureDispatcherWorkspace(deps);
+  } catch {
+    workspaceId = null;
+  }
+  if (workspaceId === null || workspaceId === '') return null;
+
+  // 2. Fast path: a persisted anchor for this prefix whose pane is still
+  //    alive is reused directly (no `tab list` round-trip).
+  const persisted = readTabAnchors(dir);
+  const cached = persisted?.byPrefix[prefix];
+  if (cached !== undefined) {
+    let alive = false;
+    try {
+      alive = await deps.isPaneAlive(cached.paneId);
+    } catch {
+      alive = false; // fail-closed — fall through to re-provision
+    }
+    if (alive) {
+      return { workspaceId, tabId: cached.tabId, paneId: cached.paneId };
+    }
+    // Stale cache (dead pane / closed tab) → fall through to re-provision.
+  }
+
+  // 3. Look for an existing tab labelled with the prefix (authoritative,
+  //    handles an anchor file lost or written out-of-band).
+  const fast = await resolvePrefixTab(cwd, deps, workspaceId, prefix, listTabs);
+  if (fast.status === 'unknown') return null; // fail-closed (never duplicate)
+  if (fast.status === 'found') {
+    persistPrefixTab(dir, workspaceId, prefix, fast.tabId, fast.paneId);
+    return { workspaceId, tabId: fast.tabId, paneId: fast.paneId };
+  }
+
+  // 4. Provision under the coordination lock with a double-check so
+  //    concurrent first-dispatches for a NEW prefix cannot duplicate tabs.
+  const release = tryAcquireCoordLock(dir);
+  if (release === null) {
+    // Another holder is provisioning — re-check once, else fail closed.
+    const raced = await resolvePrefixTab(cwd, deps, workspaceId, prefix, listTabs);
+    if (raced.status === 'found') {
+      persistPrefixTab(dir, workspaceId, prefix, raced.tabId, raced.paneId);
+      return { workspaceId, tabId: raced.tabId, paneId: raced.paneId };
+    }
+    return null;
+  }
+
+  try {
+    // Double-check inside the lock: a racing caller may have created the tab
+    // between our step-3 read and acquiring the lock.
+    const inside = await resolvePrefixTab(cwd, deps, workspaceId, prefix, listTabs);
+    if (inside.status === 'unknown') return null;
+    if (inside.status === 'found') {
+      persistPrefixTab(dir, workspaceId, prefix, inside.tabId, inside.paneId);
+      return { workspaceId, tabId: inside.tabId, paneId: inside.paneId };
+    }
+
+    // inside.status === 'none' → create the tab (never focus-stealing).
+    const createTabFn =
+      deps.createTab ?? ((ws: string, label: string) => createTabInWorkspace(cwd, ws, label));
+    let created: ItemTabAnchor | null;
+    try {
+      created = await createTabFn(workspaceId, prefix);
+    } catch {
+      return null;
+    }
+    if (created === null) return null;
+
+    // Persist the new mapping (authority for subsequent reuse).
+    if (!persistPrefixTab(dir, workspaceId, prefix, created.tabId, created.paneId)) return null;
+    return { workspaceId, tabId: created.tabId, paneId: created.paneId };
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Upsert one prefix → { tabId, paneId } entry in the persisted per-prefix
+ * map, keeping the Dispatcher `workspaceId` current. Returns `true` when the
+ * map was written.
+ *
+ * Always writes (even when the entry is unchanged) so a stale entry whose
+ * pane was superseded in herdr is corrected rather than left to be
+ * re-resolved on every dispatch.
+ */
+function persistPrefixTab(
+  dir: string,
+  workspaceId: string,
+  prefix: string,
+  tabId: string,
+  paneId: string,
+): boolean {
+  const current = readTabAnchors(dir);
+  const anchors: DispatcherTabAnchors = {
+    workspaceId,
+    byPrefix: { ...(current?.byPrefix ?? {}) },
+  };
+  anchors.byPrefix[prefix] = { tabId, paneId };
+  return writeTabAnchors(dir, anchors);
 }
 
 // ── Project workspace resolution (AC1/AC3) ─────────────────────────────

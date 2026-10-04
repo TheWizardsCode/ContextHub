@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.0.18 (2026-10-04)
+### Features
+- Recent dispatches are now grouped by time of day, so you can see when work happened. (WL-0MUMM9NED009TLL3)
+- When no questions are found, you now get a clear explanation of what's needed to clear the review flag. (WL-0MUH765F1003FKRK)
+- Review and close idle agent panes in your workspace, with your approval before anything closes. (WL-0MUJMXVPO0016DZM)
+- Failed tasks now wait before being retried, preventing wasted slots on repeated failures. (WL-0MUKYERLZ006ELL5)
+- Downtime work now always picks the top item from your Herdr list, so automated tasks match what you see. (WL-0MTK1ILM2009QYB2)
+- Automated work panes now open in your project's workspace, grouped by task. (WL-0MU321YK70035AYT)
+- Press r then p for Producer Review, or r then i to start an interview. (WL-0MU95SGEB006HQAM)
+- Automatically detects and safely fixes performance issues slowing down your machine. (WL-0MUJLCVRS0093EJJ)
+- Covered items now show a dimmed audit icon so you can tell they're already reviewed. (WL-0MUBVH8QG0020H9L)
+- Completed work can no longer ship without an audit unnoticed, with warnings and a report to catch gaps. (WL-0MUBVH9FV0027COG)
+- Press f d to review the 20 most recent auto-dispatched work items and their outcomes. (WL-0MUGLL9SS002E1D2)
+- Audits now run one at a time per machine, so they finish reliably instead of failing when several run at once. (WL-0MUIVE0YG000UVIA)
+- Completed agent sessions now close automatically, freeing up your machine's resources. (WL-0MUJL1NAH0042GOS)
+- Audit freshness now works consistently everywhere, so items won't appear fresh in one view and stale in another. (WL-0MUBVH7ZR009PP80)
+- Automated downtime work now appears in its own project tab, keeping projects separate. (WL-0MTRQT482001SNXC)
+- Adds automated checks to keep work item recovery reliable, so stalled tasks resume correctly. (WL-0MTF5WO4Q005YBVH)
+- The review queue banner now tells you whether to keep auditing or ship. (WL-0MUJQFXYC009CFRJ)
+### Bug Fixes
+- Interview questions now display in full, so you can see every option and note before answering. (WL-0MUKCGV3X0030W6K)
+- Stage filters now show in-progress work instead of hiding it. (WL-0MUIB7D30009KG00)
+- Automated tasks now open in the correct project workspace instead of a shared one. (WL-0MUR5FUWD00024XN)
+- The top info line now stays visible even when the help text wraps. (WL-0MTV979LK005YB1B)
+- Rejecting work items with an apostrophe in the reason now works correctly. (WL-0MU7KEX65004X0U9)
+- Long audit sessions no longer crash from a stale notification after a session reload. (WL-0MUIV50EJ007VH9B)
+- Shortcut commands with special characters now work correctly. (WL-0MUKH3DVA00488U0)
+- Fixed a test that was checking for an outdated keyboard shortcut hint. (WL-0MUKDNC7L000I1JO)
+### Other
+- Old debug logs are now cleaned up automatically, keeping the game running fast and smooth. (WL-0MUJL0PTS009MC8F)
+- Completing a work item no longer shows stray error messages in your terminal. (WL-0MTH28WDS008WMXA)
+
 ## v1.0.17 (2026-09-30)
 ### Features
 - Press r then i to start an interview on the selected work item. (WL-0MU95SGEB006HQAM)

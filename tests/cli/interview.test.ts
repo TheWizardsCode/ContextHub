@@ -14,13 +14,18 @@
  * triggered the original audit rejection).
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import registerInterview, {
   extractClarifyingSection,
   parseQAPairs,
   rebuildQAPairs,
   rebuildDescription,
   runInterview,
+  buildProducerReviewExplanation,
+  buildExplanationPrompt,
+  buildCommentFallback,
+  normaliseExplanation,
+  PRODUCER_REVIEW_INSTRUCTION,
 } from '../../src/commands/interview.js';
 import { createTestContext } from '../test-utils.js';
 
@@ -221,6 +226,54 @@ describe('parseQAPairs (canonical bullet appendix)', () => {
     const content = '- Q: "Threshold?" — Answer: TBD pending confirmation. Source: inference.';
     const pairs = parseQAPairs(content);
     expect(pairs).toHaveLength(1);
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('does not truncate question text containing em dashes (WL-0MUKCGV3X0030W6K)', () => {
+    // Question text with em dashes that are part of the content, not qualifiers
+    const content =
+      '- **Q:** 4. Crash behaviour — destroyed and respawn (like enemy) — **Answer:** *(awaiting producer)*.';
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      '4. Crash behaviour — destroyed and respawn (like enemy)',
+    );
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('captures the full multi-line question ending in an OPEN QUESTION marker (WL-0MUKCGV3X0030W6K)', () => {
+    // Reproduces the intake appendix from AH-0MUAYB2XR007N10W, where the
+    // answer placeholder sits on a continuation line and the question spans
+    // two lines. Previously only the first line was surfaced.
+    const content = `- **Q (round 1 follow-up):** Crash behaviour — destroyed and respawn (like enemy
+  collisions) or something else? — **OPEN QUESTION**, context: not yet answered.
+  Interim assumption: destroy + reuse the shared player-hit lifecycle (see
+  Assumptions). Source: wl comment \`AH-C0MUB8JD13004UD9E\`.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      'Crash behaviour — destroyed and respawn (like enemy collisions) or something else?',
+    );
+    expect(pairs[0].unanswered).toBe(true);
+  });
+
+  it('round-trips a multi-line OPEN QUESTION appendix losslessly', () => {
+    const content = `- **Q (round 1 follow-up):** Crash behaviour — destroyed and respawn (like enemy
+  collisions) or something else? — **OPEN QUESTION**, context: not yet answered.
+  Interim assumption: destroy + reuse the shared player-hit lifecycle. Source: reply.`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(rebuildQAPairs(pairs)).toBe(content);
+  });
+
+  it('captures a multi-line question with no answer marker at all', () => {
+    const content = `- **Q:** A question that spans
+  several lines with no marker?`;
+    const pairs = parseQAPairs(content);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].question).toBe(
+      'A question that spans several lines with no marker?',
+    );
     expect(pairs[0].unanswered).toBe(true);
   });
 
@@ -556,6 +609,35 @@ No clarifying questions were asked; the brief was sufficient.`;
     expect(updated.description).toContain('Yes');
     expect(updated.needsProducerReview).toBe(false);
   });
+
+  it('prompts with the full multi-line question and answers an OPEN QUESTION placeholder (WL-0MUKCGV3X0030W6K)', async () => {
+    const desc = `## Appendix: Clarifying questions
+
+- **Q (round 1 follow-up):** Crash behaviour — destroyed and respawn (like enemy
+  collisions) or something else? — **OPEN QUESTION**, context: not yet answered.
+  Interim assumption: destroy + reuse the shared player-hit lifecycle.
+  Source: wl comment \`AH-C0MUB8JD13004UD9E\`.`;
+    const store = makeStore(makeItem(desc, true));
+    const prompts: string[] = [];
+    const outcome = await runInterview(store.current(), store, {
+      prompt: async (m: string) => {
+        prompts.push(m);
+        return 'Destroyed and respawn like enemy collisions';
+      },
+    });
+    expect(prompts).toHaveLength(1);
+    // The full question text must be visible in the prompt, not just line 1.
+    expect(prompts[0]).toContain('destroyed and respawn (like enemy collisions)');
+    expect(prompts[0]).toContain('or something else?');
+    expect(outcome.recorded).toBe(1);
+    expect(outcome.allAnswered).toBe(true);
+    const updated = store.current();
+    expect(updated.description).toContain('Destroyed and respawn like enemy collisions');
+    expect(updated.description).not.toContain('OPEN QUESTION');
+    // Metadata after the placeholder is preserved for the audit trail.
+    expect(updated.description).toContain('Source: wl comment');
+    expect(updated.needsProducerReview).toBe(false);
+  });
 });
 
 // ── Command registration ─────────────────────────────────────────────────
@@ -629,5 +711,393 @@ Some content.
     await ctx.runCli(['interview', id]);
     const item = ctx.utils.db.get(id);
     expect(item).not.toBeNull();
+  });
+});
+
+// ── Producer-review explanation ──────────────────────────────────────────
+
+function comment(author: string, body: string): any {
+  return {
+    id: `C-${author}`,
+    workItemId: 'WL-TEST-1',
+    author,
+    comment: body,
+    createdAt: new Date().toISOString(),
+    references: [],
+  };
+}
+
+function flaggedItem(description: string, flagged = true): any {
+  return {
+    id: 'WL-TEST-1',
+    title: 'Sample',
+    description,
+    needsProducerReview: flagged,
+  } as any;
+}
+
+/** A chat client stub whose `complete` returns `response` (or throws). */
+function fakeChatClient(response: string | Error): any {
+  return {
+    available: true,
+    complete: vi.fn(async () => {
+      if (response instanceof Error) throw response;
+      return response;
+    }),
+  };
+}
+
+describe('buildProducerReviewExplanation', () => {
+  const comments = [
+    comment('bob', 'Second comment\nwith a second line'),
+    comment('alice', 'First comment'),
+  ];
+
+  it('returns null when the item is not flagged for producer review', async () => {
+    const result = await buildProducerReviewExplanation(flaggedItem('desc', false), {
+      comments,
+      chatClient: fakeChatClient('unused'),
+    });
+    expect(result).toBeNull();
+  });
+
+  it('returns the normalised LLM explanation when the call succeeds', async () => {
+    const client = fakeChatClient('Ask the\noperator to\nclear the flag.');
+    const result = await buildProducerReviewExplanation(flaggedItem('desc'), {
+      comments,
+      chatClient: client,
+    });
+    expect(result).toBe('Ask the operator to clear the flag.');
+    expect(client.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the LLM and uses the two most recent comments when --no-llm', async () => {
+    const client = fakeChatClient('unused');
+    const result = await buildProducerReviewExplanation(flaggedItem('desc'), {
+      comments,
+      chatClient: client,
+      noLlm: true,
+    });
+    expect(client.complete).not.toHaveBeenCalled();
+    expect(result).toContain('bob: Second comment');
+    expect(result).toContain('alice: First comment');
+  });
+
+  it('falls back silently when the LLM call fails', async () => {
+    const client = fakeChatClient(new Error('network unavailable'));
+    const result = await buildProducerReviewExplanation(flaggedItem('desc'), {
+      comments,
+      chatClient: client,
+    });
+    expect(client.complete).toHaveBeenCalledTimes(1);
+    expect(result).toContain('bob: Second comment');
+  });
+
+  it('falls back without calling an unavailable client', async () => {
+    const client = { available: false, complete: vi.fn() };
+    const result = await buildProducerReviewExplanation(flaggedItem('desc'), {
+      comments,
+      chatClient: client as any,
+    });
+    expect(client.complete).not.toHaveBeenCalled();
+    expect(result).toContain('alice: First comment');
+  });
+
+  it('uses a generic actionable fallback when there are no comments', async () => {
+    const result = await buildProducerReviewExplanation(flaggedItem('desc'), {
+      comments: [],
+      noLlm: true,
+    });
+    expect(result).toContain('WL-TEST-1');
+  });
+
+  it('builds the prompt from the instruction and the two most recent comments', async () => {
+    const client = fakeChatClient('ok');
+    const older = comment('old', 'Ancient history');
+    await buildProducerReviewExplanation(flaggedItem('desc'), {
+      comments: [...comments, older],
+      chatClient: client,
+    });
+    const prompt = client.complete.mock.calls[0][0] as string;
+    expect(prompt).toContain(PRODUCER_REVIEW_INSTRUCTION);
+    expect(prompt).toContain('alice: First comment');
+    expect(prompt).toContain('bob: Second comment');
+    expect(prompt).not.toContain('Ancient history');
+  });
+
+  it('normalises multi-line text to a single bounded line', () => {
+    expect(normaliseExplanation('a\n\nb   c')).toBe('a b c');
+    const bounded = normaliseExplanation('x'.repeat(2000), 50);
+    expect(bounded.length).toBeLessThanOrEqual(50);
+  });
+
+  it('buildCommentFallback renders <author>: <first line> per comment', () => {
+    const fallback = buildCommentFallback(flaggedItem('desc'), comments);
+    expect(fallback).toBe('bob: Second comment; alice: First comment');
+  });
+});
+
+describe('interview --json (non-interactive)', () => {
+  /** Register the command with a JSON-capturing output and injected comments. */
+  function setup(options: {
+    item?: { description?: string; needsProducerReview?: boolean };
+    comments?: any[];
+    chatClient?: any;
+  } = {}) {
+    const ctx = createTestContext();
+    const jsonOutput: any[] = [];
+    ctx.output = {
+      json: (data: any) => { jsonOutput.push(data); },
+      success: () => {},
+      error: () => {},
+    };
+    const id = ctx.utils.createSampleItem({});
+    ctx.utils.db.update(id, {
+      description: options.item?.description ?? '# Task\n\nNo clarifying section here.',
+      title: 'JSON task',
+      needsProducerReview: options.item?.needsProducerReview ?? true,
+    });
+    const baseGetDatabase = ctx.utils.getDatabase;
+    ctx.utils.getDatabase = (prefix?: string) => ({
+      ...baseGetDatabase(prefix),
+      getCommentsForWorkItem: () => options.comments ?? [],
+    });
+    registerInterview(ctx as any, {
+      chatClientFactory: () => options.chatClient ?? null,
+    });
+    return { ctx, id, jsonOutput };
+  }
+
+  it('returns the explanation and question state without mutating the item', async () => {
+    const client = fakeChatClient('Clear the flag by doing X.');
+    const { ctx, id, jsonOutput } = setup({
+      item: { description: '# Task\n\nNo section.', needsProducerReview: true },
+      comments: [comment('producer', 'Please clarify scope.')],
+      chatClient: client,
+    });
+
+    await ctx.runCli(['interview', id, '--json']);
+
+    expect(jsonOutput).toHaveLength(1);
+    expect(jsonOutput[0]).toMatchObject({
+      success: true,
+      workItemId: id,
+      needsProducerReview: true,
+      producerReviewExplanation: 'Clear the flag by doing X.',
+      noSection: true,
+      noQuestions: false,
+    });
+    // No mutation in JSON mode applies to the flag or the description.
+    const stored = ctx.utils.db.get(id);
+    expect(stored.needsProducerReview).toBe(true);
+    expect(stored.description).toContain('No section.');
+  });
+
+  it('uses the comment fallback with --no-llm and never calls the LLM', async () => {
+    const client = fakeChatClient('unused');
+    const { ctx, id, jsonOutput } = setup({
+      item: { description: '# Task\n\nNo section.', needsProducerReview: true },
+      comments: [comment('producer', 'Please clarify scope.\nMore detail.')],
+      chatClient: client,
+    });
+
+    await ctx.runCli(['interview', id, '--json', '--no-llm']);
+
+    expect(client.complete).not.toHaveBeenCalled();
+    expect(jsonOutput[0].producerReviewExplanation).toBe('producer: Please clarify scope.');
+  });
+
+  it('returns a null explanation for a non-flagged item', async () => {
+    const { ctx, id, jsonOutput } = setup({
+      item: { description: '# Task\n\nNo section.', needsProducerReview: false },
+      comments: [comment('producer', 'Hello')],
+      chatClient: fakeChatClient('unused'),
+    });
+
+    await ctx.runCli(['interview', id, '--json']);
+
+    expect(jsonOutput[0].needsProducerReview).toBe(false);
+    expect(jsonOutput[0].producerReviewExplanation).toBeNull();
+  });
+
+  it('reports outstanding-question state without prompting in JSON mode', async () => {
+    const desc = `# Task
+
+## Appendix: Clarifying questions
+
+- Q: "Scope?" — Answer: *(awaiting producer)*. Source: reply.`;
+    const { ctx, id, jsonOutput } = setup({
+      item: { description: desc, needsProducerReview: true },
+      comments: [comment('producer', 'Scope question raised.')],
+      chatClient: fakeChatClient('unused'),
+    });
+
+    await ctx.runCli(['interview', id, '--json', '--no-llm']);
+
+    expect(jsonOutput[0]).toMatchObject({
+      noSection: false,
+      noQuestions: false,
+      total: 1,
+      outstanding: 1,
+      allAnswered: false,
+    });
+    // A flagged item with outstanding questions gets no explanation (only the
+    // noSection/noQuestions cases do).
+    expect(jsonOutput[0].producerReviewExplanation).toBeNull();
+  });
+});
+
+// ── Clear-the-flag interactive prompt ────────────────────────────────────
+
+describe('interview clear-the-flag prompt', () => {
+  /**
+   * Register the command for an interactive run with captured output and a
+   * scripted prompt pool. The prompt loop is injected so no real readline
+   * interface is created.
+   */
+  function setupInteractive(options: {
+    description?: string;
+    needsProducerReview?: boolean;
+    answers?: string[];
+    comments?: any[];
+  } = {}) {
+    const ctx = createTestContext();
+    const messages: string[] = [];
+    const answers = [...(options.answers ?? [])];
+    const originalLog = console.log;
+    console.log = (...args: any[]) => { messages.push(args.join(' ')); };
+
+    const id = ctx.utils.createSampleItem({});
+    ctx.utils.db.update(id, {
+      description: options.description ?? '# Task\n\nNo clarifying section here.',
+      title: 'Prompt task',
+      needsProducerReview: options.needsProducerReview ?? true,
+    });
+    const baseGetDatabase = ctx.utils.getDatabase;
+    ctx.utils.getDatabase = (prefix?: string) => ({
+      ...baseGetDatabase(prefix),
+      getCommentsForWorkItem: () => options.comments ?? [],
+    });
+
+    registerInterview(ctx as any, {
+      chatClientFactory: () => null,
+      promptLoopFactory: () => ({
+        next: async (message: string) => {
+          messages.push(message);
+          return answers.shift() ?? '';
+        },
+        close: () => {},
+      }),
+      clearPrompt: async (message: string) => {
+        messages.push(message);
+        return /^y(es)?$/i.test((answers.shift() ?? '').trim());
+      },
+    });
+
+    return {
+      ctx,
+      id,
+      messages,
+      restore: () => { console.log = originalLog; },
+    };
+  }
+
+  it('prompts to clear the flag and clears it on yes', async () => {
+    const t = setupInteractive({ answers: ['y'] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.messages.some(m => /Clear the needsProducerReview flag\? \(y\/N\)/.test(m))).toBe(true);
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('leaves the flag set on an explicit no', async () => {
+    const t = setupInteractive({ answers: ['n'] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(true);
+      expect(t.messages.some(m => /remains flagged/.test(m))).toBe(true);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('leaves the flag set on empty input (default No)', async () => {
+    const t = setupInteractive({ answers: [''] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(true);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('does not prompt when no explanation was shown (unflagged item)', async () => {
+    const t = setupInteractive({ needsProducerReview: false, answers: ['y'] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.messages.some(m => /Clear the needsProducerReview flag/.test(m))).toBe(false);
+      // Unchanged (still false).
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('never prompts or mutates in --json mode', async () => {
+    const ctx = createTestContext();
+    const jsonOutput: any[] = [];
+    const messages: string[] = [];
+    const originalLog = console.log;
+    console.log = (...args: any[]) => { messages.push(args.join(' ')); };
+    ctx.output = { json: (d: any) => jsonOutput.push(d), success: () => {}, error: () => {} };
+    const id = ctx.utils.createSampleItem({});
+    ctx.utils.db.update(id, {
+      description: '# Task\n\nNo clarifying section here.',
+      needsProducerReview: true,
+    });
+    registerInterview(ctx as any, { chatClientFactory: () => null });
+
+    try {
+      await ctx.runCli(['interview', id, '--json']);
+      expect(jsonOutput).toHaveLength(1);
+      expect(ctx.utils.db.get(id).needsProducerReview).toBe(true);
+      expect(messages.some(m => /Clear the needsProducerReview flag/.test(m))).toBe(false);
+    } finally {
+      console.log = originalLog;
+    }
+  });
+
+  it('does not prompt when questions remain outstanding', async () => {
+    const desc = `# Task
+
+## Appendix: Clarifying questions
+
+- Q: "Scope?" — Answer: *(awaiting producer)*. Source: reply.`;
+    const t = setupInteractive({ description: desc, answers: ['answer', 'y'] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.messages.some(m => /Clear the needsProducerReview flag/.test(m))).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('preserves the existing allAnswered auto-clear path (no prompt)', async () => {
+    const desc = `# Task
+
+## Appendix: Clarifying questions
+
+- Q: "Scope?" — Answer (user): "Repo-wide". Source: reply.`;
+    const t = setupInteractive({ description: desc, answers: [] });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(t.messages.some(m => /Clear the needsProducerReview flag/.test(m))).toBe(false);
+      expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(false);
+    } finally {
+      t.restore();
+    }
   });
 });

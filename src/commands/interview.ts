@@ -28,7 +28,9 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { InterviewOptions } from '../cli-types.js';
-import type { WorkItem } from '../types.js';
+import type { WorkItem, Comment } from '../types.js';
+import { OpenAIChatClient, type ChatClient } from '../lib/llm.js';
+import { resolveLlmConfig } from '../config.js';
 import * as readline from 'readline';
 
 // ── Section markers ──────────────────────────────────────────────────────
@@ -58,6 +60,18 @@ const ANSWER_LINE_RE =
 
 /** An explicit "awaiting producer" placeholder. */
 const PLACEHOLDER_RE = /^\*{0,2}\(?\s*awaiting producer\s*\)?\*{0,2}/i;
+/**
+ * An explicit "OPEN QUESTION" placeholder used by the intake/plan skills
+ * to mark a question that the producer has not yet answered, e.g.
+ * `— **OPEN QUESTION**, context: ...`.
+ */
+const OPEN_QUESTION_RE = /^\*{0,2}\(?OPEN\s+QUESTION\)?\*{0,2}/i;
+/**
+ * An inline `— **OPEN QUESTION**` answer marker on a continuation line,
+ * capturing the placeholder token itself in group 1.
+ */
+const INLINE_OPEN_QUESTION_RE =
+  /\s*[—–-]\s*(\*{0,2}\(?OPEN\s+QUESTION\)?\*{0,2})/i;
 /** A "TBD" answer is treated as outstanding. */
 const TBD_RE = /^\*{0,2}(?:tbd|to be determined)\b/i;
 /** Trailing attribution metadata that shares the answer line. */
@@ -250,7 +264,7 @@ function computeAnswerRegion(
   // Detect placeholders before stripping bold markers so the whole token is
   // replaced when the producer answers.
   const raw = content.slice(s, e);
-  const placeholder = raw.match(PLACEHOLDER_RE);
+  const placeholder = raw.match(PLACEHOLDER_RE) ?? raw.match(OPEN_QUESTION_RE);
   if (placeholder) {
     return {
       start: s,
@@ -281,7 +295,8 @@ function computeAnswerRegion(
 
   // Placeholders/TBD may sit inside quotes.
   const inner = content.slice(s, e);
-  const innerPlaceholder = inner.match(PLACEHOLDER_RE);
+  const innerPlaceholder =
+    inner.match(PLACEHOLDER_RE) ?? inner.match(OPEN_QUESTION_RE);
   if (innerPlaceholder) {
     return {
       start: s,
@@ -358,12 +373,21 @@ export function parseQAPairs(content: string): ClarifyingQAPair[] {
     let answerLine = cur.line;
 
     const inline = cur.remainder.match(INLINE_ANSWER_RE);
-    if (inline) {
-      question = cleanQuestion(cur.remainder.slice(0, inline.index));
-      const tail = inline[2] ?? '';
+    const inlineOpen = inline ? null : cur.remainder.match(INLINE_OPEN_QUESTION_RE);
+    if (inline || inlineOpen) {
+      const isOpen = !inline;
+      const match = (inline ?? inlineOpen)!;
+      const markerIdx = match.index ?? 0;
+      const markerLen = match[0].length;
+      const placeholder = isOpen ? (match[1] ?? '') : '';
+      const tail = isOpen ? '' : (match[2] ?? '');
+      question = cleanQuestion(cur.remainder.slice(0, markerIdx));
       const rawStart =
-        cur.remainderStart + (inline.index ?? 0) + inline[0].length - tail.length;
-      const rawEnd = cur.remainderStart + (inline.index ?? 0) + inline[0].length;
+        cur.remainderStart +
+        markerIdx +
+        markerLen -
+        (isOpen ? placeholder.length : tail.length);
+      const rawEnd = cur.remainderStart + markerIdx + markerLen;
       region = computeAnswerRegion(content, rawStart, rawEnd);
     } else {
       let found: {
@@ -402,6 +426,20 @@ export function parseQAPairs(content: string): ClarifyingQAPair[] {
           };
           break;
         }
+        // An unresolved question uses an inline `— **OPEN QUESTION**`
+        // placeholder, which may sit on a continuation line.
+        const om = lines[j].match(INLINE_OPEN_QUESTION_RE);
+        if (om) {
+          const placeholder = om[1] ?? '';
+          const idx = om.index ?? 0;
+          found = {
+            line: j,
+            start: lineStart[j] + idx + om[0].length - placeholder.length,
+            end: lineStart[j] + idx + om[0].length,
+            before: lines[j].slice(0, idx),
+          };
+          break;
+        }
       }
 
       if (found) {
@@ -411,7 +449,12 @@ export function parseQAPairs(content: string): ClarifyingQAPair[] {
         region = computeAnswerRegion(content, found.start, found.end);
         answerLine = found.line;
       } else {
-        question = cleanQuestion(cur.remainder);
+        // No answer marker: treat every line up to the next question as part
+        // of the question so multi-line questions are not truncated.
+        const endLine =
+          idx + 1 < starts.length ? starts[idx + 1].line : lines.length;
+        const continuation = lines.slice(cur.line + 1, endLine).join(' ');
+        question = cleanQuestion(`${cur.remainder} ${continuation}`);
         region = {
           start: sliceEnd,
           end: sliceEnd,
@@ -484,6 +527,137 @@ export function rebuildDescription(
   return [...before, newContent, ...after].join('\n').trim();
 }
 
+// ── Producer-review explanation ─────────────────────────────────────────
+
+/**
+ * Instruction sent to the LLM when explaining how to clear the
+ * `needsProducerReview` flag (parent AC2).
+ */
+export const PRODUCER_REVIEW_INSTRUCTION =
+  'Explain what the producer needs to do in order to remove the needsProducerReview flag';
+
+/** Maximum size (bytes) of the item context embedded in the prompt. */
+export const MAX_PROMPT_CONTEXT_BYTES = 8192;
+
+/** Maximum length (characters) of the normalised explanation line. */
+export const MAX_EXPLANATION_LENGTH = 500;
+
+/** Default timeout (ms) for the explanation LLM call. */
+export const EXPLANATION_TIMEOUT_MS = 15000;
+
+/**
+ * Dependencies for {@link buildProducerReviewExplanation}. The chat client is
+ * injected so callers (and tests) never make network calls implicitly.
+ */
+export interface ProducerReviewExplanationDeps {
+  /** Newest-first comments for the item (`getCommentsForWorkItem` order). */
+  comments: Comment[];
+  /** Chat client to use; `null`/`undefined` disables the LLM path. */
+  chatClient?: ChatClient | null;
+  /** When true, skip the LLM entirely and use the comment-based fallback. */
+  noLlm?: boolean;
+  /** Per-call timeout override in milliseconds. */
+  timeoutMs?: number;
+}
+
+/**
+ * Collapse whitespace so an explanation renders as a single bounded line.
+ * Newlines (from either path) are collapsed; over-long text is truncated.
+ */
+export function normaliseExplanation(
+  text: string,
+  maxLength: number = MAX_EXPLANATION_LENGTH,
+): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim();
+  if (collapsed.length <= maxLength) return collapsed;
+  return collapsed.slice(0, maxLength - 1).trimEnd() + '…';
+}
+
+/** First non-empty line of a comment body, trimmed. */
+function firstLine(text: string): string {
+  return text.split('\n').map(line => line.trim()).find(line => line.length > 0) ?? '';
+}
+
+/** Truncate `text` to at most `maxBytes` UTF-8 bytes without splitting a char. */
+function truncateBytes(text: string, maxBytes: number): string {
+  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
+  let result = text;
+  while (result.length > 0 && Buffer.byteLength(result, 'utf8') > maxBytes) {
+    result = result.slice(0, -1);
+  }
+  return result;
+}
+
+/**
+ * Build the LLM prompt: the fixed instruction plus item context
+ * (description and the two most recent comments), bounded to
+ * {@link MAX_PROMPT_CONTEXT_BYTES}.
+ */
+export function buildExplanationPrompt(item: WorkItem, comments: Comment[]): string {
+  const recent = comments
+    .slice(0, 2)
+    .map(c => `${c.author}: ${firstLine(c.comment)}`)
+    .join('\n');
+  const context = [
+    `Work item: ${item.id} — ${item.title}`,
+    '',
+    'Description:',
+    item.description,
+    '',
+    'Most recent comments:',
+    recent || '(none)',
+  ].join('\n');
+  return `${PRODUCER_REVIEW_INSTRUCTION}.\n\n${truncateBytes(context, MAX_PROMPT_CONTEXT_BYTES)}`;
+}
+
+/**
+ * Comment-based fallback: `<author>: <first line>` for the two most recent
+ * comments, joined on one line. When there are no usable comments a generic
+ * actionable line is returned so the producer still has a clear next step.
+ */
+export function buildCommentFallback(item: WorkItem, comments: Comment[]): string {
+  const recent = comments
+    .slice(0, 2)
+    .map(c => `${c.author}: ${firstLine(c.comment)}`)
+    .filter(entry => entry.replace(/^[^:]*:\s*/, '').length > 0);
+  if (recent.length > 0) return recent.join('; ');
+  return (
+    `No recent comments; review the item and clear the flag with ` +
+    `\`wl reviewed ${item.id} false\` once the blocker is resolved.`
+  );
+}
+
+/**
+ * Produce a one-line explanation of how the producer clears
+ * `needsProducerReview`.
+ *
+ * Returns `null` when the item is not flagged. Otherwise it calls the injected
+ * chat client (unless `noLlm` is set or the client is unavailable) and falls
+ * back silently to the two most recent comments on any failure — network
+ * error, non-2xx, timeout or empty response (parent AC2/AC3).
+ */
+export async function buildProducerReviewExplanation(
+  item: WorkItem,
+  deps: ProducerReviewExplanationDeps,
+): Promise<string | null> {
+  if (!item.needsProducerReview) return null;
+
+  if (!deps.noLlm && deps.chatClient?.available) {
+    try {
+      const response = await deps.chatClient.complete(
+        buildExplanationPrompt(item, deps.comments),
+        { timeoutMs: deps.timeoutMs ?? EXPLANATION_TIMEOUT_MS },
+      );
+      const normalised = normaliseExplanation(response);
+      if (normalised.length > 0) return normalised;
+    } catch {
+      // Silent fallback — the explanation is advisory; never surface an error.
+    }
+  }
+
+  return normaliseExplanation(buildCommentFallback(item, deps.comments));
+}
+
 // ── Core interview loop ──────────────────────────────────────────────────
 
 /** Minimal database dependency required by {@link runInterview}. */
@@ -512,7 +686,13 @@ export interface InterviewOutcome {
  *
  * Answers are persisted after each response so an interrupted session can be
  * resumed; the producer review flag is only cleared once every question has
- * a non-empty answer.
+ * a non-empty answer (the `allAnswered` auto-clear path, unchanged).
+ *
+ * This function only handles the question walkthrough. The "no questions
+ * detected" edge case (noSection / noQuestions) is handled by the command
+ * registration below, which explains how the producer clears an outstanding
+ * `needsProducerReview` flag and offers to clear it: see
+ * {@link buildProducerReviewExplanation} and `.option('--no-llm')`.
  */
 export async function runInterview(
   item: WorkItem,
@@ -615,8 +795,66 @@ function createPromptLoop(): {
 
 // ── Command registration ─────────────────────────────────────────────────
 
-export default function register(ctx: PluginContext): void {
+/** The shape returned by {@link createPromptLoop} — one shared iterator. */
+export interface InterviewPromptLoop {
+  next: (message: string) => Promise<string>;
+  close: () => void;
+}
+
+/** Injectable dependencies for the interview command (used by tests). */
+export interface InterviewCommandDeps {
+  /**
+   * Build the chat client for the explanation. Return `null` to disable the
+   * LLM path. Defaults to an `OpenAIChatClient` over the resolved LLM config.
+   */
+  chatClientFactory?: (options: { model?: string }) => ChatClient | null;
+  /**
+   * Create the interactive prompt loop. Overridable so tests never open a
+   * real readline interface (mirrors the {@link InterviewIO} pattern).
+   */
+  promptLoopFactory?: () => InterviewPromptLoop;
+  /**
+   * Confirm whether the `needsProducerReview` flag should be cleared.
+   * Defaults to a `readline` `(y/N)` prompt on stdin/stdout.
+   */
+  clearPrompt?: (message: string) => Promise<boolean>;
+}
+
+/**
+ * Ask a yes/no question on the terminal, defaulting to **No** on anything
+ * other than an explicit `y`/`yes` (parent AC1/AC3).
+ */
+export async function defaultClearPrompt(message: string): Promise<boolean> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await new Promise<string>(resolve => {
+      rl.question(message, resolve);
+    });
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+export default function register(
+  ctx: PluginContext,
+  deps: InterviewCommandDeps = {},
+): void {
   const { program, output, utils } = ctx;
+
+  const chatClientFactory =
+    deps.chatClientFactory ??
+    ((options: { model?: string }): ChatClient => {
+      const config = utils.getConfig();
+      return new OpenAIChatClient({
+        ...(config ? resolveLlmConfig(config) ?? {} : {}),
+        hasExplicitConfig: true,
+        ...(options.model ? { model: options.model } : {}),
+      });
+    });
+
+  const promptLoopFactory = deps.promptLoopFactory ?? createPromptLoop;
+  const clearPrompt = deps.clearPrompt ?? defaultClearPrompt;
 
   program
     .command('interview <id>')
@@ -624,6 +862,9 @@ export default function register(ctx: PluginContext): void {
       'Walk through outstanding interview questions on a work item interactively, capturing answers and clearing the producer review flag',
     )
     .option('--prefix <prefix>', 'Override the default prefix')
+    .option('--json', 'Non-interactive JSON output (no prompts, no mutation)')
+    .option('--no-llm', 'Disable the LLM explanation and use the comment fallback')
+    .option('--model <model>', 'Override the chat model for the explanation')
     .action(async (id: string, options: InterviewOptions) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -638,27 +879,56 @@ export default function register(ctx: PluginContext): void {
         process.exit(1);
       }
 
-      // ── Step 1: Show brief summary ───────────────────────────────────
-      if (!utils.isJsonMode()) {
-        console.log(`\n=== Interview: ${item.id} ===`);
-        console.log(`Title:     ${item.title}`);
-        console.log(`Status:    ${item.status}`);
-        console.log(`Stage:     ${item.stage}`);
-        console.log(
-          `Review:    ${item.needsProducerReview ? 'needs review' : 'not flagged'}\n`,
-        );
+      const jsonMode = options.json === true || utils.isJsonMode();
+      // Commander maps `--no-llm` to `options.llm === false`; the test harness
+      // passes the kebab-cased `noLlm`. Accept either spelling.
+      const noLlm = options.noLlm === true || options.llm === false;
+
+      const section = extractClarifyingSection(item.description);
+      const pairs = section ? parseQAPairs(section.content) : [];
+      const noSection = section === null;
+      const noQuestions = section !== null && pairs.length === 0;
+      const outstanding = pairs.filter(p => p.unanswered).length;
+      const allAnswered = !noSection && !noQuestions && outstanding === 0;
+
+      /** Explanation for the flagged no-question cases, else null. */
+      const explanationFor = async (): Promise<string | null> => {
+        if (!item.needsProducerReview || !(noSection || noQuestions)) return null;
+        return buildProducerReviewExplanation(item, {
+          comments: db.getCommentsForWorkItem(item.id),
+          chatClient: noLlm ? null : chatClientFactory({ model: options.model }),
+          noLlm,
+        });
+      };
+
+      // ── Non-interactive JSON mode: no prompts, no mutation ───────────
+      if (jsonMode) {
+        const explanation = await explanationFor();
+        output.json({
+          success: true,
+          workItemId: item.id,
+          needsProducerReview: item.needsProducerReview,
+          producerReviewExplanation: explanation,
+          noSection,
+          noQuestions,
+          total: pairs.length,
+          outstanding,
+          allAnswered,
+        });
+        return;
       }
 
-      if (utils.isJsonMode()) {
-        output.error(
-          'Interview mode requires interactive (TTY) input; use without --json',
-          { success: false, error: 'requires-tty' },
-        );
-        process.exit(1);
-      }
+      // ── Step 1: Show brief summary ───────────────────────────────────
+      console.log(`\n=== Interview: ${item.id} ===`);
+      console.log(`Title:     ${item.title}`);
+      console.log(`Status:    ${item.status}`);
+      console.log(`Stage:     ${item.stage}`);
+      console.log(
+        `Review:    ${item.needsProducerReview ? 'needs review' : 'not flagged'}\n`,
+      );
 
       // ── Step 2: Interactive walkthrough ──────────────────────────────
-      const prompts = createPromptLoop();
+      const prompts = promptLoopFactory();
       let outcome: InterviewOutcome;
       try {
         outcome = await runInterview(item, db, {
@@ -668,15 +938,38 @@ export default function register(ctx: PluginContext): void {
         prompts.close();
       }
 
+      /**
+       * Print the explanation (when the item is flagged and there is nothing
+       * to interview), then offer to clear the flag. Returns true when the
+       * flag was cleared. Never called in `--json` mode.
+       */
+      const explainAndOfferClear = async (): Promise<void> => {
+        const explanation = await explanationFor();
+        if (!explanation) {
+          console.log('Nothing to interview. Exiting.');
+          return;
+        }
+        console.log('');
+        console.log(explanation);
+        console.log('');
+        const shouldClear = await clearPrompt('Clear the needsProducerReview flag? (y/N)');
+        if (shouldClear) {
+          db.update(item.id, { needsProducerReview: false });
+          console.log('   needsProducerReview cleared.');
+        } else {
+          console.log('   needsProducerReview remains flagged.');
+        }
+      };
+
       // ── Step 3: Report outcome ───────────────────────────────────────
       if (outcome.noSection) {
         console.log('No clarifying-questions section found.');
-        console.log('Nothing to interview. Exiting.');
+        await explainAndOfferClear();
         return;
       }
       if (outcome.noQuestions) {
         console.log('No interview questions found in the clarifying section.');
-        console.log('Nothing to interview. Exiting.');
+        await explainAndOfferClear();
         return;
       }
       if (outcome.recorded === 0 && outcome.allAnswered) {

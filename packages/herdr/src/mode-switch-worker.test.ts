@@ -429,6 +429,165 @@ describe('cheap switch trigger', () => {
   });
 });
 
+// ── Drain before cheap switch (parent WL-0MUL0KO7Q003O7YJ) ─────────────
+
+describe('drain before cheap switch', () => {
+  it('getIsDraining() starts false', () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    expect(worker.getIsDraining()).toBe(false);
+  });
+
+  it('idle + proxy idle but fewer than the cheap budget free → enters drain with no switch', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    // 1 free of 3: the per-slot idle-entry gate passes (≥1 free) but the
+    // cheap pool's drain budget (≥2 free) is not yet met.
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotOperatorFree(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(0);
+    expect(worker.getIsDraining()).toBe(true);
+    // Mode tracking is unaffected by the drain state.
+    expect(worker.getLastKnownMode()).toBe('fast');
+  });
+
+  it('drain completes once the cheap budget frees → cheap switch, draining clears', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotOperatorFree(),
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(true);
+
+    // A slot frees: now 2 of 3 free → the drain completes and switches.
+    api.reset();
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotDrainComplete(),
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(false);
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'cheap' }));
+    expect(worker.getLastKnownMode()).toBe('cheap');
+  });
+
+  it('stays draining across multiple ticks while the cheap budget is unmet', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    for (let i = 0; i < 3; i += 1) {
+      advance(10_000);
+      await worker.tick({
+        enabled: true,
+        idleThresholdMs: 900_000,
+        proxyUrl: 'http://proxy',
+        proxyStatus: perSlotOperatorFree(),
+      });
+      await flushAsync();
+      expect(worker.getIsDraining()).toBe(true);
+    }
+    expect(setModePosts(api)).toHaveLength(0);
+  });
+
+  it('an operator command during drain cancels it and resets the idle clock (proxy stays fast)', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotOperatorFree(),
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(true);
+
+    // Operator returns: the drain is cancelled and the idle clock resets to
+    // "active now" (the fast-mode dedup skips a redundant fast POST).
+    api.reset();
+    worker.onOperatorCommand('http://proxy');
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(false);
+
+    // The fresh idle window means the very next tick does not re-enter drain.
+    api.reset();
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotOperatorFree(),
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(false);
+    expect(setModePosts(api)).toHaveLength(0);
+  });
+
+  it('fail-closed: a proxy status failure during drain does not exit drain and never switches', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotOperatorFree(),
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(true);
+
+    api.reset();
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: null, // endpoint failure / timeout / ambiguous
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(true); // no drain exit
+    expect(setModePosts(api)).toHaveLength(0);
+  });
+
+  it('a non-leader never enters drain', async () => {
+    clock = 1_000_000;
+    const api = mockAdminApi();
+    const worker = createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => false,
+    });
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: perSlotOperatorFree(),
+    });
+    await flushAsync();
+    expect(worker.getIsDraining()).toBe(false);
+    expect(setModePosts(api)).toHaveLength(0);
+  });
+});
+
 // ── Fail-closed paths ────────────────────────────────────────────────
 
 describe('fail-closed paths', () => {
@@ -750,8 +909,30 @@ function perSlotOperatorFree(overrides: Partial<LlamaStatus> = {}): LlamaStatus 
   });
 }
 
+/**
+ * Per-slot payload with 2 of 3 slots free — the cheap pool's spare capacity
+ * (parent WL-0MUL0KO7Q003O7YJ): one downtime pane holds a busy slot, but the
+ * two free slots satisfy the drain-completion budget, so the idle cheap
+ * switch fires.
+ */
+function perSlotDrainComplete(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
+  return perSlotStatus({
+    active_query: true,
+    local_active_query: true,
+    local_lease_active: true,
+    available_slots: 2,
+    total_slots: 3,
+    slots: [
+      { slot_id: 'slot-1', is_processing: true },
+      { slot_id: 'slot-2', is_processing: false },
+      { slot_id: 'slot-3', is_processing: false },
+    ],
+    ...overrides,
+  });
+}
+
 describe('per-slot operator gate', () => {
-  it('AC1: per-slot payload, ≥1 free slot → posts cheap even while the other two slots are busy (downtime panes)', async () => {
+  it('AC1: per-slot payload, ≥2 free slots → posts cheap even while another slot is busy (downtime panes)', async () => {
     clock = 1_000_000;
     const api = mockAdminApi();
     const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
@@ -760,7 +941,9 @@ describe('per-slot operator gate', () => {
       enabled: true,
       idleThresholdMs: 900_000,
       proxyUrl: 'http://proxy',
-      proxyStatus: perSlotOperatorFree(),
+      // Drain-complete: the cheap pool's 2 free slots are available even
+      // though a downtime pane holds the third slot busy.
+      proxyStatus: perSlotDrainComplete(),
     });
     await flushAsync();
     expect(setModePosts(api)).toHaveLength(1);
@@ -789,22 +972,23 @@ describe('per-slot operator gate', () => {
     expect(setModePosts(api)).toHaveLength(0);
   });
 
-  it('AC3: busy slots with ≥1 free slot → switch fires (spare-capacity semantics)', async () => {
+  it('AC3: busy slots with ≥2 free slots → switch fires (spare-capacity semantics)', async () => {
     clock = 1_000_000;
     const api = mockAdminApi();
     const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
     advance(900_000);
-    // 1 free of 3, without the global query/lease signals: the per-slot
-    // spare-capacity gate (≥1 free) must still fire.
+    // 2 free of 3, without the global query/lease signals: the per-slot
+    // spare-capacity gate (busy slot does not block) plus the drain-complete
+    // budget (≥2 free) fires the switch.
     await worker.tick({
       enabled: true,
       idleThresholdMs: 900_000,
       proxyUrl: 'http://proxy',
       proxyStatus: perSlotStatus({
-        available_slots: 1,
+        available_slots: 2,
         slots: [
           { slot_id: 'slot-1', is_processing: true },
-          { slot_id: 'slot-2', is_processing: true },
+          { slot_id: 'slot-2', is_processing: false },
           { slot_id: 'slot-3', is_processing: false },
         ],
       }),

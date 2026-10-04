@@ -116,7 +116,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 |----------|-------------|
 | [Heartbeat Skill](skill/heartbeat/SKILL.md) | Automated work item monitoring and audit orchestration for the Pi agent |
 | [PLUGIN_GUIDE.md](PLUGIN_GUIDE.md) | Plugin development guide and API reference |
-| [LOCAL_LLM.md](LOCAL_LLM.md) | Configure local LLM providers (Ollama, Foundry) |
+| [LOCAL_LLM.md](LOCAL_LLM.md) | Configure local LLM providers (Ollama, Foundry) and the direct `llm.*` chat config used by `wl interview` |
 | [MULTI_PROJECT_GUIDE.md](MULTI_PROJECT_GUIDE.md) | Multi-project setup with custom prefixes |
 | [API.md](API.md) | REST API endpoints and usage |
 | [docs/FILE_PATH_CONVENTION.md](docs/FILE_PATH_CONVENTION.md) | File path convention for work item descriptions |
@@ -134,7 +134,6 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [AGENTS.md](AGENTS.md) | AI agent onboarding and workflow instructions |
 | [tests/README.md](tests/README.md) | Test suite documentation |
 | [examples/README.md](examples/README.md) | Example plugins |
- | [OpenBrain Integration](docs/openbrain.md) | Documentation for the optional OpenBrain submission integration |
 
 ### Internal / Development
 
@@ -148,6 +147,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [docs/dev/wl-process-healthcheck.md](docs/dev/wl-process-healthcheck.md) | wl process healthcheck watchdog usage (cron/systemd, thresholds) |
 | [docs/dev/audit-debug-log-retention.md](docs/dev/audit-debug-log-retention.md) | Audit debug log retention policy + runbook: sweep locations/thresholds, dry-run/`--apply`/`--check`, cron install/removal, safety guarantees |
 | [docs/dev/downtime-dispatcher.md](docs/dev/downtime-dispatcher.md) | Leader-election + shared-coordination downtime dispatcher architecture (herdr); critical-first dispatch tier + freeze split-by-skill; dedicated Dispatcher workspace with per-project tabs (one tab per work-item prefix) |
+| [docs/pane-triage-skill.md](docs/pane-triage-skill.md) | Approval-gated pane-triage skill and the cross-language pane-close bridge that exposes the shared classifier to Python skills |
 
 ## Tutorials
 

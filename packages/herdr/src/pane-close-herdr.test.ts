@@ -12,6 +12,7 @@ import {
   paneKindFromLabel,
   paneItemIdFromLabel,
   readFinalAssistantEntries,
+  readSessionTailLines,
   createHerdrReaperDeps,
 } from './pane-close-herdr';
 
@@ -45,6 +46,20 @@ describe('parseHerdrPaneCloseList', () => {
   it('parses a bare pane array', () => {
     const raw = JSON.stringify([{ paneId: 'p1', label: 'x' }]);
     expect(parseHerdrPaneCloseList(raw)![0].paneId).toBe('p1');
+  });
+
+  it('parses workspace_id (WL-0MUJMXVPO0016DZM AC1)', () => {
+    const raw = JSON.stringify({
+      panes: [{ pane_id: 'w2V:p1', label: 'x', workspace_id: 'w2V' }],
+    });
+    expect(parseHerdrPaneCloseList(raw)![0].workspaceId).toBe('w2V');
+  });
+
+  it('parses tab_id (WL-0MUJMXVPO0016DZM AC3)', () => {
+    const raw = JSON.stringify({
+      panes: [{ pane_id: 'w2V:p1', label: 'x', tab_id: 'w2V:tT' }],
+    });
+    expect(parseHerdrPaneCloseList(raw)![0].tabId).toBe('w2V:tT');
   });
 
   it('tolerates log lines before the JSON envelope', () => {
@@ -129,6 +144,41 @@ describe('readFinalAssistantEntries', () => {
   });
 });
 
+describe('readSessionTailLines (WL-0MUJMXVPO0016DZM AC4)', () => {
+  function withTempFile(contents: string, fn: (path: string) => void): void {
+    const dir = mkdtempSync(join(tmpdir(), 'pane-tail-'));
+    const path = join(dir, 'session.jsonl');
+    try {
+      writeFileSync(path, contents, 'utf-8');
+      fn(path);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('returns the last N assistant lines', () => {
+    const lines: string[] = [];
+    for (let i = 1; i <= 30; i++) {
+      lines.push(
+        JSON.stringify({
+          type: 'message',
+          message: { role: 'assistant', content: [{ type: 'text', text: `line ${i}` }] },
+        }),
+      );
+    }
+    withTempFile(lines.join('\n') + '\n', (path) => {
+      const tail = readSessionTailLines(path, 20);
+      expect(tail).toHaveLength(20);
+      expect(tail[0]).toBe('line 11');
+      expect(tail[19]).toBe('line 30');
+    });
+  });
+
+  it('returns [] for an unreadable file', () => {
+    expect(readSessionTailLines('/nonexistent/session.jsonl')).toEqual([]);
+  });
+});
+
 describe('createHerdrReaperDeps', () => {
   it('maps pi panes with sessions into PaneStatus and skips session-less panes', async () => {
     const raw = JSON.stringify({
@@ -160,6 +210,27 @@ describe('createHerdrReaperDeps', () => {
       itemId: 'WL-0ABC123',
       agentProcessAlive: true,
     });
+  });
+
+  it('maps workspace_id into PaneStatus.workspaceId (WL-0MUJMXVPO0016DZM AC1)', async () => {
+    const raw = JSON.stringify({
+      panes: [
+        {
+          pane_id: 'w2V:p1',
+          label: 'Downtime triggered plan Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_status: 'idle',
+          workspace_id: 'w2V',
+          agent_session: { value: '/tmp/nonexistent-but-mapped.jsonl' },
+        },
+      ],
+    });
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn().mockResolvedValue(true),
+    });
+    const panes = await deps.listPanes();
+    expect(panes[0].workspaceId).toBe('w2V');
   });
 
   it('treats an unreadable producer-review lookup as review-blocked (fail-closed)', async () => {
