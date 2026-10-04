@@ -1253,6 +1253,41 @@ Answers are persisted after each response, so an interrupted session can be
 resumed by re-running the command: only the questions that remain outstanding
 are asked. `needsProducerReview` is cleared once every question has an answer.
 
+#### LLM-assisted question extraction
+
+The deterministic parser needs a recognised appendix heading and readable
+Q/A markup. When it finds nothing — the item was written in free prose, for
+example — the command can fall back to the local LLM to extract the
+outstanding questions:
+
+```sh
+wl interview WL-ABC123 --llm
+```
+
+The opt-in can also be set in the configuration file:
+
+```yaml
+interview:
+  intelligent: true
+```
+
+`--llm` and `interview.intelligent: true` are equivalent; `--llm` wins when
+both are present. `--no-llm` disables all LLM use, including extraction.
+
+When enabled — and only when the deterministic parser found no questions —
+the command sends the description (truncated to 8 KiB) to the configured chat
+provider with a 15 s timeout and asks for a JSON array of
+`[{"question": "..."}]`. Each returned question is shown in the same prompt
+loop as a parsed question, and **only questions the operator answers
+(confirms)** are written back — through the deterministic re-serialiser, never
+from raw model output. When the description has no clarifying section the
+canonical `## Appendix: Clarifying questions` heading is inserted; when one
+exists the confirmed questions are merged into it, keeping re-runs idempotent.
+
+If no provider is configured, or the request fails, times out or returns
+malformed JSON, the command degrades silently to the deterministic-only
+behaviour described below — no error is surfaced.
+
 #### When there are no questions to answer
 
 If no clarifying-questions section is found (or it contains no parseable
@@ -1307,9 +1342,15 @@ Options:
   `null`; multi-line explanations are preserved), `noSection`,
   `noQuestions`, `total`, `outstanding` and `allAnswered`. Performs no
   prompts, no mutation and (with `--no-llm`) no LLM call.
-- `--no-llm` — Disable the LLM explanation and use the structured fallback
-  (audit result, waiver, comments) instead (default: LLM on).
-- `--model <model>` — Override the chat model used for the explanation.
+- `--no-llm` — Disable all LLM use (the producer-review explanation and the
+  LLM-assisted question extraction) and use the structured fallback instead
+  (default: explanation on, extraction off unless enabled).
+- `--llm` — Enable LLM-assisted clarifying-question extraction when the
+  deterministic parser finds no questions. Equivalent to
+  `interview.intelligent: true`; the flag wins when both are set (default:
+  off).
+- `--model <model>` — Override the chat model used for the explanation and
+  extraction.
 
 > Without `--json`, the command requires interactive (TTY) input.
 
@@ -1338,6 +1379,19 @@ Defaults: `baseUrl` `http://192.168.0.199:8000/v1`, `model` `compact`,
 `timeoutMs` `15000`. Environment variables `LLM_BASE_URL`, `LLM_MODEL`,
 `LLM_API_KEY` and `LLM_TIMEOUT_MS` are used as fallbacks; config values take
 precedence over environment variables.
+
+#### `interview` configuration
+
+The `interview` section opts in to LLM-assisted question extraction without
+requiring the `--llm` flag:
+
+```yaml
+interview:
+  intelligent: true
+```
+
+An absent section (or `intelligent: false`) leaves extraction off. The
+provider itself is configured under `llm` (see above).
 
 ### `help` [command]
 

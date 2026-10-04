@@ -28,6 +28,10 @@ import registerInterview, {
   PRODUCER_REVIEW_INSTRUCTION,
   MAX_PROMPT_CONTEXT_BYTES,
   MAX_AUDIT_RAW_OUTPUT_BYTES,
+  parseExtractedQuestions,
+  buildExtractionPrompt,
+  EXTRACTION_TIMEOUT_MS,
+  MAX_EXTRACTION_DESCRIPTION_BYTES,
 } from '../../src/commands/interview.js';
 import { createTestContext } from '../test-utils.js';
 
@@ -1292,6 +1296,353 @@ describe('interview clear-the-flag prompt', () => {
       await t.ctx.runCli(['interview', t.id]);
       expect(t.messages.some(m => /Clear the needsProducerReview flag/.test(m))).toBe(false);
       expect(t.ctx.utils.db.get(t.id).needsProducerReview).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+});
+
+// ── LLM-assisted question extraction (WL-0MUH7ACKJ0024VGF) ───────────────
+
+describe('parseExtractedQuestions', () => {
+  it('parses a JSON array of question objects', () => {
+    expect(parseExtractedQuestions('[{"question":"A?"},{"question":"B?"}]')).toEqual([
+      'A?',
+      'B?',
+    ]);
+  });
+
+  it('returns an empty array for [] and blank input', () => {
+    expect(parseExtractedQuestions('[]')).toEqual([]);
+    expect(parseExtractedQuestions('   ')).toEqual([]);
+  });
+
+  it('tolerates markdown fences and surrounding prose', () => {
+    expect(
+      parseExtractedQuestions('Here you go:\n```json\n[{"question":"Fenced?"}]\n```'),
+    ).toEqual(['Fenced?']);
+  });
+
+  it('degrades to an empty array for malformed or non-array payloads', () => {
+    expect(parseExtractedQuestions('not json')).toEqual([]);
+    expect(parseExtractedQuestions('{"question":"object?"}')).toEqual([]);
+    expect(parseExtractedQuestions('[{"nope":1},"bad",{"question":"  "}]')).toEqual([]);
+  });
+
+  it('de-duplicates repeated questions', () => {
+    expect(
+      parseExtractedQuestions('[{"question":"Same?"},{"question":"Same?"}]'),
+    ).toEqual(['Same?']);
+  });
+});
+
+describe('buildExtractionPrompt', () => {
+  it('bounds the description to the 8 KB extraction limit', () => {
+    const prompt = buildExtractionPrompt('x'.repeat(20_000));
+    expect(prompt).toContain('Extract every unanswered clarifying question');
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThan(
+      MAX_EXTRACTION_DESCRIPTION_BYTES + 1000,
+    );
+  });
+});
+
+describe('runInterview LLM extraction fallback', () => {
+  const noSectionDesc = '# Task\n\nNo clarifying section here.';
+  const noQuestionsDesc = `# Task
+
+## Appendix: Clarifying questions
+
+No questions here — just context prose.`;
+
+  function extractionClient(response: string | Error, available = true): any {
+    return {
+      available,
+      complete: vi.fn(async () => {
+        if (response instanceof Error) throw response;
+        return response;
+      }),
+    };
+  }
+
+  it('extracts questions, confirms each, and writes answers deterministically', async () => {
+    const store = makeStore(makeItem(noSectionDesc));
+    const chat = extractionClient(
+      '[{"question":"Who is the user?"},{"question":"What format?"}]',
+    );
+    const prompts: string[] = [];
+    const answers = ['Support engineers', 'JSON'];
+    const outcome = await runInterview(
+      store.current(),
+      store,
+      {
+        prompt: async (message: string) => {
+          prompts.push(message);
+          return answers.shift() ?? '';
+        },
+      },
+      { llmFallback: true, chatClient: chat, timeoutMs: EXTRACTION_TIMEOUT_MS },
+    );
+
+    expect(chat.complete).toHaveBeenCalledTimes(1);
+    expect(chat.complete.mock.calls[0][1]).toEqual({ timeoutMs: 15_000 });
+    expect(prompts).toHaveLength(2);
+    expect(prompts[0]).toContain('Who is the user?');
+    expect(outcome.extracted).toBe(2);
+    expect(outcome.recorded).toBe(2);
+    expect(outcome.allAnswered).toBe(true);
+
+    const desc = store.current().description;
+    expect(desc).toContain('## Appendix: Clarifying questions');
+    expect(desc).toContain('- Q: Who is the user? — Answer (producer): Support engineers');
+    expect(desc).toContain('- Q: What format? — Answer (producer): JSON');
+    expect(store.current().needsProducerReview).toBe(false);
+  });
+
+  it('returns the deterministic no-question fallback when the LLM returns []', async () => {
+    const store = makeStore(makeItem(noSectionDesc));
+    const chat = extractionClient('[]');
+    const outcome = await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => 'unused' },
+      { llmFallback: true, chatClient: chat },
+    );
+    expect(outcome.extracted).toBe(0);
+    expect(outcome.noSection).toBe(true);
+    expect(store.current().description).toBe(noSectionDesc);
+  });
+
+  it('degrades silently when the LLM throws (network/timeout)', async () => {
+    const store = makeStore(makeItem(noSectionDesc));
+    const chat = extractionClient(new Error('Chat API request timed out after 15000 ms'));
+    const outcome = await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => 'unused' },
+      { llmFallback: true, chatClient: chat },
+    );
+    expect(outcome.extracted).toBe(0);
+    expect(outcome.noSection).toBe(true);
+    expect(store.current().description).toBe(noSectionDesc);
+  });
+
+  it('does not call an unavailable client', async () => {
+    const store = makeStore(makeItem(noSectionDesc));
+    const chat = extractionClient('ignored', false);
+    const outcome = await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => 'unused' },
+      { llmFallback: true, chatClient: chat },
+    );
+    expect(chat.complete).not.toHaveBeenCalled();
+    expect(outcome.extracted).toBe(0);
+  });
+
+  it('never calls the LLM when the deterministic parser finds questions', async () => {
+    const desc = `# Task
+
+## Appendix: Clarifying questions
+
+- Q: "Existing?" — Answer (user): "Yes". Source: reply.`;
+    const store = makeStore(makeItem(desc));
+    const chat = extractionClient('[{"question":"Hallucinated?"}]');
+    const outcome = await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => 'unused' },
+      { llmFallback: true, chatClient: chat },
+    );
+    expect(chat.complete).not.toHaveBeenCalled();
+    expect(outcome.extracted).toBe(0);
+    expect(outcome.allAnswered).toBe(true);
+  });
+
+  it('writes only operator-confirmed extracted questions', async () => {
+    const store = makeStore(makeItem(noSectionDesc));
+    const chat = extractionClient('[{"question":"Keep me?"},{"question":"Skip me?"}]');
+    const answers = ['Confirmed', ''];
+    const outcome = await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => answers.shift() ?? '' },
+      { llmFallback: true, chatClient: chat },
+    );
+    expect(outcome.recorded).toBe(1);
+    expect(outcome.outstanding).toBe(1);
+    expect(outcome.allAnswered).toBe(false);
+    const desc = store.current().description;
+    expect(desc).toContain('Keep me?');
+    expect(desc).not.toContain('Skip me?');
+    expect(store.current().needsProducerReview).toBe(true);
+  });
+
+  it('feeds the clarifying-section body (not the whole description) to the LLM', async () => {
+    const desc = `# Task
+
+UNRELATED_PREAMBLE_SENTINEL
+
+## Appendix: Clarifying questions
+
+SECTION_BODY_SENTINEL
+
+## Risks
+
+MORE`;
+    const store = makeStore(makeItem(desc));
+    const chat = extractionClient('[]');
+    await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => 'unused' },
+      { llmFallback: true, chatClient: chat },
+    );
+    const prompt = chat.complete.mock.calls[0][0] as string;
+    expect(prompt).toContain('SECTION_BODY_SENTINEL');
+    expect(prompt).not.toContain('UNRELATED_PREAMBLE_SENTINEL');
+  });
+
+  it('merges extracted questions into an existing question-free section', async () => {
+    const store = makeStore(makeItem(noQuestionsDesc));
+    const chat = extractionClient('[{"question":"Merged?"}]');
+    const outcome = await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => 'Yes' },
+      { llmFallback: true, chatClient: chat },
+    );
+    expect(outcome.extracted).toBe(1);
+    const desc = store.current().description;
+    expect(desc.match(/## Appendix: Clarifying questions/g)).toHaveLength(1);
+    expect(desc).toContain('just context prose');
+    expect(desc).toContain('- Q: Merged? — Answer (producer): Yes');
+  });
+});
+
+describe('interview --llm command', () => {
+  function setup(options: {
+    description?: string;
+    config?: any;
+    chatClient?: any;
+    answers?: string[];
+    needsProducerReview?: boolean;
+    jsonOutput?: any[];
+  } = {}) {
+    const ctx = createTestContext();
+    const messages: string[] = [];
+    const answers = [...(options.answers ?? [])];
+    const originalLog = console.log;
+    console.log = (...args: any[]) => { messages.push(args.join(' ')); };
+    if (options.jsonOutput) {
+      ctx.output = {
+        json: (data: any) => { options.jsonOutput!.push(data); },
+        success: () => {},
+        error: () => {},
+      };
+    }
+    ctx.utils.getConfig = () => options.config ?? {};
+    const id = ctx.utils.createSampleItem({});
+    ctx.utils.db.update(id, {
+      description: options.description ?? '# Task\n\nNo clarifying section here.',
+      title: 'LLM task',
+      needsProducerReview: options.needsProducerReview ?? true,
+    });
+    const baseGetDatabase = ctx.utils.getDatabase;
+    ctx.utils.getDatabase = (prefix?: string) => ({
+      ...baseGetDatabase(prefix),
+      getCommentsForWorkItem: () => [],
+      getAuditResult: () => null,
+    });
+    registerInterview(ctx as any, {
+      chatClientFactory: () => options.chatClient ?? null,
+      promptLoopFactory: () => ({
+        next: async (message: string) => {
+          messages.push(message);
+          return answers.shift() ?? '';
+        },
+        close: () => {},
+      }),
+      clearPrompt: async () => false,
+    });
+    return { ctx, id, messages, restore: () => { console.log = originalLog; } };
+  }
+
+  it('extracts, confirms and writes questions when --llm is passed', async () => {
+    const chat = fakeChatClient('[{"question":"Who is the user?"}]');
+    const t = setup({ chatClient: chat, answers: ['Support engineers'] });
+    try {
+      await t.ctx.runCli(['interview', t.id, '--llm']);
+      expect(chat.complete).toHaveBeenCalledTimes(1);
+      const stored = t.ctx.utils.db.get(t.id);
+      expect(stored.description).toContain('Who is the user?');
+      expect(stored.description).toContain('Support engineers');
+      expect(stored.needsProducerReview).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('does not call the extraction LLM without --llm or config opt-in', async () => {
+    const chat = fakeChatClient('[{"question":"Who is the user?"}]');
+    const t = setup({
+      chatClient: chat,
+      answers: [''],
+      needsProducerReview: false,
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(chat.complete).not.toHaveBeenCalled();
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('enables extraction from interview.intelligent: true', async () => {
+    const chat = fakeChatClient('[{"question":"Who is the user?"}]');
+    const t = setup({
+      chatClient: chat,
+      config: { interview: { intelligent: true } },
+      answers: ['Support engineers'],
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(chat.complete).toHaveBeenCalledTimes(1);
+      expect(t.ctx.utils.db.get(t.id).description).toContain('Support engineers');
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('lets --no-llm override interview.intelligent: true', async () => {
+    const chat = fakeChatClient('[{"question":"Who is the user?"}]');
+    const t = setup({
+      chatClient: chat,
+      config: { interview: { intelligent: true } },
+      answers: [''],
+      needsProducerReview: false,
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id, '--no-llm']);
+      expect(chat.complete).not.toHaveBeenCalled();
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('never runs extraction in --json mode (no prompts, no mutation)', async () => {
+    const chat = fakeChatClient('[{"question":"Who is the user?"}]');
+    const jsonOutput: any[] = [];
+    const t = setup({
+      chatClient: chat,
+      answers: [''],
+      needsProducerReview: false,
+      jsonOutput,
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id, '--json', '--llm']);
+      expect(chat.complete).not.toHaveBeenCalled();
+      expect(jsonOutput).toHaveLength(1);
+      expect(t.ctx.utils.db.get(t.id).description).not.toContain('Who is the user?');
     } finally {
       t.restore();
     }

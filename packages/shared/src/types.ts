@@ -241,6 +241,27 @@ export interface LlmConfig {
 }
 
 /**
+ * Configuration for the `wl interview` command.
+ *
+ * `intelligent: true` opts in to LLM-assisted clarifying-question extraction:
+ * when the deterministic parser finds no questions, the command asks the local
+ * OpenAI-compatible provider (configured under `llm`) to extract questions
+ * from the description as a fallback. This is the config-file equivalent of
+ * the `wl interview --llm` flag; the CLI flag takes precedence. Provider
+ * settings (base URL, model, API key, timeout) always come from `llm`.
+ *
+ * Example:
+ * ```yaml
+ * interview:
+ *   intelligent: true
+ * ```
+ */
+export interface InterviewConfig {
+  /** Enable LLM-assisted question extraction when no questions are parsed. */
+  intelligent?: boolean;
+}
+
+/**
  * Configuration for a worklog project
  */
 export interface WorklogConfig {
@@ -328,6 +349,11 @@ export interface WorklogConfig {
    * ```
    */
   llm?: LlmConfig;
+  /**
+   * Interview command configuration (opt-in LLM-assisted question
+   * extraction). See {@link InterviewConfig}.
+   */
+  interview?: InterviewConfig;
 }
 
 /**

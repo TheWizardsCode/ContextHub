@@ -197,6 +197,14 @@ export function loadConfig(): WorklogConfig | null {
     return null;
   }
 
+  // Validate the optional interview config section (opt-in LLM question
+  // extraction). Absent section → LLM fallback off (no behaviour change).
+  const interviewError = validateInterviewConfig(config);
+  if (interviewError) {
+    console.error(interviewError);
+    return null;
+  }
+
   // Resolve LLM config section (config → env vars → defaults).
   config.llm = resolveLlmConfig(config);
 
@@ -325,6 +333,47 @@ function validateLlmConfig(config: WorklogConfig): string | null {
   }
 
   return null;
+}
+
+/**
+ * Validate the optional `interview` config section.
+ *
+ * Returns an error message string when the section is present but malformed,
+ * or `null` when it is absent or valid. A non-object `interview` value or a
+ * non-boolean `intelligent` value is rejected; an absent section is valid and
+ * leaves LLM-assisted question extraction disabled.
+ */
+export function validateInterviewConfig(config: WorklogConfig): string | null {
+  const interview = (config as { interview?: unknown }).interview;
+  if (interview === undefined || interview === null) return null;
+  if (typeof interview !== 'object' || Array.isArray(interview)) {
+    return 'Invalid config: interview must be an object mapping to intelligent';
+  }
+
+  const section = interview as Record<string, unknown>;
+  if (
+    section.intelligent !== undefined &&
+    typeof section.intelligent !== 'boolean'
+  ) {
+    return 'Invalid config: interview.intelligent must be a boolean';
+  }
+
+  return null;
+}
+
+/**
+ * Whether LLM-assisted question extraction is enabled via the
+ * `interview.intelligent: true` config opt-in.
+ *
+ * This is the config-file equivalent of the `wl interview --llm` flag; the
+ * CLI flag takes precedence at the command boundary. Provider settings always
+ * come from `llm.*` / {@link resolveLlmConfig}. An absent section (or a
+ * non-true value) returns `false`, so existing users see no behaviour change.
+ */
+export function isIntelligentInterviewEnabled(
+  config: WorklogConfig | null | undefined,
+): boolean {
+  return config?.interview?.intelligent === true;
 }
 
 /** Parse a positive finite numeric env var, returning undefined otherwise. */

@@ -200,7 +200,11 @@ export interface InterviewOptions {
   prefix?: string;
   /** Non-interactive JSON output mode (no prompts, no mutation). */
   json?: boolean;
-  /** Commander maps the `--no-llm` flag to `llm: false`. */
+  /**
+   * LLM control flag. Commander maps `--llm` to `llm: true` (explicitly
+   * enable LLM-assisted question extraction) and `--no-llm` to `llm: false`
+   * (disable all LLM use). The test harness reports `--no-llm` as `noLlm`.
+   */
   llm?: boolean;
   /** Test-harness spelling of `--no-llm`. */
   noLlm?: boolean;
