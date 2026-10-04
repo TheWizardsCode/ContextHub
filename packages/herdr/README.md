@@ -405,14 +405,18 @@ critical items at the Herdr head, so a critical item dispatches as soon as it is
 first classifyable list item (WL-0MSI8H3HP000K0RG audit, WL-0MSMAYPQP001FLR6 implement,
 WL-0MT3FM8VA005XBHE critical).
 
-**Extended dispatch window (WL-0MU6UL3GQ0015AA5):** the Herdr head is windowed
-(mandatory items always included, remaining slots filled from "other" items), so a large
-mandatory set can push the only dispatchable candidate past the window. When the head
-yields no candidate the dispatcher re-reads the **same ranking path** with a bounded
-larger count (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional items) and skips the items
-already seen — a window extension, never a second ranking. The TUI worklist still renders
-exactly `browseItemCount` items; the extension is dispatch-only. A `no-candidate` outcome
-therefore means the whole bounded dispatch backlog held nothing dispatchable.
+**Sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes
+WL-0MU6UL3GQ0015AA5 AC1/AC4):** the dispatcher head is the sprint view. Both selection
+paths pass the live per-root `browseItemCount` (clamped 1–50) to `getHerdrListHead`, so
+the head equals the rendered worklist (mandatory items always included, remaining slots
+filled from "other" items). Non-critical work outside the view is never dispatched: when
+the head yields no candidate the dispatcher reports the in-view terminal reason
+(`no-candidate`, `review-queue-hold`, `code-freeze`, …) and does not scan hidden backlog.
+A bounded out-of-window escape hatch (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional
+items) re-reads the **same ranking path** but returns **only** `critical` items — because
+critical items are already mandatory in the view this is normally a no-op, and it can
+never surface hidden non-critical work. The TUI worklist still renders exactly
+`browseItemCount` items.
 
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)

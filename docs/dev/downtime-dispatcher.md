@@ -32,38 +32,61 @@ critical work is never starved by lower-priority items occupying the window (see
 *Critical-first tier* section). If no head item passes the filters, the dispatcher reports
 "no candidate" rather than falling back to a second ranking.
 No `wl next`/database scoring change is required; the observable contract is
-"dispatcher == Herdr list head".
+"dispatcher == Herdr list head". The head is fetched with the **live per-root
+`browseItemCount`** limit (clamped 1–50), so the dispatcher head equals the
+rendered sprint view — see *Sprint-view-only dispatch window* below.
 
-### Extended dispatch window (WL-0MU6UL3GQ0015AA5)
+### Sprint-view-only dispatch window (WL-0MUNS8X97007C9H9)
 
-The Herdr head is **windowed**: mandatory items (critical + `completed`/`in_review`) are
-always included and consume window slots, and the remaining slots are filled from "other"
-items. When the mandatory set is large, the first genuinely dispatchable candidate can fall
-**outside** the window — the 2026-09-18 incident (a 30-item head whose only dispatchable
-item was the 22nd "other") left the machine with **zero dispatches for 31 h** while a
-healthy backlog existed. The dispatcher therefore **extends the dispatch window when the
-head yields no candidate**:
+The dispatcher head **is** the sprint view. Both selection paths pass the live
+per-root `browseItemCount` setting — clamped to the supported `1`–`50` range by
+`resolveSprintViewWindow` (`packages/herdr/src/browse-window.ts`), the same
+clamp the TUI worklist applies — as the `getHerdrListHead` limit:
 
-- It re-reads the **same ranking path** (`fetchNextItems` → `selectWorkItems` →
-  `regroupWorkItems`) with a bounded larger count and skips the items already seen — a
-  **window extension, never a second ranking**. Ordering is unchanged; only more "other"
-  items become visible.
-- The extension is bounded by `DOWNTIME_DISPATCH_EXTEND_MAX` (`downtime-worker.ts`, 30): at
-  most `head length + 30` items are scanned per dispatch cycle (a default 30-item head
-  therefore scans at most 60 items).
-- The extension runs on **both** dispatch paths — `dispatchDowntimeWork` (direct dispatch)
-  and `computeMostImportantItem` (the coordination check-in offer) — so an instance never
-  offers "nothing" while its backlog holds dispatchable work.
-- The **TUI worklist is unchanged**: it keeps rendering exactly `browseItemCount` items
-  (clamped 1–50). The extension is dispatch-only.
-- **Fail-open:** a failed/empty extended lookup degrades to the original terminal reason, so
-  the extension can never convert a defined outcome into a new failure.
+- `dispatchDowntimeWork` (direct dispatch), and
+- `computeMostImportantItem` (the coordination check-in offer).
 
-Because of the extension, the **"no candidate" contract applies only to a genuinely empty
-dispatchable backlog** (or a backlog fully blocked by a safety gate) — not to an item hidden
-beyond the `browseItemCount` window. Other terminal reasons (code-freeze, `audit-in-flight`,
-`audit-host-saturated`, `fresh-audit-skip`, `review-queue-hold`, `wl-error`) keep their
-existing semantics.
+`getHerdrListHead` forwards the limit to `fetchNextItems(limit)`, so the head
+contains exactly the items the sprint view renders (`f-s-s` → `/wl`): the
+mandatory set (all `critical` plus all completed/`in_review`) and enough
+"other" items to fill the remaining `browseItemCount` slots. The setting is
+re-read live on every dispatch cycle, so a change applies without a restart. A
+caller that passes no limit falls back to the sprint-view default (20), so an
+unwindowed head is never produced.
+
+**Non-critical work outside the view is never dispatched.** When the head
+yields no candidate the dispatcher reports the terminal reason derived from the
+in-view flags (`no-candidate`, `review-queue-hold`, `code-freeze`,
+`fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`, `in-flight-hold`,
+`wl-error`) and does **not** fall back to a second ranking or an out-of-view
+non-critical scan. When every visible item is filtered by a safety gate (or the
+view is empty) the outcome is a NOP.
+
+**Critical escape hatch (defensive).** A bounded out-of-window read
+(`fetchExtendedHerdrItems`, `DOWNTIME_DISPATCH_EXTEND_MAX = 30`) re-reads the
+**same ranking path** with a larger window — a window extension, never a second
+ranking — and returns **only** `critical` items. Because every `critical` item
+is already mandatory in the view, this escape hatch is normally a no-op; it
+exists purely as a safety net so a release blocker can never be windowed out.
+Non-critical items beyond the sprint view are filtered out, so the operator can
+never be surprised by hidden-backlog dispatch. The extension runs on both
+dispatch paths; the **TUI worklist is unchanged** (it keeps rendering exactly
+`browseItemCount` items, plus the mandatory set).
+
+**Supersedes WL-0MU6UL3GQ0015AA5 AC1/AC4.** That item widened the non-critical
+window to prevent a 31-hour starvation incident. This item deliberately reverses
+the non-critical part of that behaviour: the dispatch window now tracks the
+operator-curated sprint view. The accepted trade-off (recorded on
+WL-0MUNS8X97007C9H9) is that if every visible item is blocked and the only
+dispatchable item lies beyond `browseItemCount`, the dispatcher no-ops —
+mitigated operationally by raising `browseItemCount` (up to 50) or clearing a
+blocker. The WL-0MU6UL3GQ0015AA5 starvation regression now asserts this NOP
+behaviour rather than a dispatch.
+
+**Fail-open preserved.** A failed head lookup still resolves `{ok:false}` (the
+caller keeps its entry / reports `wl-error`); a failed or empty extended
+critical read degrades to the original terminal reason, so the escape hatch can
+never convert a defined outcome into a new failure.
 
 **Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
 entry per instance — an **offer** of that instance's own Herdr list head (computed at the
@@ -523,13 +546,11 @@ only to automated downtime dispatch).
 The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
 (no poll, no idle tracking, no dispatch) for `downtimeNoCandidateCooldownMs`
 (default 60 min) after a genuinely empty backlog, resetting the idle
-tracker so a fresh full idle period is required after the pause. The
-**extended dispatch window** (WL-0MU6UL3GQ0015AA5, see *Ranking contract*
-above) guarantees a `no-candidate` outcome means the *whole* bounded
-dispatch backlog — not merely the initial head — held nothing dispatchable:
-the window is extended at least to the first dispatchable candidate, up to
-`DOWNTIME_DISPATCH_EXTEND_MAX` additional items, before `no-candidate` is
-reported. In
+tracker so a fresh full idle period is required after the pause. A
+`no-candidate` outcome means the *sprint view* — the live `browseItemCount`
+window (plus mandatory items) — held nothing dispatchable: the dispatcher does
+not scan hidden backlog (WL-0MUNS8X97007C9H9; see *Sprint-view-only dispatch
+window* above). In
 coordination mode (WL-0MTEZ4XZJ006Y9U7) the shared runtime file
 (`.worklog/downtime-coordination.json`) is an **offer list, not the
 backlog**: the leader removes each entry after dispatching (see step 4

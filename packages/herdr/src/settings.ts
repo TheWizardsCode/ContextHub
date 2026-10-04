@@ -8,6 +8,18 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
+  clampBrowseItemCount,
+  DEFAULT_BROWSE_ITEM_COUNT,
+  MIN_BROWSE_ITEM_COUNT,
+  MAX_BROWSE_ITEM_COUNT,
+} from './browse-window.js';
+
+// Re-exported for backward compatibility: the sprint-view window bounds and
+// clamp moved to the leaf `browse-window.ts` module so the downtime dispatcher
+// (`downtime-worker.ts`) can share them without an import cycle
+// (WL-0MUNS8X97007C9H9 AC1).
+export { clampBrowseItemCount, MIN_BROWSE_ITEM_COUNT, MAX_BROWSE_ITEM_COUNT, DEFAULT_BROWSE_ITEM_COUNT };
+import {
   clampDowntimeIdleThresholdMs,
   clampDowntimeMarkerStaleWindowMs,
   clampDowntimeNoCandidateCooldownMs,
@@ -145,7 +157,7 @@ export const defaultSettings: PluginSettings = {
   showIcons: true,
   autoSync: true,
   syncIntervalMs: 60000,
-  browseItemCount: 20,
+  browseItemCount: DEFAULT_BROWSE_ITEM_COUNT,
   showHelpText: true,
   downtimeEnabled: true,
   downtimeIdleThresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
@@ -165,24 +177,10 @@ export const defaultSettings: PluginSettings = {
   maxSyncStalenessMs: 60_000,
 };
 
-/** Minimum allowed browseItemCount. */
-export const MIN_BROWSE_ITEM_COUNT = 1;
-/** Maximum allowed browseItemCount. */
-export const MAX_BROWSE_ITEM_COUNT = 50;
-
 /** Minimum allowed maxSyncStalenessMs (1 s). */
 export const MIN_MAX_SYNC_STALENESS_MS = 1_000;
 /** Maximum allowed maxSyncStalenessMs (5 min). */
 export const MAX_MAX_SYNC_STALENESS_MS = 300_000;
-
-/**
- * Clamp a browseItemCount value to the supported [1, 50] range.
- * Used at load time so persisted/parsed values cannot exceed the bounds.
- */
-export function clampBrowseItemCount(value: number): number {
-  if (!Number.isFinite(value)) return defaultSettings.browseItemCount;
-  return Math.min(Math.max(Math.round(value), MIN_BROWSE_ITEM_COUNT), MAX_BROWSE_ITEM_COUNT);
-}
 
 /**
  * Clamp maxSyncStalenessMs to the supported [1000, 300000] range.

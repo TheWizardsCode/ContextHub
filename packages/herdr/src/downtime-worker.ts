@@ -133,6 +133,7 @@
 
 import { spawn } from 'node:child_process';
 import { isAuditFresh } from '@worklog/shared/icons';
+import { DEFAULT_BROWSE_ITEM_COUNT, resolveSprintViewWindow } from './browse-window.js';
 import type { CodeFreezeStatus } from './code-freeze.js';
 import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './downtime-disable-marker.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
@@ -306,25 +307,29 @@ export const DISPATCH_PIPELINE_SINGLE_FLIGHT = 1;
  * dispatch is held until audits / producer review drain it back below.
  * Re-read live from settings each tick (no restart); root-only counting
  * via `wl list --status completed --stage in_review --root-only --json`.
+ *
+ * The canonical definition lives in the leaf `browse-window.ts` module
+ * (shared with the TUI sprint view without an import cycle,
+ * WL-0MUNS8X97007C9H9 AC1); re-exported here for backward compatibility.
  */
-export const DEFAULT_BROWSE_ITEM_COUNT = 20;
+export { DEFAULT_BROWSE_ITEM_COUNT };
 
 /**
  * Maximum number of additional items to fetch when extending the dispatch
- * window (WL-0MU6UL3GQ0015AA5).
+ * window (WL-0MU6UL3GQ0015AA5; restricted to critical-only by
+ * WL-0MUNS8X97007C9H9 AC2/AC4).
  *
- * When the Herdr list head contains no dispatchable candidate but the
- * broader backlog does, the dispatcher re-reads the SAME ranking path with a
- * window of `head length + DOWNTIME_DISPATCH_EXTEND_MAX` items and iterates
- * the newly visible ones in the same Herdr priority order. This prevents
- * starvation when mandatory items (critical + completed/in_review) consume
- * most of the head slots and the only dispatchable item falls outside the
- * window.
+ * The dispatcher head is the sprint view, so a defensive out-of-window read
+ * re-checks the SAME ranking path with a window of
+ * `head length + DOWNTIME_DISPATCH_EXTEND_MAX` items. The extension returns
+ * ONLY `critical` items: every non-critical candidate must be visible in the
+ * sprint view, so a non-critical item beyond `browseItemCount` is never
+ * dispatched. Because all `critical` items are mandatory in the view, this
+ * escape hatch is normally a no-op.
  *
- * The extension is bounded: a default 30-item head plus an extension of 30
- * means at most 60 items are ever scanned per dispatch cycle. The TUI
- * worklist continues to show exactly `browseItemCount` items (clamped
- * 1–50).
+ * The extension is bounded: at most `head length + 30` items are ever scanned
+ * per dispatch cycle. The TUI worklist continues to show exactly
+ * `browseItemCount` items (clamped 1–50).
  */
 export const DOWNTIME_DISPATCH_EXTEND_MAX = 30;
 
@@ -2464,24 +2469,24 @@ export function isImplementHeldByReviewGate(
   return candidate.priority !== 'critical';
 }
 
-// ── Dispatch-window extension (WL-0MU6UL3GQ0015AA5) ─────────────────
+// ── Critical-only dispatch-window escape hatch (WL-0MUNS8X97007C9H9) ─────────────────
 /**
- * Fetch the EXTENDED Herdr head for dispatch (WL-0MU6UL3GQ0015AA5).
+ * Fetch the CRITICAL-ONLY extended Herdr head for dispatch
+ * (WL-0MU6UL3GQ0015AA5, restricted by WL-0MUNS8X97007C9H9 AC2/AC4).
  *
  * The dispatcher consumes the Herdr list head produced by the canonical
- * ranking path (fetcher → smart-selection → grouping). Mandatory items
- * (critical + `completed`/`in_review`) are always included and consume
- * window slots, so when they are numerous the first genuinely dispatchable
- * candidate can fall beyond the initial window — the dispatcher then sees
- * no candidate even though the broader backlog holds one (the 2026-09-18
- * 31-hour starvation incident).
- *
- * This helper re-reads the SAME ranking path with a larger window
+ * ranking path (fetcher → smart-selection → grouping), windowed to the live
+ * `browseItemCount` so the head equals the rendered sprint view. Every
+ * `critical` item is mandatory in that view, so this helper is a DEFENSIVE
+ * safety net: it re-reads the SAME ranking path with a larger window
  * (`current.length + DOWNTIME_DISPATCH_EXTEND_MAX`) and returns only the
- * items NOT already present in `current`, preserving the canonical order.
+ * `critical` items NOT already present in `current`, preserving the canonical
+ * order. NON-CRITICAL items beyond the sprint view are never returned — the
+ * operator must be able to see any work the dispatcher acts on.
+ *
  * It is a WINDOW EXTENSION, never a second ranking: the same
  * `selectWorkItems` / `regroupWorkItems` contract decides the order, just
- * with more "other" items included.
+ * with more items included.
  *
  * Fail-open: an absent optional `limit` support (test mocks ignoring the
  * argument), a `{ok:false}` CLI failure, a thrown error, or an extended head
@@ -2502,7 +2507,9 @@ export async function fetchExtendedHerdrItems(
     );
     if (!extended.ok) return [];
     const seen = new Set(current.map((i) => i.id));
-    return extended.items.filter((i) => !seen.has(i.id));
+    // Critical-only escape hatch: a non-critical item beyond the sprint view
+    // is never dispatchable (WL-0MUNS8X97007C9H9 AC2/AC4).
+    return extended.items.filter((i) => !seen.has(i.id) && i.priority === 'critical');
   } catch {
     return []; // fail-open: the extension never breaks a defined outcome
   }
@@ -3473,7 +3480,13 @@ export async function computeMostImportantItem(
   const freezeStatus = deps.readCodeFreezeStatus(cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
-  const head = await deps.getHerdrListHead(cwd);
+  // The dispatch window is the sprint view: the live per-root
+  // `browseItemCount`, clamped exactly as the TUI worklist does
+  // (WL-0MUNS8X97007C9H9 AC1). Passing the effective value means the head —
+  // and therefore every candidate — equals the rendered view.
+  const sprintWindow = resolveSprintViewWindow(browseItemCount);
+
+  const head = await deps.getHerdrListHead(cwd, sprintWindow);
   if (!head.ok) return { ok: false, error: head.error }; // CLI error — fail-open (entry kept)
   if (head.items.length === 0) return { ok: true, noCandidate: true };
 
@@ -3503,7 +3516,7 @@ export async function computeMostImportantItem(
     if (reviewGate === undefined) {
       // Frozen already pauses audit/implement offers (filter below), so the
       // gate is never consulted under a freeze.
-      reviewGate = frozen ? null : await readReviewQueueGate(deps, cwd, browseItemCount);
+      reviewGate = frozen ? null : await readReviewQueueGate(deps, cwd, sprintWindow);
     }
     return reviewGate;
   };
@@ -4270,6 +4283,12 @@ export async function dispatchDowntimeWork(
     const panesEligible = freeSlots === undefined || freeSlots >= DOWNTIME_PANE_MIN_FREE_SLOTS;
     const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
 
+    // Sprint-view dispatch window (WL-0MUNS8X97007C9H9 AC1): the live per-root
+    // `browseItemCount` clamped exactly as the TUI worklist does, so the Herdr
+    // head below equals the rendered sprint view. Non-critical work outside
+    // this window is never dispatched.
+    const sprintWindow = resolveSprintViewWindow(opts.browseItemCount);
+
     let auditInFlight = false;
     let auditCheckFailed = false;
     let freshnessSkip = false;
@@ -4306,7 +4325,7 @@ export async function dispatchDowntimeWork(
     // intake/critical flow unconditionally.
     let reviewGate: ReviewQueueGateResult | null = null;
     if (!frozen && panesEligible) {
-      reviewGate = await readReviewQueueGate(deps, opts.cwd, opts.browseItemCount);
+      reviewGate = await readReviewQueueGate(deps, opts.cwd, sprintWindow);
     }
 
     // ── Herdr list head consumes the ranking (WL-0MTK1ILM2009QYB2 ACs 1–2) ──
@@ -4321,7 +4340,7 @@ export async function dispatchDowntimeWork(
     // once the suite is fully on Herdr-head stubs.
     {
       const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, auditHostSaturated };
-      const head = await deps.getHerdrListHead(opts.cwd);
+      const head = await deps.getHerdrListHead(opts.cwd, sprintWindow);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
         // Item-scoped in-flight state (WL-0MUBEZ6PE002WLP4 / F3): resolved

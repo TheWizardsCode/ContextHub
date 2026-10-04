@@ -939,12 +939,14 @@ export function createDowntimeDeps(
     getRunningDowntimePanes: runningPanesResolver,
     // Herdr list head (WL-0MTK1ILM2009QYB2): canonical ranking via fetcher → smart-selection → grouping.
     // The dispatcher treats this as the single ranking source; remaining safety gates are filters.
-    // Batch size 30: enough to filter through (code-freeze, dispatched-marker, single-flight)
-    // without excessive overhead; fetchNextItems applies mandatory-always, browseItemCount
-    // windowing, and regroupWorkItems grouping — the sole ranking path.
+    // Callers pass the live sprint-view window (`browseItemCount`, clamped 1–50) so the head
+    // equals the rendered worklist (WL-0MUNS8X97007C9H9 AC1). The fallback applies only to a
+    // caller that passes no limit; it defaults to the sprint-view default so an unwindowed head
+    // is never produced. `fetchNextItems` applies mandatory-always, browseItemCount windowing,
+    // and regroupWorkItems grouping — the sole ranking path.
     getHerdrListHead: async (_cwd: string, limit?: number): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
       try {
-        const items = await fetchNextItems(limit ?? 30);
+        const items = await fetchNextItems(limit ?? defaultSettings.browseItemCount);
         return { ok: true, items };
       } catch (err) {
         return { ok: false, error: String(err) };
