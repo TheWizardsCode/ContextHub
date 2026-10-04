@@ -1243,26 +1243,39 @@ keypresses mid-keystroke (WL-0MTV67MZU003H7SH). There is no user value in
 syncing or refreshing the list while a form is active, so the work is
 deferred until typing finishes.
 
-- **Shared predicate** — `isInputActive(formState, shipItDialog,
-  blockedNoticeActive)` in `worklist.ts` returns `true` when
-  `formState !== null || shipItDialog !== null || blockedNoticeActive`.
-  Both scheduler ticks (the 30s `refresh` and the 60s `sync`) check it
-  alongside the existing `paneGate.visible()` check and return early when it
-  is true. The guard is defined once and shared — future text-input overlays
-  are covered by extending the single predicate, not per-screen copies.
+- **Shared predicate, checked on every background path** —
+  `isInputActive(formState, shipItDialog, blockedNoticeActive)` in
+  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null
+  || blockedNoticeActive`. The 30s `refresh` and 60s `sync` scheduler ticks
+  check it alongside the existing `paneGate.visible()` check and return early
+  when it is true. The same predicate is also consulted **inside**
+  `doRefresh`/`doSync` themselves, so every other background path that calls
+  them directly is covered too: tab-focus resume, the herdr event subscriber
+  (`pane_focused`), the hidden→visible resume-poll fallback, the
+  command-completion `onRefresh` hook, and agent-status event re-renders. The
+  guard is defined once and shared — future text-input overlays are covered by
+  extending the single predicate, not per-screen copies.
 - **All text-input sites covered** — the command-parameter form
   (`FormState`), the Ship It confirmation dialog (`ShipItDialogState`), the
   Ship-mode blocked notice, and `md-note-edit` (which opens a `FormState`)
   are all covered. There is no separate note-edit state to gate.
 - **Fast typing never drops characters** — a raw stdin `data` event may
-  carry **several coalesced keystrokes** when the user types quickly (the
-  PTY batches bytes). Both text-input handlers run every chunk through the
-  shared `splitKeypresses()` tokeniser (`key-input.ts`) so each key is
-  applied in order; escape sequences (arrows, Ctrl+Enter, bracketed paste)
-  stay intact as one token. Previously a multi-character chunk was silently
-  discarded because only `key.length === 1` was accepted — the residual
-  "missing keystrokes when typing fast" bug that the tick gate alone could
-  not fix.
+  carry **several coalesced keystrokes** when the user types quickly (the PTY
+  batches bytes). Both text-input handlers run every chunk through the shared
+  `splitKeypresses()` tokeniser (`key-input.ts`) so each key is applied in
+  order; escape sequences (arrows, Ctrl+Enter, bracketed paste) stay intact as
+  one token. Previously a multi-character chunk was silently discarded because
+  only `key.length === 1` was accepted — the residual "missing keystrokes when
+  typing fast" bug that the tick gate alone could not fix.
+- **Split bytes are reassembled across chunks** — the TUI reads stdin through a
+  stateful `KeypressDecoder` (`key-input.ts`). Raw TTY input is a byte stream,
+  not one key per `data` event: a multi-byte UTF-8 code point or an escape
+  sequence can be split across reads. The decoder buffers the incomplete tail
+  (`StringDecoder` for UTF-8; the tokeniser for an incomplete CSI sequence) and
+  completes it from the next chunk, so bytes are never lost and a split
+  mouse/arrow/bracketed-paste sequence is never misread as a bare `Esc` that
+  would cancel the open form. A lone trailing `ESC` is still emitted
+  immediately as the Escape key so cancel/submit stays responsive.
 - **Resume contract: skip, don't coalesce** — ticks are silently dropped
   while typing; the next regular tick after the overlay closes fires
   normally. No queued or immediate post-close refresh is emitted (this

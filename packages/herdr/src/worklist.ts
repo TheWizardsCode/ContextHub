@@ -67,6 +67,7 @@ import {
 } from './form-dialog.js';
 import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
+import { KeypressDecoder } from './key-input.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 import {
@@ -4875,6 +4876,17 @@ export async function runWorklistTui(
   let blockedNotice: string | null = null;
 
   /**
+   * Single source of truth for "the user is typing" (WL-0MTV67MZU003H7SH):
+   * true while any text-input overlay (`formState`, `shipItDialog`, or the
+   * modal `blockedNotice`) is open. Background refresh/sync paths consult this
+   * so no re-render or `wl` spawn contends with typing — whichever path
+   * triggers the work (scheduler tick, focus-resume, event subscriber, or the
+   * command-completion hook). See {@link isInputActive}.
+   */
+  const inputActive = (): boolean =>
+    isInputActive(formState, shipItDialog, blockedNotice !== null);
+
+  /**
    * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
    * ambiguous marker keeps `codeFreezeActive` false (browsing and shortcut
    * blocking are unchanged); only the ambiguous-marker banner state and the
@@ -4978,6 +4990,10 @@ export async function runWorklistTui(
     agentEventRenderPending = true;
     Promise.resolve().then(() => {
       agentEventRenderPending = false;
+      // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and its
+      // open overlay) while a text-input overlay is active. Icons catch up on
+      // the next non-typing render/refresh.
+      if (inputActive()) return;
       try {
         if (agentTracker) {
           mergeAgentStatesCached(state.items, agentTracker);
@@ -5154,6 +5170,13 @@ export async function runWorklistTui(
    * Fetch and apply updated items, with optional notification.
    */
   const doRefresh = async (showNotification = false): Promise<void> => {
+    // Typing gate (WL-0MTV67MZU003H7SH): never refresh while a text-input
+    // overlay is open — a background re-render would contend with the typing
+    // event loop. Skip silently (not coalesced); the next scheduler tick after
+    // the overlay closes refreshes normally. Centralised here so it covers ALL
+    // callers (scheduler tick, focus-resume, event subscriber, and the
+    // command-completion hook), not just the scheduler tick.
+    if (inputActive()) return;
     // Single-flight guard with trailing/coalescing: if a refresh is already
     // in-flight, record the request as pending and return. The pending flag
     // is checked in the `finally` block so a trailing refresh runs after the
@@ -5312,6 +5335,10 @@ export async function runWorklistTui(
   // binding was removed (WL-0MSGG5N5Z0074TLY) — doSync is now reached only
   // from the auto-sync timer path.
   const doSync = async (ifIdle = false, heartbeatTtlMs?: number): Promise<void> => {
+    // Typing gate (WL-0MTV67MZU003H7SH): never spawn `wl sync` while a
+    // text-input overlay is open. Skip silently; the next tick after the
+    // overlay closes syncs normally.
+    if (inputActive()) return;
     const outcome = await runSync(getWorklogDir(), {
       ifIdle,
       ...(heartbeatTtlMs !== undefined ? { heartbeat: true, heartbeatTtlMs } : {}),
@@ -5443,8 +5470,7 @@ export async function runWorklistTui(
   const dispatchMouse = (key: string): boolean =>
     handleMouseInput(state, key, termSize, clickState);
 
-  const onData = async (chunk: Buffer): Promise<void> => {
-    const key = chunk.toString();
+  const handleKeyInput = async (key: string): Promise<void> => {
 
     // Alt+m toggle shortcut (WL-0MT0AP2LR000JFWN): always available,
     // even in modal states. Toggles mouse tracking on/off so the user
@@ -6048,6 +6074,20 @@ export async function runWorklistTui(
     render();
   };
 
+  // ── Streaming stdin decode (WL-0MTV67MZU003H7SH) ──────────────────
+  // Raw TTY input is a byte stream: a multi-byte UTF-8 code point or a
+  // mouse/paste/arrow escape sequence can be split across `data` events while
+  // typing fast. `KeypressDecoder` buffers the incomplete tail and completes
+  // it from the next chunk (never dropping bytes, never misreading a split
+  // escape as the Esc key). Complete keys are dispatched through the SAME
+  // handler as before, one decoded chunk at a time.
+  const keyDecoder = new KeypressDecoder();
+  const onData = (chunk: Buffer): void => {
+    const keys = keyDecoder.push(chunk);
+    if (keys.length === 0) return;
+    void handleKeyInput(keys.join(''));
+  };
+
   let resolve: (value: WorkItem | undefined) => void;
   const promise = new Promise<WorkItem | undefined>((res) => {
     resolve = res;
@@ -6353,7 +6393,7 @@ export async function runWorklistTui(
       intervalMs: opts.refreshIntervalMs,
       singleFlight: true,
       run: createGatedTick({
-        isInputActive: () => isInputActive(formState, shipItDialog, blockedNotice !== null),
+        isInputActive: inputActive,
         isVisible: () => paneGate.visible(),
         onHidden: () => {
           panePaused = true;
@@ -6390,7 +6430,7 @@ export async function runWorklistTui(
       intervalMs: opts.syncIntervalMs,
       fireImmediately: true,
       run: createGatedTick({
-        isInputActive: () => isInputActive(formState, shipItDialog, blockedNotice !== null),
+        isInputActive: inputActive,
         isVisible: () => paneGate.visible(),
         onHidden: () => {
           panePaused = true;
