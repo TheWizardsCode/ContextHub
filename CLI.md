@@ -1257,14 +1257,39 @@ are asked. `needsProducerReview` is cleared once every question has an answer.
 
 If no clarifying-questions section is found (or it contains no parseable
 questions) but the item is still flagged for producer review, the command
-explains what the producer must do to clear the flag. The explanation is
-produced by the local LLM proxy's `compact` model, prompted with the
-instruction *"Explain what the producer needs to do in order to remove the
-needsProducerReview flag"* plus item context (the description and the two most
-recent comments). When the LLM is disabled or unreachable the command falls
-back silently to the two most recent comments (`<author>: <first line>`).
+explains **why** the item is flagged — naming the triggering evidence — and
+only then what the producer must do to clear the flag.
 
-The explanation is advisory only — it never mutates the description.
+The explanation is produced by the local LLM proxy's `compact` model, prompted
+with an instruction to first state the reason (citing the triggering evidence)
+and then the action, plus item context:
+
+- the **latest audit result** (verdict, provenance, summary and a bounded
+  raw-output excerpt) — the strongest signal for review-gated items;
+- the description; and
+- the two most recent comments.
+
+The audit block is placed ahead of the description so it survives the overall
+context bound (`MAX_PROMPT_CONTEXT_BYTES`, 8 KiB) when the description is very
+large. The summary and raw-output excerpt are individually bounded so a single
+large audit cannot dominate the prompt.
+
+When the LLM is disabled (`--no-llm`) or unreachable the command falls back
+silently to the **structured evidence**, in priority order:
+
+1. the latest audit result (verdict and summary);
+2. a durable audit-gap waiver (`auditWaiver`);
+3. the two most recent comments (`<author>: <first line>`);
+4. a generic actionable line (`wl reviewed <id> false`) as a last resort.
+
+The rendered explanation preserves intentional line breaks and short Markdown
+structure — it is no longer collapsed into a single line — but collapses runs
+of spaces and repeated blank lines, and is bounded by a documented maximum
+(`MAX_EXPLANATION_LENGTH`, 1000 characters, and `MAX_EXPLANATION_LINES`, 24
+lines). Truncation is marked with a trailing ellipsis.
+
+The explanation is advisory only — it never mutates the description or clears
+the flag.
 
 After printing the explanation the command asks
 `Clear the needsProducerReview flag? (y/N)` (default **No**); answering `y`
@@ -1279,11 +1304,11 @@ Options:
 - `--prefix <prefix>` — Operate on a specific prefix (optional).
 - `--json` — Non-interactive mode: prints JSON with
   `needsProducerReview` (boolean), `producerReviewExplanation` (string or
-  `null`), `noSection`, `noQuestions`, `total`, `outstanding` and
-  `allAnswered`. Performs no prompts, no mutation and (with `--no-llm`) no
-  LLM call.
-- `--no-llm` — Disable the LLM explanation and use the comment fallback
-  (default: LLM on).
+  `null`; multi-line explanations are preserved), `noSection`,
+  `noQuestions`, `total`, `outstanding` and `allAnswered`. Performs no
+  prompts, no mutation and (with `--no-llm`) no LLM call.
+- `--no-llm` — Disable the LLM explanation and use the structured fallback
+  (audit result, waiver, comments) instead (default: LLM on).
 - `--model <model>` — Override the chat model used for the explanation.
 
 > Without `--json`, the command requires interactive (TTY) input.

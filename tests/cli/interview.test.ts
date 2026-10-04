@@ -23,9 +23,11 @@ import registerInterview, {
   runInterview,
   buildProducerReviewExplanation,
   buildExplanationPrompt,
-  buildCommentFallback,
-  normaliseExplanation,
+  buildFallbackExplanation,
+  renderExplanation,
   PRODUCER_REVIEW_INSTRUCTION,
+  MAX_PROMPT_CONTEXT_BYTES,
+  MAX_AUDIT_RAW_OUTPUT_BYTES,
 } from '../../src/commands/interview.js';
 import { createTestContext } from '../test-utils.js';
 
@@ -761,13 +763,14 @@ describe('buildProducerReviewExplanation', () => {
     expect(result).toBeNull();
   });
 
-  it('returns the normalised LLM explanation when the call succeeds', async () => {
-    const client = fakeChatClient('Ask the\noperator to\nclear the flag.');
+  it('preserves intentional line breaks in the LLM explanation (AC3)', async () => {
+    const client = fakeChatClient('Reason: AC3 unmet\nAction: fix rendering');
     const result = await buildProducerReviewExplanation(flaggedItem('desc'), {
       comments,
       chatClient: client,
     });
-    expect(result).toBe('Ask the operator to clear the flag.');
+    expect(result).toBe('Reason: AC3 unmet\nAction: fix rendering');
+    expect(result!.split('\n').length).toBeGreaterThan(1);
     expect(client.complete).toHaveBeenCalledTimes(1);
   });
 
@@ -825,15 +828,160 @@ describe('buildProducerReviewExplanation', () => {
     expect(prompt).not.toContain('Ancient history');
   });
 
-  it('normalises multi-line text to a single bounded line', () => {
-    expect(normaliseExplanation('a\n\nb   c')).toBe('a b c');
-    const bounded = normaliseExplanation('x'.repeat(2000), 50);
-    expect(bounded.length).toBeLessThanOrEqual(50);
+  it('prompt instruction asks for the reason ("why") as well as the action (AC1)', () => {
+    const instruction = PRODUCER_REVIEW_INSTRUCTION.toLowerCase();
+    expect(instruction).toContain('why');
+    expect(instruction).toContain('remove the needsproducerreview flag');
   });
 
-  it('buildCommentFallback renders <author>: <first line> per comment', () => {
-    const fallback = buildCommentFallback(flaggedItem('desc'), comments);
-    expect(fallback).toBe('bob: Second comment; alice: First comment');
+  it('names the audit reason when the LLM path is disabled (AC1)', async () => {
+    const auditResult = {
+      readyToClose: false,
+      auditedAt: '2026-10-04T21:00:00.000Z',
+      author: 'audit-runner',
+      summary: 'AC1 unmet: explanation does not state why',
+    };
+    const result = await buildProducerReviewExplanation(flaggedItem('desc'), {
+      comments: [],
+      auditResult,
+      noLlm: true,
+    });
+    expect(result).toContain('not ready to close');
+    expect(result).toContain('AC1 unmet: explanation does not state why');
+  });
+
+  it('surfaces audit evidence in the prompt and preserves multi-line rendering', async () => {
+    const auditResult = {
+      readyToClose: false,
+      auditedAt: '2026-10-04T21:00:00.000Z',
+      author: 'audit-runner',
+      summary: 'AC3 unmet: rendering still truncates',
+      rawOutput: 'VERDICT: not ready\nAC3: unmet',
+    };
+    const client = fakeChatClient('Because AC3 failed\nFix the renderer');
+    const result = await buildProducerReviewExplanation(flaggedItem('desc'), {
+      comments,
+      auditResult,
+      chatClient: client,
+    });
+    const prompt = client.complete.mock.calls[0][0] as string;
+    expect(prompt).toContain(auditResult.summary);
+    expect(result).toBe('Because AC3 failed\nFix the renderer');
+  });
+
+  describe('renderExplanation (AC3)', () => {
+    it('preserves line breaks but collapses runs of spaces', () => {
+      const rendered = renderExplanation('Line one\n\nLine two   with   spaces');
+      expect(rendered).toBe('Line one\n\nLine two with spaces');
+      expect(rendered.split('\n').length).toBeGreaterThan(1);
+    });
+
+    it('bounds the explanation by length', () => {
+      const bounded = renderExplanation('x'.repeat(5000), 100, 50);
+      expect(bounded.length).toBeLessThanOrEqual(100);
+    });
+
+    it('bounds the explanation by line count', () => {
+      const many = Array.from({ length: 100 }, (_, i) => `line ${i}`).join('\n');
+      const bounded = renderExplanation(many, 5000, 10);
+      expect(bounded.split('\n').length).toBeLessThanOrEqual(10);
+      expect(bounded.length).toBeLessThanOrEqual(5000);
+    });
+
+    it('marks truncation with an ellipsis', () => {
+      const bounded = renderExplanation('x'.repeat(5000), 50, 50);
+      expect(bounded.endsWith('…')).toBe(true);
+    });
+  });
+
+  describe('buildFallbackExplanation structured signals (AC4)', () => {
+    const auditResult = {
+      readyToClose: false,
+      auditedAt: '2026-10-04T21:00:00.000Z',
+      author: 'audit-runner',
+      summary: 'AC3 unmet: the explanation is still collapsed to one line',
+      rawOutput: 'VERDICT: not ready\nAC3: unmet',
+    };
+
+    it('reports the audit verdict and summary when an audit result exists (a)', () => {
+      const fallback = buildFallbackExplanation(flaggedItem('desc'), comments, auditResult);
+      expect(fallback).toContain('not ready to close');
+      expect(fallback).toContain(auditResult.summary);
+      expect(fallback).not.toContain('bob: Second comment');
+    });
+
+    it('reports a durable audit waiver when there is no audit result', () => {
+      const item = flaggedItem('desc') as any;
+      item.auditWaiver = {
+        reason: 'Audit gap deliberately accepted for a docs-only change',
+        author: 'producer',
+        waivedAt: '2026-10-04T21:00:00.000Z',
+      };
+      const fallback = buildFallbackExplanation(item, comments, null);
+      expect(fallback).toContain('Audit gap waived by producer');
+      expect(fallback).toContain('docs-only change');
+    });
+
+    it('falls back to the comments when there is no audit evidence (b)', () => {
+      const fallback = buildFallbackExplanation(flaggedItem('desc'), comments, null);
+      expect(fallback).toBe('bob: Second comment\nalice: First comment');
+    });
+
+    it('uses a generic actionable line as a last resort (c)', () => {
+      const fallback = buildFallbackExplanation(flaggedItem('desc'), [], null);
+      expect(fallback).toContain('WL-TEST-1');
+      expect(fallback).toContain('No structured evidence');
+    });
+  });
+
+  describe('buildExplanationPrompt audit context (AC2)', () => {
+    const auditResult = {
+      readyToClose: false,
+      auditedAt: '2026-10-04T21:00:00.000Z',
+      author: 'audit-runner',
+      summary: 'AC3 unmet: rendering still truncates',
+      rawOutput: 'VERDICT: not ready\nAC3: unmet',
+    };
+
+    it('includes the audit summary as first-class prompt context', () => {
+      const prompt = buildExplanationPrompt(flaggedItem('desc'), comments, auditResult);
+      expect(prompt).toContain(auditResult.summary);
+      expect(prompt).toContain('Latest audit result:');
+      expect(prompt).toContain('not ready to close');
+    });
+
+    it('keeps the audit context ahead of a large description', () => {
+      const big = flaggedItem('z'.repeat(50000));
+      const prompt = buildExplanationPrompt(big, [], auditResult);
+      expect(prompt).toContain(auditResult.summary);
+    });
+
+    it('bounds the total prompt context by MAX_PROMPT_CONTEXT_BYTES', () => {
+      const prefix = `${PRODUCER_REVIEW_INSTRUCTION}.\n\n`;
+      const prompt = buildExplanationPrompt(
+        flaggedItem('y'.repeat(50000)),
+        [comment('a', 'z'.repeat(50000))],
+        auditResult,
+      );
+      expect(prompt.startsWith(prefix)).toBe(true);
+      const context = prompt.slice(prefix.length);
+      expect(Buffer.byteLength(context, 'utf8')).toBeLessThanOrEqual(
+        MAX_PROMPT_CONTEXT_BYTES,
+      );
+    });
+
+    it('bounds the raw-output excerpt embedded in the prompt', () => {
+      const hugeRaw = { ...auditResult, rawOutput: 'r'.repeat(50000) };
+      const prompt = buildExplanationPrompt(flaggedItem('desc'), [], hugeRaw);
+      const marker = 'Raw output (excerpt):';
+      const rawIdx = prompt.indexOf(marker);
+      expect(rawIdx).toBeGreaterThan(-1);
+      const excerpt = prompt.slice(rawIdx + marker.length);
+      // The bound plus the small trailing description/comments sections.
+      expect(Buffer.byteLength(excerpt, 'utf8')).toBeLessThan(
+        MAX_AUDIT_RAW_OUTPUT_BYTES + 200,
+      );
+    });
   });
 });
 
@@ -842,6 +990,7 @@ describe('interview --json (non-interactive)', () => {
   function setup(options: {
     item?: { description?: string; needsProducerReview?: boolean };
     comments?: any[];
+    auditResult?: any;
     chatClient?: any;
   } = {}) {
     const ctx = createTestContext();
@@ -861,6 +1010,7 @@ describe('interview --json (non-interactive)', () => {
     ctx.utils.getDatabase = (prefix?: string) => ({
       ...baseGetDatabase(prefix),
       getCommentsForWorkItem: () => options.comments ?? [],
+      getAuditResult: () => options.auditResult ?? null,
     });
     registerInterview(ctx as any, {
       chatClientFactory: () => options.chatClient ?? null,
@@ -905,6 +1055,52 @@ describe('interview --json (non-interactive)', () => {
 
     expect(client.complete).not.toHaveBeenCalled();
     expect(jsonOutput[0].producerReviewExplanation).toBe('producer: Please clarify scope.');
+  });
+
+  it('preserves a multi-line explanation and does not mutate the item (AC5)', async () => {
+    const client = fakeChatClient('Reason: AC3 unmet\nAction: fix rendering');
+    const { ctx, id, jsonOutput } = setup({
+      item: { description: '# Task\n\nNo section.', needsProducerReview: true },
+      comments: [],
+      chatClient: client,
+    });
+
+    await ctx.runCli(['interview', id, '--json']);
+
+    expect(jsonOutput).toHaveLength(1);
+    expect(jsonOutput[0].producerReviewExplanation).toBe(
+      'Reason: AC3 unmet\nAction: fix rendering',
+    );
+    // Round-trips as valid JSON with the newline preserved.
+    expect(JSON.parse(JSON.stringify(jsonOutput[0])).producerReviewExplanation).toBe(
+      'Reason: AC3 unmet\nAction: fix rendering',
+    );
+    const stored = ctx.utils.db.get(id);
+    expect(stored.needsProducerReview).toBe(true);
+    expect(stored.description).toContain('No section.');
+  });
+
+  it('surfaces the audit verdict and summary in --json when the LLM is disabled (AC4)', async () => {
+    const { ctx, id, jsonOutput } = setup({
+      item: { description: '# Task\n\nNo section.', needsProducerReview: true },
+      comments: [],
+      auditResult: {
+        readyToClose: false,
+        auditedAt: '2026-10-04T21:00:00.000Z',
+        author: 'audit-runner',
+        summary: 'AC3 unmet: rendering still truncates',
+      },
+      chatClient: fakeChatClient('unused'),
+    });
+
+    await ctx.runCli(['interview', id, '--json', '--no-llm']);
+
+    expect(jsonOutput[0].producerReviewExplanation).toContain('not ready to close');
+    expect(jsonOutput[0].producerReviewExplanation).toContain(
+      'AC3 unmet: rendering still truncates',
+    );
+    const stored = ctx.utils.db.get(id);
+    expect(stored.needsProducerReview).toBe(true);
   });
 
   it('returns a null explanation for a non-flagged item', async () => {
