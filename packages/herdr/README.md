@@ -1836,7 +1836,7 @@ modal input form:
 | `<podcast-target>` | `w s` write-script sub-chord: stage `intake_complete` (sourced) → `--doc <first .md> --force-single`; otherwise with open editor-note children → `--rewrite <first .podcast.md>`; otherwise a belt-and-braces error is shown and nothing dispatches (never authors a duplicate) | `/skill:wiki-podcast-script <podcast-target>` |
 | `<podcast-review>` | `w r` write-review sub-chord: first `.podcast.md` Key File in raw form (runs the 6 reviews with `--review`; belt-and-braces error when no script exists yet) | `/skill:wiki-podcast-script --review <podcast-review>` |
 | `<podcast-both>` | `w b` write-both sub-chord: first `.podcast.md` Key File in raw form (runs reviews + rewrite in one pass with `--review-rewrite`, 7 LLM calls; belt-and-braces error when no script exists yet) | `/skill:wiki-podcast-script --review-rewrite <podcast-both>` |
-| `<podcast-script>` | `t` TTS chord: first `.podcast.md` Key File, normalized to the wiki-dir-relative `podcast/...` path the TTS skill expects (errors when no script exists yet) | `/skill:wiki-tts-generate --podcast-file <podcast-script>` |
+| `<podcast-script>` | `t` TTS chord: first `.podcast.md` Key File, normalized to the wiki-dir-relative `podcast/...` path the TTS skill expects (the canonical worklog-root-relative `.llm-wiki/wiki/podcast/...` form is stripped of its wiki-root prefix; errors when no script exists yet) | `/skill:wiki-tts-generate --podcast-file <podcast-script>` |
 
 All markers require the chord entry to carry `work_item_types: ["podcast"]`
 so they are only visible on podcast-typed items (see [Shortcut filtering by

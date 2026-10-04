@@ -4522,6 +4522,35 @@ export interface PodcastTargetResolution {
 }
 
 /**
+ * Normalize a `.podcast.md` Key File path to the wiki-dir-relative form the
+ * TTS skill's `--podcast-file` expects (OSL-0MUTPC7SF0011Y54).
+ *
+ * The canonical episode `Key Files:` form records the script
+ * worklog-root-relative — e.g.
+ * `.llm-wiki/wiki/podcast/<stem>/<stem>.podcast.md` — which is the form the
+ * `wiki-podcast-script` CLI resolves when it runs with the worklog root as
+ * its CWD. The TTS skill instead resolves `--podcast-file` against
+ * `--wiki-dir` (default `.llm-wiki/wiki`), so the wiki-root prefix is
+ * stripped to leave `podcast/<stem>/<stem>.podcast.md`.
+ *
+ * - A wiki-dir-relative path (`podcast/...`) or wiki-relative path
+ *   (`wiki/...`) is returned unchanged.
+ * - A bare `<title>/<title>.podcast.md` is podcast-dir-relative (the legacy
+ *   form) and gets the `podcast/` prefix.
+ */
+function toWikiRelativePodcastPath(script: string): string {
+  const normalized = script.replace(/^\.\//, '');
+  const wikiRootPrefix = '.llm-wiki/wiki/';
+  if (normalized.startsWith(wikiRootPrefix)) {
+    return normalized.slice(wikiRootPrefix.length);
+  }
+  if (normalized.startsWith('podcast/') || normalized.startsWith('wiki/')) {
+    return normalized;
+  }
+  return `podcast/${normalized}`;
+}
+
+/**
  * Resolve podcast-progression command markers (`<podcast-target>`,
  * `<podcast-script>`, `<podcast-review>`, `<podcast-both>`) for the selected
  * work item at dispatch time (OSL-0MSKFXM380098LFL, folding in
@@ -4549,8 +4578,12 @@ export interface PodcastTargetResolution {
  * The `t` TTS chord command
  * (`/skill:wiki-tts-generate --podcast-file <podcast-script>`) resolves
  * `<podcast-script>` to the first `.podcast.md` Key File, normalized to the
- * wiki-dir-relative `podcast/...` form the TTS skill expects (a bare
- * `<title>/<title>.podcast.md` Key File path is podcast-dir-relative).
+ * wiki-dir-relative `podcast/...` form the TTS skill expects. The canonical
+ * episode Key File form is worklog-root-relative
+ * (`.llm-wiki/wiki/podcast/<stem>/<stem>.podcast.md`), so the wiki-root
+ * prefix is stripped; a bare `<title>/<title>.podcast.md` Key File path is
+ * podcast-dir-relative (the legacy form) and gets the `podcast/` prefix
+ * (OSL-0MUTPC7SF0011Y54).
  *
  * Markers are resolved BEFORE the generic modal-form check so they never
  * fall through to the input form. Returns the input command unchanged when
@@ -4619,11 +4652,9 @@ export async function resolvePodcastTarget(
     if (!script) {
       return { error: 'No podcast script found in Key Files: — author the script first (w)' };
     }
-    // The TTS skill resolves --podcast-file relative to the wiki dir;
-    // episode Key Files store the script podcast-dir-relative.
-    const podcastFile = script.startsWith('podcast/') || script.startsWith('wiki/')
-      ? script
-      : `podcast/${script}`;
+    // Episode Key Files record the script worklog-root-relative; normalize
+    // to the wiki-dir-relative form the TTS skill's --podcast-file expects.
+    const podcastFile = toWikiRelativePodcastPath(script);
     resolved = resolved.replace(/<podcast-script>/g, podcastFile);
   }
 
