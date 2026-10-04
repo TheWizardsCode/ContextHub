@@ -227,7 +227,7 @@ program.hook('preAction', () => {
 
   // Propagate the global --verbose flag into WL_VERBOSE so code paths that
   // detect verbosity via process.env or that run outside Commander can pick
-  // it up (e.g. background submitToOpenBrain). Use string '1' for truthy.
+  // it up. Use string '1' for truthy.
   try {
     const opts = program.opts();
     if (opts && opts.verbose) {

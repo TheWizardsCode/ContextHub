@@ -101,6 +101,7 @@ import {
   clampDowntimeIdleThresholdMs,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeNoCandidateCooldownMs,
+  clampDowntimeNonTerminalCooldownMs,
   clampDowntimeMarkerStaleWindowMs,
   countFreeUnownedSlots,
   isSlotOwned,
@@ -117,6 +118,9 @@ import {
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
+  DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+  DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS,
+  DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
@@ -641,9 +645,170 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
   });
 });
 
+// ── Per-prefix tab dispatch wiring (C1 fallback, WL-0MUR5FUWD00024XN) ───────
+
+describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
+  const candidate = {
+    id: 'WL-ABC',
+    title: 'Some task',
+    stage: 'intake_complete' as const,
+    status: 'open',
+  };
+
+  it('AC1: resolves the per-prefix tab and forwards its anchor pane (primary path)', async () => {
+    const getDispatcherTabAnchor = vi.fn().mockResolvedValue({
+      workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
+    });
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-ABC'),
+      expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
+    );
+  });
+
+  it('AC1: each prefix routes to its own tab (WL vs TCE)', async () => {
+    const wlDeps = makeDeps({
+      getDispatcherTabAnchor: vi.fn().mockResolvedValue({
+        workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-1', title: 'wl', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+    const tceDeps = makeDeps({
+      getDispatcherTabAnchor: vi.fn().mockResolvedValue({
+        workspaceId: 'wD', tabId: 'wD:tTCE', paneId: 'wD:tTCE:p1',
+      }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'TCE-2', title: 'tce', stage: 'intake_complete', status: 'open' },
+      }),
+    });
+
+    await dispatchDowntimeWork(wlDeps, { model: 'plan', cwd: '/repo-wl' });
+    await dispatchDowntimeWork(tceDeps, { model: 'plan', cwd: '/repo-tce' });
+
+    expect(wlDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-wl', 'WL');
+    expect(tceDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-tce', 'TCE');
+    expect(wlDeps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:tWL:p1', cwd: '/repo-wl' }),
+    );
+    expect(tceDeps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:tTCE:p1', cwd: '/repo-tce' }),
+    );
+  });
+
+  it('AC2/AC4: a resolved project workspace wins and the per-prefix dep is not called', async () => {
+    const resolveProjectWorkspace = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' });
+    const getItemTabAnchor = vi
+      .fn()
+      .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+    const getDispatcherTabAnchor = vi.fn().mockResolvedValue({
+      workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
+    });
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      resolveProjectWorkspace,
+      getItemTabAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
+    expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
+    expect(getDispatcherTabAnchor).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wC:tWL-ABC:p1' }),
+    );
+  });
+
+  it('AC5: the per-prefix Dispatcher path is used when the project workspace resolves to null', async () => {
+    const getDispatcherTabAnchor = vi.fn().mockResolvedValue({
+      workspaceId: 'wD', tabId: 'wD:tWL', paneId: 'wD:tWL:p1',
+    });
+    const resolveProjectWorkspace = vi.fn().mockResolvedValue(null);
+    const getItemTabAnchor = vi.fn();
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:LEGACY', workspaceId: 'wD' });
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      resolveProjectWorkspace,
+      getItemTabAnchor,
+      getDispatcherAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
+    expect(getItemTabAnchor).not.toHaveBeenCalled();
+    expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
+    expect(getDispatcherAnchor).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
+    );
+  });
+
+  it('AC1 fail-safe: a null per-prefix anchor aborts with anchor-unavailable (no fallback)', async () => {
+    const getDispatcherTabAnchor = vi.fn().mockResolvedValue(null);
+    const getDispatcherAnchor = vi
+      .fn()
+      .mockResolvedValue({ paneId: 'wD:LEGACY', workspaceId: 'wD' });
+    const deps = makeDeps({
+      getDispatcherTabAnchor,
+      getDispatcherAnchor,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(getDispatcherAnchor).not.toHaveBeenCalled();
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.recordDispatch).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC1 fail-safe: a throwing per-prefix resolver aborts with anchor-unavailable', async () => {
+    const deps = makeDeps({
+      getDispatcherTabAnchor: vi.fn().mockRejectedValue(new Error('herdr down')),
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('anchor-unavailable');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+  });
+});
+
 // ── Project workspace + item-ID tab dispatch wiring (WL-0MU321YK70035AYT) ──
 
-describe('project workspace + item-ID tab dispatch wiring', () => {
+// These tests exercise the PRIMARY project-workspace + item-ID tab path,
+// reaffirmed as primary in WL-0MUR5FUWD00024XN. The per-prefix Dispatcher tab
+// and the legacy single anchor are fallbacks used only when no project
+// workspace resolves for the item's root.
+describe('project workspace + item-ID tab dispatch wiring (primary path)', () => {
   const candidate = {
     id: 'WL-ABC',
     title: 'Some task',
@@ -781,7 +946,7 @@ describe('project workspace + item-ID tab dispatch wiring', () => {
     expect(deps.claimItem).not.toHaveBeenCalled();
   });
 
-  it('AC5 retirement: the full item id (not a prefix) is forwarded; no retired dep key', async () => {
+  it('legacy wiring: without the per-prefix dep the item-ID tab path is used (backward compat)', async () => {
     const getItemTabAnchor = vi.fn().mockResolvedValue({ tabId: 'wC:tX', paneId: 'wC:tX:p1' });
     const deps = makeDeps({
       resolveProjectWorkspace: vi
@@ -3713,6 +3878,25 @@ describe('downtime settings clamps', () => {
     expect(clampDowntimeNoCandidateCooldownMs(Number.NaN)).toBe(DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS);
     expect(clampDowntimeNoCandidateCooldownMs(Infinity)).toBe(DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS);
   });
+
+  it('clampDowntimeNonTerminalCooldownMs keeps valid values and clamps to [60s, 24h]', () => {
+    expect(clampDowntimeNonTerminalCooldownMs(DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS)).toBe(
+      DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+    );
+    // Below the 60s floor → clamped up (no immediate retry).
+    expect(clampDowntimeNonTerminalCooldownMs(1_000)).toBe(DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS);
+    expect(clampDowntimeNonTerminalCooldownMs(60_000)).toBe(60_000);
+    // Above the 24h ceiling → clamped down (cannot strand indefinitely).
+    expect(clampDowntimeNonTerminalCooldownMs(48 * 60 * 60 * 1000)).toBe(
+      DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS,
+    );
+  });
+
+  it('clampDowntimeNonTerminalCooldownMs rejects negative and non-finite values', () => {
+    expect(clampDowntimeNonTerminalCooldownMs(-1)).toBe(DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS);
+    expect(clampDowntimeNonTerminalCooldownMs(Number.NaN)).toBe(DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS);
+    expect(clampDowntimeNonTerminalCooldownMs(Infinity)).toBe(DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS);
+  });
 });
 
 // ── Wiring helpers (F4) ───────────────────────────────────────────────
@@ -4303,6 +4487,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     deps?: Partial<DowntimeWorkerDeps>;
     mode?: 'cheap' | 'fast';
     concurrentDispatchCap?: number;
+    drainPaused?: boolean;
   } = {}) {
     const cfg = {
       enabled: overrides.enabled ?? true,
@@ -4316,6 +4501,8 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
       ...(overrides.concurrentDispatchCap !== undefined
         ? { concurrentDispatchCap: overrides.concurrentDispatchCap }
         : {}),
+      // Drain pause signal (parent WL-0MUL0KO7Q003O7YJ, F2).
+      drainPaused: overrides.drainPaused,
     };
     const fetcher = vi
       .fn()
@@ -4427,6 +4614,37 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
 
     const call = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(call[1]).not.toHaveProperty('spawnConfig');
+  });
+
+  it('F2: a drainPaused config pauses new dispatches and reports the draining block token', async () => {
+    // While the mode-switch worker drains active sessions down to the cheap
+    // pool budget, the dispatcher must not spawn NEW panes. The poll still
+    // runs (so the mode-switch worker keeps observing free slots) and the
+    // refusal is neutral — no candidate was even selected.
+    const { worker, deps } = makeWorker({ thresholdMs: 0, drainPaused: true });
+    vi.setSystemTime(1_000_000);
+
+    const result = await worker.tick();
+
+    expect(result).toEqual({ polled: true, dispatched: false, idle: true });
+    expect(worker.blockReason).toBe('draining');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('F2: dispatch resumes on the next idle tick once the drain signal clears', async () => {
+    const { worker, deps, cfg } = makeWorker({ thresholdMs: 0, drainPaused: true });
+    vi.setSystemTime(1_000_000);
+    const paused = await worker.tick();
+    expect(paused.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    // The drain completed (the proxy switched to cheap) → the very next
+    // idle tick dispatches normally.
+    cfg.drainPaused = false;
+    vi.setSystemTime(1_000_001);
+    const resumed = await worker.tick();
+    expect(resumed.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
   });
 
   it('requires a fresh full idle period after a dispatch (AC5)', async () => {
@@ -10031,6 +10249,165 @@ describe('dispatched success-marker staleness on the live path (WL-0MU6UL0RJ008I
     const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, WINDOW_MS);
     expect(result.ok).toBe(true);
     if (result.ok) expect('noCandidate' in result).toBe(true);
+  });
+});
+
+// ── Non-terminal pane-close cooldown — live paths (WL-0MUKYERLZ006ELL5) ──
+
+describe('non-terminal pane-close cooldown on the live paths (WL-0MUKYERLZ006ELL5)', () => {
+  const COOLDOWN_MS = DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const tempCwds: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempCwds.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeCwd(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'dt-nonterminal-cooldown-'));
+    tempCwds.push(dir);
+    return dir;
+  }
+
+  function writeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(
+      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+      entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
+      'utf8',
+    );
+  }
+
+  const planHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'intake_complete',
+    priority: 'medium',
+    sortIndex: 30,
+  });
+
+  /** A non-terminal pane-close entry for the plan candidate. */
+  function closeEntry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      entryType: 'pane-close',
+      itemId: 'PLN-1',
+      kind: 'plan',
+      stage: 'intake_complete',
+      reasonCode: 'agent-ended-no-terminal',
+      outcome: 'requires-attention',
+      timestamp: ago(60_000),
+      closed: true,
+      ...overrides,
+    };
+  }
+
+  it('AC1: a recent non-terminal close holds re-dispatch with the neutral cooldown reason', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry()]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(false);
+    // Distinguishable from 'no-candidate' so the no-candidate cooldown is
+    // not entered and no strike is recorded (AC3/AC5).
+    expect(outcome.reason).toBe('non-terminal-cooldown');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.recordError).not.toHaveBeenCalled();
+    expect(deps.recordDispatchFailure).not.toHaveBeenCalled();
+  });
+
+  it('AC2: a close older than cooldownMs releases the item (dispatches normally)', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry({ timestamp: ago(COOLDOWN_MS + 1) })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(outcome.candidate?.id).toBe('PLN-1');
+  });
+
+  it('AC3: stage advancement mid-cooldown releases the item immediately', async () => {
+    const cwd = makeCwd();
+    // Dispatched at `idea`; the item has since advanced to `intake_complete`.
+    writeLog(cwd, [closeEntry({ stage: 'idea' })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('PLN-1');
+  });
+
+  it('AC4: a terminal close (reasonCode none) does not apply the cooldown', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry({ reasonCode: 'none', outcome: 'closed-as-plan-complete' })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(true);
+  });
+
+  it('applies the cooldown per-kind: an intake close does not hold a plan re-dispatch', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry({ kind: 'intake', itemId: 'PLN-1' })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd, nonTerminalCooldownMs: COOLDOWN_MS });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+  });
+
+  it('AC7: computeMostImportantItem reports a distinct cooldown hold, never noCandidate', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry()]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, undefined, COOLDOWN_MS);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect('nonTerminalCooldownHold' in result).toBe(true);
+      expect('noCandidate' in result).toBe(false);
+      // The offer-computation hold is NOT a candidate offer.
+      expect('candidate' in result).toBe(false);
+    }
+  });
+
+  it('AC7: computeMostImportantItem offers a cooldown-elapsed item normally', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [closeEntry({ timestamp: ago(COOLDOWN_MS + 1) })]);
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planHead('PLN-1')] }),
+    });
+
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, undefined, COOLDOWN_MS);
+
+    expect(result.ok).toBe(true);
+    if (result.ok && 'candidate' in result) {
+      expect(result.candidate.id).toBe('PLN-1');
+      expect(result.kind).toBe('plan');
+    } else {
+      throw new Error(`expected a candidate offer, got ${JSON.stringify(result)}`);
+    }
   });
 });
 

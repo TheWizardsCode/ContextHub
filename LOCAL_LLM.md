@@ -210,6 +210,29 @@ be used by agents via standard provider configuration (e.g. Ollama
 $env:OPENCODE_SERVER_PORT = 51625
 ```
 
+### Direct LLM chat features (`llm.*` config)
+
+Some `wl` features call an OpenAI-compatible chat-completions endpoint
+directly — currently the `wl interview` producer-review explanation, which
+uses the `ChatClient` in `src/lib/llm.ts`. These are configured under the
+`llm` section of `.worklog/config.yaml`, parallel to `embedding`:
+
+```yaml
+llm:
+  baseUrl: http://192.168.0.199:8000/v1
+  model: compact
+  apiKey: optional-key   # omit for local providers that need no auth
+  timeoutMs: 15000
+```
+
+Defaults: `baseUrl` `http://192.168.0.199:8000/v1`, `model` `compact`,
+`timeoutMs` `15000`. Environment variables `LLM_BASE_URL`, `LLM_MODEL`,
+`LLM_API_KEY` and `LLM_TIMEOUT_MS` are used as fallbacks; config values take
+precedence over environment variables (matching the `embedding.*` precedence).
+Every call is bounded by the timeout and degrades silently to a non-LLM
+fallback on error. See [CLI.md](CLI.md#interview-options-id) for the
+`wl interview --no-llm` opt-out.
+
 ---
 
 ## Task routing guidance (what to run locally vs hosted)

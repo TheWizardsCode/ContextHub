@@ -16,6 +16,7 @@ export {
   type UpdateWorkItemInput,
   type WorkItemQuery,
   type EmbeddingConfig,
+  type LlmConfig,
   type WorklogConfig,
   type Comment,
   type DependencyEdge,

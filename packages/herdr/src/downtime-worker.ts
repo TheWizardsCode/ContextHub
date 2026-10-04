@@ -39,7 +39,18 @@
  *    additionally excludes items with `needsProducerReview === true`
  *    (parent WL-0MTIAL65N004T22F): items flagged for producer review are
  *    never auto-dispatched, preventing the worker from consuming local
- *    slots on items awaiting a human decision. A tier-2 CLI error does
+ *    slots on items awaiting a human decision.
+ *    A NON-TERMINAL pane-close cooldown (WL-0MUKYERLZ006ELL5) is applied as
+ *    a sequential filter after the dispatched-marker exclusion and before
+ *    the code-freeze gate: an item whose previous pane of the SAME kind
+ *    closed without reaching a terminal stage (`agent-ended-no-terminal`,
+ *    `audit-ended-no-result`, ...) is skipped until
+ *    `downtimeNonTerminalCooldownMs` has elapsed, or the item advances past
+ *    its dispatched-at stage. It is neutral — never a strike, never
+ *    `no-candidate` (distinct reason `non-terminal-cooldown`) — so it never
+ *    enters the no-candidate cooldown; the same filter is applied on the
+ *    coordination offer path (`computeMostImportantItem` /
+ *    `dispatchFromCoordination`). A tier-2 CLI error does
  *    NOT short-circuit: the idea tier is still attempted so a tier-3
  *    candidate can still dispatch.
  *    `wl next` failures are reported as `{ok:false}` (fail closed to busy)
@@ -72,8 +83,10 @@
  *    work-item id (`deps.getItemTabAnchor`), and forwards that tab's root
  *    pane as `--anchor <id>` so send-to-pi.sh splits from THAT pane. Each
  *    project's automated panes therefore land in the project's own workspace
- *    grouped per item. When no plugin pane resolves, the path falls back to
- *    the retained machine-wide Dispatcher anchor (`deps.getDispatcherAnchor`,
+ *    grouped per item — the PRIMARY path. When no plugin pane resolves, the
+ *    path falls back to the per-prefix tab in the Dispatcher workspace
+ *    (`deps.getDispatcherTabAnchor`, C1 WL-0MTRQT482001SNXC), then to the
+ *    retained machine-wide Dispatcher anchor (`deps.getDispatcherAnchor`,
  *    C0 WL-0MTR01EU7005SYZG). Anchor provisioning failure degrades to reason
  *    'anchor-unavailable' (neutral "no dispatch this cycle", never a fallback
  *    to the leader's pane). Scheduled-prompt spawns keep the Dispatcher
@@ -146,8 +159,10 @@ import {
   readDowntimeLogEntries as _readDowntimeEntries,
   dispatchedItemMarkers as _dispatchedMarkers,
   markerStillExcludes as _markerStillExcludes,
+  isNonTerminalCooldownActive as _isNonTerminalCooldownActive,
   appendPaneCloseLogEntry as _appendPaneCloseLogEntry,
   type DispatchMarker,
+  type DowntimeLogEntry,
   type PaneCloseLogEntry,
   type PaneLifecycleKind,
 } from './downtime-log.js';
@@ -163,6 +178,7 @@ import { paneCloseReaperDue } from './pane-close-scheduler.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 import type {
   DispatcherAnchor,
+  DispatcherPrefixTabAnchor,
   ItemTabAnchor,
   ProjectWorkspaceTarget,
 } from './dispatcher-anchor.js';
@@ -250,6 +266,27 @@ export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
 
 /** Default pause after a genuine empty backlog: 60 minutes. */
 export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
+
+/**
+ * Default minimum cooldown (WL-0MUKYERLZ006ELL5) between successive downtime
+ * dispatches of the same `(item, kind)` after a pane closed WITHOUT reaching a
+ * terminal stage (`agent-ended-no-terminal`, `audit-ended-no-result`, or any
+ * future non-terminal code). Prevents a repeatedly failing session from being
+ * re-selected immediately and wasting local-LLM slots. Default 30 minutes.
+ */
+export const DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS = 30 * 60 * 1000;
+
+/**
+ * Hard floor for the non-terminal cooldown (1 minute): a defensive minimum so
+ * the control cannot be disabled or set trivially small (no immediate retry).
+ */
+export const DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS = 60 * 1000;
+
+/**
+ * Hard ceiling for the non-terminal cooldown (24 hours): above this a
+ * repeatedly-failing item could be stranded indefinitely.
+ */
+export const DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
 
 /**
  * Per-process dispatch-PIPELINE single-flight bound (WL-0MT50LKAK001EF5Q).
@@ -1418,6 +1455,8 @@ export type MostImportantItemResult =
   | { ok: true; reviewQueueHold: true }
   /** Every remaining offerable candidate is a critical item already in flight (live working pane): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry (WL-0MUBVKYH5009CGBI / F4). */
   | { ok: true; inFlightHold: true }
+  /** The only remaining offerable candidates are held by the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
+  | { ok: true; nonTerminalCooldownHold: true }
   | { ok: false; error?: string };
 
 
@@ -1993,8 +2032,10 @@ export interface DowntimeWorkerDeps {
    * worklog root `cwd` (WL-0MU321YK70035AYT, AC1/AC3). When it resolves, the
    * worklog dispatch path places the pane in that workspace (via
    * {@link getItemTabAnchor}) instead of the machine-wide Dispatcher anchor.
-   * A `null` result (no plugin pane, or an unreadable/ambiguous one) falls
-   * back to {@link getDispatcherAnchor} (AC4). Optional for backward
+   * This is the PRIMARY placement path (AC1, WL-0MUR5FUWD00024XN): a `null`
+   * result (no plugin pane, or an unreadable/ambiguous one) falls back to
+   * {@link getDispatcherTabAnchor} (per-prefix Dispatcher tab) when wired,
+   * else to {@link getDispatcherAnchor} (AC4). Optional for backward
    * compatibility with pre-change callers/tests; production wiring
    * (`createDowntimeDeps`) always provides it.
    */
@@ -2013,6 +2054,22 @@ export interface DowntimeWorkerDeps {
     workspaceId: string,
     itemId: string,
   ): Promise<ItemTabAnchor | null>;
+  /**
+   * Resolve or create the per-prefix tab anchor inside the Dispatcher
+   * workspace (C1, parent WL-0MTRQT482001SNXC). Given a work-item id
+   * prefix (e.g. `WL`, `TCE`), returns the tab+pane for routing the dispatch
+   * into a per-project tab. This is a FALLBACK path (AC3, WL-0MUR5FUWD00024XN):
+   * it is only consulted when {@link resolveProjectWorkspace} does not
+   * resolve a project workspace for the item's root. A `null` result then
+   * degrades to 'anchor-unavailable' — the caller NEVER falls back to the
+   * legacy Dispatcher anchor or the leader's pane when this dep is wired.
+   * Optional for test callers that inject mocks; production wiring provides
+   * it.
+   */
+  getDispatcherTabAnchor?(
+    cwd: string,
+    prefix: string,
+  ): Promise<DispatcherPrefixTabAnchor | null>;
   /**
    * Audit trail for a successful dispatch: comment on the item + rolling
    * log entry under `.worklog`. Resolves TRUE only when the rolling-log
@@ -2507,8 +2564,8 @@ export function selectCriticalFirstCandidates(
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; auditHostSaturated: boolean },
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -2635,6 +2692,15 @@ async function dispatchFromHerdrList(
     ) {
       continue;
     }
+    // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): a neutral
+    // sequential filter — hold an item whose previous same-kind pane closed
+    // without reaching a terminal stage until the cooldown elapses (or the
+    // item advances past its dispatched-at stage). Never a strike, never
+    // 'no-candidate'.
+    if (_isNonTerminalCooldownActive(entries, item.id, k, item.stage, ctx.nonTerminalCooldownMs, now)) {
+      flags.cooldownHeld = true;
+      continue;
+    }
     // Code-freeze split-by-skill: audit+implement dispatch pauses during
     // a freeze/ambiguous marker (plan/intake still dispatch).
     if (ctx.frozen && (k === 'audit' || k === 'implement')) continue;
@@ -2715,10 +2781,13 @@ async function rollbackClaimForFailure(
  *    `deps.resolveProjectWorkspace`, ensure/reuse the tab labelled with the
  *    exact work-item id via `deps.getItemTabAnchor`, and forward that tab's
  *    root pane as `anchorId` so the pane lands in the project workspace under
- *    the item's tab. When no project workspace resolves, fall back to the
- *    retained machine-wide `deps.getDispatcherAnchor` (AC4). A null/failed
- *    resolution aborts with reason 'anchor-unavailable' — never the leader's
- *    pane and never another project's workspace.
+ *    the item's tab. This is the PRIMARY placement path. When no project
+ *    workspace resolves, placement falls back to the per-prefix tab in the
+ *    `Dispatcher` workspace (C1, WL-0MTRQT482001SNXC), then to the retained
+ *    machine-wide `deps.getDispatcherAnchor` (AC4). A null/failed
+ *    project-workspace resolution does not abort when a fallback is wired;
+ *    a failed item-tab provision aborts with reason 'anchor-unavailable' —
+ *    never the leader's pane and never another project's workspace.
  *  - Claim (compare-and-swap): exactly one concurrent pane wins; a loser
  *    (or a wl claim failure) ABORTS the dispatch — no pane, no marker, no
  *    success record. A lost race resolves reason 'claim-failed' (neutral,
@@ -2755,56 +2824,90 @@ async function dispatchClaimedTier(
   },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
-  // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): resolve the dedicated
-  // Dispatcher anchor pane BEFORE the claim so a provisioning failure
-  // degrades to "no dispatch this cycle" (F1 AC6 — caller fail-safe) without
-  // claiming/marking an item that can never spawn a pane. Absent dep
-  // (legacy/test callers) → no anchor, legacy current-pane behavior.
-  //
-  // Per-prefix tab anchor (C1, parent WL-0MTRQT482001SNXC): the primary path
-  // routes the candidate's work-item prefix (`<PREFIX>` before the first `-`)
-  // to its own tab inside the single Dispatcher workspace. When wired, the
-  // per-prefix resolver REPLACES the legacy single anchor — a null result is
-  // 'anchor-unavailable' and NEVER falls back to the legacy anchor or the
-  // leader's pane.
+  // Placement precedence (AC1, WL-0MUR5FUWD00024XN): resolve the anchor
+  // BEFORE the claim so a provisioning failure degrades to "no dispatch this
+  // cycle" (F1 AC6 — caller fail-safe) without claiming/marking an item that
+  // can never spawn a pane. The precedence is:
+  //   (a) project workspace + item-ID tab (primary);
+  //   (b) per-prefix Dispatcher tab (fallback when no project workspace
+  //       resolves);
+  //   (c) legacy single Dispatcher anchor.
+  // Absent deps (legacy/test callers) → no anchor, legacy current-pane
+  // behavior.
   let anchorId: string | undefined;
-  // True when `anchorId` is a PROJECT-WORKSPACE item-tab anchor (the primary
-  // path). Those tabs are provisioned with herdr's initial root pane (an
-  // empty bash pane) which is only needed as the split anchor for the FIRST
-  // dispatch — after the dispatch pane spawns it is closed so the tab shows
-  // only the productive pane (WL-0MU2EOHK900425VU). The Dispatcher fallback
-  // anchor is deliberately exempt: its root pane is the persisted dispatch
-  // anchor and closing it would trigger a blank re-provision loop.
+  // True when `anchorId` is a tab root pane (a project item tab or a
+  // per-prefix Dispatcher tab). Tab roots are provisioned with herdr's
+  // initial root pane (an empty bash pane) which is only needed as the split
+  // anchor for the FIRST dispatch — after the dispatch pane spawns it is
+  // closed so the tab shows only the productive pane. The legacy Dispatcher
+  // fallback anchor is deliberately exempt: its root pane is the persisted
+  // dispatch anchor and closing it would trigger a blank re-provision loop.
   let anchorIsTabRoot = false;
-  // Primary path (AC1/AC3): resolve the project workspace that hosts the
-  // worklog plugin pane for this item's root, then ensure/reuse the tab
-  // labelled with the exact work-item id and anchor the pane there (AC2).
-  let projectTarget: ProjectWorkspaceTarget | null = null;
+  // Extract the work-item id prefix (e.g. `WL-0MTO…` → `WL`, `TCE-…` → `TCE`).
+  const prefix = candidate.id.split('-', 1)[0];
+
+  // ── Primary path: project workspace + item-ID tab (WL-0MU321YK70035AYT) ─
+  // Resolve the candidate's project workspace from its worklog root, ensure/
+  // reuse a tab labelled with the exact work-item id, and anchor the pane to
+  // that tab's root pane. This is the PRIMARY placement path: when a project
+  // plugin pane resolves for the root, the Dispatcher workspace is NOT used
+  // (AC2/AC3). A null resolution falls through to the per-prefix fallback.
   if (typeof deps.resolveProjectWorkspace === 'function') {
+    let projectTarget: ProjectWorkspaceTarget | null = null;
     try {
       projectTarget = await deps.resolveProjectWorkspace(opts.cwd);
     } catch {
       projectTarget = null; // fail-closed on any resolver error
     }
-  }
-  if (projectTarget !== null && typeof deps.getItemTabAnchor === 'function') {
-    let tabAnchor: ItemTabAnchor | null = null;
-    try {
-      tabAnchor = await deps.getItemTabAnchor(opts.cwd, projectTarget.workspaceId, candidate.id);
-    } catch {
-      tabAnchor = null; // fail-closed
+    if (projectTarget !== null && typeof deps.getItemTabAnchor === 'function') {
+      let tabAnchor: ItemTabAnchor | null = null;
+      try {
+        tabAnchor = await deps.getItemTabAnchor(opts.cwd, projectTarget.workspaceId, candidate.id);
+      } catch {
+        tabAnchor = null; // fail-closed
+      }
+      if (tabAnchor === null) {
+        // The workspace resolved but its item tab could not be provisioned:
+        // fail closed rather than place a project pane in the Dispatcher
+        // workspace (never a wrong placement).
+        return { dispatched: false, reason: 'anchor-unavailable' };
+      }
+      anchorId = tabAnchor.paneId;
+      anchorIsTabRoot = true;
     }
-    if (tabAnchor === null) {
-      // The workspace resolved but its item tab could not be provisioned:
-      // fail closed rather than place a project pane in the Dispatcher
-      // workspace (never a wrong placement).
+  }
+
+  // ── Fallback: per-prefix tab in Dispatcher workspace (AC3) ────────────
+  // Reached only when no project workspace resolved for the item's root.
+  // When wired, the per-prefix resolver REPLACES the legacy single anchor —
+  // a null/failed resolution is 'anchor-unavailable' (no dispatch this
+  // cycle) and NEVER falls back to the legacy Dispatcher anchor or the
+  // leader's pane (constraint: fail-safe, never a wrong-tab placement).
+  if (anchorId === undefined && typeof deps.getDispatcherTabAnchor === 'function') {
+    if (!prefix) {
+      // No prefix extractable (empty/invalid id) → cannot route by prefix.
       return { dispatched: false, reason: 'anchor-unavailable' };
     }
-    anchorId = tabAnchor.paneId;
+    let prefixAnchor: DispatcherPrefixTabAnchor | null = null;
+    try {
+      prefixAnchor = await deps.getDispatcherTabAnchor(opts.cwd, prefix);
+    } catch {
+      prefixAnchor = null; // fail-closed
+    }
+    if (prefixAnchor === null) {
+      return { dispatched: false, reason: 'anchor-unavailable' };
+    }
+    anchorId = prefixAnchor.paneId;
+    // Per-prefix Dispatcher tabs use herdr's initial root pane as anchor.
     anchorIsTabRoot = true;
-  } else if (typeof deps.getDispatcherAnchor === 'function') {
-    // Fallback (AC4): no project plugin pane resolved → the retained
-    // machine-wide Dispatcher anchor.
+  }
+
+  // ── Fallback: legacy Dispatcher single anchor (AC4) ───────────────────
+  // When this dep IS wired, a null/failed resolution fails closed
+  // ('anchor-unavailable') — never a current-pane placement. When it is NOT
+  // wired (pre-C0 / legacy/test callers), no anchor is set and the spawn
+  // uses the legacy current-pane behaviour.
+  if (anchorId === undefined && typeof deps.getDispatcherAnchor === 'function') {
     let anchor: DispatcherAnchor | null = null;
     try {
       anchor = await deps.getDispatcherAnchor(opts.cwd);
@@ -2815,7 +2918,11 @@ async function dispatchClaimedTier(
       return { dispatched: false, reason: 'anchor-unavailable' };
     }
     anchorId = anchor.paneId;
+    // The legacy Dispatcher anchor is NOT a tab root — it is the persisted
+    // dispatch pane and must never be closed.
+    anchorIsTabRoot = false;
   }
+
   // Cross-root claim (WL-0MTQ14W7L003II5A): opts.cwd is the item's worklog
   // root — the coordination leader passes the OFFER's root so the CAS claim
   // lands in the item's own database (never the leader's module override).
@@ -3329,6 +3436,12 @@ export function toCoordinationCandidate(info: DowntimeItemInfo): DowntimeCandida
  *    implements remain the result is `{ok:true, reviewQueueHold:true}`
  *    (never `noCandidate`), so the no-candidate cooldown is not entered
  *    while the queue drains.
+ *  - the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5) holds an
+ *    item whose previous same-kind pane closed without reaching a terminal
+ *    stage until `downtimeNonTerminalCooldownMs` elapses (or the item
+ *    advances past its dispatched-at stage); when ONLY cooldown-held items
+ *    remain the result is `{ok:true, nonTerminalCooldownHold:true}` (never
+ *    `noCandidate`), so the no-candidate cooldown is not entered.
  *
  * Active-audit single-flight and the free-slot minimums are
  * dispatch-time gates, so they are NOT applied to an offer.
@@ -3345,6 +3458,7 @@ export async function computeMostImportantItem(
   now: number = Date.now(),
   browseItemCount: number = DEFAULT_BROWSE_ITEM_COUNT,
   markerStaleWindowMs: number = DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+  nonTerminalCooldownMs: number = DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
 ): Promise<MostImportantItemResult> {
   // The check-in (and the worker's no-candidate probe) requires the Herdr
   // head lookup: without it there is no canonical ranking to offer from —
@@ -3390,6 +3504,9 @@ export async function computeMostImportantItem(
     return reviewGate;
   };
   let heldByReviewQueue = false;
+  // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral hold —
+  // the backlog is not empty, so the caller must not pause.
+  let heldByCooldown = false;
 
   // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F4
   // WL-0MUBVKYH5009CGBI): resolved for THIS instance's OWN root (`cwd`) —
@@ -3468,6 +3585,12 @@ export async function computeMostImportantItem(
       ) {
         continue;
       }
+      // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
+      // sequential filter (same placement as the dispatch path).
+      if (_isNonTerminalCooldownActive(entries, item.id, k, item.stage, nonTerminalCooldownMs, now)) {
+        heldByCooldown = true;
+        continue;
+      }
       // Code-freeze split-by-skill: audit+implement+risk-effort offers pause
       // during a freeze/ambiguous marker (plan/intake still offer).
       if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) continue;
@@ -3529,9 +3652,11 @@ export async function computeMostImportantItem(
   // resumes immediately when the queue drains below the threshold).
   return heldByReviewQueue
     ? { ok: true, reviewQueueHold: true }
-    : heldByInFlight
-      ? { ok: true, inFlightHold: true }
-      : { ok: true, noCandidate: true };
+    : heldByCooldown
+      ? { ok: true, nonTerminalCooldownHold: true }
+      : heldByInFlight
+        ? { ok: true, inFlightHold: true }
+        : { ok: true, noCandidate: true };
 }
 
 /**
@@ -3563,7 +3688,13 @@ export async function computeMostImportantItem(
  *    implements flow unconditionally; when every surviving offer is held,
  *    the outcome reason is the neutral 'review-queue-hold' (never
  *    'no-candidate' / cooldown);
- *  - per-tier free-slot minimums (audit ≥ 2, single-pane ≥ 1).
+ *  - per-tier free-slot minimums (audit ≥ 2, single-pane ≥ 1);
+ *  - non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): an offer whose
+ *    previous same-kind pane closed without reaching a terminal stage is
+ *    KEPT but skipped this cycle until `downtimeNonTerminalCooldownMs`
+ *    elapses (or the item advances past its dispatched-at stage); when every
+ *    surviving offer is cooldown-held the outcome is the neutral
+ *    'non-terminal-cooldown' (never 'no-candidate').
  *
  * The first offer that passes every filter dispatches via the existing
  * `dispatchClaimedTier` pipeline (CAS claim → marker write → spawn); its
@@ -3579,7 +3710,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; spawnConfig?: DowntimeSpawnConfig },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; spawnConfig?: DowntimeSpawnConfig },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -3636,6 +3767,19 @@ export async function dispatchFromCoordination(
     return inFlightCache.get(root) ?? { available: false, itemIds: new Set() };
   };
   let inFlightHold = false;
+
+  // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): read the rolling
+  // dispatch log ONCE per OFFER root (cached) — the log is per-worklog-root,
+  // like the review gate and in-flight caches above.
+  const cooldownEntriesCache = new Map<string, DowntimeLogEntry[]>();
+  const cooldownEntriesForRoot = async (root: string): Promise<DowntimeLogEntry[]> => {
+    if (!cooldownEntriesCache.has(root)) {
+      cooldownEntriesCache.set(root, await _readDowntimeEntries(root));
+    }
+    return cooldownEntriesCache.get(root) ?? [];
+  };
+  const cooldownMs = opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
+  let cooldownHold = false;
 
   // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): FIRST dispatch stage,
   // gated by the SAME fresh-read code-freeze marker as the audit/implement
@@ -3709,6 +3853,23 @@ export async function dispatchFromCoordination(
     const kind = classifyItemForDispatch(result.info, now);
     if (kind === null) {
       removeEntry(opts.coordinationDir, entry.instanceId);
+      continue;
+    }
+    // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
+    // sequential filter — keep the entry (it is still a valid offer) but
+    // skip it this cycle while the cooldown holds. Never a strike, never
+    // 'no-candidate'.
+    if (
+      _isNonTerminalCooldownActive(
+        await cooldownEntriesForRoot(worklogRoot),
+        result.info.id,
+        kind,
+        result.info.stage,
+        cooldownMs,
+        now,
+      )
+    ) {
+      cooldownHold = true;
       continue;
     }
     // Code-freeze split-by-skill: audit/implement/risk-effort offers pause
@@ -3819,9 +3980,11 @@ export async function dispatchFromCoordination(
     ? { dispatched: false, reason: 'code-freeze' }
     : reviewHold
       ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
-      : inFlightHold
-        ? { dispatched: false, reason: 'in-flight-pane' }
-        : { dispatched: false, reason: 'no-candidate' };
+      : cooldownHold
+        ? { dispatched: false, reason: 'non-terminal-cooldown' }
+        : inFlightHold
+          ? { dispatched: false, reason: 'in-flight-pane' }
+          : { dispatched: false, reason: 'no-candidate' };
 }
 
 /**
@@ -3845,11 +4008,13 @@ export async function runCoordinationCheckIn(
     browseItemCount?: number;
     /** Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT); defaults to DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS. */
     markerStaleWindowMs?: number;
+    /** Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5); defaults to DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS. */
+    nonTerminalCooldownMs?: number;
   },
   now: number = Date.now(),
 ): Promise<{ offered: string | null; updated: boolean }> {
   const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
-  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs);
+  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs, coordinator.nonTerminalCooldownMs);
   if (!result.ok) {
     // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
     return { offered: current?.workItemId ?? null, updated: false };
@@ -4047,6 +4212,13 @@ export async function dispatchDowntimeWork(
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`.
      */
     markerStaleWindowMs?: number;
+    /**
+     * Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): an item whose
+     * previous same-kind pane closed without reaching a terminal stage is
+     * skipped until this many ms elapse. Optional — absent falls back to
+     * `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`.
+     */
+    nonTerminalCooldownMs?: number;
     /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
     spawnConfig?: DowntimeSpawnConfig;
   },
@@ -4144,7 +4316,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, auditHostSaturated };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, auditHostSaturated };
       const head = await deps.getHerdrListHead(opts.cwd);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -4154,7 +4326,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, inFlight, spawnConfig: opts.spawnConfig };
+        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, inFlight, spawnConfig: opts.spawnConfig };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return herdrOutcome;
 
@@ -4181,6 +4353,7 @@ export async function dispatchDowntimeWork(
         const auditCheckError = flags.auditCheckError;
         freshnessSkip = flags.freshnessSkip;
         const reviewHeld = flags.reviewHeld;
+        const cooldownHeld = flags.cooldownHeld;
         // Herdr list had items but every one was filtered by a safety gate:
         // compose the terminal reason and DO NOT fall through to the legacy
         // chain (AC2 — gates are filters, not a fallback ranking).
@@ -4204,6 +4377,11 @@ export async function dispatchDowntimeWork(
         // candidates: neutral 'review-queue-hold', NEVER 'no-candidate' — no
         // cooldown while audits drain the queue (WL-0MTTSWC1X005P4VD AC2).
         if (reviewHeld) return { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON };
+        // Non-terminal cooldown held the only remaining candidates: neutral
+        // 'non-terminal-cooldown', NEVER 'no-candidate' — the backlog is not
+        // empty, so the no-candidate cooldown must not fire
+        // (WL-0MUKYERLZ006ELL5 AC3/AC6).
+        if (cooldownHeld) return { dispatched: false, reason: 'non-terminal-cooldown' };
         return { dispatched: false, reason: 'no-candidate' };
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
@@ -4866,6 +5044,9 @@ export async function monitorDispatchedPanes(
         outcome: decision.outcome,
         reason: decision.reason,
         reasonCode: decision.reasonCode,
+        // Dispatched-at stage, so the non-terminal cooldown can be released
+        // when the item advances (WL-0MUKYERLZ006ELL5 parent AC4).
+        stage: pane.stage,
         closed,
       };
       try {
@@ -4924,6 +5105,17 @@ export interface DowntimeWorkerConfig {
      */
     mode?: 'cheap' | 'fast';
     /**
+     * Drain-pause signal from the mode-switch worker (parent
+     * WL-0MUL0KO7Q003O7YJ, F2 WL-0MUNMCZ2K003DZ50): `true` while the worker
+     * is draining active sessions down to the cheap-pool budget. When set,
+     * `tick()` polls and tracks idle as usual but never dispatches a NEW
+     * work item — in-flight work is untouched. Re-read every tick, so once
+     * the drain ends and the proxy switches to cheap, dispatch resumes on
+     * the next idle tick. Defaults to `undefined` → no pause (backward
+     * compatible fail-open: an unwired worker dispatches as before).
+     */
+    drainPaused?: boolean;
+    /**
      * Maximum concurrent dispatch pipelines (WL-0MT50S9JW001DHME). Defaults
      * to `DISPATCH_PIPELINE_SINGLE_FLIGHT` (1). Only a single-flight budget
      * permits `'2'`; an unbounded (`0`) or ≥ 2 budget keeps `'1'`.
@@ -4931,6 +5123,11 @@ export interface DowntimeWorkerConfig {
     concurrentDispatchCap?: number;
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
+    /**
+     * Non-terminal pane-close cooldown, ms (WL-0MUKYERLZ006ELL5). Optional
+     * for backward compat — defaults to DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS.
+     */
+    nonTerminalCooldownMs?: number;
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
     browseItemCount?: number;
     /**
@@ -5483,6 +5680,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
               instanceId,
               browseItemCount: cfg.browseItemCount,
               markerStaleWindowMs: cfg.markerStaleWindowMs,
+              nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
             }, tickNow);
             lastOfferEmpty = checkIn.offered === null;
             // WL-0MTEZ4XZJ006Y9U7 (AC2): a successful re-offer proves the
@@ -5786,6 +5984,28 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       const contentionQueueDepth =
         typeof status.contention_queue_depth === 'number' ? status.contention_queue_depth : 0;
 
+      // ── Drain pause (parent WL-0MUL0KO7Q003O7YJ, F2 WL-0MUNMCZ2K003DZ50) ──
+      // While the mode-switch worker drains active sessions down to the
+      // cheap-pool budget, pause NEW dispatches. The gate sits AFTER the
+      // poll + `onProxyIdle` hook above, so the mode-switch worker keeps
+      // receiving a fresh status every tick and can observe the drain
+      // complete; in-flight panes are never touched. `drainPaused` is
+      // re-read from config() each tick, so once the drain ends and the
+      // proxy switches to cheap, dispatch resumes on the next idle tick.
+      // Neutral refusal (no strike, no cooldown) like the slot-owned /
+      // contention gates below. Fail-open: `undefined` (unwired) never
+      // pauses.
+      if (cfg.drainPaused === true) {
+        void recordDecision(cfg.cwd, 'draining', {
+          freeSlots,
+          totalSlots: status.total_slots,
+          ownerPresent: ownerLeaseHeld,
+          runningPanes,
+          contentionDepth: contentionQueueDepth,
+        });
+        return { polled: true, dispatched: false, idle: true };
+      }
+
       // Single machine-wide dispatch gate applied to BOTH coordination and
       // legacy modes: a new pane must never be dispatched while the slot is
       // owned or the proxy reports live contention. Each refusal is neutral
@@ -5844,6 +6064,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   coordinationDir: opts.coordinationDir,
                   freeSlots,
                   browseItemCount: cfg.browseItemCount,
+                  nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
@@ -5862,6 +6083,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 contentionQueueDepth,
                 // Success-marker staleness window (WL-0MU6UL0RJ008IHGT).
                 markerStaleWindowMs: cfg.markerStaleWindowMs,
+                // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
+                nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                 spawnConfig,
               });
         // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
@@ -5906,7 +6129,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           //    and reset the idle tracker (fresh full idle period required
           //    after the pause).
           if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
-            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs);
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs);
             if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
               errorStrikes = 0; // the CLI answered — it is healthy
               cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
@@ -6959,6 +7182,22 @@ export function clampDowntimeRequiredFreeSlots(value: number): number {
 export function clampDowntimeNoCandidateCooldownMs(value: number): number {
   if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS;
   return Math.max(Math.round(value), DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS);
+}
+
+/**
+ * Clamp the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): reject
+ * negative/non-finite (fall back to the 30-minute default) and clamp to
+ * [DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS,
+ * DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS] (1 minute – 24 hours) so the control
+ * can neither be disabled/trivially small (immediate retry) nor set so large
+ * that a repeatedly-failing item is stranded.
+ */
+export function clampDowntimeNonTerminalCooldownMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS),
+    DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS,
+  );
 }
 
 /**

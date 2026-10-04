@@ -92,10 +92,10 @@ export function buildDispatchWorkItem(row: RecentDispatchRow): WorkItem {
  */
 export function mergeDispatchRow(live: WorkItem, row: RecentDispatchRow): WorkItem {
   const merged: WorkItem = { ...live };
-  // Strip the live browse list's grouping so the dispatches view stays a flat
-  // list; ordering is applied by the caller (fetchItemsForView) using the
-  // canonical main-list comparator. Interleaving live groups here would emit
-  // repeated headings (getDisplayRows emits one whenever `group` changes).
+  // Strip the live browse list's grouping; the caller (fetchItemsForView)
+  // assigns the 4-hour time-block group/label for the dispatches view
+  // (WL-0MUMM9NED009TLL3) so getDisplayRows emits one heading per time block
+  // rather than repeated browse-group headings.
   delete merged.group;
   delete merged.groupLabel;
   merged.isLogDerived = true;

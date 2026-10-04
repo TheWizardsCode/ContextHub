@@ -5,7 +5,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 ## Features
 
 - **Browse work items** — Lists work items from `wl next` in a scrollable, keyboard-navigable list. The top-level list is root-only: child work items are hidden and appear only under their parent via expand — **at any depth** (epic → feature → task and deeper): any item with children (its `childCount > 0`) can be expanded with Tab/Enter, its children fetched on demand via `wl list --parent` and shown indented at their hierarchy depth (WL-0MSQ3FH1K000MMJW). Expanded parents **stay expanded across refreshes**: each auto/manual refresh re-fetches their children in parallel with the top-level list and swaps both in atomically, so the hierarchy never momentarily collapses or flickers (WL-0MSBVBNGH002RDP5).
-- **Filter by stage, priority, or recent dispatches** — Press `f` then an axis key (`s`=stage, `p`=priority, `d`=dispatches), then a value key, or type `/wl <stage>` / `/wl --priority <priority>` / `/wl dispatches`. Stage axis: `f s i`=idea, `f s n`=intake, `f s p`=plan, `f s r`=review, `f s s`=sprint back to the default view. Priority axis: `f p l`=low, `f p m`=medium, `f p h`=high, `f p c`=critical, `f p s`=clear the priority filter. Dispatches axis: `f d` shows the most recent downtime dispatches from the local rolling log (see [Recent dispatches view](#recent-dispatches-view)). Stage, priority, and dispatches filters are **mutually exclusive** (replace semantics — applying one clears the others); sprint (`f s s`, `f p s`, or bare `/wl`) clears all three. Filtered views show every root item matching the filter's rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage; log-derived rows for the dispatches view) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW, WL-0MSKC8T46006999S, WL-0MUGLL9SS002E1D2)
+- **Filter by stage, priority, or recent dispatches** — Press `f` then an axis key (`s`=stage, `p`=priority, `d`=dispatches), then a value key, or type `/wl <stage>` / `/wl --priority <priority>` / `/wl dispatches`. Stage axis: `f s i`=idea, `f s n`=intake, `f s p`=plan, `f s r`=review, `f s s`=sprint back to the default view. Priority axis: `f p l`=low, `f p m`=medium, `f p h`=high, `f p c`=critical, `f p s`=clear the priority filter. Dispatches axis: `f d` shows the downtime dispatches from the local rolling log grouped into 4-hour time blocks (see [Recent dispatches view](#recent-dispatches-view)). Stage, priority, and dispatches filters are **mutually exclusive** (replace semantics — applying one clears the others); sprint (`f s s`, `f p s`, or bare `/wl`) clears all three. Filtered views show every root item matching the filter's rule (open items for most stages; `completed`/`in-progress`/`open` for the in_review stage; log-derived rows for the dispatches view) — no `browseItemCount` cap and no `wl next` selection omission (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW, WL-0MSKC8T46006999S, WL-0MUGLL9SS002E1D2)
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The metadata section (list-mode panel and detail view) mirrors the list's icons with text labels — the selected item's Stage row uses the same audit-aware `in_review` icon (✅/❌/❓ fresh, ⏳ stale-passed, 🔍 otherwise), and the Audit/Reviewed rows pair their icons with text (e.g. `✅ ready to close`, `❌ needs review`). The detail view additionally shows the last audit timestamp. **Child coverage (WL-0MUBVH8QG0020H9L):** a `completed`/`in_review` child whose direct parent has a fresh audit is *covered* — its list row and metadata Stage row show the parent's audit-result symbol in a dimmed/grey style (visually distinct from a bright own-audit icon) and the metadata panel adds a `Covered by <parent-id>` row. Coverage is **derived at read time** (`isCoveredByParent` over the parent's audit freshness inputs via the shared `isAuditFresh` predicate) — nothing is persisted and there is no schema migration. A child with its own audit always shows its own verdict; an uncovered child (no own audit, parent demoted/stale) keeps the plain `🔍` stage icon and is never dispatched (see [audit-tier selection](#audit-tier-dispatch)). In text-only (`noIcons`) mode the covered indicator renders as `[COVERED]`.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
@@ -109,7 +109,7 @@ The plugin pane will then be available via the Herdr plugin system.
      - `f`, `p`, `h` — high priority items
      - `f`, `p`, `c` — critical priority items
      - `f`, `p`, `s` — Clear the priority filter (return to the unfiltered browse list)
-   - Press `f`, `d` — Show the most recent downtime dispatches (see [Recent dispatches view](#recent-dispatches-view))
+   - Press `f`, `d` — Show the downtime dispatches grouped into 4-hour time blocks (see [Recent dispatches view](#recent-dispatches-view))
    - Stage, priority, and dispatches filters are **mutually exclusive**: applying one replaces whichever other axis was active (single filter slot, replace semantics). Sprint (`f s s`, `f p s`, or `/wl` with no arguments) clears **all** of them.
    - Type `/wl dispatches` directly to activate the dispatches view (equivalent to `f d`).
    - `/wl <stage>` accepts shorthand aliases (`idea`, `intake`, `plan`, `progress`, `review`) and canonical stage names (`intake_complete`, `plan_complete`, `in_progress`, `in_review`)
@@ -169,13 +169,16 @@ Semantics:
   since been **closed or deleted** still appears. The view never mutates the
   log or any work item; it is display-only and spawns no `wl` processes
   beyond the existing refresh (and the detail fetch below).
-- **Up to 20 rows, main-list order** — rows are deduplicated by work item id
-  (one row per id) and the 20 most recently active items are selected; the
-  visible list is then ordered exactly like the main selection list
-  (Critical → plan/intake → Idea → In Review, using the same within-group
-  comparator), but without group headings. The log itself is bounded to the
-  most recent 100 entries (`DOWNTIME_LOG_MAX_ENTRIES`), so the 20 most recent
-  items normally fall inside the retained window.
+- **4-hour time blocks, oldest first** — rows are deduplicated by work item id
+  (one row per id), then grouped into 4-hour **UTC** time blocks by each item's
+  most recent log timestamp (e.g. `00:00–04:00`, `04:00–08:00`, …,
+  `20:00–24:00`). Each block renders a heading (`29 Sep 2026, 00:00–04:00`)
+  through the existing group-heading path; blocks are ordered **oldest first**
+  while items inside a block stay **newest-first**. There is no result cap —
+  every item still retained in the log is shown. A row whose timestamp is
+  missing or unparseable is collected into a trailing **`Unknown time`** block.
+  The log itself is bounded to the most recent 100 entries
+  (`DOWNTIME_LOG_MAX_ENTRIES`), which is the effective upper bound on rows.
 - **Kind and outcome annotations** — where the log carries them, each row
   also shows the dispatch `kind` (`plan`/`intake`/`audit`/`risk-effort`/
   `implement`) and the latest pane-close **outcome** (e.g.
@@ -353,21 +356,28 @@ dispatches; the other herdr instances coordinate instead of polling:
   election degrades to the pre-refactor behavior for that instance (no
   dispatch from it); the existing dispatched-marker exclusion and CAS
   claim guards are preserved unchanged.
-- **Pane placement (WL-0MU321YK70035AYT)** — automated downtime panes for a
-  work item spawn in the **project's own herdr workspace** — the workspace
-  hosting the `Work Items` plugin pane whose `HERDR_RESOLVED_CWD` equals the
-  item's worklog root — inside a **tab labelled with the exact work-item id**,
-  created on first use and reused thereafter. The pane is split from that
-  tab's root pane (`send-to-pi.sh --anchor <tabRootPaneId>`), so a second
-  dispatch for the same item adds a pane to the same tab. When no plugin pane
-  resolves for the root, the dispatcher falls back to the retained
-  machine-wide `Dispatcher` anchor
-  (`~/.herdr/downtime/downtime-dispatch-anchor.json`); scheduled prompts (no
-  work-item id) always use that anchor. Resolution is fail-closed (never
-  another project's workspace, never the leader's pane); the rejected
-  per-prefix tab routing (`downtime-dispatch-tab-anchors.json`) is retired.
+- **Pane placement (WL-0MUR5FUWD00024XN)** — automated downtime panes
+  spawn in the **owning project's herdr workspace** inside a **tab labelled
+  with the exact work-item id**: `resolveProjectWorkspace` finds the `Work
+  Items` plugin pane whose logical root (`HERDR_RESOLVED_CWD`) equals the
+  item's worklog root, `getItemTabAnchor` ensures/reuses the item-ID tab, and
+  the pane is split from that tab's root pane (`send-to-pi.sh --anchor
+  <itemTabRootPaneId>`). The machine-wide `Dispatcher` workspace is the
+  **fallback only**: when no project plugin pane resolves for the item's root,
+  the pane anchors to a **per-prefix tab** (`WL` for ContextHub items,
+  `TCE`/`CG` for Tableau Card Engine items, …), created on first use and
+  reused thereafter (persisted map
+  `~/.herdr/downtime/downtime-dispatch-tab-anchors.json`, shape
+  `{ workspaceId, byPrefix: { "<PREFIX>": { tabId, paneId } } }`; tab
+  provisioning runs under the coordination lock with a double-check, and a
+  dead persisted pane is re-provisioned); when neither yields an anchor the
+  retained single `Dispatcher` anchor is used
+  (`~/.herdr/downtime/downtime-dispatch-anchor.json`). Resolution is
+  fail-closed (never another project's tab, never the leader's pane): a
+  null/failed resolution reports `anchor-unavailable` (no dispatch this
+  cycle). Scheduled prompts (no work-item id) keep the `Dispatcher` anchor.
   See
-  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#project-workspace-placement--item-id-tabs-wl-0mu321yk70035ayt).
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
@@ -446,6 +456,13 @@ without per-slot data it fails closed to all-slots-free for `0 < N < total`
   tracking, no dispatch) after the worker finds no candidate in either
   stage — a genuine empty backlog (default: `3600000` = 60 minutes, floor
   60s so the pause cannot be disabled or set trivially small)
+- `downtimeNonTerminalCooldownMs` — Minimum cooldown between successive
+  downtime dispatches of the same item/kind after its pane closes without
+  reaching a terminal stage (`agent-ended-no-terminal`,
+  `audit-ended-no-result`) — a neutral skip (never a strike, never a
+  no-candidate) released early when the item advances past its
+  dispatched-at stage (default: `1800000` = 30 minutes, clamped to 1 min –
+  24 h)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (when the proxy
@@ -969,6 +986,18 @@ instead of reaching the backlog tiers, so it never triggers the no-candidate
 cooldown; when none are due and the backlog is genuinely empty, the existing
 no-candidate cooldown applies unchanged.
 
+**Non-terminal cooldown (WL-0MUKYERLZ006ELL5)** — an item whose previous
+pane of the same kind (plan/intake/audit/risk-effort/implement) closed
+without reaching a terminal stage (`agent-ended-no-terminal`,
+`audit-ended-no-result`, …) is held out of re-dispatch for
+`downtimeNonTerminalCooldownMs` (default 30 min, clamped to 1 min – 24 h) so
+a repeatedly failing session cannot consume another local-LLM slot
+immediately. Stage advancement releases the hold at once. The skip is
+neutral — reason `non-terminal-cooldown`, never a strike and never
+`no-candidate`, so it does not enter the empty-backlog pause. The same
+filter runs on the direct Herdr-head path, the coordination offer
+computation, and leader dispatch of a remote offer.
+
 **Empty-backlog cooldown** — when the implement, plan, and intake `wl next`
 lookups and the critical-tier lookup genuinely return no candidate (the
 tab's project has nothing to dispatch), the worker enters a full **pause**
@@ -1214,16 +1243,26 @@ keypresses mid-keystroke (WL-0MTV67MZU003H7SH). There is no user value in
 syncing or refreshing the list while a form is active, so the work is
 deferred until typing finishes.
 
-- **Shared predicate** — `isInputActive(formState, shipItDialog)` in
-  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null`.
+- **Shared predicate** — `isInputActive(formState, shipItDialog,
+  blockedNoticeActive)` in `worklist.ts` returns `true` when
+  `formState !== null || shipItDialog !== null || blockedNoticeActive`.
   Both scheduler ticks (the 30s `refresh` and the 60s `sync`) check it
   alongside the existing `paneGate.visible()` check and return early when it
   is true. The guard is defined once and shared — future text-input overlays
   are covered by extending the single predicate, not per-screen copies.
 - **All text-input sites covered** — the command-parameter form
-  (`FormState`), the Ship It confirmation dialog (`ShipItDialogState`), and
-  `md-note-edit` (which opens a `FormState`) are all covered. There is no
-  separate note-edit state to gate.
+  (`FormState`), the Ship It confirmation dialog (`ShipItDialogState`), the
+  Ship-mode blocked notice, and `md-note-edit` (which opens a `FormState`)
+  are all covered. There is no separate note-edit state to gate.
+- **Fast typing never drops characters** — a raw stdin `data` event may
+  carry **several coalesced keystrokes** when the user types quickly (the
+  PTY batches bytes). Both text-input handlers run every chunk through the
+  shared `splitKeypresses()` tokeniser (`key-input.ts`) so each key is
+  applied in order; escape sequences (arrows, Ctrl+Enter, bracketed paste)
+  stay intact as one token. Previously a multi-character chunk was silently
+  discarded because only `key.length === 1` was accepted — the residual
+  "missing keystrokes when typing fast" bug that the tick gate alone could
+  not fix.
 - **Resume contract: skip, don't coalesce** — ticks are silently dropped
   while typing; the next regular tick after the overlay closes fires
   normally. No queued or immediate post-close refresh is emitted (this
@@ -1295,11 +1334,12 @@ only one axis is ever active; the header shows which one
 (`(filtered: stage <stage>)` or `(filtered: priority <priority>)`).
 
 The **dispatches** view (press `f` + `d`, or `/wl dispatches`) is the third
-filter axis. It uses the local rolling dispatch log to choose up to 20
-read-only rows (deduplicated by work item id) and renders each surviving item
-from the live work item so its icons match the other views, ordered like the
-main selection list; an item no longer in `wl` falls back to the log-derived
-id/title so closed/deleted items still appear (WL-0MUGLL9SS002E1D2). It is
+filter axis. It uses the local rolling dispatch log to choose read-only rows
+(deduplicated by work item id, grouped into 4-hour UTC time blocks ordered
+oldest-first) and renders each surviving item from the live work item so its
+icons match the other views; an item no longer in `wl` falls back to the
+log-derived id/title so closed/deleted items still appear
+(WL-0MUGLL9SS002E1D2, WL-0MUMM9NED009TLL3). It is
 mutually exclusive with the stage and priority filters (the header shows
 `(filtered: dispatches)`), and a missing/malformed log renders an empty list
 rather than an error. See [Recent dispatches view](#recent-dispatches-view).
