@@ -117,6 +117,9 @@ time-based plan.
 - `packages/herdr/src/mode-switch-worker.test.ts` — worker core tests
 - `packages/herdr/src/mode-switch-integration.test.ts` — wiring tests
   (settings → worker, route classification, scheduler interval constants)
+- `packages/herdr/src/drain-dispatch-integration.test.ts` — drain → dispatch
+  integration tests (the live `getIsDraining()` → `config().drainPaused`
+  wiring pauses, resumes and cancels dispatch)
 - `packages/herdr/src/settings.ts` — settings schema + validation/clamps
 - `packages/herdr/src/index.ts` — agent-route hook wiring
 - `packages/herdr/src/worklist.ts` — scheduler task registration
