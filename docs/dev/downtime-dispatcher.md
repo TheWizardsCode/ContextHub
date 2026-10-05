@@ -1155,13 +1155,13 @@ as fallback — they are orphaned and ignored. Guarantees:
 
 The original spec (parent AC8) said "30s proxy poll + 4 min continuous idle
 threshold". **Accepted variance (2026-08-24): the code defaults are
-canonical — 10s dispatch poll, 60s continuous idle threshold, with the proxy
+canonical — 10s dispatch poll, 75s continuous idle threshold, with the proxy
 status refresh unchanged at 30s.**
 
 | Setting | Default | Source |
 |---|---|---|
 | Dispatch poll interval | **10 s** (`downtimePollIntervalMs`) | `DEFAULT_DOWNTIME_POLL_INTERVAL_MS`, floor 10 s (`downtime-worker.ts`) |
-| LLM continuous idle threshold | **60 s** (`downtimeIdleThresholdMs`) | `DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS`, floor 1 s (`downtime-worker.ts`) |
+| LLM continuous idle threshold | **75 s** (`downtimeIdleThresholdMs`) | `DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS`, floor 1 s (`downtime-worker.ts`) |
 | Proxy status refresh | 30 s (`refreshIntervalMs`) | `settings.ts` (unchanged, pre-refactor cadence) |
 | Leader lease TTL | 5 min (`DEFAULT_LEASE_TTL_SECONDS = 300`) | `leader-election.ts` |
 | Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.ts`, `leader-election.ts` |
@@ -1178,8 +1178,11 @@ Both dispatch-poll and idle-threshold are configurable in the herdr plugin
 settings file (`~/.config/herdr/worklog-plugin.json`,
 `downtimePollIntervalMs` / `downtimeIdleThresholdMs`) and are clamped on
 load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
-`downtime-worker.ts`). The success-marker staleness window
-(`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped on load
+`downtime-worker.ts`). The 75 s idle threshold exceeds the 1-minute
+slot-exhaustion cooldown so that existing sessions have a chance to reclaim
+the slot before a new work item is dispatched. The success-marker staleness
+window (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped
+on load
 (`clampDowntimeMarkerStaleWindowMs`). The non-terminal pane-close cooldown
 (`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
 (`clampDowntimeNonTerminalCooldownMs`). The per-item/per-kind attempt cap
@@ -1221,7 +1224,7 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 - **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** neither the project workspace/item tab nor the Dispatcher fallback anchor could be provisioned (fail-closed, never the leader's pane). For the project path check the `pane list` / `process-info` / `/proc/<pid>/environ` reads (no `Work Items` pane for the root, missing `HERDR_RESOLVED_CWD`, or unreadable `/proc` on non-Linux); for the fallback check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock`), and the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <itemId> --no-focus` JSON parse (shape drift across herdr versions). The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty/missing anchor file or unreadable machine dir is treated as missing (never a crash).
 - **Pane landed in the wrong project's workspace:** resolution is fail-closed — it never selects another root's workspace. Check (a) the item's `cwd` (worklog root) matches exactly the plugin pane's `HERDR_RESOLVED_CWD` (trailing-slash tolerant); (b) when ≥2 `Work Items` panes resolve to the same root the focused pane wins, else the lowest pane id — close the surplus plugin pane to remove the ambiguity; (c) stale `dist/` in the running plugin (rebuild with `npm run build` in `packages/herdr`). If no plugin pane resolves, panes intentionally fall back to the `Dispatcher` workspace — that is AC4, not a misroute.
 - **No dispatches happening:** confirm a leader is elected (lease file
-  present + recent `lastUpdated` refresh), the proxy reports idle for ≥ 60 s
+  present + recent `lastUpdated` refresh), the proxy reports idle for ≥ 75 s
   continuously, and the coordination list has offers. Check
   `downtime-coordination.log` for check-ins and the dispatches log for the
   last dispatch.

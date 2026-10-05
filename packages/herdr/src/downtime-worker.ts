@@ -200,7 +200,13 @@ export const DOWNTIME_POLL_INTERVAL_FLOOR_MS = 10_000;
 export const DOWNTIME_IDLE_THRESHOLD_FLOOR_MS = 1_000;
 
 export const DEFAULT_DOWNTIME_POLL_INTERVAL_MS = 10_000;
-export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 60_000;
+/**
+ * Default LLM idle threshold: 75 seconds. Chosen so that the slot-exhaustion
+ * cooldown (1 min) has elapsed before the Dispatcher considers a slot fresh
+ * enough for a new work item — this gives currently-active sessions the
+ * opportunity to reclaim the slot first.
+ */
+export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 75_000;
 
 /**
  * Default required-free-slots count: 2 of 3 slots (spare-capacity dispatch,
@@ -7366,7 +7372,7 @@ export function clampDowntimePollInterval(value: number): number {
 
 /**
  * Clamp the idle threshold: reject negative/non-finite (fall back to the
- * 60s default, DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS) and floor at 1s to
+ * 75s default, DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS) and floor at 1s to
  * prevent immediate dispatch.
  */
 export function clampDowntimeIdleThresholdMs(value: number): number {
