@@ -103,8 +103,8 @@ export const ADMIN_MODE_PATH = '/admin/mode';
 /** Proxy mode-switch endpoint path. */
 export const ADMIN_SET_MODE_PATH = '/admin/set-mode';
 
-/** Default idle window before switching to cheap mode: 60 minutes. */
-export const DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS = 3_600_000;
+/** Default idle window before switching to cheap mode: 15 minutes. */
+export const DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS = 900_000;
 
 /**
  * Free slots the proxy must report before the idle cheap switch completes.
@@ -148,7 +148,7 @@ export const MODE_SWITCH_RUN_TIMEOUT_MS = 30_000;
 
 /**
  * Clamp the mode-switch idle threshold: reject negative/non-finite (fall
- * back to the 60-minute default) and floor at 60s so the operator cannot
+ * back to the 15-minute default) and floor at 60s so the operator cannot
  * configure an immediate cheap-switch.
  */
 export function clampModeSwitchIdleThresholdMs(value: number): number {

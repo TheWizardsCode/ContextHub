@@ -908,7 +908,7 @@ New settings (all optional):
   when `false` the scheduler registers no mode-switch task and the
   agent-route hook is a no-op)
 - `modeSwitchIdleThresholdMs` — Operator-inactivity window before a cheap
-  switch is considered (default: `3600000` = 60 minutes, hard floor `60000`)
+  switch is considered (default: `900000` = 15 minutes, hard floor `60000`)
 - `modeSwitchPollIntervalMs` — Poll interval for the proxy idle check when
   evaluating the idle window (default: `10000`, clamped to `[5000, 60000]`)
 

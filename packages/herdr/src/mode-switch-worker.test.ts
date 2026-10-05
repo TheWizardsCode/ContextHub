@@ -1532,11 +1532,11 @@ describe('graceful leader transitions (AC5)', () => {
   });
 });
 
-describe('60-minute default (AC3)', () => {
-  it('defaults the idle threshold to 3_600_000 ms and clamps invalid input to it', () => {
-    expect(DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS).toBe(3_600_000);
-    expect(clampModeSwitchIdleThresholdMs(NaN)).toBe(3_600_000);
-    expect(clampModeSwitchIdleThresholdMs(-1)).toBe(3_600_000);
+describe('15-minute default (AC3)', () => {
+  it('defaults the idle threshold to 900_000 ms and clamps invalid input to it', () => {
+    expect(DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS).toBe(900_000);
+    expect(clampModeSwitchIdleThresholdMs(NaN)).toBe(900_000);
+    expect(clampModeSwitchIdleThresholdMs(-1)).toBe(900_000);
     // The 60s floor is unchanged.
     expect(clampModeSwitchIdleThresholdMs(1_000)).toBe(MODE_SWITCH_IDLE_THRESHOLD_FLOOR_MS);
   });
