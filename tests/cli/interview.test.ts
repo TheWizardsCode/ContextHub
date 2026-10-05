@@ -896,6 +896,19 @@ describe('buildProducerReviewExplanation', () => {
       const bounded = renderExplanation('x'.repeat(5000), 50, 50);
       expect(bounded.endsWith('…')).toBe(true);
     });
+
+    it('applies the raised default bounds (8192 chars / 512 lines)', () => {
+      // Single long line: the default character cap is 8192.
+      const long = renderExplanation('x'.repeat(10000));
+      expect(long.length).toBeGreaterThan(8000);
+      expect(long.length).toBeLessThanOrEqual(8192);
+
+      // Many short lines: the default line cap is 512, well above the old 24.
+      const manyLines = Array.from({ length: 600 }, (_, i) => `line ${i}`).join('\n');
+      const lineBounded = renderExplanation(manyLines);
+      expect(lineBounded.split('\n').length).toBeGreaterThan(100);
+      expect(lineBounded.split('\n').length).toBeLessThanOrEqual(512);
+    });
   });
 
   describe('buildFallbackExplanation structured signals (AC4)', () => {

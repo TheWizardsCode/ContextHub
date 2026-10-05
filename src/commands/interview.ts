@@ -571,14 +571,14 @@ export const MAX_AUDIT_SUMMARY_BYTES = 2048;
 export const MAX_AUDIT_RAW_OUTPUT_BYTES = 2048;
 
 /** Maximum length (characters) of the rendered explanation. */
-export const MAX_EXPLANATION_LENGTH = 1000;
+export const MAX_EXPLANATION_LENGTH = 8192;
 
 /**
  * Maximum number of lines in the rendered explanation. The render keeps
  * intentional line breaks (AC3) but caps how many are surfaced so a runaway
  * LLM response cannot flood the console.
  */
-export const MAX_EXPLANATION_LINES = 24;
+export const MAX_EXPLANATION_LINES = 512;
 
 /** Default timeout (ms) for the explanation LLM call. */
 export const EXPLANATION_TIMEOUT_MS = 15000;

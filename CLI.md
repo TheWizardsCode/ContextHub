@@ -1320,7 +1320,7 @@ silently to the **structured evidence**, in priority order:
 The rendered explanation preserves intentional line breaks and short Markdown
 structure — it is no longer collapsed into a single line — but collapses runs
 of spaces and repeated blank lines, and is bounded by a documented maximum
-(`MAX_EXPLANATION_LENGTH`, 1000 characters, and `MAX_EXPLANATION_LINES`, 24
+(`MAX_EXPLANATION_LENGTH`, 8192 characters, and `MAX_EXPLANATION_LINES`, 512
 lines). Truncation is marked with a trailing ellipsis.
 
 The explanation is advisory only — it never mutates the description or clears
