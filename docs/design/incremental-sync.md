@@ -293,7 +293,12 @@ the records changed since the last full snapshot — not unbounded history.
 
 The incremental path runs entirely inside the existing sync flow, so it
 inherits unchanged:
-- the file lock (`withFileLock`, `getLockPathForJsonl`),
+- the file lock (`withFileLock`, `getLockPathForJsonl`) — also acquired by the
+  mutating commands `wl update` / `wl comment add` / `wl audit-set` around
+  their read-modify-write, so a sync can never overwrite a mutation that
+  landed after its local read (no lost update; see
+  [DATA_SYNCING.md § Concurrent Writes](../DATA_SYNCING.md#concurrent-writes-sync-vs-mutating-commands) and
+  `tests/cli/sync-vs-mutation.test.ts`),
 - the single-flight guard and `--if-idle` skip semantics (WL-0MSAB7ZUC004SK7E),
 - the ephemeral JSONL pattern (SQLite → JSONL → push → delete).
 

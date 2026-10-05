@@ -13,6 +13,7 @@ import type {
 } from '../cli-types.js';
 import type { UpdateCommentInput } from '../types.js';
 import { humanFormatComment, resolveFormat } from './helpers.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -74,12 +75,14 @@ export default function register(ctx: PluginContext): void {
         process.exit(1);
       }
 
-      const comment = db.createComment({
-        workItemId: normalizedWorkItemId,
-        author: options.author,
-        comment: commentText,
-        references: refs,
-      });
+      const comment = withStoreMutationLock(ctx.dataPath, () =>
+        db.createComment({
+          workItemId: normalizedWorkItemId,
+          author: options.author,
+          comment: commentText,
+          references: refs,
+        })
+      );
       
       if (!comment) {
         output.error(`Work item not found: ${workItemId}`, { success: false, error: `Work item not found: ${workItemId}` });
