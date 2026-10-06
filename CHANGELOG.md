@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.19 (2026-10-06)
+> **Release focus:** This release focuses on reliability and workflow polish across task handling, sessions, and audits, fixing issues like endless retries, lost progress from connection errors, and sync conflicts that dropped completed work. It also improves visibility and speed with priority icons, clearer flag explanations, quick-create options, and more accurate reporting from the latest worklog data.
+### Features
+- Flagged items now explain why they need review, not just how to clear the flag. (WL-0MUUAMP7M008Z4GK)
+- Installing in a worktree no longer breaks your global Pi extension. (WL-0MUSTNEQW003V3KO)
+- Refactor and standup now use the latest worklog data, so reports and findings stay accurate. (WL-0MUAD8U24001ZK5K)
+- Stops stuck tasks from retrying endlessly and flags them for review. (WL-0MUKYEXMK0033MFK)
+- Interview now finds questions even when they're written in plain prose. (WL-0MUH7ACKJ0024VGF)
+- Release notes now include a clear link to play the latest build and share feedback. (WL-0MUWCGF670087GAS)
+- Spot urgent work at a glance with a new priority icon in the list. (WL-0MTQYTA20009YXBT)
+- Active sessions now get priority for freed slots before new work starts. (WL-0MUV0VEFW007ZBB7)
+- Create tasks faster with new quick-create options. (WL-0MTCLB50D0026YA7)
+### Bug Fixes
+- Completed work and comments no longer get lost when multiple sessions sync at once. (WL-0MUV2U9QF002S9J1)
+- The finish step now runs your project's full test suite, so pushes are properly validated. (WL-0MUL6LCE00042MB0)
+- Downtime work now only starts on items visible in your sprint view, so nothing hidden gets picked up. (WL-0MUNS8X97007C9H9)
+- Transient connection errors now retry automatically instead of losing your progress. (WL-0MUQO8AEE003G1Z2)
+- Panes no longer close while you're still working or waiting to respond. (WL-0MUMCZAC40058HCC)
+- Passed audits no longer appear stale after minor edits, so you won't see false warnings or rerun audits. (WL-0MUN7QWFP0010EQC)
+- Audits no longer crash on large codebases, so your results save reliably. (WL-0MSS55LFU00973S2)
+- Downtime tabs no longer show an empty pane alongside your dispatch output. (WL-0MU2EOHK900425VU)
+- Fixed duplicate error messages when viewing a non-existent wishlist. (WL-0MTGDZVLV0055T4C)
+- Background updates now pause while you type, so no more dropped keystrokes. (WL-0MTV67MZU003H7SH)
+### Other
+- Longer explanations can now be shown without being cut off. (WL-0MUV4B3QZ007THLW)
+
 ## v1.0.18 (2026-10-04)
 ### Features
 - Recent dispatches are now grouped by time of day, so you can see when work happened. (WL-0MUMM9NED009TLL3)
