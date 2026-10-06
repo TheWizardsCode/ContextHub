@@ -75,6 +75,22 @@ Install the extension globally:
 npm run install:pi-extension
 ```
 
+> **Installer guards.** `scripts/install-pi-extension.sh` only points the global
+> symlink at a checkout it can actually load. It is a safe no-op (exit `0`, no
+> mutation of `~/.pi/agent/extensions`) when either of the following holds:
+>
+> - **Worktree context** — `REPO_ROOT` contains the `.worklog/worktrees/` path
+>   segment (as created by `/skill:implement`). This prevents an unbuilt,
+>   short-lived worktree from repointing — and then breaking — the machine-global
+>   extension once the worktree is removed.
+> - **Unbuilt checkout** — `dist/wl-integration/spawn.js` is absent. The
+>   extension resolves this compiled output at runtime, so installing from an
+>   unbuilt checkout would produce a broken extension. Run `npm run build`
+>   first.
+>
+> Because the guards exit `0` rather than failing, `npm install` in a worktree
+> still succeeds and leaves the existing global symlink untouched.
+
 For a single-command install of all integrations (herdr plugin + Pi extension):
 
 ```bash

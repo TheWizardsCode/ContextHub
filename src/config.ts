@@ -197,6 +197,22 @@ export function loadConfig(): WorklogConfig | null {
     return null;
   }
 
+  // Validate the optional interview config section (opt-in LLM question
+  // extraction). Absent section → LLM fallback off (no behaviour change).
+  const interviewError = validateInterviewConfig(config);
+  if (interviewError) {
+    console.error(interviewError);
+    return null;
+  }
+
+  // Validate the optional `cta` (call-to-action) field before it reaches
+  // report consumers. Absent field → no behaviour change.
+  const ctaError = validateCtaConfig(config);
+  if (ctaError) {
+    console.error(ctaError);
+    return null;
+  }
+
   // Resolve LLM config section (config → env vars → defaults).
   config.llm = resolveLlmConfig(config);
 
@@ -325,6 +341,65 @@ function validateLlmConfig(config: WorklogConfig): string | null {
   }
 
   return null;
+}
+
+/**
+ * Validate the optional `interview` config section.
+ *
+ * Returns an error message string when the section is present but malformed,
+ * or `null` when it is absent or valid. A non-object `interview` value or a
+ * non-boolean `intelligent` value is rejected; an absent section is valid and
+ * leaves LLM-assisted question extraction disabled.
+ */
+export function validateInterviewConfig(config: WorklogConfig): string | null {
+  const interview = (config as { interview?: unknown }).interview;
+  if (interview === undefined || interview === null) return null;
+  if (typeof interview !== 'object' || Array.isArray(interview)) {
+    return 'Invalid config: interview must be an object mapping to intelligent';
+  }
+
+  const section = interview as Record<string, unknown>;
+  if (
+    section.intelligent !== undefined &&
+    typeof section.intelligent !== 'boolean'
+  ) {
+    return 'Invalid config: interview.intelligent must be a boolean';
+  }
+
+  return null;
+}
+
+/**
+ * Validate the optional `cta` (call-to-action) config field.
+ *
+ * Returns an error message string when `cta` is present but not a string, or
+ * `null` when it is absent or valid. A present non-string value (for example a
+ * nested mapping produced by an unquoted YAML value) is rejected so a
+ * malformed CTA cannot silently reach report consumers. Absent is valid and
+ * leaves existing behaviour unchanged.
+ */
+export function validateCtaConfig(config: WorklogConfig): string | null {
+  const cta = (config as { cta?: unknown }).cta;
+  if (cta === undefined || cta === null) return null;
+  if (typeof cta !== 'string') {
+    return 'Invalid config: cta must be a string (quote Markdown values in YAML)';
+  }
+  return null;
+}
+
+/**
+ * Whether LLM-assisted question extraction is enabled via the
+ * `interview.intelligent: true` config opt-in.
+ *
+ * This is the config-file equivalent of the `wl interview --llm` flag; the
+ * CLI flag takes precedence at the command boundary. Provider settings always
+ * come from `llm.*` / {@link resolveLlmConfig}. An absent section (or a
+ * non-true value) returns `false`, so existing users see no behaviour change.
+ */
+export function isIntelligentInterviewEnabled(
+  config: WorklogConfig | null | undefined,
+): boolean {
+  return config?.interview?.intelligent === true;
 }
 
 /** Parse a positive finite numeric env var, returning undefined otherwise. */
@@ -458,6 +533,25 @@ export function resolveLlmConfig(config: WorklogConfig): LlmConfig | undefined {
   }
 
   return { baseUrl, model, apiKey, timeoutMs };
+}
+
+/**
+ * Resolve the per-project call-to-action (CTA).
+ *
+ * Returns the configured `cta` Markdown string, or `null` when it is absent or
+ * blank so report consumers can skip rendering without a behaviour change.
+ * Mirrors the resolver style of {@link resolveLlmConfig}; accepts a possibly
+ * `null`/`undefined` config so callers that tolerate a missing config can read
+ * the CTA directly. The `cta` value is read defensively (runtime type guard)
+ * because config objects may come from unvalidated sources such as
+ * `loadConfigRelaxed()`.
+ */
+export function resolveProjectCta(
+  config: WorklogConfig | null | undefined,
+): string | null {
+  const cta = (config as { cta?: unknown } | null | undefined)?.cta;
+  if (typeof cta !== 'string' || cta.trim() === '') return null;
+  return cta;
 }
 
 /**

@@ -8,14 +8,28 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
+  clampBrowseItemCount,
+  DEFAULT_BROWSE_ITEM_COUNT,
+  MIN_BROWSE_ITEM_COUNT,
+  MAX_BROWSE_ITEM_COUNT,
+} from './browse-window.js';
+
+// Re-exported for backward compatibility: the sprint-view window bounds and
+// clamp moved to the leaf `browse-window.ts` module so the downtime dispatcher
+// (`downtime-worker.ts`) can share them without an import cycle
+// (WL-0MUNS8X97007C9H9 AC1).
+export { clampBrowseItemCount, MIN_BROWSE_ITEM_COUNT, MAX_BROWSE_ITEM_COUNT, DEFAULT_BROWSE_ITEM_COUNT };
+import {
   clampDowntimeIdleThresholdMs,
   clampDowntimeMarkerStaleWindowMs,
+  clampDowntimeMaxAttempts,
   clampDowntimeNoCandidateCooldownMs,
   clampDowntimeNonTerminalCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+  DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DEFAULT_DOWNTIME_MODEL,
   DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
@@ -87,6 +101,15 @@ export interface PluginSettings {
    */
   downtimeNonTerminalCooldownMs: number;
   /**
+   * Per-item, per-kind dispatch-ATTEMPT cap (WL-0MUKYEXMK0033MFK). Once an
+   * item has been dispatched this many times for a kind at its current
+   * worklog stage (including non-terminal pane closes), it is flagged
+   * `needsProducerReview` and excluded from further automatic dispatch of
+   * that kind. A stage advancement resets the budget. Default 3; clamped to
+   * [1, 10].
+   */
+  downtimeMaxAttempts: number;
+  /**
    * Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT): a
    * SUCCESS dispatch marker whose item is still at the marker's dispatched-at
    * stage is released once its age exceeds this window, so a pane that
@@ -103,7 +126,7 @@ export interface PluginSettings {
    */
   modeSwitchEnabled: boolean;
   /**
-   * Idle window before switching to cheap mode (ms). Default 3_600_000 (60 min).
+   * Idle window before switching to cheap mode (ms). Default 900_000 (15 min).
    * A new operator agent-route command resets this timer.
    */
   modeSwitchIdleThresholdMs: number;
@@ -145,7 +168,7 @@ export const defaultSettings: PluginSettings = {
   showIcons: true,
   autoSync: true,
   syncIntervalMs: 60000,
-  browseItemCount: 20,
+  browseItemCount: DEFAULT_BROWSE_ITEM_COUNT,
   showHelpText: true,
   downtimeEnabled: true,
   downtimeIdleThresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
@@ -155,6 +178,7 @@ export const defaultSettings: PluginSettings = {
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   downtimeNonTerminalCooldownMs: DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+  downtimeMaxAttempts: DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   modeSwitchEnabled: true,
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
@@ -165,24 +189,10 @@ export const defaultSettings: PluginSettings = {
   maxSyncStalenessMs: 60_000,
 };
 
-/** Minimum allowed browseItemCount. */
-export const MIN_BROWSE_ITEM_COUNT = 1;
-/** Maximum allowed browseItemCount. */
-export const MAX_BROWSE_ITEM_COUNT = 50;
-
 /** Minimum allowed maxSyncStalenessMs (1 s). */
 export const MIN_MAX_SYNC_STALENESS_MS = 1_000;
 /** Maximum allowed maxSyncStalenessMs (5 min). */
 export const MAX_MAX_SYNC_STALENESS_MS = 300_000;
-
-/**
- * Clamp a browseItemCount value to the supported [1, 50] range.
- * Used at load time so persisted/parsed values cannot exceed the bounds.
- */
-export function clampBrowseItemCount(value: number): number {
-  if (!Number.isFinite(value)) return defaultSettings.browseItemCount;
-  return Math.min(Math.max(Math.round(value), MIN_BROWSE_ITEM_COUNT), MAX_BROWSE_ITEM_COUNT);
-}
 
 /**
  * Clamp maxSyncStalenessMs to the supported [1000, 300000] range.
@@ -266,6 +276,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeNonTerminalCooldownMs: typeof parsed.downtimeNonTerminalCooldownMs === 'number'
         ? clampDowntimeNonTerminalCooldownMs(parsed.downtimeNonTerminalCooldownMs)
         : defaultSettings.downtimeNonTerminalCooldownMs,
+      downtimeMaxAttempts: typeof parsed.downtimeMaxAttempts === 'number'
+        ? clampDowntimeMaxAttempts(parsed.downtimeMaxAttempts)
+        : defaultSettings.downtimeMaxAttempts,
       downtimeMarkerStaleWindowMs: typeof parsed.downtimeMarkerStaleWindowMs === 'number'
         ? clampDowntimeMarkerStaleWindowMs(parsed.downtimeMarkerStaleWindowMs)
         : defaultSettings.downtimeMarkerStaleWindowMs,

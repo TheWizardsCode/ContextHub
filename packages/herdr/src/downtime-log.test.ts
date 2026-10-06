@@ -42,6 +42,7 @@ import {
   DOWNTIME_LOG_MAX_ENTRIES,
   recentAuditDispatchedItemIds,
   isNonTerminalCooldownActive,
+  countAttempts,
 } from './downtime-log.js';
 import type { DowntimeLogEntry, RecentDispatchRow } from './downtime-log.js';
 
@@ -1427,5 +1428,68 @@ describe('isNonTerminalCooldownActive (WL-0MUKYERLZ006ELL5)', () => {
       { itemId: 'WL-A', kind: 'intake', dispatchedAt: new Date(NOW - 60_000).toISOString(), stage: 'idea' },
     ];
     expect(active(markers)).toBe(false);
+  });
+});
+
+// ── countAttempts (WL-0MUKYEXMK0033MFK AC1/AC4/AC7e) ───────────────────
+
+describe('countAttempts (WL-0MUKYEXMK0033MFK)', () => {
+  const marker = (overrides: Partial<DowntimeLogEntry> = {}): DowntimeLogEntry => ({
+    itemId: 'WL-A',
+    kind: 'implement',
+    stage: 'plan_complete',
+    dispatchedAt: '2026-09-28T10:00:00.000Z',
+    ...overrides,
+  });
+
+  it('counts every dispatch marker for the (item, kind) at the current stage', () => {
+    const entries = [marker(), marker(), marker()];
+    expect(countAttempts(entries, 'WL-A', 'implement', 'plan_complete')).toBe(3);
+  });
+
+  it('is scoped by kind — markers of another kind do not count', () => {
+    const entries = [marker(), marker({ kind: 'plan' })];
+    expect(countAttempts(entries, 'WL-A', 'implement', 'plan_complete')).toBe(1);
+  });
+
+  it('is scoped by item — markers of another item do not count', () => {
+    const entries = [marker(), marker({ itemId: 'WL-B' })];
+    expect(countAttempts(entries, 'WL-A', 'implement', 'plan_complete')).toBe(1);
+  });
+
+  it('resets the budget on stage advancement: only markers at the current stage count (AC4)', () => {
+    const entries = [
+      marker({ stage: 'intake_complete' }),
+      marker({ stage: 'intake_complete' }),
+      marker({ stage: 'plan_complete' }),
+    ];
+    // The item advanced to plan_complete: the two earlier attempts no longer count.
+    expect(countAttempts(entries, 'WL-A', 'implement', 'plan_complete')).toBe(1);
+  });
+
+  it('counts non-terminal pane closes once, via their dispatch marker', () => {
+    const entries = [
+      marker(),
+      { entryType: 'pane-close', itemId: 'WL-A', kind: 'implement', stage: 'plan_complete', timestamp: '2026-09-28T10:05:00.000Z', reasonCode: 'agent-ended-no-terminal' } as DowntimeLogEntry,
+    ];
+    expect(countAttempts(entries, 'WL-A', 'implement', 'plan_complete')).toBe(1);
+  });
+
+  it('excludes spawn-failed traces and post-spawn enrichment entries (no double count)', () => {
+    const entries = [
+      marker(),
+      marker({ outcome: 'spawn-failed' }),
+      marker({ enrichment: true }),
+    ];
+    expect(countAttempts(entries, 'WL-A', 'implement', 'plan_complete')).toBe(1);
+  });
+
+  it('does not count legacy markers without a recorded stage (fail-open under-count)', () => {
+    const entries = [{ itemId: 'WL-A', kind: 'implement', dispatchedAt: '2026-09-28T10:00:00.000Z' } as DowntimeLogEntry];
+    expect(countAttempts(entries, 'WL-A', 'implement', 'plan_complete')).toBe(0);
+  });
+
+  it('yields 0 for an empty/missing log (AC7e fail-open)', () => {
+    expect(countAttempts([], 'WL-A', 'implement', 'plan_complete')).toBe(0);
   });
 });

@@ -405,14 +405,18 @@ critical items at the Herdr head, so a critical item dispatches as soon as it is
 first classifyable list item (WL-0MSI8H3HP000K0RG audit, WL-0MSMAYPQP001FLR6 implement,
 WL-0MT3FM8VA005XBHE critical).
 
-**Extended dispatch window (WL-0MU6UL3GQ0015AA5):** the Herdr head is windowed
-(mandatory items always included, remaining slots filled from "other" items), so a large
-mandatory set can push the only dispatchable candidate past the window. When the head
-yields no candidate the dispatcher re-reads the **same ranking path** with a bounded
-larger count (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional items) and skips the items
-already seen — a window extension, never a second ranking. The TUI worklist still renders
-exactly `browseItemCount` items; the extension is dispatch-only. A `no-candidate` outcome
-therefore means the whole bounded dispatch backlog held nothing dispatchable.
+**Sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes
+WL-0MU6UL3GQ0015AA5 AC1/AC4):** the dispatcher head is the sprint view. Both selection
+paths pass the live per-root `browseItemCount` (clamped 1–50) to `getHerdrListHead`, so
+the head equals the rendered worklist (mandatory items always included, remaining slots
+filled from "other" items). Non-critical work outside the view is never dispatched: when
+the head yields no candidate the dispatcher reports the in-view terminal reason
+(`no-candidate`, `review-queue-hold`, `code-freeze`, …) and does not scan hidden backlog.
+A bounded out-of-window escape hatch (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional
+items) re-reads the **same ranking path** but returns **only** `critical` items — because
+critical items are already mandatory in the view this is normally a no-op, and it can
+never surface hidden non-critical work. The TUI worklist still renders exactly
+`browseItemCount` items.
 
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)
@@ -463,6 +467,13 @@ without per-slot data it fails closed to all-slots-free for `0 < N < total`
   no-candidate) released early when the item advances past its
   dispatched-at stage (default: `1800000` = 30 minutes, clamped to 1 min –
   24 h)
+- `downtimeMaxAttempts` — Per-item, per-kind dispatch-attempt cap. Once an
+  item has been dispatched this many times for a kind at its current worklog
+  stage (including non-terminal pane closes), it is flagged
+  `needsProducerReview` and excluded from further automatic dispatch of that
+  kind — a neutral skip (reason `attempt-budget-exhausted`, never a strike,
+  never a no-candidate) reset by a stage advancement (default: `3`, clamped
+  to 1 – 10)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (when the proxy
@@ -845,7 +856,11 @@ proxy idle state:
   records operator activity and triggers a switch to fast mode via `POST
   {proxyUrl}/admin/set-mode` when the proxy is not already in fast mode.
   The POST is fire-and-forget and cannot block command dispatch (fail-open),
-  so a slow or unresponsive proxy never delays the operator.
+  so a slow or unresponsive proxy never delays the operator. When the cached
+  mode says fast the command path re-reads the proxy's actual mode
+  (`GET /admin/mode`) first, so a schedule-driven flip to cheap while the
+  operator is active can never suppress the explicit fast switch
+  (WL-0MUWIHUL2000JEFR).
 - **Cheap on idle (fail-closed)** — once the operator has been inactive for
   `modeSwitchIdleThresholdMs` **and** the proxy reports idle (via backend
   `GET {proxyUrl}/llama/local/status`; no local query, no model switch, no
@@ -897,7 +912,7 @@ New settings (all optional):
   when `false` the scheduler registers no mode-switch task and the
   agent-route hook is a no-op)
 - `modeSwitchIdleThresholdMs` — Operator-inactivity window before a cheap
-  switch is considered (default: `3600000` = 60 minutes, hard floor `60000`)
+  switch is considered (default: `900000` = 15 minutes, hard floor `60000`)
 - `modeSwitchPollIntervalMs` — Poll interval for the proxy idle check when
   evaluating the idle window (default: `10000`, clamped to `[5000, 60000]`)
 
@@ -997,6 +1012,19 @@ neutral — reason `non-terminal-cooldown`, never a strike and never
 `no-candidate`, so it does not enter the empty-backlog pause. The same
 filter runs on the direct Herdr-head path, the coordination offer
 computation, and leader dispatch of a remote offer.
+
+**Per-item/per-kind attempt cap (WL-0MUKYEXMK0033MFK)** — the dispatcher
+counts dispatch attempts per `(item, kind)` from the rolling dispatch log
+(`countAttempts`) and, once the count reaches `downtimeMaxAttempts`
+(default 3, clamped to 1 – 10) at the item's current stage, flags the item
+`needsProducerReview` and stops auto-dispatching that kind. Non-terminal
+closes count via their dispatch marker; `spawn-failed` traces and post-spawn
+enrichment entries do not. Stage advancement resets the budget (earlier-stage
+markers no longer count). The skip is neutral — reason
+`attempt-budget-exhausted`, never a strike and never `no-candidate`. The same
+filter runs on the direct Herdr-head path (including the critical-first
+scan), the coordination offer computation, and leader dispatch of a remote
+offer. A missing/unreadable/corrupt log is fail-open (count 0).
 
 **Empty-backlog cooldown** — when the implement, plan, and intake `wl next`
 lookups and the critical-tier lookup genuinely return no candidate (the
@@ -1243,26 +1271,39 @@ keypresses mid-keystroke (WL-0MTV67MZU003H7SH). There is no user value in
 syncing or refreshing the list while a form is active, so the work is
 deferred until typing finishes.
 
-- **Shared predicate** — `isInputActive(formState, shipItDialog,
-  blockedNoticeActive)` in `worklist.ts` returns `true` when
-  `formState !== null || shipItDialog !== null || blockedNoticeActive`.
-  Both scheduler ticks (the 30s `refresh` and the 60s `sync`) check it
-  alongside the existing `paneGate.visible()` check and return early when it
-  is true. The guard is defined once and shared — future text-input overlays
-  are covered by extending the single predicate, not per-screen copies.
+- **Shared predicate, checked on every background path** —
+  `isInputActive(formState, shipItDialog, blockedNoticeActive)` in
+  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null
+  || blockedNoticeActive`. The 30s `refresh` and 60s `sync` scheduler ticks
+  check it alongside the existing `paneGate.visible()` check and return early
+  when it is true. The same predicate is also consulted **inside**
+  `doRefresh`/`doSync` themselves, so every other background path that calls
+  them directly is covered too: tab-focus resume, the herdr event subscriber
+  (`pane_focused`), the hidden→visible resume-poll fallback, the
+  command-completion `onRefresh` hook, and agent-status event re-renders. The
+  guard is defined once and shared — future text-input overlays are covered by
+  extending the single predicate, not per-screen copies.
 - **All text-input sites covered** — the command-parameter form
   (`FormState`), the Ship It confirmation dialog (`ShipItDialogState`), the
   Ship-mode blocked notice, and `md-note-edit` (which opens a `FormState`)
   are all covered. There is no separate note-edit state to gate.
 - **Fast typing never drops characters** — a raw stdin `data` event may
-  carry **several coalesced keystrokes** when the user types quickly (the
-  PTY batches bytes). Both text-input handlers run every chunk through the
-  shared `splitKeypresses()` tokeniser (`key-input.ts`) so each key is
-  applied in order; escape sequences (arrows, Ctrl+Enter, bracketed paste)
-  stay intact as one token. Previously a multi-character chunk was silently
-  discarded because only `key.length === 1` was accepted — the residual
-  "missing keystrokes when typing fast" bug that the tick gate alone could
-  not fix.
+  carry **several coalesced keystrokes** when the user types quickly (the PTY
+  batches bytes). Both text-input handlers run every chunk through the shared
+  `splitKeypresses()` tokeniser (`key-input.ts`) so each key is applied in
+  order; escape sequences (arrows, Ctrl+Enter, bracketed paste) stay intact as
+  one token. Previously a multi-character chunk was silently discarded because
+  only `key.length === 1` was accepted — the residual "missing keystrokes when
+  typing fast" bug that the tick gate alone could not fix.
+- **Split bytes are reassembled across chunks** — the TUI reads stdin through a
+  stateful `KeypressDecoder` (`key-input.ts`). Raw TTY input is a byte stream,
+  not one key per `data` event: a multi-byte UTF-8 code point or an escape
+  sequence can be split across reads. The decoder buffers the incomplete tail
+  (`StringDecoder` for UTF-8; the tokeniser for an incomplete CSI sequence) and
+  completes it from the next chunk, so bytes are never lost and a split
+  mouse/arrow/bracketed-paste sequence is never misread as a bare `Esc` that
+  would cancel the open form. A lone trailing `ESC` is still emitted
+  immediately as the Escape key so cancel/submit stays responsive.
 - **Resume contract: skip, don't coalesce** — ticks are silently dropped
   while typing; the next regular tick after the overlay closes fires
   normally. No queued or immediate post-close refresh is emitted (this
@@ -1836,7 +1877,7 @@ modal input form:
 | `<podcast-target>` | `w s` write-script sub-chord: stage `intake_complete` (sourced) → `--doc <first .md> --force-single`; otherwise with open editor-note children → `--rewrite <first .podcast.md>`; otherwise a belt-and-braces error is shown and nothing dispatches (never authors a duplicate) | `/skill:wiki-podcast-script <podcast-target>` |
 | `<podcast-review>` | `w r` write-review sub-chord: first `.podcast.md` Key File in raw form (runs the 6 reviews with `--review`; belt-and-braces error when no script exists yet) | `/skill:wiki-podcast-script --review <podcast-review>` |
 | `<podcast-both>` | `w b` write-both sub-chord: first `.podcast.md` Key File in raw form (runs reviews + rewrite in one pass with `--review-rewrite`, 7 LLM calls; belt-and-braces error when no script exists yet) | `/skill:wiki-podcast-script --review-rewrite <podcast-both>` |
-| `<podcast-script>` | `t` TTS chord: first `.podcast.md` Key File, normalized to the wiki-dir-relative `podcast/...` path the TTS skill expects (errors when no script exists yet) | `/skill:wiki-tts-generate --podcast-file <podcast-script>` |
+| `<podcast-script>` | `t` TTS chord: first `.podcast.md` Key File, normalized to the wiki-dir-relative `podcast/...` path the TTS skill expects (the canonical worklog-root-relative `.llm-wiki/wiki/podcast/...` form is stripped of its wiki-root prefix; errors when no script exists yet) | `/skill:wiki-tts-generate --podcast-file <podcast-script>` |
 
 All markers require the chord entry to carry `work_item_types: ["podcast"]`
 so they are only visible on podcast-typed items (see [Shortcut filtering by

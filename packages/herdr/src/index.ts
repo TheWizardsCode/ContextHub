@@ -34,6 +34,7 @@ import {
   setWorklogDir,
   claimWorkItem,
   rollbackClaimWorkItem,
+  markNeedsProducerReviewWorkItem,
   getExecFileAsync,
   buildWlArgs,
   buildWlArgsForRoot,
@@ -60,7 +61,12 @@ import {
   removeActiveAuditMarker,
 } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
-import { createHerdrReaperDeps } from './pane-close-herdr.js';
+import {
+  countSpawnedChildProcesses,
+  createHerdrReaperDeps,
+  dirHasRecentModifications,
+  parsePaneProcessInfo,
+} from './pane-close-herdr.js';
 import { runScheduledPaneClose } from './pane-close-scheduler.js';
 import {
   createDowntimeWorker,
@@ -939,12 +945,14 @@ export function createDowntimeDeps(
     getRunningDowntimePanes: runningPanesResolver,
     // Herdr list head (WL-0MTK1ILM2009QYB2): canonical ranking via fetcher → smart-selection → grouping.
     // The dispatcher treats this as the single ranking source; remaining safety gates are filters.
-    // Batch size 30: enough to filter through (code-freeze, dispatched-marker, single-flight)
-    // without excessive overhead; fetchNextItems applies mandatory-always, browseItemCount
-    // windowing, and regroupWorkItems grouping — the sole ranking path.
+    // Callers pass the live sprint-view window (`browseItemCount`, clamped 1–50) so the head
+    // equals the rendered worklist (WL-0MUNS8X97007C9H9 AC1). The fallback applies only to a
+    // caller that passes no limit; it defaults to the sprint-view default so an unwindowed head
+    // is never produced. `fetchNextItems` applies mandatory-always, browseItemCount windowing,
+    // and regroupWorkItems grouping — the sole ranking path.
     getHerdrListHead: async (_cwd: string, limit?: number): Promise<import('./downtime-worker.js').DowntimeHerdrListResult> => {
       try {
-        const items = await fetchNextItems(limit ?? 30);
+        const items = await fetchNextItems(limit ?? defaultSettings.browseItemCount);
         return { ok: true, items };
       } catch (err) {
         return { ok: false, error: String(err) };
@@ -1607,17 +1615,48 @@ export function createDowntimeDeps(
           }
         },
         invokingPaneId,
-        getNeedsProducerReview: async (itemId: string) => {
+        // Item lookup (parent AC2/AC6): fetch both the producer-review flag
+        // and the work-item stage so the close-decision snapshot records the
+        // stage. Fail-closed: an unreadable item stays review-blocked.
+        getItemInfo: async (itemId: string) => {
           const { stdout } = await getExecFileAsync()(
             'wl',
             ['show', itemId, '--json'],
             { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, cwd },
           );
           const parsed = extractJson(stdout) as {
-            workItem?: { needsProducerReview?: boolean };
+            workItem?: { needsProducerReview?: boolean; stage?: string };
           };
-          return parsed?.workItem?.needsProducerReview === true;
+          return {
+            needsProducerReview: parsed?.workItem?.needsProducerReview === true,
+            stage: parsed?.workItem?.stage,
+          };
         },
+        // Live-child probe (parent AC1/AC3): count foreground processes in
+        // the pane other than the agent itself via `herdr pane process-info`.
+        // Fail-closed: an unreadable/failed lookup yields 0.
+        childProcessCount: async (pane) => {
+          try {
+            const { stdout } = await getExecFileAsync()(
+              herdrBin,
+              ['pane', 'process-info', '--pane', pane.paneId],
+              {
+                encoding: 'utf8',
+                timeout: DOWNTIME_WL_TIMEOUT_MS,
+                maxBuffer: 4 * 1024 * 1024,
+                cwd,
+              },
+            );
+            return countSpawnedChildProcesses(parsePaneProcessInfo(stdout));
+          } catch {
+            return 0; // fail-closed: no evidence of spawned children
+          }
+        },
+        // Recent file-modification probe (parent AC3): scan the pane's
+        // workspace for files changed within the activity window. Fail-closed
+        // on an unreadable directory.
+        hasRecentFileModifications: (pane) =>
+          dirHasRecentModifications(pane.foregroundCwd ?? pane.cwd),
       });
       const result = await runScheduledPaneClose(
         deps,
@@ -1649,6 +1688,13 @@ export function createDowntimeDeps(
       // pre-claim status+stage so a future idle period can re-select it.
       // Race-safe (--if-status in_progress) and fail-closed (never throws).
       return rollbackClaimWorkItem(itemId, original, cwd);
+    },
+    // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
+    // `needsProducerReview = true` when an item exhausts its automatic
+    // dispatch-attempt budget so it surfaces for human triage. Cross-root
+    // (`cwd` is the item's worklog root) and fail-closed (never throws).
+    async markNeedsProducerReview(itemId: string, cwd: string): Promise<boolean> {
+      return markNeedsProducerReviewWorkItem(itemId, cwd);
     },
   };
 }
@@ -1871,16 +1917,11 @@ async function main(): Promise<void> {
         // (conservative `undefined` → PARALLELISM=1) and populated immediately
         // after, so later ticks read the real mode.
         mode: modeSwitchHolder.worker?.getLastKnownMode() ?? undefined,
-        // Drain-pause signal (parent WL-0MUL0KO7Q003O7YJ, F2
-        // WL-0MUNMCZ2K003DZ50): while the mode-switch worker drains sessions
-        // down to the cheap-pool budget, the dispatcher pauses NEW panes. The
-        // holder is empty during synchronous construction (conservative
-        // `false` → dispatch unaffected), populated immediately after, so
-        // later ticks read the live drain state.
-        drainPaused: modeSwitchHolder.worker?.getIsDraining() ?? false,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
         nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,
+        // Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK).
+        maxAttempts: s.downtimeMaxAttempts,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
         browseItemCount: s.browseItemCount,

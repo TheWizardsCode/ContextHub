@@ -964,6 +964,36 @@ describe('runCoordinationCheckIn', () => {
     expect(entry?.directory).toBe('/repo');
   });
 
+  it('offers the head using the effective browseItemCount (AC1, WL-0MUNS8X97007C9H9)', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [headItem({ id: 'WL-IMP', stage: 'idea', status: 'open' })],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    await runCoordinationCheckIn(deps, {
+      cwd: '/repo',
+      coordinationDir: testDir,
+      instanceId: 'inst-1',
+      browseItemCount: 33,
+    });
+    expect(getHerdrListHead).toHaveBeenCalledWith('/repo', 33);
+  });
+
+  it('clamps an out-of-range browseItemCount on the check-in offer path', async () => {
+    const getHerdrListHead = vi.fn().mockResolvedValue({
+      ok: true,
+      items: [headItem({ id: 'WL-IMP', stage: 'idea', status: 'open' })],
+    });
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+    await runCoordinationCheckIn(deps, {
+      cwd: '/repo',
+      coordinationDir: testDir,
+      instanceId: 'inst-1',
+      browseItemCount: 999,
+    });
+    expect(getHerdrListHead).toHaveBeenCalledWith('/repo', 50);
+  });
+
   it('updates the entry when the most-important (Herdr head) item changes', async () => {
     const deps = makeCoordinationDeps({
       getHerdrListHead: vi.fn()

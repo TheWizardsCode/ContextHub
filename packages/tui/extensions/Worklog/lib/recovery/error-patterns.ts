@@ -97,6 +97,15 @@ const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
   /server\s*encountered/i,
   /all providers exhausted/i,
   /no provider available/i,
+  // pi-ai mapStopReason() collapses the enriched finish_reason payload to
+  // the generic string "Provider finish_reason: error", discarding type/
+  // message/suggested_action. Classify as server-error so the recovery loop
+  // retries with exponential backoff rather than losing a long task
+  // (WL-0MUQO8AEE003G1Z2).  Note: suggested_action is forwarded on the wire
+  // but mapStopReason() currently drops it — see upstream tracking at
+  // LP-0MUI5B98B0080CIB.
+  /finish_reason:\s*error/i,
+  /provider finish_reason:\s*error/i,
 ];
 
 const DEFAULT_AUTH_ERROR_PATTERNS: RegExp[] = [

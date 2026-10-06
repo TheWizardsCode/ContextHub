@@ -10,7 +10,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { splitKeypresses } from './key-input.js';
+import { splitKeypresses, splitKeypressesComplete, KeypressDecoder } from './key-input.js';
 
 describe('splitKeypresses', () => {
   it('returns an empty list for an empty chunk', () => {
@@ -78,5 +78,79 @@ describe('splitKeypresses', () => {
     for (const chunk of ['hello', 'ab\x1b[Ac', '\x1b[13;5uok\r', '\x1b[200~x\ny\x1b[201~']) {
       expect(splitKeypresses(chunk).join('')).toBe(chunk);
     }
+  });
+});
+
+describe('splitKeypressesComplete — streaming variant (WL-0MTV67MZU003H7SH)', () => {
+  it('emits complete keys and withholds an incomplete CSI tail', () => {
+    expect(splitKeypressesComplete('ab\x1b[')).toEqual({
+      keys: ['a', 'b'],
+      pending: '\x1b[',
+    });
+    expect(splitKeypressesComplete('a\x1b[3')).toEqual({
+      keys: ['a'],
+      pending: '\x1b[3',
+    });
+  });
+
+  it('returns a complete CSI sequence with no pending tail', () => {
+    expect(splitKeypressesComplete('\x1b[A')).toEqual({ keys: ['\x1b[A'], pending: '' });
+    expect(splitKeypressesComplete('\x1b[200~')).toEqual({ keys: ['\x1b[200~'], pending: '' });
+  });
+
+  it('emits a lone trailing ESC as the Esc key (never withheld)', () => {
+    expect(splitKeypressesComplete('\x1b')).toEqual({ keys: ['\x1b'], pending: '' });
+    expect(splitKeypressesComplete('a\x1b')).toEqual({ keys: ['a', '\x1b'], pending: '' });
+  });
+});
+
+describe('KeypressDecoder — cross-chunk lossless decoding (WL-0MTV67MZU003H7SH)', () => {
+  it('splits a coalesced printable chunk into one key per character', () => {
+    const decoder = new KeypressDecoder();
+    expect(decoder.push('hello')).toEqual(['h', 'e', 'l', 'l', 'o']);
+    expect(decoder.hasPending()).toBe(false);
+  });
+
+  it('reassembles a multi-byte UTF-8 character split across two Buffers', () => {
+    const decoder = new KeypressDecoder();
+    // 'é' is 0xC3 0xA9. Splitting mid-sequence would yield U+FFFD if each
+    // chunk were decoded on its own.
+    expect(decoder.push(Buffer.from([0xc3]))).toEqual([]);
+    expect(decoder.push(Buffer.from([0xa9]))).toEqual(['é']);
+  });
+
+  it('reassembles an SGR mouse sequence split across chunks instead of cancelling', () => {
+    const decoder = new KeypressDecoder();
+    // A split like this previously delivered a bare ESC first, which the form
+    // read as Esc and cancelled the whole overlay.
+    expect(decoder.push('\x1b[<0;10;')).toEqual([]);
+    expect(decoder.push('5M')).toEqual(['\x1b[<0;10;5M']);
+  });
+
+  it('reassembles a bracketed-paste opener split across chunks', () => {
+    const decoder = new KeypressDecoder();
+    expect(decoder.push('\x1b[20')).toEqual([]);
+    expect(decoder.push('0~')).toEqual(['\x1b[200~']);
+  });
+
+  it('emits a lone ESC immediately (Escape stays responsive)', () => {
+    const decoder = new KeypressDecoder();
+    expect(decoder.push('\x1b')).toEqual(['\x1b']);
+    expect(decoder.hasPending()).toBe(false);
+  });
+
+  it('flush() force-emits a stuck incomplete escape as literal keys', () => {
+    const decoder = new KeypressDecoder();
+    expect(decoder.push('\x1b[')).toEqual([]);
+    expect(decoder.hasPending()).toBe(true);
+    expect(decoder.flush()).toEqual(['\x1b[']);
+    expect(decoder.hasPending()).toBe(false);
+  });
+
+  it('never drops bytes: held plus completed tokens reconstruct the input', () => {
+    const decoder = new KeypressDecoder();
+    const first = decoder.push('ab\x1b[');
+    const second = decoder.push('Ac');
+    expect([...first, ...second].join('')).toBe('ab\x1b[Ac');
   });
 });

@@ -228,11 +228,17 @@ describe('getIconPrefix', () => {
     expect(prefix).toBeTruthy();
   });
 
-  it('returns same display width in icon and noIcons mode', () => {
+  it('pads icon-mode prefixes to the fixed width and shows fallbacks in noIcons mode', () => {
     const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', priority: 'high' };
     const withIcons = getIconPrefix(item, { noIcons: false });
     const withoutIcons = getIconPrefix(item, { noIcons: true });
-    expect(stringDisplayWidth(withIcons)).toBe(stringDisplayWidth(withoutIcons));
+    // Icon mode is padded to the fixed ICON_PREFIX_WIDTH (13 cells) so the
+    // item-ID column aligns. noIcons mode renders text fallbacks, which are
+    // wider than a single glyph, so its width is a >= floor rather than an
+    // exact match (WL-0MTQYTA20009YXBT).
+    expect(stringDisplayWidth(withIcons)).toBe(13);
+    expect(withoutIcons).not.toMatch(/\p{Emoji}/u);
+    expect(stringDisplayWidth(withoutIcons)).toBeGreaterThanOrEqual(13);
   });
 
   it('produces a prefix with no spaces between consecutive icons', () => {
@@ -306,5 +312,81 @@ describe('getIconPrefix', () => {
     const withWidth = stringDisplayWidth(getIconPrefix(withReview));
     const withoutWidth = stringDisplayWidth(getIconPrefix(withoutReview));
     expect(withWidth).toBe(withoutWidth);
+  });
+
+  // ── Priority icon in the prefix (WL-0MUBEDFLC004JN86) ─────────────
+
+  it('includes a priority icon for each priority level', () => {
+    const expected: Record<string, string> = {
+      critical: '\u{1F6A8}', // 🚨
+      high: '\u{2B50}',      // ⭐
+      medium: '\u{1F4CB}',   // 📋
+      low: '\u{1F422}',      // 🐢
+    };
+    for (const [priority, glyph] of Object.entries(expected)) {
+      const prefix = getIconPrefix({ id: 'T1', title: 'T', status: 'open', priority });
+      expect(prefix.startsWith(glyph)).toBe(true);
+    }
+  });
+
+  it('renders the PRIORITY_FALLBACK text first when noIcons is enabled', () => {
+    const item: WorkItem = { id: 'T1', title: 'T', status: 'open', priority: 'high' };
+    const prefix = getIconPrefix(item, { noIcons: true });
+    expect(prefix.startsWith('[HIGH]')).toBe(true);
+    expect(prefix).not.toContain('\u{2B50}');
+  });
+
+  it('reserves an empty priority cell when priority is missing', () => {
+    const undefinedPriority: WorkItem = { id: 'T1', title: 'T', status: 'open' };
+    const nullPriority = { id: 'T2', title: 'T', status: 'open', priority: null } as unknown as WorkItem;
+
+    const undefinedPrefix = getIconPrefix(undefinedPriority);
+    const nullPrefix = getIconPrefix(nullPriority);
+
+    // No stray priority glyph or fallback text appears, and both cases align
+    // identically (the fixed-width padding absorbs the empty cell).
+    expect(undefinedPrefix).not.toMatch(/\u{1F6A8}|\u{2B50}|\u{1F4CB}|\u{1F422}/u);
+    expect(nullPrefix).toBe(undefinedPrefix);
+  });
+
+  it('places the priority icon before the agent status slot', () => {
+    const item: WorkItem = {
+      id: 'T1', title: 'T', status: 'open', priority: 'critical', agentState: 'working',
+    };
+    const prefix = getIconPrefix(item);
+    // Priority glyph (🚨) must come before the agent-status glyph (🟢).
+    expect(prefix.indexOf('\u{1F6A8}')).toBeLessThan(prefix.indexOf('\u{1F7E2}'));
+  });
+
+  it('keeps the prefix width fixed at 13 cells with and without a priority', () => {
+    const withPriority: WorkItem = { id: 'T1', title: 'T', status: 'open', priority: 'high' };
+    const withoutPriority: WorkItem = { id: 'T2', title: 'T', status: 'open' };
+
+    expect(stringDisplayWidth(getIconPrefix(withPriority))).toBe(13);
+    expect(stringDisplayWidth(getIconPrefix(withoutPriority))).toBe(13);
+  });
+
+  it('keeps the prefix width aligned across all priority/anchor combinations', () => {
+    const items: WorkItem[] = [
+      { id: 'T1', title: 'T', status: 'open', priority: 'critical' },
+      { id: 'T2', title: 'T', status: 'open', priority: 'high', stage: 'in_review' },
+      { id: 'T3', title: 'T', status: 'completed', stage: 'in_review', needsProducerReview: true },
+      { id: 'T4', title: 'T', status: 'blocked', issueType: 'epic' as const, priority: 'low' },
+      { id: 'T5', title: 'T', status: 'open' },
+    ];
+    const widths = items.map((item) => stringDisplayWidth(getIconPrefix(item)));
+    expect(widths.every((w) => w === 13)).toBe(true);
+  });
+
+  it('renders the priority icon in noIcons mode as the fallback text', () => {
+    const item: WorkItem = { id: 'T1', title: 'T', status: 'open', priority: 'medium', agentState: 'idle' };
+    const withIcons = getIconPrefix(item, { noIcons: false });
+    const withoutIcons = getIconPrefix(item, { noIcons: true });
+
+    expect(withIcons).toContain('\u{1F4CB}');
+    expect(withoutIcons).not.toContain('\u{1F4CB}');
+    // The priority fallback is prepended (before the agent fallback).
+    expect(withoutIcons).toContain('[MED ]');
+    expect(withoutIcons.indexOf('[MED ]')).toBeLessThan(withoutIcons.indexOf('[IDLE]'));
   });
 });

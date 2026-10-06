@@ -14,6 +14,7 @@ import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { loadStatusStageRules, normalizeStatusValue } from '../status-stage-rules.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -47,7 +48,7 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-re-sort', 'Skip automatic re-sort after the update')
     .option('--re-sort-sync', 'Force a synchronous re-sort after the update', false)
-    .action(async (...rawArgs: any[]) => {
+    .action(async (...rawArgs: any[]) => withStoreMutationLock(ctx.dataPath, async () => {
       // Accept re-sort flags to control automatic re-sort behavior after writes
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
@@ -634,5 +635,5 @@ export default function register(ctx: PluginContext): void {
             else void Promise.resolve().then(() => (db as any).reSort());
           }
         } catch (_e) {}
-    });
+    }));
 }

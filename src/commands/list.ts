@@ -4,8 +4,10 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { ListOptions } from '../cli-types.js';
-import type { WorkItemQuery, WorkItemStatus, WorkItemPriority } from '../types.js';
+import type { WorkItem, WorkItemQuery, WorkItemStatus, WorkItemPriority } from '../types.js';
 import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
+import { getGitRepoRoot } from '@worklog/shared/worklog-paths';
+import { computeContentFingerprint, createGitRunner } from '../audit-fingerprint.js';
 import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, humanFormatProjected, resolveFormat, sortByPriorityAndDate } from './helpers.js';
 import { compareGroupableItems } from './grouping.js';
 
@@ -157,6 +159,34 @@ export default function register(ctx: PluginContext): void {
           auditMapForSort.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null, fingerprint: ar.fingerprint ?? null });
         }
       }
+      // Canonical content fingerprints (WL-0MUN7QWFP0010EQC). An item that
+      // carries a stored audit fingerprint gets its *current* fingerprint
+      // computed so the shared `isAuditFresh` predicate can use the primary
+      // content gate instead of the fragile 60 s time gate. Computed lazily
+      // and memoised per item id, and only when a stored fingerprint exists
+      // (the gate requires both sides), so items without an audit pay no git
+      // cost. `null` (unresolvable / git unavailable) fails safe to the time
+      // gate.
+      const gitRepoRoot = getGitRepoRoot() ?? process.cwd();
+      const runGit = createGitRunner(gitRepoRoot);
+      const currentFingerprintCache = new Map<string, string | null>();
+      const currentFingerprintFor = (
+        item: WorkItem,
+        storedFingerprint: string | null | undefined,
+      ): string | null => {
+        if (!storedFingerprint) return null;
+        if (currentFingerprintCache.has(item.id)) {
+          return currentFingerprintCache.get(item.id) ?? null;
+        }
+        const computed = computeContentFingerprint({
+          id: item.id,
+          description: item.description ?? '',
+          runGit,
+        });
+        currentFingerprintCache.set(item.id, computed);
+        return computed;
+      };
+
       const sortedAll = items.slice().sort((a, b) => {
         // In-review lists: bucket sort first
         if (isInReviewList && auditMapForSort) {
@@ -168,6 +198,7 @@ export default function register(ctx: PluginContext): void {
               auditResult: arA ? arA.readyToClose : null,
               auditedAt: arA ? arA.auditedAt : null,
               fingerprint: arA ? arA.fingerprint : null,
+              currentFingerprint: currentFingerprintFor(a, arA?.fingerprint ?? null),
               updatedAt: a.updatedAt,
             },
             { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
@@ -175,6 +206,7 @@ export default function register(ctx: PluginContext): void {
               auditResult: arB ? arB.readyToClose : null,
               auditedAt: arB ? arB.auditedAt : null,
               fingerprint: arB ? arB.fingerprint : null,
+              currentFingerprint: currentFingerprintFor(b, arB?.fingerprint ?? null),
               updatedAt: b.updatedAt,
             },
           );
@@ -217,14 +249,15 @@ export default function register(ctx: PluginContext): void {
             auditResult: audit ? audit.readyToClose : null,
             auditedAt: audit ? audit.auditedAt : null,
             fingerprint: audit ? audit.fingerprint : null,
+            currentFingerprint: currentFingerprintFor(item, audit?.fingerprint ?? null),
             childCount: childCounts.get(item.id) ?? 0,
           };
         });
         // Apply --fields projection when requested (id always included).
         // The projected items drop enrichment fields (auditResult, auditedAt,
-        // childCount) unless explicitly requested in the field list... they are
-        // never part of the shared VALID_FIELDS vocabulary, so they are omitted
-        // whenever a projection is active.
+        // fingerprint, currentFingerprint, childCount) unless explicitly
+        // requested: they are not part of the shared VALID_FIELDS vocabulary,
+        // so a projection is a strict subset of the requested fields.
         const jsonItems = requestedFields
           ? enrichedItems.map(item => pickFields(item, requestedFields))
           : enrichedItems;

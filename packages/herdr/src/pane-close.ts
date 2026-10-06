@@ -35,6 +35,15 @@
  */
 export const DEFAULT_IDLE_THRESHOLD_MS = 30 * 60 * 1000;
 
+/**
+ * herdr `agent_status` values that mean the agent is actively working
+ * (parent AC3). A pane reporting one of these is kept open by the
+ * activity guard even when its idle time exceeds the threshold: an agent
+ * can be silent-for-a-while yet busy (long-running tool call, model
+ * thinking) and must not be reaped.
+ */
+const ACTIVE_AGENT_STATUSES = new Set(['work', 'working', 'busy', 'running']);
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 /**
@@ -74,6 +83,12 @@ export interface SessionSample {
    * connections. Optional/tolerant: absent or `false` = no activity.
    */
   hasActiveNetworkConnections?: boolean;
+  /**
+   * Raw herdr agent status (`idle`, `work`, `done`, `unknown`, …), when
+   * known. Used both for the logging snapshot and as an activity signal
+   * (parent AC3): a `work`-class status keeps the pane open.
+   */
+  agentStatus?: string;
 }
 
 /**
@@ -101,6 +116,8 @@ export interface CloseReasonSnapshot {
   hasRecentFileModifications?: boolean;
   /** Active network-connection activity signal. */
   hasActiveNetworkConnections?: boolean;
+  /** Raw herdr agent status at decision time, when known. */
+  agentStatus?: string;
   /** Pane age since first dispatch (ms), when known. */
   ageSinceDispatchMs?: number;
   /** Configured grace period (ms); `0` = disabled. */
@@ -192,6 +209,8 @@ export function classifySession(
 
   // Full state snapshot (parent AC6 / AC4.1): attached to every decision so
   // the reason can be reconstructed from the log alone.
+  const agentStatus =
+    typeof sample.agentStatus === 'string' ? sample.agentStatus : undefined;
   const reasonSnapshot: CloseReasonSnapshot = {
     kind: sample.kind,
     agentProcessAlive: sample.agentProcessAlive === true,
@@ -199,6 +218,7 @@ export function classifySession(
     itemStage: typeof sample.itemStage === 'string' ? sample.itemStage : undefined,
     needsProducerReview: sample.needsProducerReview === true,
     isInvokingPane: sample.isInvokingPane === true,
+    agentStatus,
     childProcessCount:
       typeof sample.childProcessCount === 'number' && Number.isFinite(sample.childProcessCount)
         ? sample.childProcessCount
@@ -251,12 +271,14 @@ export function classifySession(
   }
 
   // 5. Active-agent signals (parent AC3): a pane showing recent file or
-  //    network activity is still working even when its idle time exceeds the
-  //    threshold. This guards the idle-threshold path only — an explicit
-  //    `</end_session>` marker (above) still closes the pane.
+  //    network activity, or reporting a `work`-class agent status, is still
+  //    working even when its idle time exceeds the threshold. This guards the
+  //    idle-threshold path only — an explicit `</end_session>` marker (above)
+  //    still closes the pane.
   if (
     sample.hasRecentFileModifications === true ||
-    sample.hasActiveNetworkConnections === true
+    sample.hasActiveNetworkConnections === true ||
+    (agentStatus !== undefined && ACTIVE_AGENT_STATUSES.has(agentStatus.toLowerCase()))
   ) {
     return decide(false, 'active');
   }

@@ -230,7 +230,9 @@ Defaults: `baseUrl` `http://192.168.0.199:8000/v1`, `model` `compact`,
 `LLM_API_KEY` and `LLM_TIMEOUT_MS` are used as fallbacks; config values take
 precedence over environment variables (matching the `embedding.*` precedence).
 Every call is bounded by the timeout and degrades silently to a non-LLM
-fallback on error. See [CLI.md](CLI.md#interview-options-id) for the
+fallback on error; the fallback reports the flag reason from the structured
+evidence first (the persisted audit verdict and summary, then an audit waiver,
+then the review comments). See [CLI.md](CLI.md#interview-options-id) for the
 `wl interview --no-llm` opt-out.
 
 ---

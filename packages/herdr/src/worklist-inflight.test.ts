@@ -44,6 +44,8 @@ vi.mock('./notify.js', () => ({
 import { runWorklistTui } from './worklist.js';
 import { setExecFileAsync, resetExecFileAsync } from './fetcher.js';
 import type { WorkItem } from './fetcher.js';
+import { runSync } from './auto-sync.js';
+import { loadShortcutConfig } from './shortcut-config.js';
 
 // ---------------------------------------------------------------------------
 // Fake stdin/stdout harness (same pattern as worklist-visibility.test.ts)
@@ -313,6 +315,175 @@ describe('worklist doRefresh trailing/coalescing refresh (WL-0MTIB7JAN004MQ8N)',
     await vi.advanceTimersByTimeAsync(0);
     expect(fetcher).toHaveBeenCalledTimes(1);
 
+    await quit(p);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Typing gate on ALL background paths (WL-0MTV67MZU003H7SH)
+// ---------------------------------------------------------------------------
+// The scheduler tick gate alone was not enough: focus-resume, the event
+// subscriber, the resume-poll fallback, and the command-completion hook all
+// call `doRefresh`/`doSync` directly. The gate now lives INSIDE those two
+// functions, so every background path pauses while a text-input overlay is
+// open and resumes afterwards.
+
+describe('worklist typing gate on background refresh/sync (WL-0MTV67MZU003H7SH)', () => {
+  /** Auto-refresh cadence used by the scheduler in these tests. */
+  const INTERVAL = 30_000;
+
+  it('pauses auto-refresh while a text-input overlay is open and resumes after close', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock(true) as any);
+
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => []);
+    const p = runWorklistTui(fetcher, [], loadShortcutConfig(), {
+      autoRefresh: true,
+      refreshIntervalMs: INTERVAL,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    fetcher.mockClear();
+
+    // Open the lower-case `s` Search form (unknown <search_term> → FormState).
+    dataHandler?.(Buffer.from('s'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // While the form is open, three refresh intervals must produce ZERO
+    // fetcher (wl) invocations.
+    await vi.advanceTimersByTimeAsync(INTERVAL * 3);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    // Close the form — the next tick refreshes again (resume within one
+    // interval).
+    dataHandler?.(Buffer.from('\x1b'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(fetcher).toHaveBeenCalled();
+
+    await quit(p);
+  });
+
+  it('pauses auto-sync while a text-input overlay is open and resumes after close', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock(true) as any);
+    const runSyncMock = vi.mocked(runSync);
+
+    const p = runWorklistTui(async () => [], [], loadShortcutConfig(), {
+      autoRefresh: false,
+      autoSync: true,
+      syncIntervalMs: 60_000,
+      // Disable the DB-change/heartbeat skip so the sync action runs whenever
+      // the typing gate allows it (the gate is what this test exercises).
+      maxSyncStalenessMs: 0,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    runSyncMock.mockClear(); // drop the fireImmediately start-up sync
+
+    dataHandler?.(Buffer.from('s'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // Two sync intervals while the form is open must spawn ZERO `wl sync`.
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(runSyncMock).not.toHaveBeenCalled();
+
+    dataHandler?.(Buffer.from('\x1b'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(runSyncMock).toHaveBeenCalled();
+
+    await quit(p);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-chunk escape reassembly through the real stdin listener
+// (WL-0MTV67MZU003H7SH)
+// ---------------------------------------------------------------------------
+// The form previously decoded each raw `data` event on its own, so an escape
+// sequence split across events could leak its tail into the typed text (or, if
+// split after the bare ESC introducer, cancel the form). The streaming decoder
+// reassembles it.
+
+describe('worklist stdin decoder — split escape sequences (WL-0MTV67MZU003H7SH)', () => {
+  /** Strip ANSI SGR sequences for plain-text assertions. */
+  const plain = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+
+  /** The most recent full form render. */
+  const formRender = (): string => plain(writes[writes.length - 1] ?? '');
+
+  async function openSearchForm(): Promise<void> {
+    dataHandler?.(Buffer.from('s'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(formRender()).toContain('Command Input');
+  }
+
+  it('ignores a split CSI arrow instead of typing its tail characters', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock(true) as any);
+
+    const p = runWorklistTui(async () => [], [], loadShortcutConfig(), {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await openSearchForm();
+
+    // 'ab', then ↑ split into ESC [ + A, then 'cd'. Without reassembly the
+    // 'A' would be inserted as a literal character.
+    dataHandler?.(Buffer.from('ab'));
+    await vi.advanceTimersByTimeAsync(0);
+    dataHandler?.(Buffer.from('\x1b['));
+    await vi.advanceTimersByTimeAsync(0);
+    dataHandler?.(Buffer.from('A'));
+    await vi.advanceTimersByTimeAsync(0);
+    dataHandler?.(Buffer.from('cd'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const out = formRender();
+    expect(out).toContain('abcd');
+    expect(out).not.toContain('abAcd');
+    // The form is still open — a split escape must not cancel it.
+    expect(out).toContain('Command Input');
+
+    dataHandler?.(Buffer.from('\x1b')); // close the form
+    await vi.advanceTimersByTimeAsync(0);
+    await quit(p);
+  });
+
+  it('ignores an SGR mouse report split across chunks (no stray digits)', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock(true) as any);
+
+    const p = runWorklistTui(async () => [], [], loadShortcutConfig(), {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await openSearchForm();
+
+    dataHandler?.(Buffer.from('xy'));
+    await vi.advanceTimersByTimeAsync(0);
+    // SGR mouse press split before the final 'M'.
+    dataHandler?.(Buffer.from('\x1b[<0;10;'));
+    await vi.advanceTimersByTimeAsync(0);
+    dataHandler?.(Buffer.from('5M'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const out = formRender();
+    expect(out).toContain('xy');
+    expect(out).not.toContain('xy5M');
+
+    dataHandler?.(Buffer.from('\x1b')); // close the form
+    await vi.advanceTimersByTimeAsync(0);
     await quit(p);
   });
 });

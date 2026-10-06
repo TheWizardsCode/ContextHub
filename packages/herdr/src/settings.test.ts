@@ -190,10 +190,10 @@ describe('modeSwitchEnabled', () => {
 });
 
 describe('modeSwitchIdleThresholdMs', () => {
-  it('defaults to 3_600_000 ms (60 minutes)', () => {
-    expect(defaultSettings.modeSwitchIdleThresholdMs).toBe(3_600_000);
+  it('defaults to 900_000 ms (15 minutes)', () => {
+    expect(defaultSettings.modeSwitchIdleThresholdMs).toBe(900_000);
     const path = tempSettingsPath();
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(3_600_000);
+    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(900_000);
   });
 
   it('clamps a persisted value below the 60s floor up to the floor', () => {
@@ -208,7 +208,7 @@ describe('modeSwitchIdleThresholdMs', () => {
   it('falls back to the default when the persisted value is not a number', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, modeSwitchIdleThresholdMs: 'later' }), 'utf-8');
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(3_600_000);
+    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(900_000);
   });
 });
 
@@ -407,5 +407,34 @@ describe('paneClose settings (WL-0MUJL1NAH0042GOS)', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, paneCloseGracePeriodMinutes: 'soon' }), 'utf-8');
     expect(loadSettings(path).paneCloseGracePeriodMinutes).toBe(5);
+  });
+});
+
+// ── downtimeMaxAttempts (WL-0MUKYEXMK0033MFK) ─────────────────────────
+
+describe('downtimeMaxAttempts setting (WL-0MUKYEXMK0033MFK)', () => {
+  it('defaults to 3', () => {
+    expect(defaultSettings.downtimeMaxAttempts).toBe(3);
+  });
+
+  it('a persisted value overrides the default', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeMaxAttempts: 7 });
+    expect(loadSettings(path).downtimeMaxAttempts).toBe(7);
+  });
+
+  it('clamps an out-of-range persisted value into [1, 10]', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeMaxAttempts: 999 });
+    expect(loadSettings(path).downtimeMaxAttempts).toBe(10);
+
+    saveSettings(path, { ...defaultSettings, downtimeMaxAttempts: 0 });
+    expect(loadSettings(path).downtimeMaxAttempts).toBe(1);
+  });
+
+  it('falls back to the default when the persisted value is not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxAttempts: 'lots' }), 'utf-8');
+    expect(loadSettings(path).downtimeMaxAttempts).toBe(3);
   });
 });

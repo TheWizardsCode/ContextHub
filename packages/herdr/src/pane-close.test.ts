@@ -536,6 +536,30 @@ describe('classifySession — active-agent signals table (parent AC3)', () => {
       expected: { close: false, reasonCode: 'active' },
     },
     {
+      name: 'a work agent status keeps an over-threshold pane active (parent AC3)',
+      sample: { agentProcessAlive: true, idleMs: THRESHOLD_MS + 1, agentStatus: 'work' },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: false, reasonCode: 'active' },
+    },
+    {
+      name: 'other work-class statuses are case-insensitive',
+      sample: { agentProcessAlive: true, idleMs: THRESHOLD_MS + 1, agentStatus: 'BUSY' },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: false, reasonCode: 'active' },
+    },
+    {
+      name: 'an idle agent status falls through to the idle-threshold close',
+      sample: { agentProcessAlive: true, idleMs: THRESHOLD_MS + 1, agentStatus: 'idle' },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: true, reasonCode: 'idle-threshold' },
+    },
+    {
+      name: 'an unknown agent status falls through to the idle-threshold close',
+      sample: { agentProcessAlive: true, idleMs: THRESHOLD_MS + 1, agentStatus: 'unknown' },
+      opts: { idleThresholdMs: THRESHOLD_MS },
+      expected: { close: true, reasonCode: 'idle-threshold' },
+    },
+    {
       name: 'explicitly false signals fall through to the idle-threshold close',
       sample: {
         agentProcessAlive: true,
@@ -728,6 +752,19 @@ describe('classifySession — reasonSnapshot (parent AC6 / AC4.1)', () => {
       sample: { hasActiveNetworkConnections: true },
       reasonCode: 'active',
       expected: { hasRecentFileModifications: false, hasActiveNetworkConnections: true },
+    },
+    {
+      name: 'active via agent status',
+      sample: { agentStatus: 'work' },
+      reasonCode: 'active',
+      expected: { agentStatus: 'work', hasRecentFileModifications: false },
+    },
+    {
+      name: 'idle-threshold records the agent status for diagnosis',
+      sample: { agentProcessAlive: true, idleMs: 700_000, agentStatus: 'idle' },
+      opts: { idleThresholdMs: 600_000 },
+      reasonCode: 'idle-threshold',
+      expected: { agentStatus: 'idle', agentProcessAlive: true, idleMs: 700_000 },
     },
   ];
 

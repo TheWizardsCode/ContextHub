@@ -37,6 +37,7 @@ vi.mock('./notify.js', () => ({
 import { runWorklistTui } from './worklist.js';
 import { setExecFileAsync, resetExecFileAsync } from './fetcher.js';
 import type { WorkItem } from './fetcher.js';
+import { stringDisplayWidth } from '@worklog/shared/icons';
 
 // ---------------------------------------------------------------------------
 // Fake stdin/stdout harness (same pattern as worklist-agent-state.test.ts)
@@ -197,5 +198,52 @@ describe('worklist — showIcons gating through runWorklistTui', () => {
     expect(output).toContain('WL-1');
 
     await quit(p);
+  });
+
+  it('renders the priority icon first in the list-row prefix (WL-0MTQYTA20009YXBT)', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock() as any);
+
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
+      { id: 'WL-CRIT', title: 'Critical task', status: 'open', stage: 'idea', priority: 'critical' },
+      { id: 'WL-PLAIN', title: 'Plain task', status: 'open', stage: 'idea' },
+    ]);
+
+    const p = runWorklistTui(fetcher, undefined, undefined, {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    await quit(p);
+
+    // The list is rendered above the metadata panel, so the first line
+    // containing an item ID is its list row.
+    const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, '');
+    const lines = writes.join('').split('\n');
+    // Normalize the selection marker (`▸`): stringDisplayWidth models it as
+    // 2 cells but terminals render it as 1, so the selected row would
+    // otherwise measure 1 cell wider than the non-selected row.
+    const norm = (s: string): string => stripAnsi(s).replace('▸', ' ');
+    const findLine = (id: string): string =>
+      norm(lines.find((l) => l.includes(id)) ?? '');
+    const critLine = findLine('WL-CRIT');
+    const plainLine = findLine('WL-PLAIN');
+    expect(critLine).not.toBe('');
+    expect(plainLine).not.toBe('');
+
+    // The critical priority glyph (🚨) appears in the prefix, before the ID
+    // (and therefore before the after-title priority text).
+    const critPrefix = critLine.slice(0, critLine.indexOf('WL-CRIT'));
+    expect(critPrefix).toContain('\u{1F6A8}');
+    // A missing priority leaves the column empty (no stray priority glyph).
+    const plainPrefix = plainLine.slice(0, plainLine.indexOf('WL-PLAIN'));
+    expect(plainPrefix).not.toContain('\u{1F6A8}');
+
+    // Alignment is preserved: the item-ID column is identical either way.
+    const idCol = (line: string, id: string): number =>
+      stringDisplayWidth(line.slice(0, line.indexOf(id)));
+    expect(idCol(critLine, 'WL-CRIT')).toBe(idCol(plainLine, 'WL-PLAIN'));
   });
 });

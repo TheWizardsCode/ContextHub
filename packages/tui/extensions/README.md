@@ -21,6 +21,16 @@ registers the agent-side plugin modules that complement the Herdr plugin
 > covers browsing, filtering, detail views, shortcuts, and code-freeze
 > awareness. See `packages/herdr/` for that plugin.
 
+## Installation
+
+The global symlink is created by `npm run install:pi-extension`
+(`scripts/install-pi-extension.sh`). The installer is guarded: it makes no
+change to `~/.pi/agent/extensions` (and exits `0`) when run from an
+`implement` worktree (`.worklog/worktrees/` path segment) or from a checkout
+without compiled `dist/wl-integration/spawn.js` output. Run `npm run build`
+from the main checkout before installing. See the top-level
+[README](../../README.md#pi-agent-plugin) for details.
+
 ## Activity Indicator
 
 The extension displays a **persistent activity indicator** in the Pi footer,

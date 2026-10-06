@@ -94,13 +94,19 @@ a background `wl sync` / list refresh could fire while the user was typing and
 replace the render state mid-keystroke. The fix defers that background work
 while any text-input overlay is open.
 
-- **Shared predicate** — `isInputActive(formState, shipItDialog,
-  blockedNoticeActive)` in `worklist.ts` returns `true` when
-  `formState !== null || shipItDialog !== null || blockedNoticeActive`.
-  It is defined once and exported for unit testing; the scheduler checks it at
-  the top of both the `refresh` (30s) and `sync` (60s) task callbacks,
-  alongside the existing `paneGate.visible()` check, and returns early when
-  true.
+- **Shared predicate, enforced on every background path** —
+  `isInputActive(formState, shipItDialog, blockedNoticeActive)` in
+  `worklist.ts` returns `true` when `formState !== null || shipItDialog !== null
+  || blockedNoticeActive`. It is defined once and exported for unit testing.
+  The scheduler checks it at the top of both the `refresh` (30s) and `sync`
+  (60s) task callbacks, alongside the existing `paneGate.visible()` check. The
+  same predicate is also checked **inside** `doRefresh`/`doSync`, so the other
+  background paths that call them directly — tab-focus resume, the herdr event
+  subscriber (`pane_focused`), the hidden→visible resume-poll fallback, the
+  command-completion `onRefresh` hook, and agent-status event re-renders — are
+  covered too. This is the key hardening over the first cut: gating only the
+  scheduler ticks left those direct callers able to refresh/re-render during
+  typing.
 - **Coverage** — the command-parameter form (`FormState` in
   `form-dialog.ts`), the Ship It confirmation dialog (`ShipItDialogState` in
   `ship-it-dialog.ts`), the Ship-mode blocked notice, and `md-note-edit`
@@ -117,6 +123,15 @@ while any text-input overlay is open.
   Before this, `handleInput` only accepted a single character
   (`key.length === 1`) and silently discarded a multi-character chunk — the
   residual dropped-keypress bug seen when typing fast.
+- **Split bytes: streaming decode (WL-0MTV67MZU003H7SH)** — a raw `data` event
+  is not guaranteed to end on a key boundary: a multi-byte UTF-8 code point or
+  an escape sequence can be split across reads. The TUI reads stdin through the
+  stateful `KeypressDecoder` (`key-input.ts`), which holds the incomplete tail
+  (`StringDecoder` for UTF-8; the tokeniser for an incomplete CSI sequence) and
+  completes it from the next chunk. No bytes are dropped, and a split
+  mouse/arrow/bracketed-paste sequence is not misread as a bare `Esc` that
+  would cancel the open form. A lone trailing `ESC` is still emitted
+  immediately as Escape so cancel/submit stays responsive.
 - **Resume contract: skip, don't coalesce** — ticks that fall inside a typing
   window are silently dropped; the next regular tick after the overlay closes
   fires normally. No immediate post-close refresh is queued (avoids refresh
@@ -205,7 +220,10 @@ used panes). Before this fix, N idle agents produced dozens of concurrent
    and the form keeps every keystroke.
 4. Type rapidly across a scheduled tick boundary. Expected: **zero dropped
    characters**. Fast typing can deliver several keystrokes in one stdin
-   chunk; the shared `splitKeypresses()` tokeniser preserves every one.
+   chunk; the shared `splitKeypresses()` tokeniser preserves every one. An
+   escape sequence (arrow / mouse / bracketed paste) split across two `data`
+   events is reassembled by `KeypressDecoder` and must not insert stray
+   characters or cancel the form.
 5. Close the overlay. Expected: the next scheduled tick refreshes/syncs
    normally (no queued immediate refresh) and the header returns to its normal
    state.

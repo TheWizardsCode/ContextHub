@@ -750,10 +750,11 @@ export interface ReviewQueueState {
  * (the same query as the former `fetchCompletedItemCount`). "Outstanding
  * audit" reuses the shared `isAuditFresh` predicate: a missing `auditedAt`
  * or a stored audit that is not current counts as outstanding; a fresh
- * audit (passed or failed) does not. `wl list --json` does not expose
- * `currentFingerprint`, so the predicate degrades to the 60 s time gate for
- * these items — the same semantics the audit-dispatch tier uses for a
- * non-hydrated list (AC3). A CLI error or unparseable output resolves to
+ * audit (passed or failed) does not. `wl list --json` exposes
+ * `currentFingerprint` for items that carry a stored fingerprint, so the
+ * predicate uses the primary content gate rather than the 60 s time gate
+ * (WL-0MUN7QWFP0010EQC); items without a stored fingerprint still fall back
+ * to the time gate. A CLI error or unparseable output resolves to
  * undefined (never throws).
  *
  * Root-only is intentional (WL-0MSTLFW14000KPEC): children are not counted as
@@ -957,6 +958,31 @@ export async function rollbackClaimWorkItem(
   } catch {
     // Fail-closed: a failed/stale rollback resolves false (the caller reports
     // the failure and leaves the item as-is — no worse than before recovery).
+    return false;
+  }
+}
+
+/**
+ * Flag a work item as needing producer review (`needsProducerReview = true`)
+ * via `wl reviewed <id> true` (WL-0MUKYEXMK0033MFK AC3). The downtime
+ * dispatcher calls this once an item exhausts its per-item/per-kind attempt
+ * budget so it surfaces for human triage instead of looping through idle
+ * cycles. `worklogRoot` targets that root's database via per-call
+ * `--worklog-dir` (the same cross-root convention as `claimWorkItem`).
+ *
+ * Idempotent: setting the flag true when it is already true is a no-op.
+ * Never throws — a failure resolves `false` (fail-closed: the dispatcher
+ * still skips the budget-exhausted item and retries the flag next cycle).
+ */
+export async function markNeedsProducerReviewWorkItem(
+  id: string,
+  worklogRoot?: string,
+): Promise<boolean> {
+  try {
+    const dirOverride = worklogRoot !== undefined ? join(worklogRoot, '.worklog') : undefined;
+    await runWl(['reviewed', id, 'true'], true, CLAIM_TIMEOUT_MS, dirOverride);
+    return true;
+  } catch {
     return false;
   }
 }

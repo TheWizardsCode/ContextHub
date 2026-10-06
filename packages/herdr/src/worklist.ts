@@ -67,6 +67,7 @@ import {
 } from './form-dialog.js';
 import { readFromClipboard, writeToClipboard } from './clipboard.js';
 import { ShipItDialogState, overlayShipItDialog } from './ship-it-dialog.js';
+import { KeypressDecoder } from './key-input.js';
 import { extractFilePaths } from './grouping.js';
 import { renderMarkdown, renderMarkdownViewer } from './md-viewer.js';
 import {
@@ -4522,6 +4523,35 @@ export interface PodcastTargetResolution {
 }
 
 /**
+ * Normalize a `.podcast.md` Key File path to the wiki-dir-relative form the
+ * TTS skill's `--podcast-file` expects (OSL-0MUTPC7SF0011Y54).
+ *
+ * The canonical episode `Key Files:` form records the script
+ * worklog-root-relative — e.g.
+ * `.llm-wiki/wiki/podcast/<stem>/<stem>.podcast.md` — which is the form the
+ * `wiki-podcast-script` CLI resolves when it runs with the worklog root as
+ * its CWD. The TTS skill instead resolves `--podcast-file` against
+ * `--wiki-dir` (default `.llm-wiki/wiki`), so the wiki-root prefix is
+ * stripped to leave `podcast/<stem>/<stem>.podcast.md`.
+ *
+ * - A wiki-dir-relative path (`podcast/...`) or wiki-relative path
+ *   (`wiki/...`) is returned unchanged.
+ * - A bare `<title>/<title>.podcast.md` is podcast-dir-relative (the legacy
+ *   form) and gets the `podcast/` prefix.
+ */
+function toWikiRelativePodcastPath(script: string): string {
+  const normalized = script.replace(/^\.\//, '');
+  const wikiRootPrefix = '.llm-wiki/wiki/';
+  if (normalized.startsWith(wikiRootPrefix)) {
+    return normalized.slice(wikiRootPrefix.length);
+  }
+  if (normalized.startsWith('podcast/') || normalized.startsWith('wiki/')) {
+    return normalized;
+  }
+  return `podcast/${normalized}`;
+}
+
+/**
  * Resolve podcast-progression command markers (`<podcast-target>`,
  * `<podcast-script>`, `<podcast-review>`, `<podcast-both>`) for the selected
  * work item at dispatch time (OSL-0MSKFXM380098LFL, folding in
@@ -4549,8 +4579,12 @@ export interface PodcastTargetResolution {
  * The `t` TTS chord command
  * (`/skill:wiki-tts-generate --podcast-file <podcast-script>`) resolves
  * `<podcast-script>` to the first `.podcast.md` Key File, normalized to the
- * wiki-dir-relative `podcast/...` form the TTS skill expects (a bare
- * `<title>/<title>.podcast.md` Key File path is podcast-dir-relative).
+ * wiki-dir-relative `podcast/...` form the TTS skill expects. The canonical
+ * episode Key File form is worklog-root-relative
+ * (`.llm-wiki/wiki/podcast/<stem>/<stem>.podcast.md`), so the wiki-root
+ * prefix is stripped; a bare `<title>/<title>.podcast.md` Key File path is
+ * podcast-dir-relative (the legacy form) and gets the `podcast/` prefix
+ * (OSL-0MUTPC7SF0011Y54).
  *
  * Markers are resolved BEFORE the generic modal-form check so they never
  * fall through to the input form. Returns the input command unchanged when
@@ -4619,11 +4653,9 @@ export async function resolvePodcastTarget(
     if (!script) {
       return { error: 'No podcast script found in Key Files: — author the script first (w)' };
     }
-    // The TTS skill resolves --podcast-file relative to the wiki dir;
-    // episode Key Files store the script podcast-dir-relative.
-    const podcastFile = script.startsWith('podcast/') || script.startsWith('wiki/')
-      ? script
-      : `podcast/${script}`;
+    // Episode Key Files record the script worklog-root-relative; normalize
+    // to the wiki-dir-relative form the TTS skill's --podcast-file expects.
+    const podcastFile = toWikiRelativePodcastPath(script);
     resolved = resolved.replace(/<podcast-script>/g, podcastFile);
   }
 
@@ -4875,6 +4907,17 @@ export async function runWorklistTui(
   let blockedNotice: string | null = null;
 
   /**
+   * Single source of truth for "the user is typing" (WL-0MTV67MZU003H7SH):
+   * true while any text-input overlay (`formState`, `shipItDialog`, or the
+   * modal `blockedNotice`) is open. Background refresh/sync paths consult this
+   * so no re-render or `wl` spawn contends with typing — whichever path
+   * triggers the work (scheduler tick, focus-resume, event subscriber, or the
+   * command-completion hook). See {@link isInputActive}.
+   */
+  const inputActive = (): boolean =>
+    isInputActive(formState, shipItDialog, blockedNotice !== null);
+
+  /**
    * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
    * ambiguous marker keeps `codeFreezeActive` false (browsing and shortcut
    * blocking are unchanged); only the ambiguous-marker banner state and the
@@ -4978,6 +5021,10 @@ export async function runWorklistTui(
     agentEventRenderPending = true;
     Promise.resolve().then(() => {
       agentEventRenderPending = false;
+      // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and its
+      // open overlay) while a text-input overlay is active. Icons catch up on
+      // the next non-typing render/refresh.
+      if (inputActive()) return;
       try {
         if (agentTracker) {
           mergeAgentStatesCached(state.items, agentTracker);
@@ -5154,6 +5201,13 @@ export async function runWorklistTui(
    * Fetch and apply updated items, with optional notification.
    */
   const doRefresh = async (showNotification = false): Promise<void> => {
+    // Typing gate (WL-0MTV67MZU003H7SH): never refresh while a text-input
+    // overlay is open — a background re-render would contend with the typing
+    // event loop. Skip silently (not coalesced); the next scheduler tick after
+    // the overlay closes refreshes normally. Centralised here so it covers ALL
+    // callers (scheduler tick, focus-resume, event subscriber, and the
+    // command-completion hook), not just the scheduler tick.
+    if (inputActive()) return;
     // Single-flight guard with trailing/coalescing: if a refresh is already
     // in-flight, record the request as pending and return. The pending flag
     // is checked in the `finally` block so a trailing refresh runs after the
@@ -5312,6 +5366,10 @@ export async function runWorklistTui(
   // binding was removed (WL-0MSGG5N5Z0074TLY) — doSync is now reached only
   // from the auto-sync timer path.
   const doSync = async (ifIdle = false, heartbeatTtlMs?: number): Promise<void> => {
+    // Typing gate (WL-0MTV67MZU003H7SH): never spawn `wl sync` while a
+    // text-input overlay is open. Skip silently; the next tick after the
+    // overlay closes syncs normally.
+    if (inputActive()) return;
     const outcome = await runSync(getWorklogDir(), {
       ifIdle,
       ...(heartbeatTtlMs !== undefined ? { heartbeat: true, heartbeatTtlMs } : {}),
@@ -5443,8 +5501,7 @@ export async function runWorklistTui(
   const dispatchMouse = (key: string): boolean =>
     handleMouseInput(state, key, termSize, clickState);
 
-  const onData = async (chunk: Buffer): Promise<void> => {
-    const key = chunk.toString();
+  const handleKeyInput = async (key: string): Promise<void> => {
 
     // Alt+m toggle shortcut (WL-0MT0AP2LR000JFWN): always available,
     // even in modal states. Toggles mouse tracking on/off so the user
@@ -5552,7 +5609,11 @@ export async function runWorklistTui(
       return;
     }
 
-    if (key === 'q' && state.mode !== 'filter') {
+    // Quit on a bare `q` — but NOT while a chord is pending, because `q`
+    // may be the chord's next key (e.g. the `c q` create-quick chord,
+    // WL-0MTCLB50D0026YA7). Chord-mode handling below consumes the key
+    // when `chordState.pendingKeys` is non-empty.
+    if (key === 'q' && state.mode !== 'filter' && chordState.pendingKeys.length === 0) {
       cleanup();
       resolve(undefined);
       return;
@@ -6048,6 +6109,20 @@ export async function runWorklistTui(
     render();
   };
 
+  // ── Streaming stdin decode (WL-0MTV67MZU003H7SH) ──────────────────
+  // Raw TTY input is a byte stream: a multi-byte UTF-8 code point or a
+  // mouse/paste/arrow escape sequence can be split across `data` events while
+  // typing fast. `KeypressDecoder` buffers the incomplete tail and completes
+  // it from the next chunk (never dropping bytes, never misreading a split
+  // escape as the Esc key). Complete keys are dispatched through the SAME
+  // handler as before, one decoded chunk at a time.
+  const keyDecoder = new KeypressDecoder();
+  const onData = (chunk: Buffer): void => {
+    const keys = keyDecoder.push(chunk);
+    if (keys.length === 0) return;
+    void handleKeyInput(keys.join(''));
+  };
+
   let resolve: (value: WorkItem | undefined) => void;
   const promise = new Promise<WorkItem | undefined>((res) => {
     resolve = res;
@@ -6353,7 +6428,7 @@ export async function runWorklistTui(
       intervalMs: opts.refreshIntervalMs,
       singleFlight: true,
       run: createGatedTick({
-        isInputActive: () => isInputActive(formState, shipItDialog, blockedNotice !== null),
+        isInputActive: inputActive,
         isVisible: () => paneGate.visible(),
         onHidden: () => {
           panePaused = true;
@@ -6390,7 +6465,7 @@ export async function runWorklistTui(
       intervalMs: opts.syncIntervalMs,
       fireImmediately: true,
       run: createGatedTick({
-        isInputActive: () => isInputActive(formState, shipItDialog, blockedNotice !== null),
+        isInputActive: inputActive,
         isVisible: () => paneGate.visible(),
         onHidden: () => {
           panePaused = true;
