@@ -1917,13 +1917,6 @@ async function main(): Promise<void> {
         // (conservative `undefined` → PARALLELISM=1) and populated immediately
         // after, so later ticks read the real mode.
         mode: modeSwitchHolder.worker?.getLastKnownMode() ?? undefined,
-        // Drain-pause signal (parent WL-0MUL0KO7Q003O7YJ, F2
-        // WL-0MUNMCZ2K003DZ50): while the mode-switch worker drains sessions
-        // down to the cheap-pool budget, the dispatcher pauses NEW panes. The
-        // holder is empty during synchronous construction (conservative
-        // `false` → dispatch unaffected), populated immediately after, so
-        // later ticks read the live drain state.
-        drainPaused: modeSwitchHolder.worker?.getIsDraining() ?? false,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
         nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,

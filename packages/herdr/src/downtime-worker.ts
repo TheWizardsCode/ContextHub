@@ -5309,17 +5309,6 @@ export interface DowntimeWorkerConfig {
      */
     mode?: 'cheap' | 'fast';
     /**
-     * Drain-pause signal from the mode-switch worker (parent
-     * WL-0MUL0KO7Q003O7YJ, F2 WL-0MUNMCZ2K003DZ50): `true` while the worker
-     * is draining active sessions down to the cheap-pool budget. When set,
-     * `tick()` polls and tracks idle as usual but never dispatches a NEW
-     * work item — in-flight work is untouched. Re-read every tick, so once
-     * the drain ends and the proxy switches to cheap, dispatch resumes on
-     * the next idle tick. Defaults to `undefined` → no pause (backward
-     * compatible fail-open: an unwired worker dispatches as before).
-     */
-    drainPaused?: boolean;
-    /**
      * Maximum concurrent dispatch pipelines (WL-0MT50S9JW001DHME). Defaults
      * to `DISPATCH_PIPELINE_SINGLE_FLIGHT` (1). Only a single-flight budget
      * permits `'2'`; an unbounded (`0`) or ≥ 2 budget keeps `'1'`.
@@ -6196,28 +6185,6 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // cumulative telemetry and must never gate dispatch.
       const contentionQueueDepth =
         typeof status.contention_queue_depth === 'number' ? status.contention_queue_depth : 0;
-
-      // ── Drain pause (parent WL-0MUL0KO7Q003O7YJ, F2 WL-0MUNMCZ2K003DZ50) ──
-      // While the mode-switch worker drains active sessions down to the
-      // cheap-pool budget, pause NEW dispatches. The gate sits AFTER the
-      // poll + `onProxyIdle` hook above, so the mode-switch worker keeps
-      // receiving a fresh status every tick and can observe the drain
-      // complete; in-flight panes are never touched. `drainPaused` is
-      // re-read from config() each tick, so once the drain ends and the
-      // proxy switches to cheap, dispatch resumes on the next idle tick.
-      // Neutral refusal (no strike, no cooldown) like the slot-owned /
-      // contention gates below. Fail-open: `undefined` (unwired) never
-      // pauses.
-      if (cfg.drainPaused === true) {
-        void recordDecision(cfg.cwd, 'draining', {
-          freeSlots,
-          totalSlots: status.total_slots,
-          ownerPresent: ownerLeaseHeld,
-          runningPanes,
-          contentionDepth: contentionQueueDepth,
-        });
-        return { polled: true, dispatched: false, idle: true };
-      }
 
       // Single machine-wide dispatch gate applied to BOTH coordination and
       // legacy modes: a new pane must never be dispatched while the slot is

@@ -28,7 +28,12 @@ presence and proxy idle state, without operator intervention:
   `/downtime toggle` chord do **not** count as operator activity.
 - The worker records the operator timestamp and POSTs
   `/admin/set-mode {"mode":"fast"}` — unless the last-known mode is already
-  fast (dedup; refreshed via `GET /admin/mode` per poll).
+  fast (dedup). Idle ticks (the only other mode refresh) do not run while the
+  operator is active, so when the cached mode says fast the command path
+  re-reads the actual mode via `GET /admin/mode` first: a schedule-driven flip
+  to cheap can never suppress the operator's explicit fast request
+  (WL-0MUWIHUL2000JEFR). A failed re-read keeps the cached mode
+  (fail-closed: never switch off an unknown state).
 - **Fail-open:** the POST is fire-and-forget and can never block or delay
   command dispatch — a slow or unresponsive proxy never delays the operator.
 
@@ -42,26 +47,6 @@ presence and proxy idle state, without operator intervention:
 - **Fail-closed:** endpoint failures, timeouts, network errors, and ambiguous
   responses yield no switch and never crash or block the plugin. A `409`
   (mode-switch restart in progress) is a no-op, retried on a later tick.
-
-### Drain before switching (WL-0MUL0KO7Q003O7YJ)
-
-When the idle window is met **and** the proxy is idle, the worker enters a
-**draining** state instead of switching immediately: it waits until the active
-session count has fallen to the cheap pool's budget (`freeSlots >=
-DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2`), then switches. In-flight work is never
-killed — draining only delays the switch and blocks *new* dispatches.
-
-While draining:
-
-- The downtime dispatcher pauses **new** dispatches. The mode-switch worker
-  exposes `getIsDraining()`; `index.ts` forwards it to the dispatcher as
-  `config().drainPaused`, and `DowntimeWorker.tick()` refuses to dispatch while
-  it is `true`. The poll and `onProxyIdle` hook still run every tick, so the
-  mode-switch worker keeps observing the live free-slot count.
-- Once the budget frees, the drain completes, the proxy switches to cheap,
-  `getIsDraining()` clears, and dispatch resumes on the next idle tick.
-- An operator agent-route command (`onOperatorCommand`) cancels the drain
-  immediately, resets the idle clock, and keeps the proxy fast.
 
 ### Restart semantics
 
@@ -117,9 +102,6 @@ time-based plan.
 - `packages/herdr/src/mode-switch-worker.test.ts` — worker core tests
 - `packages/herdr/src/mode-switch-integration.test.ts` — wiring tests
   (settings → worker, route classification, scheduler interval constants)
-- `packages/herdr/src/drain-dispatch-integration.test.ts` — drain → dispatch
-  integration tests (the live `getIsDraining()` → `config().drainPaused`
-  wiring pauses, resumes and cancels dispatch)
 - `packages/herdr/src/settings.ts` — settings schema + validation/clamps
 - `packages/herdr/src/index.ts` — agent-route hook wiring
 - `packages/herdr/src/worklist.ts` — scheduler task registration

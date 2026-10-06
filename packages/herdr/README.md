@@ -856,7 +856,11 @@ proxy idle state:
   records operator activity and triggers a switch to fast mode via `POST
   {proxyUrl}/admin/set-mode` when the proxy is not already in fast mode.
   The POST is fire-and-forget and cannot block command dispatch (fail-open),
-  so a slow or unresponsive proxy never delays the operator.
+  so a slow or unresponsive proxy never delays the operator. When the cached
+  mode says fast the command path re-reads the proxy's actual mode
+  (`GET /admin/mode`) first, so a schedule-driven flip to cheap while the
+  operator is active can never suppress the explicit fast switch
+  (WL-0MUWIHUL2000JEFR).
 - **Cheap on idle (fail-closed)** — once the operator has been inactive for
   `modeSwitchIdleThresholdMs` **and** the proxy reports idle (via backend
   `GET {proxyUrl}/llama/local/status`; no local query, no model switch, no

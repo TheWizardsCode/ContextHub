@@ -9,8 +9,11 @@
  *    the plugin (WL-0MSN3FWV5008KQE9), the worker records the operator
  *    timestamp and fire-and-forget POSTs `/admin/set-mode {"mode":"fast"}`.
  *    A failed switch never blocks or delays the command dispatch (fail-open:
- *    the pane opens regardless). The fast switch fires on the instance that
- *    received the command, whichever pane that is — see the leader note below.
+ *    the pane opens regardless). When the cached mode says `fast` the command
+ *    path re-reads the actual mode first, so a schedule-driven flip to cheap
+ *    never suppresses the explicit fast request (WL-0MUWIHUL2000JEFR). The
+ *    fast switch fires on the instance that received the command, whichever
+ *    pane that is — see the leader note below.
  *  - **Leader-only cheap switching (WL-0MU6MXCZZ007ZXT9, AC1):** only the
  *    downtime leader (`DowntimeWorker.isLeader`, reused — no separate
  *    election) runs the idle cheap-switch logic. Non-leader instances skip
@@ -25,20 +28,12 @@
  *    max of the local clock and the shared timestamp, so the proxy stays fast
  *    while **any** pane has recent activity. A read/write failure falls back
  *    to the local clock (AC6, fail-closed: never a premature cheap switch).
- *  - **Cheap switch on idle (drain before switching, parent
- *    WL-0MUL0KO7Q003O7YJ):** on each tick (scheduler task, or the downtime
+ *  - **Cheap switch on idle:** on each tick (scheduler task, or the downtime
  *    dispatcher's `onProxyIdle` callback — the leader is the only pane that
  *    runs that dispatcher), when the operator has been idle
  *    (no agent-route commands on any pane) for ≥ `modeSwitchIdleThresholdMs`
  *    **AND** the proxy reports idle (reusing `evaluateIdle` from
- *    downtime-worker.ts), the worker drains active sessions down to the
- *    cheap pool's spare capacity before POSTing
- *    `/admin/set-mode {"mode":"cheap"}`. The drain completes once
- *    `evaluateIdle(status, MODE_SWITCH_DRAIN_FREE_SLOTS)` holds (≥ 2 free
- *    slots); until then the worker reports `getIsDraining() === true` so the
- *    downtime dispatcher pauses NEW dispatches (existing in-flight work is
- *    never killed). An operator agent-route command cancels the drain and
- *    resets the idle clock (the proxy stays fast).
+ *    downtime-worker.ts), the worker POSTs `/admin/set-mode {"mode":"cheap"}`.
  *    **Per-slot operator gate (parent WL-0MT9F67Y3008S0PR, decision 1.a):**
  *    when the proxy serves per-slot identity (`slots[]` valid per
  *    `parseLlamaStatus`), the idle gate requires only ≥ 1 free slot
@@ -46,14 +41,13 @@
  *    semantics shared with the downtime dispatcher, whose autonomous
  *    query/lease work holds the OTHER busy slots. A downtime pane is exactly
  *    the work the operator wants to keep running while the proxy runs cheap,
- *    so the busy slots must **not** block the idle *entry* gate (Q4b
- *    decision; accepted tradeoff: a fast-mode downtime request in flight
- *    during the mode restart is killed and retried by its client). The drain
- *    *completion* gate then still requires the cheap pool's 2 free slots.
- *    Without per-slot data the all-slots-free fail-closed entry fallback is
- *    unchanged (`evaluateIdle(status, 0)` — full global checks). In every
- *    case a busy proxy (server down, model switch, or 0 free slots)
- *    **delays** the switch — it never kills in-flight work.
+ *    so the busy slots must **not** delay the switch (Q4b decision;
+ *    accepted tradeoff: a fast-mode downtime request in flight during the
+ *    mode restart is killed and retried by its client). Without per-slot
+ *    data the all-slots-free fail-closed fallback is unchanged
+ *    (`evaluateIdle(status, 0)` — full global checks). In every case a busy
+ *    proxy (server down, model switch, or 0 free slots) **delays** the
+ *    switch — it never kills in-flight work.
  *  - **No redundant switching / no hammering:** the worker skips a switch when
  *    the persisted mode already matches the target (tracking last-known mode,
  *    refreshed via `GET /admin/mode` on each poll). At most one switch per
@@ -89,7 +83,6 @@ import { join } from 'node:path';
 import {
   evaluateIdle,
   parseLlamaStatus,
-  DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_PANE_MIN_FREE_SLOTS,
   type LlamaStatus,
 } from './downtime-worker.js';
@@ -105,15 +98,6 @@ export const ADMIN_SET_MODE_PATH = '/admin/set-mode';
 
 /** Default idle window before switching to cheap mode: 15 minutes. */
 export const DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS = 900_000;
-
-/**
- * Free slots the proxy must report before the idle cheap switch completes.
- * Reuses the audit-dispatch slot budget (`DOWNTIME_AUDIT_MIN_FREE_SLOTS` = 2)
- * as the cheap-mode pool size (parent WL-0MUL0KO7Q003O7YJ): the worker drains
- * active sessions down to this spare-capacity level before switching, so the
- * two-slot cheap pool always has room for the operator to return.
- */
-export const MODE_SWITCH_DRAIN_FREE_SLOTS = DOWNTIME_AUDIT_MIN_FREE_SLOTS;
 
 /**
  * Defensive floor for the idle threshold (60s): a trivially small window
@@ -392,9 +376,8 @@ export type Now = () => number;
 export interface ModeSwitchWorker {
   /**
    * Record that the operator issued an agent-route command through the
-   * plugin. Updates the idle clock, cancels any in-progress drain (the
-   * operator is back — the cheap switch is abandoned), and (fire-and-forget)
-   * POSTs `/admin/set-mode {"mode":"fast"}` when the last known mode is not
+   * plugin. Updates the idle clock and (fire-and-forget) POSTs
+   * `/admin/set-mode {"mode":"fast"}` when the last known mode is not
    * already fast. Never blocks or delays the command dispatch (fail-open).
    * `proxyUrl` is the shared `downtimeProxyUrl`.
    */
@@ -414,15 +397,6 @@ export interface ModeSwitchWorker {
    * mode (`null`) conservatively maps to the serial `'1'` default.
    */
   getLastKnownMode(): ProxyMode | null;
-  /**
-   * Whether the worker is currently draining active sessions before the idle
-   * cheap switch (parent WL-0MUL0KO7Q003O7YJ): true once the idle window is
-   * met and the proxy is idle but fewer than the cheap pool's free slots are
-   * available, cleared once the switch completes or an operator command
-   * arrives. The downtime dispatcher reads this to pause new dispatches while
-   * draining (WL-0MUNMCZ2K003DZ50).
-   */
-  getIsDraining(): boolean;
 }
 
 /**
@@ -484,16 +458,6 @@ export function createModeSwitchWorker(deps?: ModeSwitchWorkerOptions): ModeSwit
   let lastKnownMode: ProxyMode | null = null;
   /** True while a mode-switch POST is in flight (per-process single-flight). */
   let switchInFlight = false;
-  /**
-   * True while draining active sessions before the idle cheap switch: the
-   * idle window is met, the proxy is idle, but fewer than
-   * `MODE_SWITCH_DRAIN_FREE_SLOTS` slots are free. While draining the worker
-   * keeps polling (it does not kill in-flight work) and the downtime
-   * dispatcher pauses NEW dispatches so the slots can fall to the cheap
-   * pool's budget. Cleared on switch completion, operator command, or a
-   * resumed idle window (parent WL-0MUL0KO7Q003O7YJ).
-   */
-  let draining = false;
 
   /**
    * Fire-and-forget mode switch with per-process single-flight and
@@ -519,12 +483,25 @@ export function createModeSwitchWorker(deps?: ModeSwitchWorkerOptions): ModeSwit
     }
   };
 
+  /**
+   * Fire the operator-command fast switch. The command path must not trust a
+   * possibly-stale `lastKnownMode`: the proxy can flip to cheap on its own
+   * schedule while the operator is active, and idle ticks — the only other
+   * place the mode is refreshed — do not run while active. When the cache
+   * says `fast` (the only value that would suppress the switch), re-read the
+   * actual mode first; on a read failure keep the cache (fail-closed: never
+   * switch off an unknown state). Fire-and-forget; never throws.
+   */
+  const fireFastSwitch = async (proxyUrl: string): Promise<void> => {
+    if (lastKnownMode === 'fast') {
+      const current = await getAdminMode(proxyUrl, fetcher);
+      if (current !== null) lastKnownMode = current;
+    }
+    await fireSwitch(proxyUrl, 'fast');
+  };
+
   return {
     onOperatorCommand(proxyUrl: string): void {
-      // The operator is back: an in-progress drain is abandoned (the cheap
-      // switch is cancelled) and the idle clock resets to "active now"
-      // (parent WL-0MUL0KO7Q003O7YJ — operator-command cancellation).
-      draining = false;
       // Record operator activity (agent-route command) on the local clock.
       lastOperatorCommandAt = now();
       // Broadcast to every pane — leader and non-leader alike — so the
@@ -538,15 +515,11 @@ export function createModeSwitchWorker(deps?: ModeSwitchWorkerOptions): ModeSwit
       // leader — gating fast on leadership would leave the proxy in cheap
       // while the operator is actively working (AC4). Only the *cheap* idle
       // switch is leader-gated; see tick() (AC1).
-      void fireSwitch(proxyUrl, 'fast');
+      void fireFastSwitch(proxyUrl);
     },
 
     getLastKnownMode(): ProxyMode | null {
       return lastKnownMode;
-    },
-
-    getIsDraining(): boolean {
-      return draining;
     },
 
     async tick(opts: ModeSwitchTickOptions): Promise<void> {
@@ -564,12 +537,7 @@ export function createModeSwitchWorker(deps?: ModeSwitchWorkerOptions): ModeSwit
       // clock can never be null — restart resets to "active now", so a fresh
       // full window is always required.)
       const elapsed = now() - effectiveLastActivityAt();
-      if (elapsed < opts.idleThresholdMs) {
-        // Activity resumed (local or shared cross-pane command): any
-        // in-progress drain is abandoned and the cheap switch is cancelled.
-        draining = false;
-        return;
-      }
+      if (elapsed < opts.idleThresholdMs) return;
 
       // Fetch proxy status when not provided (the worker fetches its own
       // idle state from the proxy so the caller doesn't need to). null
@@ -603,25 +571,9 @@ export function createModeSwitchWorker(deps?: ModeSwitchWorkerOptions): ModeSwit
         lastKnownMode = currentMode;
       }
       // Skip when the persisted mode already matches the target (or is
-      // unknown/read-unreachable — fail-closed no-op). A no-op also clears
-      // any stale drain state.
-      if (lastKnownMode === 'cheap' || lastKnownMode === null) {
-        draining = false;
-        return;
-      }
+      // unknown/read-unreachable — fail-closed no-op).
+      if (lastKnownMode === 'cheap' || lastKnownMode === null) return;
 
-      // Drain before switching (parent WL-0MUL0KO7Q003O7YJ): the cheap pool
-      // holds `MODE_SWITCH_DRAIN_FREE_SLOTS` (2) slots, so wait until that
-      // many slots are free before switching. If the budget is already
-      // available the switch fires on this tick; otherwise the worker enters
-      // (or stays in) the draining state and the downtime dispatcher pauses
-      // new work (WL-0MUNMCZ2K003DZ50) so the active sessions can subside.
-      if (!evaluateIdle(proxyStatus, MODE_SWITCH_DRAIN_FREE_SLOTS)) {
-        draining = true;
-        return;
-      }
-
-      draining = false;
       await fireSwitch(opts.proxyUrl, 'cheap');
     },
   };

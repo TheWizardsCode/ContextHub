@@ -4581,7 +4581,6 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     deps?: Partial<DowntimeWorkerDeps>;
     mode?: 'cheap' | 'fast';
     concurrentDispatchCap?: number;
-    drainPaused?: boolean;
   } = {}) {
     const cfg = {
       enabled: overrides.enabled ?? true,
@@ -4595,8 +4594,6 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
       ...(overrides.concurrentDispatchCap !== undefined
         ? { concurrentDispatchCap: overrides.concurrentDispatchCap }
         : {}),
-      // Drain pause signal (parent WL-0MUL0KO7Q003O7YJ, F2).
-      drainPaused: overrides.drainPaused,
     };
     const fetcher = vi
       .fn()
@@ -4708,37 +4705,6 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
 
     const call = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(call[1]).not.toHaveProperty('spawnConfig');
-  });
-
-  it('F2: a drainPaused config pauses new dispatches and reports the draining block token', async () => {
-    // While the mode-switch worker drains active sessions down to the cheap
-    // pool budget, the dispatcher must not spawn NEW panes. The poll still
-    // runs (so the mode-switch worker keeps observing free slots) and the
-    // refusal is neutral — no candidate was even selected.
-    const { worker, deps } = makeWorker({ thresholdMs: 0, drainPaused: true });
-    vi.setSystemTime(1_000_000);
-
-    const result = await worker.tick();
-
-    expect(result).toEqual({ polled: true, dispatched: false, idle: true });
-    expect(worker.blockReason).toBe('draining');
-    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-  });
-
-  it('F2: dispatch resumes on the next idle tick once the drain signal clears', async () => {
-    const { worker, deps, cfg } = makeWorker({ thresholdMs: 0, drainPaused: true });
-    vi.setSystemTime(1_000_000);
-    const paused = await worker.tick();
-    expect(paused.dispatched).toBe(false);
-    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-
-    // The drain completed (the proxy switched to cheap) → the very next
-    // idle tick dispatches normally.
-    cfg.drainPaused = false;
-    vi.setSystemTime(1_000_001);
-    const resumed = await worker.tick();
-    expect(resumed.dispatched).toBe(true);
-    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
   });
 
   it('requires a fresh full idle period after a dispatch (AC5)', async () => {
