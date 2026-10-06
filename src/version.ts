@@ -1,2 +1,2 @@
 // Auto-generated; do not edit.
-export const WORKLOG_VERSION = '1.0.18';
+export const WORKLOG_VERSION = '1.0.19';
