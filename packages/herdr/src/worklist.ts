@@ -5578,7 +5578,11 @@ export async function runWorklistTui(
       return;
     }
 
-    if (key === 'q' && state.mode !== 'filter') {
+    // Quit on a bare `q` — but NOT while a chord is pending, because `q`
+    // may be the chord's next key (e.g. the `c q` create-quick chord,
+    // WL-0MTCLB50D0026YA7). Chord-mode handling below consumes the key
+    // when `chordState.pendingKeys` is non-empty.
+    if (key === 'q' && state.mode !== 'filter' && chordState.pendingKeys.length === 0) {
       cleanup();
       resolve(undefined);
       return;
