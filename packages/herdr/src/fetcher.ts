@@ -750,10 +750,11 @@ export interface ReviewQueueState {
  * (the same query as the former `fetchCompletedItemCount`). "Outstanding
  * audit" reuses the shared `isAuditFresh` predicate: a missing `auditedAt`
  * or a stored audit that is not current counts as outstanding; a fresh
- * audit (passed or failed) does not. `wl list --json` does not expose
- * `currentFingerprint`, so the predicate degrades to the 60 s time gate for
- * these items — the same semantics the audit-dispatch tier uses for a
- * non-hydrated list (AC3). A CLI error or unparseable output resolves to
+ * audit (passed or failed) does not. `wl list --json` exposes
+ * `currentFingerprint` for items that carry a stored fingerprint, so the
+ * predicate uses the primary content gate rather than the 60 s time gate
+ * (WL-0MUN7QWFP0010EQC); items without a stored fingerprint still fall back
+ * to the time gate. A CLI error or unparseable output resolves to
  * undefined (never throws).
  *
  * Root-only is intentional (WL-0MSTLFW14000KPEC): children are not counted as

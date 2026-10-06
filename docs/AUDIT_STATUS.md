@@ -238,6 +238,18 @@ Fingerprint sources: `wl audit-set --fingerprint <hex>`, or an
 line. An explicit `--fingerprint`/`--audit-fingerprint` flag wins over an
 embedded line.
 
+**Current fingerprint at read time.** `wl list --json` emits
+`currentFingerprint` for every item: the canonical fingerprint recomputed from
+the item's current content (per-touched-path git state + description hash + Key
+Files) via a TypeScript port of the audit skill's algorithm. It is computed for
+items that carry a stored `fingerprint` and is `null` otherwise (or when git
+cannot determine it). Consumers that only have `wl list` output — the herdr
+selection list, the TUI extension, the review-queue banner — can therefore take
+the primary content gate instead of the 60 s time gate
+(WL-0MUN7QWFP0010EQC). The port is parity-tested against
+`audit_runner._compute_content_fingerprint` (skipped when the audit skill is not
+installed).
+
 Flag-only flips of `needsProducerReview` do not bump `updatedAt`
 (WL-0MSN6ZCTN0027U2R), and neither do comment writes (WL-0MUBVH6JM0093KVM):
 comment create/update/delete bump `activityAt` only. `updatedAt` therefore

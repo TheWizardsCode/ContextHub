@@ -782,6 +782,18 @@ wl --json list -s open --tags backlog
 wl list --needs-producer-review
 ```
 
+When `--json` is used, each work item includes the audit enrichment fields
+`auditResult`, `auditedAt`, and `fingerprint` (from the `audit_results`
+table), plus `currentFingerprint` — the canonical content fingerprint of the
+item's *current* content (per-touched-path git state + description hash + Key
+Files, matching the audit skill's algorithm). `currentFingerprint` is
+computed only for items that carry a stored `fingerprint`; it is `null`
+otherwise, or when git cannot determine it. Comparing `fingerprint` with
+`currentFingerprint` is the primary `isAuditFresh` gate, so a fresh audit
+stays fresh across `updatedAt` churn (WL-0MUN7QWFP0010EQC). Like the other
+enrichment fields, `currentFingerprint` is omitted when an explicit `--fields`
+projection is active.
+
 ---
 
 ### `search` <query> [options]
