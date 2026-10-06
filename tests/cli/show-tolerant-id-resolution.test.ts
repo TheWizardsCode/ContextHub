@@ -227,6 +227,33 @@ describe('tolerant work-item ID resolution', () => {
       expect(jsonErr.success).toBe(false);
       expect(jsonErr.error).toContain('Work item not found');
     });
+
+    it('human mode prints the not-found error exactly once (WL-0MTGDZVLV0055T4C)', async () => {
+      let error: any;
+      try {
+        await execAsync(`tsx ${cliPath} show NONEXISTENT-999`);
+      } catch (e: any) {
+        error = e;
+      }
+      expect(error).toBeDefined();
+
+      const stderr = error?.stderr ?? '';
+      const occurrences = stderr.split('Work item not found').length - 1;
+      expect(occurrences).toBe(1);
+    });
+
+    it('human mode does not write the not-found error to stdout', async () => {
+      let error: any;
+      try {
+        await execAsync(`tsx ${cliPath} show NONEXISTENT-999`);
+      } catch (e: any) {
+        error = e;
+      }
+      expect(error).toBeDefined();
+
+      const stdout = error?.stdout ?? '';
+      expect(stdout).not.toContain('Work item not found');
+    });
   });
 
   // ── AC5: --json output is machine-parseable ────────────────────────────
