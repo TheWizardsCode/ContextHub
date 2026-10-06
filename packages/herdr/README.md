@@ -1392,6 +1392,26 @@ above.
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
 
+### Review-queue-depth footer banner
+
+When the root-only `completed`/`in_review` count reaches `browseItemCount`
+(default 20, re-read live from settings), the selection-list footer shows a
+review-queue-depth banner (WL-0MTHSHN5V008R5L0). Its copy reflects the audit
+state of the queue (WL-0MUDYTQ55002NUSJ):
+
+- **Outstanding audit** — at least one root-level `in_review` item has no
+  stored audit or a non-current (stale) audit, per the shared `isAuditFresh`
+  predicate — the banner reads
+  `Review queue deep (<n> of <browseItemCount> completed/in_review) — focus on audits`.
+- **Every item freshly audited** — the banner reads
+  `Ready to Ship (shortcut 'S')`, prompting the `S` Ship It shortcut.
+
+The banner is gated by `showHelpText` and is **display-only**: it never
+disables downtime dispatch and never writes or clears the
+`.herdr-downtime-disabled` marker (queue depth must never halt coordination —
+see the sprint-complete auto-disable removal in
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md)).
+
 ### Fold indicators (below-the-fold / above-the-fold markers)
 
 When the display-rows list (headings + items) has more rows than fit in
