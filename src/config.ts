@@ -205,6 +205,14 @@ export function loadConfig(): WorklogConfig | null {
     return null;
   }
 
+  // Validate the optional `cta` (call-to-action) field before it reaches
+  // report consumers. Absent field → no behaviour change.
+  const ctaError = validateCtaConfig(config);
+  if (ctaError) {
+    console.error(ctaError);
+    return null;
+  }
+
   // Resolve LLM config section (config → env vars → defaults).
   config.llm = resolveLlmConfig(config);
 
@@ -362,6 +370,24 @@ export function validateInterviewConfig(config: WorklogConfig): string | null {
 }
 
 /**
+ * Validate the optional `cta` (call-to-action) config field.
+ *
+ * Returns an error message string when `cta` is present but not a string, or
+ * `null` when it is absent or valid. A present non-string value (for example a
+ * nested mapping produced by an unquoted YAML value) is rejected so a
+ * malformed CTA cannot silently reach report consumers. Absent is valid and
+ * leaves existing behaviour unchanged.
+ */
+export function validateCtaConfig(config: WorklogConfig): string | null {
+  const cta = (config as { cta?: unknown }).cta;
+  if (cta === undefined || cta === null) return null;
+  if (typeof cta !== 'string') {
+    return 'Invalid config: cta must be a string (quote Markdown values in YAML)';
+  }
+  return null;
+}
+
+/**
  * Whether LLM-assisted question extraction is enabled via the
  * `interview.intelligent: true` config opt-in.
  *
@@ -507,6 +533,25 @@ export function resolveLlmConfig(config: WorklogConfig): LlmConfig | undefined {
   }
 
   return { baseUrl, model, apiKey, timeoutMs };
+}
+
+/**
+ * Resolve the per-project call-to-action (CTA).
+ *
+ * Returns the configured `cta` Markdown string, or `null` when it is absent or
+ * blank so report consumers can skip rendering without a behaviour change.
+ * Mirrors the resolver style of {@link resolveLlmConfig}; accepts a possibly
+ * `null`/`undefined` config so callers that tolerate a missing config can read
+ * the CTA directly. The `cta` value is read defensively (runtime type guard)
+ * because config objects may come from unvalidated sources such as
+ * `loadConfigRelaxed()`.
+ */
+export function resolveProjectCta(
+  config: WorklogConfig | null | undefined,
+): string | null {
+  const cta = (config as { cta?: unknown } | null | undefined)?.cta;
+  if (typeof cta !== 'string' || cta.trim() === '') return null;
+  return cta;
 }
 
 /**

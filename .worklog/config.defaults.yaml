@@ -36,3 +36,7 @@ statusStageCompatibility:
   blocked: [idea, intake_complete, plan_complete]
   completed: [in_review, done]
   deleted: [idea, intake_complete, plan_complete, done]
+# Optional per-project call-to-action (CTA) surfaced in release/report output.
+# Free-form Markdown — quote the value so link syntax survives the YAML
+# round-trip. Absent = no behaviour change. See CONFIG.md for details.
+# cta: "[Play the alpha release](https://example.github.io/my-project/). Provide feedback in [Discord](https://discord.gg/gUKQTFkzQ4)"

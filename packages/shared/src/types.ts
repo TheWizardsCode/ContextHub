@@ -354,6 +354,17 @@ export interface WorklogConfig {
    * extraction). See {@link InterviewConfig}.
    */
   interview?: InterviewConfig;
+  /**
+   * Optional per-project call-to-action (CTA) — a free-form Markdown string
+   * surfaced in release/report output (e.g. the ship skill's CHANGELOG and
+   * release notifications). Read via {@link resolveProjectCta}.
+   *
+   * Example:
+   * ```yaml
+   * cta: "[Play the alpha release](https://example.github.io/project/). Provide feedback in [Discord](https://discord.gg/gUKQTFkzQ4)"
+   * ```
+   */
+  cta?: string;
 }
 
 /**
