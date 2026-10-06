@@ -97,6 +97,12 @@ export interface PaneStatus {
   hasActiveNetworkConnections?: boolean;
   /** The PID of the agent process (for process-group teardown). */
   pid?: number;
+  /**
+   * Raw herdr agent status (`idle`, `work`, `done`, `unknown`, …), when
+   * known. Surfaced in the close-decision snapshot and used as an activity
+   * signal (parent AC3/AC6).
+   */
+  agentStatus?: string;
 }
 
 /** The result of classifying one pane. */
@@ -258,6 +264,7 @@ function toSessionSample(ps: PaneStatus): SessionSample {
     hasRecentFileModifications: ps.hasRecentFileModifications,
     hasActiveNetworkConnections: ps.hasActiveNetworkConnections,
     itemStage: ps.itemStage,
+    agentStatus: ps.agentStatus,
   };
 }
 

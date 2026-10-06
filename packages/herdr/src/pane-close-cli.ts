@@ -23,7 +23,12 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
-import { createHerdrReaperDeps } from './pane-close-herdr.js';
+import {
+  countSpawnedChildProcesses,
+  createHerdrReaperDeps,
+  dirHasRecentModifications,
+  parsePaneProcessInfo,
+} from './pane-close-herdr.js';
 import type { ReaperDeps } from './pane-close-reaper.js';
 import { runReaperCli } from './pane-close-reaper.js';
 
@@ -113,7 +118,8 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
       }
     },
     invokingPaneId,
-    getNeedsProducerReview: async (itemId: string) => {
+    // Item lookup (parent AC2/AC6): producer-review flag + work-item stage.
+    getItemInfo: async (itemId: string) => {
       const { stdout } = await io.execFileAsync('wl', ['show', itemId, '--json'], {
         encoding: 'utf8',
         timeout: CLI_COMMAND_TIMEOUT_MS,
@@ -121,11 +127,36 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
         cwd: io.cwd,
       });
       const parsed = extractJsonValue(stdout) as {
-        workItem?: { needsProducerReview?: boolean };
+        workItem?: { needsProducerReview?: boolean; stage?: string };
       };
       // Fail-closed: an unreadable item is treated as review-blocked.
-      return parsed?.workItem?.needsProducerReview === true;
+      return {
+        needsProducerReview: parsed?.workItem?.needsProducerReview === true,
+        stage: parsed?.workItem?.stage,
+      };
     },
+    // Live-child probe (parent AC1/AC3): count foreground processes other
+    // than the agent itself. Fail-closed to 0.
+    childProcessCount: async (pane) => {
+      try {
+        const { stdout } = await io.execFileAsync(
+          herdrBin,
+          ['pane', 'process-info', '--pane', pane.paneId],
+          {
+            encoding: 'utf8',
+            timeout: CLI_COMMAND_TIMEOUT_MS,
+            maxBuffer: 4 * 1024 * 1024,
+            cwd: io.cwd,
+          },
+        );
+        return countSpawnedChildProcesses(parsePaneProcessInfo(stdout));
+      } catch {
+        return 0;
+      }
+    },
+    // Recent file-modification probe (parent AC3). Fail-closed.
+    hasRecentFileModifications: (pane) =>
+      dirHasRecentModifications(pane.foregroundCwd ?? pane.cwd),
   });
 }
 

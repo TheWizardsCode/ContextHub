@@ -9,7 +9,8 @@
  * the I/O shell is thin and fail-closed (never throws into the worker).
  */
 
-import { closeSync, openSync, readSync, statSync } from 'node:fs';
+import { closeSync, openSync, readdirSync, readSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 import type { PaneStatus, ReaperDeps } from './pane-close-reaper.js';
 import { terminateProcessGroup } from './process-group.js';
@@ -49,6 +50,10 @@ export interface ParsedHerdrPane {
   sessionPath?: string;
   workspaceId?: string;
   tabId?: string;
+  /** Pane working directory, when reported (activity-probe input). */
+  cwd?: string;
+  /** Foreground process working directory, when reported. */
+  foregroundCwd?: string;
 }
 
 /**
@@ -119,6 +124,14 @@ export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
           : typeof rec.tabId === 'string'
             ? rec.tabId
             : undefined,
+      cwd:
+        typeof (rec as Record<string, unknown>).cwd === 'string'
+          ? ((rec as Record<string, unknown>).cwd as string)
+          : undefined,
+      foregroundCwd:
+        typeof (rec as Record<string, unknown>).foreground_cwd === 'string'
+          ? ((rec as Record<string, unknown>).foreground_cwd as string)
+          : undefined,
     });
   }
   return parsed;
@@ -307,6 +320,123 @@ export function readSessionTailLines(
   return output.slice(-tailLines);
 }
 
+// ── Production activity probes (parent AC3) ────────────────────────────
+
+/** Default recent-modification window for the file activity probe (2 min). */
+export const RECENT_FILE_ACTIVITY_WINDOW_MS = 2 * 60 * 1000;
+
+/** Maximum directory entries inspected by the activity scan (cost bound). */
+export const RECENT_FILE_SCAN_MAX_ENTRIES = 2000;
+
+/**
+ * Best-effort check for recently modified files under `dir` (parent AC3).
+ *
+ * Walks the directory tree breadth-first (bounded to `maxEntries` entries,
+ * skipping VCS/dependency noise) and returns true as soon as a regular file
+ * with an mtime within `windowMs` is found. Fail-closed and never throws:
+ * an absent/unreadable directory or a stat failure yields no activity.
+ */
+export function dirHasRecentModifications(
+  dir: string | undefined,
+  opts?: { windowMs?: number; nowMs?: number; maxEntries?: number; ignore?: string[] },
+): boolean {
+  if (typeof dir !== 'string' || dir === '') return false;
+  const windowMs = opts?.windowMs ?? RECENT_FILE_ACTIVITY_WINDOW_MS;
+  const nowMs = opts?.nowMs ?? Date.now();
+  const maxEntries = opts?.maxEntries ?? RECENT_FILE_SCAN_MAX_ENTRIES;
+  const cutoff = nowMs - windowMs;
+  const ignore = new Set(opts?.ignore ?? ['node_modules', '.git', '.worklog', 'dist']);
+  let visited = 0;
+  const stack: string[] = [dir];
+  while (stack.length > 0 && visited < maxEntries) {
+    const current = stack.pop() as string;
+    let entries;
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue; // fail-closed on unreadable directories
+    }
+    for (const entry of entries) {
+      visited++;
+      if (visited > maxEntries) break;
+      if (ignore.has(entry.name)) continue;
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile()) {
+        try {
+          if (statSync(full).mtimeMs >= cutoff) return true;
+        } catch {
+          // ignore an unreadable file
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** Normalised subset of `herdr pane process-info` used by the reaper. */
+export interface PaneProcessInfo {
+  /** Foreground process-group leader id, when reported. */
+  foregroundProcessGroupId?: number;
+  /** PIDs of the pane's foreground processes. */
+  foregroundPids: number[];
+}
+
+/**
+ * Parse `herdr pane process-info --pane <id>` output. Tolerates log lines
+ * before the JSON envelope and the `{result:{process_info:{…}}}` shape.
+ * Returns `null` when no process-info can be found (caller fails closed).
+ */
+export function parsePaneProcessInfo(raw: string): PaneProcessInfo | null {
+  const brace = raw.indexOf('{');
+  if (brace < 0) return null;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(raw.slice(brace));
+  } catch {
+    return null;
+  }
+  if (!payload || typeof payload !== 'object') return null;
+  const obj = payload as Record<string, unknown>;
+  const result = obj.result;
+  const resultObj =
+    result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
+  const info = resultObj?.process_info ?? obj.process_info;
+  if (!info || typeof info !== 'object') return null;
+  const rec = info as Record<string, unknown>;
+  const group = rec.foreground_process_group_id;
+  const procs = rec.foreground_processes;
+  const foregroundPids: number[] = [];
+  if (Array.isArray(procs)) {
+    for (const proc of procs) {
+      if (!proc || typeof proc !== 'object') continue;
+      const pid = (proc as Record<string, unknown>).pid;
+      if (typeof pid === 'number' && Number.isFinite(pid)) foregroundPids.push(pid);
+    }
+  }
+  return {
+    foregroundProcessGroupId:
+      typeof group === 'number' && Number.isFinite(group) ? group : undefined,
+    foregroundPids,
+  };
+}
+
+/**
+ * Count processes in the pane *spawned by* the agent — i.e. foreground
+ * processes other than the foreground process-group leader (the agent
+ * itself). Excluding the leader is essential: counting the agent's own
+ * process would make the classifier's `live-children` guard fire for every
+ * live pane and prevent all auto-close (parent AC1).
+ *
+ * Absent/unparsable process-info yields 0 (no activity).
+ */
+export function countSpawnedChildProcesses(info: PaneProcessInfo | null): number {
+  if (!info) return 0;
+  const leader = info.foregroundProcessGroupId;
+  return info.foregroundPids.filter((pid) => leader === undefined || pid !== leader).length;
+}
+
 // ── Production deps factory ───────────────────────────────────────────
 
 /** Injectable I/O for the production deps (tests/other callers may override). */
@@ -319,19 +449,29 @@ export interface HerdrReaperIo {
   invokingPaneId?: string;
   /** Optional producer-review lookup; absent → false (fail-closed default). */
   getNeedsProducerReview?(itemId: string): Promise<boolean>;
-  /** Count session-scoped child processes; absent → 0. */
-  childProcessCount?(paneId: string): number;
+  /**
+   * Optional combined item-info lookup (parent AC6). When supplied it
+   * supersedes `getNeedsProducerReview` and additionally populates
+   * `PaneStatus.itemStage` so the close-decision snapshot records the
+   * work-item stage. Absent → falls back to `getNeedsProducerReview`.
+   */
+  getItemInfo?(itemId: string): Promise<{ needsProducerReview: boolean; stage?: string }>;
+  /**
+   * Count session-scoped child processes for a pane (parent AC1/AC3);
+   * absent → 0. Receives the parsed pane so callers can probe by session
+   * path / cwd rather than pane id alone.
+   */
+  childProcessCount?(pane: ParsedHerdrPane): number | Promise<number>;
   /**
    * Recent file-modification probe (parent AC3); absent → false (no
-   * activity). Kept injectable because workspace scanning is platform- and
-   * cost-sensitive.
+   * activity). Receives the parsed pane so callers can scan its workspace.
    */
-  hasRecentFileModifications?(paneId: string): boolean;
+  hasRecentFileModifications?(pane: ParsedHerdrPane): boolean;
   /**
    * Active network-connection probe (parent AC3); absent → false (no
-   * activity). Kept injectable for the same reason.
+   * activity). Platform-specific and kept injectable.
    */
-  hasActiveNetworkConnections?(paneId: string): boolean;
+  hasActiveNetworkConnections?(pane: ParsedHerdrPane): boolean;
   /** Clock (injectable for tests). */
   now?(): number;
 }
@@ -386,13 +526,24 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
         const status = (pane.agentStatus ?? '').toLowerCase();
         const agentProcessAlive = status !== 'done' && status !== 'exited' && status !== '';
 
+        // Producer-review + item-stage lookup (parent AC2/AC6). Prefer the
+        // combined `getItemInfo`; fall back to the boolean-only lookup.
         let needsProducerReview = false;
-        if (itemId !== '' && typeof io.getNeedsProducerReview === 'function') {
+        let itemStage: string | undefined;
+        if (itemId !== '' && typeof io.getItemInfo === 'function') {
           try {
-            needsProducerReview = await io.getNeedsProducerReview(itemId);
+            const info = await io.getItemInfo(itemId);
+            needsProducerReview = info.needsProducerReview === true;
+            itemStage = typeof info.stage === 'string' && info.stage !== '' ? info.stage : undefined;
           } catch {
             // fail-closed: an unreadable item must never be closed without
             // evidence — treat as review-blocked (never auto-close).
+            needsProducerReview = true;
+          }
+        } else if (itemId !== '' && typeof io.getNeedsProducerReview === 'function') {
+          try {
+            needsProducerReview = await io.getNeedsProducerReview(itemId);
+          } catch {
             needsProducerReview = true;
           }
         }
@@ -401,6 +552,7 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
           id: pane.paneId,
           kind: paneKindFromLabel(pane.label),
           itemId,
+          itemStage,
           title: pane.label || pane.paneId,
           workspaceId: pane.workspaceId,
           tabId: pane.tabId,
@@ -408,13 +560,14 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
           sessionEntries: entries,
           sessionTail,
           agentProcessAlive,
+          agentStatus: pane.agentStatus,
           idleMs,
           needsProducerReview,
           isInvokingPane: pane.paneId === io.invokingPaneId,
-          childProcessCount: io.childProcessCount?.(pane.paneId) ?? 0,
+          childProcessCount: (await io.childProcessCount?.(pane)) ?? 0,
           ageSinceDispatchMs,
-          hasRecentFileModifications: io.hasRecentFileModifications?.(pane.paneId) ?? false,
-          hasActiveNetworkConnections: io.hasActiveNetworkConnections?.(pane.paneId) ?? false,
+          hasRecentFileModifications: io.hasRecentFileModifications?.(pane) ?? false,
+          hasActiveNetworkConnections: io.hasActiveNetworkConnections?.(pane) ?? false,
         });
       }
       return result;

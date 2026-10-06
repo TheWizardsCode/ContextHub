@@ -1113,17 +1113,31 @@ idempotent:
   (manually opened panes, and marker-less panes whose agent died). It runs
   on the downtime-worker tick at most once per `PANE_CLOSE_REAPER_INTERVAL_MS`
   (default 60 s), gated by the `paneCloseEnabled` setting (default on), with
-  a `paneCloseIdleThresholdMinutes` idle threshold (default 30, clamped
-  [1, 1440]).
+  a `paneCloseIdleThresholdMinutes` idle threshold (default 0 — idle close
+  disabled — clamped [0, 1440]) and a `paneCloseGracePeriodMinutes` grace
+  period (default 5, clamped [1, 1440]).
 
 The reaper classifies each Herdr pane via the shared `classifySession()`
 module (`packages/herdr/src/pane-close.ts`): close when the final assistant
-message ends with `</end_session>`, when the agent process is gone, or when
-the agent is alive but idle beyond the threshold. It never closes an
-`implement` pane, an item awaiting producer review, the invoking pane, or a
-pane with live children. A close failure for one pane is recorded and the
-run continues; a reaper throw is caught and logged so it can never crash the
-worker.
+message ends with `</end_session>`, or (only when the idle threshold is
+positive) when the agent is alive but idle beyond the threshold. It never
+closes an `implement` pane, an item awaiting producer review, the invoking
+pane, a pane with live children, or a pane still within its grace period. A
+dead agent is **not** closed — the operator may still need to read the final
+output. A close failure for one pane is recorded and the run continues; a
+reaper throw is caught and logged so it can never crash the worker.
+
+**Active-agent signals (parent AC3).** The production deps
+(`pane-close-herdr.ts`) populate the classifier's activity signals so
+long-running-but-silent agents are not reaped: the raw herdr `agent_status`
+(a `work`-class status keeps the pane `active`), recent file modifications
+in the pane's workspace (`dirHasRecentModifications`, 2-minute window,
+bounded scan), and the count of spawned child processes from
+`herdr pane process-info` (excluding the pane's own foreground
+process-group leader, so an idle agent is not misclassified as having
+children). The work-item stage and producer-review flag are fetched once
+per pane (`getItemInfo`) and recorded in every
+`CloseReasonSnapshot`/reaper-ledger row (parent AC6).
 
 **Coexistence.** With Mechanism B disabled there is a single active closer,
 so the previous non-atomic double-close race is gone. The reaper still skips
@@ -1171,7 +1185,8 @@ status refresh unchanged at 30s.**
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
 | Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
-| Pane-closure idle threshold | **30 min** (`paneCloseIdleThresholdMinutes`; clamped to 1 min – 24 h) | `pane-close-scheduler.ts` |
+| Pane-closure idle threshold | **0 min** — idle close disabled (`paneCloseIdleThresholdMinutes`; clamped to 0 min – 24 h) | `pane-close-scheduler.ts` |
+| Pane-closure grace period | **5 min** (`paneCloseGracePeriodMinutes`; clamped to 1 min – 24 h; no pane is eligible for close within this window of first dispatch, WL-0MUMM5IUF003EVT8) | `pane-close-scheduler.ts` |
 | (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin
@@ -1202,7 +1217,7 @@ on load
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
 | `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |
 | `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
-| `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + pi session logs |
+| `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + `herdr pane process-info` + pi session logs (activity probes: agent status, recent file modifications, spawned child processes) |
 | `packages/herdr/src/process-group.ts` | Session-scoped child-process teardown (SIGTERM → grace → SIGKILL) |
 | `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` |
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |

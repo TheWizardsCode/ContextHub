@@ -61,7 +61,12 @@ import {
   removeActiveAuditMarker,
 } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
-import { createHerdrReaperDeps } from './pane-close-herdr.js';
+import {
+  countSpawnedChildProcesses,
+  createHerdrReaperDeps,
+  dirHasRecentModifications,
+  parsePaneProcessInfo,
+} from './pane-close-herdr.js';
 import { runScheduledPaneClose } from './pane-close-scheduler.js';
 import {
   createDowntimeWorker,
@@ -1610,17 +1615,48 @@ export function createDowntimeDeps(
           }
         },
         invokingPaneId,
-        getNeedsProducerReview: async (itemId: string) => {
+        // Item lookup (parent AC2/AC6): fetch both the producer-review flag
+        // and the work-item stage so the close-decision snapshot records the
+        // stage. Fail-closed: an unreadable item stays review-blocked.
+        getItemInfo: async (itemId: string) => {
           const { stdout } = await getExecFileAsync()(
             'wl',
             ['show', itemId, '--json'],
             { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, cwd },
           );
           const parsed = extractJson(stdout) as {
-            workItem?: { needsProducerReview?: boolean };
+            workItem?: { needsProducerReview?: boolean; stage?: string };
           };
-          return parsed?.workItem?.needsProducerReview === true;
+          return {
+            needsProducerReview: parsed?.workItem?.needsProducerReview === true,
+            stage: parsed?.workItem?.stage,
+          };
         },
+        // Live-child probe (parent AC1/AC3): count foreground processes in
+        // the pane other than the agent itself via `herdr pane process-info`.
+        // Fail-closed: an unreadable/failed lookup yields 0.
+        childProcessCount: async (pane) => {
+          try {
+            const { stdout } = await getExecFileAsync()(
+              herdrBin,
+              ['pane', 'process-info', '--pane', pane.paneId],
+              {
+                encoding: 'utf8',
+                timeout: DOWNTIME_WL_TIMEOUT_MS,
+                maxBuffer: 4 * 1024 * 1024,
+                cwd,
+              },
+            );
+            return countSpawnedChildProcesses(parsePaneProcessInfo(stdout));
+          } catch {
+            return 0; // fail-closed: no evidence of spawned children
+          }
+        },
+        // Recent file-modification probe (parent AC3): scan the pane's
+        // workspace for files changed within the activity window. Fail-closed
+        // on an unreadable directory.
+        hasRecentFileModifications: (pane) =>
+          dirHasRecentModifications(pane.foregroundCwd ?? pane.cwd),
       });
       const result = await runScheduledPaneClose(
         deps,
