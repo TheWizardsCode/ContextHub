@@ -96,6 +96,15 @@ describe('isServerError', () => {
     expect(isServerError(makeErrorMsg('429 Too Many Requests'))).toBe(false);
   });
 
+  it('detects "finish_reason: error" from pi-ai mapStopReason()', () => {
+    // pi-ai collapses the enriched finish_reason payload to a generic string,
+    // discarding the type/message/suggested_action details (WL-0MUQO8AEE003G1Z2).
+    expect(isServerError(makeErrorMsg('Provider finish_reason: error'))).toBe(true);
+    expect(isServerError(makeErrorMsg('finish_reason: error'))).toBe(true);
+    expect(isServerError(makeErrorMsg('PROVIDER FINISH_REASON: ERROR'))).toBe(true);
+    expect(isServerError(makeErrorMsg('provider finish_reason: error'))).toBe(true);
+  });
+
   it('returns false for non-error messages', () => {
     expect(isServerError(makeErrorMsg('', 'stop'))).toBe(false);
   });
@@ -295,6 +304,13 @@ describe('classifyError', () => {
   it('classifies server errors', () => {
     expect(classifyError(makeErrorMsg('500 Internal Server Error'))).toBe(ErrorCategory.SERVER_ERROR);
     expect(classifyError(makeErrorMsg('503 Service Unavailable'))).toBe(ErrorCategory.SERVER_ERROR);
+  });
+
+  it('classifies "Provider finish_reason: error" as SERVER_ERROR (retryable)', () => {
+    // pi-ai mapStopReason() produces this string; it must be retried via the
+    // SERVER_ERROR loop (WL-0MUQO8AEE003G1Z2).
+    expect(classifyError(makeErrorMsg('Provider finish_reason: error'))).toBe(ErrorCategory.SERVER_ERROR);
+    expect(classifyError(makeErrorMsg('finish_reason: error'))).toBe(ErrorCategory.SERVER_ERROR);
   });
 
   it('classifies "all providers exhausted" as SERVER_ERROR (auto-retry)', () => {
