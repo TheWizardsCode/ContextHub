@@ -61,8 +61,10 @@ describe('defaultSettings', () => {
     expect(defaultSettings.downtimeEnabled).toBe(true);
   });
 
-  it('has a 60s idle threshold by default', () => {
-    expect(defaultSettings.downtimeIdleThresholdMs).toBe(60000);
+  it('has a 75s idle threshold by default', () => {
+    // Default raised 60 → 75 s in WL-0MUV0VEFW007ZBB7 so active sessions
+    // (1-minute slot-exhaustion cooldown) can reclaim a freed slot first.
+    expect(defaultSettings.downtimeIdleThresholdMs).toBe(75000);
   });
 
   it('has downtimeRequiredFreeSlots 2 (spare-capacity default) by default', () => {
@@ -124,7 +126,7 @@ describe('loadSettings', () => {
     }), 'utf-8');
     const settings = loadSettings(settingsPath);
     expect(settings.downtimePollIntervalMs).toBe(10000);
-    expect(settings.downtimeIdleThresholdMs).toBe(60000);
+    expect(settings.downtimeIdleThresholdMs).toBe(75000);
     expect(settings.downtimeRequiredFreeSlots).toBe(2);
     expect(settings.downtimeModel).toBe('plan');
   });
@@ -137,7 +139,7 @@ describe('loadSettings', () => {
     const settings = loadSettings(settingsPath);
     expect(settings.downtimeEnabled).toBe(false);
     expect(settings.downtimeProxyUrl).toBe('http://10.0.0.5:8000');
-    expect(settings.downtimeIdleThresholdMs).toBe(60000); // from defaults
+    expect(settings.downtimeIdleThresholdMs).toBe(75000); // from defaults
     expect(settings.downtimePollIntervalMs).toBe(10000); // from defaults
     expect(settings.downtimeRequiredFreeSlots).toBe(2); // default N=2 (spare-capacity)
   });
