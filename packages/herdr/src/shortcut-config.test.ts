@@ -307,6 +307,93 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(reject?.command).toContain('--status open --stage plan_complete --priority medium');
   });
 
+// ── c chord split: c-n (create intake) and c-q (create quick) (WL-0MTCLB50D0026YA7) ──
+
+describe('loadShortcutConfig — c chord split (WL-0MTCLB50D0026YA7)', () => {
+  it('no longer registers the old single-key c shortcut', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['c'], 'list', undefined, false)).toBeUndefined();
+    expect(registry.lookupChordEntry(['c'], 'detail', undefined, false)).toBeUndefined();
+    expect(registry.lookupChord(['c'], 'list')).toBeUndefined();
+  });
+
+  it('registers [c, n] as create-intake (c-n chord)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['c', 'n'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe("/intake <description> --priority <priority default='medium'>");
+    expect(entry?.label).toBe('create intake');
+    expect(entry?.view).toBe('both');
+    expect(entry?.model).toBe('plan');
+    // c-n has the same work_item_types gate as the n shortcut
+    expect(entry?.workItemTypes).toEqual(['bug', 'docs', 'feature', 'task', 'chore', 'epic']);
+  });
+
+  it('registers [c, q] as create-quick (c-q chord)', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['c', 'q'], 'list', undefined, false);
+    expect(entry).toBeDefined();
+    expect(entry?.command).toBe("!!wl create -t <title> -d <description> -p <priority default='medium'>");
+    expect(entry?.label).toBe('create quick');
+    expect(entry?.view).toBe('both');
+    // c-q has NO work_item_types gating — it creates a new root item
+    expect(entry?.workItemTypes).toBeUndefined();
+  });
+
+  it('resolves both c-n and c-q via lookupChord', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChord(['c', 'n'], 'list')).toBe("/intake <description> --priority <priority default='medium'>");
+    expect(registry.lookupChord(['c', 'q'], 'list')).toBe("!!wl create -t <title> -d <description> -p <priority default='medium'>");
+  });
+
+  it('c-n and c-q appear under leader key c in help hints', () => {
+    const registry = loadShortcutConfig();
+    const nextChords = registry.getChordByLeader('c', 'list', false);
+    expect(nextChords).toHaveLength(2);
+
+    const labels = nextChords.map(e => e.label);
+    expect(labels).toContain('create intake');
+    expect(labels).toContain('create quick');
+
+    const hints = formatChordHints(nextChords, ['c']);
+    expect(hints).toContain('n:');
+    expect(hints).toContain('q:');
+  });
+
+  it('c-n respects work_item_types gating (same as n shortcut)', () => {
+    const registry = loadShortcutConfig();
+    const codeTypes = ['bug', 'docs', 'feature', 'task', 'chore', 'epic'];
+    for (const t of codeTypes) {
+      expect(registry.lookupChord(['c', 'n'], 'list', undefined, false, t)).toBeDefined();
+    }
+    // Hidden on podcast-typed items
+    expect(registry.lookupChord(['c', 'n'], 'list', undefined, false, 'podcast')).toBeUndefined();
+  });
+
+  it('c-q has no issue-type gating', () => {
+    const registry = loadShortcutConfig();
+    // Available on every issue type
+    for (const t of ['bug', 'docs', 'feature', 'task', 'chore', 'epic', 'podcast']) {
+      expect(registry.lookupChord(['c', 'q'], 'list', undefined, false, t)).toBeDefined();
+    }
+  });
+
+  it('c-n and c-q are visible in both list and detail views', () => {
+    const registry = loadShortcutConfig();
+    for (const chord of [['c', 'n'], ['c', 'q']]) {
+      expect(registry.lookupChordEntry(chord as ['c', 'n'], 'list')).toBeDefined();
+      expect(registry.lookupChordEntry(chord as ['c', 'n'], 'detail')).toBeDefined();
+    }
+  });
+
+  it('c-n and c-q have work_item_types matching the n shortcut', () => {
+    const registry = loadShortcutConfig();
+    const nEntry = registry.lookupChordEntry(['n'], 'list');
+    const cnEntry = registry.lookupChordEntry(['c', 'n'], 'list');
+    expect(cnEntry?.workItemTypes).toEqual(nEntry?.workItemTypes);
+  });
+});
+
   it('registers the d downtime-toggle chord to /downtime toggle (WL-0MSZ4NSOE007AQEF)', () => {
     const registry = loadShortcutConfig();
     const entry = registry.lookupChordEntry(['d'], 'list', undefined, false);
