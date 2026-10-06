@@ -788,6 +788,56 @@ export function markerStillExcludes(
   return now - t <= stalenessWindowMs;
 }
 
+// ── Per-item/per-kind dispatch-attempt budget (WL-0MUKYEXMK0033MFK) ───
+
+/**
+ * Count dispatch ATTEMPTS for one `(itemId, kind)` pair at the item's
+ * CURRENT stage (WL-0MUKYEXMK0033MFK AC1).
+ *
+ * An "attempt" is a dispatch-marker entry for the kind — the same predicate
+ * the success-marker readers use (`isDispatchMarkerEntry`), so pane-close
+ * lifecycle entries are not counted on their own: each non-terminal close
+ * still counts exactly once, via the dispatch marker that opened its pane.
+ * Two entry kinds are excluded from the count because they do not represent
+ * an opened pane:
+ *
+ *  - `outcome: 'spawn-failed'` traces — the pane never appeared (same
+ *    non-excluding convention as the marker readers, WL-0MT32F908002YFFA);
+ *  - `enrichment: true` entries — the best-effort post-spawn enrichment
+ *    copies the marker verbatim and would otherwise double-count a single
+ *    dispatch (WL-0MUBVL251006JAQ0).
+ *
+ * BUDGET RESET ON STAGE ADVANCEMENT (AC4): only markers whose dispatched-at
+ * `stage` equals the item's current stage count. A marker written before an
+ * advancement carries the old stage and no longer counts, giving the item a
+ * fresh budget at its new stage. Legacy markers without a recorded stage
+ * are treated as `''` and never match a real stage, so a partial/legacy log
+ * under-counts (fail-open) rather than over-counting.
+ *
+ * FAIL-OPEN (AC7e): a missing/unreadable/corrupt log yields no entries (see
+ * `readDowntimeLogEntries`) and therefore a count of 0 — a bad log can never
+ * block all dispatch. Never throws.
+ */
+export function countAttempts(
+  entries: DowntimeLogEntry[],
+  itemId: string,
+  kind: string,
+  itemStage: string | undefined,
+): number {
+  const stage = itemStage ?? '';
+  let count = 0;
+  for (const e of entries) {
+    if (!isDispatchMarkerEntry(e)) continue;
+    if (e.outcome === 'spawn-failed') continue;
+    if (e.enrichment === true) continue;
+    if (e.kind !== kind || e.itemId !== itemId) continue;
+    const entryStage = typeof e.stage === 'string' ? e.stage : '';
+    if (entryStage !== stage) continue;
+    count += 1;
+  }
+  return count;
+}
+
 // ── Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5) ────────────
 
 /**

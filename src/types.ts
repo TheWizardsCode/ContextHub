@@ -17,6 +17,7 @@ export {
   type WorkItemQuery,
   type EmbeddingConfig,
   type LlmConfig,
+  type InterviewConfig,
   type WorklogConfig,
   type Comment,
   type DependencyEdge,

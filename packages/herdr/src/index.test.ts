@@ -662,11 +662,12 @@ describe('createDowntimeDeps', () => {
     }
   });
 
-  // Herdr list head wiring + extended dispatch window (WL-0MU6UL3GQ0015AA5):
-  // the default head is fetched with `wl next -n 30`; an explicit limit — used
-  // by the dispatcher's bounded window extension — is forwarded verbatim so
-  // the extension re-reads the SAME ranking path with a larger window.
-  it('getHerdrListHead forwards the requested limit to wl next and defaults to 30', async () => {
+  // Herdr list head wiring (WL-0MUNS8X97007C9H9): callers (the dispatcher's
+  // two selection paths) pass the live sprint-view `browseItemCount` limit,
+  // which is forwarded verbatim so the head equals the rendered worklist. A
+  // caller that passes no limit falls back to the sprint-view default (20) so
+  // an unwindowed head is never produced.
+  it('getHerdrListHead forwards the requested limit to wl next and defaults to the sprint-view default (20)', async () => {
     const mockExec = vi.fn().mockImplementation((_bin: string, args: string[]) => {
       if (args.includes('next')) {
         return Promise.resolve({ stdout: JSON.stringify({ success: true, results: [] }), stderr: '' });
@@ -681,7 +682,7 @@ describe('createDowntimeDeps', () => {
 
     const nextCalls = mockExec.mock.calls.filter(([, a]) => (a as string[]).includes('next'));
     expect(nextCalls).toHaveLength(2);
-    expect(nextCalls[0][1]).toEqual(expect.arrayContaining(['-n', '30']));
+    expect(nextCalls[0][1]).toEqual(expect.arrayContaining(['-n', '20']));
     expect(nextCalls[1][1]).toEqual(expect.arrayContaining(['-n', '60']));
   });
 

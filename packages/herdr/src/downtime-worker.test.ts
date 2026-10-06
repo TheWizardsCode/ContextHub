@@ -69,6 +69,7 @@ import {
   createPerSlotIdleTracker,
   dispatchDowntimeWork,
   computeMostImportantItem,
+  dispatchFromCoordination,
   fetchExtendedHerdrItems,
   createDowntimeWorker,
   buildDowntimePrompt,
@@ -103,6 +104,10 @@ import {
   clampDowntimeNoCandidateCooldownMs,
   clampDowntimeNonTerminalCooldownMs,
   clampDowntimeMarkerStaleWindowMs,
+  clampDowntimeMaxAttempts,
+  DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+  DOWNTIME_MAX_ATTEMPTS_MIN,
+  DOWNTIME_MAX_ATTEMPTS_MAX,
   countFreeUnownedSlots,
   isSlotOwned,
   parseHerdrPaneListOutput,
@@ -175,6 +180,7 @@ import {
 } from './leader-election.js';
 import {
   writeCoordinationFile,
+  type CoordinationEntry,
 } from './coordination.js';
 import {
   statusFixtures,
@@ -1157,6 +1163,94 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(true);
     expect(deps.closePane).toBeUndefined();
+  });
+
+  // ── Audit-rejection regressions (WL-0MU2EOHK900425VU) ─────────────────
+  // The producer rejected the first fix because the empty shell pane was
+  // still present after creating a tab in an existing workspace. Root cause:
+  // the cleanup preferred `records` (the FULL machine-wide pane set, which
+  // always contains the anchor itself) over `paneIds` (the running DOWNTIME
+  // panes), so `liveIds.includes(anchorId)` was always true and every close
+  // was suppressed. The cleanup now uses the running-downtime set.
+
+  it('AC1 regression: closes the root pane even when records contains the anchor (full pane set)', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // Production `records` = the FULL pane list: it contains the blank
+      // anchor (which is not a downtime pane). `paneIds` (running downtime
+      // panes) is empty → the anchor must be closed.
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 0,
+        paneIds: [],
+        records: [
+          { paneId: 'wC:tWL-ABC:p1', label: 'bash' },
+          { paneId: 'wC:other', label: 'bash' },
+        ],
+      }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith('wC:tWL-ABC:p1', '/repo');
+  });
+
+  it('AC1 regression: records-only payload is filtered to downtime panes (anchor still closed)', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // Legacy payload without `paneIds`; `records` holds the blank anchor
+      // (not a downtime pane) → filtering yields no live downtime pane.
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 0,
+        records: [{ paneId: 'wC:tWL-ABC:p1', label: 'bash' }],
+      }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith('wC:tWL-ABC:p1', '/repo');
+  });
+
+  it('AC2 fail-safe regression: leaves the anchor open when liveness fails (ok:false)', async () => {
+    const closePane = vi.fn().mockResolvedValue(true);
+    const deps = makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:tPlugin' }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' }),
+      // Liveness query FAILED → cannot confirm → leave the anchor open.
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: false, error: 'herdr unavailable' }),
+      closePane,
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(closePane).not.toHaveBeenCalled();
   });
 });
 
@@ -4487,7 +4581,6 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     deps?: Partial<DowntimeWorkerDeps>;
     mode?: 'cheap' | 'fast';
     concurrentDispatchCap?: number;
-    drainPaused?: boolean;
   } = {}) {
     const cfg = {
       enabled: overrides.enabled ?? true,
@@ -4501,8 +4594,6 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
       ...(overrides.concurrentDispatchCap !== undefined
         ? { concurrentDispatchCap: overrides.concurrentDispatchCap }
         : {}),
-      // Drain pause signal (parent WL-0MUL0KO7Q003O7YJ, F2).
-      drainPaused: overrides.drainPaused,
     };
     const fetcher = vi
       .fn()
@@ -4614,37 +4705,6 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
 
     const call = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(call[1]).not.toHaveProperty('spawnConfig');
-  });
-
-  it('F2: a drainPaused config pauses new dispatches and reports the draining block token', async () => {
-    // While the mode-switch worker drains active sessions down to the cheap
-    // pool budget, the dispatcher must not spawn NEW panes. The poll still
-    // runs (so the mode-switch worker keeps observing free slots) and the
-    // refusal is neutral — no candidate was even selected.
-    const { worker, deps } = makeWorker({ thresholdMs: 0, drainPaused: true });
-    vi.setSystemTime(1_000_000);
-
-    const result = await worker.tick();
-
-    expect(result).toEqual({ polled: true, dispatched: false, idle: true });
-    expect(worker.blockReason).toBe('draining');
-    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-  });
-
-  it('F2: dispatch resumes on the next idle tick once the drain signal clears', async () => {
-    const { worker, deps, cfg } = makeWorker({ thresholdMs: 0, drainPaused: true });
-    vi.setSystemTime(1_000_000);
-    const paused = await worker.tick();
-    expect(paused.dispatched).toBe(false);
-    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-
-    // The drain completed (the proxy switched to cheap) → the very next
-    // idle tick dispatches normally.
-    cfg.drainPaused = false;
-    vi.setSystemTime(1_000_001);
-    const resumed = await worker.tick();
-    expect(resumed.dispatched).toBe(true);
-    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
   });
 
   it('requires a fresh full idle period after a dispatch (AC5)', async () => {
@@ -9832,7 +9892,7 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
 // path too — the field is threaded into `classifyItemForDispatch` as of
 // WL-0MU72WJ8C0005GIE / 022f1b24.)
 
-describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5)', () => {
+describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0MU6UL3GQ0015AA5 AC1/AC4)', () => {
   const OLD = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
 
   /**
@@ -9886,10 +9946,74 @@ describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5
     sortIndex: 999,
   });
 
+  /** A dispatchable CRITICAL implement item (the AC4 escape-hatch shape). */
+  const dispatchableCriticalImplement = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Critical ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'critical',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 500,
+  });
+
   const fullHead = (): DowntimeHerdrItem[] => [...mandatorySet(), ...blockedOthers()];
 
+  describe('AC1 — head limit equals the live sprint-view browseItemCount', () => {
+    it('direct dispatch passes the effective browseItemCount to getHerdrListHead', async () => {
+      const getHerdrListHead = vi.fn().mockResolvedValue({ ok: true, items: [dispatchableIntake('CG-INWINDOW')] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+      expect(getHerdrListHead).toHaveBeenCalledWith('/repo', 20);
+    });
+
+    it('clamps an out-of-range browseItemCount to the supported [1, 50] range', async () => {
+      const getHerdrListHead = vi.fn().mockResolvedValue({ ok: true, items: [dispatchableIntake('CG-INWINDOW')] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 999 });
+      expect(getHerdrListHead).toHaveBeenLastCalledWith('/repo', 50);
+
+      getHerdrListHead.mockClear();
+      await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 0 });
+      expect(getHerdrListHead).toHaveBeenLastCalledWith('/repo', 1);
+    });
+
+    it('defaults to the sprint-view default (20) when browseItemCount is undefined', async () => {
+      const getHerdrListHead = vi.fn().mockResolvedValue({ ok: true, items: [dispatchableIntake('CG-INWINDOW')] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+      expect(getHerdrListHead).toHaveBeenCalledWith('/repo', 20);
+    });
+
+    it('computeMostImportantItem passes the effective browseItemCount to getHerdrListHead', async () => {
+      const getHerdrListHead = vi.fn().mockResolvedValue({ ok: true, items: [dispatchableIntake('CG-INWINDOW')] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      await computeMostImportantItem(deps, '/repo', Date.now(), 33);
+
+      expect(getHerdrListHead).toHaveBeenCalledWith('/repo', 33);
+    });
+
+    it('re-reads the live browseItemCount on every dispatch cycle (settings change applies without restart)', async () => {
+      const getHerdrListHead = vi.fn().mockResolvedValue({ ok: true, items: [dispatchableIntake('CG-INWINDOW')] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 15 });
+      await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 40 });
+
+      expect(getHerdrListHead).toHaveBeenNthCalledWith(1, '/repo', 15);
+      expect(getHerdrListHead).toHaveBeenNthCalledWith(2, '/repo', 40);
+    });
+  });
+
   describe('AC3 — regression: the dispatchable item beyond the window cap is found', () => {
-    it('direct dispatch (dispatchDowntimeWork) dispatches the out-of-window candidate', async () => {
+    it('regression (WL-0MU6UL3GQ0015AA5 updated): a non-critical item beyond the sprint view is NOP, not dispatched', async () => {
       const initialHead = fullHead();
       const target = dispatchableIntake('CG-0MTZO0YIM000VAIQ');
       const getHerdrListHead = vi.fn()
@@ -9899,25 +10023,24 @@ describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5
 
       const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
 
-      expect(outcome.dispatched).toBe(true);
-      expect(outcome.kind).toBe('intake');
-      expect(outcome.candidate?.id).toBe('CG-0MTZO0YIM000VAIQ');
-      // The extension re-read the SAME ranking path with a bounded larger
-      // window (never a second ranking).
+      // The out-of-window item is NON-critical: the sprint-view-only contract
+      // reports no-candidate instead of dispatching hidden backlog work
+      // (supersedes WL-0MU6UL3GQ0015AA5 for non-critical work).
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      expect(deps.claimItem).not.toHaveBeenCalled();
+      // The critical-only extension still consulted the SAME ranking path
+      // (never a second ranking).
       expect(getHerdrListHead).toHaveBeenCalledTimes(2);
       expect(getHerdrListHead).toHaveBeenNthCalledWith(
         2,
         '/repo',
         initialHead.length + DOWNTIME_DISPATCH_EXTEND_MAX,
       );
-      expect(deps.claimItem).toHaveBeenCalledWith(
-        'CG-0MTZO0YIM000VAIQ',
-        { status: 'open', stage: 'idea' },
-        '/repo',
-      );
     });
 
-    it('the coordination check-in offer (computeMostImportantItem) also uses the extended window', async () => {
+    it('the coordination check-in offer (computeMostImportantItem) also no-ops on a non-critical out-of-window item', async () => {
       const initialHead = fullHead();
       const target = dispatchableIntake('CG-OFFER');
       const getHerdrListHead = vi.fn()
@@ -9927,11 +10050,7 @@ describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5
 
       const result = await computeMostImportantItem(deps, '/repo');
 
-      expect(result).toMatchObject({
-        ok: true,
-        kind: 'intake',
-        candidate: { id: 'CG-OFFER' },
-      });
+      expect(result).toMatchObject({ ok: true, noCandidate: true });
       expect(getHerdrListHead).toHaveBeenCalledTimes(2);
     });
 
@@ -9948,10 +10067,10 @@ describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5
       expect(getHerdrListHead).toHaveBeenCalledTimes(1);
     });
 
-    it('extends even under a code freeze to reach plan/intake work beyond the window', async () => {
-      // Under a freeze, audit/implement candidates are paused, but plan/intake
-      // prep work still dispatches. A dispatchable intake item beyond the
-      // window must therefore still be reachable.
+    it('stays code-freeze under a freeze even when a non-critical item lies beyond the window', async () => {
+      // Under a freeze, audit/implement candidates are paused; a non-critical
+      // item beyond the sprint view is not an escape hatch, so the terminal
+      // reason stays derived from the in-view flags.
       const initialHead = fullHead();
       const target = dispatchableIntake('CG-FROZEN-OUT-OF-WINDOW');
       const getHerdrListHead = vi.fn()
@@ -9964,10 +10083,8 @@ describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5
 
       const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-      expect(outcome.dispatched).toBe(true);
-      expect(outcome.kind).toBe('intake');
-      expect(outcome.candidate?.id).toBe('CG-FROZEN-OUT-OF-WINDOW');
-      expect(getHerdrListHead).toHaveBeenCalledTimes(2);
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('code-freeze');
     });
   });
 
@@ -10012,26 +10129,70 @@ describe('dispatch-window extension — head-cap starvation (WL-0MU6UL3GQ0015AA5
     });
   });
 
-  describe('fetchExtendedHerdrItems — window extension primitive', () => {
-    const item = (id: string): DowntimeHerdrItem => ({
+  describe('AC4 — critical items remain dispatchable', () => {
+    it('a critical item in the head still dispatches while every non-critical item is filtered', async () => {
+      const getHerdrListHead = vi.fn().mockResolvedValue({
+        ok: true,
+        items: [dispatchableCriticalImplement('CG-CRIT-DISPATCH'), ...blockedOthers()],
+      });
+      const deps = makeDeps({ getHerdrListHead });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      expect(outcome.candidate?.id).toBe('CG-CRIT-DISPATCH');
+    });
+
+    it('the critical-only extension still reaches an out-of-window critical item', async () => {
+      const initialHead = fullHead();
+      const target = dispatchableCriticalImplement('CG-CRIT-OUT-OF-WINDOW');
+      const getHerdrListHead = vi.fn()
+        .mockResolvedValueOnce({ ok: true, items: initialHead })
+        .mockResolvedValueOnce({ ok: true, items: [...initialHead, target] });
+      const deps = makeDeps({ getHerdrListHead });
+
+      const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      expect(outcome.candidate?.id).toBe('CG-CRIT-OUT-OF-WINDOW');
+    });
+  });
+
+  describe('fetchExtendedHerdrItems — critical-only escape hatch primitive', () => {
+    const item = (id: string, priority = 'medium'): DowntimeHerdrItem => ({
       id,
       title: `Item ${id}`,
       status: 'open',
       stage: 'idea',
+      priority,
     });
 
-    it('returns only the newly visible items, preserving the canonical order', async () => {
-      const current = [item('A'), item('B')];
+    it('returns only newly visible CRITICAL items, preserving the canonical order', async () => {
+      const current = [item('A')];
       const dep = vi.fn().mockResolvedValue({
         ok: true,
-        items: [item('A'), item('B'), item('C'), item('D')],
+        items: [item('A'), item('B'), item('C', 'critical'), item('D'), item('E', 'critical')],
       });
       const deps = makeDeps({ getHerdrListHead: dep });
 
       const extended = await fetchExtendedHerdrItems(deps, '/repo', current);
 
-      expect(extended.map((i) => i.id)).toEqual(['C', 'D']);
-      expect(dep).toHaveBeenCalledWith('/repo', 2 + DOWNTIME_DISPATCH_EXTEND_MAX);
+      expect(extended.map((i) => i.id)).toEqual(['C', 'E']);
+      expect(extended.every((i) => i.priority === 'critical')).toBe(true);
+      expect(dep).toHaveBeenCalledWith('/repo', 1 + DOWNTIME_DISPATCH_EXTEND_MAX);
+    });
+
+    it('never returns a non-critical item beyond the sprint view (AC4)', async () => {
+      const current = [item('A')];
+      const dep = vi.fn().mockResolvedValue({
+        ok: true,
+        items: [item('A'), item('B', 'high'), item('C'), item('D', 'low')],
+      });
+      const deps = makeDeps({ getHerdrListHead: dep });
+
+      expect(await fetchExtendedHerdrItems(deps, '/repo', current)).toEqual([]);
     });
 
     it('returns [] when the extended head adds nothing (limit-ignoring dep)', async () => {
@@ -11933,5 +12094,303 @@ describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T20
     expect(outcome.dispatched).toBe(false);
     expect(worker.blockReason).toBe('slot-owner');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});
+
+// ── Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK) ───────
+//
+// A repeatedly non-terminal item must stop consuming dispatch slots. Once
+// the rolling dispatch log records `maxAttempts` attempts for an
+// `(item, kind)` at the item's current stage, the item is flagged
+// `needsProducerReview` and excluded from further automatic dispatch of that
+// kind, with a neutral `attempt-budget-exhausted` reason (never a strike,
+// never `no-candidate`). A stage advancement resets the budget; a
+// missing/corrupt log is fail-open (count 0).
+
+describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
+  // 1s marker-stale window so same-stage markers written in the past are
+  // RELEASED (otherwise the duplicate-dispatch marker guard would skip the
+  // item before the budget filter runs).
+  const WINDOW_MS = 1_000;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeCwd(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'dt-attempt-budget-'));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  function writeRawLog(cwd: string, raw: string): void {
+    mkdirSync(join(cwd, '.worklog'), { recursive: true });
+    writeFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), raw, 'utf8');
+  }
+
+  function writeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
+    writeRawLog(cwd, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+  }
+
+  const implementHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Implement ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'high',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 10,
+  });
+
+  const planHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'intake_complete',
+    priority: 'medium',
+    sortIndex: 30,
+  });
+
+  const marker = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    itemId: 'IMP-1',
+    kind: 'implement',
+    stage: 'plan_complete',
+    dispatchedAt: ago(60_000),
+    ...overrides,
+  });
+
+  function depsFor(items: DowntimeHerdrItem[], overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
+    return makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items }),
+      markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+      ...overrides,
+    });
+  }
+
+  it('AC7a: below the cap the item is eligible for dispatch', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker()]); // 2 attempts < 3
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+    expect(outcome.candidate?.id).toBe('IMP-1');
+    expect(deps.markNeedsProducerReview).not.toHaveBeenCalled();
+  });
+
+  it('AC7b: at the cap the item is skipped with the neutral attempt-budget-exhausted reason', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker(), marker()]); // 3 attempts == 3
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('attempt-budget-exhausted');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // Neutral: never a CLI-error strike.
+    expect(deps.recordError).not.toHaveBeenCalled();
+  });
+
+  it('AC7c: the producer-review flag is set exactly once when the cap is reached', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker(), marker()]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledTimes(1);
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
+  });
+
+  it('AC7d: a stage advancement resets the budget (earlier-stage attempts do not count)', async () => {
+    const cwd = makeCwd();
+    // Three attempts recorded at the PRIOR stage; the item has since advanced
+    // to plan_complete, so the earlier attempts no longer count.
+    writeLog(cwd, [
+      marker({ stage: 'intake_complete' }),
+      marker({ stage: 'intake_complete' }),
+      marker({ stage: 'intake_complete' }),
+    ]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('IMP-1');
+    expect(deps.markNeedsProducerReview).not.toHaveBeenCalled();
+  });
+
+  it('AC7e: a corrupt/missing log is fail-open (never blocks all dispatch)', async () => {
+    const cwd = makeCwd();
+    writeRawLog(cwd, '{not valid json}\nalso-not-json\n');
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('IMP-1');
+  });
+
+  it('AC4: the budget is per-kind — attempts of another kind do not exhaust it', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [
+      { itemId: 'IMP-1', kind: 'plan', stage: 'plan_complete', dispatchedAt: ago(60_000) },
+      { itemId: 'IMP-1', kind: 'plan', stage: 'plan_complete', dispatchedAt: ago(60_000) },
+      { itemId: 'IMP-1', kind: 'plan', stage: 'plan_complete', dispatchedAt: ago(60_000) },
+    ]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('implement');
+  });
+
+  it('AC6 (offer path): computeMostImportantItem reports attemptBudgetHold, never noCandidate', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker(), marker()]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, WINDOW_MS, undefined, 3);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect('attemptBudgetHold' in result).toBe(true);
+      expect('noCandidate' in result).toBe(false);
+      expect('candidate' in result).toBe(false);
+    }
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
+  });
+
+  it('AC6 (offer path): below the cap computeMostImportantItem still offers the item', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [marker(), marker()]);
+    const deps = depsFor([implementHead('IMP-1')]);
+
+    const result = await computeMostImportantItem(deps, cwd, Date.now(), undefined, WINDOW_MS, undefined, 3);
+
+    expect(result.ok).toBe(true);
+    if (result.ok && 'candidate' in result) {
+      expect(result.candidate.id).toBe('IMP-1');
+      expect(result.kind).toBe('implement');
+    } else {
+      throw new Error(`expected a candidate offer, got ${JSON.stringify(result)}`);
+    }
+  });
+
+  it('AC6 (leader/coordination path): dispatchFromCoordination enforces the cap and flags the item', async () => {
+    const cwd = makeCwd();
+    const coordinationDir = makeCwd();
+    writeLog(cwd, [marker(), marker(), marker()]);
+    const deps = makeDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: {
+          id: 'IMP-1',
+          title: 'Implement IMP-1',
+          status: 'open',
+          stage: 'plan_complete',
+          priority: 'high',
+          risk: 'Low',
+          effort: 'S',
+          sortIndex: 10,
+        },
+      }),
+      markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+    });
+    const entries: CoordinationEntry[] = [{
+      instanceId: 'inst-1',
+      workItemId: 'IMP-1',
+      directory: cwd,
+      worklogRoot: cwd,
+      assignedAt: ago(60_000),
+      lastUpdated: ago(60_000),
+    }];
+
+    const outcome = await dispatchFromCoordination(deps, entries, {
+      model: 'plan',
+      cwd,
+      coordinationDir,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('attempt-budget-exhausted');
+    expect(deps.claimItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
+  });
+
+  it('plan kind: the cap is enforced for a plan candidate too', async () => {
+    const cwd = makeCwd();
+    writeLog(cwd, [
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(60_000) },
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(60_000) },
+      { itemId: 'PLN-1', kind: 'plan', stage: 'intake_complete', dispatchedAt: ago(60_000) },
+    ]);
+    const deps = depsFor([planHead('PLN-1')]);
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      markerStaleWindowMs: WINDOW_MS,
+      maxAttempts: 3,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('attempt-budget-exhausted');
+    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('PLN-1', cwd);
+  });
+});
+
+describe('clampDowntimeMaxAttempts (WL-0MUKYEXMK0033MFK)', () => {
+  it('defaults on non-finite input', () => {
+    expect(clampDowntimeMaxAttempts(Number.NaN)).toBe(DEFAULT_DOWNTIME_MAX_ATTEMPTS);
+    expect(clampDowntimeMaxAttempts(Number.POSITIVE_INFINITY)).toBe(DEFAULT_DOWNTIME_MAX_ATTEMPTS);
+  });
+
+  it('clamps into the documented [1, 10] range', () => {
+    expect(clampDowntimeMaxAttempts(0)).toBe(DOWNTIME_MAX_ATTEMPTS_MIN);
+    expect(clampDowntimeMaxAttempts(-5)).toBe(DOWNTIME_MAX_ATTEMPTS_MIN);
+    expect(clampDowntimeMaxAttempts(99)).toBe(DOWNTIME_MAX_ATTEMPTS_MAX);
+    expect(clampDowntimeMaxAttempts(4)).toBe(4);
   });
 });

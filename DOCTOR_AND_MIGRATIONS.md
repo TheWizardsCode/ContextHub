@@ -10,6 +10,7 @@ This document describes the `wl doctor` command and the migration policy for Wor
 
 - **Status/stage compatibility** — validates every work item's status and stage against the rules defined in `.worklog/config.yaml` (see `docs/validation/status-stage-inventory.md` for the full rule set).
 - **Dependency edges** — checks that all dependency edges reference existing work items.
+- **Podcast script `Key Files:`** — flags a `podcast` item at a script-bearing stage (`plan_complete` / `in_review` / `done`) whose `Key Files:` contains no `.podcast.md` path that resolves to an existing file under the worklog root, and any `podcast` item whose listed `.podcast.md` path does not resolve. Detection is artifact-based (filesystem), not stage/status-based. `wl doctor --fix` backfills the path when a matching script is found (see `docs/FILE_PATH_CONVENTION.md`).
 - **Pending migrations** — the `upgrade` subcommand detects and applies schema migrations.
 - **Stale deleted items** — the `prune` subcommand removes soft-deleted items older than a configurable threshold.
 - **Audit gaps** — the `audit-gaps` subcommand reports `completed`/`in_review` items with no audit record (read-only).

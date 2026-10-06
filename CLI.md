@@ -782,6 +782,18 @@ wl --json list -s open --tags backlog
 wl list --needs-producer-review
 ```
 
+When `--json` is used, each work item includes the audit enrichment fields
+`auditResult`, `auditedAt`, and `fingerprint` (from the `audit_results`
+table), plus `currentFingerprint` — the canonical content fingerprint of the
+item's *current* content (per-touched-path git state + description hash + Key
+Files, matching the audit skill's algorithm). `currentFingerprint` is
+computed only for items that carry a stored `fingerprint`; it is `null`
+otherwise, or when git cannot determine it. Comparing `fingerprint` with
+`currentFingerprint` is the primary `isAuditFresh` gate, so a fresh audit
+stays fresh across `updatedAt` churn (WL-0MUN7QWFP0010EQC). Like the other
+enrichment fields, `currentFingerprint` is omitted when an explicit `--fields`
+projection is active.
+
 ---
 
 ### `search` <query> [options]
@@ -1253,18 +1265,78 @@ Answers are persisted after each response, so an interrupted session can be
 resumed by re-running the command: only the questions that remain outstanding
 are asked. `needsProducerReview` is cleared once every question has an answer.
 
+#### LLM-assisted question extraction
+
+The deterministic parser needs a recognised appendix heading and readable
+Q/A markup. When it finds nothing — the item was written in free prose, for
+example — the command can fall back to the local LLM to extract the
+outstanding questions:
+
+```sh
+wl interview WL-ABC123 --llm
+```
+
+The opt-in can also be set in the configuration file:
+
+```yaml
+interview:
+  intelligent: true
+```
+
+`--llm` and `interview.intelligent: true` are equivalent; `--llm` wins when
+both are present. `--no-llm` disables all LLM use, including extraction.
+
+When enabled — and only when the deterministic parser found no questions —
+the command sends the description (truncated to 8 KiB) to the configured chat
+provider with a 15 s timeout and asks for a JSON array of
+`[{"question": "..."}]`. Each returned question is shown in the same prompt
+loop as a parsed question, and **only questions the operator answers
+(confirms)** are written back — through the deterministic re-serialiser, never
+from raw model output. When the description has no clarifying section the
+canonical `## Appendix: Clarifying questions` heading is inserted; when one
+exists the confirmed questions are merged into it, keeping re-runs idempotent.
+
+If no provider is configured, or the request fails, times out or returns
+malformed JSON, the command degrades silently to the deterministic-only
+behaviour described below — no error is surfaced.
+
 #### When there are no questions to answer
 
 If no clarifying-questions section is found (or it contains no parseable
 questions) but the item is still flagged for producer review, the command
-explains what the producer must do to clear the flag. The explanation is
-produced by the local LLM proxy's `compact` model, prompted with the
-instruction *"Explain what the producer needs to do in order to remove the
-needsProducerReview flag"* plus item context (the description and the two most
-recent comments). When the LLM is disabled or unreachable the command falls
-back silently to the two most recent comments (`<author>: <first line>`).
+explains **why** the item is flagged — naming the triggering evidence — and
+only then what the producer must do to clear the flag.
 
-The explanation is advisory only — it never mutates the description.
+The explanation is produced by the local LLM proxy's `compact` model, prompted
+with an instruction to first state the reason (citing the triggering evidence)
+and then the action, plus item context:
+
+- the **latest audit result** (verdict, provenance, summary and a bounded
+  raw-output excerpt) — the strongest signal for review-gated items;
+- the description; and
+- the two most recent comments.
+
+The audit block is placed ahead of the description so it survives the overall
+context bound (`MAX_PROMPT_CONTEXT_BYTES`, 8 KiB) when the description is very
+large. The summary and raw-output excerpt are individually bounded so a single
+large audit cannot dominate the prompt.
+
+When the LLM is disabled (`--no-llm`) or unreachable the command falls back
+silently to the **structured evidence**, in priority order:
+
+1. the latest audit result (verdict and summary);
+2. a durable audit-gap waiver (`auditWaiver`);
+3. the two most recent comments (`<author>: <first line>`);
+4. a generic actionable line (`wl reviewed <id> false`) as a last resort.
+
+The rendered explanation preserves intentional line breaks and short Markdown
+structure — it is no longer collapsed into a single line — but collapses runs
+of spaces and repeated blank lines, and is bounded by a documented maximum
+(`MAX_EXPLANATION_LENGTH`, 8192 characters, and `MAX_EXPLANATION_LINES`, 512
+lines). Truncation is marked with a trailing ellipsis.
+
+The explanation is advisory only — it never mutates the description or clears
+the flag.
 
 After printing the explanation the command asks
 `Clear the needsProducerReview flag? (y/N)` (default **No**); answering `y`
@@ -1279,12 +1351,18 @@ Options:
 - `--prefix <prefix>` — Operate on a specific prefix (optional).
 - `--json` — Non-interactive mode: prints JSON with
   `needsProducerReview` (boolean), `producerReviewExplanation` (string or
-  `null`), `noSection`, `noQuestions`, `total`, `outstanding` and
-  `allAnswered`. Performs no prompts, no mutation and (with `--no-llm`) no
-  LLM call.
-- `--no-llm` — Disable the LLM explanation and use the comment fallback
-  (default: LLM on).
-- `--model <model>` — Override the chat model used for the explanation.
+  `null`; multi-line explanations are preserved), `noSection`,
+  `noQuestions`, `total`, `outstanding` and `allAnswered`. Performs no
+  prompts, no mutation and (with `--no-llm`) no LLM call.
+- `--no-llm` — Disable all LLM use (the producer-review explanation and the
+  LLM-assisted question extraction) and use the structured fallback instead
+  (default: explanation on, extraction off unless enabled).
+- `--llm` — Enable LLM-assisted clarifying-question extraction when the
+  deterministic parser finds no questions. Equivalent to
+  `interview.intelligent: true`; the flag wins when both are set (default:
+  off).
+- `--model <model>` — Override the chat model used for the explanation and
+  extraction.
 
 > Without `--json`, the command requires interactive (TTY) input.
 
@@ -1313,6 +1391,19 @@ Defaults: `baseUrl` `http://192.168.0.199:8000/v1`, `model` `compact`,
 `timeoutMs` `15000`. Environment variables `LLM_BASE_URL`, `LLM_MODEL`,
 `LLM_API_KEY` and `LLM_TIMEOUT_MS` are used as fallbacks; config values take
 precedence over environment variables.
+
+#### `interview` configuration
+
+The `interview` section opts in to LLM-assisted question extraction without
+requiring the `--llm` flag:
+
+```yaml
+interview:
+  intelligent: true
+```
+
+An absent section (or `intelligent: false`) leaves extraction off. The
+provider itself is configured under `llm` (see above).
 
 ### `help` [command]
 

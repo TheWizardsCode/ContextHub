@@ -32,38 +32,61 @@ critical work is never starved by lower-priority items occupying the window (see
 *Critical-first tier* section). If no head item passes the filters, the dispatcher reports
 "no candidate" rather than falling back to a second ranking.
 No `wl next`/database scoring change is required; the observable contract is
-"dispatcher == Herdr list head".
+"dispatcher == Herdr list head". The head is fetched with the **live per-root
+`browseItemCount`** limit (clamped 1–50), so the dispatcher head equals the
+rendered sprint view — see *Sprint-view-only dispatch window* below.
 
-### Extended dispatch window (WL-0MU6UL3GQ0015AA5)
+### Sprint-view-only dispatch window (WL-0MUNS8X97007C9H9)
 
-The Herdr head is **windowed**: mandatory items (critical + `completed`/`in_review`) are
-always included and consume window slots, and the remaining slots are filled from "other"
-items. When the mandatory set is large, the first genuinely dispatchable candidate can fall
-**outside** the window — the 2026-09-18 incident (a 30-item head whose only dispatchable
-item was the 22nd "other") left the machine with **zero dispatches for 31 h** while a
-healthy backlog existed. The dispatcher therefore **extends the dispatch window when the
-head yields no candidate**:
+The dispatcher head **is** the sprint view. Both selection paths pass the live
+per-root `browseItemCount` setting — clamped to the supported `1`–`50` range by
+`resolveSprintViewWindow` (`packages/herdr/src/browse-window.ts`), the same
+clamp the TUI worklist applies — as the `getHerdrListHead` limit:
 
-- It re-reads the **same ranking path** (`fetchNextItems` → `selectWorkItems` →
-  `regroupWorkItems`) with a bounded larger count and skips the items already seen — a
-  **window extension, never a second ranking**. Ordering is unchanged; only more "other"
-  items become visible.
-- The extension is bounded by `DOWNTIME_DISPATCH_EXTEND_MAX` (`downtime-worker.ts`, 30): at
-  most `head length + 30` items are scanned per dispatch cycle (a default 30-item head
-  therefore scans at most 60 items).
-- The extension runs on **both** dispatch paths — `dispatchDowntimeWork` (direct dispatch)
-  and `computeMostImportantItem` (the coordination check-in offer) — so an instance never
-  offers "nothing" while its backlog holds dispatchable work.
-- The **TUI worklist is unchanged**: it keeps rendering exactly `browseItemCount` items
-  (clamped 1–50). The extension is dispatch-only.
-- **Fail-open:** a failed/empty extended lookup degrades to the original terminal reason, so
-  the extension can never convert a defined outcome into a new failure.
+- `dispatchDowntimeWork` (direct dispatch), and
+- `computeMostImportantItem` (the coordination check-in offer).
 
-Because of the extension, the **"no candidate" contract applies only to a genuinely empty
-dispatchable backlog** (or a backlog fully blocked by a safety gate) — not to an item hidden
-beyond the `browseItemCount` window. Other terminal reasons (code-freeze, `audit-in-flight`,
-`audit-host-saturated`, `fresh-audit-skip`, `review-queue-hold`, `wl-error`) keep their
-existing semantics.
+`getHerdrListHead` forwards the limit to `fetchNextItems(limit)`, so the head
+contains exactly the items the sprint view renders (`f-s-s` → `/wl`): the
+mandatory set (all `critical` plus all completed/`in_review`) and enough
+"other" items to fill the remaining `browseItemCount` slots. The setting is
+re-read live on every dispatch cycle, so a change applies without a restart. A
+caller that passes no limit falls back to the sprint-view default (20), so an
+unwindowed head is never produced.
+
+**Non-critical work outside the view is never dispatched.** When the head
+yields no candidate the dispatcher reports the terminal reason derived from the
+in-view flags (`no-candidate`, `review-queue-hold`, `code-freeze`,
+`fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`, `in-flight-hold`,
+`wl-error`) and does **not** fall back to a second ranking or an out-of-view
+non-critical scan. When every visible item is filtered by a safety gate (or the
+view is empty) the outcome is a NOP.
+
+**Critical escape hatch (defensive).** A bounded out-of-window read
+(`fetchExtendedHerdrItems`, `DOWNTIME_DISPATCH_EXTEND_MAX = 30`) re-reads the
+**same ranking path** with a larger window — a window extension, never a second
+ranking — and returns **only** `critical` items. Because every `critical` item
+is already mandatory in the view, this escape hatch is normally a no-op; it
+exists purely as a safety net so a release blocker can never be windowed out.
+Non-critical items beyond the sprint view are filtered out, so the operator can
+never be surprised by hidden-backlog dispatch. The extension runs on both
+dispatch paths; the **TUI worklist is unchanged** (it keeps rendering exactly
+`browseItemCount` items, plus the mandatory set).
+
+**Supersedes WL-0MU6UL3GQ0015AA5 AC1/AC4.** That item widened the non-critical
+window to prevent a 31-hour starvation incident. This item deliberately reverses
+the non-critical part of that behaviour: the dispatch window now tracks the
+operator-curated sprint view. The accepted trade-off (recorded on
+WL-0MUNS8X97007C9H9) is that if every visible item is blocked and the only
+dispatchable item lies beyond `browseItemCount`, the dispatcher no-ops —
+mitigated operationally by raising `browseItemCount` (up to 50) or clearing a
+blocker. The WL-0MU6UL3GQ0015AA5 starvation regression now asserts this NOP
+behaviour rather than a dispatch.
+
+**Fail-open preserved.** A failed head lookup still resolves `{ok:false}` (the
+caller keeps its entry / reports `wl-error`); a failed or empty extended
+critical read degrades to the original terminal reason, so the escape hatch can
+never convert a defined outcome into a new failure.
 
 **Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
 entry per instance — an **offer** of that instance's own Herdr list head (computed at the
@@ -325,6 +348,50 @@ re-read from settings every tick (live) and wired through
 `dispatchDowntimeWork`, `computeMostImportantItem`, `runCoordinationCheckIn`
 and `dispatchFromCoordination`.
 
+### Per-item, per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)
+
+The dispatcher enforces a **per-`(item, kind)` attempt budget** derived from
+the rolling dispatch log (`countAttempts`), so an item that repeatedly closes
+non-terminally (`agent-ended-no-terminal`, `audit-ended-no-result`) cannot
+consume local-LLM slots across many idle cycles without escalation.
+
+- **Attempt count (AC1).** An attempt is a dispatch marker for the kind
+  (the same predicate the success-marker readers use). Non-terminal pane
+  closes count once, via the marker that opened their pane; `spawn-failed`
+  traces and post-spawn `enrichment` entries are excluded (they never opened
+  a pane). No new persistent store is introduced — the count is derived from
+  the existing bounded log and is **fail-open**: a missing/unreadable/corrupt
+  log yields 0.
+- **Cap enforced (AC2).** Once the count reaches `maxAttempts`, the item is
+  excluded as a sequential filter on both paths — the Herdr-list-head scan
+  (`dispatchFromHerdrList`, including the critical-first scan) and the
+  coordination offer/leader path (`computeMostImportantItem`,
+  `dispatchFromCoordination`). The cap is evaluated after the
+  duplicate-dispatch marker guard and the in-flight guard, so it never
+  bypasses either.
+- **Escalation (AC3).** Reaching the cap flags the item
+  `needsProducerReview = true` (`markNeedsProducerReview`, backed by
+  `wl reviewed <id> true`) so it surfaces for human triage. The flag is set
+  at most once per dispatch cycle, and once set the existing global
+  producer-review exclusion stops all further automatic dispatch.
+- **Stage advancement resets (AC4).** Only markers whose dispatched-at
+  `stage` equals the item's current stage count. A stage advancement leaves
+  the earlier markers at the old stage, so the item gets a fresh budget at
+  its new stage.
+- **Neutral skip (AC5).** The skip reason is `attempt-budget-exhausted` —
+  distinct from `no-candidate` and never a CLI-error strike (the worker's
+  three-strike rule is unaffected; the offer computation reports the distinct
+  `{ok:true, attemptBudgetHold:true}` variant so a budget-held backlog keeps
+  polling).
+
+**Configuration.** `downtimeMaxAttempts` is a plugin setting
+(default **3**, `DEFAULT_DOWNTIME_MAX_ATTEMPTS`), clamped by
+`clampDowntimeMaxAttempts` to **[1, 10]**
+(`DOWNTIME_MAX_ATTEMPTS_MIN` / `..._MAX`). It is re-read from settings every
+tick (live) and wired through `DowntimeWorkerConfig.config().maxAttempts`
+into `dispatchDowntimeWork`, `computeMostImportantItem`,
+`runCoordinationCheckIn` and `dispatchFromCoordination`.
+
 ### Pane placement: project workspace first, `Dispatcher` fallback (WL-0MUR5FUWD00024XN)
 
 Automated downtime panes spawn **inside the owning project's herdr
@@ -377,6 +444,21 @@ worklog root is `R`:
    via `herdr tab list`, so a second dispatch for the same item reuses the
    same tab (never a duplicate).
 3. **Spawn** — `--anchor <itemTabRootPaneId>`, `--no-focus` preserved.
+4. **Root-pane cleanup** — after the dispatch pane has spawned, the item
+   tab's initial root pane (herdr's automatically-provisioned empty bash
+   pane, used only as the split anchor) is closed, so the tab shows only the
+   productive dispatch pane (WL-0MU2EOHK900425VU). Only the ROOT pane is ever
+   closed: the anchor is closed unless liveness POSITIVELY confirms it is a
+   live downtime dispatch pane. Liveness uses the running **downtime** pane
+   ids (`paneIds`); the full machine-wide `records` set must never be used
+   directly for this check because it always contains the anchor itself and
+   would suppress every close. A `records`-only payload is filtered through
+   `countRunningDowntimePanes`. When liveness cannot be confirmed
+   (query failed/absent) the anchor is left open (fail-safe) so a running
+   agent pane is never closed. On a later dispatch for the same item the
+   surviving dispatch pane is the anchor and is correctly spared. The
+   retained `Dispatcher` fallback anchor is deliberately exempt: closing it
+   would trigger the stale-detection re-provision loop.
 
 When the workspace resolves but the item-ID tab cannot be provisioned, the
 dispatch fails closed with `anchor-unavailable` — it never places the pane in
@@ -439,14 +521,23 @@ Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`):
 - **Project workspace + item-ID tab (primary):** `resolveProjectWorkspace`
   resolves the plugin pane for the item's root; `getItemTabAnchor` returns the
   anchor pane for the exact item-ID tab, creating it on first use under the
-  coordination lock. `dispatchClaimedTier` consults this path first whenever
-  both deps are wired.
+  coordination lock. After the first dispatch the tab's initial root pane is
+  closed (see invariant step 4) so the tab is never left with an empty bash
+  pane; a later dispatch for the same item reuses the surviving dispatch pane
+  as the split anchor (WL-0MU2EOHK900425VU). The cleanup is fail-safe: it
+  closes the anchor only when the running-downtime-pane liveness query
+  succeeds and the anchor is absent from it — never using the full pane list,
+  which would include the anchor and suppress the close. `dispatchClaimedTier`
+  consults this path first whenever both deps are wired.
 - **Per-prefix tab (fallback):** `getDispatcherTabAnchor(cwd, deps, prefix)`
   ensures the `Dispatcher` workspace, fast-paths the persisted live anchor,
   else lists tabs (`herdr tab list --workspace <id>`), else under the
   coordination lock (with a double-check) runs `herdr tab create --workspace
   <id> --label <prefix> --no-focus` and returns the new `tab_id` +
-  `root_pane.pane_id`. Consulted only when no project workspace resolves.
+  `root_pane.pane_id`. Consulted only when no project workspace resolves. Its
+  initial root pane is cleaned up after the first dispatch by the same
+  fail-safe rule as the project item tab (step 4); the fallback
+  `getDispatcherAnchor` pane is never closed.
 - **Fallback anchor:** `getDispatcherAnchor(cwd, deps)` provisions one
   `Dispatcher` workspace + persisted anchor pane in the machine coordination
   dir (`~/.herdr/downtime/downtime-dispatch-anchor.json`, atomic tmp+rename,
@@ -499,13 +590,11 @@ only to automated downtime dispatch).
 The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
 (no poll, no idle tracking, no dispatch) for `downtimeNoCandidateCooldownMs`
 (default 60 min) after a genuinely empty backlog, resetting the idle
-tracker so a fresh full idle period is required after the pause. The
-**extended dispatch window** (WL-0MU6UL3GQ0015AA5, see *Ranking contract*
-above) guarantees a `no-candidate` outcome means the *whole* bounded
-dispatch backlog — not merely the initial head — held nothing dispatchable:
-the window is extended at least to the first dispatchable candidate, up to
-`DOWNTIME_DISPATCH_EXTEND_MAX` additional items, before `no-candidate` is
-reported. In
+tracker so a fresh full idle period is required after the pause. A
+`no-candidate` outcome means the *sprint view* — the live `browseItemCount`
+window (plus mandatory items) — held nothing dispatchable: the dispatcher does
+not scan hidden backlog (WL-0MUNS8X97007C9H9; see *Sprint-view-only dispatch
+window* above). In
 coordination mode (WL-0MTEZ4XZJ006Y9U7) the shared runtime file
 (`.worklog/downtime-coordination.json`) is an **offer list, not the
 backlog**: the leader removes each entry after dispatching (see step 4
@@ -1024,17 +1113,31 @@ idempotent:
   (manually opened panes, and marker-less panes whose agent died). It runs
   on the downtime-worker tick at most once per `PANE_CLOSE_REAPER_INTERVAL_MS`
   (default 60 s), gated by the `paneCloseEnabled` setting (default on), with
-  a `paneCloseIdleThresholdMinutes` idle threshold (default 30, clamped
-  [1, 1440]).
+  a `paneCloseIdleThresholdMinutes` idle threshold (default 0 — idle close
+  disabled — clamped [0, 1440]) and a `paneCloseGracePeriodMinutes` grace
+  period (default 5, clamped [1, 1440]).
 
 The reaper classifies each Herdr pane via the shared `classifySession()`
 module (`packages/herdr/src/pane-close.ts`): close when the final assistant
-message ends with `</end_session>`, when the agent process is gone, or when
-the agent is alive but idle beyond the threshold. It never closes an
-`implement` pane, an item awaiting producer review, the invoking pane, or a
-pane with live children. A close failure for one pane is recorded and the
-run continues; a reaper throw is caught and logged so it can never crash the
-worker.
+message ends with `</end_session>`, or (only when the idle threshold is
+positive) when the agent is alive but idle beyond the threshold. It never
+closes an `implement` pane, an item awaiting producer review, the invoking
+pane, a pane with live children, or a pane still within its grace period. A
+dead agent is **not** closed — the operator may still need to read the final
+output. A close failure for one pane is recorded and the run continues; a
+reaper throw is caught and logged so it can never crash the worker.
+
+**Active-agent signals (parent AC3).** The production deps
+(`pane-close-herdr.ts`) populate the classifier's activity signals so
+long-running-but-silent agents are not reaped: the raw herdr `agent_status`
+(a `work`-class status keeps the pane `active`), recent file modifications
+in the pane's workspace (`dirHasRecentModifications`, 2-minute window,
+bounded scan), and the count of spawned child processes from
+`herdr pane process-info` (excluding the pane's own foreground
+process-group leader, so an idle agent is not misclassified as having
+children). The work-item stage and producer-review flag are fetched once
+per pane (`getItemInfo`) and recorded in every
+`CloseReasonSnapshot`/reaper-ledger row (parent AC6).
 
 **Coexistence.** With Mechanism B disabled there is a single active closer,
 so the previous non-atomic double-close race is gone. The reaper still skips
@@ -1066,13 +1169,13 @@ as fallback — they are orphaned and ignored. Guarantees:
 
 The original spec (parent AC8) said "30s proxy poll + 4 min continuous idle
 threshold". **Accepted variance (2026-08-24): the code defaults are
-canonical — 10s dispatch poll, 60s continuous idle threshold, with the proxy
+canonical — 10s dispatch poll, 75s continuous idle threshold, with the proxy
 status refresh unchanged at 30s.**
 
 | Setting | Default | Source |
 |---|---|---|
 | Dispatch poll interval | **10 s** (`downtimePollIntervalMs`) | `DEFAULT_DOWNTIME_POLL_INTERVAL_MS`, floor 10 s (`downtime-worker.ts`) |
-| LLM continuous idle threshold | **60 s** (`downtimeIdleThresholdMs`) | `DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS`, floor 1 s (`downtime-worker.ts`) |
+| LLM continuous idle threshold | **75 s** (`downtimeIdleThresholdMs`) | `DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS`, floor 1 s (`downtime-worker.ts`) |
 | Proxy status refresh | 30 s (`refreshIntervalMs`) | `settings.ts` (unchanged, pre-refactor cadence) |
 | Leader lease TTL | 5 min (`DEFAULT_LEASE_TTL_SECONDS = 300`) | `leader-election.ts` |
 | Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.ts`, `leader-election.ts` |
@@ -1080,19 +1183,26 @@ status refresh unchanged at 30s.**
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
+| Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
-| Pane-closure idle threshold | **30 min** (`paneCloseIdleThresholdMinutes`; clamped to 1 min – 24 h) | `pane-close-scheduler.ts` |
+| Pane-closure idle threshold | **0 min** — idle close disabled (`paneCloseIdleThresholdMinutes`; clamped to 0 min – 24 h) | `pane-close-scheduler.ts` |
+| Pane-closure grace period | **5 min** (`paneCloseGracePeriodMinutes`; clamped to 1 min – 24 h; no pane is eligible for close within this window of first dispatch, WL-0MUMM5IUF003EVT8) | `pane-close-scheduler.ts` |
 | (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin
 settings file (`~/.config/herdr/worklog-plugin.json`,
 `downtimePollIntervalMs` / `downtimeIdleThresholdMs`) and are clamped on
 load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
-`downtime-worker.ts`). The success-marker staleness window
-(`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped on load
+`downtime-worker.ts`). The 75 s idle threshold exceeds the 1-minute
+slot-exhaustion cooldown so that existing sessions have a chance to reclaim
+the slot before a new work item is dispatched. The success-marker staleness
+window (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped
+on load
 (`clampDowntimeMarkerStaleWindowMs`). The non-terminal pane-close cooldown
 (`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
-(`clampDowntimeNonTerminalCooldownMs`).
+(`clampDowntimeNonTerminalCooldownMs`). The per-item/per-kind attempt cap
+(`downtimeMaxAttempts`) is likewise configurable and clamped on load
+(`clampDowntimeMaxAttempts`).
 
 ## Files & runtime artifacts
 
@@ -1107,7 +1217,7 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
 | `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |
 | `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
-| `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + pi session logs |
+| `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + `herdr pane process-info` + pi session logs (activity probes: agent status, recent file modifications, spawned child processes) |
 | `packages/herdr/src/process-group.ts` | Session-scoped child-process teardown (SIGTERM → grace → SIGKILL) |
 | `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` |
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |
@@ -1129,7 +1239,7 @@ load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
 - **No `Downtime triggered …` pane but `anchor-unavailable` in logs:** neither the project workspace/item tab nor the Dispatcher fallback anchor could be provisioned (fail-closed, never the leader's pane). For the project path check the `pane list` / `process-info` / `/proc/<pid>/environ` reads (no `Work Items` pane for the root, missing `HERDR_RESOLVED_CWD`, or unreadable `/proc` on non-Linux); for the fallback check `~/.herdr/downtime/` writability, coordination lock contention (`downtime-coordination.lock`), and the `herdr workspace create --label Dispatcher` / `herdr tab create --workspace <id> --label <itemId> --no-focus` JSON parse (shape drift across herdr versions). The worker degrades to “no dispatch this cycle” and retries next idle tick; an empty/missing anchor file or unreadable machine dir is treated as missing (never a crash).
 - **Pane landed in the wrong project's workspace:** resolution is fail-closed — it never selects another root's workspace. Check (a) the item's `cwd` (worklog root) matches exactly the plugin pane's `HERDR_RESOLVED_CWD` (trailing-slash tolerant); (b) when ≥2 `Work Items` panes resolve to the same root the focused pane wins, else the lowest pane id — close the surplus plugin pane to remove the ambiguity; (c) stale `dist/` in the running plugin (rebuild with `npm run build` in `packages/herdr`). If no plugin pane resolves, panes intentionally fall back to the `Dispatcher` workspace — that is AC4, not a misroute.
 - **No dispatches happening:** confirm a leader is elected (lease file
-  present + recent `lastUpdated` refresh), the proxy reports idle for ≥ 60 s
+  present + recent `lastUpdated` refresh), the proxy reports idle for ≥ 75 s
   continuously, and the coordination list has offers. Check
   `downtime-coordination.log` for check-ins and the dispatches log for the
   last dispatch.

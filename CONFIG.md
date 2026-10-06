@@ -104,6 +104,38 @@ The system loads configuration in this order:
 
 If no configuration exists at all, the system defaults to using `WI` as the prefix.
 
+## Project CTA (Call-to-Action)
+
+The optional `cta` field declares a project-specific call-to-action — a
+free-form **Markdown** string that report consumers (for example the ship
+skill's CHANGELOG section and release notifications) can surface. It is
+typically used by game projects to invite players to try a build and give
+feedback.
+
+```yaml
+# .worklog/config.yaml
+cta: "[Play the alpha release](https://example.github.io/my-project/). Provide feedback in [Discord](https://discord.gg/gUKQTFkzQ4)"
+```
+
+- **Optional.** When absent, the resolver returns `null` and report output is
+  unchanged (no behaviour change).
+- **Markdown / YAML-safe.** The value is a Markdown string; **quote it** in
+  YAML (as above) so link syntax such as `[label](url)` survives the
+  round-trip. A present non-string value fails config validation.
+- **Two-tier override.** Like every other field, a `cta` in
+  `.worklog/config.yaml` overrides a `cta` in `.worklog/config.defaults.yaml`.
+
+Consumers read the merged value through the exported `resolveProjectCta()`
+resolver in `src/config.ts`, or directly from the loaded `WorklogConfig`
+(`config.cta`):
+
+```ts
+import { loadConfig, resolveProjectCta } from './config.js';
+
+const config = loadConfig();
+const cta = resolveProjectCta(config); // string | null
+```
+
 ## GitHub Settings
 
 Optional GitHub settings (edit `.worklog/config.yaml` manually):

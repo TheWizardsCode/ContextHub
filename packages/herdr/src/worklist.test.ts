@@ -2413,6 +2413,41 @@ describe('resolvePodcastTarget — podcast-progression dispatch', () => {
     expect(result).toEqual({ command: '/skill:wiki-tts-generate --podcast-file wiki/podcast/foo/foo.podcast.md' });
   });
 
+  // OSL-0MUTPC7SF0011Y54: the canonical episode Key Files form records the
+  // script worklog-root-relative (`.llm-wiki/wiki/podcast/...`), which the
+  // `w`-chords resolve directly and the `t` chord must normalize to the
+  // wiki-dir-relative `podcast/...` form the TTS skill expects.
+  it('strips the worklog-root wiki prefix for <podcast-script> (canonical Key Files form)', async () => {
+    const worklogRelativeItem: WorkItem = {
+      ...draftedItem,
+      description: '## Key Files:\n- .llm-wiki/wiki/podcast/foo/foo.podcast.md\n',
+    };
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', worklogRelativeItem);
+    expect(result).toEqual({ command: '/skill:wiki-tts-generate --podcast-file podcast/foo/foo.podcast.md' });
+  });
+
+  it('strips a leading ./ from the worklog-root-relative <podcast-script> form', async () => {
+    const worklogRelativeItem: WorkItem = {
+      ...draftedItem,
+      description: '## Key Files:\n- ./.llm-wiki/wiki/podcast/foo/foo.podcast.md\n',
+    };
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', worklogRelativeItem);
+    expect(result).toEqual({ command: '/skill:wiki-tts-generate --podcast-file podcast/foo/foo.podcast.md' });
+  });
+
+  it('normalizes the real Ep 10 worklog-root-relative Key File to a wiki-dir-relative path', async () => {
+    const ep10: WorkItem = {
+      ...draftedItem,
+      description:
+        '## Key Files:\n- .llm-wiki/wiki/podcast/tableau-card-engine-ep10-the-complex-game-main-street/tableau-card-engine-ep10-the-complex-game-main-street.podcast.md\n',
+    };
+    const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', ep10);
+    expect(result).toEqual({
+      command:
+        '/skill:wiki-tts-generate --podcast-file podcast/tableau-card-engine-ep10-the-complex-game-main-street/tableau-card-engine-ep10-the-complex-game-main-street.podcast.md',
+    });
+  });
+
   it('errors on <podcast-script> when no script exists', async () => {
     const result = await resolvePodcastTarget('/skill:wiki-tts-generate --podcast-file <podcast-script>', sourcedItem);
     expect(result.error).toMatch(/no podcast script/i);
@@ -2450,6 +2485,21 @@ describe('resolvePodcastTarget — podcast-progression dispatch', () => {
     const wikiItem: WorkItem = { ...draftedItem, description: '## Key Files:\n- wiki/podcast/foo/foo.podcast.md\n' };
     const result = await resolvePodcastTarget('/skill:wiki-podcast-script --review <podcast-review>', wikiItem);
     expect(result).toEqual({ command: '/skill:wiki-podcast-script --review wiki/podcast/foo/foo.podcast.md' });
+  });
+
+  it('passes the worklog-root-relative Key File through verbatim for w-r/w-b (raw form)', async () => {
+    const worklogRelativeItem: WorkItem = {
+      ...draftedItem,
+      description: '## Key Files:\n- .llm-wiki/wiki/podcast/foo/foo.podcast.md\n',
+    };
+    const review = await resolvePodcastTarget('/skill:wiki-podcast-script --review <podcast-review>', worklogRelativeItem);
+    expect(review).toEqual({
+      command: '/skill:wiki-podcast-script --review .llm-wiki/wiki/podcast/foo/foo.podcast.md',
+    });
+    const both = await resolvePodcastTarget('/skill:wiki-podcast-script --review-rewrite <podcast-both>', worklogRelativeItem);
+    expect(both).toEqual({
+      command: '/skill:wiki-podcast-script --review-rewrite .llm-wiki/wiki/podcast/foo/foo.podcast.md',
+    });
   });
 
   it('returns the command unchanged for a command with no podcast markers (review marker absent)', async () => {

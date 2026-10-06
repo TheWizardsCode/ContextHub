@@ -108,8 +108,8 @@ describe('getIconPrefix — fixed-width agent slot (AC3 alignment invariance)', 
   const withBlockedAgent = { status: 'open', stage: 'idea', agentState: 'blocked' } as const;
 
   it('keeps the total prefix at the fixed width with and without an agent', () => {
-    expect(stringDisplayWidth(getIconPrefix(base))).toBe(12);
-    expect(stringDisplayWidth(getIconPrefix(withAgent))).toBe(12);
+    expect(stringDisplayWidth(getIconPrefix(base))).toBe(13);
+    expect(stringDisplayWidth(getIconPrefix(withAgent))).toBe(13);
   });
 
   it('keeps the remaining icons at identical columns (no column shift)', () => {

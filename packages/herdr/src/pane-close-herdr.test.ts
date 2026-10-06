@@ -3,7 +3,7 @@
  * herdr/session reaper deps (WL-0MUJW9FFW009008M / WL-0MUJL1NAH0042GOS).
  */
 import { describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -14,6 +14,9 @@ import {
   readFinalAssistantEntries,
   readSessionTailLines,
   createHerdrReaperDeps,
+  parsePaneProcessInfo,
+  countSpawnedChildProcesses,
+  dirHasRecentModifications,
 } from './pane-close-herdr';
 
 describe('parseHerdrPaneCloseList', () => {
@@ -317,8 +320,95 @@ describe('createHerdrReaperDeps', () => {
     expect(panes).toHaveLength(1);
     expect(panes[0].hasRecentFileModifications).toBe(true);
     expect(panes[0].hasActiveNetworkConnections).toBe(true);
-    expect(recent).toHaveBeenCalledWith('w1:p1');
-    expect(network).toHaveBeenCalledWith('w1:p1');
+    expect(recent).toHaveBeenCalledWith(expect.objectContaining({ paneId: 'w1:p1' }));
+    expect(network).toHaveBeenCalledWith(expect.objectContaining({ paneId: 'w1:p1' }));
+  });
+
+  it('populates itemStage and producer-review from getItemInfo (parent AC6)', async () => {
+    const raw = JSON.stringify({
+      panes: [
+        {
+          pane_id: 'w1:p1',
+          label: 'Downtime triggered plan Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_status: 'idle',
+          agent_session: { value: '/tmp/item-info.jsonl' },
+        },
+      ],
+    });
+    const getItemInfo = vi.fn().mockResolvedValue({ needsProducerReview: false, stage: 'plan_complete' });
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn(),
+      getItemInfo,
+    });
+    const panes = await deps.listPanes();
+    expect(getItemInfo).toHaveBeenCalledWith('WL-0ABC123');
+    expect(panes[0].itemStage).toBe('plan_complete');
+    expect(panes[0].needsProducerReview).toBe(false);
+  });
+
+  it('treats a failed getItemInfo lookup as review-blocked (fail-closed)', async () => {
+    const raw = JSON.stringify({
+      panes: [
+        {
+          pane_id: 'w1:p1',
+          label: 'Downtime triggered plan Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_status: 'idle',
+          agent_session: { value: '/tmp/item-info-fail.jsonl' },
+        },
+      ],
+    });
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn(),
+      getItemInfo: vi.fn().mockRejectedValue(new Error('wl down')),
+    });
+    const panes = await deps.listPanes();
+    expect(panes[0].needsProducerReview).toBe(true);
+  });
+
+  it('maps the raw herdr agent status into PaneStatus (parent AC3/AC6)', async () => {
+    const raw = JSON.stringify({
+      panes: [
+        {
+          pane_id: 'w1:p1',
+          label: 'Downtime triggered plan Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_status: 'work',
+          agent_session: { value: '/tmp/agent-status.jsonl' },
+        },
+      ],
+    });
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn(),
+    });
+    const panes = await deps.listPanes();
+    expect(panes[0].agentStatus).toBe('work');
+    expect(panes[0].agentProcessAlive).toBe(true);
+  });
+
+  it('awaits an async childProcessCount probe (parent AC1/AC3)', async () => {
+    const raw = JSON.stringify({
+      panes: [
+        {
+          pane_id: 'w1:p1',
+          label: 'Downtime triggered plan Foo - WL-0ABC123',
+          agent: 'pi',
+          agent_status: 'idle',
+          agent_session: { value: '/tmp/child-count.jsonl' },
+        },
+      ],
+    });
+    const deps = createHerdrReaperDeps({
+      listPanesRaw: vi.fn().mockResolvedValue(raw),
+      closePane: vi.fn(),
+      childProcessCount: vi.fn().mockResolvedValue(2),
+    });
+    const panes = await deps.listPanes();
+    expect(panes[0].childProcessCount).toBe(2);
   });
 
   it('defaults activity probes to false when absent (backwards compatible)', async () => {
@@ -340,5 +430,92 @@ describe('createHerdrReaperDeps', () => {
     const panes = await deps.listPanes();
     expect(panes[0].hasRecentFileModifications).toBe(false);
     expect(panes[0].hasActiveNetworkConnections).toBe(false);
+  });
+});
+
+describe('parsePaneProcessInfo', () => {
+  it('parses the {result:{process_info:{…}}} envelope', () => {
+    const raw = JSON.stringify({
+      id: 'cli:pane:process_info',
+      result: {
+        process_info: {
+          foreground_process_group_id: 2817319,
+          foreground_processes: [
+            { pid: 2817319, cmdline: 'npm run dev --host' },
+            { pid: 2817357, cmdline: 'sh -c vite --host' },
+            { pid: 2817359, cmdline: 'node vite --host' },
+          ],
+        },
+        type: 'pane_process_info',
+      },
+    });
+    const info = parsePaneProcessInfo(raw);
+    expect(info).toEqual({
+      foregroundProcessGroupId: 2817319,
+      foregroundPids: [2817319, 2817357, 2817359],
+    });
+  });
+
+  it('tolerates log lines before the JSON payload', () => {
+    const raw = 'connecting...\n' + JSON.stringify({ result: { process_info: { foreground_processes: [{ pid: 7 }] } } });
+    expect(parsePaneProcessInfo(raw)).toEqual({ foregroundProcessGroupId: undefined, foregroundPids: [7] });
+  });
+
+  it('returns null when no JSON envelope is present', () => {
+    expect(parsePaneProcessInfo('no json here')).toBeNull();
+    expect(parsePaneProcessInfo('{not valid json')).toBeNull();
+  });
+});
+
+describe('countSpawnedChildProcesses', () => {
+  it('excludes the foreground process-group leader (the agent itself)', () => {
+    expect(
+      countSpawnedChildProcesses({
+        foregroundProcessGroupId: 100,
+        foregroundPids: [100, 101, 102],
+      }),
+    ).toBe(2);
+  });
+
+  it('returns 0 for an idle pane whose only process is the agent', () => {
+    expect(countSpawnedChildProcesses({ foregroundProcessGroupId: 5, foregroundPids: [5] })).toBe(0);
+  });
+
+  it('returns 0 for absent process-info (fail-closed)', () => {
+    expect(countSpawnedChildProcesses(null)).toBe(0);
+  });
+});
+
+describe('dirHasRecentModifications', () => {
+  it('detects a recently modified file and ignores stale ones', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-recent-'));
+    try {
+      writeFileSync(join(dir, 'fresh.txt'), 'x');
+      const now = Date.now();
+      // Freshly written file is within the window.
+      expect(dirHasRecentModifications(dir, { windowMs: 60_000, nowMs: now })).toBe(true);
+      // A window in the past (now far in the future) sees it as stale.
+      expect(
+        dirHasRecentModifications(dir, { windowMs: 1_000, nowMs: now + 3_600_000 }),
+      ).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns false for an absent directory (fail-closed)', () => {
+    expect(dirHasRecentModifications('/nonexistent/does/not/exist')).toBe(false);
+    expect(dirHasRecentModifications(undefined)).toBe(false);
+  });
+
+  it('descends into subdirectories', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-recent-sub-'));
+    try {
+      mkdirSync(join(dir, 'src'));
+      writeFileSync(join(dir, 'src', 'nested.ts'), 'x');
+      expect(dirHasRecentModifications(dir, { windowMs: 60_000 })).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

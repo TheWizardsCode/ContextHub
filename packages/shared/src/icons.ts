@@ -701,7 +701,7 @@ export function stringDisplayWidth(s: string): number {
 }
 
 /** Fixed target width for icon prefix alignment (terminal cells). */
-const ICON_PREFIX_WIDTH = 12;
+const ICON_PREFIX_WIDTH = 13;
 
 // ── Icon prefix composition ───────────────────────────────────────────
 
@@ -753,7 +753,10 @@ export function getIconPrefixParts(
 ): IconPrefixParts {
   const noIcons = opts?.noIcons ?? false;
 
-  // Column 0: agent status — fixed-width reserved slot so rows with and
+  // Column 0: priority icon (new, WL-0MTQYTA20009YXBT)
+  const priorityIconText = priorityIcon(item.priority, { noIcons });
+
+  // Column 1: agent status — fixed-width reserved slot so rows with and
   // without an agent keep the remaining icons and the item-ID column at
   // identical columns (AC3, WL-0MSBQUJQX005RAT9).
   const agentIcon = agentStatusIcon(item.agentState, { noIcons });
@@ -778,7 +781,7 @@ export function getIconPrefixParts(
   // Build full prefix and pad to fixed width for alignment. The agent slot
   // is included in the total, so rows with and without an agent still land
   // at exactly ICON_PREFIX_WIDTH cells.
-  let prefix = [agentSlot, coreIcons, epicSuffix].filter(Boolean).join('');
+  let prefix = [priorityIconText, agentSlot, coreIcons, epicSuffix].filter(Boolean).join('');
   const width = stringDisplayWidth(prefix);
   if (width < ICON_PREFIX_WIDTH) {
     prefix = prefix.padEnd(prefix.length + (ICON_PREFIX_WIDTH - width), ' ');
@@ -787,7 +790,7 @@ export function getIconPrefixParts(
   // `sIcon` and `secondIcon` are always non-empty (status/stage icons have
   // fallbacks), so these indices are always valid and point at the stage
   // icon the coverage dimming wraps.
-  const stageStart = agentSlot.length + sIcon.length;
+  const stageStart = priorityIconText.length + agentSlot.length + sIcon.length;
   return { text: prefix, stageStart, stageEnd: stageStart + secondIcon.length };
 }
 
@@ -797,12 +800,13 @@ export function getIconPrefixParts(
  * to a fixed display width so the item-ID column aligns vertically
  * regardless of how many icon fields are present.
  *
- * Column layout (left to right):
- *   0. Agent status (fixed-width reserved slot, WL-0MSBQUJQX005RAT9)
- *   1. Status icon
- *   2. Stage icon (for in_review items, shows audit-aware icon instead)
- *   3. Producer review flag
- *   4. Optional epic icon + child count
+ * Column layout (left to right, WL-0MTQYTA20009YXBT):
+ *   0. Priority icon (new)
+ *   1. Agent status (fixed-width reserved slot, WL-0MSBQUJQX005RAT9)
+ *   2. Status icon
+ *   3. Stage icon (for in_review items, shows audit-aware icon instead)
+ *   4. Producer review flag
+ *   5. Optional epic icon
  */
 export function getIconPrefix(item: IconPrefixItem, opts?: IconOptions): string {
   return getIconPrefixParts(item, opts).text;

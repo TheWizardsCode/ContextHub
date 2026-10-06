@@ -8,6 +8,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import { promises as fs } from 'fs';
 import { extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText, resolveAuditAuthor } from '../audit.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -111,7 +112,7 @@ export default function register(ctx: PluginContext): void {
       fingerprint?: string;
       prefix?: string;
       json?: boolean;
-    }) => {
+    }) => withStoreMutationLock(ctx.dataPath, async () => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
 
@@ -237,5 +238,5 @@ export default function register(ctx: PluginContext): void {
       if (reverted) {
         console.log(`[${reverted.item.id} reverted from ${reverted.from.status}/${reverted.from.stage} to ${reverted.to.status}/${reverted.to.stage}]`);
       }
-    });
+    }));
 }

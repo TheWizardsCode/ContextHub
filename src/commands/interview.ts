@@ -23,6 +23,23 @@
  * Answers are written back in place so surrounding markup (Source lines,
  * attribution, quotes) is preserved losslessly.
  *
+ * When the item is flagged for producer review but there is nothing to
+ * interview (no section, or no parseable questions), the command explains
+ * **why** it is flagged — drawing on the persisted audit result, the review
+ * comments and the description — and then offers to clear the flag. The
+ * explanation is produced by the local LLM when available and silently falls
+ * back to the structured evidence otherwise; it is advisory and never mutates
+ * the item (WL-0MUUAMP7M008Z4GK).
+ *
+ * When the item is **not** flagged (or before explaining) and the operator
+ * opts in with `--llm` or `interview.intelligent: true`, the command falls
+ * back to the local LLM to extract questions from natural prose when the
+ * deterministic parser finds none. Extracted questions are confirmed one by
+ * one through the same prompt loop and only confirmed answers are written
+ * back through the deterministic re-serialiser; an unavailable/failing LLM
+ * degrades silently to the deterministic-only behaviour
+ * (WL-0MUH7ACKJ0024VGF).
+ *
  * WL-0MU55UDBJ008DJ67
  */
 
@@ -30,7 +47,10 @@ import type { PluginContext } from '../plugin-types.js';
 import type { InterviewOptions } from '../cli-types.js';
 import type { WorkItem, Comment } from '../types.js';
 import { OpenAIChatClient, type ChatClient } from '../lib/llm.js';
-import { resolveLlmConfig } from '../config.js';
+import {
+  resolveLlmConfig,
+  isIntelligentInterviewEnabled,
+} from '../config.js';
 import * as readline from 'readline';
 
 // ── Section markers ──────────────────────────────────────────────────────
@@ -530,20 +550,56 @@ export function rebuildDescription(
 // ── Producer-review explanation ─────────────────────────────────────────
 
 /**
- * Instruction sent to the LLM when explaining how to clear the
- * `needsProducerReview` flag (parent AC2).
+ * Instruction sent to the LLM when explaining the `needsProducerReview`
+ * flag. The model must first state **why** the item is flagged (citing the
+ * triggering evidence) and only then what the producer must do to clear it
+ * (WL-0MUUAMP7M008Z4GK AC1).
  */
 export const PRODUCER_REVIEW_INSTRUCTION =
-  'Explain what the producer needs to do in order to remove the needsProducerReview flag';
+  'Explain why the needsProducerReview flag is set, citing the triggering ' +
+  'evidence (the latest audit verdict and summary, review or audit comments, ' +
+  'or the item description), and then explain what the producer needs to do ' +
+  'in order to remove the needsProducerReview flag';
 
 /** Maximum size (bytes) of the item context embedded in the prompt. */
 export const MAX_PROMPT_CONTEXT_BYTES = 8192;
 
-/** Maximum length (characters) of the normalised explanation line. */
-export const MAX_EXPLANATION_LENGTH = 500;
+/** Maximum bytes of the audit summary embedded in the explanation prompt. */
+export const MAX_AUDIT_SUMMARY_BYTES = 2048;
+
+/** Maximum bytes of the audit raw-output excerpt embedded in the prompt. */
+export const MAX_AUDIT_RAW_OUTPUT_BYTES = 2048;
+
+/** Maximum length (characters) of the rendered explanation. */
+export const MAX_EXPLANATION_LENGTH = 8192;
+
+/**
+ * Maximum number of lines in the rendered explanation. The render keeps
+ * intentional line breaks (AC3) but caps how many are surfaced so a runaway
+ * LLM response cannot flood the console.
+ */
+export const MAX_EXPLANATION_LINES = 512;
 
 /** Default timeout (ms) for the explanation LLM call. */
 export const EXPLANATION_TIMEOUT_MS = 15000;
+
+/**
+ * The subset of a persisted audit result consumed by the explanation. This is
+ * structurally compatible with `PersistentStore#getAuditResult`, so callers
+ * pass the row returned by the store directly (WL-0MUUAMP7M008Z4GK AC2/AC4).
+ */
+export interface ProducerReviewAuditContext {
+  /** Whether the latest audit judged the item ready to close. */
+  readyToClose: boolean;
+  /** ISO 8601 timestamp of the audit, when known. */
+  auditedAt?: string | null;
+  /** Human-readable audit summary, when present. */
+  summary?: string | null;
+  /** Machine-readable audit output, when present. */
+  rawOutput?: string | null;
+  /** Audit author/provenance, when known. */
+  author?: string | null;
+}
 
 /**
  * Dependencies for {@link buildProducerReviewExplanation}. The chat client is
@@ -552,25 +608,58 @@ export const EXPLANATION_TIMEOUT_MS = 15000;
 export interface ProducerReviewExplanationDeps {
   /** Newest-first comments for the item (`getCommentsForWorkItem` order). */
   comments: Comment[];
+  /**
+   * Latest persisted audit result, when one exists. Included as first-class
+   * prompt context and as the primary structured fallback signal.
+   */
+  auditResult?: ProducerReviewAuditContext | null;
   /** Chat client to use; `null`/`undefined` disables the LLM path. */
   chatClient?: ChatClient | null;
-  /** When true, skip the LLM entirely and use the comment-based fallback. */
+  /** When true, skip the LLM entirely and use the structured fallback. */
   noLlm?: boolean;
   /** Per-call timeout override in milliseconds. */
   timeoutMs?: number;
 }
 
 /**
- * Collapse whitespace so an explanation renders as a single bounded line.
- * Newlines (from either path) are collapsed; over-long text is truncated.
+ * Render an explanation readably for the console: keep intentional line
+ * breaks and short Markdown structure, but collapse runs of spaces/tabs and
+ * repeated blank lines, then bound the result by a documented character
+ * length and line count (WL-0MUUAMP7M008Z4GK AC3). Truncation is marked with
+ * a trailing ellipsis line.
  */
-export function normaliseExplanation(
+export function renderExplanation(
   text: string,
   maxLength: number = MAX_EXPLANATION_LENGTH,
+  maxLines: number = MAX_EXPLANATION_LINES,
 ): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim();
-  if (collapsed.length <= maxLength) return collapsed;
-  return collapsed.slice(0, maxLength - 1).trimEnd() + '…';
+  const source = (text ?? '').replace(/\r\n?/g, '\n');
+  const collapsed: string[] = [];
+  for (const raw of source.split('\n')) {
+    const line = raw.replace(/[ \t]+/g, ' ').replace(/\s+$/, '');
+    // Collapse runs of blank lines to a single blank line.
+    if (line === '' && collapsed[collapsed.length - 1] === '') continue;
+    collapsed.push(line);
+  }
+  while (collapsed.length > 0 && collapsed[0] === '') collapsed.shift();
+  while (collapsed.length > 0 && collapsed[collapsed.length - 1] === '') collapsed.pop();
+
+  const joined = collapsed.join('\n');
+  const overLines = collapsed.length > maxLines;
+  const overLength = joined.length > maxLength;
+  const truncated = overLines || overLength;
+
+  const kept = overLines
+    ? collapsed.slice(0, Math.max(1, maxLines - 1))
+    : collapsed;
+  let result = kept.join('\n');
+  // Reserve two characters for the newline + ellipsis appended below.
+  const budget = truncated ? Math.max(1, maxLength - 2) : maxLength;
+  if (result.length > budget) result = result.slice(0, budget);
+  result = result.replace(/\s+$/, '');
+
+  if (!truncated) return result;
+  return result.length > 0 ? `${result}\n…` : '…';
 }
 
 /** First non-empty line of a comment body, trimmed. */
@@ -589,52 +678,125 @@ function truncateBytes(text: string, maxBytes: number): string {
 }
 
 /**
- * Build the LLM prompt: the fixed instruction plus item context
- * (description and the two most recent comments), bounded to
- * {@link MAX_PROMPT_CONTEXT_BYTES}.
+ * Format an audit result for the explanation prompt: verdict, provenance,
+ * summary and a bounded raw-output excerpt. The summary/raw output are
+ * individually bounded so a single large audit cannot dominate the prompt.
  */
-export function buildExplanationPrompt(item: WorkItem, comments: Comment[]): string {
+function formatAuditPromptContext(audit: ProducerReviewAuditContext): string {
+  const lines = [
+    `Verdict: ${audit.readyToClose ? 'ready to close' : 'not ready to close'}`,
+    `Audited at: ${audit.auditedAt ?? 'unknown'}`,
+    `Audit author: ${audit.author ?? 'unknown'}`,
+  ];
+  const summary = audit.summary?.trim();
+  if (summary) {
+    lines.push('Summary:', truncateBytes(summary, MAX_AUDIT_SUMMARY_BYTES));
+  }
+  const raw = audit.rawOutput?.trim();
+  if (raw) {
+    lines.push(
+      'Raw output (excerpt):',
+      truncateBytes(raw, MAX_AUDIT_RAW_OUTPUT_BYTES),
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * Build the LLM prompt: the fixed instruction plus item context — the latest
+ * audit result, the description and the two most recent comments — bounded to
+ * {@link MAX_PROMPT_CONTEXT_BYTES}.
+ *
+ * The audit block is placed before the description so it survives the overall
+ * byte-bounded truncation even when the description is very large: the audit
+ * verdict/summary is the single most informative signal for flagging
+ * (WL-0MUUAMP7M008Z4GK AC2).
+ */
+export function buildExplanationPrompt(
+  item: WorkItem,
+  comments: Comment[],
+  auditResult?: ProducerReviewAuditContext | null,
+): string {
   const recent = comments
     .slice(0, 2)
     .map(c => `${c.author}: ${firstLine(c.comment)}`)
     .join('\n');
-  const context = [
-    `Work item: ${item.id} — ${item.title}`,
+  const sections: string[] = [`Work item: ${item.id} — ${item.title}`];
+  if (auditResult) {
+    sections.push('', 'Latest audit result:', formatAuditPromptContext(auditResult));
+  }
+  sections.push(
     '',
     'Description:',
     item.description,
     '',
     'Most recent comments:',
     recent || '(none)',
-  ].join('\n');
+  );
+  const context = sections.join('\n');
   return `${PRODUCER_REVIEW_INSTRUCTION}.\n\n${truncateBytes(context, MAX_PROMPT_CONTEXT_BYTES)}`;
 }
 
-/**
- * Comment-based fallback: `<author>: <first line>` for the two most recent
- * comments, joined on one line. When there are no usable comments a generic
- * actionable line is returned so the producer still has a clear next step.
- */
-export function buildCommentFallback(item: WorkItem, comments: Comment[]): string {
-  const recent = comments
-    .slice(0, 2)
-    .map(c => `${c.author}: ${firstLine(c.comment)}`)
-    .filter(entry => entry.replace(/^[^:]*:\s*/, '').length > 0);
-  if (recent.length > 0) return recent.join('; ');
+/** The generic, last-resort actionable line. */
+function genericFallback(item: WorkItem): string {
   return (
-    `No recent comments; review the item and clear the flag with ` +
-    `\`wl reviewed ${item.id} false\` once the blocker is resolved.`
+    `No structured evidence found in the description, comments or audit result; ` +
+    `review the item and clear the flag with \`wl reviewed ${item.id} false\` ` +
+    `once the blocker is resolved.`
   );
 }
 
 /**
- * Produce a one-line explanation of how the producer clears
- * `needsProducerReview`.
+ * Structured fallback used when the LLM is unavailable/disabled.
+ *
+ * Reports the flag reason from structured signals first — the latest audit
+ * verdict and summary, then a durable audit-gap waiver, then the two most
+ * recent comments — and only falls back to the generic actionable line as a
+ * last resort (WL-0MUUAMP7M008Z4GK AC4). Line breaks are preserved so the
+ * caller can render multiple signals readably.
+ */
+export function buildFallbackExplanation(
+  item: WorkItem,
+  comments: Comment[],
+  auditResult?: ProducerReviewAuditContext | null,
+): string {
+  if (auditResult) {
+    const verdict = auditResult.readyToClose
+      ? 'ready to close'
+      : 'not ready to close';
+    const attribution = auditResult.author ? ` (audited by ${auditResult.author})` : '';
+    const lines = [`Latest audit verdict: ${verdict}${attribution}.`];
+    if (auditResult.auditedAt) lines.push(`Audited at: ${auditResult.auditedAt}`);
+    const summary = auditResult.summary?.trim();
+    if (summary) lines.push(summary);
+    return lines.join('\n');
+  }
+
+  const waiver = item.auditWaiver;
+  const waiverReason = waiver?.reason?.trim();
+  if (waiver && waiverReason) {
+    const author = waiver.author ? ` by ${waiver.author}` : '';
+    return `Audit gap waived${author}: ${waiverReason}`;
+  }
+
+  const recent = comments
+    .slice(0, 2)
+    .map(c => `${c.author}: ${firstLine(c.comment)}`)
+    .filter(entry => entry.replace(/^[^:]*:\s*/, '').length > 0);
+  if (recent.length > 0) return recent.join('\n');
+
+  return genericFallback(item);
+}
+
+/**
+ * Produce a bounded, readable explanation of **why** the item requires
+ * producer review and what clears the flag.
  *
  * Returns `null` when the item is not flagged. Otherwise it calls the injected
  * chat client (unless `noLlm` is set or the client is unavailable) and falls
- * back silently to the two most recent comments on any failure — network
- * error, non-2xx, timeout or empty response (parent AC2/AC3).
+ * back silently to the structured evidence — audit verdict/summary, waiver,
+ * comments — on any failure (network error, non-2xx, timeout or empty
+ * response). The explanation is advisory: it never mutates the item.
  */
 export async function buildProducerReviewExplanation(
   item: WorkItem,
@@ -645,17 +807,165 @@ export async function buildProducerReviewExplanation(
   if (!deps.noLlm && deps.chatClient?.available) {
     try {
       const response = await deps.chatClient.complete(
-        buildExplanationPrompt(item, deps.comments),
+        buildExplanationPrompt(item, deps.comments, deps.auditResult),
         { timeoutMs: deps.timeoutMs ?? EXPLANATION_TIMEOUT_MS },
       );
-      const normalised = normaliseExplanation(response);
-      if (normalised.length > 0) return normalised;
+      const rendered = renderExplanation(response);
+      if (rendered.length > 0) return rendered;
     } catch {
       // Silent fallback — the explanation is advisory; never surface an error.
     }
   }
 
-  return normaliseExplanation(buildCommentFallback(item, deps.comments));
+  return renderExplanation(
+    buildFallbackExplanation(item, deps.comments, deps.auditResult),
+  );
+}
+
+// ── LLM-assisted question extraction ─────────────────────────────────────
+
+/**
+ * Instruction sent to the LLM when the deterministic parser finds no
+ * clarifying questions. The model must return **only** a JSON array of
+ * `{ question }` objects (or `[]`) so the response can be parsed defensively
+ * and every entry confirmed by the operator before anything is written
+ * (WL-0MUH7ACKJ0024VGF AC2/AC3/AC4).
+ */
+export const EXTRACTION_INSTRUCTION =
+  'Extract every unanswered clarifying question from the work item ' +
+  'description below. Respond with ONLY a JSON array of objects of the ' +
+  'form [{"question": "..."}] and nothing else. If there are no clarifying ' +
+  'questions, respond with []. Do not include answered questions, ' +
+  'commentary, or markdown code fences.';
+
+/** Maximum size (bytes) of the description sent to the extraction LLM. */
+export const MAX_EXTRACTION_DESCRIPTION_BYTES = 8192;
+
+/** Default timeout (ms) for the extraction LLM call. */
+export const EXTRACTION_TIMEOUT_MS = 15000;
+
+/**
+ * Build the bounded extraction prompt: the fixed instruction plus the
+ * description source truncated to {@link MAX_EXTRACTION_DESCRIPTION_BYTES}.
+ * Callers pass the clarifying-section body when one is present (and
+ * non-empty), otherwise the whole description.
+ */
+export function buildExtractionPrompt(description: string): string {
+  return (
+    `${EXTRACTION_INSTRUCTION}\n\n` +
+    `Description:\n${truncateBytes(description, MAX_EXTRACTION_DESCRIPTION_BYTES)}`
+  );
+}
+
+/**
+ * Defensively parse an LLM extraction response into a de-duplicated list of
+ * question strings.
+ *
+ * Non-JSON text, a non-array payload, malformed entries and blank questions
+ * are all treated as "no questions" and never throw (WL-0MUH7ACKJ0024VGF
+ * AC: parse defensively). A leading/trailing markdown code fence or
+ * surrounding prose is tolerated.
+ */
+export function parseExtractedQuestions(raw: string): string[] {
+  if (typeof raw !== 'string') return [];
+  let text = raw.trim();
+  if (text === '') return [];
+
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fence && typeof fence[1] === 'string') text = fence[1].trim();
+
+  if (!text.startsWith('[')) {
+    const start = text.indexOf('[');
+    const end = text.lastIndexOf(']');
+    if (start === -1 || end <= start) return [];
+    text = text.slice(start, end + 1);
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+
+  const questions: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of parsed) {
+    if (!entry || typeof entry !== 'object') continue;
+    const question = (entry as { question?: unknown }).question;
+    if (typeof question !== 'string') continue;
+    const cleaned = question.replace(/\s+/g, ' ').trim();
+    if (cleaned === '' || seen.has(cleaned)) continue;
+    seen.add(cleaned);
+    questions.push(cleaned);
+  }
+  return questions;
+}
+
+/**
+ * Ask the chat client to extract clarifying questions from `description`.
+ * Returns `[]` (never throws) when the client is unavailable, the request
+ * fails, times out or the response is malformed — callers then fall back
+ * silently to the deterministic-only behaviour (WL-0MUH7ACKJ0024VGF AC5).
+ */
+export async function extractQuestionsWithLlm(
+  chatClient: ChatClient | null | undefined,
+  description: string,
+  timeoutMs: number = EXTRACTION_TIMEOUT_MS,
+): Promise<string[]> {
+  if (!chatClient?.available) return [];
+  try {
+    const raw = await chatClient.complete(buildExtractionPrompt(description), {
+      timeoutMs,
+    });
+    return parseExtractedQuestions(raw);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Build lossless clarifying-Q/A pairs for LLM-extracted questions so that
+ * confirmed answers are written back through the deterministic re-serialiser
+ * ({@link rebuildQAPairs} / {@link rebuildDescription}) rather than from raw
+ * model output (WL-0MUH7ACKJ0024VGF AC4).
+ */
+export function buildExtractedPairs(questions: string[]): ClarifyingQAPair[] {
+  return questions.map((question, index) => ({
+    number: index + 1,
+    question,
+    answer: '',
+    unanswered: true,
+    startLine: 0,
+    endLine: 0,
+    before: `- Q: ${question} — Answer (producer): `,
+    after: '\n',
+    needsScaffold: false,
+  }));
+}
+
+/** Canonical heading used when the description has no clarifying section. */
+export const EXTRACTED_SECTION_HEADER = '## Appendix: Clarifying questions';
+
+/** Append a clarifying section to a description that has none. */
+export function insertClarifyingSection(
+  description: string,
+  content: string,
+): string {
+  const base = description.replace(/\s+$/, '');
+  const body = content.replace(/\s+$/, '');
+  if (base.length === 0) return `${EXTRACTED_SECTION_HEADER}\n\n${body}`;
+  return `${base}\n\n${EXTRACTED_SECTION_HEADER}\n\n${body}`;
+}
+
+/** Merge new extracted pairs into an existing (question-free) section body. */
+function mergeExtractedIntoSection(existing: string, content: string): string {
+  const base = existing.replace(/\s+$/, '');
+  const body = content.replace(/\s+$/, '');
+  if (base.length === 0) return body;
+  if (body.length === 0) return base;
+  return `${base}\n${body}`;
 }
 
 // ── Core interview loop ──────────────────────────────────────────────────
@@ -678,56 +988,67 @@ export interface InterviewOutcome {
   total: number;
   outstanding: number;
   allAnswered: boolean;
+  /** Number of questions extracted by the LLM fallback (0 when unused). */
+  extracted: number;
 }
 
-/**
- * Walk the outstanding questions on `item`, prompting via `io` and writing
- * each answer back to the description as it is given.
- *
- * Answers are persisted after each response so an interrupted session can be
- * resumed; the producer review flag is only cleared once every question has
- * a non-empty answer (the `allAnswered` auto-clear path, unchanged).
- *
- * This function only handles the question walkthrough. The "no questions
- * detected" edge case (noSection / noQuestions) is handled by the command
- * registration below, which explains how the producer clears an outstanding
- * `needsProducerReview` flag and offers to clear it: see
- * {@link buildProducerReviewExplanation} and `.option('--no-llm')`.
- */
-export async function runInterview(
-  item: WorkItem,
-  store: InterviewStore,
-  io: InterviewIO,
-): Promise<InterviewOutcome> {
-  const empty: InterviewOutcome = {
+/** Options controlling the LLM-assisted question-extraction fallback. */
+export interface InterviewRunOptions {
+  /** Enable LLM extraction when the deterministic parser finds no questions. */
+  llmFallback?: boolean;
+  /** Chat client for extraction; `null`/`undefined` disables the path. */
+  chatClient?: ChatClient | null;
+  /** Per-call timeout override for the extraction request (ms). */
+  timeoutMs?: number;
+}
+
+/** A zeroed outcome; `extracted` is always present. */
+function emptyOutcome(): InterviewOutcome {
+  return {
     noSection: false,
     noQuestions: false,
     recorded: 0,
     total: 0,
     outstanding: 0,
     allAnswered: false,
+    extracted: 0,
   };
+}
 
-  const section = extractClarifyingSection(item.description);
-  if (!section) return { ...empty, noSection: true };
-
-  const pairs = parseQAPairs(section.content);
-  if (pairs.length === 0) return { ...empty, noQuestions: true };
+/**
+ * Prompt for and persist answers to `pairs`.
+ *
+ * On the deterministic path (`fromExtraction === false`) the whole section is
+ * rebuilt losslessly on every answer, exactly as before. On the LLM-extracted
+ * path only questions the operator actually answers (confirms) are written
+ * back — skipped questions are dropped — and the write-back always goes
+ * through {@link rebuildQAPairs} / {@link rebuildDescription}, inserting the
+ * canonical section header when the description had none.
+ */
+async function walkQuestions(
+  item: WorkItem,
+  store: InterviewStore,
+  io: InterviewIO,
+  section: ClarifyingSection | null,
+  pairs: ClarifyingQAPair[],
+  fromExtraction: boolean,
+): Promise<InterviewOutcome> {
+  const outcome = emptyOutcome();
+  outcome.total = pairs.length;
+  outcome.extracted = fromExtraction ? pairs.length : 0;
 
   const unanswered = pairs.filter(p => p.unanswered);
   if (unanswered.length === 0) {
     if (item.needsProducerReview) {
       store.update(item.id, { needsProducerReview: false });
     }
-    return {
-      ...empty,
-      total: pairs.length,
-      allAnswered: true,
-    };
+    outcome.allAnswered = true;
+    return outcome;
   }
 
   let recorded = 0;
   let interrupted = false;
+  const confirmed: ClarifyingQAPair[] = [];
 
   for (const pair of unanswered) {
     const answer = await io.prompt(`${pair.number}. ${pair.question}\n   →`);
@@ -742,8 +1063,21 @@ export async function runInterview(
     pair.unanswered = false;
     recorded += 1;
 
-    const newContent = rebuildQAPairs(pairs);
-    const newDescription = rebuildDescription(item.description, section, newContent);
+    let newDescription: string;
+    if (fromExtraction) {
+      confirmed.push(pair);
+      const newContent = rebuildQAPairs(confirmed);
+      newDescription = section
+        ? rebuildDescription(
+            item.description,
+            section,
+            mergeExtractedIntoSection(section.content, newContent),
+          )
+        : insertClarifyingSection(item.description, newContent);
+    } else {
+      const newContent = rebuildQAPairs(pairs);
+      newDescription = rebuildDescription(item.description, section, newContent);
+    }
     store.update(item.id, { description: newDescription });
   }
 
@@ -752,13 +1086,69 @@ export async function runInterview(
     store.update(item.id, { needsProducerReview: false });
   }
 
+  outcome.recorded = recorded;
+  outcome.outstanding = pairs.filter(p => p.unanswered).length;
+  outcome.allAnswered = allAnswered;
+  return outcome;
+}
+
+/**
+ * Walk the outstanding questions on `item`, prompting via `io` and writing
+ * each answer back to the description as it is given.
+ *
+ * Answers are persisted after each response so an interrupted session can be
+ * resumed; the producer review flag is only cleared once every question has
+ * a non-empty answer (the `allAnswered` auto-clear path, unchanged).
+ *
+ * When the deterministic parser finds no questions and the caller enables the
+ * LLM fallback (`options.llmFallback` + an available `chatClient`),
+ * {@link extractQuestionsWithLlm} is asked for a bounded JSON array of
+ * questions; each is then presented through the same prompt loop for
+ * confirmation and answer. Extraction failures degrade silently to the
+ * deterministic-only outcome (WL-0MUH7ACKJ0024VGF AC1–AC6).
+ *
+ * The "no questions detected" edge case (noSection / noQuestions) is handled
+ * by the command registration below, which explains how the producer clears
+ * an outstanding `needsProducerReview` flag and offers to clear it: see
+ * {@link buildProducerReviewExplanation} and `.option('--no-llm')`.
+ */
+export async function runInterview(
+  item: WorkItem,
+  store: InterviewStore,
+  io: InterviewIO,
+  options: InterviewRunOptions = {},
+): Promise<InterviewOutcome> {
+  const section = extractClarifyingSection(item.description);
+  const pairs = section ? parseQAPairs(section.content) : [];
+
+  // Deterministic questions always win — the LLM is never called then.
+  if (pairs.length > 0) {
+    return walkQuestions(item, store, io, section, pairs, false);
+  }
+
+  // No parseable questions → optional LLM-assisted extraction fallback.
+  if (options.llmFallback && options.chatClient?.available) {
+    // Prefer the clarifying-section body when one is present and non-empty;
+    // otherwise scan the whole description (WL-0MUQ0VQ8A002HHFA).
+    const source =
+      section && section.content.trim() !== ''
+        ? section.content
+        : item.description;
+    const questions = await extractQuestionsWithLlm(
+      options.chatClient,
+      source,
+      options.timeoutMs,
+    );
+    if (questions.length > 0) {
+      const extractedPairs = buildExtractedPairs(questions);
+      return walkQuestions(item, store, io, section, extractedPairs, true);
+    }
+  }
+
   return {
-    noSection: false,
-    noQuestions: false,
-    recorded,
-    total: pairs.length,
-    outstanding: pairs.filter(p => p.unanswered).length,
-    allAnswered,
+    ...emptyOutcome(),
+    noSection: section === null,
+    noQuestions: section !== null,
   };
 }
 
@@ -804,8 +1194,9 @@ export interface InterviewPromptLoop {
 /** Injectable dependencies for the interview command (used by tests). */
 export interface InterviewCommandDeps {
   /**
-   * Build the chat client for the explanation. Return `null` to disable the
-   * LLM path. Defaults to an `OpenAIChatClient` over the resolved LLM config.
+   * Build the chat client used for the producer-review explanation and the
+   * LLM-assisted question extraction. Return `null` to disable the LLM path.
+   * Defaults to an `OpenAIChatClient` over the resolved LLM config.
    */
   chatClientFactory?: (options: { model?: string }) => ChatClient | null;
   /**
@@ -836,6 +1227,28 @@ export async function defaultClearPrompt(message: string): Promise<boolean> {
   }
 }
 
+/**
+ * Whether the operator explicitly passed `--llm`.
+ *
+ * Commander stores `--llm` and `--no-llm` on the same `llm` key whose default
+ * is `true`, so the only reliable signal is the option source. When running
+ * under Commander, `getOptionValueSource('llm') === 'cli'` means the operator
+ * set it (and `options.llm !== false` distinguishes `--llm` from `--no-llm`).
+ * The in-process test harness invokes the action without a Commander command
+ * and reports only an explicit `--llm` as `options.llm === true`.
+ */
+function isExplicitLlmRequested(
+  options: InterviewOptions,
+  command?: { getOptionValueSource?: (name: string) => string },
+): boolean {
+  if (command && typeof command.getOptionValueSource === 'function') {
+    return (
+      command.getOptionValueSource('llm') === 'cli' && options.llm !== false
+    );
+  }
+  return options.llm === true;
+}
+
 export default function register(
   ctx: PluginContext,
   deps: InterviewCommandDeps = {},
@@ -863,9 +1276,17 @@ export default function register(
     )
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--json', 'Non-interactive JSON output (no prompts, no mutation)')
-    .option('--no-llm', 'Disable the LLM explanation and use the comment fallback')
+    .option('--no-llm', 'Disable all LLM use (explanation and question extraction)')
+    .option(
+      '--llm',
+      'Enable LLM-assisted clarifying-question extraction when the deterministic parser finds none',
+    )
     .option('--model <model>', 'Override the chat model for the explanation')
-    .action(async (id: string, options: InterviewOptions) => {
+    .action(async (
+      id: string,
+      options: InterviewOptions,
+      command?: { getOptionValueSource?: (name: string) => string },
+    ) => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
 
@@ -884,6 +1305,17 @@ export default function register(
       // passes the kebab-cased `noLlm`. Accept either spelling.
       const noLlm = options.noLlm === true || options.llm === false;
 
+      // Enablement for LLM question extraction: explicit `--llm` (highest
+      // priority) or the `interview.intelligent: true` config opt-in;
+      // `--no-llm` disables all LLM use. Provider settings come from `llm.*`.
+      const config = utils.getConfig();
+      const intelligent = isIntelligentInterviewEnabled(config);
+      const llmFallbackEnabled =
+        !noLlm && (isExplicitLlmRequested(options, command) || intelligent);
+      const chatClient = noLlm
+        ? null
+        : chatClientFactory({ model: options.model });
+
       const section = extractClarifyingSection(item.description);
       const pairs = section ? parseQAPairs(section.content) : [];
       const noSection = section === null;
@@ -896,7 +1328,8 @@ export default function register(
         if (!item.needsProducerReview || !(noSection || noQuestions)) return null;
         return buildProducerReviewExplanation(item, {
           comments: db.getCommentsForWorkItem(item.id),
-          chatClient: noLlm ? null : chatClientFactory({ model: options.model }),
+          auditResult: db.getAuditResult(item.id),
+          chatClient,
           noLlm,
         });
       };
@@ -931,9 +1364,16 @@ export default function register(
       const prompts = promptLoopFactory();
       let outcome: InterviewOutcome;
       try {
-        outcome = await runInterview(item, db, {
-          prompt: (message: string) => prompts.next(message),
-        });
+        outcome = await runInterview(
+          item,
+          db,
+          { prompt: (message: string) => prompts.next(message) },
+          {
+            llmFallback: llmFallbackEnabled,
+            chatClient,
+            timeoutMs: EXTRACTION_TIMEOUT_MS,
+          },
+        );
       } finally {
         prompts.close();
       }
@@ -950,6 +1390,7 @@ export default function register(
           return;
         }
         console.log('');
+        console.log('Why this item needs producer review:');
         console.log(explanation);
         console.log('');
         const shouldClear = await clearPrompt('Clear the needsProducerReview flag? (y/N)');
@@ -962,6 +1403,27 @@ export default function register(
       };
 
       // ── Step 3: Report outcome ───────────────────────────────────────
+      if (outcome.extracted > 0) {
+        console.log('');
+        if (outcome.allAnswered) {
+          console.log(
+            `✅ ${outcome.recorded} of ${outcome.extracted} LLM-extracted question(s) confirmed for ${normalizedId}.`,
+          );
+          console.log('   needsProducerReview cleared.');
+        } else if (outcome.recorded > 0) {
+          console.log(
+            `📝 ${outcome.recorded} of ${outcome.extracted} LLM-extracted question(s) confirmed for ${normalizedId}.`,
+          );
+          console.log(
+            `   ${outcome.outstanding} question(s) skipped — needsProducerReview remains flagged.`,
+          );
+        } else {
+          console.log(
+            `The LLM suggested ${outcome.extracted} question(s); none were confirmed.`,
+          );
+        }
+        return;
+      }
       if (outcome.noSection) {
         console.log('No clarifying-questions section found.');
         await explainAndOfferClear();

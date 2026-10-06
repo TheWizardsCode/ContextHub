@@ -66,16 +66,16 @@ export default function register(ctx: PluginContext): void {
       }
 
       if (!item) {
-        // Use the CLI output renderer for stderr when available so errors
-        // look consistent with other CLI output in TTY. In JSON mode we
-        // skip the human-formatted stderr output to keep stderr machine-
-        // readable and rely on output.error to emit structured JSON.
-        const cliOut = createCliOutputFromCommand(program.opts(), utils.getConfig() ?? undefined);
-        if (!program.opts().json) {
+        // Emit the error exactly once. In JSON mode use the structured
+        // `output.error` helper; in human mode use the CLI renderer so the
+        // message is consistent with other CLI output. Calling both would
+        // print the same error twice (WL-0MTGDZVLV0055T4C).
+        if (program.opts().json) {
+          output.error(`Work item not found: ${normalizedId}`, { success: false, error: `Work item not found: ${normalizedId}` });
+        } else {
+          const cliOut = createCliOutputFromCommand(program.opts(), utils.getConfig() ?? undefined);
           cliOut.printError(`Work item not found: ${normalizedId}`);
         }
-        // Signal JSON consumers with structured error via output.error
-        output.error(`Work item not found: ${normalizedId}`, { success: false, error: `Work item not found: ${normalizedId}` });
         process.exit(1);
       }
       

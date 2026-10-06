@@ -10,13 +10,25 @@
   },
   {
     "chord": [
-      "c"
+      "c",
+      "n"
     ],
     "command": "/intake <description> --priority <priority default='medium'>",
     "view": "both",
-    "label": "create new",
-    "description": "Create a new work item with a description and priority.",
-    "model": "plan"
+    "label": "create intake",
+    "description": "Create a new work item with a description and priority (c n).",
+    "model": "plan",
+    "work_item_types": ["bug", "docs", "feature", "task", "chore", "epic"]
+  },
+  {
+    "chord": [
+      "c",
+      "q"
+    ],
+    "command": "!!wl create -t <title> -d <description> -p <priority default='medium'>",
+    "view": "both",
+    "label": "create quick",
+    "description": "Quickly create a new work item with title, description, and priority — no issue-type gating (c q)."
   },
   {
     "chord": [

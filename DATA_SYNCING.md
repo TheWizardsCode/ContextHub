@@ -62,6 +62,23 @@ To prevent this, auto-sync spawners pass `wl sync --if-idle`:
 
 Manual `wl sync` (without `--if-idle`) keeps the original behavior: it waits for the lock (with exponential backoff) and runs to completion.
 
+### Concurrent Writes: Sync vs Mutating Commands
+
+`wl sync` holds the per-store advisory file lock (`.worklog/worklog-data.jsonl.lock`, via `withFileLock` / `getLockPathForJsonl`) for its entire fetch → merge → write → push operation. The single-command mutators `wl update`, `wl comment add`, and `wl audit-set` acquire the **same** lock around their own read-modify-write, so a mutation and a sync can never interleave:
+
+- If a mutation is in flight, `wl sync` waits for the lock instead of taking its snapshot while a write is landing.
+- If a sync is in flight, a mutating command waits (bounded by the lock timeout, 30 s by default) instead of writing into the sync's read→write window.
+
+This closes a lost-update race (WL-0MUV2U9QF002S9J1) in which a sync's stale snapshot overwrote a concurrent terminal `completed`/`in_review` transition and dropped a comment added in the window. The guarantee is **no lost update**: a mutation that commits after the sync's local read is never overwritten by the sync's write-back.
+
+What is deliberately unchanged:
+
+- **Intentional reopen / auto-revert still works.** A newer local `open` (including the `wl audit-set --ready-to-close no` auto-revert to `open`/`plan_complete`) still beats an older remote `completed`/`in_review` — the lock serialises the writes, it does not block the transition.
+- **`wl sync --if-idle` still skips instead of queueing** when the lock is held (see above).
+- **Comments remain add-only** in the merge layer.
+
+Regression coverage: `tests/cli/sync-vs-mutation.test.ts` parks a `wl sync` inside `git fetch` and asserts that a concurrent terminal-state update and comment both survive.
+
 ### Config Options
 
 Set in `.worklog/config.yaml` (local) or `.worklog/config.defaults.yaml` (team defaults):
