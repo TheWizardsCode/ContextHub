@@ -347,6 +347,28 @@ Icons are prepended before the title in CLI list output:
 > `src/theme.ts` remains the CLI's self-contained icon source; the Herdr
 > plugin imports from the shared `@worklog/shared/icons` module.
 
+#### Herdr worklist icon prefix
+
+The Herdr worklist selection list renders a fixed-width icon prefix via
+`getIconPrefix` (`packages/shared/src/icons.ts`) before the item ID/title.
+The prefix is padded to `ICON_PREFIX_WIDTH` (13 terminal cells) so the ID
+column aligns across rows, and the columns are (left to right):
+
+| Column | Content | Notes |
+|--------|---------|-------|
+| 0 | Priority icon | `🚨` critical, `⭐` high, `📋` medium, `🐢` low (added WL-0MTQYTA20009YXBT) |
+| 1 | Agent status | Fixed-width reserved slot (`AGENT_SLOT_WIDTH`) |
+| 2 | Status icon | `statusIcon` |
+| 3 | Stage / audit icon | `stageDisplayIcon` (audit-aware for `in_review`) |
+| 4 | Producer review flag | `needsProducerReviewIcon` |
+| 5 | Epic icon | Optional, when `issueType === 'epic'` |
+
+When the priority is missing the priority column is empty; the fixed-width
+padding keeps the remaining columns aligned. In `noIcons` mode the priority
+column shows `PRIORITY_FALLBACK` (e.g. `[HIGH]`); text fallbacks are wider
+than a single glyph, so the noIcons prefix is a fixed *minimum* width rather
+than an exact match for the icon-mode width.
+
 ### 13.3 CLI Detail Output
 
 File: `src/cli-output.ts`, `src/commands/helpers.ts` (`humanFormatWorkItem`)
