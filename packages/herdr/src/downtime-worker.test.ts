@@ -279,7 +279,6 @@ describe('downtime worker fixtures', () => {
 describe('idle detection (isIdleStatus)', () => {
   const idle: LlamaStatus = {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
@@ -304,7 +303,6 @@ describe('idle detection (isIdleStatus)', () => {
     // the worker must never dispatch on an unverifiable busy signal.
     const partial: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 4,
@@ -313,11 +311,11 @@ describe('idle detection (isIdleStatus)', () => {
     expect(isIdleStatus(partial, 0)).toBe(false);
   });
 
-  it('is idle during remote-only traffic when local_active_query=false (global active_query true)', () => {
-    // Remote provider streams keep the GLOBAL active_query true while the
+  it('is idle during remote-only traffic when local_active_query=false', () => {
+    // Remote provider streams keep the global query signal true while the
     // local model is idle with free slots; the proxy's local_active_query is
     // the local-only signal (LP-0MSL2ZLLS009RVKR) and must not block dispatch.
-    expect(isIdleStatus({ ...idle, active_query: true, local_active_query: false }, 0)).toBe(true);
+    expect(isIdleStatus({ ...idle, local_active_query: false }, 0)).toBe(true);
   });
 
   it('is busy while a model switch is in progress', () => {
@@ -3757,7 +3755,6 @@ describe('endpoint failures and poller', () => {
   it('derives local_lease_active from the lease fields when the boolean is absent', async () => {
     const status = parseLlamaStatus({
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
       total_slots: 4,
@@ -3815,7 +3812,6 @@ describe('endpoint failures and poller', () => {
 describe('parseLlamaStatus local_active_query', () => {
   const base = {
     llama_server_running: true,
-    active_query: false,
     model_switch_in_progress: false,
     available_slots: 4,
     total_slots: 4,
@@ -3849,7 +3845,6 @@ describe('parseLlamaStatus local_active_query', () => {
 describe('runtime idle evaluation (evaluateIdle)', () => {
   const idle: LlamaStatus = {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
@@ -3857,29 +3852,53 @@ describe('runtime idle evaluation (evaluateIdle)', () => {
     total_slots: 4,
   };
 
-  it('N=0 (default) requires all slots free', () => {
-    expect(evaluateIdle(idle, 0)).toBe(true);
+  function slotsFor(processing: number[], total = 4): LlamaSlot[] {
+    return Array.from({ length: total }, (_, i) => ({
+      slot_id: `s${i + 1}`,
+      is_processing: processing.includes(i + 1),
+    }));
+  }
+
+  it('fails closed when per-slot detail is absent (never admits the count)', () => {
+    // Fail-closed contract (WL-0MUXVPXAZ005RESW): the untrusted
+    // `available_slots` count is never a dispatch budget — absent `slots`
+    // means no trustworthy signal, so even a full count is busy.
+    expect(evaluateIdle(idle, 0)).toBe(false);
     expect(evaluateIdle({ ...idle, available_slots: 3 }, 0)).toBe(false);
+    expect(evaluateIdle({ ...idle, available_slots: 4 }, 2)).toBe(false);
   });
 
-  it('degrades 0 < N < total slots to ALL slots free (fail-closed, no per-slot data)', () => {
-    // Without per-slot identity (LP-0MSG5TA7Y002GN39), N=2 with 4 slots
-    // must NOT dispatch on "any 2 free" — it requires all 4 free.
-    expect(evaluateIdle({ ...idle, available_slots: 2 }, 2)).toBe(false);
-    expect(evaluateIdle({ ...idle, available_slots: 4 }, 2)).toBe(true);
+  it('fails closed when per-slot detail is empty or stale', () => {
+    expect(evaluateIdle({ ...idle, slots: [] }, 0)).toBe(false);
+    expect(
+      evaluateIdle(
+        { ...idle, slots: slotsFor([]), slots_stale: true },
+        0,
+      ),
+    ).toBe(false);
+  });
+
+  it('N=0 (default) requires all slots free from the per-slot array', () => {
+    expect(evaluateIdle({ ...idle, slots: slotsFor([]) }, 0)).toBe(true);
+    // available_slots still says 4 but the per-slot array shows one busy → busy.
+    expect(
+      evaluateIdle({ ...idle, slots: slotsFor([4]) }, 0),
+    ).toBe(false);
   });
 
   it('N == total slots behaves like all slots free', () => {
-    expect(evaluateIdle({ ...idle, available_slots: 4 }, 4)).toBe(true);
-    expect(evaluateIdle({ ...idle, available_slots: 3 }, 4)).toBe(false);
+    expect(evaluateIdle({ ...idle, slots: slotsFor([]) }, 4)).toBe(true);
+    expect(evaluateIdle({ ...idle, slots: slotsFor([4]) }, 4)).toBe(false);
   });
 
   it('N > total slots can never be idle (never dispatches)', () => {
-    expect(evaluateIdle({ ...idle, available_slots: 4 }, 5)).toBe(false);
+    expect(evaluateIdle({ ...idle, slots: slotsFor([]) }, 5)).toBe(false);
   });
 
   it('ambiguous responses (total_slots 0) are busy', () => {
-    expect(evaluateIdle({ ...idle, total_slots: 0, available_slots: 0 }, 0)).toBe(false);
+    expect(
+      evaluateIdle({ ...idle, total_slots: 0, available_slots: 0 }, 0),
+    ).toBe(false);
   });
 });
 
@@ -4639,11 +4658,11 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
   });
 
   it('treats remote-only traffic as idle and dispatches after the threshold (local_active_query=false)', async () => {
-    // Integration (AC2): a stub status with global active_query=true but
-    // local_active_query=false (remote streams in flight, local slots free)
-    // must be treated as idle and dispatch after the idle threshold.
+    // Integration (AC2): a stub status with local_active_query=false
+    // (remote streams in flight, local slots free) must be treated as idle
+    // and dispatch after the idle threshold.
     const { worker, deps, cfg } = makeWorker({
-      status: { ...idleAllSlotsFree, active_query: true, local_active_query: false },
+      status: { ...idleAllSlotsFree, local_active_query: false },
     });
     const start = 1_000_000;
     vi.setSystemTime(start);
@@ -5578,7 +5597,6 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
 describe('parseLlamaStatus per-slot slots array', () => {
   const base = {
     llama_server_running: true,
-    active_query: false,
     model_switch_in_progress: false,
     available_slots: 4,
     total_slots: 4,
@@ -5661,7 +5679,6 @@ describe('parseLlamaStatus per-slot slots array', () => {
     // zero-dispatch regression. Mirror the live payload exactly.
     const livePayload = {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
@@ -5785,7 +5802,6 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
   const busy = (id: string): LlamaSlot => ({ slot_id: id, is_processing: true });
   const perSlot = (slots: LlamaSlot[], available: number, total: number): LlamaStatus => ({
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
@@ -5806,7 +5822,7 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
     // mode ONLY llama_server_running and model_switch_in_progress remain
     // global gates — query/lease signals are superseded by per-slot
     // is_processing (a busy slot's query/lease is the operator's own session).
-    expect(evaluateIdle({ ...twoFree, active_query: true }, 2)).toBe(true); // relaxed: query does NOT block
+    expect(evaluateIdle(twoFree, 2)).toBe(true); // relaxed: query does NOT block
     expect(evaluateIdle({ ...twoFree, local_active_query: true }, 2)).toBe(true); // relaxed
     expect(evaluateIdle({ ...twoFree, local_lease_active: true }, 2)).toBe(true); // relaxed: lease does NOT block
     expect(evaluateIdle({ ...twoFree, model_switch_in_progress: true }, 2)).toBe(false); // still global
@@ -5840,7 +5856,6 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
 function perSlotThreeOfFourFreeActiveQuery(): LlamaStatus {
   return {
     llama_server_running: true,
-    active_query: true,
     model_switch_in_progress: false,
     local_lease_active: true,
     available_slots: 3,
@@ -5855,11 +5870,11 @@ function perSlotThreeOfFourFreeActiveQuery(): LlamaStatus {
 }
 
 describe('spare-capacity dispatch: relaxed global idle gate (per-slot mode)', () => {
-  it('per-slot mode: a mid-query (active_query) busy slot does NOT block dispatch into free slots (AC1)', () => {
-    // 3 of 4 slots free with active_query=true, local_active_query=true,
-    // local_lease_active=true. In the relaxed global gate (AC1), these
-    // per-slot query/lease signals are superseded by per-slot is_processing.
-    // Only llama_server_running and model_switch_in_progress stay global.
+  it('per-slot mode: a mid-query busy slot does NOT block dispatch into free slots (AC1)', () => {
+    // 3 of 4 slots free with local_active_query=true, local_lease_active=true.
+    // In the relaxed global gate (AC1), these per-slot query/lease signals
+    // are superseded by per-slot is_processing. Only llama_server_running and
+    // model_switch_in_progress stay global.
     const status = perSlotThreeOfFourFreeActiveQuery();
     // The new relaxed check: active_query/local_active_query/local_lease
     // are NOT blocking in per-slot mode — 3 free >= N=2.
@@ -5869,7 +5884,6 @@ describe('spare-capacity dispatch: relaxed global idle gate (per-slot mode)', ()
   it('per-slot mode: local_lease_active on a busy slot does NOT block dispatch (AC1)', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: true,
       available_slots: 3,
@@ -5888,7 +5902,6 @@ describe('spare-capacity dispatch: relaxed global idle gate (per-slot mode)', ()
   it('per-slot mode: local_active_query on a busy slot does NOT block dispatch (AC2)', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: true,
       model_switch_in_progress: false,
       local_active_query: true,
       local_lease_active: false,
@@ -5930,7 +5943,6 @@ describe('spare-capacity dispatch: pre-fix proxy (no local_active_query) fails c
     // fails closed (busy) on an absent signal — no silent degraded dispatch.
     const noLocalQuery: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 2,
@@ -5942,7 +5954,6 @@ describe('spare-capacity dispatch: pre-fix proxy (no local_active_query) fails c
     // Even with all slots free, absent local_active_query → busy.
     const allFree: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 4,
@@ -5954,7 +5965,6 @@ describe('spare-capacity dispatch: pre-fix proxy (no local_active_query) fails c
   it('pre-fix proxy with N=0 (default): absent local_active_query → busy', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 2,
@@ -5969,7 +5979,6 @@ describe('spare-capacity dispatch: ambiguous payloads are busy (AC5)', () => {
   it('missing slot_id fields are treated as busy (fail-closed)', () => {
     const malformed: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 3,
@@ -5987,7 +5996,6 @@ describe('spare-capacity dispatch: ambiguous payloads are busy (AC5)', () => {
   it('total_slots 0 is always busy', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 0,
@@ -5999,7 +6007,6 @@ describe('spare-capacity dispatch: ambiguous payloads are busy (AC5)', () => {
   it('N > total can never be idle', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 3,
@@ -6090,7 +6097,6 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     // while the downtime worker uses the spare capacity.
     const operatorSessionPayload = {
       llama_server_running: true,
-      active_query: true,
       local_active_query: true,
       model_switch_in_progress: false,
       local_lease_active: true,
@@ -6138,7 +6144,7 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
 
     // slot-1 goes mid-query while slot-2 stays free; the global query signal
     // also fires. Spare-capacity relaxation: only slot-1's timer resets.
-    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...perSlotTwoFree, active_query: true }));
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotTwoFree));
     vi.setSystemTime(start + cfg.thresholdMs - 10_000);
     const mid = await worker.tick();
     expect(mid.idle).toBe(true); // free count still ≥ N=2 (slot-1 busy)
@@ -6156,7 +6162,6 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     // the audit candidate is skipped and the plan pane dispatches instead.
     const oneFreePayload = {
       llama_server_running: true,
-      active_query: true,
       model_switch_in_progress: false,
       local_lease_active: true,
       available_slots: 1,
@@ -6202,7 +6207,6 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     // live payload end-to-end: poll → parse → idle run → threshold → dispatch.
     const livePayload = {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
@@ -6293,7 +6297,7 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
 
     // model_switch_in_progress is a GLOBAL gate in per-slot mode (spare-
     // capacity relaxation, parent WL-0MT32F90V008UAD2 AC2) — it resets
-    // every slot timer. A per-slot query/lease (active_query) is NOT global
+    // every slot timer. A per-slot query/lease signal is NOT global
     // anymore and is covered by the dedicated spare-capacity tests.
     fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...perSlotAllFree, model_switch_in_progress: true }));
     vi.setSystemTime(start + 10_000);
@@ -6337,24 +6341,25 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
   });
 
-  it('without per-slot data and 0 < N < total, falls back to all-slots-free (never any N slots)', async () => {
-    // No slots array: evaluateIdle degrades to all-slots-free, so 2 of 4
-    // free is BUSY even though N=2 — the worker never dispatches on
-    // any-N availability without per-slot identity.
+  it('without usable per-slot data, fails closed (never dispatches on any-N availability)', async () => {
+    // No usable per-slot detail + 0 < N < total: the worker fails closed
+    // (WL-0MUXVPXAZ005RESW) — never dispatching on the untrusted count —
+    // and records the distinct `slots-unavailable` reason.
     const { worker, deps, cfg, fetcher } = makePerSlotWorker({
       requiredFreeSlots: 2,
-      status: { ...idleAllSlotsFree, available_slots: 2 },
+      status: { ...idleAllSlotsFree, slots: undefined, available_slots: 4 },
     });
     const start = 1_000_000;
     vi.setSystemTime(start);
     const first = await worker.tick();
-    expect(first.idle).toBe(false); // 2 of 4 free without identity → busy
+    expect(first.idle).toBe(false);
+    expect(worker.blockReason).toBe('no-slots');
 
     vi.setSystemTime(start + cfg.thresholdMs);
     const at = await worker.tick();
     expect(at.dispatched).toBe(false);
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-    expect(fetcher).toHaveBeenCalled(); // still polling — never any-N dispatch
+    expect(fetcher).toHaveBeenCalled(); // still polling — just never dispatching
   });
 
   it('with per-slot data but N=0, falls back to all-slots-free (per-slot mode only when 0 < N < total)', async () => {
@@ -8469,7 +8474,6 @@ describe('bounded concurrent dispatch — claim safety regression', () => {
 describe('parseLlamaStatus: contention + per-slot owner (AC5/AC6)', () => {
   const base = {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
@@ -8883,14 +8887,18 @@ describe('worker tick: the LLM idle check is the sole concurrency limiter (WL-0M
     vi.useFakeTimers();
     try {
       // Single slot, idle by is_processing, but a live lease is held AND the
-      // worker has a running pane → the owner gate refuses the dispatch.
+      // slot is owned by a live pane → the owner gate refuses the dispatch.
       const { worker, deps } = makeSingleSlotWorker({
         status: {
           ...idleAllSlotsFree,
           available_slots: 1,
           total_slots: 1,
+          local_lease_active: true,
           local_owner_session_id: 'session-live',
           local_owner_lease_remaining_seconds: 120,
+          slots: [
+            { slot_id: 'slot-1', is_processing: false, owner_session_id: 'session-live' },
+          ],
         },
         runningPanes: () => ({ ok: true, count: 1 }),
       });
@@ -10712,7 +10720,6 @@ describe('parseLlamaStatus: array local_owner_session_id (WL-0MU88086A0089US4)',
   function makeBase(): Record<string, unknown> {
     return {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
@@ -10822,7 +10829,6 @@ describe('parseLlamaStatus: local_owner_session_ids normalization (WL-0MU88086A0
   function makeBase(): Record<string, unknown> {
     return {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
@@ -10924,7 +10930,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       const ownedSlot = 'http://localhost:8080';
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -10963,7 +10968,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -10997,7 +11001,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       const ownerC = 'http://localhost:8082';
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11039,7 +11042,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       // Only 1 free unowned slot — below audit-tier minimum of 2.
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11079,7 +11081,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11124,7 +11125,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11674,20 +11674,21 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
     expect(decisionHeaderToken('code-freeze')).toBe('code-freeze');
   });
 
-  it('AC1: a slot-owned refusal writes one decision line with reason + slot/owner fields', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-slot-'));
+  it('AC1: a fail-closed refusal writes the distinct slots-unavailable reason + observed fields', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-failclosed-'));
     try {
-      // Count-based (no `slots`), idle (local_lease_active=false) but the
-      // global owner session id is present and a downtime pane is alive →
-      // slotOwned.
+      // The exact live shape (WL-0MUFP30T2003OX1F): stale/empty per-slot
+      // detail with a held owner lease. The dispatcher fails closed and
+      // records the distinct `slots-unavailable` reason (WL-0MUXVPXAZ005RESW).
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
-        local_lease_active: false,
+        local_lease_active: true,
         available_slots: 1,
-        total_slots: 1,
+        total_slots: 3,
+        slots: [],
+        slots_stale: true,
         local_owner_session_id: 'session-live-pane',
         contention_queue_depth: 0,
         contention_queued_count: 0,
@@ -11699,7 +11700,7 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
       });
       const outcome = await worker.tick();
       expect(outcome.dispatched).toBe(false);
-      expect(worker.blockReason).toBe('slot-owner');
+      expect(worker.blockReason).toBe('no-slots');
       await vi.waitFor(async () => {
         const entries = (await readCoordinationLogEntries(root)).filter(
           (e) => e.kind === 'decision',
@@ -11708,11 +11709,11 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
         expect(entries[0]).toMatchObject({
           kind: 'decision',
           operation: 'no-dispatch',
-          reason: 'slot-owned',
-          freeSlots: 1,
-          totalSlots: 1,
+          reason: 'slots-unavailable',
+          freeSlots: 0,
+          totalSlots: 3,
           ownerPresent: true,
-          runningPanes: 1,
+          runningPanes: null,
           contentionDepth: 0,
         });
         expect(typeof entries[0].at).toBe('string');
@@ -11727,12 +11728,17 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: false,
-        available_slots: 1,
-        total_slots: 1,
+        available_slots: 4,
+        total_slots: 4,
+        slots: [
+          { slot_id: 'slot-1', is_processing: false },
+          { slot_id: 'slot-2', is_processing: false },
+          { slot_id: 'slot-3', is_processing: false },
+          { slot_id: 'slot-4', is_processing: false },
+        ],
         contention_queue_depth: 3,
         contention_queued_count: 3,
       };
@@ -11762,7 +11768,6 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: false,
@@ -11835,21 +11840,22 @@ describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () 
     expect(LOCAL_DISPATCH_LEASE_MAX_SECONDS).toBe(1500);
   });
 
-  it('AC1/AC3: a max-TTL unknown/operator lease on a count-based single slot still refuses dispatch', async () => {
+  it('AC1/AC3: a max-TTL operator lease on a single owned slot still refuses dispatch', async () => {
     // The dispatcher must not optimistically assume the lease expired: a lease
-    // at the proxy MAX on a count-based single-slot setup (an unknown/operator
-    // owner) keeps blocking while a downtime pane is alive. local_lease_active
-    // is false so the idle gate passes and the slot-owned gate is the blocker.
+    // at the proxy MAX on a single-slot setup (an unknown/operator owner) keeps
+    // the slot owned, so no free unowned slot remains and dispatch is refused.
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
-      local_lease_active: false,
+      local_lease_active: true,
       available_slots: 1,
       total_slots: 1,
       local_owner_session_id: 'operator-session',
       local_owner_lease_remaining_seconds: LOCAL_DISPATCH_LEASE_MAX_SECONDS,
+      slots: [
+        { slot_id: 'slot-1', is_processing: false, owner_session_id: 'operator-session' },
+      ],
       contention_queue_depth: 0,
       contention_queued_count: 0,
     };
@@ -11860,7 +11866,6 @@ describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () 
     });
     const outcome = await worker.tick();
     expect(outcome.dispatched).toBe(false);
-    expect(worker.blockReason).toBe('slot-owner');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 
@@ -11875,7 +11880,6 @@ describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () 
       const ownSession = 'dispatched-pane-session';
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11911,14 +11915,13 @@ describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () 
   });
 });
 
-// ── Stale/empty slots fallback + count-based spare capacity ───────────
-// (WL-0MUFP30T2003OX1F)
+// ── Fail-closed per-slot contract (WL-0MUXVPXAZ005RESW) ──────────────
+// Supersedes the count-based fallback introduced by WL-0MUFP30T2003OX1F.
 
-describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T2003OX1F)', () => {
+describe('fail-closed on unusable per-slot detail (WL-0MUXVPXAZ005RESW)', () => {
   function makeRaw(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       llama_server_running: true,
-      active_query: true,
       local_active_query: true,
       model_switch_in_progress: false,
       local_lease_active: false,
@@ -11969,7 +11972,7 @@ describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T20
     return { worker, deps };
   }
 
-  it('AC4: parses slots_stale and preserves the empty slots array', () => {
+  it('parses slots_stale and preserves the empty slots array', () => {
     const status = parseLlamaStatus(makeRaw());
     expect(status).not.toBeNull();
     expect(status!.slots).toEqual([]);
@@ -11979,30 +11982,47 @@ describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T20
     expect(status!.local_owner_session_id).toBe('audit-pane-session');
   });
 
-  it('AC4: a malformed slots_stale fails closed (null)', () => {
+  it('a malformed slots_stale fails closed (null)', () => {
     expect(parseLlamaStatus(makeRaw({ slots_stale: 'yes' }))).toBeNull();
     expect(parseLlamaStatus(makeRaw({ slots_stale: 1 }))).toBeNull();
   });
 
-  it('AC4: empty/stale slots are NOT per-slot identity — evaluateIdle falls back to the count', () => {
-    // Active local query → the leased slot is processing, not reserved → 2 free >= N=2.
-    const active = parseLlamaStatus(makeRaw({ available_slots: 2 }))!;
-    expect(evaluateIdle(active, 2)).toBe(true);
-    // Idle-but-leased (no active query) → reserve the leased slot → 1 < 2.
-    const idleLease = parseLlamaStatus(
-      makeRaw({ available_slots: 2, local_active_query: false, active_query: false }),
+  it('evaluateIdle fails closed for absent, empty, and stale per-slot detail', () => {
+    // The untrusted available_slots count is never a dispatch budget:
+    // absent, empty, or stale per-slot detail all yield busy.
+    const absent = parseLlamaStatus(makeRaw({ available_slots: 3, slots: undefined }))!;
+    expect(absent.slots).toBeUndefined();
+    expect(evaluateIdle(absent, 1)).toBe(false);
+
+    const empty = parseLlamaStatus(makeRaw({ available_slots: 3 }))!;
+    expect(empty.slots).toEqual([]);
+    expect(evaluateIdle(empty, 1)).toBe(false);
+
+    const stale = parseLlamaStatus(
+      makeRaw({ available_slots: 3, slots: [{ slot_id: 0, is_processing: false }] }),
     )!;
-    expect(evaluateIdle(idleLease, 2)).toBe(false);
+    expect(stale.slots_stale).toBe(true);
+    expect(evaluateIdle(stale, 1)).toBe(false);
   });
 
-  it('AC1: live payload (stale/empty slots, lease, live pane) dispatches into the free slot', async () => {
+  it('decisionHeaderToken maps the distinct fail-closed reason to no-slots', () => {
+    expect(decisionHeaderToken('slots-unavailable')).toBe('no-slots');
+    expect(decisionHeaderToken('slots-unavailable')).not.toBe(
+      decisionHeaderToken('slot-owned'),
+    );
+    expect(decisionHeaderToken('slots-unavailable')).not.toBe(
+      decisionHeaderToken('proxy-contention'),
+    );
+  });
+
+  it('AC1/AC4: the exact live payload (stale/empty slots, held lease, live pane) does NOT dispatch', async () => {
     vi.useFakeTimers();
     try {
       // The exact live shape: total=3, available=1, slots:[], slots_stale:true,
-      // an owner lease held by a dispatched pane. N=1 (single-pane dispatch).
+      // an owner lease held by a dispatched pane. The dispatcher must fail
+      // closed and record the distinct `slots-unavailable` reason.
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: true,
         local_active_query: true,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -12027,73 +12047,47 @@ describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T20
       await worker.tick(); // baseline
       vi.setSystemTime(start + 5_000);
       const outcome = await worker.tick();
-      expect(outcome.dispatched).toBe(true);
-      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('no-slots');
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('AC2: count-based multi-slot with spare capacity and a held lease dispatches', async () => {
+  it('never derives the dispatch budget from available_slots (fail-closed budget)', async () => {
+    // available_slots=3 would previously have admitted a dispatch; with no
+    // usable per-slot detail the worker refuses regardless of the count.
     vi.useFakeTimers();
     try {
-      // 3 slots, 2 free, N=2, an active local query holding the lease: the RCA
-      // window shape. The machine-wide lease must not block the spare capacity.
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: true,
         local_active_query: true,
         model_switch_in_progress: false,
-        local_lease_active: true,
-        available_slots: 2,
+        local_lease_active: false,
+        available_slots: 3,
         total_slots: 3,
-        local_owner_session_id: 'dispatched-pane-session',
-        local_owner_session_ids: ['dispatched-pane-session'],
-        local_owner_lease_remaining_seconds: 840,
+        slots: [],
+        slots_stale: true,
         contention_queue_depth: 0,
         contention_queued_count: 0,
       };
       const { worker, deps } = makeStaleWorker({
         status,
-        requiredFreeSlots: 2,
+        requiredFreeSlots: 1,
         thresholdMs: 1_000,
-        runningPanes: 1,
+        runningPanes: 0,
       });
       const start = 2_000_000;
       vi.setSystemTime(start);
       await worker.tick();
       vi.setSystemTime(start + 5_000);
       const outcome = await worker.tick();
-      expect(outcome.dispatched).toBe(true);
-      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      expect(outcome.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('AC3: count-based single-slot with a held lease still refuses', async () => {
-    const status: LlamaStatus = {
-      llama_server_running: true,
-      active_query: false,
-      local_active_query: false,
-      model_switch_in_progress: false,
-      local_lease_active: false,
-      available_slots: 1,
-      total_slots: 1,
-      local_owner_session_id: 'operator-session',
-      local_owner_session_ids: ['operator-session'],
-      contention_queue_depth: 0,
-      contention_queued_count: 0,
-    };
-    const { worker, deps } = makeStaleWorker({
-      status,
-      requiredFreeSlots: 1,
-      runningPanes: 1,
-    });
-    const outcome = await worker.tick();
-    expect(outcome.dispatched).toBe(false);
-    expect(worker.blockReason).toBe('slot-owner');
-    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });
 

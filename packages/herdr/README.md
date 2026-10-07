@@ -476,11 +476,17 @@ without per-slot data it fails closed to all-slots-free for `0 < N < total`
   to 1 – 10)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
-Idle means: llama-server running, no active **local** query (when the proxy
-serves `local_active_query` — preferred over the global `active_query`, so
-remote-only streams with free local slots do not block dispatch; absent on
-pre-fix proxies, the global `active_query` is used as the fallback), no model
-switch, no active local lease, and the required free-slot condition met.
+Idle means: llama-server running, no active **local** query (the proxy's
+`local_active_query` is the sole busy signal, so remote-only streams with free
+local slots do not block dispatch; absent on pre-fix proxies it is treated as
+busy), no model switch, no active local lease, and the required free-slot
+condition met. **Per-slot detail is mandatory (fail-closed contract,
+WL-0MUXVPXAZ005RESW):** the free-slot budget always comes from the per-slot
+`slots` array, never the `available_slots` count. When per-slot detail is
+absent, empty (`slots: []`), or stale (`slots_stale: true`) the dispatcher
+refuses to dispatch and records the distinct reason `slots-unavailable`
+(header token `no-slots`), so a fail-closed stop is distinguishable from
+`slot-owner` / `contention`.
 **In per-slot identity mode with `0 < N < total` the query/lease checks are
 relaxed** (spare-capacity dispatch, parent WL-0MT32F90V008UAD2): a query or
 lease tied to a busy slot is the operator's own session and must not block
@@ -528,10 +534,11 @@ period; an ambiguous/unparseable poll also resets all timers (fail-closed).
 This assumes `slot_id` values are stable across polls (they identify the
 physical slots on the llama-server). Malformed per-slot data (non-array,
 missing/empty `slot_id`, non-boolean `is_processing`, or duplicate ids) is
-treated as busy (fail-closed). Without per-slot data — or when N is `0` or
-≥ `total` — the worker falls back to the count-based all-slots-free logic
-with the FULL global checks (server, local query, model switch, lease): N
-of `total` slots free never dispatches without per-slot identity.
+treated as busy (fail-closed). **Without usable per-slot detail the worker
+fails closed** (no dispatch, reason `slots-unavailable` / header token
+`no-slots`) rather than falling back to the `available_slots` count. When N
+is `0` or ≥ `total`, the full global checks (server, local query, model
+switch, lease) apply and the free count still comes from the per-slot array.
 
 **Per-tier free-slot minimums** (parent WL-0MT32F90V008UAD2 AC3) — at
 selection time, against the latest polled status, each dispatch tier
@@ -873,9 +880,11 @@ proxy idle state:
   the dispatcher's query/lease — no longer block the switch: a downtime pane
   is exactly the work the operator wants running while the proxy runs cheap.
   Accepted tradeoff: a fast-mode downtime request in flight during the mode
-  restart is killed and retried by its client. Without per-slot data the
-  all-slots-free fail-closed fallback is unchanged (server up, no query,
-  no model switch, no lease, ALL slots free). Any ambiguity — an
+  restart is killed and retried by its client. Under the shared fail-closed
+  contract (WL-0MUXVPXAZ005RESW) `evaluateIdle` returns false when per-slot
+  detail is unusable, so a proxy that cannot serve `slots[]` delays the
+  cheap switch rather than switching on an unverifiable count. Any
+  ambiguity — an
   unparseable status payload (including malformed/ambiguous per-slot
   identity), a non-2xx admin response, or a fetch failure —
   is treated as busy (fail-closed) so the proxy is never switched cheap

@@ -1034,12 +1034,19 @@ describe('runCoordinationCheckIn', () => {
 function makeStatusPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: 4,
     total_slots: 4,
+    // Per-slot detail is required under the fail-closed contract
+    // (WL-0MUXVPXAZ005RESW).
+    slots: [
+      { slot_id: 'slot-1', is_processing: false },
+      { slot_id: 'slot-2', is_processing: false },
+      { slot_id: 'slot-3', is_processing: false },
+      { slot_id: 'slot-4', is_processing: false },
+    ],
     ...overrides,
   };
 }

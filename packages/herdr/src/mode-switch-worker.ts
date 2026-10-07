@@ -554,10 +554,11 @@ export function createModeSwitchWorker(deps?: ModeSwitchWorkerOptions): ModeSwit
       // (spare-capacity, DOWNTIME_PANE_MIN_FREE_SLOTS — the relaxed per-slot
       // global checks: llama-server up + no model switch only), so busy
       // downtime-pane slots holding the dispatcher's query/lease no longer
-      // block the switch. Without per-slot data the all-slots-free
-      // fail-closed fallback is unchanged (requiredFreeSlots = 0, full
-      // global checks). proxyStatus null (endpoint failure, timeout,
-      // ambiguous/malformed) ⇒ busy (fail-closed).
+      // block the switch. Under the shared fail-closed contract
+      // (WL-0MUXVPXAZ005RESW) evaluateIdle returns false when per-slot detail
+      // is unusable (absent/empty/stale), so the switch is delayed rather
+      // than made on an unverifiable count. proxyStatus null (endpoint
+      // failure, timeout, ambiguous/malformed) ⇒ busy (fail-closed).
       const requiredFreeSlots = Array.isArray(proxyStatus?.slots)
         ? DOWNTIME_PANE_MIN_FREE_SLOTS
         : 0;

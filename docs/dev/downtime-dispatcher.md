@@ -666,7 +666,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 |---|---|---|---|
 | **Host-wide marker** (this mechanism) | machine-wide, all projects/instances | an audit dispatched by ANY project on this host | skip audit tier; reason `audit-host-saturated` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
-| **Proxy-slot gating** (`available_slots` / `contention_queue_depth` / per-slot ownership) | the Local Proxy | live slot availability, queue depth, live leases | ineligible/skip audit dispatch (per-tier minimum 2 free slots) or `proxy-contention` |
+| **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot ownership) | the Local Proxy | live slot availability, queue depth, live leases | ineligible/skip audit dispatch (per-tier minimum 2 free slots) or `proxy-contention`; unusable per-slot detail → `slots-unavailable` |
 | **`AUDIT_PHASE2_PARALLELISM=1`** | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots |
 
 **Observability.** The skip is logged to stderr as
@@ -995,7 +995,9 @@ Each machine-wide entry records `worklogRoot` (preferred) + `directory` alias.
 The single leader dispatches offers in **file order** (each offer is its root's
 Herdr list head) **across worklogRoots** and spawns each pane in the entry's
 `worklogRoot`. The slot budget is machine-wide: ONE leader poll →
-ONE `freeSlots` snapshot (per-slot or `available_slots`), forwarded to the sole
+ONE `freeSlots` snapshot **derived from the per-slot array** — the only
+trusted availability source (fail-closed contract, WL-0MUXVPXAZ005RESW) —
+forwarded to the sole
 dispatch call — no per-worklog duplication (F5 WL-0MTII48OV008P2QU;
 WL-0MT50LKAK001EF5Q single cap source). v1 scope is single-machine; a
 multi-machine (real flock/NFS) extension is future work.
@@ -1028,9 +1030,10 @@ an agent on a tool call (wl, bash, tests) left the slot "free", so multiple
    The dispatcher does **not** wait out a lease: it dispatches into genuinely
    free **unowned** slots via the per-slot gate (WL-0MU8807BI008C9ME), and a
    lease held by a dispatched pane (which already owns its own slot) does not
-   block the OTHER free unowned slots. Only the **count-based single-slot**
-   path treats a held lease as blocking (a truly owned sole slot stays
-   protected). The maximum is pinned in code as
+   block the OTHER free unowned slots. The lease is a **decision-log signal
+   only** (`ownerPresent`): the ownership gate itself is derived from the
+   trusted per-slot array (a slot with a live `owner_session_id` is never
+   free). The maximum is pinned in code as
    `LOCAL_DISPATCH_LEASE_MAX_SECONDS`; if `llm-manager` changes the default,
    revisit that constant and this section so the assumption cannot drift
    silently again.
@@ -1038,23 +1041,21 @@ an agent on a tool call (wl, bash, tests) left the slot "free", so multiple
    `owner_session_id`; `countFreeUnownedSlots` excludes owned slots from the
    free count and the per-slot idle tracker resets an owned slot's timer, so
    a slot with a live lease is never considered available for a new pane.
-   A single idle-but-owned slot (count-based path) fails closed via the
-   derived `local_lease_active`.
 
-   **Stale/empty per-slot data (WL-0MUFP30T2003OX1F).** The proxy serves
-   `slots: []` together with `slots_stale: true` when its fresh `/slots`
-   query fails: the slot COUNTS come from the last-known cache but the
-   per-slot detail is unavailable. An empty array is **not** "zero free
-   slots", so the worker treats stale OR empty `slots` as "no per-slot
-   identity" and falls back to the count-based path. In that path, with a
-   multi-slot config (`0 < N < total`) a held lease no longer blocks
-   dispatch into the proxy-reported spare capacity: the count-based gate
-   uses `available_slots`, reserving one slot per lease only when the owner
-   may be idle (`local_active_query !== true` — an active query's slot is
-   already processing and excluded from the count). A single-slot
-   (`total_slots = 1`) or `N <= 0` / `N >= total` setup keeps the strict
-   fail-closed gate. The proxy-side improvement (serve cached per-slot
-   detail when stale) is tracked separately in `llm-manager`.
+   **Fail closed on unusable per-slot detail (WL-0MUXVPXAZ005RESW).** The
+   proxy serves `slots: []` together with `slots_stale: true` when its fresh
+   `/slots` query fails: the slot COUNTS come from the last-known cache but
+   the per-slot detail is unavailable. An empty array is **not** "zero free
+   slots". Under the fail-closed contract, absent, empty, or stale per-slot
+   detail is **unusable**: the worker refuses to dispatch and records the
+   distinct reason `slots-unavailable` (header token `no-slots`), so a
+   fail-closed stop is distinguishable from `slot-owned` / `proxy-contention`
+   in the decision log and herdr header. The inaccurate count-based fallback
+   (and its `countBasedFreeSlots` / `countBasedSpareCapacity` / `leaseReserve`
+   / `ownerLeaseCount` helpers) has been **removed** — `available_slots` is
+   never used as a dispatch budget. The proxy-side improvement (serve cached
+   per-slot detail when stale) is tracked separately in `llm-manager`
+   (LP-0MUFSVXID0039ZAQ).
 3. **Contention feedback (AC6)** — the proxy's LIVE `contention_queue_depth`
    is parsed; while > 0 the dispatcher backs off with outcome reason
    `proxy-contention` until the queue drains. The sibling

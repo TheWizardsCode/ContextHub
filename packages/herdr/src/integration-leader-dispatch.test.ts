@@ -71,12 +71,19 @@ function makeEntry(instanceId: string, workItemId: string, directory: string): C
 function idlePayload(): Record<string, unknown> {
   return {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: 4,
     total_slots: 4,
+    // Per-slot detail is required under the fail-closed contract
+    // (WL-0MUXVPXAZ005RESW).
+    slots: [
+      { slot_id: 'slot-1', is_processing: false },
+      { slot_id: 'slot-2', is_processing: false },
+      { slot_id: 'slot-3', is_processing: false },
+      { slot_id: 'slot-4', is_processing: false },
+    ],
   };
 }
 
@@ -120,7 +127,15 @@ function makeWorker(opts: {
 }): DowntimeWorker {
   const fetcher = vi.fn(async () => {
     const payload = idlePayload();
-    if (opts.freeSlots !== undefined) payload.available_slots = opts.freeSlots;
+    if (opts.freeSlots !== undefined) {
+      payload.available_slots = opts.freeSlots;
+      // Keep the per-slot array consistent with the requested free count
+      // (the trusted availability source under the fail-closed contract).
+      payload.slots = Array.from({ length: 4 }, (_, i) => ({
+        slot_id: `slot-${i + 1}`,
+        is_processing: i >= opts.freeSlots!,
+      }));
+    }
     return {
       ok: true,
       status: 200,

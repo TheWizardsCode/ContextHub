@@ -15,13 +15,21 @@ import type { LlamaStatus } from './downtime-worker.js';
 
 export const idleAllSlotsFree: LlamaStatus = {
   llama_server_running: true,
-  active_query: false,
   local_active_query: false,
   model_switch_in_progress: false,
   local_lease_active: false,
   available_slots: 4,
   total_slots: 4,
   current_model: 'qwen3-8b',
+  // Per-slot detail is the ONLY trusted availability source under the
+  // fail-closed contract (WL-0MUXVPXAZ005RESW); an idle fixture therefore
+  // carries a consistent all-free slot array.
+  slots: [
+    { slot_id: 'slot-1', is_processing: false },
+    { slot_id: 'slot-2', is_processing: false },
+    { slot_id: 'slot-3', is_processing: false },
+    { slot_id: 'slot-4', is_processing: false },
+  ],
   // Normalised owner-session list (WL-0MU88086A0089US4): always present on
   // the parsed status, empty when the proxy reports no owner.
   local_owner_session_ids: [],
@@ -33,7 +41,16 @@ export const busyLocalLease: LlamaStatus = { ...idleAllSlotsFree, local_lease_ac
 export const busyServerNotRunning: LlamaStatus = { ...idleAllSlotsFree, llama_server_running: false };
 
 /** available_slots < total_slots → busy with the default N=0 (all slots). */
-export const busyNotAllSlotsFree: LlamaStatus = { ...idleAllSlotsFree, available_slots: 2 };
+export const busyNotAllSlotsFree: LlamaStatus = {
+  ...idleAllSlotsFree,
+  available_slots: 2,
+  slots: [
+    { slot_id: 'slot-1', is_processing: true },
+    { slot_id: 'slot-2', is_processing: true },
+    { slot_id: 'slot-3', is_processing: false },
+    { slot_id: 'slot-4', is_processing: false },
+  ],
+};
 
 /** `total_slots` 0 with everything else idle → ambiguous → busy. */
 export const ambiguousZeroTotalSlots: LlamaStatus = {
@@ -86,7 +103,6 @@ export const perSlotOneProcessing: LlamaStatus = {
  */
 export const perSlotThreeOfFourFree: LlamaStatus = {
   ...perSlotOneProcessing,
-  active_query: true,
   local_active_query: true,
   local_lease_active: true,
 };
