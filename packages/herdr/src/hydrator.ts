@@ -1,7 +1,7 @@
 /**
  * packages/herdr/src/hydrator.ts — Herdr hydrator (WL-0MSOJLZD9004P8PI)
  *
- * Self-heals the work queue: periodically fetches every `in_progress` work
+ * Self-heals the work queue: periodically fetches every `in-progress` work
  * item, matches each against a live agent pane in the current workspace
  * (the pane's title carries the work-item ID), and DEMOTES any item with no
  * matching pane so it re-enters the dispatchable pool instead of lingering
@@ -93,10 +93,10 @@ export const WORK_ITEM_ID_REGEX = /[A-Z][A-Z0-9]*-[0-9A-Z]{6,}/g;
  * rules is repaired (never emitted invalid).
  */
 export const ALLOWED_STAGES_BY_STATUS: Record<string, readonly string[]> = {
-  open: ['idea', 'intake_complete', 'plan_complete', 'in_progress'],
+  open: ['idea', 'intake_complete', 'plan_complete'],
   blocked: ['idea', 'intake_complete', 'plan_complete'],
   completed: ['in_review', 'done'],
-  'in-progress': ['intake_complete', 'plan_complete', 'in_progress'],
+  'in-progress': ['intake_complete', 'plan_complete'],
 };
 
 /** Statuses considered terminal for an outbound dependency target. */
@@ -243,7 +243,11 @@ export function isActiveBlocker(target: HydratorDepTarget): boolean {
 
 /**
  * Return `stage` when it is valid for `status`, otherwise the closest
- * allowed stage below `in_progress` (`plan_complete`, else `idea`).
+ * allowed stage (`plan_complete`, else `idea`).
+ *
+ * `in_progress` is no longer part of the CLI stage vocabulary, so it is
+ * never in the allowed list and is always repaired to a valid stage
+ * (WL-0MUY1CSQG007TCYX).
  */
 export function compatibleStage(stage: string, status: string): string {
   const allowed = ALLOWED_STAGES_BY_STATUS[status] ?? [];

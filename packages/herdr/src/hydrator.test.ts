@@ -15,6 +15,7 @@ import {
   makeWorstCasePanes,
 } from './hydrator.fixtures.js';
 import {
+  ALLOWED_STAGES_BY_STATUS,
   collectPaneWorkItemIds,
   compatibleStage,
   createHydratorRunner,
@@ -163,6 +164,21 @@ describe('compatibleStage', () => {
 
   it('repairs an invalid stage (blocked cannot sit at in_progress)', () => {
     expect(compatibleStage('in_progress', 'blocked')).toBe('plan_complete');
+  });
+
+  it('never allows the removed in_progress stage for any status (WL-0MUY1CSQG007TCYX)', () => {
+    for (const status of Object.keys(ALLOWED_STAGES_BY_STATUS)) {
+      expect(ALLOWED_STAGES_BY_STATUS[status]).not.toContain('in_progress');
+    }
+    // The legacy stage is therefore always repaired to a CLI-valid stage.
+    expect(compatibleStage('in_progress', 'open')).toBe('plan_complete');
+    expect(compatibleStage('in_progress', 'in-progress')).toBe('plan_complete');
+    expect(compatibleStage('in_progress', 'blocked')).toBe('plan_complete');
+  });
+
+  it('keeps the CLI-valid stages allowed for open and in-progress', () => {
+    expect(ALLOWED_STAGES_BY_STATUS.open).toEqual(['idea', 'intake_complete', 'plan_complete']);
+    expect(ALLOWED_STAGES_BY_STATUS['in-progress']).toEqual(['intake_complete', 'plan_complete']);
   });
 });
 
