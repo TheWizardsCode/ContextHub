@@ -346,19 +346,27 @@ wl audit-unwaive WL-ABC123
 wl audit-unwaive WL-ABC123 --json
 ```
 
-### `delete` [options] <id>
+### `delete` [options] <ids...>
 
-Delete a work item (marks as deleted): this sets the work item status to `deleted` in the local database. If you prefer to set the status explicitly, use `wl update <id> -s deleted` instead.
+Delete one or more work items (marks them as deleted): sets each work item's status to `deleted` in the local database. If you prefer to set the status explicitly, use `wl update <id> -s deleted` instead.
+
+Every id is processed independently. A failure for one id (for example, not found) does not stop the remaining ids; each id is reported in a per-id result. The command exits non-zero if any id failed and zero when all ids succeed. Descendants of a recursively-deleted parent are reported per id, and the automatic git sync runs exactly once after all deletions in the invocation complete (suppressed by `--no-sync`).
 
 Options:
 
-- `--prefix <prefix>` — Operate on a specific prefix (optional).
+- `--prefix <prefix>` — Operate on a specific prefix (optional; applies uniformly to every id in the batch).
+- `--no-recursive` — Delete only the specified items, leaving children orphaned (applies to every id).
+- `--no-sync` — Skip the automatic post-delete sync for the whole batch.
+
+JSON mode returns a per-id `results` array plus an overall `success`/`deleted`/`failed` summary. When exactly one id is supplied, the legacy single-id fields (`deletedId`, `deletedWorkItem`, `recursive`) are preserved for backward compatibility. Duplicate ids, and ids already removed as a descendant earlier in the same batch, are reported as `skipped` (`already deleted`) rather than failing the command.
 
 Examples:
 
 ```sh
-wl delete WL-ABC123            # permanently removes the item and its comments
-wl --json delete WL-ABC123     # machine-readable confirmation (204 on success)
+wl delete WL-ABC123 WL-DEF456 WL-GHI789   # delete several items in one command
+wl delete WL-ABC123 --no-recursive        # delete only the parent, leaving children
+wl delete WL-ABC123 WL-DEF456 --no-sync   # delete a batch without syncing
+wl --json delete WL-ABC123                # single-id machine-readable confirmation
 ```
 
 ### `comment` (subcommands)
