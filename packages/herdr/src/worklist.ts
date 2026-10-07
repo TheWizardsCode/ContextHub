@@ -163,34 +163,36 @@ export function createGatedTick(deps: {
  */
 export const SHIP_IT_COMMAND = '/skill:ship release';
 
+// The canonical `wl` CLI stage vocabulary (WL-0MUY1CRBQ007L7AK). Mirrors the
+// stages accepted by `wl update`/`wl next` validation (`done` is the
+// post-release terminal stage). Do NOT reintroduce `in_progress`/`completed`:
+// the CLI no longer accepts them as stages (`status=in-progress` is the
+// "actively worked" signal).
 export const STAGES = [
   'idea',
   'intake_complete',
   'plan_complete',
-  'in_progress',
   'in_review',
-  'completed',
-  'done',  // legacy stage alias for completed (WL-0MU3U1AMP0044WUX)
+  'done',
 ] as const;
 
 export type Stage = (typeof STAGES)[number];
 
 // ── /wl <stage> argument map (WL-0MSDT8X1V003206G) ────────────────────
 // Maps every accepted /wl stage argument — shorthand aliases and canonical
-// stage names — to the internal stage name used for filtering. Matches the
-// Pi TUI extension's STAGE_MAP so `/wl <stage>` behaviour is identical.
+// stage names — to the internal stage name used for filtering. Restricted to
+// the CLI stage vocabulary (WL-0MUY1CRBQ007L7AK): unknown/removed values are
+// absent, so `/wl <bogus>` (and `/wl progress`, `/wl completed`) fail soft.
 export const STAGE_MAP: Record<string, string> = {
   intake: 'intake_complete',
   plan: 'plan_complete',
-  progress: 'in_progress',
   review: 'in_review',
   // Canonical names mapped to themselves for validation
   idea: 'idea',
   intake_complete: 'intake_complete',
   plan_complete: 'plan_complete',
-  in_progress: 'in_progress',
   in_review: 'in_review',
-  done: 'done',  // legacy stage alias for completed (WL-0MU3U1AMP0044WUX)
+  done: 'done',
 };
 
 // ── /wl --priority <priority> map (WL-0MSKC8T46006999S) ────────────────
@@ -209,10 +211,8 @@ export const STAGE_COLORS: Record<string, number> = {
   idea: 247,
   intake_complete: 68,
   plan_complete: 172,
-  in_progress: 76,
   in_review: 220,
-  completed: 33,
-  done: 33,  // legacy stage alias for completed (WL-0MU3U1AMP0044WUX)
+  done: 33,
 };
 
 // ── Metadata panel sizing ───────────────────────────────────────────────
@@ -2529,7 +2529,7 @@ export function formatFilterPrompt(maxCols: number): string {
     ` ${ANSI.bold}Filter by stage:${ANSI.reset}`,
     ` ${options}`,
     '',
-    ` ${ANSI.dim}[0-5] select stage  [esc] cancel${ANSI.reset}`,
+    ` ${ANSI.dim}[0-${STAGES.length - 1}] select stage  [esc] cancel${ANSI.reset}`,
   ];
   return lines.join('\n');
 }

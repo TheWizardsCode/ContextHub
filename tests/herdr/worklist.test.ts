@@ -12,7 +12,9 @@ import {
   formatDetailView,
   handleKeypress,
   createListRenderer,
+  dispatchChordCommand,
   STAGES,
+  STAGE_MAP,
 } from '../../packages/herdr/src/worklist.js';
 import type { WorkItem } from '../../packages/herdr/src/worklist.js';
 
@@ -130,16 +132,16 @@ describe('WorkItemListState', () => {
 
   it('applies stage filter and resets selection', () => {
     const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
-    state.applyFilter('in_progress');
-    expect(state.activeFilter).toBe('in_progress');
+    state.applyFilter('plan_complete');
+    expect(state.activeFilter).toBe('plan_complete');
     expect(state.selectedIndex).toBe(0);
     const filtered = state.items;
-    expect(filtered.every((i) => i.stage === 'in_progress')).toBe(true);
+    expect(filtered.every((i) => i.stage === 'plan_complete')).toBe(true);
   });
 
   it('clears filter to show all items', () => {
     const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
-    state.applyFilter('in_progress');
+    state.applyFilter('plan_complete');
     state.clearFilter();
     expect(state.activeFilter).toBeNull();
     expect(state.items).toHaveLength(5);
@@ -285,49 +287,126 @@ describe('WorkItemListState', () => {
 
 
 describe('StageFilter', () => {
-  it('lists all stage options', () => {
+  it('lists exactly the CLI stage vocabulary (WL-0MUY1CRBQ007L7AK)', () => {
     expect(STAGES).toEqual([
       'idea',
       'intake_complete',
       'plan_complete',
-      'in_progress',
       'in_review',
-      'completed',
       'done',
     ]);
   });
 
-  it('StageFilter can cycle through stages', () => {
-    const filter = new StageFilter();
-    expect(filter.current).toBeNull();
-    filter.cycle();
-    expect(filter.current).toBe('idea');
-    filter.cycle();
-    expect(filter.current).toBe('intake_complete');
-    filter.cycle();
-    expect(filter.current).toBe('plan_complete');
+  it('does not contain the removed in_progress / completed stages', () => {
+    expect(STAGES).not.toContain('in_progress');
+    expect(STAGES).not.toContain('completed');
   });
 
-  it('StageFilter wraps around', () => {
+  it('StageFilter cycles through the five CLI stages then clears to null', () => {
     const filter = new StageFilter();
-    // Cycle through all stages (7 stages including legacy 'done')
-    for (let i = 0; i < 7; i++) filter.cycle();
-    // Should be at 'done' (last stage), next cycle goes to null
+    expect(filter.current).toBeNull();
+    const seen: Array<string | null> = [];
+    // Six cycles: the five valid stages, then a clear to null.
+    for (let i = 0; i < 6; i++) {
+      filter.cycle();
+      seen.push(filter.current);
+    }
+    expect(seen).toEqual([
+      'idea',
+      'intake_complete',
+      'plan_complete',
+      'in_review',
+      'done',
+      null,
+    ]);
+  });
+
+  it('StageFilter wraps around from the last stage back to the first', () => {
+    const filter = new StageFilter();
+    // Advance to the last stage ('done'), then one more cycle clears to null.
+    for (let i = 0; i < STAGES.length; i++) filter.cycle();
+    expect(filter.current).toBe('done');
     filter.cycle();
     expect(filter.current).toBeNull();
+    // Cycling again restarts at the first stage.
+    filter.cycle();
+    expect(filter.current).toBe('idea');
   });
 
   it('set applies a valid stage', () => {
     const filter = new StageFilter();
-    filter.set('in_progress');
-    expect(filter.current).toBe('in_progress');
+    filter.set('in_review');
+    expect(filter.current).toBe('in_review');
   });
 
   it('set with null clears the filter', () => {
     const filter = new StageFilter();
-    filter.set('in_progress');
+    filter.set('in_review');
     filter.set(null);
     expect(filter.current).toBeNull();
+  });
+});
+
+describe('STAGE_MAP alias resolution (WL-0MUY1CRBQ007L7AK)', () => {
+  it('resolves the supported shorthand aliases to canonical CLI stages', () => {
+    expect(STAGE_MAP['intake']).toBe('intake_complete');
+    expect(STAGE_MAP['plan']).toBe('plan_complete');
+    expect(STAGE_MAP['review']).toBe('in_review');
+  });
+
+  it('resolves every canonical CLI stage name to itself', () => {
+    for (const stage of STAGES) {
+      expect(STAGE_MAP[stage]).toBe(stage);
+    }
+  });
+
+  it('no longer resolves the removed progress / in_progress / completed values', () => {
+    expect(STAGE_MAP['progress']).toBeUndefined();
+    expect(STAGE_MAP['in_progress']).toBeUndefined();
+    expect(STAGE_MAP['completed']).toBeUndefined();
+  });
+
+  it('exposes no mapping whose value is a removed stage', () => {
+    expect(Object.values(STAGE_MAP)).not.toContain('in_progress');
+    expect(Object.values(STAGE_MAP)).not.toContain('completed');
+  });
+});
+
+describe('dispatchChordCommand /wl <stage> fail-soft (WL-0MUY1CRBQ007L7AK)', () => {
+  it('applies valid aliases and canonical names', () => {
+    const cases: Array<[string, string]> = [
+      ['idea', 'idea'],
+      ['intake', 'intake_complete'],
+      ['plan', 'plan_complete'],
+      ['review', 'in_review'],
+      ['done', 'done'],
+      ['intake_complete', 'intake_complete'],
+      ['plan_complete', 'plan_complete'],
+      ['in_review', 'in_review'],
+    ];
+    for (const [arg, expected] of cases) {
+      const state = new WorkItemListState([], DEFAULT_TERM_SIZE);
+      expect(dispatchChordCommand(`/wl ${arg}`, state)).toBe(true);
+      expect(state.activeFilter).toBe(expected);
+    }
+  });
+
+  it('fails soft for /wl progress (removed alias): no crash, no filter applied', () => {
+    const state = new WorkItemListState([], DEFAULT_TERM_SIZE);
+    expect(dispatchChordCommand('/wl progress', state)).toBe(false);
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('fails soft for /wl completed (removed alias): no crash, no filter applied', () => {
+    const state = new WorkItemListState([], DEFAULT_TERM_SIZE);
+    expect(dispatchChordCommand('/wl completed', state)).toBe(false);
+    expect(state.activeFilter).toBeNull();
+  });
+
+  it('fails soft for an unknown /wl <bogus> argument', () => {
+    const state = new WorkItemListState([], DEFAULT_TERM_SIZE);
+    expect(dispatchChordCommand('/wl bogus', state)).toBe(false);
+    expect(state.activeFilter).toBeNull();
   });
 });
 
@@ -528,9 +607,9 @@ describe('createListRenderer', () => {
 
   it('indicates an active stage filter in the header only (no filter bar)', () => {
     const renderer = createListRenderer();
-    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, 'in_progress', 'list', null);
+    const output = renderer(sampleItems, 0, 0, DEFAULT_TERM_SIZE, 'in_review', 'list', null);
     const firstLine = output.split('\n')[0];
-    expect(firstLine).toContain('(filtered: in_progress)');
+    expect(firstLine).toContain('(filtered: in_review)');
     expect(output).not.toMatch(/Filter: /);
   });
 

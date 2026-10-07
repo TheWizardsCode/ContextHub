@@ -1157,6 +1157,9 @@ describe('dispatch view refetch trigger and detail fallback (WL-0MUL2J15W00277XH
     expect(isWlViewCommand('/wl')).toBe(true);
     expect(isWlViewCommand('/wl idea')).toBe(true);
     expect(isWlViewCommand('/wl --priority critical')).toBe(true);
+    // Removed stage aliases are no longer view commands (WL-0MUY1CRBQ007L7AK).
+    expect(isWlViewCommand('/wl progress')).toBe(false);
+    expect(isWlViewCommand('/wl completed')).toBe(false);
     // Non-view commands are not.
     expect(isWlViewCommand('/wl bogus')).toBe(false);
     expect(isWlViewCommand('/skill:implement WL-1')).toBe(false);
@@ -1480,16 +1483,30 @@ describe('dispatchChordCommand', () => {
     expect(state.activeFilter).toBe('in_review');
   });
 
-  it('accepts canonical stage names and the progress alias for /wl commands', () => {
+  it('accepts canonical stage names and supported aliases for /wl commands', () => {
     const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
-    expect(dispatchChordCommand('/wl progress', state)).toBe(true);
-    expect(state.activeFilter).toBe('in_progress');
+    expect(dispatchChordCommand('/wl intake', state)).toBe(true);
+    expect(state.activeFilter).toBe('intake_complete');
+    expect(dispatchChordCommand('/wl plan', state)).toBe(true);
+    expect(state.activeFilter).toBe('plan_complete');
+    expect(dispatchChordCommand('/wl review', state)).toBe(true);
+    expect(state.activeFilter).toBe('in_review');
+    expect(dispatchChordCommand('/wl done', state)).toBe(true);
+    expect(state.activeFilter).toBe('done');
     expect(dispatchChordCommand('/wl intake_complete', state)).toBe(true);
     expect(state.activeFilter).toBe('intake_complete');
     expect(dispatchChordCommand('/wl plan_complete', state)).toBe(true);
     expect(state.activeFilter).toBe('plan_complete');
     expect(dispatchChordCommand('/wl in_review', state)).toBe(true);
     expect(state.activeFilter).toBe('in_review');
+  });
+
+  it('fails soft for the removed /wl progress and /wl completed aliases (WL-0MUY1CRBQ007L7AK)', () => {
+    const state = new WorkItemListState([makeItem('A', 'idea')], TERM_80x24);
+    expect(dispatchChordCommand('/wl progress', state)).toBe(false);
+    expect(state.activeFilter).toBeNull();
+    expect(dispatchChordCommand('/wl completed', state)).toBe(false);
+    expect(state.activeFilter).toBeNull();
   });
 
   it('leaves unknown /wl stage arguments unhandled (no crash, no filter)', () => {
