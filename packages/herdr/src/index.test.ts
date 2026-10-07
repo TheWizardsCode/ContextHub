@@ -462,6 +462,171 @@ describe('resolveInteractiveItemAnchor (AC3/AC5)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Interactive item-tab root-pane cleanup (WL-0MUYI3JRC006115V, test-first)
+//
+// TDD red phase: the interactive dispatch path does NOT yet close the
+// placeholder root pane after the first pane spawns into a freshly created
+// item tab, so `closeInteractiveTabRootPane` is not exported. These tests pin
+// the interface agreed with the sibling implementation child
+// (WL-0MUYI3K8H007MPKF) and go green when it lands (parent WL-0MUKZGEQ2007FECS,
+// AC7/AC8). The dynamic import keeps the existing index.test.ts suite green in
+// the red phase — only these new cases fail.
+//
+// Pinned contract (parent AC7):
+//   closeInteractiveTabRootPane(anchorPaneId, ctx, deps)
+//     - closes the anchor pane only when liveness POSITIVELY confirms it is
+//       NOT a live tracked pi/shell pane;
+//     - leaves the anchor open when liveness is unknown/unavailable (fail-safe)
+//       or when the anchor IS a live tracked pane;
+//     - never throws (fail-open) — cleanup errors never change the dispatch
+//       outcome.
+//
+// The liveness dep mirrors the downtime path's `getRunningDowntimePanes`
+// (`{ok:true, paneIds}` / `{ok:false}`): `getLiveTrackedPanes(cwd)` returns the
+// ids of panes currently hosting a tracked pi/shell session, or `{ok:false}`
+// when the probe cannot be answered. `closePane(paneId, cwd)` mirrors the
+// existing herdr close convention.
+// ---------------------------------------------------------------------------
+
+type InteractiveRootPaneCleanupDeps = {
+  /** Live tracked pi/shell pane ids, or `{ok:false}` when unknown. */
+  getLiveTrackedPanes?: (cwd: string) => Promise<{ ok: boolean; paneIds?: string[] }>;
+  /** Close a pane; may reject (the helper swallows it). */
+  closePane?: (paneId: string, cwd: string) => Promise<boolean>;
+};
+
+type InteractiveRootPaneCleanupHelpers = {
+  closeInteractiveTabRootPane?: (
+    anchorPaneId: string | undefined,
+    ctx: { cwd: string },
+    deps: InteractiveRootPaneCleanupDeps,
+  ) => Promise<void>;
+};
+
+async function loadInteractiveCleanupHelpers(): Promise<InteractiveRootPaneCleanupHelpers> {
+  return (await import('./index.js')) as unknown as InteractiveRootPaneCleanupHelpers;
+}
+
+describe('closeInteractiveTabRootPane — interactive root-pane cleanup (AC7/AC8)', () => {
+  const ANCHOR = 'w9:tWL-ABC:p1';
+  const CWD = '/repo';
+
+  it('AC7: closes the placeholder root pane after a spawn into a freshly created item tab', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    // A freshly created item tab's placeholder root pane hosts no tracked
+    // pi/shell pane → liveness positively excludes the anchor → close it.
+    await helpers.closeInteractiveTabRootPane!(
+      ANCHOR,
+      { cwd: CWD },
+      {
+        getLiveTrackedPanes: vi.fn().mockResolvedValue({ ok: true, paneIds: [] }),
+        closePane,
+      },
+    );
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith(ANCHOR, CWD);
+  });
+
+  it('AC7: NEVER closes a reused live tracked pane (existing item-tab anchor)', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await helpers.closeInteractiveTabRootPane!(
+      ANCHOR,
+      { cwd: CWD },
+      {
+        getLiveTrackedPanes: vi
+          .fn()
+          .mockResolvedValue({ ok: true, paneIds: ['w9:tWL-ABC:p2', ANCHOR] }),
+        closePane,
+      },
+    );
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-safe: a failed liveness query (ok:false) leaves the anchor open', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await helpers.closeInteractiveTabRootPane!(
+      ANCHOR,
+      { cwd: CWD },
+      {
+        getLiveTrackedPanes: vi
+          .fn()
+          .mockResolvedValue({ ok: false, error: 'herdr unavailable' }),
+        closePane,
+      },
+    );
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-safe: an absent liveness dep leaves the anchor open', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await helpers.closeInteractiveTabRootPane!(ANCHOR, { cwd: CWD }, { closePane });
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-safe: a liveness payload without paneIds is treated as unknown', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await helpers.closeInteractiveTabRootPane!(
+      ANCHOR,
+      { cwd: CWD },
+      { getLiveTrackedPanes: vi.fn().mockResolvedValue({ ok: true }), closePane },
+    );
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-safe: a throwing liveness probe never throws and leaves the anchor open', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await expect(
+      helpers.closeInteractiveTabRootPane!(
+        ANCHOR,
+        { cwd: CWD },
+        {
+          getLiveTrackedPanes: vi
+            .fn()
+            .mockRejectedValue(new Error('herdr pane list blew up')),
+          closePane,
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-open: a throwing closePane never throws (dispatch outcome unchanged)', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockRejectedValue(new Error('herdr pane close blew up'));
+    await expect(
+      helpers.closeInteractiveTabRootPane!(
+        ANCHOR,
+        { cwd: CWD },
+        {
+          getLiveTrackedPanes: vi.fn().mockResolvedValue({ ok: true, paneIds: [] }),
+          closePane,
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(closePane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC7: a missing anchor (no item tab) is a no-op', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    const getLiveTrackedPanes = vi.fn().mockResolvedValue({ ok: true, paneIds: [] });
+    await helpers.closeInteractiveTabRootPane!(
+      undefined,
+      { cwd: CWD },
+      { getLiveTrackedPanes, closePane },
+    );
+    expect(getLiveTrackedPanes).not.toHaveBeenCalled();
+    expect(closePane).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // stripCommandPrefix tests
 // ---------------------------------------------------------------------------
 
