@@ -25,7 +25,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Quit** — Press `q` to exit
 - **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
-- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
+- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_review`, `done` — no custom stage values). Actively-worked items are identified by `status = in-progress`, not by a stage. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. Any markdown document opened in the viewer can also be annotated in place (`n,e` add/edit, `n,d` delete); podcast scripts sync notes to the worklog as child work items (PRD §7.3). See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
@@ -112,7 +112,7 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `f`, `d` — Show the downtime dispatches grouped into 4-hour time blocks (see [Recent dispatches view](#recent-dispatches-view))
    - Stage, priority, and dispatches filters are **mutually exclusive**: applying one replaces whichever other axis was active (single filter slot, replace semantics). Sprint (`f s s`, `f p s`, or `/wl` with no arguments) clears **all** of them.
    - Type `/wl dispatches` directly to activate the dispatches view (equivalent to `f d`).
-   - `/wl <stage>` accepts shorthand aliases (`idea`, `intake`, `plan`, `progress`, `review`) and canonical stage names (`intake_complete`, `plan_complete`, `in_progress`, `in_review`)
+   - `/wl <stage>` accepts the five CLI stage names (`idea`, `intake_complete`, `plan_complete`, `in_review`, `done`) plus the shorthand aliases `idea`, `intake`, `plan`, and `review`. The removed `progress` alias and the legacy `completed` value no longer apply a filter — they fail soft (no crash, no filter change) exactly like `/wl <bogus>`
    - `/wl --priority <priority>` accepts the canonical priority names `critical`, `high`, `medium`, `low`; unknown values fall back gracefully (no crash, no filter change)
    - `/wl` with no stage/priority argument returns to the default unfiltered browse list
    - Filtered views show every root item matching the filter's rule (see [Selection List Behaviour](#selection-list-behaviour))
@@ -121,7 +121,7 @@ The plugin pane will then be available via the Herdr plugin system.
 4. Workflow shortcuts (single-key):
    - Press `c` — Create a new work item
    - Press `d` — **Toggle downtime dispatch for the current pane** (per-pane only — sibling panes and other worklog roots are unaffected; the header shows `[Downtime Off]` while off and the live status when on. The disable persists across plugin restarts via a `.herdr-downtime-disabled` marker in the worklog root; press `d` again to return to following the global setting. See [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
-   - Press `i` — Run the implement workflow on the selected item (intake_complete, plan_complete, in_progress)
+   - Press `i` — Run the implement workflow on the selected item (intake_complete, plan_complete)
    - Press `n` — Run the intake workflow on the selected item (idea stage)
    - Press `p` — Run the plan workflow on the selected item (intake_complete stage)
    - Press `s` — Insert a search command
@@ -1478,9 +1478,10 @@ first rows), so a long list never scrolls off the top.
   the row is omitted entirely when there are no `.md` Key Files. The row is
   **display-only** — opening a document happens from the detail view's
   Related Docs table of contents (see [Markdown viewer](#markdown-viewer)).
-- For items whose stage is `in_progress`, the panel additionally shows
-  **`Last command:`** — the most recent command the plugin dispatched
-  against that item (`none yet` until the first dispatch).
+- For actively-worked items (`status = in-progress`), the panel
+  additionally shows **`Last command:`** — the most recent command the
+  plugin dispatched against that item (`none yet` until the first
+  dispatch).
 - When the item has a description, the panel shows a **`Description`**
   preview: the first up-to-3 non-empty lines of the description (markdown
   source as-is, each line truncated to the pane width), so you can see what
@@ -1498,7 +1499,7 @@ first rows), so a long list never scrolls off the top.
 
 Work items are grouped by their Worklog **stage** using the standard
 lifecycle stages only — `idea`, `intake_complete`, `plan_complete`,
-`in_progress`, `in_review`, `done`. No custom stage values are required for
+`in_review`, `done`. No custom stage values are required for
 grouping, so podcast episode items group exactly as their frontmatter
 `pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
 in the canonical order (Critical → Group N → Idea → Other → In Review) as
@@ -1508,10 +1509,12 @@ while a heading is selected collapses/expands that group — collapsed groups
 hide their items from both the render and navigation (the heading itself
 stays). Counts reflect the top-level items in the group (post stage-filter)
 regardless of collapse state. Stage changes re-group items on the next
-refresh. Non-critical `in_progress` items join the file-path-partitioned
-`Group N` lists alongside `plan_complete`/`intake_complete` items and sort
-ahead of them (actively-worked items first); "Other" remains only as a
-safety net for unknown/custom stages.
+refresh. Non-critical actively-worked items (`status = in-progress`) join
+the file-path-partitioned `Group N` lists alongside
+`plan_complete`/`intake_complete` items and sort ahead of them
+(actively-worked items first); "Other" remains only as a safety net for
+unknown/custom stages (including the removed `in_progress`/`completed`
+stage values), so legacy rows still render deterministically.
 
 **In Review** items are sorted within the group using a deterministic
 **6-bucket predicate** (WL-0MSLPM5ZB003TADT):
