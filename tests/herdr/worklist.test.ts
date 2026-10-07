@@ -437,6 +437,27 @@ describe('formatItemLine', () => {
     const line = formatItemLine(item, 80);
     expect(line).toContain('idea');
   });
+
+  // Status-based in-progress UI behaviour (WL-0MUY1CS9E006ZLS0): the stage
+  // tag is suppressed for actively-worked items, keyed off `status` rather
+  // than the retired `stage === 'in_progress'` sentinel.
+  it('suppresses the stage tag for actively-worked items (status in-progress)', () => {
+    const item = makeItem({ stage: 'plan_complete', status: 'in-progress' });
+    const line = formatItemLine(item, 120, false);
+    expect(line).not.toContain('[plan_complete]');
+  });
+
+  it('shows the stage tag for items that are not actively worked', () => {
+    const item = makeItem({ stage: 'plan_complete', status: 'open' });
+    const line = formatItemLine(item, 120, false);
+    expect(line).toContain('[plan_complete]');
+  });
+
+  it('keys the stage-tag suppression off status, not the retired in_progress stage', () => {
+    const item = makeItem({ stage: 'in_progress', status: 'open' });
+    const line = formatItemLine(item, 120, false);
+    expect(line).toContain('[in_progress]');
+  });
 });
 
 describe('formatDetailView', () => {

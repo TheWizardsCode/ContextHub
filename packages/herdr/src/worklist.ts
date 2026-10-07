@@ -1352,7 +1352,7 @@ export function formatItemLine(
     ? ` ${priorityIcon(item.priority, { noIcons })} ${item.priority}`
     : '';
 
-  const stageTag = item.stage && item.stage !== 'in_progress'
+  const stageTag = item.stage && item.status !== 'in-progress'
     ? ` [${item.stage}]`
     : '';
 
@@ -1967,7 +1967,7 @@ function buildDescriptionPreview(
  *
  * Renders the selected item's fields (via {@link buildMetaRows}) plus a
  * description preview (up to 3 lines) and a last command line when the item's
- * stage is `in_progress`. The panel scrolls independently with its own offset:
+ * status is `in-progress`. The panel scrolls independently with its own offset:
  * when the content is taller than the panel,
  * `metaScrollOffset` selects the visible window and a `[m/M scroll]`
  * indicator is appended to the last line.
@@ -1977,7 +1977,7 @@ function buildDescriptionPreview(
  * @param panelRows - Number of rows available for the panel.
  * @param metaScrollOffset - Vertical scroll offset into the panel content.
  * @param lastCommand - Most recent command for the item (shown only when the
- *                      item stage is `in_progress`).
+ *                      item status is `in-progress`).
  * @returns Exactly `panelRows` lines ready for the renderer.
  */
 export function formatMetadataPanel(
@@ -2015,15 +2015,16 @@ export function formatMetadataPanel(
   // panel space (WL-0MT9ZJF28004UJ28 AC2). The 3-row floor keeps a
   // meaningful preview on short panels; tall panels show more of the
   // description. A row is reserved for the Last command line (when the item
-  // is in_progress) so it stays visible. Cached per (id, description) so the
-  // markdown parser runs at most once per selection change.
-  const reserveLastCommand = item.stage === 'in_progress' ? 1 : 0;
+  // is being actively worked, i.e. status is in-progress) so it stays visible.
+  // Cached per (id, description) so the markdown parser runs at most once per
+  // selection change.
+  const reserveLastCommand = item.status === 'in-progress' ? 1 : 0;
   const previewBudget = Math.max(DESCRIPTION_PREVIEW_MAX_LINES, panelRows - lines.length - reserveLastCommand);
   const preview = buildDescriptionPreview(item.id, item.description, maxCols, previewBudget);
   lines.push(...preview);
 
   // Last command — only meaningful while the item is being worked on
-  if (item.stage === 'in_progress') {
+  if (item.status === 'in-progress') {
     if (lastCommand) {
       lines.push(` ${ANSI.dim}Last command: ${lastCommand}${ANSI.reset}`);
     } else {
@@ -2056,6 +2057,29 @@ export function formatMetadataPanel(
   }
 
   return visible;
+}
+
+/**
+ * Resolve the metadata-panel Last-command line for the selected item
+ * (WL-0MUY1CS9E006ZLS0).
+ *
+ * Only actively-worked items (`status === 'in-progress'`) expose their most
+ * recent recorded command; every other item yields `undefined` so the panel
+ * hides the line. This mirrors {@link formatMetadataPanel}'s status-based
+ * reservation, so the looked-up command and the reserved row always agree.
+ * Best effort: a missing or unreadable command log yields `undefined` and the
+ * panel falls back to its graceful "none yet" placeholder.
+ */
+export function resolveMetaLastCommand(
+  item: WorkItem | null | undefined,
+): string | undefined {
+  if (!item || item.status !== 'in-progress') return undefined;
+  try {
+    return getLastCommand(item.id)?.command ?? undefined;
+  } catch {
+    // ignore: panel shows the graceful "none yet" fallback
+    return undefined;
+  }
 }
 
 /**
@@ -3904,8 +3928,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
 
     // ── Metadata panel ────────────────────────────────────────────
     // Reserve the bottom `panelHeight` rows for the selected row's
-    // metadata (plus its last command when in_progress). The panel has its
-    // own scroll offset (m/M) so long metadata never affects list
+    // metadata (plus its last command when status is in-progress). The panel
+    // has its own scroll offset (m/M) so long metadata never affects list
     // navigation (WL-0MSAYNVBY006LM9X). A heading selection has no item —
     // formatMetadataPanel renders a blank panel (group info lands here via
     // T5).
@@ -6244,19 +6268,12 @@ export async function runWorklistTui(
     }
 
     // Look up the selected item's last recorded command for the metadata
-    // panel (only shown for in_progress items). Best effort: a missing or
-    // unreadable log yields undefined and the panel falls back gracefully.
-    let metaLastCommand: string | undefined;
-    if (state.mode === 'list') {
-      const selected = state.getSelectedItem();
-      if (selected && selected.stage === 'in_progress') {
-        try {
-          metaLastCommand = getLastCommand(selected.id)?.command ?? undefined;
-        } catch {
-          // ignore: panel shows the graceful "none yet" fallback
-        }
-      }
-    }
+    // panel (only shown for actively-worked, status in-progress items). Best
+    // effort: a missing or unreadable log yields undefined and the panel falls
+    // back gracefully.
+    const metaLastCommand = state.mode === 'list'
+      ? resolveMetaLastCommand(state.getSelectedItem())
+      : undefined;
 
     // ── Hover tooltip (WL-0MT9XRZDK006GMUH) ────────────────────────
     // Build the tooltip lines for the currently hovered row when it is a

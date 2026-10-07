@@ -26,6 +26,7 @@ import {
   computeMetadataPanelHeight,
   computeDynamicLayout,
   formatMetadataPanel,
+  resolveMetaLastCommand,
   formatTimestamp,
   buildMetaRows,
   pairMetaRows,
@@ -3118,7 +3119,9 @@ function makeRichItem(): WorkItem {
   return {
     id: 'WL-RICH1',
     title: 'Rich metadata item',
-    status: 'in_progress',
+    // Valid status spelling (hyphen): the metadata panel's Last-command
+    // behaviour now keys off `status === 'in-progress'` (WL-0MUY1CS9E006ZLS0).
+    status: 'in-progress',
     stage: 'in_progress',
     priority: 'high',
     issueType: 'feature',
@@ -3584,7 +3587,7 @@ describe('keyToAction — manual sync binding removed', () => {
 
 // ── Last-command display (WL-0MSEPP1DE00285TQ-FT6) ───────────────────────
 // The metadata panel shows the most recent recorded command when the selected
-// item's stage is in_progress, hidden otherwise, with a graceful fallback.
+// item's status is in-progress, hidden otherwise, with a graceful fallback.
 
 describe('formatMetadataPanel — last command line (in_progress only)', () => {
   it('shows the last command for in_progress items', () => {
@@ -3603,6 +3606,52 @@ describe('formatMetadataPanel — last command line (in_progress only)', () => {
     const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0, null).join('\n');
     expect(joined).toContain('Last command:');
     expect(joined).toContain('none yet');
+  });
+
+  // Status-based in-progress behaviour (WL-0MUY1CS9E006ZLS0): the panel keys
+  // off `status === 'in-progress'`, not the retired `stage === 'in_progress'`.
+  it('shows the last command for status in-progress items whose stage is not in_progress', () => {
+    const item = { ...makeRichItem(), status: 'in-progress', stage: 'plan_complete' };
+    const joined = formatMetadataPanel(item, 80, 20, 0, '/skill:implement WL-RICH1').join('\n');
+    expect(joined).toContain('Last command:');
+    expect(joined).toContain('/skill:implement WL-RICH1');
+  });
+
+  it('hides the last command when a retired in_progress stage is not status in-progress', () => {
+    const item = { ...makeRichItem(), status: 'open', stage: 'in_progress' };
+    const joined = formatMetadataPanel(item, 80, 20, 0, '/skill:implement WL-RICH1').join('\n');
+    expect(joined).not.toContain('Last command:');
+  });
+});
+
+describe('resolveMetaLastCommand — status-based Last-command lookup (WL-0MUY1CS9E006ZLS0)', () => {
+  let logPath: string;
+
+  beforeEach(() => {
+    logPath = join(tmpdir(), `herdr-cmdlookup-${Date.now()}-${Math.random().toString(36).slice(2)}.json`);
+    setLogPath(logPath);
+  });
+
+  afterEach(() => {
+    resetLogPath();
+  });
+
+  it('returns the recorded command for a status in-progress item regardless of stage', () => {
+    recordCommand('WL-RICH1', '/skill:implement WL-RICH1');
+    const item = { ...makeRichItem(), status: 'in-progress', stage: 'plan_complete' };
+    expect(resolveMetaLastCommand(item)).toBe('/skill:implement WL-RICH1');
+  });
+
+  it('returns undefined for an inactive item carrying the retired in_progress stage', () => {
+    recordCommand('WL-RICH1', '/skill:implement WL-RICH1');
+    const item = { ...makeRichItem(), status: 'open', stage: 'in_progress' };
+    expect(resolveMetaLastCommand(item)).toBeUndefined();
+  });
+
+  it('returns undefined for a null selection or an item with no recorded command', () => {
+    expect(resolveMetaLastCommand(null)).toBeUndefined();
+    expect(resolveMetaLastCommand(undefined)).toBeUndefined();
+    expect(resolveMetaLastCommand({ ...makeRichItem(), status: 'in-progress' })).toBeUndefined();
   });
 });
 
@@ -3776,7 +3825,7 @@ describe('pairMetaRows — compound row compression (WL-0MSNIX4V60012266)', () =
   it('pairs Status+Stage on a single row with the ` / ` separator', () => {
     const rows = pairMetaRows(buildMetaRows(makeRichItem()));
     const map = new Map(rows);
-    expect(map.get('Status+Stage')).toBe('\u{1F504} in_progress / \u{1F6E0}\u{FE0F} in_progress');
+    expect(map.get('Status+Stage')).toBe('\u{1F504} in-progress / \u{1F6E0}\u{FE0F} in_progress');
     // The individual rows are consumed — no stray Status/Stage rows remain.
     expect(rows.some(([label]) => label === 'Status' || label === 'Stage')).toBe(false);
   });
@@ -3872,13 +3921,13 @@ describe('metadata views — paired-row compression (WL-0MSNIX4V60012266)', () =
     const panel = formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, true).join('\n');
     // Labels are padded to the shared field width, so assert on the
     // visible value runs rather than exact label-adjacent strings.
-    expect(panel).toMatch(/Status\+Stage\s+in_progress \/ in_progress/);
+    expect(panel).toMatch(/Status\+Stage\s+in-progress \/ in_progress/);
     expect(panel).toMatch(/Priority\+Type\s+high \/ feature/);
     expect(panel).not.toContain('\u{1F504}');
     const detail = formatDetailContent(makeRichItem(), 80, undefined, true).join('\n');
     expect(detail).toContain('Status+Stage');
     expect(detail).toContain('Priority+Type');
-    expect(detail).toMatch(/Status\+Stage\s+\|\s+in_progress \/ in_progress/);
+    expect(detail).toMatch(/Status\+Stage\s+\|\s+in-progress \/ in_progress/);
   });
 
   it('saves 4 vertical rows for a fully-populated item', () => {
@@ -3905,9 +3954,9 @@ describe('metadata views — paired-row compression (WL-0MSNIX4V60012266)', () =
 describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', () => {
   it('prefixes Status, Stage, Priority, Risk and Effort with the list icons', () => {
     const rows = new Map(buildMetaRows(makeRichItem()));
-    // makeRichItem: status in_progress, stage in_progress, priority high,
+    // makeRichItem: status in-progress, stage in_progress, priority high,
     // risk medium, effort 3 (free-form — no icon key).
-    expect(rows.get('Status')).toBe('\u{1F504} in_progress'); // 🔄
+    expect(rows.get('Status')).toBe('\u{1F504} in-progress'); // 🔄
     expect(rows.get('Stage')).toBe('\u{1F6E0}\u{FE0F} in_progress'); // 🛠️
     expect(rows.get('Priority')).toBe('\u{2B50} high'); // ⭐
     expect(rows.get('Risk')).toBe('\u{1F7E1} medium'); // 🟡
@@ -3936,7 +3985,7 @@ describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', 
 
   it('renders plain text values when icons are disabled (no emoji, no [BRACKET] fallbacks)', () => {
     const rows = new Map(buildMetaRows(makeRichItem(), true));
-    expect(rows.get('Status')).toBe('in_progress');
+    expect(rows.get('Status')).toBe('in-progress');
     expect(rows.get('Stage')).toBe('in_progress');
     expect(rows.get('Priority')).toBe('high');
     expect(rows.get('Type')).toBe('feature');
@@ -3988,14 +4037,14 @@ describe('buildMetaRows — audit-aware in_review Stage row (WL-0MSGIXHHI009KFW9
 describe('metadata panel and detail view — icon + text values (WL-0MSGIXHHI009KFW9 AC6)', () => {
   it('renders icon+text in the list-mode metadata panel', () => {
     const joined = formatMetadataPanel(makeRichItem(), 80, 20, 0).join('\n');
-    expect(joined).toContain('\u{1F504} in_progress'); // 🔄 status
+    expect(joined).toContain('\u{1F504} in-progress'); // 🔄 status
     expect(joined).toContain('\u{2B50} high'); // ⭐ priority
     expect(joined).toContain('\u{2705} ready to close'); // ✅ audit
   });
 
   it('renders icon+text in the detail-view metadata table', () => {
     const joined = formatDetailContent(makeRichItem(), 80).join('\n');
-    expect(joined).toContain('\u{1F504} in_progress');
+    expect(joined).toContain('\u{1F504} in-progress');
     expect(joined).toContain('\u{2B50} high');
     expect(joined).toContain('\u{2705} ready to close');
   });
