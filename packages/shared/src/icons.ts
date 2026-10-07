@@ -48,6 +48,10 @@ const STATUS_FALLBACK: Record<string, string> = {
   input_needed:  '[HELP]',
 };
 
+// The CLI stage vocabulary is idea/intake_complete/plan_complete/in_review/
+// done. `in_progress` and `completed` are no longer valid stages but are
+// retained here as display-only legacy entries so persisted rows render
+// fail-soft without throwing (WL-0MUY1CT7D006LEQT).
 const STAGE_ICONS: Record<string, string> = {
   idea:             '\u{1F4A1}',           // 💡
   intake_complete:  '\u{1F4E5}',           // 📥
@@ -606,6 +610,8 @@ export function stageDisplayIcon(
  * Map stage to ANSI 256-color code.
  */
 export function stageColor(stage: string | undefined): number {
+  // `in_progress`/`completed` are retained legacy display entries (see
+  // STAGE_ICONS); unknown stages fall back to 241.
   const colors: Record<string, number> = {
     idea: 247,             // grey
     intake_complete: 68,   // blue-ish

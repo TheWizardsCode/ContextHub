@@ -326,6 +326,38 @@ describe('legacy "done" stage renders identically to "completed" (WL-0MU3U1AMP00
   });
 });
 
+// ── Stage vocabulary alignment (WL-0MUY1CT7D006LEQT) ──────────────────────
+
+describe('stage icon/colour vocabulary alignment (WL-0MUY1CT7D006LEQT)', () => {
+  const VALID_STAGES = ['idea', 'intake_complete', 'plan_complete', 'in_review', 'done'] as const;
+
+  it('renders a non-fallback icon and colour for every valid CLI stage', () => {
+    for (const stage of VALID_STAGES) {
+      expect(stageIcon(stage)).not.toBe('\u{2753}'); // ❓ is the unknown fallback
+      expect(stageColor(stage)).not.toBe(241);        // 241 is the default colour
+    }
+  });
+
+  it('falls back to the question mark for an unknown stage without throwing', () => {
+    expect(() => stageIcon('bogus_stage')).not.toThrow();
+    expect(stageIcon('bogus_stage')).toBe('\u{2753}'); // ❓
+    expect(stageIcon('bogus_stage', { noIcons: true })).toBe('[BOGUS_STAGE]');
+    expect(stageColor('bogus_stage')).toBe(241);
+  });
+
+  it('renders the removed in_progress/completed stages fail-soft and deterministically', () => {
+    // A persisted stage=in_progress row must never throw; legacy display
+    // entries keep the rendering deterministic (WL-0MUY1CT7D006LEQT).
+    for (const legacy of ['in_progress', 'completed'] as const) {
+      expect(() => stageIcon(legacy)).not.toThrow();
+      expect(() => stageIcon(legacy, { noIcons: true })).not.toThrow();
+      expect(() => stageColor(legacy)).not.toThrow();
+      expect(stageIcon(legacy)).toBeTruthy();
+      expect(typeof stageColor(legacy)).toBe('number');
+    }
+  });
+});
+
 // ── Content-fingerprint freshness gate (WL-0MUBVH5S0008NQ9K) ──────────────
 
 describe('isAuditFresh — fingerprint match makes audit fresh regardless of updatedAt (AC3–AC5)', () => {
