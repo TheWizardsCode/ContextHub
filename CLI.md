@@ -107,7 +107,7 @@ Options:
 - `--description-file <file>` — Read description from a file (optional).
 - `-s, --status <status>` — Status value from config defaults (optional; default: `open`).
 - `-p, --priority <priority>` — `low|medium|high|critical` (optional; default: `medium`).
-- `-P, --parent <parentId>` — Parent work item ID (optional).
+- `-P, --parent <parentId>` — Parent work item ID (optional). Pass `--parent null` (case-insensitive; aliases: `none`, `nil`, `-`, or `""`) to detach the item (set `parentId` to `null`). Without this flag the item is top-level by default.
 - `--tags <tags>` — Comma-separated tags (optional).
 - `-a, --assignee <assignee>` — Assignee name (optional).
 - `--stage <stage>` — Stage value from config defaults (optional).
@@ -166,6 +166,8 @@ Update fields on one or more existing work items. Accepts multiple IDs. Options 
 > **Auto-revert:** when `--audit-text`/`--audit-file` carries a `Ready to close: No` verdict for an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
 
 > **Reparenting demotion:** when `--parent <id>` attaches an item to a `completed`/`in_review` parent, the parent is demoted to `open`/`plan_complete` so a finished parent never silently gains uncompleted work. Automation-authored telemetry children (tagged `test-failure`, titled `[test-failure]…`, or created by a known bot identity) are exempt and do not rewind the parent (WL-0MTWU4XUD0001ALR). A demotion records an audit-trail comment on the parent naming the attached child, the actor, and the transition (WL-0MTWU4Y82001B3UH).
+
+> **Detach:** pass `--parent null` (case-insensitive; also accepted: `none`, `nil`, `-`, or `""`) to detach an item, setting its `parentId` to `null`. Use `wl doctor dangling-parents` to detect and optionally fix orphaned parent references (e.g. the legacy `WL-NULL` artifact).
 
 Automatic re-sort:
 

@@ -252,6 +252,28 @@ export function normalizeCliId(id?: string, overridePrefix?: string): string | u
 }
 
 /**
+ * Normalise a CLI `--parent` value. Sentinel tokens (case-insensitive) are
+ * treated as "detach" and return `null`; otherwise the value is delegated to
+ * `normalizeCliId` so that partial IDs are prefixed correctly.
+ *
+ * Accepted sentinel values (all case-insensitive): `null`, `none`, `nil`, `-`
+ * (as well as an empty string, which was the original undocumented detach
+ * syntax).
+ *
+ * This avoids the bogus `WL-NULL` parent that `normalizeCliId('null')` would
+ * otherwise produce when a user runs `wl update <id> --parent null`.
+ */
+const PARENT_DETACH_SENTINELS = new Set(['null', 'none', 'nil', '-']);
+
+export function normalizeParentId(id?: string, overridePrefix?: string): string | null {
+  if (id === undefined || id === null) return null;
+  const trimmed = String(id).trim();
+  if (trimmed === '') return null;
+  if (PARENT_DETACH_SENTINELS.has(trimmed.toLowerCase())) return null;
+  return normalizeCliId(trimmed, overridePrefix) ?? null;
+}
+
+/**
  * Create shared plugin context
  */
 export function createPluginContext(program: Command): PluginContext {
@@ -273,6 +295,7 @@ export function createPluginContext(program: Command): PluginContext {
       getConfig: loadConfig,
       getPrefix,
       normalizeCliId,
+      normalizeParentId,
       isJsonMode: () => program.opts().json
     }
   };

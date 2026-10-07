@@ -6,6 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
 import { validateStatusStageItems } from '../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../doctor/dependency-check.js';
+import { validateParentReferences } from '../doctor/parent-check.js';
 import { listPendingMigrations, runMigrations } from '../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
 import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
@@ -623,6 +624,76 @@ export default function register(ctx: PluginContext): void {
       console.log('Read-only report. Use `wl audit-waive <id> --reason "..."` to record a deliberate exception.');
     });
 
+  // ── Dangling parent references (WL-0MUJM2LV1000IHKR) ────────────────
+  doctor
+    .command('dangling-parents')
+    .description(
+      'Detect items whose parentId references a non-existent work item '
+        + '(e.g. WL-NULL artifacts from --parent null without fix) and '
+        + 'optionally fix them by setting parentId to null.',
+    )
+    .option('--dry-run', 'Show dangling references without modifying them')
+    .option('--apply', 'Fix dangling parentId by setting it to null')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action((opts: { dryRun?: boolean; apply?: boolean; prefix?: string }) => {
+      utils.requireInitialized();
+      const db = utils.getDatabase(opts.prefix);
+      const all = db.getAll();
+      const byId = new Map(all.map(item => [item.id, item]));
+
+      const dangling = validateParentReferences(all).map(finding => ({
+        id: finding.itemId,
+        title: byId.get(finding.itemId)?.title || '',
+        parentId: String((finding.context as { parentId?: unknown }).parentId ?? ''),
+      }));
+
+      if (dangling.length === 0) {
+        if (utils.isJsonMode()) {
+          output.json({ success: true, items: [], fixed: [] });
+          return;
+        }
+        console.log('Doctor dangling-parents: no dangling parent references found.');
+        return;
+      }
+
+      // Default is dry-run; --apply is required to change anything.
+      if (opts.dryRun || !opts.apply) {
+        if (utils.isJsonMode()) {
+          const out: any = { dryRun: true, items: dangling, count: dangling.length };
+          if (!opts.dryRun) {
+            out.hint = 'Use --apply to fix by setting parentId to null';
+          }
+          output.json(out);
+          return;
+        }
+        console.log(
+          `Doctor dangling-parents: found ${dangling.length} work item(s) with dangling parent references.`,
+        );
+        for (const d of dangling) {
+          console.log(`  - ${d.id}: "${d.title}" (parentId = ${d.parentId})`);
+        }
+        if (!opts.dryRun) {
+          console.log('');
+          console.log('Use --dry-run to preview or --apply to fix by setting parentId to null.');
+        }
+        return;
+      }
+
+      // --apply: detach every dangling item.
+      const fixed: Array<{ id: string; parentId: string }> = [];
+      for (const d of dangling) {
+        db.update(d.id, { parentId: null });
+        fixed.push({ id: d.id, parentId: d.parentId });
+      }
+      if (utils.isJsonMode()) {
+        output.json({ success: true, fixed });
+        return;
+      }
+      console.log(
+        `Doctor dangling-parents: fixed ${fixed.length} item(s) - parentId set to null.`,
+      );
+    });
+
   doctor
     .command('priority')
     .description('Detect and fix invalid priority values in the database')
@@ -1009,6 +1080,7 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
       let findings: any[] = [
         ...validateStatusStageItems(items, rules),
         ...validateDependencyEdges(items, dependencyEdges),
+        ...validateParentReferences(items),
         ...priorityFindings,
         ...validatePodcastScripts(items),
       ];
@@ -1105,6 +1177,11 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
               if ((f.proposedFix as any).stage) update.stage = (f.proposedFix as any).stage;
               if ((f.proposedFix as any).priority) update.priority = (f.proposedFix as any).priority;
               if ((f.proposedFix as any).description) update.description = (f.proposedFix as any).description;
+              // A `parentId: null` fix is a detach — use hasOwnProperty so the
+              // null value (falsy) is not skipped (WL-0MUJM2LV1000IHKR).
+              if (Object.prototype.hasOwnProperty.call(f.proposedFix, 'parentId')) {
+                update.parentId = (f.proposedFix as any).parentId;
+              }
               if (Object.keys(update).length > 0) {
                 try {
                   db.update(itemId, update);
