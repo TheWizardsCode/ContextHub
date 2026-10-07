@@ -1297,8 +1297,32 @@ canonical `## Appendix: Clarifying questions` heading is inserted; when one
 exists the confirmed questions are merged into it, keeping re-runs idempotent.
 
 If no provider is configured, or the request fails, times out or returns
-malformed JSON, the command degrades silently to the deterministic-only
-behaviour described below — no error is surfaced.
+malformed JSON, the command degrades to the deterministic-only behaviour
+described below, after printing a brief
+`LLM unavailable — using structured evidence.` notice so the operator knows
+the questions did not come from the model.
+
+#### In-flight progress feedback
+
+Both LLM paths (question extraction and the producer-review explanation) can
+block for up to 15 s. To make that visible, the command prints a static
+`Thinking…` status message immediately before each request.
+
+- When stdout is a TTY, an animated spinner is rendered on the same line and
+  is cleared deterministically before any subsequent output or prompt, so it
+  never interleaves with the readline prompt.
+- When stdout is not a TTY (piped or captured), only the static message is
+  written — no spinner frames and no control characters — keeping captured
+  output clean.
+- In `--json` mode no status or spinner is emitted at all; stdout stays
+  byte-for-byte valid JSON.
+- When the command falls back to structured evidence (the LLM is unavailable,
+  times out or errors), it prints `LLM unavailable — using structured
+  evidence.` once and clears the spinner. An explicit `--no-llm` opt-out does
+  not print this notice.
+
+No LLM request is issued — and therefore no feedback is shown — when the
+deterministic parser already found clarifying questions.
 
 #### When there are no questions to answer
 
@@ -1322,7 +1346,9 @@ large. The summary and raw-output excerpt are individually bounded so a single
 large audit cannot dominate the prompt.
 
 When the LLM is disabled (`--no-llm`) or unreachable the command falls back
-silently to the **structured evidence**, in priority order:
+to the **structured evidence** (printing the `LLM unavailable — using
+structured evidence.` notice for the unreachable case, but not for an
+explicit `--no-llm` opt-out), in priority order:
 
 1. the latest audit result (verdict and summary);
 2. a durable audit-gap waiver (`auditWaiver`);
@@ -1353,7 +1379,8 @@ Options:
   `needsProducerReview` (boolean), `producerReviewExplanation` (string or
   `null`; multi-line explanations are preserved), `noSection`,
   `noQuestions`, `total`, `outstanding` and `allAnswered`. Performs no
-  prompts, no mutation and (with `--no-llm`) no LLM call.
+  prompts, no mutation, no progress/status output and (with `--no-llm`) no
+  LLM call.
 - `--no-llm` — Disable all LLM use (the producer-review explanation and the
   LLM-assisted question extraction) and use the structured fallback instead
   (default: explanation on, extraction off unless enabled).
