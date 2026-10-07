@@ -102,7 +102,7 @@ describe('setWorklogDir / runWl with --worklog-dir', () => {
     setExecFileAsync(mockFn as any);
     setWorklogDir('/global-opt/.worklog');
 
-    await fetchItemsByStage('in_progress');
+    await fetchItemsByStage('plan_complete');
 
     const callArgs = mockFn.mock.calls[0][1] as string[];
     // --worklog-dir must appear before the 'list' command
@@ -136,12 +136,12 @@ describe('setWorklogDir / runWl with --worklog-dir', () => {
     });
     setExecFileAsync(mockFn as any);
 
-    await fetchItemsByStage('in_progress');
+    await fetchItemsByStage('done');
 
     const callArgs = mockFn.mock.calls[0][1] as string[];
     expect(callArgs).toContain('list');
     expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('open');
-    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('in_progress');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('done');
     expect(callArgs).toContain('--root-only');
   });
 });

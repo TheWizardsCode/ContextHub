@@ -434,13 +434,15 @@ describe('fetchChildrenForItem', () => {
   });
 
   it('regroups child items priority-first, preserving depth (WL-0MSOPHLD1000EWNN)', async () => {
-    // CLI order is NOT priority-first: a medium in_progress child precedes a
+    // CLI order is NOT priority-first: a medium Group N child precedes a
     // critical one. The regroup wiring must reorder children to the
     // canonical bucket order while keeping the hierarchy `depth` intact.
+    // (The medium child uses a valid lifecycle stage; the removed
+    // `in_progress` stage is no longer a Group N stage — WL-0MUY1CSQG007TCYX.)
     const mockFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
         workItems: [
-          { id: 'WL-001-C1', title: 'In progress child', stage: 'in_progress', priority: 'medium' },
+          { id: 'WL-001-C1', title: 'Medium child', stage: 'intake_complete', priority: 'medium' },
           { id: 'WL-001-C2', title: 'Critical child', stage: 'plan_complete', priority: 'critical' },
         ],
       }),

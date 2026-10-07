@@ -191,7 +191,7 @@ describe('fetcher timeout defaults (WL-0MSJNJXX2001NMHS)', () => {
     });
     setExecFileAsync(mockFn as any);
 
-    await fetchItemsByStage('in_progress');
+    await fetchItemsByStage('plan_complete');
 
     const opts = mockFn.mock.calls[0][2] as { timeout?: number } | undefined;
     expect(opts).toBeDefined();
