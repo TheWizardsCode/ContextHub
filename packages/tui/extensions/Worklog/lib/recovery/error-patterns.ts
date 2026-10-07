@@ -96,7 +96,21 @@ const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
   /bad\s*gateway/i,
   /server\s*encountered/i,
   /all providers exhausted/i,
-  /no provider available/i,
+  // llm-proxy scheduled-window exhaustion body (proxy returns HTTP 503):
+  // "All providers unavailable: no provider is available during the current
+  // scheduled time window". Classified as SERVER_ERROR so the recovery loop
+  // retries with exponential backoff instead of treating it as UNKNOWN and
+  // silently stalling the turn (WL-0MU56ZSSB0054D8W, extending the
+  // WL-0MT656GDS0052FTK fix for "all providers exhausted"). The optional
+  // "(is )" group also covers the earlier "no provider available" wording,
+  // so this single pattern replaces that former narrower entry rather than
+  // leaving it as an unreachable duplicate. Longer term, key off a stable
+  // machine-readable `code`/`type` field once the proxy exposes one — see
+  // follow-up LP-0MU56ZM0K005F69G.
+  /all providers unavailable/i,
+  /no provider\s+(is\s+)?available/i,
+  /scheduled time window/i,
+  /outside its available_times/i,
   // pi-ai mapStopReason() collapses the enriched finish_reason payload to
   // the generic string "Provider finish_reason: error", discarding type/
   // message/suggested_action. Classify as server-error so the recovery loop
