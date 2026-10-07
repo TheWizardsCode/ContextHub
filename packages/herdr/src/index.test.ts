@@ -20,6 +20,7 @@ import {
   spawnBackgroundPi,
   formatBackgroundFailure,
   CAPTURE_TIMEOUT_MS,
+  extractWorkItemId,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
 import {
@@ -37,6 +38,12 @@ import {
   setExecFileAsync,
   setWorklogDir,
 } from './fetcher.js';
+import type {
+  DispatcherAnchorDeps,
+  DispatcherPaneInfo,
+  DispatcherTabInfo,
+  ItemTabAnchor,
+} from './dispatcher-anchor.js';
 
 // ---------------------------------------------------------------------------
 // buildSendToPiArgs tests (WL-0MSD48ZFC0043AO3)
@@ -194,6 +201,263 @@ describe('buildRunInPaneArgs', () => {
 
   it('omits --pane-name when none is provided', () => {
     expect(buildRunInPaneArgs('ls -la', '/project')).not.toContain('--pane-name');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Interactive item-tab anchor placement (WL-0MUYI3ITQ004DDCQ, test-first)
+//
+// TDD red phase: the interactive dispatch path does NOT yet route ID-carrying
+// dispatches into a work-item-ID tab, so `buildSendToPiArgs` /
+// `buildRunInPaneArgs` do not accept an `anchor` argument and
+// `resolveInteractiveWorkspaceId` / `resolveInteractiveItemAnchor` are not
+// exported. These tests pin the interface agreed with the sibling
+// implementation child (WL-0MUYI3JAO002BTNL) and go green when it lands
+// (parent WL-0MUKZGEQ2007FECS, AC1–AC6). The dynamic import in
+// `loadInteractiveAnchorHelpers` keeps the existing index.test.ts suite green
+// in the red phase — only these new cases fail.
+// ---------------------------------------------------------------------------
+
+type InteractiveAnchorHelpers = {
+  resolveInteractiveWorkspaceId?: (
+    env?: Record<string, string | undefined>,
+  ) => string | null;
+  resolveInteractiveItemAnchor?: (
+    cwd: string,
+    workspaceId: string,
+    itemId: string,
+    deps?: DispatcherAnchorDeps,
+  ) => Promise<ItemTabAnchor | null>;
+};
+
+async function loadInteractiveAnchorHelpers(): Promise<InteractiveAnchorHelpers> {
+  return (await import('./index.js')) as unknown as InteractiveAnchorHelpers;
+}
+
+/** Minimal `DispatcherAnchorDeps` stub for the interactive item-tab tests. */
+function makeInteractiveAnchorDeps(
+  over: Partial<DispatcherAnchorDeps> = {},
+): DispatcherAnchorDeps {
+  return {
+    createWorkspace: async () => ({ workspaceId: 'wDefault', paneId: 'wDefault:p1' }),
+    isPaneAlive: async () => true,
+    listTabs: async () => [] as DispatcherTabInfo[],
+    createTab: async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }),
+    listPanes: async () => [] as DispatcherPaneInfo[],
+    ...over,
+  } as DispatcherAnchorDeps;
+}
+
+describe('buildSendToPiArgs — interactive item-tab anchor (AC1/AC6)', () => {
+  it('appends --anchor <paneId> when an anchor is supplied', () => {
+    expect(
+      buildSendToPiArgs('/skill:implement WL-1', '/project', 'code', undefined, undefined, false, 'w9:p7'),
+    ).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      '--model',
+      'code',
+      '--anchor',
+      'w9:p7',
+      '/skill:implement WL-1',
+    ]);
+  });
+
+  it('forwards --anchor as a head option (value follows, prompt stays last)', () => {
+    const args = buildSendToPiArgs(
+      '/skill:implement WL-1',
+      '/project',
+      'code',
+      '/tmp/pane.json',
+      'Manually triggered implement - WL-1',
+      true,
+      'w9:p7',
+    );
+    const at = args.indexOf('--anchor');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(args[at + 1]).toBe('w9:p7');
+    expect(args[args.length - 1]).toBe('/skill:implement WL-1');
+  });
+
+  it('omits --anchor when it is undefined (no-ID / fail-open fallback)', () => {
+    expect(buildSendToPiArgs('/skill:implement WL-1', '/project', 'code')).not.toContain('--anchor');
+  });
+
+  it('omits --anchor when it is an empty string', () => {
+    expect(
+      buildSendToPiArgs('/skill:implement WL-1', '/project', 'code', undefined, undefined, false, ''),
+    ).not.toContain('--anchor');
+  });
+});
+
+describe('buildRunInPaneArgs — interactive item-tab anchor (AC2/AC6)', () => {
+  it('appends --anchor <paneId> when an anchor is supplied', () => {
+    expect(
+      buildRunInPaneArgs('wl update WL-1 --priority high', '/project', undefined, false, 'w9:p7'),
+    ).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      '--anchor',
+      'w9:p7',
+      'wl update WL-1 --priority high',
+    ]);
+  });
+
+  it('forwards --anchor as a head option (value follows, command stays last)', () => {
+    const args = buildRunInPaneArgs(
+      'wl update WL-1 --priority high',
+      '/project',
+      'Shell: wl update WL-1 WL-1',
+      true,
+      'w9:p7',
+    );
+    const at = args.indexOf('--anchor');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(args[at + 1]).toBe('w9:p7');
+    expect(args[args.length - 1]).toBe('wl update WL-1 --priority high');
+  });
+
+  it('omits --anchor when it is undefined', () => {
+    expect(buildRunInPaneArgs('ls -la', '/project')).not.toContain('--anchor');
+  });
+
+  it('omits --anchor when it is an empty string', () => {
+    expect(buildRunInPaneArgs('ls -la', '/project', undefined, false, '')).not.toContain('--anchor');
+  });
+});
+
+describe('extractWorkItemId — no-ID fallback (AC4)', () => {
+  it('returns undefined for a blank /prompt: session (Open Pi Agent / P n)', () => {
+    expect(extractWorkItemId('/prompt:')).toBeUndefined();
+  });
+
+  it('returns undefined for generic commands with no work-item ID', () => {
+    expect(extractWorkItemId('ls -la')).toBeUndefined();
+    expect(extractWorkItemId('wl search test')).toBeUndefined();
+    expect(extractWorkItemId('wl update <id> --priority high')).toBeUndefined();
+  });
+
+  it('returns the work-item ID when one is present (both channels)', () => {
+    expect(extractWorkItemId('/skill:implement WL-ABC')).toBe('WL-ABC');
+    expect(extractWorkItemId('!!wl update WL-ABC --priority high')).toBe('WL-ABC');
+  });
+});
+
+describe('resolveInteractiveWorkspaceId (AC1/AC2)', () => {
+  it('returns HERDR_WORKSPACE_ID when set', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.resolveInteractiveWorkspaceId!({ HERDR_WORKSPACE_ID: 'w45' })).toBe('w45');
+  });
+
+  it('returns null when HERDR_WORKSPACE_ID is unset', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.resolveInteractiveWorkspaceId!({})).toBeNull();
+  });
+
+  it('treats a blank HERDR_WORKSPACE_ID as absent (fail-open to the current pane)', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.resolveInteractiveWorkspaceId!({ HERDR_WORKSPACE_ID: '' })).toBeNull();
+    expect(helpers.resolveInteractiveWorkspaceId!({ HERDR_WORKSPACE_ID: '   ' })).toBeNull();
+  });
+
+  it('defaults to process.env.HERDR_WORKSPACE_ID', async () => {
+    const saved = process.env.HERDR_WORKSPACE_ID;
+    process.env.HERDR_WORKSPACE_ID = 'w77';
+    try {
+      const helpers = await loadInteractiveAnchorHelpers();
+      expect(helpers.resolveInteractiveWorkspaceId!()).toBe('w77');
+    } finally {
+      if (saved === undefined) delete process.env.HERDR_WORKSPACE_ID;
+      else process.env.HERDR_WORKSPACE_ID = saved;
+    }
+  });
+});
+
+describe('resolveInteractiveItemAnchor (AC3/AC5)', () => {
+  let coordDir: string;
+  let savedCoord: string | undefined;
+
+  beforeEach(() => {
+    coordDir = mkdtempSync(join(tmpdir(), 'interactive-anchor-'));
+    savedCoord = process.env.HERDR_COORDINATION_DIR;
+    process.env.HERDR_COORDINATION_DIR = coordDir;
+  });
+
+  afterEach(() => {
+    if (savedCoord === undefined) delete process.env.HERDR_COORDINATION_DIR;
+    else process.env.HERDR_COORDINATION_DIR = savedCoord;
+    try { rmSync(coordDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('AC3: first call creates the exact item-ID tab and returns its anchor pane', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeInteractiveAnchorDeps({ createTab });
+
+    const got = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps);
+
+    expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(createTab).toHaveBeenCalledWith('w9', 'WL-ABC');
+  });
+
+  it('AC3: second call for the same workspace + item reuses the tab (no duplicate create)', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const tabs: DispatcherTabInfo[] = [];
+    const createTab = vi.fn(async (ws: string, label: string) => {
+      const anchor = { tabId: `${ws}:t${label}`, paneId: `${ws}:t${label}:p1` };
+      tabs.push({ tabId: anchor.tabId, label });
+      return anchor;
+    });
+    const deps = makeInteractiveAnchorDeps({
+      createTab,
+      listTabs: async () => tabs.map((t) => ({ ...t })),
+      listPanes: async () => tabs.map((t) => ({ paneId: `${t.tabId}:p1`, tabId: t.tabId })),
+      isPaneAlive: async () => true,
+    });
+
+    const first = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps);
+    const second = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps);
+
+    expect(first).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(second).toEqual(first);
+    expect(createTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC5 fail-open: tab resolution throws → null (never throws)', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const deps = makeInteractiveAnchorDeps({
+      listTabs: async () => { throw new Error('herdr tab list failed'); },
+    });
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps)).resolves.toBeNull();
+  });
+
+  it('AC5 fail-open: tab creation returns null → null', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const deps = makeInteractiveAnchorDeps({ createTab: async () => null });
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps)).resolves.toBeNull();
+  });
+
+  it('AC5 fail-open: tab creation throws → null', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const deps = makeInteractiveAnchorDeps({
+      createTab: async () => { throw new Error('herdr tab create failed'); },
+    });
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps)).resolves.toBeNull();
+  });
+
+  it('AC5 guard: empty workspace id or item id → null', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const deps = makeInteractiveAnchorDeps();
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', '', 'WL-ABC', deps)).resolves.toBeNull();
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', 'w9', '', deps)).resolves.toBeNull();
   });
 });
 

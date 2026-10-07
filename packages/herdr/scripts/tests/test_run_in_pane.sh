@@ -151,6 +151,35 @@ else
   fail "--no-focus must not skip pane run (log: $(cat "$HERDR_LOG" 2>/dev/null))"
 fi
 
+# --anchor <paneId> splits the given pane instead of --current (AC2/AC6):
+# an ID-carrying interactive dispatch anchors to the item tab's root pane.
+# TDD red phase: run-in-pane.sh does not parse --anchor yet, so these cases
+# fail until the sibling implementation child (WL-0MUYI3JAO002BTNL) lands.
+echo ""
+echo "=== Test: --anchor splits the given pane instead of --current ==="
+
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --anchor w9:p7 --no-focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "pane split --pane w9:p7" "$HERDR_LOG" 2>/dev/null; then
+  pass "--anchor splits the given pane (--pane w9:p7)"
+else
+  fail "--anchor should split --pane w9:p7 (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+if grep -q "pane split --current" "$HERDR_LOG" 2>/dev/null; then
+  fail "--anchor must not split --current"
+else
+  pass "--anchor does not use --current"
+fi
+
+# Omitting --anchor keeps the current-pane split (backward compatible).
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --no-focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "pane split --current" "$HERDR_LOG" 2>/dev/null; then
+  pass "omitting --anchor keeps the current-pane split"
+else
+  fail "without --anchor the split must use --current (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
 rm -rf "$SANDBOX"
 
 echo ""
