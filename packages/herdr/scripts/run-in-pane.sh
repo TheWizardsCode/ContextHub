@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # run-in-pane.sh — Execute a command visibly in a new Herdr pane
 #
-# Splits the current pane to the right, runs the given command through a
+# Splits the current pane to the right (or a given anchor pane when
+# --anchor is supplied), runs the given command through a
 # shell in the new pane so its command line and output are visible, renames
 # the pane, and manages the pane lifecycle:
 #   - any exit status → the pane stays open so the user can read the output;
@@ -10,7 +11,7 @@
 #     with Enter or herdr `close_pane` (default `prefix+x`)
 #
 # Usage:
-#   run-in-pane.sh [--cwd <path>] [--no-focus] [--pane-name <name>] <command>
+#   run-in-pane.sh [--cwd <path>] [--no-focus] [--anchor <paneId>] [--pane-name <name>] <command>
 #
 # The command is executed via `bash -c`, so compound commands (`&&`),
 # single-quoted arguments (e.g. `--summary 'Approved by manual review'`),
@@ -26,6 +27,12 @@
 #                      (backward compatible).
 #   --pane-name <name> Pane title (overrides RUN_IN_PANE_NAME and the
 #                      default "Command Output"; WL-0MSJ4E8UA005KG9Y)
+#   --anchor <paneId>  Split from the given pane id (e.g. an item-ID tab's
+#                      root pane) instead of the current pane, so an
+#                      ID-carrying interactive dispatch lands in the
+#                      work-item-ID tab (WL-0MUYI3JAO002BTNL). Absent =
+#                      legacy current-pane split. The flag may also be given
+#                      as `--anchor=<paneId>`.
 #
 # Everything after the options — including commands whose first token
 # starts with `--` — is treated as the command to run.
@@ -44,6 +51,17 @@ set -uo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
+
+# Extract the pane id from a `herdr pane split` JSON envelope. Tolerates the
+# `pane_id` / `paneId` / `id` key variants and nested `result` envelopes
+# (CLI-shape tolerance). Prints the first id found, or nothing when the
+# output cannot be parsed (the caller then logs the raw output and fails).
+parse_pane_id() {
+  printf '%s' "$1" | sed -n \
+    -e 's/.*"pane_id": *"\([^"]*\)".*/\1/p' \
+    -e 's/.*"paneId": *"\([^"]*\)".*/\1/p' \
+    -e 's/.*"id": *"\([^"]*\)".*/\1/p' | head -n1
+}
 
 # ── In-pane wrapper mode ─────────────────────────────────────────────────
 # Invoked by the new pane itself (via `herdr pane run ... exec bash
@@ -94,11 +112,12 @@ fi
 # ── Main mode: split, run, rename ────────────────────────────────────────
 pane_name="${RUN_IN_PANE_NAME:-Command Output}"
 # The command is everything after the leading options. Only --cwd,
-# --no-focus and --pane-name are parsed as options at the head of argv;
-# everything else (including commands whose first token begins with --) is
-# the command.
+# --no-focus, --pane-name and --anchor are parsed as options at the head of
+# argv; everything else (including commands whose first token begins with --)
+# is the command.
 target_cwd=""
 no_focus=false
+anchor=""
 while [ $# -gt 0 ]; do
   case "${1:-}" in
     --cwd)
@@ -112,6 +131,14 @@ while [ $# -gt 0 ]; do
     --pane-name)
       pane_name="$2"
       shift 2
+      ;;
+    --anchor)
+      anchor="$2"
+      shift 2
+      ;;
+    --anchor=*)
+      anchor="${1#*=}"
+      shift
       ;;
     *)
       break
@@ -130,21 +157,30 @@ if ! command -v "$herdr_bin" &>/dev/null; then
   exit 1
 fi
 
-# Split the current pane to the right
-# Resolve the target CWD for the new pane: --cwd arg > HERDR_RESOLVED_CWD
-# > $PWD.  The new pane must start in the correct project root; herdr's
-# "follow" policy would otherwise inherit the source pane's CWD (e.g. the
-# plugin directory).
+# Split the target pane to the right. Resolve the target CWD for the new
+# pane: --cwd arg > HERDR_RESOLVED_CWD > $PWD.  The new pane must start in
+# the correct project root; herdr's "follow" policy would otherwise inherit
+# the source pane's CWD (e.g. the plugin directory).
+#
+# --anchor <paneId> splits THAT pane instead of the current one (an item-ID
+# tab's root pane for an ID-carrying interactive dispatch); without it the
+# legacy `--current` split is kept (backward compatible).
 target_cwd="${target_cwd:-${HERDR_RESOLVED_CWD:-$PWD}}"
-split_out="$("$herdr_bin" pane split --current --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
+if [ -n "$anchor" ]; then
+  split_out="$("$herdr_bin" pane split --pane "$anchor" --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
+else
+  split_out="$("$herdr_bin" pane split --current --direction right --no-focus --cwd "$target_cwd" 2>/dev/null || true)"
+fi
 
 if [ -z "$split_out" ]; then
-  echo "Error: Failed to split pane. Ensure you are inside a herdr session." >&2
+  echo "Error: Failed to split pane. Ensure you are inside a herdr session (or pass --anchor with a valid pane id)." >&2
   exit 1
 fi
 
-# Parse the pane_id from JSON output
-np="$(printf '%s' "$split_out" | sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' | head -n1)"
+# Parse the pane_id from JSON output. Tolerates the `pane_id` / `paneId` /
+# `id` key variants and nested `result` envelopes (CLI-shape tolerance,
+# AC6); on failure the raw output is logged so a shape change is diagnosable.
+np="$(parse_pane_id "$split_out")"
 
 if [ -z "$np" ]; then
   echo "Error: Could not determine new pane ID from split output" >&2

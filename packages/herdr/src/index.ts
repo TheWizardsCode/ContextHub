@@ -241,6 +241,13 @@ export { stripAgentPromptPrefix };
  * or `undefined`, `--no-focus` is passed so the selection list keeps focus
  * (the default for most shortcuts). The shared script's own default
  * (focus=true) is unchanged for its other consumers.
+ *
+ * Interactive item-ID tab placement (WL-0MUYI3JAO002BTNL, parent
+ * WL-0MUKZGEQ2007FECS): when `anchor` is a non-empty pane id, `--anchor
+ * <paneId>` is forwarded so send-to-pi.sh splits that pane instead of the
+ * current pane, placing the new pi pane in the work-item-ID tab. An
+ * absent/empty anchor omits the flag, keeping the legacy current-pane split
+ * (no-ID commands and the fail-open fallback, AC4/AC5).
  */
 export function buildSendToPiArgs(
   command: string,
@@ -249,6 +256,7 @@ export function buildSendToPiArgs(
   paneIdFile?: string,
   paneName?: string,
   focus?: boolean,
+  anchor?: string,
 ): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
   const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
@@ -260,6 +268,9 @@ export function buildSendToPiArgs(
   }
   if (paneIdFile) {
     args.push('--pane-id-file', paneIdFile);
+  }
+  if (anchor) {
+    args.push('--anchor', anchor);
   }
   args.push(agentPrompt);
   return args;
@@ -280,11 +291,27 @@ export function buildSendToPiArgs(
  *
  * When `paneName` is provided, `--pane-name <paneName>` replaces the
  * script's default "Command Output" (WL-0MSJ4E8UA005KG9Y).
+ *
+ * Interactive item-ID tab placement (WL-0MUYI3JAO002BTNL, parent
+ * WL-0MUKZGEQ2007FECS): when `anchor` is a non-empty pane id, `--anchor
+ * <paneId>` is forwarded so run-in-pane.sh splits that pane instead of the
+ * current one, placing the command-output pane in the work-item-ID tab. An
+ * absent/empty anchor omits the flag, keeping the legacy current-pane split
+ * (no-ID commands and the fail-open fallback, AC4/AC5).
  */
-export function buildRunInPaneArgs(command: string, targetCwd: string, paneName?: string, focus?: boolean): string[] {
+export function buildRunInPaneArgs(
+  command: string,
+  targetCwd: string,
+  paneName?: string,
+  focus?: boolean,
+  anchor?: string,
+): string[] {
   const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
   if (paneName) {
     args.push('--pane-name', paneName);
+  }
+  if (anchor) {
+    args.push('--anchor', anchor);
   }
   args.push(command);
   return args;
@@ -751,6 +778,72 @@ async function defaultItemTabAnchorResolver(
       workspaceId,
       itemId,
     );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Resolve the workspace that should host an interactive item-ID tab
+ * (WL-0MUYI3JAO002BTNL, parent WL-0MUKZGEQ2007FECS, Q2a).
+ *
+ * Interactive dispatch uses the invoking pane's current workspace, not the
+ * project-resolved workspace the automated downtime path uses. Reads
+ * `HERDR_WORKSPACE_ID` (present in the plugin pane environment); when it is
+ * absent/blank it falls back to the workspace component of `HERDR_PANE_ID`
+ * (`<workspace>:<pane>`), then `null` so the caller fails open to the
+ * current-pane split. Synchronous and total: never throws.
+ *
+ * @param env - Environment to read (defaults to `process.env`).
+ * @returns The workspace id, or `null` when it cannot be determined.
+ */
+export function resolveInteractiveWorkspaceId(
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  const explicit = env.HERDR_WORKSPACE_ID;
+  if (typeof explicit === 'string' && explicit.trim() !== '') {
+    return explicit.trim();
+  }
+  const invokingPane = env.HERDR_PANE_ID;
+  if (typeof invokingPane === 'string') {
+    const sep = invokingPane.indexOf(':');
+    if (sep > 0) {
+      const derived = invokingPane.slice(0, sep).trim();
+      if (derived !== '') return derived;
+    }
+  }
+  return null;
+}
+
+/**
+ * Resolve (or create) the item-ID tab anchor for an interactive dispatch
+ * (WL-0MUYI3JAO002BTNL, parent WL-0MUKZGEQ2007FECS, AC1/AC2/AC3/AC5).
+ *
+ * Wraps {@link resolveItemTabAnchor} (`getItemTabAnchor`): the tab labelled
+ * exactly `itemId` inside `workspaceId` is created on first use and reused
+ * thereafter (the tab label is the key; no duplicate is created). The
+ * interactive path is intentionally **fail-open** — unlike the automated
+ * downtime path's fail-closed placement, a resolution/creation failure
+ * returns `null` so the caller falls back to the current-pane split instead
+ * of dropping the operator's dispatch. Never throws.
+ *
+ * @param cwd - Worklog root used for the coordination directory.
+ * @param workspaceId - Host workspace (see {@link resolveInteractiveWorkspaceId}).
+ * @param itemId - Exact work-item ID used as the tab label.
+ * @param deps - Injectable herdr deps; production builds real ones.
+ * @returns The resolved tab anchor, or `null` on any failure/empty input.
+ */
+export async function resolveInteractiveItemAnchor(
+  cwd: string,
+  workspaceId: string,
+  itemId: string,
+  deps?: DispatcherAnchorDeps,
+): Promise<ItemTabAnchor | null> {
+  try {
+    if (workspaceId === '' || itemId === '') return null;
+    const anchorDeps =
+      deps ?? createDispatcherAnchorDeps(cwd, process.env.HERDR_BIN_PATH ?? 'herdr');
+    return await resolveItemTabAnchor(cwd, anchorDeps, workspaceId, itemId);
   } catch {
     return null;
   }
@@ -2010,6 +2103,23 @@ async function main(): Promise<void> {
         // the user's intended project, which may differ when the plugin
         // process CWD is the herdr extension directory.
         const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
+        // Interactive item-ID tab placement (WL-0MUYI3JAO002BTNL, parent
+        // WL-0MUKZGEQ2007FECS): when a pane will open for a command that
+        // carries a work-item ID, resolve the item-ID tab anchor ONCE — the
+        // tab labelled exactly `<itemId>` in the invoking pane's current
+        // workspace — and forward it to the pane-spawning scripts so the pane
+        // is co-located with that item's other panes. Resolution is fail-open:
+        // no ID, no workspace, or any resolution/creation failure yields
+        // `undefined`, so the scripts keep today's current-pane split (AC5).
+        const interactiveItemId = shouldOpenPane ? extractWorkItemId(command) : undefined;
+        const interactiveAnchor =
+          interactiveItemId !== undefined
+            ? await resolveInteractiveItemAnchor(
+                targetCwd,
+                resolveInteractiveWorkspaceId(process.env) ?? '',
+                interactiveItemId,
+              )
+            : null;
         if (route === 'agent') {
           // Agent-route hook: record operator activity and fire fast-switch
           // (fail-open: never blocks command dispatch). Only runs for agent
@@ -2072,7 +2182,7 @@ async function main(): Promise<void> {
           // `--model <pattern>` so the pi CLI opens with the right model.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName, focus),
+            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName, focus, interactiveAnchor?.paneId),
             {
               detached: true,
               stdio: 'ignore',
@@ -2123,7 +2233,7 @@ async function main(): Promise<void> {
           const shellPaneName = buildShellPaneTitle(clean, paneTitle, shellItemId);
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(clean, targetCwd, shellPaneName, focus),
+            buildRunInPaneArgs(clean, targetCwd, shellPaneName, focus, interactiveAnchor?.paneId),
             {
               detached: true,
               stdio: 'ignore',
@@ -2161,7 +2271,7 @@ async function main(): Promise<void> {
           }
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, extractWorkItemId(command)), focus),
+            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, extractWorkItemId(command)), focus, interactiveAnchor?.paneId),
             {
               detached: true,
               stdio: 'ignore',
