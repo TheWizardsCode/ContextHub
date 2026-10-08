@@ -187,6 +187,94 @@ describe('calculateDelay with a server hint', () => {
   });
 });
 
+// ── calculateDelay: long server hints beyond the exponential cap (AC1) ─
+//
+// The llm-proxy emits a truthful `Retry-After` / `retry_after` on its
+// "All providers exhausted" 503 that, during overnight UTC gaps, is minutes
+// to hours. `BackoffConfig.serverHintMaxDelayMs` (default 6h = 21600000ms,
+// documented in retry-logic.ts) bounds those long hints so the client waits
+// the advertised time out instead of re-clamping to the 60s exponential cap.
+
+describe('calculateDelay with a long server hint (server-hint ceiling)', () => {
+  const ONE_HOUR_MS = 60 * 60 * 1000;
+  const SIX_HOURS_MS = 6 * ONE_HOUR_MS;
+
+  it('exposes a 6-hour server-hint ceiling in the default config (AC7)', () => {
+    expect(DEFAULT_BACKOFF_CONFIG.serverHintMaxDelayMs).toBe(SIX_HOURS_MS);
+  });
+
+  it('honours a hint longer than maxDelayMs in full, including upward jitter (AC1)', () => {
+    // Hint = 1h, upward jitter = 25% * 0.5 = 12.5% -> 1h + 7m30s.
+    expect(calculateDelay(1, DEFAULT_BACKOFF_CONFIG, ONE_HOUR_MS, () => 0.5)).toBe(
+      4_050_000,
+    );
+  });
+
+  it('does not clamp a long hint to the 60s exponential cap (AC1)', () => {
+    const delay = calculateDelay(1, DEFAULT_BACKOFF_CONFIG, ONE_HOUR_MS, () => 0);
+    expect(delay).toBe(ONE_HOUR_MS);
+    expect(delay).toBeGreaterThan(DEFAULT_BACKOFF_CONFIG.maxDelayMs);
+  });
+
+  it('bounds a hint beyond the ceiling at the ceiling', () => {
+    // An absurd 100h hint is bounded by the configurable 6h ceiling.
+    expect(calculateDelay(1, DEFAULT_BACKOFF_CONFIG, 100 * ONE_HOUR_MS, () => 0)).toBe(
+      SIX_HOURS_MS,
+    );
+  });
+
+  it('allows the server-hint ceiling to be configured per instance', () => {
+    const config: BackoffConfig = {
+      baseDelayMs: 2000,
+      maxDelayMs: 60000,
+      multiplier: 2,
+      serverHintMaxDelayMs: 2 * ONE_HOUR_MS,
+    };
+    expect(calculateDelay(1, config, 3 * ONE_HOUR_MS, () => 0)).toBe(2 * ONE_HOUR_MS);
+    expect(calculateDelay(1, config, ONE_HOUR_MS, () => 0)).toBe(ONE_HOUR_MS);
+  });
+
+  it('leaves hints shorter than maxDelayMs unchanged (AC3)', () => {
+    expect(calculateDelay(1, DEFAULT_BACKOFF_CONFIG, 7000, () => 0)).toBe(7000);
+    expect(calculateDelay(6, DEFAULT_BACKOFF_CONFIG, 30_000, () => 0)).toBe(30_000);
+  });
+
+  it('keeps the no-hint exponential path capped at maxDelayMs (AC4)', () => {
+    // The larger server-hint ceiling must not leak into the no-hint path.
+    expect(calculateDelay(100, DEFAULT_BACKOFF_CONFIG)).toBe(60_000);
+    expect(calculateDelay(50, DEFAULT_BACKOFF_CONFIG, undefined, () => 1)).toBe(60_000);
+  });
+
+  it('applies upward-only jitter to long hints (AC5)', () => {
+    expect(calculateDelay(1, DEFAULT_BACKOFF_CONFIG, ONE_HOUR_MS, () => 0)).toBe(
+      ONE_HOUR_MS,
+    );
+    expect(calculateDelay(1, DEFAULT_BACKOFF_CONFIG, ONE_HOUR_MS, () => 1)).toBe(
+      4_500_000,
+    );
+  });
+
+  it('never waits less than a long hint under maximum jitter (AC5)', () => {
+    const delay = calculateDelay(1, DEFAULT_BACKOFF_CONFIG, ONE_HOUR_MS, () => 1);
+    expect(delay).toBeGreaterThanOrEqual(ONE_HOUR_MS);
+  });
+
+  it('honours a multi-hour hint end-to-end from the proxy error message (AC1)', () => {
+    const message =
+      '503: {"error":{"type":"no_available_models"},"status":503,"retry_after":3600}';
+    const result = resolveRetryDelay(1, message, DEFAULT_BACKOFF_CONFIG, () => 0);
+    expect(result.serverHintMs).toBe(ONE_HOUR_MS);
+    expect(result.delayMs).toBe(ONE_HOUR_MS);
+    expect(result.delayMs).toBeGreaterThan(DEFAULT_BACKOFF_CONFIG.maxDelayMs);
+  });
+
+  it('honours a multi-hour Retry-After header hint (AC1)', () => {
+    const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, () => 0, 2 * ONE_HOUR_MS);
+    expect(result.hintSource).toBe('header');
+    expect(result.delayMs).toBe(2 * ONE_HOUR_MS);
+  });
+});
+
 // ── calculateDelay: unchanged fallback (AC3) ──────────────────────────
 
 describe('calculateDelay without a usable hint', () => {
