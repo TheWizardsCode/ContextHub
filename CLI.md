@@ -1041,6 +1041,8 @@ wl doctor upgrade --confirm       # Apply pending schema migrations (creates bac
 
 Validate work items against config-driven status/stage rules. Reports invalid values or incompatible combinations.
 
+`wl doctor` also reports pending schema migrations and outdated git hooks (read-only) and instructs you to run `wl doctor upgrade`; when validation is clean but upgrades are pending, it prints the pending-upgrade notice instead of a bare `Doctor: no issues found.`. The notice is advisory and does not change the exit code.
+
 For detailed migration policy, backup behavior, and CI guidance, see [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md).
 
 Options:
@@ -1095,6 +1097,13 @@ Notes:
 
 JSON output is a raw array of findings. Each finding includes:
 `checkId`, `type`, `severity`, `itemId`, `message`, `proposedFix`, `safe`, `context`.
+
+When pending upgrades exist, a synthetic finding with `checkId: "upgrade.pending"`
+and `type: "pending-upgrade"` is appended additively to the same array (top-level
+shape unchanged). Its `context` carries machine-readable pending-upgrade data:
+`pendingMigrations`, `pendingMigrationCount`, `outdatedHooks`, and
+`outdatedHookCount`. Consumers grouping findings by work item should skip this
+entry (`itemId: null`).
 
 ### `re-sort` [options]
 

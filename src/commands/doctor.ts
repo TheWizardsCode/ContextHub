@@ -25,6 +25,107 @@ interface DoctorOptions {
   prefix?: string;
 }
 
+/**
+ * Pending-upgrade state surfaced by the top-level `wl doctor` action:
+ * schema migrations and git hooks that `wl doctor upgrade` would apply.
+ */
+interface PendingUpgradeState {
+  pendingMigrations: ReturnType<typeof listPendingMigrations>;
+  outdatedHooks: string[];
+  hasPendingUpgrades: boolean;
+}
+
+/**
+ * Detect pending `wl doctor upgrade` work (schema migrations and outdated git
+ * hooks) without applying anything (WL-0MUTVB271007YKJZ). Read-only and
+ * best-effort: any failure degrades to "no pending upgrades" so `wl doctor`
+ * never crashes on a missing DB, a non-git directory or an absent `.githooks/`.
+ */
+function detectPendingUpgrades(): PendingUpgradeState {
+  let pendingMigrations: ReturnType<typeof listPendingMigrations> = [];
+  try {
+    pendingMigrations = listPendingMigrations() ?? [];
+  } catch (_e) {
+    pendingMigrations = [];
+  }
+
+  let outdatedHooks: string[] = [];
+  try {
+    const hooksTargetDir = detectHooksTargetDir();
+    const hooksResult = dryRunHooks('.githooks', hooksTargetDir);
+    outdatedHooks = hooksResult.hooks
+      .filter(h => h.status === 'outdated')
+      .map(h => h.name);
+  } catch (_e) {
+    outdatedHooks = [];
+  }
+
+  return {
+    pendingMigrations,
+    outdatedHooks,
+    hasPendingUpgrades: pendingMigrations.length > 0 || outdatedHooks.length > 0,
+  };
+}
+
+/**
+ * Build the synthetic JSON finding that carries pending-upgrade information.
+ * Emitted additively into the existing findings array so the `wl doctor --json`
+ * top-level shape (a raw array) and its consumers are unchanged.
+ */
+function buildPendingUpgradeFinding(state: PendingUpgradeState): {
+  checkId: string;
+  type: string;
+  severity: string;
+  itemId: string | null;
+  message: string;
+  proposedFix: null;
+  safe: boolean;
+  context: Record<string, unknown>;
+} {
+  const migrationCount = state.pendingMigrations.length;
+  const hookCount = state.outdatedHooks.length;
+  const parts: string[] = [];
+  if (migrationCount > 0) parts.push(`${migrationCount} pending migration${migrationCount === 1 ? '' : 's'}`);
+  if (hookCount > 0) parts.push(`${hookCount} outdated hook${hookCount === 1 ? '' : 's'}`);
+  return {
+    checkId: 'upgrade.pending',
+    type: 'pending-upgrade',
+    severity: 'info',
+    itemId: null,
+    message: `Pending upgrades: ${parts.join(' and ')}. Run \`wl doctor upgrade\`.`,
+    proposedFix: null,
+    safe: false,
+    context: {
+      pendingMigrations: state.pendingMigrations,
+      pendingMigrationCount: migrationCount,
+      outdatedHooks: state.outdatedHooks,
+      outdatedHookCount: hookCount,
+    },
+  };
+}
+
+/**
+ * Print the advisory pending-upgrade notice in human-readable mode. Mirrors
+ * `wl doctor upgrade --dry-run` wording so operators can preview or apply.
+ */
+function printPendingUpgradeNotice(state: PendingUpgradeState): void {
+  console.log('');
+  console.log('Doctor: pending upgrades detected.');
+  if (state.pendingMigrations.length > 0) {
+    console.log(`Pending migrations (${state.pendingMigrations.length}):`);
+    for (const m of state.pendingMigrations) {
+      console.log(` - ${m.id}: ${m.description} (safe=${m.safe})`);
+    }
+  }
+  if (state.outdatedHooks.length > 0) {
+    console.log(`Outdated hooks (${state.outdatedHooks.length}):`);
+    for (const name of state.outdatedHooks) {
+      console.log(` - ${name}`);
+    }
+  }
+  console.log('Run `wl doctor upgrade` to preview pending upgrades, or `wl doctor upgrade --confirm` to apply them.');
+}
+
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
 
@@ -1271,13 +1372,28 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
 
       // Human-readable output handled below
 
+      // Pending-upgrade detection (WL-0MUTVB271007YKJZ): read-only scan for
+      // schema migrations and outdated git hooks that `wl doctor upgrade`
+      // would apply. Computed after --fix so the notice reflects the final
+      // findings set.
+      const pendingUpgrade = detectPendingUpgrades();
+
       if (utils.isJsonMode()) {
-        output.json(findings);
+        const jsonFindings = pendingUpgrade.hasPendingUpgrades
+          ? [...findings, buildPendingUpgradeFinding(pendingUpgrade)]
+          : findings;
+        output.json(jsonFindings);
         return;
       }
 
       if (findings.length === 0) {
-        console.log('Doctor: no issues found.');
+        if (!pendingUpgrade.hasPendingUpgrades) {
+          console.log('Doctor: no issues found.');
+          return;
+        }
+        // Pending upgrades exist but validation is clean: emit the advisory
+        // notice instead of a misleading bare "no issues found" (AC2).
+        printPendingUpgradeNotice(pendingUpgrade);
         return;
       }
 
@@ -1350,6 +1466,12 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
             console.log(line);
           }
         }
+      }
+
+      // Pending-upgrade notice is appended after the existing per-item
+      // findings/manual-fix output, without altering it (AC3).
+      if (pendingUpgrade.hasPendingUpgrades) {
+        printPendingUpgradeNotice(pendingUpgrade);
       }
     });
 }

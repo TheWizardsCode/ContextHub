@@ -11,7 +11,8 @@ This document describes the `wl doctor` command and the migration policy for Wor
 - **Status/stage compatibility** — validates every work item's status and stage against the rules defined in `.worklog/config.yaml` (see `docs/validation/status-stage-inventory.md` for the full rule set).
 - **Dependency edges** — checks that all dependency edges reference existing work items.
 - **Podcast script `Key Files:`** — flags a `podcast` item at a script-bearing stage (`plan_complete` / `in_review` / `done`) whose `Key Files:` contains no `.podcast.md` path that resolves to an existing file under the worklog root, and any `podcast` item whose listed `.podcast.md` path does not resolve. Detection is artifact-based (filesystem), not stage/status-based. `wl doctor --fix` backfills the path when a matching script is found (see `docs/FILE_PATH_CONVENTION.md`).
-- **Pending migrations** — the `upgrade` subcommand detects and applies schema migrations.
+- **Pending migrations** — the top-level `wl doctor` reports pending schema migrations and outdated git hooks (read-only) and instructs you to run `wl doctor upgrade`; the `upgrade` subcommand detects and applies them.
+- **Outdated git hooks** — the top-level `wl doctor` reports worklog-managed hooks whose committed content differs from the installed hook, alongside pending migrations.
 - **Stale deleted items** — the `prune` subcommand removes soft-deleted items older than a configurable threshold.
 - **Audit gaps** — the `audit-gaps` subcommand reports `completed`/`in_review` items with no audit record (read-only).
 
@@ -31,6 +32,53 @@ wl doctor --fix
 ```
 
 When issues are found, doctor prints each work item ID with its findings and suggested fixes. Findings that require manual intervention are grouped by type at the end.
+
+### Pending-upgrade notice
+
+`wl doctor` also surfaces pending `wl doctor upgrade` work — schema migrations
+and outdated git hooks — before you would otherwise notice it. The check is
+**read-only**: it detects what `wl doctor upgrade` would apply but never changes
+the database or hooks itself. Exit status stays `0`; the notice is advisory,
+mirroring `wl doctor upgrade --dry-run`.
+
+```bash
+$ wl doctor
+Doctor: pending upgrades detected.
+Pending migrations (2):
+ - 20260315-add-audit: Legacy: Add audit TEXT column to workitems (now replaced by audit_results table) (safe=true)
+ - 20260401-add-example: Add example column (safe=true)
+Run `wl doctor upgrade` to preview pending upgrades, or `wl doctor upgrade --confirm` to apply them.
+```
+
+When there are no validation findings and no pending upgrades, doctor still
+prints `Doctor: no issues found.` When validation findings exist, the
+pending-upgrade notice is appended after the existing findings and manual-fix
+sections without altering them.
+
+In `--json` mode the output remains a single, parseable JSON array of findings
+(unchanged top-level shape). Pending-upgrade information is added additively as
+a synthetic finding:
+
+```json
+{
+  "checkId": "upgrade.pending",
+  "type": "pending-upgrade",
+  "severity": "info",
+  "itemId": null,
+  "message": "Pending upgrades: 2 pending migrations. Run `wl doctor upgrade`.",
+  "proposedFix": null,
+  "safe": false,
+  "context": {
+    "pendingMigrations": [{ "id": "20260315-add-audit", "description": "...", "safe": true }],
+    "pendingMigrationCount": 1,
+    "outdatedHooks": ["pre-push"],
+    "outdatedHookCount": 1
+  }
+}
+```
+
+Consumers that iterate findings should skip `itemId: null` / `type:
+"pending-upgrade"` entries when grouping by work item.
 
 ### Schema migrations (`wl doctor upgrade`)
 
