@@ -378,6 +378,19 @@ dispatches; the other herdr instances coordinate instead of polling:
   cycle). Scheduled prompts (no work-item id) keep the `Dispatcher` anchor.
   See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn).
+- **Stalled-work scan and resume (WL-0MUYMBSA90092QV2)** — before selecting a
+  new item on an idle cycle, the dispatcher scans the machine-wide
+  `herdr pane list` and resumes a stalled pane **in place** (reusing its
+  session) rather than opening a new one. A pane is stalled when it hosts a
+  live pi agent, its label parses to a non-terminal work item, its
+  `agent_status` is neither `blocked` nor actively working, and its
+  not-working state has persisted at least `downtimeStallThresholdMs`
+  (default 5 min). A successful resume short-circuits the cycle with the
+  neutral reason `stalled-resume` (no new-item dispatch); every skip/failure
+  is neutral (never a strike, never a cooldown, never a duplicate) and
+  degrades to the unchanged dispatch path. A foreign-root pane is resumed
+  against the root resolved from the pane's `cwd` / `agent_session`. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#stalled-work-scan-and-resume-wl-0muymbsa90092qv2-parent-wl-0muma5omh0024pn1).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
@@ -474,6 +487,15 @@ without per-slot data it fails closed to all-slots-free for `0 < N < total`
   kind — a neutral skip (reason `attempt-budget-exhausted`, never a strike,
   never a no-candidate) reset by a stage advancement (default: `3`, clamped
   to 1 – 10)
+- `downtimeStallScanEnabled` — Enable the pre-dispatch stalled-work scan
+  (default: `true`). When on, the dispatcher prefers resuming an existing
+  stalled pane over opening a new one (see the *Stalled-work scan and
+  resume* bullet above); `false` disables the scan and falls through to the
+  normal dispatch path
+- `downtimeStallThresholdMs` — Minimum continuous not-`working` duration
+  before a pane is considered stalled and resumed in place (default:
+  `300000` = 5 minutes, clamped to 60 s – 60 min; invalid/missing falls back
+  to the default)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (the proxy's

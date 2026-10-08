@@ -392,6 +392,160 @@ tick (live) and wired through `DowntimeWorkerConfig.config().maxAttempts`
 into `dispatchDowntimeWork`, `computeMostImportantItem`,
 `runCoordinationCheckIn` and `dispatchFromCoordination`.
 
+### Stalled-work scan and resume (WL-0MUYMBSA90092QV2; parent WL-0MUMA5OMH0024PN1)
+
+Before this feature the dispatcher always took the next item from the Herdr
+head and spawned a **new** pane when local-LLM capacity was idle. An existing
+pane holding a non-terminal item whose agent had stopped working (its pi agent
+went `idle`, or exited as `done`, without the item reaching a terminal stage)
+was ignored, so half-finished work accumulated in workspaces while fresh
+capacity was spent on new work. The dispatcher now performs a **machine-wide
+stalled-work scan and in-place resume** on every idle dispatch cycle, **before**
+selecting a new work item.
+
+The decision half (`classifyStalledPane`, `scanStalledPanes`) and the resume
+half (`resumeStalledPane`, `resumeStalledWorkIfAble`) live in
+`packages/herdr/src/stalled-work.ts`; production I/O seams are wired in
+`createDowntimeDeps` (`packages/herdr/src/index.ts`).
+
+#### Ordering relative to new-item dispatch (parent AC3)
+
+The scan is consulted **once per idle cycle, immediately before new-item
+selection**, on every dispatch entry point:
+
+- `dispatchDowntimeWork` (direct leader dispatch) — after the idle / free-slot
+  gate and before the Herdr-head filters (`dispatchFromHerdrList`);
+- `computeMostImportantItem` (the instance check-in offer) — before reading the
+  Herdr head, so a resumed pane makes the instance offer **nothing** that cycle
+  rather than pausing;
+- `dispatchFromCoordination` (leader dispatch of a remote offer) — before the
+  offer's review-queue / in-flight / cooldown filters.
+
+When the scan yields a resumable candidate and a resume succeeds, the cycle
+**short-circuits** with the neutral reason `stalled-resume`
+(`{dispatched:false, reason:'stalled-resume'}`; `computeMostImportantItem`
+returns `{ok:true, stalledResume:true}`) — **no new item is dispatched in that
+cycle**. When no candidate is resumable the existing dispatch path proceeds
+unchanged. The LLM idle / free-slot check remains the sole concurrency
+limiter; the scan introduces no client-side pane cap.
+
+#### Stall conditions (parent AC1)
+
+A pane is **stalled** only when **all** hold:
+
+1. it hosts a live pi agent — the parsed `herdr pane list` record has an
+   `agent` value;
+2. its label suffix parses to a non-terminal item — status not
+   `completed`/`deleted`, stage not `in_review`/`done` (reuses the canonical
+   `isActiveBlocker` predicate);
+3. its `agent_status` is neither actively working (active set
+   `work`/`working`/`busy`/`running`) nor `blocked`; and
+4. its not-`working` state has persisted at least the stall threshold
+   (`downtimeStallThresholdMs`).
+
+#### Exclusion rules and machine-readable reasons (parent AC4)
+
+Every skip is **neutral** — never a CLI-error strike, never a `no-candidate`
+cooldown, never a duplicate. `classifyStalledPane` returns a single
+machine-readable reason:
+
+| Reason | Meaning |
+|---|---|
+| `no-agent` | The pane hosts no live pi agent. |
+| `no-item-id` | The label has no parseable work-item id. |
+| `kind-unknown` | The label carries no recognisable dispatch kind. |
+| `item-terminal` | The item is completed/deleted or `in_review`/`done`. |
+| `needs-producer-review` | The item is flagged `needsProducerReview === true` (hard exclusion). |
+| `agent-working` | The agent is actively working. |
+| `agent-blocked` | The agent status is `blocked` (never hijacked). |
+| `kind-stale` | The item has already advanced past the pane's dispatched kind. |
+| `cooldown-active` | The non-terminal pane-close cooldown holds the `(item, kind)`. |
+| `attempt-cap-exhausted` | The per-item/per-kind dispatch-attempt cap is reached. |
+| `last-activity-unknown` | No parseable activity timestamp to measure a stall. |
+| `stall-threshold-not-elapsed` | Not-`working` for less than the threshold. |
+
+The dispatched kind is derived from the pane label convention
+`<Downtime|Manually> triggered <kind> …` (the kind token immediately follows
+`triggered`), recognising `implement`, `risk-effort`, `intake`, `audit` and
+`plan`. Other labels — including a free-form `Manually triggered prompt …`
+pane — have no kind and are skipped.
+
+**Kind vs stage progression (`kind-stale`).** Stage ranks are `idea` 0,
+`intake_complete` 1, `plan_complete`/`in_progress` 2, `in_review` 3, `done` 4;
+kind ranks are `intake` 0, `plan` 1, `risk-effort`/`implement` 2, `audit` 3. A
+pane whose item rank exceeds its kind rank (an `intake` pane on an
+`intake_complete` item, an `implement` pane on an `in_review` item) is stale
+and skipped. An unknown stage cannot prove advancement, so it fails open (not
+stale).
+
+**Stall anchor.** The not-working duration is measured from the **later** of
+the item's `updatedAt` and its most recent non-`spawn-failed`,
+non-`enrichment` dispatch marker for that kind, so a pane freshly dispatched
+for an old item is not mistaken for a stall. No parseable anchor → skip
+(`last-activity-unknown`).
+
+#### Resume in place (parent AC2)
+
+Each candidate is resumed **in place** — a new pane is never spawned for the
+item; the resume always targets the candidate's `paneId`:
+
+- a **live agent** receives the literal continuation prompt `continue`
+  (`herdr agent prompt <paneId> continue`, `STALLED_RESUME_PROMPT`);
+- a pane whose agent has **exited** (`agent_status` `done`/`exited`) has pi
+  relaunched in the **same** pane continuing its session
+  (`herdr agent start pi --kind pi --pane <paneId> -- --session <path>`, or
+  `-- --continue` when the pane records no session path), after which the
+  literal `continue` prompt is submitted.
+
+A successful resume records a dispatch attempt for `(item, kind)` in the item
+root's rolling dispatch log, so the existing per-item/per-kind attempt cap
+applies to resumes too; the cap is enforced up front and escalates via
+`needsProducerReview` when exhausted. Concurrent resumes of the same
+`(paneId, itemId)` are prevented by an in-process in-flight guard (a second
+attempt is the neutral `concurrent-resume` skip).
+
+#### Neutral outcome vocabulary and fail-safety (parent AC2/AC6)
+
+Every not-resumed outcome is neutral — never a strike, never a crash, never a
+duplicate. The resume adds these reasons on top of the classifier reasons
+above:
+
+| Reason | Meaning |
+|---|---|
+| `concurrent-resume` | A resume of the same `(paneId, itemId)` is already in flight. |
+| `agent-blocked` | `herdr agent prompt` refused because the agent is `blocked`. |
+| `agent-prompt-stalled` | The submission was accepted but the agent did not reach `working`/`blocked` within the CLI's documented 5 s window (`agent_prompt_stalled`). |
+| `pane-vanished` | The pane/agent disappeared (e.g. the pane-closure reaper closed it) between scan and resume. |
+| `cli-error` | Any other herdr/CLI failure. |
+
+Fail-safe degradation: an unreadable/unparseable `herdr pane list` yields no
+candidates; a per-pane failure (unresolvable root, failed `wl show`, thrown log
+read) skips that pane without aborting the scan; unwired `scanStalledPanes` /
+`resumeStalledPane` deps and a disabled scan both fall through to normal
+dispatch; a thrown resume is neutral and the scan tries the next candidate. A
+code-frozen/ambiguous cycle skips `audit` and `implement` panes (freeze
+split-by-skill), so a resume can never bypass the freeze.
+
+#### Cross-root resume contract (parent AC5)
+
+Each candidate carries the **item's own worklog root**, resolved from the
+pane's `cwd` first and then from the pi session-log path in `agent_session`
+(`defaultStalledPaneRootResolver`). The resume reads the item and its rolling
+log, records the attempt and flags producer review against **that** root —
+never the leader's ambient root. When neither `cwd` nor `agent_session`
+resolves to a valid worklog root the pane is **skipped** (fail closed) rather
+than resumed against the wrong database.
+
+#### Settings
+
+Both settings are re-read from the plugin settings on **every idle tick**
+(never cached), so a change applies live:
+
+| Setting | Default | Clamp |
+|---|---|---|
+| `downtimeStallScanEnabled` | `true` (`DEFAULT_DOWNTIME_STALL_SCAN_ENABLED`) | boolean; `false` disables the scan entirely and falls through to normal dispatch |
+| `downtimeStallThresholdMs` | 5 min / `300000` ms (`DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`) | `[60 s, 60 min]` / `[60000, 3600000]` ms (`clampDowntimeStallThresholdMs`); invalid/missing falls back to the default |
+
 ### Pane placement: project workspace first, `Dispatcher` fallback (WL-0MUR5FUWD00024XN)
 
 Automated downtime panes spawn **inside the owning project's herdr
@@ -1253,6 +1407,8 @@ status refresh unchanged at 30s.**
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
 | Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
+| Stalled-work scan | enabled (`downtimeStallScanEnabled`; re-read live; `false` disables the pre-dispatch scan and falls through to normal dispatch, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_SCAN_ENABLED` (`downtime-worker.ts`) |
+| Stalled-work threshold | **5 min** / `300000` ms (`downtimeStallThresholdMs`; minimum continuous not-`working` duration before an in-place resume; clamped to 60 s – 60 min; invalid/missing falls back to the default, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`, `clampDowntimeStallThresholdMs` (`downtime-worker.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
 | Pane-closure idle threshold | **0 min** — idle close disabled (`paneCloseIdleThresholdMinutes`; clamped to 0 min – 24 h) | `pane-close-scheduler.ts` |
 | Pane-closure grace period | **5 min** (`paneCloseGracePeriodMinutes`; clamped to 1 min – 24 h; no pane is eligible for close within this window of first dispatch, WL-0MUMM5IUF003EVT8) | `pane-close-scheduler.ts` |
@@ -1271,7 +1427,10 @@ on load
 (`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
 (`clampDowntimeNonTerminalCooldownMs`). The per-item/per-kind attempt cap
 (`downtimeMaxAttempts`) is likewise configurable and clamped on load
-(`clampDowntimeMaxAttempts`).
+(`clampDowntimeMaxAttempts`). The stalled-work scan enable flag
+(`downtimeStallScanEnabled`) and threshold (`downtimeStallThresholdMs`) are
+likewise re-read live every tick and clamped on load
+(`clampDowntimeStallThresholdMs`).
 
 ## Files & runtime artifacts
 
@@ -1281,7 +1440,8 @@ on load
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
-| `packages/herdr/src/downtime-worker.ts` | Worker tick: election, check-in, idle gate, dispatch (anchor-before-claim) |
+| `packages/herdr/src/downtime-worker.ts` | Worker tick: election, check-in, idle gate, dispatch (anchor-before-claim); stalled-work scan wiring (`resumeStalledWorkIfAble`, `STALLED_RESUME_REASON`) |
+| `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
 | `packages/herdr/src/downtime-log.ts` | Coordination/dispatch rolling logs (per worklog root, retained) |
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
 | `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |
@@ -1536,4 +1696,10 @@ trace.
   item-ID-tab placement for worklist dispatch (both channels) and its
   fail-safe placeholder root-pane cleanup* (documented in *Interactive
   dispatch pane placement* above)
+- Work item: **WL-0MUMA5OMH0024PN1** *When dispatching a new workload first
+  scan all workspaces and panes for stalled work* (+ its children
+  WL-0MUYMBK6H005PY16 settings / WL-0MUYMBMCG000Z4WP pane-record enrichment /
+  WL-0MUYMBO9X000WDF6 classifier / WL-0MUYMBPZ5004LBFX resume orchestrator /
+  WL-0MUYMBSA90092QV2 dispatch wiring / WL-0MUYMBUAK007H10J verification;
+  documented in *Stalled-work scan and resume* above)
 - Docs work item: **WL-0MT76H3Z900908TV** (this page)
