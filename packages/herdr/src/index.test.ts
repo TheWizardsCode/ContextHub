@@ -21,6 +21,8 @@ import {
   formatBackgroundFailure,
   CAPTURE_TIMEOUT_MS,
   extractWorkItemId,
+  defaultStalledPaneRootResolver,
+  worklogRootFromPiSessionPath,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
 import {
@@ -3498,5 +3500,150 @@ describe('spawnBackgroundPi', () => {
       onExit,
     });
     expect(on).toHaveBeenCalledWith('exit', expect.any(Function));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stalled-work production wiring (WL-0MUYMBSA90092QV2)
+// ---------------------------------------------------------------------------
+
+describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
+  let tempDirs: string[] = [];
+
+  beforeEach(() => {
+    tempDirs = [];
+  });
+
+  afterEach(() => {
+    resetExecFileAsync();
+    for (const dir of tempDirs.splice(0)) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  // Hyphen-free prefix so the pi session-path encoding (which replaces `/`
+  // with `-`) round-trips unambiguously back to this root.
+  function makeRoot(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'stallroot'));
+    mkdirSync(join(dir, '.worklog'), { recursive: true });
+    writeFileSync(join(dir, '.worklog', 'initialized'), '');
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  it('createDowntimeDeps wires the scan and resume seams', () => {
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(typeof deps.scanStalledPanes).toBe('function');
+    expect(typeof deps.resumeStalledPane).toBe('function');
+  });
+
+  it('defaultStalledPaneRootResolver resolves the pane cwd root and fails closed otherwise', () => {
+    const root = makeRoot();
+    expect(defaultStalledPaneRootResolver({ paneId: 'p1', cwd: root }, '/fallback')).toBe(root);
+    expect(defaultStalledPaneRootResolver({ paneId: 'p2' }, '/fallback')).toBeNull();
+    expect(defaultStalledPaneRootResolver({ paneId: 'p3', cwd: '/definitely/not/a/repo' }, '/fallback')).toBeNull();
+  });
+
+  it('worklogRootFromPiSessionPath decodes a pi session dir back to the worklog root', () => {
+    const root = makeRoot();
+    const encoded = `${root.replace(/^\//, '').split('/').join('-')}`;
+    const sessionPath = `/home/pi/.pi/agent/sessions/--${encoded}--/log.jsonl`;
+    expect(worklogRootFromPiSessionPath(sessionPath)).toBe(root);
+    expect(worklogRootFromPiSessionPath('not-a-session-path')).toBeUndefined();
+    expect(worklogRootFromPiSessionPath('')).toBeUndefined();
+  });
+
+  it('scanStalledPanes reads the machine-wide pane list and fetches the item against its OWN root', async () => {
+    const root = makeRoot();
+    const panes = JSON.stringify({
+      result: {
+        panes: [
+          {
+            pane_id: 'w1:p1',
+            label: 'Downtime triggered implement Some item - WL-STALLED',
+            agent: 'pi',
+            agent_status: 'idle',
+            cwd: root,
+          },
+        ],
+      },
+    });
+    const showJson = JSON.stringify({
+      success: true,
+      workItem: {
+        id: 'WL-STALLED',
+        title: 'Some item',
+        status: 'open',
+        stage: 'plan_complete',
+        updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      },
+    });
+    const mockExec = vi.fn().mockImplementation((_bin: string, args: string[]) => {
+      if (args.includes('pane') && args.includes('list')) {
+        return Promise.resolve({ stdout: panes, stderr: '' });
+      }
+      if (args.includes('show')) {
+        return Promise.resolve({ stdout: showJson, stderr: '' });
+      }
+      return Promise.resolve({ stdout: '{}', stderr: '' });
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const out = await deps.scanStalledPanes!(root, {
+      enabled: true,
+      frozen: false,
+      thresholdMs: 5 * 60 * 1000,
+      nonTerminalCooldownMs: 10 * 60 * 1000,
+      maxAttempts: 3,
+    });
+
+    expect(out).toHaveLength(1);
+    expect(out[0].cwd).toBe(root);
+    expect(out[0].kind).toBe('implement');
+    // The `wl show` lookup targeted the pane's OWN root, not the leader's root.
+    const showCall = mockExec.mock.calls.find(([, a]) => (a as string[]).includes('show'));
+    expect(showCall?.[1]).toEqual(expect.arrayContaining(['--worklog-dir', join(root, '.worklog')]));
+  });
+
+  it('resumeStalledPane prompts a live agent with the literal continue via herdr', async () => {
+    const calls: Array<[string, string[]]> = [];
+    const mockExec = vi.fn().mockImplementation((bin: string, args: string[]) => {
+      calls.push([bin, args]);
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const out = await deps.resumeStalledPane!(
+      {
+        pane: {
+          paneId: 'w1:p1',
+          label: 'Downtime triggered implement Some item - WL-STALLED',
+          agent: 'pi',
+          agentStatus: 'idle',
+        },
+        item: {
+          id: 'WL-STALLED',
+          status: 'open',
+          stage: 'plan_complete',
+          title: 'Some item',
+          updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+        },
+        cwd: makeRoot(),
+        kind: 'implement',
+      },
+      {
+        enabled: true,
+        frozen: false,
+        thresholdMs: 5 * 60 * 1000,
+        nonTerminalCooldownMs: 10 * 60 * 1000,
+        maxAttempts: 3,
+      },
+    );
+
+    expect(out).toMatchObject({ resumed: true, via: 'prompt', paneId: 'w1:p1' });
+    const promptCall = calls.find(([, args]) => args[0] === 'agent' && args[1] === 'prompt');
+    expect(promptCall?.[1]).toEqual(['agent', 'prompt', 'w1:p1', 'continue']);
   });
 });

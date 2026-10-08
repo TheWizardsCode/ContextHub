@@ -139,8 +139,12 @@ import {
 import {
   buildStalledResumeStartArgs,
   classifyHerdrAgentFailure,
+  resumeStalledPane,
+  scanStalledPanes,
+  type StalledPaneCandidate,
   type StalledResumeCliResult,
   type StalledResumeStartOptions,
+  type StalledScanOptions,
 } from './stalled-work.js';
 import {
   getDueScheduledPrompt as getFirstDuePrompt,
@@ -1124,6 +1128,75 @@ export async function defaultStalledResumeStartAgent(
 }
 
 /**
+ * Default machine-wide pane lister for the stalled-work scan
+ * (WL-0MUYMBSA90092QV2): one `herdr pane list` read shared by the scan. Returns
+ * `null` on any herdr failure (missing binary, timeout, unparseable output) so
+ * the scan degrades to "no stalled resume" rather than crashing dispatch.
+ */
+export async function defaultStalledPanesLister(): Promise<HerdrPaneRecord[] | null> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const { stdout } = await getExecFileAsync()(herdrBin, ['pane', 'list'], {
+      encoding: 'utf8',
+      timeout: DOWNTIME_WL_TIMEOUT_MS,
+      maxBuffer: 4 * 1024 * 1024,
+    });
+    return parseHerdrPaneListOutput(stdout);
+  } catch {
+    return null; // fail-safe: unreadable pane list → no stalled resume
+  }
+}
+
+/**
+ * Best-effort decode of a pi session-log path back to its working directory.
+ *
+ * pi encodes the cwd into the session directory name by replacing path
+ * separators with `-` and wrapping the result in `--…--` (e.g.
+ * `--home-user-projects-app--`). The encoding is lossy for directories whose
+ * names contain a literal hyphen, so the decoded path is only a HINT: the
+ * caller runs it through `resolveWorklogRoot()`, which walks up to the nearest
+ * valid `.worklog/` and returns `undefined` when the hint does not land in a
+ * worklog tree. This keeps a wrong decode harmless (the pane is skipped).
+ */
+export function worklogRootFromPiSessionPath(sessionPath: string): string | undefined {
+  if (typeof sessionPath !== 'string' || sessionPath === '') return undefined;
+  // Drop the `.jsonl` filename, then take the `--<enc>--` session directory.
+  const withoutFile = sessionPath.replace(/[\\/][^\\/]*$/, '');
+  const encoded = withoutFile.replace(/^.*[\\/]/, '');
+  if (!encoded.startsWith('--') || !encoded.endsWith('--')) return undefined;
+  const body = encoded.slice(2, -2);
+  if (body === '') return undefined;
+  // Leading separator: the body starts with the path without a leading slash
+  // (`home-user-…`); re-add `/` and replace the remaining separators.
+  const decoded = '/' + body.split('-').join('/');
+  return resolveWorklogRoot(decoded);
+}
+
+/**
+ * Default worklog-root resolver for the stalled-work scan
+ * (WL-0MUYMBSA90092QV2 AC5): prefer the pane's reported `cwd` (the pane's
+ * working directory), then fall back to the pi session-log path in
+ * `agent_session`. Returns `null` when neither resolves to a valid worklog
+ * root — the scan then fails closed (skips the pane) rather than resuming
+ * against the leader's root.
+ */
+export function defaultStalledPaneRootResolver(
+  pane: HerdrPaneRecord,
+  _fallbackCwd: string,
+): string | null {
+  if (typeof pane.cwd === 'string' && pane.cwd !== '') {
+    const fromCwd = resolveWorklogRoot(pane.cwd);
+    if (fromCwd) return fromCwd;
+  }
+  const sessionPath = pane.agentSession?.value;
+  if (typeof sessionPath === 'string' && sessionPath !== '') {
+    const fromSession = worklogRootFromPiSessionPath(sessionPath);
+    if (fromSession) return fromSession;
+  }
+  return null;
+}
+
+/**
  * Collect the pane ids already handled by the dispatch monitor
  * (WL-0MU308WSF0002JWN) from the rolling dispatch log. Used to keep the
  * scheduled pane-close reaper from double-handling a pane the monitor has
@@ -2027,6 +2100,51 @@ export function createDowntimeDeps(
     async markNeedsProducerReview(itemId: string, cwd: string): Promise<boolean> {
       return markNeedsProducerReviewWorkItem(itemId, cwd);
     },
+    // Stalled-work scan + in-place resume (WL-0MUYMBSA90092QV2): production
+    // wiring reuses the machine-wide `herdr pane list` read, the `wl show`
+    // fetch and the rolling dispatch log. The scan returns resumable
+    // candidates in pane-list order (each carrying its OWN root); the resume
+    // prompts/relaunches in place and records an attempt. Both seams are
+    // fail-safe — an unreadable scan or a thrown resume degrades to normal
+    // dispatch (never a crash, never a duplicate).
+    async scanStalledPanes(
+      cwd: string,
+      opts: StalledScanOptions,
+    ): Promise<StalledPaneCandidate[]> {
+      return scanStalledPanes(
+        {
+          listPanes: defaultStalledPanesLister,
+          fetchItem: fetchAuditItemById,
+          readEntries: readDowntimeLogEntries,
+          resolveRoot: defaultStalledPaneRootResolver,
+        },
+        cwd,
+        opts,
+      );
+    },
+    async resumeStalledPane(candidate: StalledPaneCandidate, opts: StalledScanOptions) {
+      return resumeStalledPane(
+        {
+          pane: candidate.pane,
+          item: candidate.item,
+          cwd: candidate.cwd,
+          kind: candidate.kind,
+          nonTerminalCooldownMs: opts.nonTerminalCooldownMs,
+          thresholdMs: opts.thresholdMs,
+        },
+        {
+          promptAgent: defaultStalledResumePromptAgent,
+          startAgent: defaultStalledResumeStartAgent,
+          readEntries: readDowntimeLogEntries,
+          recordAttempt: async (root, entry) => {
+            await appendDowntimeLogEntry(root, JSON.stringify(entry));
+          },
+          markNeedsProducerReview: async (itemId, root) =>
+            markNeedsProducerReviewWorkItem(itemId, root),
+          maxAttempts: opts.maxAttempts,
+        },
+      );
+    },
   };
 }
 
@@ -2255,6 +2373,9 @@ async function main(): Promise<void> {
         maxAttempts: s.downtimeMaxAttempts,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
+        // Stalled-work scan before new-item selection (WL-0MUYMBSA90092QV2).
+        stallScanEnabled: s.downtimeStallScanEnabled,
+        stallScanThresholdMs: s.downtimeStallThresholdMs,
         browseItemCount: s.browseItemCount,
         // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
         // `paneCloseEnabled` setting (default on) with a configurable

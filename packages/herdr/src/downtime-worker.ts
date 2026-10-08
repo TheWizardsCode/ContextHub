@@ -180,6 +180,11 @@ import { paneCloseReaperDue } from './pane-close-scheduler.js';
 import { parseHerdrPaneCloseList, type HerdrAgentSession } from './pane-close-herdr.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 import type {
+  StalledPaneCandidate,
+  StalledResumeOutcome,
+  StalledScanOptions,
+} from './stalled-work.js';
+import type {
   DispatcherAnchor,
   DispatcherPrefixTabAnchor,
   ItemTabAnchor,
@@ -1419,6 +1424,8 @@ export type MostImportantItemResult =
   | { ok: true; nonTerminalCooldownHold: true }
   /** The only remaining offerable candidates have exhausted their per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
   | { ok: true; attemptBudgetHold: true }
+  /** A stalled pane was resumed in place this cycle (WL-0MUYMBSA90092QV2): the instance must NOT offer new work — the resumed pane is the preferred work. Neutral: not an error, not a CLI strike, not a no-candidate cooldown. */
+  | { ok: true; stalledResume: true }
   | { ok: false; error?: string };
 
 
@@ -2138,6 +2145,30 @@ export interface DowntimeWorkerDeps {
    */
   markNeedsProducerReview?(itemId: string, cwd: string): Promise<boolean>;
   /**
+   * Machine-wide stalled-work scan (WL-0MUYMBSA90092QV2 AC1/AC4): scan every
+   * `herdr pane list` record for a pane hosting a non-terminal item whose
+   * agent has stopped working, and return the resumable candidates (each
+   * carrying its OWN worklog root). Consulted ONCE per idle cycle,
+   * immediately before new-item selection. OPTIONAL — when absent (or when
+   * `resumeStalledPane` is absent) the scan degrades to "no stalled resume"
+   * and normal dispatch proceeds unchanged. Must never throw: an
+   * unreadable/unparseable scan resolves an empty array.
+   */
+  scanStalledPanes?(cwd: string, opts: StalledScanOptions): Promise<StalledPaneCandidate[]>;
+  /**
+   * Attempt an in-place resume of ONE stalled candidate (WL-0MUYMBSA90092QV2
+   * AC2/AC6): prompt a live agent with `continue`, or relaunch pi in the SAME
+   * pane continuing its session and then submit `continue`. Records a
+   * dispatch attempt on success so the existing per-item/per-kind cap
+   * applies. OPTIONAL (see `scanStalledPanes`). Must never throw: every
+   * failure is a NEUTRAL `{resumed:false}` outcome — never a strike, never a
+   * crash, never a duplicate pane.
+   */
+  resumeStalledPane?(
+    candidate: StalledPaneCandidate,
+    opts: StalledScanOptions,
+  ): Promise<StalledResumeOutcome>;
+  /**
    * Record a persistent CLI-error event (three consecutive wl failures).
    * Must never throw (fail-closed): logging must not crash the worker.
    */
@@ -2556,6 +2587,57 @@ async function flagBudgetExhausted(
   } catch {
     // fail-closed: a flag write failure must never crash the worker
   }
+}
+
+/**
+ * Neutral outcome reason when a stalled pane was resumed in place instead of
+ * dispatching new work (WL-0MUYMBSA90092QV2 AC1/AC3): the cycle short-circuits
+ * with `dispatched:false` and this reason. NEVER a strike, NEVER a cooldown —
+ * the next idle tick re-evaluates from scratch.
+ */
+export const STALLED_RESUME_REASON = 'stalled-resume';
+
+/**
+ * Consult the stalled-work scan ONCE and, if it yields a candidate, attempt to
+ * resume the first one in place (WL-0MUYMBSA90092QV2 AC1/AC4). Returns true
+ * when a stalled pane was successfully resumed — the caller MUST then
+ * short-circuit new-item dispatch for the cycle (preference ordering).
+ *
+ * FAIL-SAFE: unwired deps, a disabled scan, a thrown scan, an unreadable pane
+ * list / unparseable output (the production scan resolves an empty list) and
+ * every `{resumed:false}` outcome all return false, so the existing dispatch
+ * path proceeds unchanged — never a crash, never a duplicate.
+ */
+export async function resumeStalledWorkIfAble(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+  opts: StalledScanOptions,
+): Promise<boolean> {
+  // Unwired deps / disabled scan degrade to normal dispatch (AC2/AC3).
+  if (opts.enabled !== true) return false;
+  if (
+    typeof deps.scanStalledPanes !== 'function' ||
+    typeof deps.resumeStalledPane !== 'function'
+  ) {
+    return false;
+  }
+  let candidates: StalledPaneCandidate[];
+  try {
+    const scanned = await deps.scanStalledPanes(cwd, opts);
+    if (!Array.isArray(scanned)) return false;
+    candidates = scanned;
+  } catch {
+    return false; // fail-safe: never crash dispatch on a broken scan
+  }
+  for (const candidate of candidates) {
+    try {
+      const outcome = await deps.resumeStalledPane(candidate, opts);
+      if (outcome.resumed) return true;
+    } catch {
+      // A thrown resume is neutral — try the next candidate, then fall through.
+    }
+  }
+  return false;
 }
 
 async function dispatchFromHerdrList(
@@ -3493,6 +3575,8 @@ export async function computeMostImportantItem(
   markerStaleWindowMs: number = DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   nonTerminalCooldownMs: number = DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   maxAttempts: number = DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+  stallScanEnabled: boolean = true,
+  stallThresholdMs: number = DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
 ): Promise<MostImportantItemResult> {
   // The check-in (and the worker's no-candidate probe) requires the Herdr
   // head lookup: without it there is no canonical ranking to offer from —
@@ -3502,6 +3586,22 @@ export async function computeMostImportantItem(
   }
   const freezeStatus = deps.readCodeFreezeStatus(cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+
+  // ── Stalled-work scan (WL-0MUYMBSA90092QV2 AC4) ──
+  // Consult the scan FIRST, before any new-item selection: a successfully
+  // resumed stalled pane is the preferred work, so the instance offers
+  // NOTHING this cycle (the caller keeps its entry / does not pause).
+  if (stallScanEnabled) {
+    const resumed = await resumeStalledWorkIfAble(deps, cwd, {
+      enabled: stallScanEnabled,
+      frozen,
+      thresholdMs: stallThresholdMs,
+      nonTerminalCooldownMs,
+      maxAttempts,
+      now,
+    });
+    if (resumed) return { ok: true, stalledResume: true };
+  }
 
   // The dispatch window is the sprint view: the live per-root
   // `browseItemCount`, clamped exactly as the TUI worklist does
@@ -3781,7 +3881,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; spawnConfig?: DowntimeSpawnConfig },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; spawnConfig?: DowntimeSpawnConfig },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -3809,6 +3909,24 @@ export async function dispatchFromCoordination(
     // No slot can host a pane — nothing to dispatch (mirrors the legacy
     // tier chain's 0-free-slots defensive no-candidate).
     return { dispatched: false, reason: 'no-candidate' };
+  }
+
+  // ── Stalled-work scan (WL-0MUYMBSA90092QV2 AC1/AC3/AC4) ──
+  // Idle-gated (free slot present) and immediately before new-item
+  // selection: prefer resuming a stalled pane over opening a new one. A
+  // successful resume short-circuits the cycle with the neutral
+  // 'stalled-resume' reason; any failure (unwired deps, unreadable pane
+  // list, resume failure) falls through to the unchanged path below.
+  {
+    const resumed = await resumeStalledWorkIfAble(deps, opts.cwd, {
+      enabled: opts.stallScanEnabled ?? true,
+      frozen,
+      thresholdMs: opts.stallScanThresholdMs ?? DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+      nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+      maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+      now,
+    });
+    if (resumed) return { dispatched: false, reason: STALLED_RESUME_REASON };
   }
 
   // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
@@ -4108,17 +4226,26 @@ export async function runCoordinationCheckIn(
   now: number = Date.now(),
 ): Promise<{ offered: string | null; updated: boolean }> {
   const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
-  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs, coordinator.nonTerminalCooldownMs, coordinator.maxAttempts);
+  // NOTE (WL-0MUYMBSA90092QV2 AC3): the check-in is NOT idle-gated (it runs
+  // before the proxy poll, for leader and non-leader alike), so the
+  // stalled-work scan is deliberately DISABLED here — resuming a pane is a
+  // dispatch-like side effect that must only run when the dispatcher is
+  // idle-gated and would otherwise dispatch. The idle-gated paths
+  // (`dispatchDowntimeWork` / `dispatchFromCoordination` / the no-candidate
+  // probe below) perform the scan+resume.
+  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs, coordinator.nonTerminalCooldownMs, coordinator.maxAttempts, false);
   if (!result.ok) {
     // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
     return { offered: current?.workItemId ?? null, updated: false };
   }
   if (!('candidate' in result)) {
-    // Genuinely nothing dispatchable (`noCandidate`) OR the deep-queue hold
-    // left nothing offerable (`reviewQueueHold`, WL-0MTTSWC1X005P4VD) —
-    // either way the own entry is removed (no dead offers; the owner
-    // re-offers once work becomes offerable). The caller distinguishes the
-    // two via the probe path (reviewQueueHold must never pause).
+    // Genuinely nothing dispatchable (`noCandidate`), the deep-queue hold
+    // left nothing offerable (`reviewQueueHold`, WL-0MTTSWC1X005P4VD), or a
+    // stalled pane was resumed in place (`stalledResume`,
+    // WL-0MUYMBSA90092QV2) — either way the own entry is removed (no dead
+    // offers; the owner re-offers once work becomes offerable). The caller
+    // distinguishes the reasons via the probe path (reviewQueueHold and
+    // stalledResume must never pause).
     const removed = removeEntry(coordinator.coordinationDir, coordinator.instanceId) !== null;
     // Audit trail (WL-0MSXHAE290067VAL): log the emptied check-in.
     void appendCoordinationLogEntry(coordinator.cwd, {
@@ -4320,6 +4447,19 @@ export async function dispatchDowntimeWork(
      * falls back to `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (3).
      */
     maxAttempts?: number;
+    /**
+     * Stalled-work scan enable (WL-0MUYMBSA90092QV2 AC2/AC3): read live from
+     * `downtimeStallScanEnabled`. Optional — absent defaults to enabled; the
+     * scan is `inert` unless `scanStalledPanes`/`resumeStalledPane` deps are
+     * wired, so an unwired caller is unaffected.
+     */
+    stallScanEnabled?: boolean;
+    /**
+     * Stalled-work stall threshold ms (WL-0MUYMBSA90092QV2): read live from
+     * `downtimeStallThresholdMs` (clamped). Optional — absent falls back to
+     * `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS` (5 min).
+     */
+    stallScanThresholdMs?: number;
     /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
     spawnConfig?: DowntimeSpawnConfig;
   },
@@ -4391,6 +4531,23 @@ export async function dispatchDowntimeWork(
     // implement-kind candidate (Q1 split-by-skill) — see the tier comment.
     const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+
+    // ── Stalled-work scan (WL-0MUYMBSA90092QV2 AC1/AC3/AC4) ──
+    // Idle-gated (a pane slot is free) and immediately before new-item
+    // selection: prefer resuming a stalled pane over opening a new one. A
+    // successful resume short-circuits the cycle with the neutral
+    // 'stalled-resume' reason; any failure (unwired deps, unreadable pane
+    // list, resume failure) falls through to the unchanged path below.
+    if (panesEligible) {
+      const resumed = await resumeStalledWorkIfAble(deps, opts.cwd, {
+        enabled: opts.stallScanEnabled ?? true,
+        frozen,
+        thresholdMs: opts.stallScanThresholdMs ?? DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+        nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+        maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+      });
+      if (resumed) return { dispatched: false, reason: STALLED_RESUME_REASON };
+    }
 
     if (!frozen && panesEligible) {
       const duePrompt = await deps.getDueScheduledPrompt(opts.cwd);
@@ -5247,6 +5404,16 @@ export interface DowntimeWorkerConfig {
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h).
      */
     markerStaleWindowMs?: number;
+    /**
+     * Stalled-work scan enable (WL-0MUYMBSA90092QV2): read live on every tick.
+     * Optional for backward compat — defaults to enabled.
+     */
+    stallScanEnabled?: boolean;
+    /**
+     * Stalled-work stall threshold, ms (WL-0MUYMBSA90092QV2): read live on
+     * every tick. Optional — defaults to `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`.
+     */
+    stallScanThresholdMs?: number;
     /**
      * Pane-lifecycle monitor cadence, ms (WL-0MU308WSF0002JWN). Optional —
      * defaults to `DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS` (30 s). Tests may
@@ -6144,6 +6311,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   browseItemCount: cfg.browseItemCount,
                   nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   maxAttempts: cfg.maxAttempts,
+                  stallScanEnabled: cfg.stallScanEnabled,
+                  stallScanThresholdMs: cfg.stallScanThresholdMs,
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
@@ -6166,6 +6335,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                 // Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK).
                 maxAttempts: cfg.maxAttempts,
+                // Stalled-work scan before new-item selection
+                // (WL-0MUYMBSA90092QV2).
+                stallScanEnabled: cfg.stallScanEnabled,
+                stallScanThresholdMs: cfg.stallScanThresholdMs,
                 spawnConfig,
               });
         // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
@@ -6210,7 +6383,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           //    and reset the idle tracker (fresh full idle period required
           //    after the pause).
           if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
-            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs, cfg.maxAttempts);
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs, cfg.maxAttempts, cfg.stallScanEnabled, cfg.stallScanThresholdMs);
             if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
               errorStrikes = 0; // the CLI answered — it is healthy
               cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;

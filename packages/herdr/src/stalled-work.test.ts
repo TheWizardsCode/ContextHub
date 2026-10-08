@@ -14,6 +14,7 @@ import {
   classifyStalledPane,
   stalledPaneKindFromLabel,
   resumeStalledPane,
+  scanStalledPanes,
   buildStalledResumeStartArgs,
   classifyHerdrAgentFailure,
   _resetStalledResumeInFlight,
@@ -21,6 +22,8 @@ import {
   type ResumeStalledPaneDeps,
   type StalledResumeStartOptions,
   type StalledPaneGuards,
+  type StalledScanDeps,
+  type StalledScanOptions,
 } from './stalled-work.js';
 import type { DowntimeItemInfo, HerdrPaneRecord } from './downtime-worker.js';
 import { countAttempts, type DowntimeLogEntry } from './downtime-log.js';
@@ -461,5 +464,155 @@ describe('resumeStalledPane — in-place resume (WL-0MUYMBPZ5004LBFX)', () => {
     const { deps, startCalls } = resumeController();
     await resumeStalledPane(resumeInput({ agentStatus: 'unknown' }), deps);
     expect(startCalls).toEqual([]);
+  });
+});
+
+// ── Machine-wide scan (WL-0MUYMBSA90092QV2) ───────────────────────────
+
+describe('scanStalledPanes — machine-wide scan (WL-0MUYMBSA90092QV2)', () => {
+  const OPTS: StalledScanOptions = {
+    enabled: true,
+    frozen: false,
+    thresholdMs: THRESHOLD,
+    nonTerminalCooldownMs: 10 * 60 * 1000,
+    maxAttempts: 3,
+    now: NOW,
+  };
+
+  function scanStage(id: string): string {
+    if (id === 'WL-PLAN') return 'intake_complete';
+    if (id === 'WL-INTAKE') return 'idea';
+    if (id === 'WL-AUDIT') return 'in_review';
+    return 'plan_complete';
+  }
+
+  function scanDeps(overrides: Partial<StalledScanDeps> = {}): StalledScanDeps {
+    return {
+      listPanes: async () => [],
+      fetchItem: async (id) => ({ ok: true, info: item({ id, stage: scanStage(id) }) }),
+      readEntries: async () => [],
+      resolveRoot: () => '/worklog/root',
+      ...overrides,
+    };
+  }
+
+  it('returns stalled candidates in pane-list order, carrying each candidate kind', async () => {
+    const panes: HerdrPaneRecord[] = [
+      pane({ paneId: 'p1', label: `Downtime triggered plan Plan me - WL-PLAN`, agentStatus: 'idle' }),
+      pane({ paneId: 'p2', label: `Downtime triggered intake Intake me - WL-INTAKE`, agentStatus: 'done' }),
+      pane({ paneId: 'p3', label: `Downtime triggered implement Implement me - WL-IMP`, agentStatus: 'working' }),
+    ];
+    const out = await scanStalledPanes(scanDeps({ listPanes: async () => panes }), '/leader', OPTS);
+
+    expect(out.map((c) => [c.pane.paneId, c.kind])).toEqual([
+      ['p1', 'plan'],
+      ['p2', 'intake'],
+    ]);
+  });
+
+  it('resolves each pane to its OWN root and fetches the item against that root (cross-root)', async () => {
+    const fetched: Array<[string, string]> = [];
+    const panes: HerdrPaneRecord[] = [
+      pane({ paneId: 'p1', label: `Downtime triggered implement Implement me - WL-A`, cwd: '/root-a' }),
+      pane({ paneId: 'p2', label: `Downtime triggered implement Implement me - WL-B`, cwd: '/root-b' }),
+    ];
+    const out = await scanStalledPanes(
+      scanDeps({
+        listPanes: async () => panes,
+        resolveRoot: (p) => (p.cwd === '/root-a' ? '/root-a' : '/root-b'),
+        fetchItem: async (id, cwd) => {
+          fetched.push([id, cwd]);
+          return { ok: true, info: item({ id, stage: scanStage(id) }) };
+        },
+      }),
+      '/leader-root',
+      OPTS,
+    );
+
+    expect(out.map((c) => c.cwd)).toEqual(['/root-a', '/root-b']);
+    expect(fetched).toEqual([['WL-A', '/root-a'], ['WL-B', '/root-b']]);
+  });
+
+  it('is inert when the scan is disabled (never lists panes)', async () => {
+    let listed = false;
+    const out = await scanStalledPanes(
+      scanDeps({ listPanes: async () => { listed = true; return [pane()]; } }),
+      '/leader',
+      { ...OPTS, enabled: false },
+    );
+    expect(out).toEqual([]);
+    expect(listed).toBe(false);
+  });
+
+  it('fails safe to no stalled resume on an unreadable/thrown pane list', async () => {
+    expect(await scanStalledPanes(scanDeps({ listPanes: async () => null }), '/leader', OPTS)).toEqual([]);
+    expect(
+      await scanStalledPanes(
+        scanDeps({ listPanes: async () => { throw new Error('herdr down'); } }),
+        '/leader',
+        OPTS,
+      ),
+    ).toEqual([]);
+  });
+
+  it('skips unresolvable-root and failed-fetch panes without aborting the scan', async () => {
+    const panes: HerdrPaneRecord[] = [
+      pane({ paneId: 'p1', label: `Downtime triggered implement Implement me - WL-A` }),
+      pane({ paneId: 'p2', label: `Downtime triggered implement Implement me - WL-B` }),
+      pane({ paneId: 'p3', label: `Downtime triggered implement Implement me - WL-C` }),
+    ];
+    const out = await scanStalledPanes(
+      scanDeps({
+        listPanes: async () => panes,
+        resolveRoot: (p) => (p.paneId === 'p1' ? null : '/root'),
+        fetchItem: async (id) => (id === 'WL-B' ? { ok: false } : { ok: true, info: item({ id, stage: scanStage(id) }) }),
+      }),
+      '/leader',
+      OPTS,
+    );
+    expect(out.map((c) => c.pane.paneId)).toEqual(['p3']);
+  });
+
+  it('treats a thrown readEntries as an empty log (fail-open) and still classifies', async () => {
+    const out = await scanStalledPanes(
+      scanDeps({
+        listPanes: async () => [pane({ paneId: 'p1', label: `Downtime triggered implement Implement me - WL-A` })],
+        readEntries: async () => { throw new Error('log unreadable'); },
+      }),
+      '/leader',
+      OPTS,
+    );
+    expect(out.map((c) => c.pane.paneId)).toEqual(['p1']);
+  });
+
+  it('skips audit/implement panes while frozen (split-by-skill) but keeps plan/intake', async () => {
+    const panes: HerdrPaneRecord[] = [
+      pane({ paneId: 'p1', label: `Downtime triggered audit Audit me - WL-AUDIT` }),
+      pane({ paneId: 'p2', label: `Downtime triggered implement Implement me - WL-IMP` }),
+      pane({ paneId: 'p3', label: `Downtime triggered plan Plan me - WL-PLAN` }),
+      pane({ paneId: 'p4', label: `Downtime triggered intake Intake me - WL-INTAKE` }),
+    ];
+    const out = await scanStalledPanes(
+      scanDeps({ listPanes: async () => panes }),
+      '/leader',
+      { ...OPTS, frozen: true },
+    );
+    expect(out.map((c) => c.kind)).toEqual(['plan', 'intake']);
+  });
+
+  it('ignores panes with no agent, no item id or no dispatch kind', async () => {
+    const panes: HerdrPaneRecord[] = [
+      pane({ paneId: 'p1', agent: undefined, label: `Downtime triggered plan Plan me - WL-A` }),
+      pane({ paneId: 'p2', label: 'Downtime plan (no item id)' }),
+      pane({ paneId: 'p3', label: `Manually triggered prompt hello - WL-C` }),
+    ];
+    let fetched = 0;
+    const out = await scanStalledPanes(
+      scanDeps({ listPanes: async () => panes, fetchItem: async (id) => { fetched += 1; return { ok: true, info: item({ id, stage: scanStage(id) }) }; } }),
+      '/leader',
+      OPTS,
+    );
+    expect(out).toEqual([]);
+    expect(fetched).toBe(0);
   });
 });

@@ -203,6 +203,7 @@ import {
   jsonResponseFixture,
   type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
+import type { StalledPaneCandidate } from './stalled-work.js';
 
 
 /** Shared deps mock for dispatch tests. */
@@ -12428,5 +12429,221 @@ describe('clampDowntimeMaxAttempts (WL-0MUKYEXMK0033MFK)', () => {
     expect(clampDowntimeMaxAttempts(-5)).toBe(DOWNTIME_MAX_ATTEMPTS_MIN);
     expect(clampDowntimeMaxAttempts(99)).toBe(DOWNTIME_MAX_ATTEMPTS_MAX);
     expect(clampDowntimeMaxAttempts(4)).toBe(4);
+  });
+});
+
+// ── Stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2) ──
+// The dispatcher must, on an idle cycle and BEFORE new-item selection,
+// consult the stalled-work scan; a successful in-place resume short-circuits
+// the cycle (preference ordering) and every failure degrades to the unchanged
+// normal dispatch path (fail-safe).
+
+describe('stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2)', () => {
+  function stalledCandidate(overrides: Partial<StalledPaneCandidate> = {}): StalledPaneCandidate {
+    return {
+      pane: {
+        paneId: 'pane-1',
+        label: 'Downtime triggered implement Some item - WL-STALLED',
+        agent: 'pi',
+        agentStatus: 'idle',
+      },
+      item: {
+        id: 'WL-STALLED',
+        status: 'open',
+        stage: 'plan_complete',
+        title: 'Some item',
+        updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      },
+      cwd: '/repo',
+      kind: 'implement',
+      ...overrides,
+    };
+  }
+
+  const implementHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Implement ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'high',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 10,
+  });
+
+  it('dispatchDowntimeWork: a successful resume short-circuits new-item dispatch', async () => {
+    const scanStalledPanes = vi.fn().mockResolvedValue([stalledCandidate()]);
+    const resumeStalledPane = vi.fn().mockResolvedValue({
+      resumed: true,
+      via: 'prompt',
+      paneId: 'pane-1',
+      itemId: 'WL-STALLED',
+      kind: 'implement',
+    });
+    const deps = makeDeps({
+      scanStalledPanes,
+      resumeStalledPane,
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome).toEqual({ dispatched: false, reason: 'stalled-resume' });
+    expect(scanStalledPanes).toHaveBeenCalledTimes(1);
+    expect(resumeStalledPane).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: '/repo', kind: 'implement' }),
+      expect.objectContaining({ enabled: true, thresholdMs: expect.any(Number) }),
+    );
+    // New-item selection never ran and no pane was spawned.
+    expect(deps.getHerdrListHead).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('dispatchDowntimeWork: an unresumable candidate falls through to normal dispatch', async () => {
+    const resumeStalledPane = vi.fn().mockResolvedValue({
+      resumed: false,
+      reason: 'agent-blocked',
+      paneId: 'pane-1',
+      itemId: 'WL-STALLED',
+      kind: 'implement',
+    });
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane,
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-1');
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatchDowntimeWork: a thrown scan degrades to normal dispatch (never a crash)', async () => {
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockRejectedValue(new Error('herdr down')),
+      resumeStalledPane: vi.fn(),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-1');
+  });
+
+  it('dispatchDowntimeWork: unwired scan deps degrade to normal dispatch', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+  });
+
+  it('dispatchDowntimeWork: a disabled scan never consults the scan dep', async () => {
+    const scanStalledPanes = vi.fn();
+    const deps = makeDeps({
+      scanStalledPanes,
+      resumeStalledPane: vi.fn(),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      stallScanEnabled: false,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(scanStalledPanes).not.toHaveBeenCalled();
+  });
+
+  it('dispatchFromCoordination: a successful resume short-circuits the offer dispatch', async () => {
+    const fetchItem = vi.fn();
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: vi.fn().mockResolvedValue({
+        resumed: true,
+        via: 'prompt',
+        paneId: 'pane-1',
+        itemId: 'WL-STALLED',
+        kind: 'implement',
+      }),
+      fetchItem,
+    });
+
+    const entry: CoordinationEntry = {
+      instanceId: 'i1',
+      workItemId: 'WL-1',
+      directory: '/repo',
+      worklogRoot: '/repo',
+      assignedAt: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+    };
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: '/coord',
+      freeSlots: 2,
+    });
+
+    expect(outcome).toEqual({ dispatched: false, reason: 'stalled-resume' });
+    expect(fetchItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('computeMostImportantItem: a successful resume reports stalledResume and offers nothing', async () => {
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: vi.fn().mockResolvedValue({
+        resumed: true,
+        via: 'prompt',
+        paneId: 'pane-1',
+        itemId: 'WL-STALLED',
+        kind: 'implement',
+      }),
+      getHerdrListHead: vi.fn(),
+    });
+
+    const result = await computeMostImportantItem(
+      deps,
+      '/repo',
+      Date.now(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      300_000,
+    );
+
+    expect(result).toEqual({ ok: true, stalledResume: true });
+    expect(deps.getHerdrListHead).not.toHaveBeenCalled();
+  });
+
+  it('computeMostImportantItem: no resume → the normal offer computation runs', async () => {
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([]),
+      resumeStalledPane: vi.fn(),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const result = await computeMostImportantItem(
+      deps,
+      '/repo',
+      Date.now(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      300_000,
+    );
+
+    expect(result).toMatchObject({ ok: true, candidate: { id: 'WL-1' } });
+    expect(deps.getHerdrListHead).toHaveBeenCalledTimes(1);
   });
 });

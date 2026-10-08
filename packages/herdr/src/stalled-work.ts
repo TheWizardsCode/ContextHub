@@ -27,6 +27,7 @@ import {
   isAttemptBudgetExhausted,
   paneLabelItemId,
   type DowntimeItemInfo,
+  type DowntimeItemResult,
   type DowntimeSkillKind,
   type HerdrPaneRecord,
 } from './downtime-worker.js';
@@ -605,4 +606,130 @@ export async function resumeStalledPane(
   } finally {
     _stalledResumeInFlight.delete(key);
   }
+}
+
+// ── Machine-wide scan (WL-0MUYMBSA90092QV2) ───────────────────────────
+
+/**
+ * Options threaded through the stalled-work scan and resume. Re-read from the
+ * plugin settings on every idle tick (never cached) so a settings change —
+ * `downtimeStallScanEnabled` / `downtimeStallThresholdMs` — applies live.
+ */
+export interface StalledScanOptions {
+  /** Master switch (`downtimeStallScanEnabled`). False → no scan at all. */
+  enabled: boolean;
+  /** True while the code-freeze marker is frozen/ambiguous (split-by-skill). */
+  frozen: boolean;
+  /** Minimum continuous not-working duration (`downtimeStallThresholdMs`). */
+  thresholdMs: number;
+  /** Non-terminal pane-close cooldown window (ms). */
+  nonTerminalCooldownMs: number;
+  /** Per-item/per-kind dispatch attempt cap. */
+  maxAttempts: number;
+  /** Injectable clock (defaults to `Date.now`). */
+  now?: number;
+}
+
+/**
+ * A stalled pane the scan is willing to resume, carrying the item's OWN
+ * worklog root so a foreign-root pane is resumed against that root — never
+ * the leader's (parent AC5).
+ */
+export interface StalledPaneCandidate {
+  pane: HerdrPaneRecord;
+  item: DowntimeItemInfo;
+  /** The item's worklog root (resolved from the pane's cwd / agent_session). */
+  cwd: string;
+  kind: DowntimeSkillKind;
+}
+
+/**
+ * Injectable I/O seams for {@link scanStalledPanes}. Production wires these to
+ * the real machine-wide `herdr pane list`, the `wl show` fetch and the rolling
+ * dispatch log; tests stub them so the scan is fully unit-testable without a
+ * live herdr session or filesystem.
+ */
+export interface StalledScanDeps {
+  /** Machine-wide pane list; `null` on an unreadable/unparseable read. */
+  listPanes(): Promise<HerdrPaneRecord[] | null>;
+  /** Fetch one item by id against its own worklog root (fail-closed). */
+  fetchItem(itemId: string, cwd: string): Promise<DowntimeItemResult>;
+  /** Read the item root's rolling dispatch log. */
+  readEntries(cwd: string): Promise<DowntimeLogEntry[]>;
+  /**
+   * Resolve the item's worklog root from the pane's `cwd` / `agent_session`.
+   * Returns `null` when the root cannot be resolved unambiguously — the scan
+   * fails closed (skips the pane) rather than resuming against a wrong root.
+   */
+  resolveRoot(pane: HerdrPaneRecord, fallbackCwd: string): string | null;
+}
+
+/**
+ * Machine-wide stalled-pane scan (WL-0MUYMBSA90092QV2 AC1/AC4): classify
+ * every `herdr pane list` record and return the resumable stalled candidates
+ * in list order. Pure orchestration over injected I/O so the ordering, the
+ * cross-root resolution and the fail-safe exclusions are unit-testable.
+ *
+ * FAIL-SAFE: an empty array when the scan is disabled, the pane list is
+ * unreadable/unparseable, or nothing is stalled. A per-pane failure (an
+ * unresolvable root, a failed `wl show`, a thrown log read) skips that pane
+ * and NEVER aborts the scan or throws. A code-frozen cycle skips `audit`/
+ * `implement` panes so a resume can never bypass the freeze split-by-skill.
+ */
+export async function scanStalledPanes(
+  deps: StalledScanDeps,
+  fallbackCwd: string,
+  opts: StalledScanOptions,
+): Promise<StalledPaneCandidate[]> {
+  if (opts.enabled !== true) return [];
+  let panes: HerdrPaneRecord[] | null;
+  try {
+    panes = await deps.listPanes();
+  } catch {
+    return []; // fail-safe: an unreadable scan degrades to no stalled resume
+  }
+  if (!Array.isArray(panes) || panes.length === 0) return [];
+  const now = opts.now ?? Date.now();
+  const candidates: StalledPaneCandidate[] = [];
+  for (const pane of panes) {
+    // Cheap pre-checks before any per-pane I/O (mirrors the classifier).
+    if (typeof pane.agent !== 'string' || pane.agent === '') continue;
+    const itemId = paneLabelItemId(pane.label);
+    if (itemId === null) continue;
+    const kind = stalledPaneKindFromLabel(pane.label);
+    if (kind === null) continue;
+    // Code-freeze split-by-skill: never resume an audit/implement pane while
+    // frozen/ambiguous — the resume path composes with, never bypasses, it.
+    if (opts.frozen && (kind === 'audit' || kind === 'implement')) continue;
+    const root = deps.resolveRoot(pane, fallbackCwd);
+    if (root === null) continue; // unresolvable root → fail closed (skip)
+    let fetched: DowntimeItemResult;
+    try {
+      fetched = await deps.fetchItem(itemId, root);
+    } catch {
+      continue;
+    }
+    if (!fetched.ok) continue;
+    let entries: DowntimeLogEntry[] = [];
+    try {
+      entries = await deps.readEntries(root);
+    } catch {
+      entries = [];
+    }
+    const decision = classifyStalledPane(
+      pane,
+      fetched.info,
+      {
+        entries,
+        nonTerminalCooldownMs: opts.nonTerminalCooldownMs,
+        maxAttempts: opts.maxAttempts,
+      },
+      now,
+      opts.thresholdMs,
+    );
+    if (decision.stalled) {
+      candidates.push({ pane, item: fetched.info, cwd: root, kind: decision.kind });
+    }
+  }
+  return candidates;
 }
