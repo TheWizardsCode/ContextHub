@@ -30,6 +30,7 @@ import {
   computeMostImportantItem,
   coordinationTierRank,
   DOWNTIME_AUDIT_RECENCY_WINDOW_MS,
+  DOWNTIME_DISPATCH_EXTEND_MAX,
   type DowntimeWorker,
   type DowntimeWorkerDeps,
   type DowntimeItemInfo,
@@ -1911,4 +1912,254 @@ describe('in-flight guard on the coordination offer path (WL-0MUBVKS5I007LSWB / 
     expect(result.candidate.id).toBe('CR-DONE');
     expect(result.kind).toBe('implement');
   });
+});
+
+// ── Own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM6) ──
+// Parent WL-0MUU4XFU90008E24: when the sprint-view head yields no dispatchable
+// candidate, the coordination-mode leader MAY fall back to its OWN worklog
+// backlog (items beyond the sprint-view window). This child pins the SELECTION
+// contract only (parent AC1, AC2, AC3, AC9):
+//
+//   * it dispatches an eligible non-critical item that sits beyond the live
+//     sprint-view window in the LEADER'S OWN root;
+//   * it never reads another instance's/root's hidden backlog (own `cwd` only);
+//   * it preserves the canonical ranking (the same `getHerdrListHead` order —
+//     a bounded window extension, never a second ranking);
+//   * the fallback window is bounded by `DOWNTIME_DISPATCH_EXTEND_MAX`;
+//   * it fails open (a `{ok:false}`/throwing/empty lookup leaves the original
+//     terminal reason unchanged).
+//
+// RED WITNESS. The fallback does not exist yet, so every body asserts the
+// post-implementation behaviour and is committed with `it.fails` — the suite
+// stays GREEN while the assertions are RED (the repo's documented TDD pattern;
+// see `docs/dev/downtime-dispatcher-post-fix-verification.md`). The
+// implementation child WL-0MUUZPBSYW004I5D3 flips each `it.fails` to `it` once
+// the fallback lands (the RED→GREEN transition is the dependency evidence).
+describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM6)', () => {
+  // The live sprint-view window used by every case (== DEFAULT_BROWSE_ITEM_COUNT).
+  const SPRINT = 20;
+
+  /** A full in-view head whose every item is filtered by the producer-review gate. */
+  const filteredInView = (): DowntimeHerdrItem[] =>
+    Array.from({ length: SPRINT }, (_, i) =>
+      headItem({
+        id: `WL-VIEW-${String(i).padStart(2, '0')}`,
+        title: `Filtered in-view ${i}`,
+        status: 'open',
+        stage: 'plan_complete',
+        priority: 'high',
+        risk: 'Low',
+        effort: 'S',
+        needsProducerReview: true,
+        sortIndex: i,
+      }),
+    );
+
+  /** An eligible, dispatchable non-critical implement item. */
+  const eligibleBacklog = (id: string, sortIndex = 1000): DowntimeHerdrItem =>
+    headItem({
+      id,
+      title: `Backlog ${id}`,
+      status: 'open',
+      stage: 'plan_complete',
+      priority: 'high',
+      risk: 'Low',
+      effort: 'S',
+      sortIndex,
+    });
+
+  /**
+   * Leader-own-root `getHerdrListHead` mock modelling the canonical ranking:
+   * a window at/below the sprint view returns only the filtered head; a larger
+   * window returns the filtered head followed by the ranked out-of-view tail.
+   */
+  const rankedOwnRoot = (
+    tail: readonly DowntimeHerdrItem[],
+    inView: DowntimeHerdrItem[] = filteredInView(),
+  ) =>
+    vi.fn(async (_cwd: string, limit = SPRINT) => ({
+      ok: true as const,
+      items: limit <= SPRINT ? inView : [...inView, ...tail],
+    }));
+
+  const dispatch = (deps: DowntimeWorkerDeps, entries: CoordinationEntry[] = []) =>
+    dispatchFromCoordination(deps, entries, {
+      model: 'plan',
+      cwd: '/leader-root',
+      coordinationDir: testDir,
+      browseItemCount: SPRINT,
+    });
+
+  it.fails(
+    'AC1: dispatches an eligible non-critical item beyond the sprint-view window from the leader own root',
+    async () => {
+      const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BACKLOG-1')]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps);
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      expect(outcome.candidate?.id).toBe('WL-BACKLOG-1');
+      // Dispatched against the leader's OWN root (claim + spawn cwd).
+      expect(deps.claimItem).toHaveBeenCalledWith('WL-BACKLOG-1', expect.anything(), '/leader-root');
+      expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+        expect.stringContaining('/skill:implement WL-BACKLOG-1'),
+        expect.objectContaining({ cwd: '/leader-root' }),
+      );
+    },
+  );
+
+  it.fails(
+    'AC1: falls back when every in-view item is filtered, not only when the view is literally empty',
+    async () => {
+      const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-FILTERED-BACKLOG')]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps);
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-FILTERED-BACKLOG');
+      // The leader's own root was read at all (own-root scope).
+      expect(getHerdrListHead).toHaveBeenCalledWith('/leader-root', expect.any(Number));
+    },
+  );
+
+  it.fails(
+    'AC2: reads only the leader own root — another root hidden backlog is never selected',
+    async () => {
+      const getHerdrListHead = vi.fn(async (cwd: string, limit = SPRINT) => ({
+        ok: true as const,
+        items:
+          limit <= SPRINT
+            ? filteredInView()
+            : [
+                ...filteredInView(),
+                ...(cwd === '/leader-root'
+                  ? [eligibleBacklog('WL-OWN-BACKLOG')]
+                  : [eligibleBacklog('WL-OTHER-BACKLOG')]),
+              ],
+      }));
+      const deps = makeCoordinationDeps({
+        getHerdrListHead,
+        // The other root's coordination offer is stale/non-dispatchable, so
+        // nothing from the offer list survives and the fallback must run.
+        fetchItem: vi.fn().mockResolvedValue({
+          ok: true,
+          info: itemInfo({ id: 'WL-OTHER-ITEM', status: 'in_progress', stage: 'in_progress' }),
+        }),
+      });
+
+      const outcome = await dispatch(deps, [makeEntry('inst-other', 'WL-OTHER-ITEM', '/other-root')]);
+
+      expect(outcome.candidate?.id).toBe('WL-OWN-BACKLOG');
+      expect(outcome.candidate?.id).not.toBe('WL-OTHER-BACKLOG');
+      // The fallback lookup is never issued against another root.
+      expect(getHerdrListHead).not.toHaveBeenCalledWith('/other-root', expect.any(Number));
+    },
+  );
+
+  it.fails(
+    'AC3: preserves canonical ranking order (first ranked eligible wins, not id/insertion order)',
+    async () => {
+      // Canonical ranking places WL-RANK-Z ahead of WL-RANK-A.
+      const getHerdrListHead = rankedOwnRoot([
+        eligibleBacklog('WL-RANK-Z', 1000),
+        eligibleBacklog('WL-RANK-A', 2000),
+      ]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps);
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-RANK-Z');
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.fails(
+    'AC3: skips a ranked out-of-view item blocked by a safety gate and dispatches the next eligible',
+    async () => {
+      const getHerdrListHead = rankedOwnRoot([
+        headItem({
+          id: 'WL-RANK-GATED',
+          status: 'open',
+          stage: 'plan_complete',
+          priority: 'high',
+          risk: 'Low',
+          effort: 'S',
+          needsProducerReview: true,
+          sortIndex: 1000,
+        }),
+        eligibleBacklog('WL-RANK-ELIGIBLE', 2000),
+      ]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps);
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-RANK-ELIGIBLE');
+    },
+  );
+
+  it.fails(
+    'AC9: the fallback window is bounded by DOWNTIME_DISPATCH_EXTEND_MAX',
+    async () => {
+      const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BOUNDED')]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      await dispatch(deps);
+
+      const limits = (getHerdrListHead as ReturnType<typeof vi.fn>).mock.calls.map(
+        (call) => call[1] as number,
+      );
+      expect(limits.length).toBeGreaterThan(0);
+      // The largest window requested is the sprint view plus the bounded
+      // extension — never an unbounded backlog read.
+      expect(Math.max(...limits)).toBe(SPRINT + DOWNTIME_DISPATCH_EXTEND_MAX);
+    },
+  );
+
+  it.fails(
+    'AC9 fail-open: a {ok:false} own-root lookup leaves the original terminal reason unchanged',
+    async () => {
+      const getHerdrListHead = vi.fn().mockResolvedValue({ ok: false, error: 'boom' });
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps);
+
+      expect(getHerdrListHead).toHaveBeenCalledWith('/leader-root', expect.any(Number));
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    },
+  );
+
+  it.fails(
+    'AC9 fail-open: a throwing own-root lookup leaves the original terminal reason unchanged',
+    async () => {
+      const getHerdrListHead = vi.fn().mockRejectedValue(new Error('boom'));
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps);
+
+      expect(getHerdrListHead).toHaveBeenCalledWith('/leader-root', expect.any(Number));
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+    },
+  );
+
+  it.fails(
+    'AC9 fail-open: an empty fallback tail leaves the original terminal reason unchanged',
+    async () => {
+      const getHerdrListHead = vi.fn().mockResolvedValue({ ok: true, items: [] });
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps);
+
+      expect(getHerdrListHead).toHaveBeenCalledWith('/leader-root', expect.any(Number));
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+    },
+  );
 });
