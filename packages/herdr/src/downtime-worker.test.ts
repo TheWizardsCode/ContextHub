@@ -8645,6 +8645,48 @@ describe('parseHerdrPaneListOutput / countRunningDowntimePanes (AC1)', () => {
     expect(panes).not.toBeNull();
     expect(countRunningDowntimePanes(panes!)).toHaveLength(2);
   });
+
+  it('exposes cwd and agent_session on parsed records (WL-0MUYMBMCG000Z4WP AC1)', () => {
+    const raw = JSON.stringify({
+      result: {
+        panes: [
+          {
+            pane_id: 'w2Y:p87',
+            label: 'Manually triggered intake - WL-ABC',
+            agent: 'pi',
+            agent_status: 'working',
+            cwd: '/home/u/projects/OtherRoot',
+            agent_session: { kind: 'path', value: '/tmp/s.jsonl' },
+          },
+        ],
+      },
+    });
+    const panes = parseHerdrPaneListOutput(raw)!;
+    expect(panes[0].cwd).toBe('/home/u/projects/OtherRoot');
+    expect(panes[0].agentSession).toEqual({ kind: 'path', value: '/tmp/s.jsonl' });
+  });
+
+  it('omits cwd / agent_session on missing or malformed fields, without throwing (WL-0MUYMBMCG000Z4WP AC3)', () => {
+    const raw = JSON.stringify({
+      panes: [
+        { pane_id: 'p1', cwd: 7, agent_session: ['x'] },
+        { pane_id: 'p2' },
+      ],
+    });
+    const panes = parseHerdrPaneListOutput(raw)!;
+    expect(panes).toHaveLength(2);
+    expect(panes[0].cwd).toBeUndefined();
+    expect(panes[0].agentSession).toBeUndefined();
+    expect(panes[1].cwd).toBeUndefined();
+    expect(panes[1].agentSession).toBeUndefined();
+  });
+
+  it('shares one parse contract: bare arrays and bracketed log prefixes parse (WL-0MUYMBMCG000Z4WP AC3)', () => {
+    const bare = JSON.stringify([{ pane_id: 'p1', cwd: '/r' }]);
+    expect(parseHerdrPaneListOutput(bare)![0].cwd).toBe('/r');
+    const prefixed = '[herdr] starting\n' + JSON.stringify({ panes: [{ pane_id: 'p1' }] });
+    expect(parseHerdrPaneListOutput(prefixed)![0].paneId).toBe('p1');
+  });
 });
 
 // ── Item-scoped in-flight guard helpers (F3 WL-0MUBVKXQJ000L8EO) ────────

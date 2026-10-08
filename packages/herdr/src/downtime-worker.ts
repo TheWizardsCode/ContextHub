@@ -177,6 +177,7 @@ import {
   type PaneItemState,
 } from './pane-lifecycle.js';
 import { paneCloseReaperDue } from './pane-close-scheduler.js';
+import { parseHerdrPaneCloseList, type HerdrAgentSession } from './pane-close-herdr.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
 import type {
   DispatcherAnchor,
@@ -1484,6 +1485,10 @@ export interface HerdrPaneRecord {
   label?: string;
   agent?: string;
   agentStatus?: string;
+  /** Pane working directory (worklog-root hint for cross-root resume). */
+  cwd?: string;
+  /** Raw `agent_session` field (session log path + agent metadata). */
+  agentSession?: HerdrAgentSession;
 }
 
 /**
@@ -1494,53 +1499,28 @@ export interface HerdrPaneRecord {
 export const DOWNTIME_PANE_LABEL_PREFIX = 'Downtime';
 
 /**
- * Parse `herdr pane list` JSON output into records. Tolerates log lines
- * prefixed before the JSON envelope (scan for the first `{`, like
- * `parseAgentListOutput`), the `{result:{panes:[…]}}` envelope, and a bare
- * array. Returns `null` when no pane array can be found (the caller treats
- * this as a failed liveness query → fail-closed).
+ * Parse `herdr pane list` JSON output into records. Thin adapter over the
+ * shared {@link parseHerdrPaneCloseList} contract (WL-0MUYMBMCG000Z4WP): the
+ * reaper and the dispatcher must never drift into two parsers. Tolerates log
+ * lines/prefixes before the JSON envelope, the `{result:{panes:[…]}}` /
+ * `{panes:[…]}` shapes and a bare array. Returns `null` when no pane array can
+ * be found (the caller treats this as a failed liveness query → fail-closed).
+ *
+ * Records carry the pane's `cwd` and raw `agent_session` alongside
+ * `paneId`/`label`/`agent`/`agentStatus` so a stalled pane for an item in
+ * another worklog root can be resumed against that root.
  */
 export function parseHerdrPaneListOutput(raw: string): HerdrPaneRecord[] | null {
-  const start = raw.indexOf('{');
-  if (start < 0) return null;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw.slice(start));
-  } catch {
-    return null;
-  }
-
-  let panes: unknown = null;
-  if (payload && typeof payload === 'object') {
-    const obj = payload as Record<string, unknown>;
-    const result = obj.result;
-    const resultObj =
-      result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
-    if (Array.isArray(resultObj?.panes)) {
-      panes = resultObj.panes;
-    } else if (Array.isArray(obj.panes)) {
-      panes = obj.panes;
-    }
-  }
-  if (!Array.isArray(panes)) return null;
-
-  const records: HerdrPaneRecord[] = [];
-  for (const entry of panes) {
-    if (!entry || typeof entry !== 'object') continue;
-    const rec = entry as Record<string, unknown>;
-    const paneId = rec.pane_id ?? rec.paneId;
-    if (typeof paneId !== 'string' || paneId === '') continue;
-    const label = typeof rec.label === 'string' ? rec.label : undefined;
-    const agent = typeof rec.agent === 'string' ? rec.agent : undefined;
-    const agentStatus =
-      typeof rec.agent_status === 'string'
-        ? rec.agent_status
-        : typeof rec.agentStatus === 'string'
-          ? rec.agentStatus
-          : undefined;
-    records.push({ paneId, label, agent, agentStatus });
-  }
-  return records;
+  const parsed = parseHerdrPaneCloseList(raw);
+  if (parsed === null) return null;
+  return parsed.map((pane) => ({
+    paneId: pane.paneId,
+    label: pane.label,
+    agent: pane.agent,
+    agentStatus: pane.agentStatus,
+    cwd: pane.cwd,
+    agentSession: pane.agentSession,
+  }));
 }
 
 /**
