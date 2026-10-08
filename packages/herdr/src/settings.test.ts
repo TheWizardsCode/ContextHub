@@ -18,6 +18,13 @@ import {
   MIN_BROWSE_ITEM_COUNT,
   MAX_BROWSE_ITEM_COUNT,
 } from './settings.js';
+import {
+  DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
+  DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+  MIN_DOWNTIME_STALL_THRESHOLD_MS,
+  MAX_DOWNTIME_STALL_THRESHOLD_MS,
+  clampDowntimeStallThresholdMs,
+} from './downtime-worker.js';
 
 function tempSettingsPath(): string {
   const dir = mkdtempSync(join(tmpdir(), 'herdr-settings-test-'));
@@ -436,5 +443,77 @@ describe('downtimeMaxAttempts setting (WL-0MUKYEXMK0033MFK)', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeMaxAttempts: 'lots' }), 'utf-8');
     expect(loadSettings(path).downtimeMaxAttempts).toBe(3);
+  });
+});
+
+// ── downtimeStallScanEnabled / downtimeStallThresholdMs (WL-0MUYMBK6H005PY16) ──
+
+describe('downtimeStallScanEnabled / downtimeStallThresholdMs (WL-0MUYMBK6H005PY16)', () => {
+  it('defaults the scan on and the threshold to 5 minutes (300000 ms)', () => {
+    expect(DEFAULT_DOWNTIME_STALL_SCAN_ENABLED).toBe(true);
+    expect(DEFAULT_DOWNTIME_STALL_THRESHOLD_MS).toBe(300_000);
+    expect(defaultSettings.downtimeStallScanEnabled).toBe(true);
+    expect(defaultSettings.downtimeStallThresholdMs).toBe(300_000);
+  });
+
+  it('loads an existing config file without the keys with the defaults', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ autoRefresh: false }), 'utf-8');
+    const loaded = loadSettings(path);
+    expect(loaded.downtimeStallScanEnabled).toBe(true);
+    expect(loaded.downtimeStallThresholdMs).toBe(300_000);
+  });
+
+  it('round-trips both fields through save/load', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, {
+      ...defaultSettings,
+      downtimeStallScanEnabled: false,
+      downtimeStallThresholdMs: 120_000,
+    });
+    const loaded = loadSettings(path);
+    expect(loaded.downtimeStallScanEnabled).toBe(false);
+    expect(loaded.downtimeStallThresholdMs).toBe(120_000);
+  });
+
+  it('clamps a persisted threshold into [60s, 60min]', () => {
+    const path = tempSettingsPath();
+    // Below the 60s floor → clamped up.
+    saveSettings(path, { ...defaultSettings, downtimeStallThresholdMs: 1_000 });
+    expect(loadSettings(path).downtimeStallThresholdMs).toBe(MIN_DOWNTIME_STALL_THRESHOLD_MS);
+    // Above the 60min ceiling → clamped down.
+    saveSettings(path, { ...defaultSettings, downtimeStallThresholdMs: 120 * 60 * 1000 });
+    expect(loadSettings(path).downtimeStallThresholdMs).toBe(MAX_DOWNTIME_STALL_THRESHOLD_MS);
+    // In-range preserved.
+    saveSettings(path, { ...defaultSettings, downtimeStallThresholdMs: 600_000 });
+    expect(loadSettings(path).downtimeStallThresholdMs).toBe(600_000);
+  });
+
+  it('falls back to the threshold default when the persisted value is not a number', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeStallThresholdMs: 'soon' }), 'utf-8');
+    expect(loadSettings(path).downtimeStallThresholdMs).toBe(DEFAULT_DOWNTIME_STALL_THRESHOLD_MS);
+  });
+
+  it('falls back to the scan default when the persisted flag is not a boolean', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ ...defaultSettings, downtimeStallScanEnabled: 'yes' }), 'utf-8');
+    expect(loadSettings(path).downtimeStallScanEnabled).toBe(true);
+  });
+
+  it('clampDowntimeStallThresholdMs clamps bounds and rejects invalid input', () => {
+    expect(clampDowntimeStallThresholdMs(DEFAULT_DOWNTIME_STALL_THRESHOLD_MS)).toBe(300_000);
+    expect(clampDowntimeStallThresholdMs(1_000)).toBe(MIN_DOWNTIME_STALL_THRESHOLD_MS);
+    expect(clampDowntimeStallThresholdMs(120 * 60 * 1000)).toBe(MAX_DOWNTIME_STALL_THRESHOLD_MS);
+    expect(clampDowntimeStallThresholdMs(600_000)).toBe(600_000);
+    expect(clampDowntimeStallThresholdMs(-1)).toBe(DEFAULT_DOWNTIME_STALL_THRESHOLD_MS);
+    expect(clampDowntimeStallThresholdMs(Number.NaN)).toBe(DEFAULT_DOWNTIME_STALL_THRESHOLD_MS);
+    expect(clampDowntimeStallThresholdMs(Infinity)).toBe(DEFAULT_DOWNTIME_STALL_THRESHOLD_MS);
+  });
+
+  it('rounds a fractional persisted threshold', () => {
+    const path = tempSettingsPath();
+    saveSettings(path, { ...defaultSettings, downtimeStallThresholdMs: 120_000.7 });
+    expect(loadSettings(path).downtimeStallThresholdMs).toBe(120_001);
   });
 });

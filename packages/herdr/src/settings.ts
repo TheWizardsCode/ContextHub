@@ -27,6 +27,7 @@ import {
   clampDowntimeNonTerminalCooldownMs,
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
+  clampDowntimeStallThresholdMs,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -36,6 +37,8 @@ import {
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_PROXY_URL,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
+  DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
+  DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
 } from './downtime-worker.js';
 import {
   clampModeSwitchIdleThresholdMs,
@@ -119,6 +122,18 @@ export interface PluginSettings {
    */
   downtimeMarkerStaleWindowMs: number;
   /**
+   * Enable the pre-dispatch stalled-work scan (WL-0MUYMBK6H005PY16). When on,
+   * the dispatcher prefers resuming an existing stalled pane over opening a new
+   * one. Default `true`.
+   */
+  downtimeStallScanEnabled: boolean;
+  /**
+   * Minimum continuous not-`working` duration before a pane is considered
+   * stalled (WL-0MUYMBK6H005PY16). Default 5 min (300000 ms); clamped to
+   * [60 s, 60 min]; invalid/missing values fall back to the default.
+   */
+  downtimeStallThresholdMs: number;
+  /**
    * Enable activity-gated mode-switching (fast on agent command, cheap on
    * idle). Default `true` (WL-0MU4MKVR4005WPBJ — was `false`, which silently
    * disabled the shipped feature); when `false` no scheduler task is
@@ -180,6 +195,8 @@ export const defaultSettings: PluginSettings = {
   downtimeNonTerminalCooldownMs: DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   downtimeMaxAttempts: DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+  downtimeStallScanEnabled: DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
+  downtimeStallThresholdMs: DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   modeSwitchEnabled: true,
   modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
   modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
@@ -282,6 +299,11 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeMarkerStaleWindowMs: typeof parsed.downtimeMarkerStaleWindowMs === 'number'
         ? clampDowntimeMarkerStaleWindowMs(parsed.downtimeMarkerStaleWindowMs)
         : defaultSettings.downtimeMarkerStaleWindowMs,
+      downtimeStallScanEnabled: typeof parsed.downtimeStallScanEnabled === 'boolean'
+        ? parsed.downtimeStallScanEnabled : defaultSettings.downtimeStallScanEnabled,
+      downtimeStallThresholdMs: typeof parsed.downtimeStallThresholdMs === 'number'
+        ? clampDowntimeStallThresholdMs(parsed.downtimeStallThresholdMs)
+        : defaultSettings.downtimeStallThresholdMs,
       modeSwitchEnabled: typeof parsed.modeSwitchEnabled === 'boolean'
         ? parsed.modeSwitchEnabled : defaultSettings.modeSwitchEnabled,
       modeSwitchIdleThresholdMs: typeof parsed.modeSwitchIdleThresholdMs === 'number'

@@ -426,6 +426,32 @@ export const DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS = 60 * 60 * 1000;
 export const DOWNTIME_MARKER_STALE_WINDOW_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * Default for the pre-dispatch stalled-work scan (WL-0MUYMBK6H005PY16):
+ * enabled. The scan prefers resuming an existing stalled pane over opening a
+ * new one; it can be turned off without a code change.
+ */
+export const DEFAULT_DOWNTIME_STALL_SCAN_ENABLED = true;
+
+/**
+ * Default stall threshold (WL-0MUYMBK6H005PY16): 5 minutes, aligned with the
+ * pane-closure reaper's grace period. A pane is a stall candidate only once
+ * its not-`working` state has persisted at least this long.
+ */
+export const DEFAULT_DOWNTIME_STALL_THRESHOLD_MS = 5 * 60 * 1000;
+
+/**
+ * Hard floor for the stall threshold (60 s): below this the scan would resume
+ * panes that are merely between tool calls, hijacking active sessions.
+ */
+export const MIN_DOWNTIME_STALL_THRESHOLD_MS = 60 * 1000;
+
+/**
+ * Hard ceiling for the stall threshold (60 min): above this a genuinely
+ * stalled pane could sit unattended for over an hour, defeating the feature.
+ */
+export const MAX_DOWNTIME_STALL_THRESHOLD_MS = 60 * 60 * 1000;
+
+/**
  * Three-strike rule: this many consecutive CLI-error dispatch outcomes
  * pause the worker entirely (after logging the persistent error).
  */
@@ -7304,6 +7330,21 @@ export function clampDowntimeMaxAttempts(value: number): number {
   return Math.min(
     Math.max(Math.round(value), DOWNTIME_MAX_ATTEMPTS_MIN),
     DOWNTIME_MAX_ATTEMPTS_MAX,
+  );
+}
+
+/**
+ * Clamp the stalled-work scan threshold (WL-0MUYMBK6H005PY16): reject
+ * negative/non-finite (fall back to the 5-minute default) and clamp to
+ * [MIN_DOWNTIME_STALL_THRESHOLD_MS, MAX_DOWNTIME_STALL_THRESHOLD_MS]
+ * (60 s – 60 min) so the scan can neither resume panes that are merely
+ * between tool calls nor leave genuinely stalled panes unattended for hours.
+ */
+export function clampDowntimeStallThresholdMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_STALL_THRESHOLD_MS;
+  return Math.min(
+    Math.max(Math.round(value), MIN_DOWNTIME_STALL_THRESHOLD_MS),
+    MAX_DOWNTIME_STALL_THRESHOLD_MS,
   );
 }
 
