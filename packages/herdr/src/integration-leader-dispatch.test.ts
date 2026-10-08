@@ -475,7 +475,7 @@ describe('integration: leader election → coordination → dispatch', () => {
         items: limit <= SPRINT ? filteredInView() : [...filteredInView(), ...tail],
       }));
 
-    it.fails(
+    it(
       'AC1/AC4: steps down exactly once after an own-backlog dispatch; another instance can take over',
       async () => {
         vi.useFakeTimers();

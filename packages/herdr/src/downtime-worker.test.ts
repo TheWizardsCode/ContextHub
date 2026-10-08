@@ -12930,15 +12930,23 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
     cwd: string,
     extra: Record<string, unknown> = {},
   ) =>
-    dispatchFromCoordination(deps, [], {
-      model: 'plan',
-      cwd,
-      coordinationDir,
-      browseItemCount: SPRINT,
-      ...extra,
-    });
+    dispatchFromCoordination(
+      // `fetchItem` is REQUIRED by the coordination leader path (fail-closed
+      // guard). These fallback tests pass no coordination entries, so it is
+      // never invoked — this default only satisfies the guard so the
+      // own-backlog fallback is reachable.
+      { fetchItem: vi.fn().mockResolvedValue({ ok: false }), ...deps },
+      [],
+      {
+        model: 'plan',
+        cwd,
+        coordinationDir,
+        browseItemCount: SPRINT,
+        ...extra,
+      },
+    );
 
-  it.fails(
+  it(
     'AC7 code-freeze: an out-of-view implement is held; a plan fallback still dispatches',
     async () => {
       const coordinationDir = makeDir('dt-oov-freeze-');
@@ -12959,7 +12967,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC7 review-queue hold: a deep queue holds an out-of-view non-critical implement, the plan dispatches',
     async () => {
       const coordinationDir = makeDir('dt-oov-reviewqueue-');
@@ -12979,7 +12987,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC7 attempt budget: a budget-exhausted out-of-view item is filtered, the next eligible dispatches',
     async () => {
       const coordinationDir = makeDir('dt-oov-budget-');
@@ -13022,7 +13030,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
     },
   );
 
-  it.fails(
+  it(
     'AC7 in-flight: a critical out-of-view item with a live working pane is held',
     async () => {
       const coordinationDir = makeDir('dt-oov-inflight-');

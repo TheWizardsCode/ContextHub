@@ -939,9 +939,13 @@ describe('loadShortcutConfig — focus: true for P n (WL-0MT70LC6B009TL3Q)', () 
 
   it('leaves every other bundled shortcut without focus (no-focus default)', () => {
     const registry = loadShortcutConfig();
+    // The only bundled shortcuts that intentionally receive focus are the
+    // blank-session `P n` (WL-0MT70LC6B009TL3Q) and the producer-interview
+    // `r i` (WL-0MURJ0LFH002O95I); every other entry keeps the no-focus
+    // default. The `r i` exemption was missed when its focus was added.
+    const focusedByDesign = new Set(['P,n', 'r,i']);
     for (const entry of registry.getEntries()) {
-      const isPn = entry.chord.join(',') === 'P,n';
-      if (!isPn) {
+      if (!focusedByDesign.has(entry.chord.join(','))) {
         expect(entry?.focus).toBeUndefined();
       }
     }

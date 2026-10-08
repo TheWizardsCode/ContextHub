@@ -1990,7 +1990,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
       browseItemCount: SPRINT,
     });
 
-  it.fails(
+  it(
     'AC1: dispatches an eligible non-critical item beyond the sprint-view window from the leader own root',
     async () => {
       const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BACKLOG-1')]);
@@ -2010,7 +2010,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
     },
   );
 
-  it.fails(
+  it(
     'AC1: falls back when every in-view item is filtered, not only when the view is literally empty',
     async () => {
       const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-FILTERED-BACKLOG')]);
@@ -2025,7 +2025,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
     },
   );
 
-  it.fails(
+  it(
     'AC2: reads only the leader own root — another root hidden backlog is never selected',
     async () => {
       const getHerdrListHead = vi.fn(async (cwd: string, limit = SPRINT) => ({
@@ -2059,7 +2059,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
     },
   );
 
-  it.fails(
+  it(
     'AC3: preserves canonical ranking order (first ranked eligible wins, not id/insertion order)',
     async () => {
       // Canonical ranking places WL-RANK-Z ahead of WL-RANK-A.
@@ -2077,7 +2077,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
     },
   );
 
-  it.fails(
+  it(
     'AC3: skips a ranked out-of-view item blocked by a safety gate and dispatches the next eligible',
     async () => {
       const getHerdrListHead = rankedOwnRoot([
@@ -2102,7 +2102,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
     },
   );
 
-  it.fails(
+  it(
     'AC9: the fallback window is bounded by DOWNTIME_DISPATCH_EXTEND_MAX',
     async () => {
       const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BOUNDED')]);
@@ -2120,7 +2120,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
     },
   );
 
-  it.fails(
+  it(
     'AC9 fail-open: a {ok:false} own-root lookup leaves the original terminal reason unchanged',
     async () => {
       const getHerdrListHead = vi.fn().mockResolvedValue({ ok: false, error: 'boom' });
@@ -2135,7 +2135,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
     },
   );
 
-  it.fails(
+  it(
     'AC9 fail-open: a throwing own-root lookup leaves the original terminal reason unchanged',
     async () => {
       const getHerdrListHead = vi.fn().mockRejectedValue(new Error('boom'));
@@ -2149,7 +2149,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
     },
   );
 
-  it.fails(
+  it(
     'AC9 fail-open: an empty fallback tail leaves the original terminal reason unchanged',
     async () => {
       const getHerdrListHead = vi.fn().mockResolvedValue({ ok: true, items: [] });
@@ -2184,7 +2184,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
   const hasOwnBacklogFlag = (outcome: { dispatched: boolean }): boolean =>
     (outcome as { ownBacklogDispatch?: boolean }).ownBacklogDispatch === true;
 
-  it.fails(
+  it(
     'step-down surface AC1: a successful own-backlog dispatch flags ownBacklogDispatch',
     async () => {
       const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BACKLOG-STEPDOWN')]);
@@ -2224,7 +2224,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
     },
   );
 
-  it.fails(
+  it(
     'step-down surface AC3: when the fallback finds no eligible item no step-down is surfaced and the reason is unchanged',
     async () => {
       // The only out-of-view item is blocked by a safety gate (producer

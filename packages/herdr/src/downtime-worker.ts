@@ -2347,6 +2347,16 @@ export interface DowntimeDispatchOutcome {
   timeoutMs?: number;
   /** Work item id being dispatched (set on dispatch-tier failures). */
   workItemId?: string;
+
+  /**
+   * True when this successful dispatch was sourced from the leader's OWN
+   * backlog beyond the sprint-view window by the fallback (parent
+   * WL-0MUU4XFU90008E24 AC1/AC4). The worker loop uses this machine-readable
+   * surface to perform the voluntary `releaseLeadership()` step-down exactly
+   * once per own-backlog dispatch, and never for a normal in-view dispatch.
+   * Absent/false on every other outcome.
+   */
+  ownBacklogDispatch?: boolean;
 }
 
 /**
@@ -2479,6 +2489,7 @@ export async function fetchExtendedHerdrItems(
   deps: DowntimeWorkerDeps,
   cwd: string,
   current: DowntimeHerdrItem[],
+  opts: { includeNonCritical?: boolean } = {},
 ): Promise<DowntimeHerdrItem[]> {
   try {
     const extended = await deps.getHerdrListHead(
@@ -2488,8 +2499,13 @@ export async function fetchExtendedHerdrItems(
     if (!extended.ok) return [];
     const seen = new Set(current.map((i) => i.id));
     // Critical-only escape hatch: a non-critical item beyond the sprint view
-    // is never dispatchable (WL-0MUNS8X97007C9H9 AC2/AC4).
-    return extended.items.filter((i) => !seen.has(i.id) && i.priority === 'critical');
+    // is never dispatchable (WL-0MUNS8X97007C9H9 AC2/AC4). When
+    // `includeNonCritical` is true (used by the own-backlog fallback — parent
+    // WL-0MUU4XFU90008E24), the filter is lifted so any ranked item in the
+    // extended tail is returned.
+    return extended.items.filter((i) =>
+      !seen.has(i.id) && (opts.includeNonCritical === true || i.priority === 'critical'),
+    );
   } catch {
     return []; // fail-open: the extension never breaks a defined outcome
   }
@@ -3881,7 +3897,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; spawnConfig?: DowntimeSpawnConfig },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; spawnConfig?: DowntimeSpawnConfig },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -3969,6 +3985,10 @@ export async function dispatchFromCoordination(
   };
   const cooldownMs = opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
   let cooldownHold = false;
+  // Dispatched-marker staleness window (WL-0MU6UL0RJ008IHGT): forwarded to
+  // the own-backlog fallback's marker exclusion (the offer path consults the
+  // marker through `fetchItem` + staleness maps below).
+  const markerStaleWindowMs = opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS;
   // Per-item/per-kind attempt-budget hold (WL-0MUKYEXMK0033MFK): neutral hold
   // — the backlog is not empty, so the caller must not pause or drop the
   // entry. A flagged set keeps the producer-review flag to at most one write
@@ -4174,6 +4194,134 @@ export async function dispatchFromCoordination(
       error: lastFetchError ?? 'all fetchItem lookups failed',
       workItemId: lastEntryWorkItemId,
     };
+  }
+
+  // ── Own-backlog fallback (parent WL-0MUU4XFU90008E24 AC1–AC9) ──────
+  // Only reached when the coordination offer list yielded no dispatchable
+  // candidate. The leader MAY then read its OWN backlog beyond the
+  // sprint-view window: a bounded WINDOW EXTENSION of the SAME canonical
+  // ranking (`getHerdrListHead`), never a second ranking, and ONLY against
+  // the leader's own `opts.cwd` (never another instance's root — AC2). Every
+  // existing safety gate is applied as a sequential filter (AC7):
+  // classify (producer review / freshness / caps), dispatched-marker
+  // exclusion, attempt budget, non-terminal cooldown, code-freeze,
+  // audit slot minimum, in-flight (critical) and the review-queue hold.
+  // The window is bounded by `DOWNTIME_DISPATCH_EXTEND_MAX` (AC9).
+  // Fail-open: a `{ok:false}`/thrown/empty lookup resolves `[]`, leaving the
+  // original terminal reason unchanged and never panicking (AC9). A
+  // successful own-backlog dispatch is flagged `ownBacklogDispatch` so the
+  // worker loop steps down leadership exactly once (AC4); a normal in-view
+  // dispatch never reaches this block.
+  {
+    const sprintWindow = resolveSprintViewWindow(opts.browseItemCount);
+    // Fail-open (AC9): a thrown own-root lookup must leave the original
+    // terminal reason unchanged and never panic.
+    let ownHead: DowntimeHerdrListResult | null = null;
+    try {
+      ownHead = await deps.getHerdrListHead(opts.cwd, sprintWindow);
+    } catch {
+      ownHead = null;
+    }
+    if (ownHead !== null && ownHead.ok) {
+      const ownTail = await fetchExtendedHerdrItems(deps, opts.cwd, ownHead.items, {
+        includeNonCritical: true,
+      });
+      if (ownTail.length > 0) {
+        const ownEntries = await cooldownEntriesForRoot(opts.cwd);
+        const ownMarkerMaps: Record<DowntimeSkillKind, Map<string, DispatchMarker>> = {
+          audit: _dispatchedMarkers(ownEntries, 'audit'),
+          implement: _dispatchedMarkers(ownEntries, 'implement'),
+          plan: _dispatchedMarkers(ownEntries, 'plan'),
+          intake: _dispatchedMarkers(ownEntries, 'intake'),
+          'risk-effort': _dispatchedMarkers(ownEntries, 'risk-effort'),
+        };
+        const ownInFlight = await inFlightForRoot(opts.cwd);
+        const flaggedForOwnBudget = new Set<string>();
+        for (const item of ownTail) {
+          // Sequential filters — the same contract as the offer path.
+          const kind = classifyItemForDispatch(item, now);
+          if (kind === null) continue;
+          const marker = ownMarkerMaps[kind]?.get(item.id);
+          if (
+            marker !== undefined &&
+            _markerStillExcludes(
+              marker,
+              item.stage,
+              now,
+              markerStaleWindowMs,
+              kind === 'audit' || kind === 'implement' ? 'id-guard' : 'stage-guard',
+            )
+          ) {
+            continue;
+          }
+          if (isAttemptBudgetExhausted(ownEntries, item.id, kind, item.stage, maxAttempts)) {
+            if (!flaggedForOwnBudget.has(item.id)) {
+              flaggedForOwnBudget.add(item.id);
+              await flagBudgetExhausted(deps, item.id, opts.cwd);
+            }
+            budgetHold = true;
+            continue;
+          }
+          if (_isNonTerminalCooldownActive(ownEntries, item.id, kind, item.stage, cooldownMs, now)) {
+            cooldownHold = true;
+            continue;
+          }
+          if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) continue;
+          if (kind === 'audit' && !auditEligible) continue;
+          if (item.priority === 'critical') {
+            const guard = evaluateCriticalFirstGuard(
+              item.id,
+              ownInFlight,
+              marker?.dispatchedAt,
+              now,
+              markerStaleWindowMs,
+            );
+            if (!guard.escalate) {
+              inFlightHold = true;
+              continue;
+            }
+          }
+          if (kind === 'implement') {
+            const gate = await reviewGateForRoot(opts.cwd);
+            if (isImplementHeldByReviewGate(kind, item, gate)) {
+              reviewHold = true;
+              continue;
+            }
+          }
+          const ownOutcome = await dispatchClaimedTier(
+            deps,
+            kind,
+            {
+              id: item.id,
+              title: item.title,
+              stage: kind === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
+              status: item.status,
+              priority: item.priority,
+              sortIndex: item.sortIndex,
+            },
+            {
+              model: opts.model,
+              cwd: opts.cwd,
+              selectionPath: 'own-backlog',
+              selectionReason: 'own-backlog-fallback',
+              spawnConfig: opts.spawnConfig,
+            },
+          );
+          if (ownOutcome.dispatched) {
+            return { ...ownOutcome, ownBacklogDispatch: true };
+          }
+          // A lost CAS race / marker-recovery rollback applies to one
+          // candidate: try the next ranked own-backlog item.
+          if (ownOutcome.reason === 'claim-failed' || ownOutcome.reason === 'claim-rolled-back') {
+            continue;
+          }
+          // Any other terminal outcome (wl-error / spawn-failed /
+          // anchor-unavailable / marker-write-failed) is returned unchanged
+          // so the caller's strike/skip semantics are preserved.
+          return ownOutcome;
+        }
+      }
+    }
   }
 
   // No offer survived the dispatch-time filters (or a freeze skip with no
@@ -6311,6 +6459,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   browseItemCount: cfg.browseItemCount,
                   nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   maxAttempts: cfg.maxAttempts,
+                  // Dispatched success-marker staleness window
+                  // (WL-0MU6UL0RJ008IHGT): forwarded to the own-backlog
+                  // fallback's marker exclusion.
+                  markerStaleWindowMs: cfg.markerStaleWindowMs,
                   stallScanEnabled: cfg.stallScanEnabled,
                   stallScanThresholdMs: cfg.stallScanThresholdMs,
                   leaseTtlMs: opts.leaseTtlSeconds
@@ -6363,6 +6515,23 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // dispatch (AC5).
           tracker.record(false);
           perSlotTracker.record([]);
+          // Voluntary leadership hand-off after an own-backlog fallback
+          // dispatch (parent WL-0MUU4XFU90008E24 AC4/AC5/A3): the fallback
+          // reached beyond the sprint-view window into the leader's own
+          // backlog, so the instance relinquishes leadership so another
+          // instance can win the next election. The claim / marker / spawn
+          // already completed inside `dispatchFromCoordination` before this
+          // point, so the step-down never rolls back a pending dispatch and
+          // the dispatched pane is not orphaned. Exactly once per own-backlog
+          // dispatch (the outcome is consumed here), and never for a normal
+          // in-view dispatch. Setting `leaderState = false` prevents an
+          // immediate self re-election in this tick (the election block runs
+          // at the start of the next tick). Legacy mode (`leaderManager ===
+          // null`) is unchanged.
+          if (outcome.ownBacklogDispatch === true && leaderManager !== null) {
+            leaderManager.releaseLeadership();
+            leaderState = false;
+          }
         } else if (outcome.reason === 'no-candidate') {
           // WL-0MTEZ4XZJ006Y9U7 (AC1): in coordination mode the shared file
           // is an OFFER LIST, not the backlog — after a dispatch the leader
