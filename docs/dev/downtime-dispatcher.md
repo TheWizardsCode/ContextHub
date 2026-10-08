@@ -580,9 +580,77 @@ Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`):
 
 Duplicate `Dispatcher` workspaces are harmless — the persisted anchor file is
 the authority, not the label count; close surplus idle ones one at a time
-without disturbing active `Downtime triggered …` panes. Manual
-`open-worklist` / `open-pi-agent` flows are unaffected (this placement applies
-only to automated downtime dispatch).
+without disturbing active `Downtime triggered …` panes. `open-worklist` /
+`open-pi-agent` flows are unaffected by the **automated** placement above
+(they carry no work-item ID). The following sub-section documents the
+**interactive** counterpart, which does place worklist-dispatched,
+ID-carrying panes into an item-ID tab.
+
+### Interactive dispatch pane placement (WL-0MUYI3JAO002BTNL)
+
+The sections above describe the **automated downtime** dispatcher. An
+operator-driven **interactive** dispatch (a worklist chord resolving to an
+ID-carrying command) also routes its pane into a tab labelled with the exact
+work-item ID, but it is a deliberately different path: it uses the invoking
+pane's **current** workspace and is **fail-open**. It is the manual
+counterpart of the automated placement (parent work item
+WL-0MUKZGEQ2007FECS).
+
+|  | Automated downtime (above) | Interactive dispatch (this sub-section) |
+|---|---|---|
+| Trigger | idle dispatcher, `dispatchClaimedTier` | operator chord / worklist command (`onCommand`) |
+| Workspace | **project** workspace resolved via `resolveProjectWorkspace` (logical-root match) | **invoking pane's current** workspace (`HERDR_WORKSPACE_ID`) |
+| Channels | agent panes (`send-to-pi.sh`) | agent panes (`send-to-pi.sh`) **and** shell/command-output panes (`run-in-pane.sh`) |
+| No work-item id | scheduled prompts → `Dispatcher` anchor | current-pane split (legacy behaviour, unchanged) |
+| Failure | **fail-closed** — `anchor-unavailable`, no pane | **fail-open** — falls back to the current-pane split, never dropped |
+
+Lifecycle (`packages/herdr/src/index.ts`; shared anchor helper in
+`packages/herdr/src/dispatcher-anchor.ts`):
+
+1. **Workspace resolution** — `resolveInteractiveWorkspaceId(env)` reads
+   `HERDR_WORKSPACE_ID` (present in the plugin pane environment); when it is
+   absent/blank it derives the workspace from the invoking pane id
+   `HERDR_PANE_ID` (`<workspace>:<pane>`), else returns `null` (→ fail-open).
+   There is **no** `/proc`-based project resolution on this path (Q2a), and
+   the pane is never placed in another project's workspace.
+2. **Item-ID tab resolution** — `resolveInteractiveItemAnchor(cwd,
+   workspaceId, itemId, deps?, onCreate?)` wraps the shared
+   `getItemTabAnchor`, so the tab labelled exactly `<itemId>` is created on
+   first use and reused thereafter under the coordination lock with the same
+   double-check and CLI-shape tolerance as the automated path (the tab label
+   is the key; no persistence file, no duplicate tab). `onCreate` fires only
+   when this call actually provisioned the tab — the create-vs-reuse signal
+   consumed by step 4. **Any** resolution/creation error returns `null`
+   (fail-open).
+3. **Anchor forwarding** — the item-tab anchor is resolved once per dispatch
+   and forwarded to both channels by the arg builders:
+   `buildSendToPiArgs(..., anchor)` and `buildRunInPaneArgs(..., anchor)`
+   append `--anchor <paneId>` when it is a non-empty string.
+   `send-to-pi.sh` already supported `--anchor`; `run-in-pane.sh` gained it —
+   with `--anchor` it runs `herdr pane split --pane <paneId> --direction right
+   --no-focus --cwd <cwd>` instead of the legacy `--current`, tolerating the
+   `pane_id` / `paneId` / `id` split-output variants (raw output logged on
+   parse failure, mirroring `send-to-pi.sh`). `--no-focus` is preserved, so
+   the item tab never steals focus.
+4. **Root-pane cleanup** — when this dispatch **created** the tab, the
+   placeholder root pane (herdr's initial empty pane, used only as the first
+   split anchor) is closed after the split is **confirmed**: the spawning
+   script writes its new pane id via `--pane-id-file`, and only then does
+   `closeInteractiveTabRootPane(anchorPaneId, { cwd }, deps)` run. Cleanup is
+   **fail-safe** — the anchor is closed only when liveness POSITIVELY
+   confirms it is not a live tracked pi/shell pane
+   (`defaultInteractiveLiveTrackedPanesResolver` → `herdr pane list`; live =
+   a non-terminal pi agent or a `Shell: …` label). Unknown liveness (probe
+   absent, failed, or unparseable) leaves the anchor open, so a reused tab's
+   live pane is never closed. Cleanup is also **fail-open** — any error is
+   swallowed and the dispatch outcome never changes. A later dispatch for the
+   same item reuses the surviving pane as the split anchor.
+
+`getItemTabAnchor` is therefore the single shared create-or-reuse mechanism
+for both placements; only the workspace choice, failure semantics and
+root-pane liveness source differ. The automated path checks the running
+**downtime** pane ids for its cleanup liveness; the interactive path checks
+the live **tracked pi/shell** panes (step 4).
 
 
 ### No-candidate cooldown & the empty offer file
@@ -1463,5 +1531,9 @@ trace.
   review-queue depth gate rewired onto the live Herdr path, sprint-complete
   auto-disable removed, marker manual-only)
 - Package README: `packages/herdr/README.md` → *Downtime worker (local-LLM
-  idle dispatch)*
+  idle dispatch)* and *Interactive pane placement (work-item-ID tabs)*
+- Work item: **WL-0MUYI3JAO002BTNL** / **WL-0MUYI3K8H007MPKF** *Interactive
+  item-ID-tab placement for worklist dispatch (both channels) and its
+  fail-safe placeholder root-pane cleanup* (documented in *Interactive
+  dispatch pane placement* above)
 - Docs work item: **WL-0MT76H3Z900908TV** (this page)
