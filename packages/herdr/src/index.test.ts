@@ -22,6 +22,7 @@ import {
   CAPTURE_TIMEOUT_MS,
   extractWorkItemId,
   defaultStalledPaneRootResolver,
+  defaultStalledPanesLister,
   worklogRootFromPiSessionPath,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
@@ -31,7 +32,7 @@ import {
   readActiveAuditMarker,
   isHostAuditActive,
 } from './machine-coordination.js';
-import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork, type ScheduledPrompt } from './downtime-worker.js';
+import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork, type HerdrPaneRecord, type ScheduledPrompt } from './downtime-worker.js';
 import { SCHEDULED_PROMPTS_FILE, scheduledPromptsPath } from './scheduled-prompts.js';
 import {
   fetchItemsByStage,
@@ -3645,5 +3646,35 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
     expect(out).toMatchObject({ resumed: true, via: 'prompt', paneId: 'w1:p1' });
     const promptCall = calls.find(([, args]) => args[0] === 'agent' && args[1] === 'prompt');
     expect(promptCall?.[1]).toEqual(['agent', 'prompt', 'w1:p1', 'continue']);
+  });
+
+  // ── Unparseable pane list / session-path fallback (WL-0MUYMBUAK007H10J) ──
+
+  it('defaultStalledPanesLister returns null for an unparseable pane list (fail-safe)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json at all', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    expect(await defaultStalledPanesLister()).toBeNull();
+  });
+
+  it('production scan degrades to no candidates when the pane list is unparseable', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '<unparseable>', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const out = await deps.scanStalledPanes!('/leader/root', {
+      enabled: true,
+      frozen: false,
+      thresholdMs: 5 * 60 * 1000,
+      nonTerminalCooldownMs: 10 * 60 * 1000,
+      maxAttempts: 3,
+    });
+    expect(out).toEqual([]);
+  });
+
+  it('defaultStalledPaneRootResolver falls back to the pi session path when cwd is absent', () => {
+    const root = makeRoot();
+    const encoded = root.replace(/^\//, '').split('/').join('-');
+    const sessionPath = `/home/pi/.pi/agent/sessions/--${encoded}--/log.jsonl`;
+    const pane: HerdrPaneRecord = { paneId: 'p', agentSession: { value: sessionPath } as never };
+    expect(defaultStalledPaneRootResolver(pane, '/fallback')).toBe(root);
   });
 });

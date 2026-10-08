@@ -105,6 +105,7 @@ import {
   clampDowntimeNonTerminalCooldownMs,
   clampDowntimeMarkerStaleWindowMs,
   clampDowntimeMaxAttempts,
+  resumeStalledWorkIfAble,
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DOWNTIME_MAX_ATTEMPTS_MIN,
   DOWNTIME_MAX_ATTEMPTS_MAX,
@@ -203,7 +204,12 @@ import {
   jsonResponseFixture,
   type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
-import type { StalledPaneCandidate } from './stalled-work.js';
+import {
+  resumeStalledPane,
+  _resetStalledResumeInFlight,
+  type ResumeStalledPaneDeps,
+  type StalledPaneCandidate,
+} from './stalled-work.js';
 
 
 /** Shared deps mock for dispatch tests. */
@@ -12645,5 +12651,190 @@ describe('stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2)', () 
 
     expect(result).toMatchObject({ ok: true, candidate: { id: 'WL-1' } });
     expect(deps.getHerdrListHead).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Stalled-work cross-root / idempotence / fail-safe integration (WL-0MUYMBUAK007H10J) ──
+// End-to-end verification over the REAL `resumeStalledPane` orchestrator (the
+// scan dep's candidates are stubbed at the dispatch boundary, so the resume
+// path itself — re-classification, the in-process (paneId,itemId) guard, the
+// CLI-failure mapping and the fail-open attempt record — is exercised as it
+// runs in production).
+
+describe('stalled-work cross-root, idempotence and fail-safe integration (WL-0MUYMBUAK007H10J)', () => {
+  const NOW = Date.now();
+
+  function stalledCandidate(overrides: Partial<StalledPaneCandidate> = {}): StalledPaneCandidate {
+    return {
+      pane: {
+        paneId: 'pane-1',
+        label: 'Downtime triggered implement Some item - WL-STALLED',
+        agent: 'pi',
+        agentStatus: 'idle',
+      },
+      item: {
+        id: 'WL-STALLED',
+        status: 'open',
+        stage: 'plan_complete',
+        title: 'Some item',
+        updatedAt: new Date(NOW - 10 * 60 * 1000).toISOString(),
+      },
+      cwd: '/foreign/root',
+      kind: 'implement',
+      ...overrides,
+    };
+  }
+
+  const implementHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Implement ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'high',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 10,
+  });
+
+  function realResumeDep(overrides: Partial<ResumeStalledPaneDeps> = {}) {
+    return (cand: StalledPaneCandidate, opts: { nonTerminalCooldownMs: number; thresholdMs: number }) =>
+      resumeStalledPane(
+        {
+          pane: cand.pane,
+          item: cand.item,
+          cwd: cand.cwd,
+          kind: cand.kind,
+          nonTerminalCooldownMs: opts.nonTerminalCooldownMs,
+          thresholdMs: opts.thresholdMs,
+        },
+        {
+          promptAgent: vi.fn().mockResolvedValue({ ok: true }),
+          startAgent: vi.fn().mockResolvedValue({ ok: true }),
+          readEntries: async () => [],
+          recordAttempt: async () => undefined,
+          markNeedsProducerReview: async () => true,
+          maxAttempts: 3,
+          now: () => NOW,
+          ...overrides,
+        },
+      );
+  }
+
+  beforeEach(() => {
+    _resetStalledResumeInFlight();
+  });
+
+  it('reaper race: a pane that vanishes mid-resume is a neutral skip; dispatch falls through with no duplicate prompt', async () => {
+    const promptAgent = vi.fn().mockResolvedValue({ ok: false, reason: 'pane-vanished' });
+    const recordAttempt = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: realResumeDep({ promptAgent, recordAttempt }),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/leader' });
+
+    // The vanished pane did not resume and did not block the cycle: the
+    // normal dispatch path proceeded and opened exactly one NEW pane.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-1');
+    expect(promptAgent).toHaveBeenCalledTimes(1);
+    expect(recordAttempt).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('a thrown resume is neutral: normal dispatch proceeds, no crash, no duplicate', async () => {
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: vi.fn().mockRejectedValue(new Error('herdr exploded')),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/leader' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-1');
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('prevents a concurrent double-resume of the same pane/item (neutral skip, single prompt)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const promptAgent = vi.fn().mockImplementation(async () => {
+      await gate;
+      return { ok: true };
+    });
+    const recordAttempt = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: realResumeDep({ promptAgent, recordAttempt }),
+    });
+    const opts = {
+      enabled: true,
+      frozen: false,
+      thresholdMs: 5 * 60 * 1000,
+      nonTerminalCooldownMs: 10 * 60 * 1000,
+      maxAttempts: 3,
+      now: NOW,
+    };
+
+    const first = resumeStalledWorkIfAble(deps, '/leader', opts);
+    const second = resumeStalledWorkIfAble(deps, '/leader', opts);
+
+    // The second concurrent cycle is a neutral skip (normal dispatch proceeds).
+    expect(await second).toBe(false);
+    expect(promptAgent).toHaveBeenCalledTimes(1);
+    // Release the first resume: it succeeds, still with a single prompt/record.
+    release();
+    expect(await first).toBe(true);
+    expect(promptAgent).toHaveBeenCalledTimes(1);
+    expect(recordAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('degrades to no stalled resume when the scan/resume seams are unwired', async () => {
+    const opts = {
+      enabled: true,
+      frozen: false,
+      thresholdMs: 5 * 60 * 1000,
+      nonTerminalCooldownMs: 10 * 60 * 1000,
+      maxAttempts: 3,
+      now: NOW,
+    };
+    const c = stalledCandidate();
+
+    expect(await resumeStalledWorkIfAble({} as DowntimeWorkerDeps, '/leader', opts)).toBe(false);
+    // Only the scan wired: no resume attempted.
+    expect(
+      await resumeStalledWorkIfAble(
+        { scanStalledPanes: vi.fn().mockResolvedValue([c]) } as unknown as DowntimeWorkerDeps,
+        '/leader',
+        opts,
+      ),
+    ).toBe(false);
+    // Only the resume wired: the scan is never consulted.
+    const resume = vi.fn();
+    expect(
+      await resumeStalledWorkIfAble(
+        { resumeStalledPane: resume } as unknown as DowntimeWorkerDeps,
+        '/leader',
+        opts,
+      ),
+    ).toBe(false);
+    expect(resume).not.toHaveBeenCalled();
+    // A scan that resolves a non-array (unparseable) is a neutral no-resume.
+    expect(
+      await resumeStalledWorkIfAble(
+        {
+          scanStalledPanes: vi.fn().mockResolvedValue(null),
+          resumeStalledPane: resume,
+        } as unknown as DowntimeWorkerDeps,
+        '/leader',
+        opts,
+      ),
+    ).toBe(false);
+    expect(resume).not.toHaveBeenCalled();
   });
 });
