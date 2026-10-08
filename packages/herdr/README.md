@@ -338,9 +338,15 @@ dispatches; the other herdr instances coordinate instead of polling:
   (closed/`in_progress`/`done`, audit-now-fresh, `needsProducerReview ===
   true`, above-caps, or otherwise not currently dispatchable) is **removed
   eagerly without pane or dispatched marker**, and dispatch continues to
-  the next offer. The dispatched entry is **removed**; its owner re-offers
-  its next Herdr head at the next check-in. There is **no TTL-based
-  pruning**. **Every per-entry `wl` invocation — the dispatch-time
+  the next offer. If no offer is dispatchable, the leader may fall back to
+  its **own backlog** — a bounded window extension of the same ranking
+  beyond the sprint view, own root only — and, on a successful own-backlog
+  dispatch, voluntarily steps down via `releaseLeadership()` so another
+  instance can take over (WL-0MUU4XFU90008E24; see the *Own-backlog
+  fallback & leadership hand-off* paragraph below). The dispatched entry is
+  **removed**; its owner re-offers its next Herdr head at the next
+  check-in. There is **no TTL-based pruning**. **Every per-entry `wl`
+  invocation — the dispatch-time
   `fetchItem`/audit-enrichment lookups, the CAS claim (`wl update`) and the
   `wl comment add` trail — resolves against the OFFER's own `worklogRoot`
   via stateless per-call `--worklog-dir` (`buildWlArgsForRoot`,
@@ -422,14 +428,32 @@ WL-0MT3FM8VA005XBHE critical).
 WL-0MU6UL3GQ0015AA5 AC1/AC4):** the dispatcher head is the sprint view. Both selection
 paths pass the live per-root `browseItemCount` (clamped 1–50) to `getHerdrListHead`, so
 the head equals the rendered worklist (mandatory items always included, remaining slots
-filled from "other" items). Non-critical work outside the view is never dispatched: when
-the head yields no candidate the dispatcher reports the in-view terminal reason
-(`no-candidate`, `review-queue-hold`, `code-freeze`, …) and does not scan hidden backlog.
+filled from "other" items). Non-critical work outside the view is never dispatched by
+the normal paths: when the head yields no candidate the dispatcher reports the in-view
+terminal reason (`no-candidate`, `review-queue-hold`, `code-freeze`, …) and does not scan
+hidden backlog — except via the coordination own-backlog fallback below, which then hands
+off leadership.
 A bounded out-of-window escape hatch (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional
 items) re-reads the **same ranking path** but returns **only** `critical` items — because
 critical items are already mandatory in the view this is normally a no-op, and it can
 never surface hidden non-critical work. The TUI worklist still renders exactly
 `browseItemCount` items.
+
+**Own-backlog fallback & leadership hand-off (WL-0MUU4XFU90008E24;
+coordination/leader mode only):** when the coordination offer list yields no
+dispatchable candidate, the leader may read its **own** backlog beyond the
+sprint view — a bounded window extension of the SAME canonical ranking
+(`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional items), never a second ranking,
+and **own-root only** (never another instance's hidden backlog). Every safety
+gate still applies as a sequential filter, and the lookup is fail-open (a
+`{ok:false}`/thrown/empty tail leaves the original terminal reason unchanged).
+On a successful own-backlog dispatch (claim → marker → spawn already complete)
+the leader calls `releaseLeadership()` **exactly once** and stops acting as
+leader, so another instance can win the next election; it never steps down
+after a normal in-view dispatch, and a fallback that finds nothing retains
+leadership and the original terminal reason. **Legacy mode** (no
+`leaderManager`) is unchanged. See
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#own-backlog-fallback--leadership-hand-off-wl-0muu4xfu90008e24).
 
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)

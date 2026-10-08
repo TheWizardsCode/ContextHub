@@ -54,13 +54,16 @@ re-read live on every dispatch cycle, so a change applies without a restart. A
 caller that passes no limit falls back to the sprint-view default (20), so an
 unwindowed head is never produced.
 
-**Non-critical work outside the view is never dispatched.** When the head
-yields no candidate the dispatcher reports the terminal reason derived from the
-in-view flags (`no-candidate`, `review-queue-hold`, `code-freeze`,
-`fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`, `in-flight-hold`,
-`wl-error`) and does **not** fall back to a second ranking or an out-of-view
-non-critical scan. When every visible item is filtered by a safety gate (or the
-view is empty) the outcome is a NOP.
+**Non-critical work outside the view is never dispatched by the normal
+paths.** When the head yields no candidate the dispatcher reports the terminal
+reason derived from the in-view flags (`no-candidate`, `review-queue-hold`,
+`code-freeze`, `fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`,
+`in-flight-hold`, `wl-error`) and does **not** fall back to a second ranking or
+an out-of-view non-critical scan. When every visible item is filtered by a
+safety gate (or the view is empty) the outcome is a NOP — **except** on the
+coordination leader path, which has one bounded, own-root escape valve that
+then hands off leadership (see *Own-backlog fallback & leadership hand-off*
+below).
 
 **Critical escape hatch (defensive).** A bounded out-of-window read
 (`fetchExtendedHerdrItems`, `DOWNTIME_DISPATCH_EXTEND_MAX = 30`) re-reads the
@@ -69,7 +72,9 @@ ranking — and returns **only** `critical` items. Because every `critical` item
 is already mandatory in the view, this escape hatch is normally a no-op; it
 exists purely as a safety net so a release blocker can never be windowed out.
 Non-critical items beyond the sprint view are filtered out, so the operator can
-never be surprised by hidden-backlog dispatch. The extension runs on both
+never be surprised by hidden-backlog dispatch. (The critical-only filter is
+lifted **only** for the coordination-mode own-backlog fallback below; the
+defensive escape hatch itself stays critical-only.) The extension runs on both
 dispatch paths; the **TUI worklist is unchanged** (it keeps rendering exactly
 `browseItemCount` items, plus the mandatory set).
 
@@ -87,6 +92,72 @@ behaviour rather than a dispatch.
 caller keeps its entry / reports `wl-error`); a failed or empty extended
 critical read degrades to the original terminal reason, so the escape hatch can
 never convert a defined outcome into a new failure.
+
+### Own-backlog fallback & leadership hand-off (WL-0MUU4XFU90008E24)
+
+The sprint-view-only window above is the **normal** dispatch contract: the
+dispatcher head equals the rendered view and a view with nothing dispatchable
+is a NOP. In **coordination/leader mode** the leader additionally has a
+bounded, self-scoped escape valve so a fleet does not idle when one root's view
+is momentarily empty or fully blocked — with a fairness guard so no instance
+can monopolise leadership by repeatedly reaching into its own hidden backlog.
+
+**Trigger (AC1).** The fallback is evaluated in `dispatchFromCoordination`
+**only after** the coordination offer scan yields no dispatchable candidate —
+i.e. the same terminal-reason set the view can produce (`no-candidate`,
+`review-queue-hold`, `code-freeze`, `fresh-audit-skip`, `audit-in-flight`,
+`audit-host-saturated`, `in-flight-hold`, or a genuinely empty view). It never
+runs when a normal in-view/coordination offer dispatched.
+
+**Own root only (AC2).** The fallback reads the leader's **own** worklog root
+(`opts.cwd`) only — never another instance's or another worklog root's hidden
+backlog. A `{ok:false}` lookup, a thrown error, or an empty extended tail is
+fail-open: the original terminal reason is reported unchanged and nothing
+panics (AC9).
+
+**Bounded window, canonical ranking, gates are filters (AC3/AC7/AC9).** The
+fallback is a **window extension**, never a second ranking: it re-reads the
+SAME canonical ranking path (`getHerdrListHead` → `fetchNextItems` →
+`selectWorkItems` → `regroupWorkItems`) with a larger, bounded window
+(`current.length + DOWNTIME_DISPATCH_EXTEND_MAX`, `= 30` additional items) and
+returns only the newly visible tail. The critical-only filter of the defensive
+escape hatch above is lifted for the fallback (any ranked item in the extended
+tail is eligible), but every existing safety gate still applies as a
+**sequential filter** — classify/producer-review/freshness/caps,
+dispatched-marker exclusion, attempt budget, non-terminal cooldown,
+code-freeze, audit slot minimum, in-flight (critical) guard, and the
+review-queue hold. A gated own-backlog item is skipped exactly like an in-view
+one; a lost CAS race tries the next ranked candidate.
+
+**Leadership hand-off (AC4/AC5/AC6, assumption A3).** A successful dispatch
+sourced from the own backlog (and **only** then) is flagged machine-readably on
+the outcome (`ownBacklogDispatch: true`). After the claim, dispatch marker and
+pane spawn have completed, the worker loop calls the existing
+`LeaderElectionManager.releaseLeadership()` **exactly once** and sets
+`leaderState = false`, so another instance can win the next election. The
+step-down never rolls back the pending dispatch and never orphans the spawned
+pane. It is **not** called after a normal in-view dispatch, and **not** called
+when the fallback finds nothing — in that case leadership is retained and the
+pre-existing terminal reason is reported unchanged. Because there is no
+reliable peer-eligibility predicate (coordination entries are removed on
+dispatch), the step-down is unconditional after a successful fallback dispatch;
+with no peer the same instance simply re-wins the normal election on a later
+tick, bounded by the existing election backoff.
+
+**Scope: coordination/leader mode only.** The fallback lives on the
+coordination leader path (`dispatchFromCoordination`) and the step-down is
+guarded by a non-null `leaderManager`. **Legacy mode** (no `coordinationDir`;
+`leaderManager === null`, `leaderState` hard-coded `true`) is unchanged — there
+is no manager and no peer to hand off to, so the direct/legacy path keeps the
+strict sprint-view-only behaviour (non-critical out-of-view work is never
+dispatched). The TUI worklist is unchanged.
+
+**No contradiction with WL-0MUNS8X97007C9H9.** The sprint-view-only contract
+still governs the dispatcher head and the direct/legacy path; the fallback is a
+bounded, own-root, leadership-handing-off exception on the coordination leader
+path only. It is *not* a reinstatement of the unconditional non-critical
+extension that WL-0MUNS8X97007C9H9 superseded: the window stays bounded, the
+ranking is the same, and the fairness guard removes the monopolisation risk.
 
 **Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
 entry per instance — an **offer** of that instance's own Herdr list head (computed at the
@@ -194,7 +265,12 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    override / round-robin ordering are retired by WL-0MTK1ILM2009QYB2).
    Each entry is eligibility re-checked at dispatch time; stale entries are
    dropped (removed) without a pane or marker (see Lifecycle §2). When a slot
-   opens the first passing offer dispatches in the entry's `worklogRoot`.
+   opens the first passing offer dispatches in the entry's `worklogRoot`. If
+   **no** offer passes, the leader performs one bounded own-backlog fallback
+   against its **own** root (`opts.cwd`) and, on a successful fallback
+   dispatch, voluntarily steps down via `releaseLeadership()` so another
+   instance can take over (WL-0MUU4XFU90008E24; see *Own-backlog fallback &
+   leadership hand-off* above).
 4. The dispatched entry is **removed** from the coordination file. The
    existing dispatched-marker exclusion and CAS claim mechanisms are
    preserved unchanged.
@@ -816,7 +892,10 @@ tracker so a fresh full idle period is required after the pause. A
 `no-candidate` outcome means the *sprint view* — the live `browseItemCount`
 window (plus mandatory items) — held nothing dispatchable: the dispatcher does
 not scan hidden backlog (WL-0MUNS8X97007C9H9; see *Sprint-view-only dispatch
-window* above). In
+window* above) **except** via the coordination leader's bounded own-backlog
+fallback, which dispatches before this reason is returned and then hands off
+leadership (WL-0MUU4XFU90008E24; see *Own-backlog fallback & leadership
+hand-off* above). In
 coordination mode (WL-0MTEZ4XZJ006Y9U7) the shared runtime file
 (`.worklog/downtime-coordination.json`) is an **offer list, not the
 backlog**: the leader removes each entry after dispatching (see step 4
@@ -1544,8 +1623,8 @@ duplicate-dispatch RCA is answerable from the log alone:
 
 | Field | Type | Description |
 |---|---|---|
-| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `scheduled-prompt`, or `legacy-tier` |
-| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `scheduled-due`, `critical-tier` |
+| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `own-backlog` (coordination own-backlog fallback, WL-0MUU4XFU90008E24), `scheduled-prompt`, or `legacy-tier` |
+| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `own-backlog-fallback` (WL-0MUU4XFU90008E24), `scheduled-due`, `critical-tier` |
 | `paneId` | string \| null | (Enrichment entry only) the resolved dispatch pane/session id, or `null` when it could not be resolved — never a guess |
 | `enrichment` | `true` | (Enrichment entry only) discriminator marking a post-spawn enrichment rather than a fresh dispatch |
 
@@ -1702,4 +1781,8 @@ trace.
   WL-0MUYMBO9X000WDF6 classifier / WL-0MUYMBPZ5004LBFX resume orchestrator /
   WL-0MUYMBSA90092QV2 dispatch wiring / WL-0MUYMBUAK007H10J verification;
   documented in *Stalled-work scan and resume* above)
+- Work item: **WL-0MUU4XFU90008E24** *Own-backlog dispatch fallback must
+  relinquish leadership* (bounded own-root fallback + voluntary
+  `releaseLeadership()` hand-off; documented in *Own-backlog fallback &
+  leadership hand-off* above)
 - Docs work item: **WL-0MT76H3Z900908TV** (this page)
