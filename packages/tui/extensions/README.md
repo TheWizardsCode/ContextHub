@@ -263,10 +263,16 @@ returns HTTP `503` with a `Retry-After` header — the retry loop honours that
 hint instead of retrying on the plain exponential schedule:
 
 - When a hint is present it is **authoritative**: the delay tracks the
-  server-requested delay (plus upward-only jitter, bounded by `maxDelayMs`,
-  default 60s). The local exponential backoff is used only when the hint is
-  absent or malformed, so a grown local backoff can never override the
-  server's recommended wait.
+  server-requested delay (plus upward-only jitter, bounded by
+  `serverHintMaxDelayMs`, default 6 h = `21_600_000` ms). The local
+  exponential backoff is used only when the hint is absent or malformed, so a
+  grown local backoff can never override the server's recommended wait.
+- The server-hint ceiling is deliberately separate from the exponential
+  `maxDelayMs` (default 60 s): a truthful multi-minute/multi-hour `Retry-After`
+  — e.g. the llm-proxy "all providers exhausted" 503 during an overnight UTC
+  provider gap — is honoured in full rather than clamped back to 60 s. Set
+  `serverHintMaxDelayMs` to `Infinity` to remove the additional cap. The sleep
+  stays interruptible, so ESC / session switch still aborts promptly.
 - Upward-only jitter (25% by default, `serverHintJitterRatio`) is applied to
   hint-derived delays so concurrent clients do not retry in lockstep.
 - Missing or malformed hints fall back to the existing exponential backoff,
@@ -337,7 +343,7 @@ The recovery module is implemented in `Worklog/lib/recovery/` and consists of:
 | File | Purpose |
 |------|---------|
 | `error-patterns.ts` | Error classification patterns for all 8 categories |
-| `retry-logic.ts` | Exponential backoff, `Retry-After` header/`retry_after` parsing (plus a `fetch` capture wrapper) and jitter, state managers, interruptible sleep |
+| `retry-logic.ts` | Exponential backoff, `Retry-After` header/`retry_after` parsing (plus a `fetch` capture wrapper) and jitter, the `serverHintMaxDelayMs` server-hint ceiling, state managers, interruptible sleep |
 | `recovery.ts` | Compact-and-continue, checkpoint-and-terminate, and single-shot parse-error continue handlers |
 | `retry-command.ts` | `/retry` command interface (status, reset, manual-trigger) |
 | `register-recovery.ts` | Extension lifecycle wiring (agent_end, turn_end, session_start, session_compact) |
