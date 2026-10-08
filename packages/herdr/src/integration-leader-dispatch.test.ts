@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -20,6 +20,7 @@ import {
   type DowntimeWorker,
   type DowntimeWorkerDeps,
   type DowntimeItemInfo,
+  type DowntimeHerdrItem,
 } from './downtime-worker.js';
 import { createLeaderElectionManager, LEASE_FILE } from './leader-election.js';
 import {
@@ -29,6 +30,32 @@ import {
   COORDINATION_FILE,
   type CoordinationEntry,
 } from './coordination.js';
+
+// ── releaseLeadership() spy (WL-0MUZPBRX3007STFK) ───────────────────────
+// Wrap createLeaderElectionManager so every manager's releaseLeadership()
+// call is observable at the worker boundary without reaching into the
+// worker's private closure. The real implementation is still used (the rest
+// of the module is spread through), so existing election behaviour is
+// unchanged — the spy only records the voluntary step-down.
+const { releaseLeadershipSpy } = vi.hoisted(() => ({ releaseLeadershipSpy: vi.fn() }));
+
+vi.mock('./leader-election.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./leader-election.js')>();
+  return {
+    ...actual,
+    createLeaderElectionManager: (
+      opts: Parameters<typeof actual.createLeaderElectionManager>[0],
+    ) => {
+      const manager = actual.createLeaderElectionManager(opts);
+      const release = manager.releaseLeadership.bind(manager);
+      manager.releaseLeadership = () => {
+        releaseLeadershipSpy(manager.getInstanceId());
+        release();
+      };
+      return manager;
+    },
+  };
+});
 
 // ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -403,5 +430,135 @@ describe('integration: leader election → coordination → dispatch', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  // ── Leadership step-down after an own-backlog dispatch ───────────────
+  // (WL-0MUZPBRX3007STFK, parent AC4/AC5)
+  //
+  // The worker owns the leader-election manager, so this is the only layer
+  // that can observe the voluntary `releaseLeadership()` hand-off. RED
+  // WITNESS: the own-backlog fallback and step-down do not exist yet, so the
+  // positive tests below assert post-implementation behaviour and are
+  // committed with `it.fails` — the suite stays GREEN while the assertions
+  // are RED. The implementation child WL-0MUPBSYW004I5D3 flips each
+  // `it.fails` to `it` once the fallback + step-down land.
+	describe('leadership step-down after an own-backlog dispatch (WL-0MUZPBRX3007STFK)', () => {
+    const SPRINT = 20;
+
+    /** The sprint-view window: every item is filtered (never dispatchable). */
+    const filteredInView = (): DowntimeHerdrItem[] =>
+      Array.from({ length: SPRINT }, (_, i) => ({
+        id: `WL-VIEW-${i}`,
+        title: `Filtered ${i}`,
+        status: 'open',
+        stage: 'in_review',
+        priority: 'medium',
+        risk: 'Low',
+        effort: 'S',
+        sortIndex: i,
+      }));
+
+    /** An eligible non-critical item beyond the sprint-view window. */
+    const eligibleTail = (id: string): DowntimeHerdrItem => ({
+      id,
+      title: `Backlog ${id}`,
+      status: 'open',
+      stage: 'idea',
+      priority: 'high',
+      sortIndex: 1000,
+    });
+
+    /** Own-root head: the in-view window, then the out-of-view tail. */
+    const ownRoot = (tail: DowntimeHerdrItem[]) =>
+      vi.fn(async (_cwd: string, limit = SPRINT) => ({
+        ok: true as const,
+        items: limit <= SPRINT ? filteredInView() : [...filteredInView(), ...tail],
+      }));
+
+    it.fails(
+      'AC1/AC4: steps down exactly once after an own-backlog dispatch; another instance can take over',
+      async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(70_000_000);
+        try {
+          releaseLeadershipSpy.mockClear();
+          const depsA = baseDeps({ getHerdrListHead: ownRoot([eligibleTail('WL-OWN-BACKLOG')]) });
+          const depsB = baseDeps(); // B has no own work to offer
+          const workerA = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-a', cwd: dirA, deps: depsA });
+          const workerB = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-b', cwd: dirB, deps: depsB });
+
+          await workerA.tick(); // A elects + checks in (nothing offered)
+          await workerB.tick(); // B joins as a non-leader
+          expect(workerA.isLeader).toBe(true);
+
+          vi.setSystemTime(70_000_000 + 60_001);
+          const at = await workerA.tick(); // idle threshold met → own-backlog dispatch
+
+          expect(at.dispatched).toBe(true);
+          // The dispatch itself was not undone by the hand-off: claim + marker
+          // + spawn all completed before the step-down.
+          expect(depsA.claimItem).toHaveBeenCalled();
+          expect(depsA.recordDispatch).toHaveBeenCalled();
+          expect(depsA.spawnAgentPane).toHaveBeenCalledWith(
+            expect.stringContaining('WL-OWN-BACKLOG'),
+            expect.objectContaining({ cwd: dirA }),
+          );
+          // The voluntary step-down fired exactly once.
+          expect(releaseLeadershipSpy).toHaveBeenCalledTimes(1);
+          expect(releaseLeadershipSpy).toHaveBeenCalledWith('inst-a');
+          // The lease was released so another instance can win.
+          expect(existsSync(join(sharedCoord, LEASE_FILE))).toBe(false);
+
+          // B takes over the now-vacant lease before A's next tick.
+          vi.setSystemTime(70_000_000 + 60_002);
+          await workerB.tick();
+          expect(workerB.isLeader).toBe(true);
+
+          // A's next tick observes itself as non-leader (no re-election).
+          vi.setSystemTime(70_000_000 + 60_003);
+          await workerA.tick();
+          expect(workerA.isLeader).toBe(false);
+          // The step-down is once per own-backlog dispatch — no repeated calls.
+          expect(releaseLeadershipSpy).toHaveBeenCalledTimes(1);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
+
+    it(
+      'AC2: a normal in-view (offer-list) dispatch does NOT step down',
+      async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(80_000_000);
+        try {
+          releaseLeadershipSpy.mockClear();
+          // B offers an eligible item; A dispatches it from the coordination file.
+          const depsB = baseDeps({
+            getHerdrListHead: vi.fn().mockResolvedValue({
+              ok: true,
+              items: [{ id: 'WL-B1', title: 'B one', status: 'open', stage: 'intake_complete' }],
+            }),
+          });
+          const depsA = baseDeps({
+            fetchItem: vi.fn().mockResolvedValue({ ok: true, info: itemInfo('WL-B1', 'intake_complete') }),
+          });
+          const workerA = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-a', cwd: dirA, deps: depsA });
+          const workerB = makeWorker({ coordinationDir: sharedCoord, instanceId: 'inst-b', cwd: dirB, deps: depsB });
+
+          await workerA.tick();
+          await workerB.tick();
+          vi.setSystemTime(80_000_000 + 60_001);
+          const at = await workerA.tick();
+
+          expect(at.dispatched).toBe(true);
+          expect(releaseLeadershipSpy).not.toHaveBeenCalled();
+          expect(workerA.isLeader).toBe(true);
+          expect(existsSync(join(sharedCoord, LEASE_FILE))).toBe(true);
+        } finally {
+          vi.useRealTimers();
+        }
+      },
+    );
   });
 });

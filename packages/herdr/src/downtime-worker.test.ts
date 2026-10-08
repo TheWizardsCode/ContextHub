@@ -12838,3 +12838,218 @@ describe('stalled-work cross-root, idempotence and fail-safe integration (WL-0MU
     expect(resume).not.toHaveBeenCalled();
   });
 });
+
+// ── Own-backlog fallback safety gates (WL-0MUZPBRX3007STFK, parent AC7) ──
+//
+// The own-backlog candidate is a dispatch candidate like any other: every
+// existing safety gate must still apply to it as a SEQUENTIAL FILTER, never
+// as a fallback ordering. Each test hides an eligible out-of-view item behind
+// a gate and asserts the gate is not bypassed — the gated item is never
+// claimed, and the fallback continues to the next eligible out-of-view item
+// where one exists. The offer-list gate tests already exist above; these pin
+// the same gates on the fallback path.
+//
+// RED WITNESS. The fallback does not exist yet, so every body asserts the
+// post-implementation behaviour and is committed with `it.fails` — the suite
+// stays GREEN while the assertions are RED (the repo's documented TDD pattern;
+// see `docs/dev/downtime-dispatcher-post-fix-verification.md`). The
+// implementation child WL-0MUPBSYW004I5D3 flips each `it.fails` to `it` once
+// the fallback lands (the RED→GREEN transition is the dependency evidence).
+describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
+  const SPRINT = 20;
+  // 1s marker-stale window so same-stage markers written in the past are
+  // RELEASED (the dispatched-marker guard) while the attempt-budget filter
+  // still counts them.
+  const WINDOW_MS = 1_000;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeDir(prefix: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  /** An eligible non-critical plan_complete out-of-view item (implement tier). */
+  const eligibleBacklog = (
+    id: string,
+    overrides: Partial<DowntimeHerdrItem> = {},
+  ): DowntimeHerdrItem => ({
+    id,
+    title: `Backlog ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'high',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 1000,
+    ...overrides,
+  });
+
+  /** An eligible plan-tier out-of-view item (idea → intake; unaffected by the freeze/review gates). */
+  const eligiblePlan = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'idea',
+    priority: 'high',
+    sortIndex: 3000,
+  });
+
+  /** In-view filler that is never dispatchable (the retired `in_review` stage). */
+  const inView = (): DowntimeHerdrItem[] =>
+    Array.from({ length: SPRINT }, (_, i) => ({
+      id: `WL-VIEW-${i}`,
+      title: `In-view ${i}`,
+      status: 'open',
+      stage: 'in_review',
+      priority: 'medium',
+      risk: 'Low',
+      effort: 'S',
+      sortIndex: i,
+    }));
+
+  /**
+   * Own-root head: the in-view window at/below SPRINT, then the hinted
+   * out-of-view tail once the dispatcher widens the window. Mirrors the
+   * canonical ranking path (the same head, just more items included).
+   */
+  const ownRoot = (tail: DowntimeHerdrItem[]) =>
+    vi.fn(async (_cwd: string, limit = SPRINT) => ({
+      ok: true as const,
+      items: limit <= SPRINT ? inView() : [...inView(), ...tail],
+    }));
+
+  const dispatchFallback = (
+    deps: DowntimeWorkerDeps,
+    coordinationDir: string,
+    cwd: string,
+    extra: Record<string, unknown> = {},
+  ) =>
+    dispatchFromCoordination(deps, [], {
+      model: 'plan',
+      cwd,
+      coordinationDir,
+      browseItemCount: SPRINT,
+      ...extra,
+    });
+
+  it.fails(
+    'AC7 code-freeze: an out-of-view implement is held; a plan fallback still dispatches',
+    async () => {
+      const coordinationDir = makeDir('dt-oov-freeze-');
+      const cwd = makeDir('dt-oov-freeze-root-');
+      const deps = makeDeps({
+        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOV-IMPL'), eligiblePlan('WL-OOV-PLAN')]),
+        readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      });
+
+      const outcome = await dispatchFallback(deps, coordinationDir, cwd);
+
+      // The fallback was attempted (post-implementation) — RED before it lands.
+      expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
+      // The frozen implement is never claimed; the plan fallback dispatches.
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-OOV-PLAN');
+      expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-IMPL', expect.anything(), expect.anything());
+    },
+  );
+
+  it.fails(
+    'AC7 review-queue hold: a deep queue holds an out-of-view non-critical implement, the plan dispatches',
+    async () => {
+      const coordinationDir = makeDir('dt-oov-reviewqueue-');
+      const cwd = makeDir('dt-oov-reviewqueue-root-');
+      const deps = makeDeps({
+        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOV-IMPL'), eligiblePlan('WL-OOV-PLAN')]),
+        // A completed/in_review queue at/over the sprint threshold = deep.
+        getReviewQueueCount: vi.fn().mockResolvedValue(SPRINT),
+      });
+
+      const outcome = await dispatchFallback(deps, coordinationDir, cwd);
+
+      expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-OOV-PLAN');
+      expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-IMPL', expect.anything(), expect.anything());
+    },
+  );
+
+  it.fails(
+    'AC7 attempt budget: a budget-exhausted out-of-view item is filtered, the next eligible dispatches',
+    async () => {
+      const coordinationDir = makeDir('dt-oov-budget-');
+      const cwd = makeDir('dt-oov-budget-root-');
+      // Three same-stage implement markers exhaust the per-item/per-kind cap.
+      mkdirSync(join(cwd, '.worklog'), { recursive: true });
+      writeFileSync(
+        join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+        [0, 1, 2]
+          .map(() =>
+            JSON.stringify({
+              itemId: 'WL-OOV-BUDGET',
+              kind: 'implement',
+              stage: 'plan_complete',
+              dispatchedAt: ago(60_000),
+            }),
+          )
+          .join('\n') + '\n',
+        'utf8',
+      );
+      const deps = makeDeps({
+        getHerdrListHead: ownRoot([
+          eligibleBacklog('WL-OOV-BUDGET', { sortIndex: 1000 }),
+          eligibleBacklog('WL-OOV-FRESH', { sortIndex: 2000 }),
+        ]),
+        markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchFallback(deps, coordinationDir, cwd, {
+        maxAttempts: 3,
+        markerStaleWindowMs: WINDOW_MS,
+      });
+
+      expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
+      // The exhausted item is flagged and skipped; the next eligible dispatches.
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-OOV-FRESH');
+      expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('WL-OOV-BUDGET', cwd);
+      expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-BUDGET', expect.anything(), expect.anything());
+    },
+  );
+
+  it.fails(
+    'AC7 in-flight: a critical out-of-view item with a live working pane is held',
+    async () => {
+      const coordinationDir = makeDir('dt-oov-inflight-');
+      const cwd = makeDir('dt-oov-inflight-root-');
+      const deps = makeDeps({
+        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOV-CRIT', { priority: 'critical' })]),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true,
+          count: 1,
+          paneIds: ['w1:p1'],
+          records: [
+            {
+              paneId: 'w1:p1',
+              label: 'Downtime triggered implement Backlog - WL-OOV-CRIT',
+              agent: 'pi',
+              agentStatus: 'working',
+            },
+          ],
+        }),
+      });
+
+      const outcome = await dispatchFallback(deps, coordinationDir, cwd);
+
+      expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('in-flight-pane');
+      expect(deps.claimItem).not.toHaveBeenCalled();
+    },
+  );
+});

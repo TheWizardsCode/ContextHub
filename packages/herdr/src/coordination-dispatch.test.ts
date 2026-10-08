@@ -2162,4 +2162,98 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
       expect(outcome.reason).toBe('no-candidate');
     },
   );
+
+  // ── Leadership step-down surface (WL-0MUZPBRX3007STFK) ───────────────
+  //
+  // `dispatchFromCoordination` does NOT own the leader-election manager (the
+  // worker loop does, `downtime-worker.ts`), so it cannot call
+  // `releaseLeadership()` itself. Instead it surfaces a machine-readable
+  // `ownBacklogDispatch` flag on the outcome — the worker loop steps down
+  // exactly once per successful own-backlog dispatch, and never for a normal
+  // in-view dispatch (parent AC4). These tests pin that surface; the
+  // worker-level `releaseLeadership()` call-count and the next-tick
+  // non-leader observation are pinned in `downtime-worker.test.ts` /
+  // `integration-leader-dispatch.test.ts`.
+
+  /**
+   * Read the step-down surface without a compile-time dependency on the
+   * (not-yet-declared) field — this test item changes no production code, so
+   * the flag is read through a narrow structural cast rather than widening
+   * `DowntimeDispatchOutcome` here.
+   */
+  const hasOwnBacklogFlag = (outcome: { dispatched: boolean }): boolean =>
+    (outcome as { ownBacklogDispatch?: boolean }).ownBacklogDispatch === true;
+
+  it.fails(
+    'step-down surface AC1: a successful own-backlog dispatch flags ownBacklogDispatch',
+    async () => {
+      const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BACKLOG-STEPDOWN')]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps);
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-BACKLOG-STEPDOWN');
+      // The stage-appropriate dispatch completes before the surface is set.
+      expect(deps.claimItem).toHaveBeenCalled();
+      expect(deps.recordDispatch).toHaveBeenCalled();
+      expect(deps.spawnAgentPane).toHaveBeenCalled();
+      expect(hasOwnBacklogFlag(outcome)).toBe(true);
+    },
+  );
+
+  it(
+    'step-down surface AC2: a normal in-view (offer-list) dispatch does NOT flag ownBacklogDispatch',
+    async () => {
+      // An eligible offer in the shared list — the dispatch never reaches the
+      // own-backlog fallback, so no step-down is surfaced.
+      const deps = makeCoordinationDeps({
+        fetchItem: vi.fn().mockResolvedValue({
+          ok: true,
+          info: itemInfo({ id: 'WL-INVIEW', status: 'open', stage: 'plan_complete', risk: 'Low', effort: 'S' }),
+        }),
+      });
+
+      const outcome = await dispatch(deps, [makeEntry('inst-inview', 'WL-INVIEW', '/leader-root')]);
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.kind).toBe('implement');
+      expect(hasOwnBacklogFlag(outcome)).toBe(false);
+      // The own-root fallback read never ran.
+      expect(deps.getHerdrListHead).not.toHaveBeenCalled();
+    },
+  );
+
+  it.fails(
+    'step-down surface AC3: when the fallback finds no eligible item no step-down is surfaced and the reason is unchanged',
+    async () => {
+      // The only out-of-view item is blocked by a safety gate (producer
+      // review) — the fallback finds nothing to dispatch, so leadership must
+      // be retained and the pre-existing terminal reason reported.
+      const gatedTail = headItem({
+        id: 'WL-OOV-GATED',
+        status: 'open',
+        stage: 'plan_complete',
+        priority: 'high',
+        risk: 'Low',
+        effort: 'S',
+        needsProducerReview: true,
+        sortIndex: 1000,
+      });
+      const getHerdrListHead = vi.fn(async (_cwd: string, limit = SPRINT) => ({
+        ok: true as const,
+        items: limit <= SPRINT ? filteredInView() : [...filteredInView(), gatedTail],
+      }));
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatch(deps);
+
+      // The fallback was attempted (post-implementation) — RED before it lands.
+      expect(getHerdrListHead).toHaveBeenCalledWith('/leader-root', expect.any(Number));
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('no-candidate');
+      expect(hasOwnBacklogFlag(outcome)).toBe(false);
+      expect(deps.claimItem).not.toHaveBeenCalled();
+    },
+  );
 });
