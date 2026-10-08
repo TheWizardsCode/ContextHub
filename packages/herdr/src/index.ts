@@ -137,6 +137,12 @@ import {
   recentAuditDispatchedItemIds,
 } from './downtime-log.js';
 import {
+  buildStalledResumeStartArgs,
+  classifyHerdrAgentFailure,
+  type StalledResumeCliResult,
+  type StalledResumeStartOptions,
+} from './stalled-work.js';
+import {
   getDueScheduledPrompt as getFirstDuePrompt,
   loadScheduledPrompts,
   updateScheduledPromptLastTriggered,
@@ -1045,6 +1051,75 @@ export async function defaultRunningDowntimePanesResolver(
     return { ok: true, count: paneIds.length, paneIds, records: panes };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * Extract the human-readable failure text from a herdr `execFile` error so
+ * {@link classifyHerdrAgentFailure} can map it to a neutral resume reason.
+ * Prefers stderr/stdout (where herdr writes its machine-readable codes) over
+ * the generic Error message.
+ */
+function herdrAgentErrorText(err: unknown): string {
+  if (err !== null && typeof err === 'object') {
+    const e = err as { stderr?: unknown; stdout?: unknown; message?: unknown };
+    const parts: string[] = [];
+    if (typeof e.stderr === 'string' && e.stderr !== '') parts.push(e.stderr);
+    if (typeof e.stdout === 'string' && e.stdout !== '') parts.push(e.stdout);
+    if (typeof e.message === 'string' && e.message !== '') parts.push(e.message);
+    if (parts.length > 0) return parts.join(' ');
+  }
+  return String(err);
+}
+
+/**
+ * Default `herdr agent prompt` seam for the stalled-work resume orchestrator
+ * (WL-0MUYMBPZ5004LBFX): submit a prompt to a LIVE agent
+ * (`herdr agent prompt <paneId> <text>`). Rejects when the agent is blocked
+ * (`agent_blocked`) and returns `agent_prompt_stalled` when an accepted
+ * submission never reaches `working`/`blocked`. Both map to a NEUTRAL resume
+ * failure reason (never a strike). Fail-safe: any herdr failure resolves
+ * `{ok:false, reason}` rather than throwing.
+ */
+export async function defaultStalledResumePromptAgent(
+  paneId: string,
+  text: string,
+): Promise<StalledResumeCliResult> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    await getExecFileAsync()(herdrBin, ['agent', 'prompt', paneId, text], {
+      encoding: 'utf8',
+      timeout: DOWNTIME_WL_TIMEOUT_MS,
+    });
+    return { ok: true };
+  } catch (err) {
+    const raw = herdrAgentErrorText(err);
+    return { ok: false, reason: classifyHerdrAgentFailure(raw), error: raw };
+  }
+}
+
+/**
+ * Default `herdr agent start` seam for the stalled-work resume orchestrator
+ * (WL-0MUYMBPZ5004LBFX): relaunch pi in an EXISTING pane whose agent has
+ * exited, continuing the item's session
+ * (`herdr agent start pi --kind pi --pane <paneId> -- --session <path>` or
+ * `-- --continue`). Fail-safe: any herdr failure resolves `{ok:false, reason}`
+ * (a vanished pane is mapped to `pane-vanished`) rather than throwing.
+ */
+export async function defaultStalledResumeStartAgent(
+  paneId: string,
+  opts: StalledResumeStartOptions,
+): Promise<StalledResumeCliResult> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    await getExecFileAsync()(herdrBin, buildStalledResumeStartArgs(paneId, opts), {
+      encoding: 'utf8',
+      timeout: DOWNTIME_WL_TIMEOUT_MS,
+    });
+    return { ok: true };
+  } catch (err) {
+    const raw = herdrAgentErrorText(err);
+    return { ok: false, reason: classifyHerdrAgentFailure(raw), error: raw };
   }
 }
 

@@ -297,3 +297,312 @@ export function classifyStalledPane(
 
   return { stalled: true, kind };
 }
+
+// ── herdr agent CLI seams ─────────────────────────────────────────────
+
+/**
+ * Literal continuation prompt submitted when resuming a stalled pane
+ * (parent AC2 / intake Q5): a fixed neutral nudge, never a stage-appropriate
+ * skill command. Kept as a named constant so the orchestrator and its tests
+ * share one source of truth.
+ */
+export const STALLED_RESUME_PROMPT = 'continue';
+
+/**
+ * Why a `herdr agent prompt` / `herdr agent start` invocation did not resume
+ * the pane. Every value is a NEUTRAL outcome — the caller must never turn it
+ * into a CLI-error strike, a crash, or a duplicate resume:
+ *
+ *  - `agent-blocked`        — the CLI refused because the agent is blocked.
+ *  - `agent-prompt-stalled` — the submission was accepted but the agent never
+ *                             reached `working`/`blocked` within the CLI's
+ *                             documented 5 s window.
+ *  - `pane-vanished`        — the pane/agent disappeared (e.g. the pane-close
+ *                             reaper closed it) between scan and resume.
+ *  - `cli-error`            — any other herdr/CLI failure.
+ */
+export type StalledResumeFailureReason =
+  | 'agent-blocked'
+  | 'agent-prompt-stalled'
+  | 'pane-vanished'
+  | 'cli-error';
+
+/** Result of one herdr agent prompt/start invocation (injected seam). */
+export type StalledResumeCliResult =
+  | { ok: true }
+  | { ok: false; reason: StalledResumeFailureReason; error?: string };
+
+/** Options for relaunching an exited agent in its own pane. */
+export interface StalledResumeStartOptions {
+  /** pi session log path to continue; absent → `pi --continue`. */
+  sessionPath?: string;
+}
+
+/**
+ * Injectable I/O seams for {@link resumeStalledPane}. Production wires them
+ * to the real herdr CLI, the rolling dispatch log and the worklog flag write;
+ * tests stub them so the orchestrator is fully unit-testable without a live
+ * herdr session or filesystem.
+ */
+export interface ResumeStalledPaneDeps {
+  /** Submit `continue` to a live agent: `herdr agent prompt <paneId> continue`. */
+  promptAgent(paneId: string, text: string): Promise<StalledResumeCliResult>;
+  /**
+   * Relaunch pi in an existing pane (agent exited) continuing its session:
+   * `herdr agent start pi --kind pi --pane <paneId>` with
+   * `-- --session <path>` (or `-- --continue`). The caller submits the
+   * literal `continue` prompt afterwards.
+   */
+  startAgent(paneId: string, opts: StalledResumeStartOptions): Promise<StalledResumeCliResult>;
+  /** Read the item root's rolling dispatch log (cooldown/attempt/anchor inputs). */
+  readEntries(cwd: string): Promise<DowntimeLogEntry[]>;
+  /** Append a dispatch-attempt marker to the item root's rolling log. */
+  recordAttempt(cwd: string, entry: DowntimeLogEntry): Promise<void>;
+  /** Flag an item whose attempt budget is exhausted for producer review. */
+  markNeedsProducerReview(itemId: string, cwd: string): Promise<boolean>;
+  /** Per-item/per-kind dispatch attempt cap. */
+  maxAttempts: number;
+  /** Injectable clock (defaults to `Date.now`). */
+  now?(): number;
+}
+
+/**
+ * Build the `herdr agent start` argument vector for relaunching pi in an
+ * existing pane and continuing the item's session. Uses `--session <path>`
+ * when the pane records one, else `pi --continue` (most recent session).
+ * Pure so the continuation contract is unit-testable without a live CLI.
+ */
+export function buildStalledResumeStartArgs(
+  paneId: string,
+  opts: StalledResumeStartOptions = {},
+): string[] {
+  const args = ['agent', 'start', 'pi', '--kind', 'pi', '--pane', paneId];
+  if (typeof opts.sessionPath === 'string' && opts.sessionPath !== '') {
+    args.push('--', '--session', opts.sessionPath);
+  } else {
+    args.push('--', '--continue');
+  }
+  return args;
+}
+
+/**
+ * Classify a raw herdr/CLI failure into a neutral resume failure reason.
+ * Recognises the CLI's documented codes (`agent_blocked`,
+ * `agent_prompt_stalled`) and a vanished pane; everything else is
+ * `cli-error`. Pure so the mapping is unit-testable without a live herdr.
+ */
+export function classifyHerdrAgentFailure(
+  raw: string | null | undefined,
+): StalledResumeFailureReason {
+  const text = (raw ?? '').toLowerCase();
+  if (text.includes('agent_blocked') || text.includes('already blocked')) {
+    return 'agent-blocked';
+  }
+  if (text.includes('agent_prompt_stalled') || text.includes('prompt stalled')) {
+    return 'agent-prompt-stalled';
+  }
+  if (
+    (text.includes('pane') || text.includes('pane_id')) &&
+    (text.includes('not found') ||
+      text.includes('no such') ||
+      text.includes('does not exist') ||
+      text.includes('unknown pane'))
+  ) {
+    return 'pane-vanished';
+  }
+  return 'cli-error';
+}
+
+// ── Resume orchestrator ───────────────────────────────────────────────
+
+/**
+ * Process-wide in-flight resume guard, keyed by `(paneId, itemId)`
+ * (parent AC5): a second concurrent resume of the same pane/item in this
+ * process is a neutral `concurrent-resume` skip, so a stalled pane is never
+ * prompted twice in the same cycle.
+ */
+const _stalledResumeInFlight = new Set<string>();
+
+/**
+ * Test helper: clear the in-process resume guard between tests.
+ */
+export function _resetStalledResumeInFlight(): void {
+  _stalledResumeInFlight.clear();
+}
+
+function stalledResumeKey(paneId: string, itemId: string): string {
+  return `${paneId}\u0000${itemId}`;
+}
+
+/** Inputs for one in-place resume attempt. */
+export interface StalledResumeInput {
+  /** Parsed `herdr pane list` record for the stalled pane. */
+  pane: HerdrPaneRecord;
+  /** The item named by the pane's label suffix. */
+  item: DowntimeItemInfo;
+  /** The item's worklog root (resolved from the pane's cwd / agent_session). */
+  cwd: string;
+  /** Non-terminal pane-close cooldown window (ms). */
+  nonTerminalCooldownMs: number;
+  /** Minimum continuous not-working duration (ms). */
+  thresholdMs?: number;
+  /**
+   * The dispatched kind derived from the pane label by the scan. The
+   * classifier re-derives it from the label and wins on any mismatch, so the
+   * two parses can never silently diverge.
+   */
+  kind: DowntimeSkillKind;
+}
+
+/**
+ * Outcome of one {@link resumeStalledPane} attempt. `resumed:false` is ALWAYS
+ * a neutral "not resumed this cycle" result — never a strike, never a crash,
+ * never a duplicate. Includes every classifier reason plus the in-process
+ * concurrency guard and the herdr CLI failures.
+ */
+export type StalledResumeOutcomeReason =
+  | StalledPaneReason
+  | 'concurrent-resume'
+  | StalledResumeFailureReason;
+
+export type StalledResumeOutcome =
+  | {
+      resumed: true;
+      via: 'prompt' | 'start';
+      paneId: string;
+      itemId: string;
+      kind: DowntimeSkillKind;
+    }
+  | {
+      resumed: false;
+      reason: StalledResumeOutcomeReason;
+      paneId: string;
+      itemId: string;
+      kind: DowntimeSkillKind;
+    };
+
+/** Best-effort producer-review escalation — never throws. */
+async function flagStalledResumeBudgetExhausted(
+  deps: ResumeStalledPaneDeps,
+  itemId: string,
+  cwd: string,
+): Promise<void> {
+  try {
+    await deps.markNeedsProducerReview(itemId, cwd);
+  } catch {
+    // fail-closed: a flag write failure must never crash the worker
+  }
+}
+
+/** Session log path recorded on the pane, when present. */
+function stalledResumeSessionPath(pane: HerdrPaneRecord): string | undefined {
+  const value = pane.agentSession?.value;
+  return typeof value === 'string' && value !== '' ? value : undefined;
+}
+
+/**
+ * Attempt an IN-PLACE resume of a stalled pane (parent AC2/AC5/AC6). It
+ * re-classifies the pane against the item's CURRENT rolling log, then:
+ *
+ *  - a live agent receives the literal `continue`
+ *    (`herdr agent prompt <paneId> continue`);
+ *  - a pane whose agent has exited (`done`/`exited`) has pi relaunched in the
+ *    SAME pane continuing its session (`herdr agent start pi …`), after which
+ *    the literal `continue` prompt is submitted.
+ *
+ * It records a dispatch attempt for `(item, kind)` on success, so the existing
+ * per-item/per-kind attempt cap applies to resumes too, and enforces that cap
+ * up front — escalating via `needsProducerReview` when exhausted.
+ *
+ * FAIL-SAFE: every not-resumed outcome (a classifier exclusion, a concurrent
+ * resume, a `blocked` agent, `agent_prompt_stalled`, a vanished pane, or any
+ * CLI error) is NEUTRAL — it never throws, never records a strike, and never
+ * spawns a duplicate. A successful resume is the ONLY path that records an
+ * attempt. A new pane is NEVER spawned: the resume always targets
+ * `pane.paneId`.
+ */
+export async function resumeStalledPane(
+  input: StalledResumeInput,
+  deps: ResumeStalledPaneDeps,
+): Promise<StalledResumeOutcome> {
+  const { pane, item, cwd, kind, nonTerminalCooldownMs } = input;
+  const itemId = item.id;
+  const base = { paneId: pane.paneId, itemId, kind };
+
+  // 1. Concurrency guard (paneId, itemId): a second resume in flight for the
+  //    same pane/item is a neutral skip.
+  const key = stalledResumeKey(pane.paneId, itemId);
+  if (_stalledResumeInFlight.has(key)) {
+    return { resumed: false, reason: 'concurrent-resume', ...base };
+  }
+  _stalledResumeInFlight.add(key);
+
+  try {
+    // 2. Re-classify against the item's CURRENT log (cooldown, attempt cap,
+    //    stall anchor). Fail-safe: an unreadable log yields [] (fail-open).
+    let entries: DowntimeLogEntry[] = [];
+    try {
+      entries = await deps.readEntries(cwd);
+    } catch {
+      entries = [];
+    }
+    const decision = classifyStalledPane(
+      pane,
+      item,
+      { entries, nonTerminalCooldownMs, maxAttempts: deps.maxAttempts },
+      (deps.now ?? Date.now)(),
+      input.thresholdMs ?? DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+    );
+    if (!decision.stalled) {
+      // Attempt-budget exhaustion is the one exclusion that escalates: flag
+      // the item for producer review so a repeatedly stalled pane surfaces
+      // instead of looping through idle cycles forever (parent AC2).
+      if (decision.reason === 'attempt-cap-exhausted') {
+        await flagStalledResumeBudgetExhausted(deps, itemId, cwd);
+      }
+      return { resumed: false, reason: decision.reason, ...base };
+    }
+
+    // 3. Resume in place. An exited agent is relaunched in the SAME pane
+    //    (continuing its session) before the literal prompt is submitted; a
+    //    live agent is prompted directly.
+    const status = (pane.agentStatus ?? '').toLowerCase().trim();
+    const mustRelaunch = status === 'done' || status === 'exited';
+    if (mustRelaunch) {
+      const started = await deps.startAgent(pane.paneId, {
+        sessionPath: stalledResumeSessionPath(pane),
+      });
+      if (!started.ok) {
+        return { resumed: false, reason: started.reason, ...base };
+      }
+    }
+    const prompted = await deps.promptAgent(pane.paneId, STALLED_RESUME_PROMPT);
+    if (!prompted.ok) {
+      return { resumed: false, reason: prompted.reason, ...base };
+    }
+
+    // 4. Record the dispatch attempt (success only) — reuses the normal
+    //    claim/attempt bookkeeping so the cap applies to resumes too. A write
+    //    failure is swallowed (fail-open): the resume already happened and a
+    //    logging failure must not turn it into a crash or a wrong outcome.
+    try {
+      await deps.recordAttempt(cwd, {
+        itemId,
+        kind,
+        dispatchedAt: new Date((deps.now ?? Date.now)()).toISOString(),
+        cwd,
+        ...(item.title !== undefined ? { title: item.title } : {}),
+        ...(item.stage !== undefined ? { stage: item.stage } : {}),
+      });
+    } catch {
+      // fail-open: the resume already happened
+    }
+
+    return { resumed: true, via: mustRelaunch ? 'start' : 'prompt', ...base };
+  } catch {
+    // Any unexpected throw (an unwired/throwing seam) is a neutral CLI error.
+    return { resumed: false, reason: 'cli-error', ...base };
+  } finally {
+    _stalledResumeInFlight.delete(key);
+  }
+}

@@ -9,14 +9,21 @@
  * asserting its machine-readable reason code.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import {
   classifyStalledPane,
   stalledPaneKindFromLabel,
+  resumeStalledPane,
+  buildStalledResumeStartArgs,
+  classifyHerdrAgentFailure,
+  _resetStalledResumeInFlight,
+  STALLED_RESUME_PROMPT,
+  type ResumeStalledPaneDeps,
+  type StalledResumeStartOptions,
   type StalledPaneGuards,
 } from './stalled-work.js';
 import type { DowntimeItemInfo, HerdrPaneRecord } from './downtime-worker.js';
-import type { DowntimeLogEntry } from './downtime-log.js';
+import { countAttempts, type DowntimeLogEntry } from './downtime-log.js';
 
 const NOW = Date.parse('2026-10-08T12:00:00.000Z');
 const THRESHOLD = 5 * 60 * 1000;
@@ -231,5 +238,228 @@ describe('classifyStalledPane — safety / no-progress exclusions (WL-0MUYMBO9X0
       stalled: false,
       reason: 'attempt-cap-exhausted',
     });
+  });
+});
+
+// ── In-place resume orchestrator (WL-0MUYMBPZ5004LBFX) ──────────────────
+
+interface ResumeSpies {
+  deps: ResumeStalledPaneDeps;
+  promptCalls: Array<[string, string]>;
+  startCalls: Array<[string, StalledResumeStartOptions]>;
+  recorded: DowntimeLogEntry[];
+  flagged: string[];
+}
+
+/**
+ * Build a fully-stubbed {@link ResumeStalledPaneDeps} controller. The default
+ * seams succeed; `overrides` inject a failure/observation. `promptGate` lets a
+ * concurrency test hold the first prompt open.
+ */
+function resumeController(
+  overrides: Partial<ResumeStalledPaneDeps> = {},
+  promptGate?: Promise<void>,
+): ResumeSpies {
+  const promptCalls: Array<[string, string]> = [];
+  const startCalls: Array<[string, StalledResumeStartOptions]> = [];
+  const recorded: DowntimeLogEntry[] = [];
+  const flagged: string[] = [];
+  const deps: ResumeStalledPaneDeps = {
+    promptAgent: async (paneId, text) => {
+      promptCalls.push([paneId, text]);
+      if (promptGate !== undefined) await promptGate;
+      return { ok: true };
+    },
+    startAgent: async (paneId, opts) => {
+      startCalls.push([paneId, opts]);
+      return { ok: true };
+    },
+    readEntries: async () => [],
+    recordAttempt: async (_cwd, entry) => {
+      recorded.push(entry);
+    },
+    markNeedsProducerReview: async (itemId) => {
+      flagged.push(itemId);
+      return true;
+    },
+    maxAttempts: 3,
+    now: () => NOW,
+    ...overrides,
+  };
+  return { deps, promptCalls, startCalls, recorded, flagged };
+}
+
+function resumeInput(paneOverrides: Partial<HerdrPaneRecord> = {}, itemOverrides: Partial<DowntimeItemInfo> = {}) {
+  return {
+    pane: pane(paneOverrides),
+    item: item(itemOverrides),
+    cwd: '/worklog/root',
+    nonTerminalCooldownMs: 10 * 60 * 1000,
+    thresholdMs: THRESHOLD,
+    kind: 'implement' as const,
+  };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+describe('buildStalledResumeStartArgs (WL-0MUYMBPZ5004LBFX)', () => {
+  it('continues a named session with --session <path>', () => {
+    expect(buildStalledResumeStartArgs('pane-1', { sessionPath: '/s/abc.jsonl' })).toEqual([
+      'agent', 'start', 'pi', '--kind', 'pi', '--pane', 'pane-1', '--', '--session', '/s/abc.jsonl',
+    ]);
+  });
+
+  it('falls back to pi --continue when no session path is recorded', () => {
+    expect(buildStalledResumeStartArgs('pane-1')).toEqual([
+      'agent', 'start', 'pi', '--kind', 'pi', '--pane', 'pane-1', '--', '--continue',
+    ]);
+    expect(buildStalledResumeStartArgs('pane-1', { sessionPath: '' })).toEqual([
+      'agent', 'start', 'pi', '--kind', 'pi', '--pane', 'pane-1', '--', '--continue',
+    ]);
+  });
+});
+
+describe('classifyHerdrAgentFailure (WL-0MUYMBPZ5004LBFX)', () => {
+  it('maps the documented CLI codes to neutral reasons', () => {
+    expect(classifyHerdrAgentFailure('error: agent_blocked')).toBe('agent-blocked');
+    expect(classifyHerdrAgentFailure('agent_prompt_stalled after 5000ms')).toBe('agent-prompt-stalled');
+    expect(classifyHerdrAgentFailure('pane 3 not found')).toBe('pane-vanished');
+    expect(classifyHerdrAgentFailure('unknown pane id')).toBe('pane-vanished');
+  });
+
+  it('maps anything unrecognised (and absence) to cli-error', () => {
+    expect(classifyHerdrAgentFailure('boom')).toBe('cli-error');
+    expect(classifyHerdrAgentFailure(undefined)).toBe('cli-error');
+  });
+});
+
+describe('resumeStalledPane — in-place resume (WL-0MUYMBPZ5004LBFX)', () => {
+  beforeEach(() => {
+    _resetStalledResumeInFlight();
+  });
+
+  it('prompts a live agent with the literal continue and records an attempt', async () => {
+    const { deps, promptCalls, startCalls, recorded } = resumeController();
+    const out = await resumeStalledPane(resumeInput({ agentStatus: 'idle' }), deps);
+
+    expect(out).toEqual({
+      resumed: true,
+      via: 'prompt',
+      paneId: 'pane-1',
+      itemId: ITEM_ID,
+      kind: 'implement',
+    });
+    expect(promptCalls).toEqual([['pane-1', STALLED_RESUME_PROMPT]]);
+    expect(startCalls).toEqual([]);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      itemId: ITEM_ID,
+      kind: 'implement',
+      stage: 'plan_complete',
+      cwd: '/worklog/root',
+    });
+    expect(recorded[0].dispatchedAt).toBe(new Date(NOW).toISOString());
+  });
+
+  it('relaunches pi in the same pane continuing the session, then submits continue', async () => {
+    const sessionPath = '/sessions/abc.jsonl';
+    const { deps, promptCalls, startCalls, recorded } = resumeController();
+    const out = await resumeStalledPane(
+      resumeInput({ agentStatus: 'done', agentSession: { value: sessionPath } }),
+      deps,
+    );
+
+    expect(out).toMatchObject({ resumed: true, via: 'start', paneId: 'pane-1' });
+    expect(startCalls).toEqual([['pane-1', { sessionPath }]]);
+    expect(promptCalls).toEqual([['pane-1', STALLED_RESUME_PROMPT]]);
+    expect(recorded).toHaveLength(1);
+  });
+
+  it('relaunches an exited agent and continues the latest session without a path', async () => {
+    const { deps, startCalls } = resumeController();
+    const out = await resumeStalledPane(resumeInput({ agentStatus: 'exited' }), deps);
+    expect(out).toMatchObject({ resumed: true, via: 'start' });
+    expect(startCalls).toEqual([['pane-1', { sessionPath: undefined }]]);
+  });
+
+  it('records the attempt in the normal bookkeeping so the cap counts it', async () => {
+    const { deps, recorded } = resumeController();
+    await resumeStalledPane(resumeInput(), deps);
+    expect(countAttempts(recorded, ITEM_ID, 'implement', 'plan_complete')).toBe(1);
+  });
+
+  it('escalates via needsProducerReview when the attempt cap is exhausted, without resuming', async () => {
+    const entries: DowntimeLogEntry[] = Array.from({ length: 3 }, () => ({
+      itemId: ITEM_ID,
+      kind: 'implement',
+      stage: 'plan_complete',
+      dispatchedAt: new Date(NOW - 20 * 60 * 1000).toISOString(),
+    }));
+    const { deps, promptCalls, recorded, flagged } = resumeController({
+      readEntries: async () => entries,
+    });
+    const out = await resumeStalledPane(resumeInput(), deps);
+
+    expect(out).toMatchObject({ resumed: false, reason: 'attempt-cap-exhausted' });
+    expect(flagged).toEqual([ITEM_ID]);
+    expect(promptCalls).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+
+  it('prevents a concurrent resume of the same pane/item', async () => {
+    const gate = deferred();
+    const { deps, promptCalls } = resumeController({}, gate.promise);
+    const first = resumeStalledPane(resumeInput(), deps);
+    const second = resumeStalledPane(resumeInput(), deps);
+
+    expect(await second).toEqual({
+      resumed: false,
+      reason: 'concurrent-resume',
+      paneId: 'pane-1',
+      itemId: ITEM_ID,
+      kind: 'implement',
+    });
+    await expect.poll(() => promptCalls.length).toBe(1);
+    gate.resolve();
+    expect(await first).toMatchObject({ resumed: true });
+    expect(promptCalls).toHaveLength(1);
+  });
+
+  it('is fail-safe: every neutral failure returns without a strike or a record', async () => {
+    const cases: Array<[Partial<ResumeStalledPaneDeps>, Partial<HerdrPaneRecord>, string]> = [
+      [{ promptAgent: async () => ({ ok: false, reason: 'agent-blocked' }) }, {}, 'agent-blocked'],
+      [{ promptAgent: async () => ({ ok: false, reason: 'agent-prompt-stalled' }) }, {}, 'agent-prompt-stalled'],
+      [
+        { startAgent: async () => ({ ok: false, reason: 'pane-vanished' }) },
+        { agentStatus: 'done' },
+        'pane-vanished',
+      ],
+      [
+        { promptAgent: async () => { throw new Error('herdr exploded'); } },
+        {},
+        'cli-error',
+      ],
+      [{}, { agentStatus: 'blocked' }, 'agent-blocked'],
+      [{}, { agentStatus: 'working' }, 'agent-working'],
+    ];
+
+    for (const [overrides, paneOverrides, reason] of cases) {
+      const { deps, recorded } = resumeController(overrides);
+      const out = await resumeStalledPane(resumeInput(paneOverrides), deps);
+      expect(out).toMatchObject({ resumed: false, reason });
+      expect(recorded).toEqual([]);
+    }
+  });
+
+  it('does not relaunch a live agent (only done/exited panes are relaunched)', async () => {
+    const { deps, startCalls } = resumeController();
+    await resumeStalledPane(resumeInput({ agentStatus: 'unknown' }), deps);
+    expect(startCalls).toEqual([]);
   });
 });
