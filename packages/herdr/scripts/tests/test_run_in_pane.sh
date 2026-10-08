@@ -180,6 +180,30 @@ else
   fail "without --anchor the split must use --current (log: $(cat "$HERDR_LOG" 2>/dev/null))"
 fi
 
+# --pane-id-file writes the split pane id immediately after the split
+# (WL-0MUYI3K8H007MPKF): the interactive dispatch uses this as the
+# split-confirmation channel that gates the fail-safe placeholder cleanup.
+echo ""
+echo "=== Test: --pane-id-file writes the new pane id after the split ==="
+
+ID_FILE="$SANDBOX/pane-id.json"
+rm -f "$HERDR_LOG" "$ID_FILE"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --pane-id-file "$ID_FILE" --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if [ -f "$ID_FILE" ] && grep -q '"pane_id":"test-pane-main"' "$ID_FILE"; then
+  pass "--pane-id-file writes the split pane id JSON"
+else
+  fail "--pane-id-file should write the split pane id (file: $(cat "$ID_FILE" 2>/dev/null))"
+fi
+
+# Omitting --pane-id-file writes nothing (opt-in channel, backward compatible).
+rm -f "$ID_FILE"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if [ ! -f "$ID_FILE" ]; then
+  pass "omitting --pane-id-file writes no file"
+else
+  fail "without --pane-id-file no file should be written"
+fi
+
 rm -rf "$SANDBOX"
 
 echo ""

@@ -11,7 +11,7 @@
 #     with Enter or herdr `close_pane` (default `prefix+x`)
 #
 # Usage:
-#   run-in-pane.sh [--cwd <path>] [--no-focus] [--anchor <paneId>] [--pane-name <name>] <command>
+#   run-in-pane.sh [--cwd <path>] [--no-focus] [--anchor <paneId>] [--pane-name <name>] [--pane-id-file <path>] <command>
 #
 # The command is executed via `bash -c`, so compound commands (`&&`),
 # single-quoted arguments (e.g. `--summary 'Approved by manual review'`),
@@ -33,6 +33,13 @@
 #                      work-item-ID tab (WL-0MUYI3JAO002BTNL). Absent =
 #                      legacy current-pane split. The flag may also be given
 #                      as `--anchor=<paneId>`.
+#   --pane-id-file <path>
+#                      Write the new pane ID as JSON ({"pane_id": "<id>"}) to
+#                      <path> immediately after the split succeeds. Mirror of
+#                      send-to-pi.sh's flag: the interactive dispatch uses it
+#                      as a split-confirmation channel to gate the fail-safe
+#                      placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF).
+#                      May also be given as `--pane-id-file=<path>`.
 #
 # Everything after the options — including commands whose first token
 # starts with `--` — is treated as the command to run.
@@ -118,6 +125,7 @@ pane_name="${RUN_IN_PANE_NAME:-Command Output}"
 target_cwd=""
 no_focus=false
 anchor=""
+pane_id_file=""
 while [ $# -gt 0 ]; do
   case "${1:-}" in
     --cwd)
@@ -138,6 +146,14 @@ while [ $# -gt 0 ]; do
       ;;
     --anchor=*)
       anchor="${1#*=}"
+      shift
+      ;;
+    --pane-id-file)
+      pane_id_file="$2"
+      shift 2
+      ;;
+    --pane-id-file=*)
+      pane_id_file="${1#*=}"
       shift
       ;;
     *)
@@ -186,6 +202,14 @@ if [ -z "$np" ]; then
   echo "Error: Could not determine new pane ID from split output" >&2
   echo "Output: $split_out" >&2
   exit 1
+fi
+
+# When --pane-id-file is given, write the pane ID immediately after the split
+# succeeds (mirroring send-to-pi.sh) so the caller can confirm the split
+# without parsing herdr output itself. Best effort: a failed write must not
+# abort the command execution in the new pane.
+if [ -n "$pane_id_file" ]; then
+  printf '{"pane_id":"%s"}\n' "$np" > "$pane_id_file" 2>/dev/null || true
 fi
 
 # Run the command through a shell in the new pane. Each argument is

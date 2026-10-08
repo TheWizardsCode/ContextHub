@@ -115,6 +115,7 @@ import {
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
   isSafeDowntimePaneToClose,
+  type HerdrPaneRecord,
   type RunningPanesResult,
   type LlamaStatus,
 } from './downtime-worker.js';
@@ -147,6 +148,7 @@ import {
   resolveProjectWorkspace as resolveProjectWorkspaceForRoot,
   createDispatcherAnchorDeps,
   type DispatcherAnchor,
+  type DispatcherAnchorDeps,
   type DispatcherPrefixTabAnchor,
   type ItemTabAnchor,
   type ProjectWorkspaceTarget,
@@ -298,6 +300,12 @@ export function buildSendToPiArgs(
  * current one, placing the command-output pane in the work-item-ID tab. An
  * absent/empty anchor omits the flag, keeping the legacy current-pane split
  * (no-ID commands and the fail-open fallback, AC4/AC5).
+ *
+ * When `paneIdFile` is provided, `--pane-id-file <path>` is forwarded so
+ * run-in-pane.sh writes the new pane id immediately after the split succeeds
+ * (mirroring send-to-pi.sh). The interactive dispatch path uses this as a
+ * split-confirmation channel to gate the fail-safe placeholder root-pane
+ * cleanup (WL-0MUYI3K8H007MPKF, AC7). An absent value omits the flag.
  */
 export function buildRunInPaneArgs(
   command: string,
@@ -305,6 +313,7 @@ export function buildRunInPaneArgs(
   paneName?: string,
   focus?: boolean,
   anchor?: string,
+  paneIdFile?: string,
 ): string[] {
   const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
   if (paneName) {
@@ -312,6 +321,9 @@ export function buildRunInPaneArgs(
   }
   if (anchor) {
     args.push('--anchor', anchor);
+  }
+  if (paneIdFile) {
+    args.push('--pane-id-file', paneIdFile);
   }
   args.push(command);
   return args;
@@ -831,6 +843,10 @@ export function resolveInteractiveWorkspaceId(
  * @param workspaceId - Host workspace (see {@link resolveInteractiveWorkspaceId}).
  * @param itemId - Exact work-item ID used as the tab label.
  * @param deps - Injectable herdr deps; production builds real ones.
+ * @param onCreate Optional create-vs-reuse observer forwarded to
+ *   {@link resolveItemTabAnchor} (`getItemTabAnchor`): invoked only when this
+ *   call provisioned the tab. The interactive dispatch path uses it to gate
+ *   the fail-safe placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF, AC7).
  * @returns The resolved tab anchor, or `null` on any failure/empty input.
  */
 export async function resolveInteractiveItemAnchor(
@@ -838,14 +854,161 @@ export async function resolveInteractiveItemAnchor(
   workspaceId: string,
   itemId: string,
   deps?: DispatcherAnchorDeps,
+  onCreate?: (anchor: ItemTabAnchor) => void,
 ): Promise<ItemTabAnchor | null> {
   try {
     if (workspaceId === '' || itemId === '') return null;
     const anchorDeps =
       deps ?? createDispatcherAnchorDeps(cwd, process.env.HERDR_BIN_PATH ?? 'herdr');
-    return await resolveItemTabAnchor(cwd, anchorDeps, workspaceId, itemId);
+    return await resolveItemTabAnchor(cwd, anchorDeps, workspaceId, itemId, onCreate);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Liveness dependency for {@link closeInteractiveTabRootPane}: the ids of
+ * panes currently hosting a TRACKED pi/shell session, or `{ok:false}` when
+ * the probe cannot be answered (unknown → the caller leaves the pane open).
+ *
+ * Mirrors the downtime path's `getRunningDowntimePanes` result shape: only a
+ * POSITIVE `{ok:true, paneIds}` excludes the anchor from cleanup.
+ */
+export interface InteractiveLiveTrackedPanesResult {
+  ok: boolean;
+  paneIds?: string[];
+  error?: string;
+}
+
+/** Injectable dependencies for {@link closeInteractiveTabRootPane} (tests). */
+export interface InteractiveRootPaneCleanupDeps {
+  /** Live tracked pi/shell pane ids, or `{ok:false}` when unknown. */
+  getLiveTrackedPanes?: (cwd: string) => Promise<InteractiveLiveTrackedPanesResult>;
+  /** Close a pane; may reject (the helper swallows it). */
+  closePane?: (paneId: string, cwd: string) => Promise<boolean>;
+}
+
+/**
+ * Fail-safe cleanup of an interactive item tab's placeholder root pane
+ * (WL-0MUYI3K8H007MPKF, parent WL-0MUKZGEQ2007FECS, AC7).
+ *
+ * A freshly provisioned item tab is created with herdr's initial root pane,
+ * used only as the split anchor for the FIRST dispatch. Once that dispatch's
+ * pane has spawned, the placeholder is closed so the tab shows only the
+ * productive pane. This mirrors the downtime path's root-pane cleanup
+ * (WL-0MU2EOHK900425VU) with the interactive path's fail-safe/fail-open
+ * semantics:
+ *
+ *  - **Fail-safe:** the anchor is closed ONLY when liveness POSITIVELY
+ *    confirms it is not a live tracked pi/shell pane. When the probe is
+ *    absent, failed (`ok:false`), or returns an unparseable payload
+ *    (no `paneIds`), the anchor is left open — a live agent/shell pane is
+ *    never closed (a reused tab's anchor is a live pane and survives).
+ *  - **Fail-open:** any thrown error (liveness probe or close) is swallowed;
+ *    cleanup never blocks, fails, or changes the dispatch outcome.
+ *
+ * @param anchorPaneId The anchor pane to close, or `undefined`/empty when no
+ *   item tab was provisioned (a no-op — liveness is not even probed).
+ * @param ctx The worklog root (`cwd`) the resolver/close operations run in.
+ * @param deps Injectable liveness + close dependencies.
+ */
+export async function closeInteractiveTabRootPane(
+  anchorPaneId: string | undefined,
+  ctx: { cwd: string },
+  deps: InteractiveRootPaneCleanupDeps,
+): Promise<void> {
+  try {
+    if (typeof anchorPaneId !== 'string' || anchorPaneId === '') return;
+    if (typeof deps.getLiveTrackedPanes !== 'function') return;
+    // Only a POSITIVE liveness answer may authorise a close; anything else
+    // (absent dep, ok:false, thrown probe, missing paneIds) leaves it open.
+    let liveIds: string[] | null = null;
+    try {
+      const result = await deps.getLiveTrackedPanes(ctx.cwd);
+      if (result && result.ok === true && Array.isArray(result.paneIds)) {
+        liveIds = result.paneIds;
+      }
+    } catch {
+      liveIds = null; // fail-safe: unknown liveness → leave open
+    }
+    if (liveIds === null) return;
+    if (liveIds.includes(anchorPaneId)) return; // live tracked pane → leave open
+    if (typeof deps.closePane === 'function') {
+      await deps.closePane(anchorPaneId, ctx.cwd);
+    }
+  } catch {
+    // fail-open: root-pane cleanup must never block or fail the dispatch
+  }
+}
+
+/**
+ * Default interactive liveness resolver (AC7): the ids of panes currently
+ * hosting a TRACKED pi/shell session, derived from `herdr pane list`.
+ *
+ * A pane is a live tracked pane when it hosts a live pi agent (`agent`
+ * present, status not terminal) OR its label marks a shell-command pane
+ * (`Shell: …`, set by `run-in-pane.sh` via `buildShellPaneTitle`). A freshly
+ * provisioned item tab's placeholder root pane hosts neither, so it is
+ * excluded and may be closed; a reused tab's anchor is a live pi/shell pane
+ * and is included, so it is never closed.
+ *
+ * Fail-safe: any herdr failure (missing binary, timeout, unparseable output)
+ * resolves `{ok:false}` — the caller then leaves the anchor open rather than
+ * risk closing a live pane on unknown state.
+ */
+export async function defaultInteractiveLiveTrackedPanesResolver(
+  _cwd: string,
+): Promise<InteractiveLiveTrackedPanesResult> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    const { stdout } = await getExecFileAsync()(
+      herdrBin,
+      ['pane', 'list'],
+      { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 },
+    );
+    const panes = parseHerdrPaneListOutput(stdout);
+    if (panes === null) return { ok: false, error: 'herdr pane list parse failure' };
+    const paneIds = panes.filter(isLiveTrackedPane).map((p) => p.paneId);
+    return { ok: true, paneIds };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/**
+ * True when a parsed `herdr pane list` record is a live tracked pi/shell
+ * pane (see {@link defaultInteractiveLiveTrackedPanesResolver}). A bare
+ * placeholder root pane (no agent, no shell-command label) is NOT tracked.
+ */
+function isLiveTrackedPane(rec: HerdrPaneRecord): boolean {
+  const status = (rec.agentStatus ?? '').toLowerCase();
+  const agentLive =
+    typeof rec.agent === 'string' &&
+    rec.agent !== '' &&
+    status !== 'done' &&
+    status !== 'exited';
+  const shellLive = typeof rec.label === 'string' && rec.label.startsWith('Shell: ');
+  return agentLive || shellLive;
+}
+
+/**
+ * Default interactive pane-close dependency (AC7): `herdr pane close
+ * <paneId>`. Fail-open at the caller — a failure resolves `false` and is
+ * swallowed by {@link closeInteractiveTabRootPane}.
+ */
+export async function defaultInteractiveClosePane(
+  paneId: string,
+  _cwd: string,
+): Promise<boolean> {
+  try {
+    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
+    await getExecFileAsync()(herdrBin, ['pane', 'close', paneId], {
+      encoding: 'utf8',
+      timeout: DOWNTIME_WL_TIMEOUT_MS,
+    });
+    return true;
+  } catch {
+    return false; // fail-open: a failed close never throws
   }
 }
 
@@ -2112,14 +2275,38 @@ async function main(): Promise<void> {
         // no ID, no workspace, or any resolution/creation failure yields
         // `undefined`, so the scripts keep today's current-pane split (AC5).
         const interactiveItemId = shouldOpenPane ? extractWorkItemId(command) : undefined;
+        // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF, AC7): populated only
+        // when resolveInteractiveItemAnchor PROVISIONED the item tab. A reused
+        // tab leaves this null, so a reused live anchor is never considered
+        // for cleanup. Combined with the fail-safe liveness gate below, a live
+        // pane is never closed.
+        let createdItemTabAnchor: ItemTabAnchor | null = null;
         const interactiveAnchor =
           interactiveItemId !== undefined
             ? await resolveInteractiveItemAnchor(
                 targetCwd,
                 resolveInteractiveWorkspaceId(process.env) ?? '',
                 interactiveItemId,
+                undefined,
+                (anchor) => { createdItemTabAnchor = anchor; },
               )
             : null;
+        // Fail-safe placeholder root-pane cleanup (WL-0MUYI3K8H007MPKF, AC7):
+        // only ever runs after a CONFIRMED successful split (the spawning
+        // script writes its pane-id file right after the split) and only when
+        // THIS dispatch provisioned the item tab. All errors are swallowed by
+        // closeInteractiveTabRootPane — the dispatch outcome never changes.
+        const runInteractiveRootPaneCleanup = (): Promise<void> =>
+          createdItemTabAnchor !== null
+            ? closeInteractiveTabRootPane(
+                createdItemTabAnchor.paneId,
+                { cwd: targetCwd },
+                {
+                  getLiveTrackedPanes: defaultInteractiveLiveTrackedPanesResolver,
+                  closePane: defaultInteractiveClosePane,
+                },
+              )
+            : Promise.resolve();
         if (route === 'agent') {
           // Agent-route hook: record operator activity and fire fast-switch
           // (fail-open: never blocks command dispatch). Only runs for agent
@@ -2194,9 +2381,14 @@ async function main(): Promise<void> {
           if (itemId && paneIdFile) {
             // Fire-and-forget: polling must never block the TUI loop. A
             // missing file (split failed) is a no-op — no entry recorded.
+            // Once the pane id is captured (proving the split succeeded) the
+            // freshly-created item tab's placeholder root pane is closed
+            // (fail-safe; WL-0MUYI3K8H007MPKF, AC7).
             void capturePaneIdFromFile(itemId, paneIdFile, (wid, pid) =>
               agentTracker.recordAgentForWorkItem(wid, pid, command),
-            );
+            ).then((capturedPaneId) => {
+              if (capturedPaneId !== undefined) return runInteractiveRootPaneCleanup();
+            });
           }
         } else if (route === 'pane') {
           // Strip `!!` / `!` bash history-expansion prefixes, then run the
@@ -2231,9 +2423,14 @@ async function main(): Promise<void> {
           // and its work item.
           const shellItemId = extractWorkItemId(clean);
           const shellPaneName = buildShellPaneTitle(clean, paneTitle, shellItemId);
+          // Split-confirmation channel for the cleanup below: only requested
+          // when a fresh item tab needs its placeholder root pane closed.
+          const shellPaneIdFile = createdItemTabAnchor
+            ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}-shell.json`)
+            : undefined;
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(clean, targetCwd, shellPaneName, focus, interactiveAnchor?.paneId),
+            buildRunInPaneArgs(clean, targetCwd, shellPaneName, focus, interactiveAnchor?.paneId, shellPaneIdFile),
             {
               detached: true,
               stdio: 'ignore',
@@ -2242,6 +2439,13 @@ async function main(): Promise<void> {
             },
           );
           child.unref(); // Allow the parent to exit independently
+          if (shellPaneIdFile) {
+            void capturePaneIdFromFile(shellItemId ?? '', shellPaneIdFile, () => {}).then(
+              (capturedPaneId) => {
+                if (capturedPaneId !== undefined) return runInteractiveRootPaneCleanup();
+              },
+            );
+          }
         } else {
           // Plain (non-!!) shell commands: run them visibly in a new herdr pane
           // from the resolved project root so they always execute in the tab's
@@ -2269,9 +2473,13 @@ async function main(): Promise<void> {
             );
             return;
           }
+          const plainItemId = extractWorkItemId(command);
+          const plainPaneIdFile = createdItemTabAnchor
+            ? join(tmpdir(), `herdr-pane-${process.pid}-${Date.now()}-shell.json`)
+            : undefined;
           const child = spawn(
             RUN_IN_PANE_SCRIPT,
-            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, extractWorkItemId(command)), focus, interactiveAnchor?.paneId),
+            buildRunInPaneArgs(command, targetCwd, buildShellPaneTitle(command, paneTitle, plainItemId), focus, interactiveAnchor?.paneId, plainPaneIdFile),
             {
               detached: true,
               stdio: 'ignore',
@@ -2280,6 +2488,13 @@ async function main(): Promise<void> {
             },
           );
           child.unref();
+          if (plainPaneIdFile) {
+            void capturePaneIdFromFile(plainItemId ?? '', plainPaneIdFile, () => {}).then(
+              (capturedPaneId) => {
+                if (capturedPaneId !== undefined) return runInteractiveRootPaneCleanup();
+              },
+            );
+          }
         }
       },
     },
