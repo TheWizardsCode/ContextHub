@@ -930,6 +930,18 @@ describe('shortcuts.json command routing', () => {
     expect(pn!.focus).toBe(true);
   });
 
+  it('routes the r i producer-interview command with focus:true (WL-0MURJ0LFH002O95I)', () => {
+    const _here2 = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(_here2, 'shortcuts.json'), 'utf8');
+    const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
+    const ri = parsed.find((e) => Array.isArray(e.chord) && e.chord.join(',') === 'r,i');
+    expect(ri).toBeDefined();
+    // The interactive interview pane must receive focus immediately.
+    expect(ri!.focus).toBe(true);
+    // The focus behaviour is documented in the entry's description.
+    expect(String(ri!.description)).toMatch(/focus/i);
+  });
+
   it('binds P-p to the free-form prompt, P-a to the audit-gaps prompt, and P-n to a blank session', () => {
     const freePrompt = entries.find((e) => e.chord.join(' ') === 'P p');
     expect(freePrompt).toBeDefined();
