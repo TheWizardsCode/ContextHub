@@ -860,8 +860,15 @@ Lifecycle (`packages/herdr/src/index.ts`; shared anchor helper in
    with `--anchor` it runs `herdr pane split --pane <paneId> --direction right
    --no-focus --cwd <cwd>` instead of the legacy `--current`, tolerating the
    `pane_id` / `paneId` / `id` split-output variants (raw output logged on
-   parse failure, mirroring `send-to-pi.sh`). `--no-focus` is preserved, so
-   the item tab never steals focus.
+   parse failure, mirroring `send-to-pi.sh`). `--no-focus` is preserved by
+   default, so the item tab never steals focus — **except** for shortcuts
+   that opt in with `focus: true` (currently `r i`, the producer interview,
+   WL-0MURJ0LFH002O95I): their dispatch passes `--focus`, and
+   `run-in-pane.sh` focuses the new pane's item tab (`herdr pane get <pane>`
+   → `herdr tab focus <tabId>`) **before** zooming the pane. Tab focus is
+   required because the pane lives in a tab other than the caller's and
+   `pane zoom` alone cannot switch tabs; it is best-effort/fail-open (an
+   unresolvable tab id falls back to the zoom-only behaviour).
 4. **Root-pane cleanup** — when this dispatch **created** the tab, the
    placeholder root pane (herdr's initial empty pane, used only as the first
    split anchor) is closed after the split is **confirmed**: the spawning

@@ -11,7 +11,7 @@
 #     with Enter or herdr `close_pane` (default `prefix+x`)
 #
 # Usage:
-#   run-in-pane.sh [--cwd <path>] [--no-focus] [--anchor <paneId>] [--pane-name <name>] [--pane-id-file <path>] <command>
+#   run-in-pane.sh [--cwd <path>] [--focus|--no-focus] [--anchor <paneId>] [--pane-name <name>] [--pane-id-file <path>] <command>
 #
 # The command is executed via `bash -c`, so compound commands (`&&`),
 # single-quoted arguments (e.g. `--summary 'Approved by manual review'`),
@@ -25,6 +25,14 @@
 #                      pane opens in the background (WL-0MSHIA53D009DJOT).
 #                      Without the flag the new pane is focused as before
 #                      (backward compatible).
+#   --focus            Focus the new pane (the default). Accepted explicitly
+#                      so callers that always pass one of the two forms
+#                      (`buildRunInPaneArgs`) never leak the flag into the
+#                      command. When the new pane lands in a DIFFERENT tab —
+#                      an ID-carrying interactive dispatch anchored to the
+#                      work-item-ID tab (WL-0MUYI3JAO002BTNL) — the pane's tab
+#                      is focused first, because `pane zoom` alone cannot
+#                      switch tabs (WL-0MURJ0LFH002O95I).
 #   --pane-name <name> Pane title (overrides RUN_IN_PANE_NAME and the
 #                      default "Command Output"; WL-0MSJ4E8UA005KG9Y)
 #   --anchor <paneId>  Split from the given pane id (e.g. an item-ID tab's
@@ -68,6 +76,16 @@ parse_pane_id() {
     -e 's/.*"pane_id": *"\([^"]*\)".*/\1/p' \
     -e 's/.*"paneId": *"\([^"]*\)".*/\1/p' \
     -e 's/.*"id": *"\([^"]*\)".*/\1/p' | head -n1
+}
+
+# Extract the tab id from a `herdr pane get` JSON envelope (`result.pane.tab_id`)
+# so the focus path can switch to the tab the new pane lives in
+# (WL-0MURJ0LFH002O95I). Tolerates the `tab_id` / `tabId` key variants; prints
+# nothing when absent (the caller then skips tab focus, fail-open).
+parse_tab_id() {
+  printf '%s' "$1" | sed -n \
+    -e 's/.*"tab_id": *"\([^"]*\)".*/\1/p' \
+    -e 's/.*"tabId": *"\([^"]*\)".*/\1/p' | head -n1
 }
 
 # ── In-pane wrapper mode ─────────────────────────────────────────────────
@@ -119,9 +137,9 @@ fi
 # ── Main mode: split, run, rename ────────────────────────────────────────
 pane_name="${RUN_IN_PANE_NAME:-Command Output}"
 # The command is everything after the leading options. Only --cwd,
-# --no-focus, --pane-name and --anchor are parsed as options at the head of
-# argv; everything else (including commands whose first token begins with --)
-# is the command.
+# --focus, --no-focus, --pane-name and --anchor are parsed as options at the
+# head of argv; everything else (including commands whose first token begins
+# with --) is the command.
 target_cwd=""
 no_focus=false
 anchor=""
@@ -131,6 +149,14 @@ while [ $# -gt 0 ]; do
     --cwd)
       target_cwd="$2"
       shift 2
+      ;;
+    --focus)
+      # Explicit focus: the default. Consuming it here is essential — an
+      # unrecognised --focus would fall through to the command and the pane
+      # would run `--focus --cwd …` instead of the real command
+      # (WL-0MURJ0LFH002O95I).
+      no_focus=false
+      shift
       ;;
     --no-focus)
       no_focus=true
@@ -228,7 +254,20 @@ quoted_pane="$(printf '%q' "$np")"
 # (WL-0MSHIA53D009DJOT): selection-list dispatches pass --no-focus so the
 # command-output pane opens without stealing focus; the user can focus it
 # manually with herdr pane navigation.
+#
+# An ID-carrying interactive dispatch anchors the split to the work-item-ID
+# tab (WL-0MUYI3JAO002BTNL), so the new pane can live in a DIFFERENT tab than
+# the caller's selection list. `pane zoom` only affects the pane within its
+# tab — it cannot switch tabs — so the pane's tab is focused first
+# (WL-0MURJ0LFH002O95I). Resolving the tab id is best-effort and fail-open: an
+# unavailable id falls back to the legacy zoom-only behaviour (the pane still
+# receives keyboard focus when it shares the caller's tab).
 if [ "$no_focus" = false ]; then
+  pane_get_out="$("$herdr_bin" pane get "$np" 2>/dev/null || true)"
+  tab_id="$(parse_tab_id "$pane_get_out")"
+  if [ -n "$tab_id" ]; then
+    "$herdr_bin" tab focus "$tab_id" >/dev/null 2>&1 || true
+  fi
   "$herdr_bin" pane zoom "$np" --on >/dev/null 2>&1 || true
   "$herdr_bin" pane zoom "$np" --off >/dev/null 2>&1 || true
 fi

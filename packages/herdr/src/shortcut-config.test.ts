@@ -929,10 +929,17 @@ describe('parseShortcutEntry — focus field (WL-0MT70LC6B009TL3Q)', () => {
   });
 });
 
-describe('loadShortcutConfig — focus: true for P n (WL-0MT70LC6B009TL3Q)', () => {
+describe('loadShortcutConfig — focus: true for P n and r i (WL-0MT70LC6B009TL3Q, WL-0MURJ0LFH002O95I)', () => {
   it('marks the P n blank-session shortcut as focused', () => {
     const registry = loadShortcutConfig();
     const entry = registry.lookupChordEntry(['P', 'n'], 'list');
+    expect(entry).toBeDefined();
+    expect(entry?.focus).toBe(true);
+  });
+
+  it('marks the r i producer-interview shortcut as focused', () => {
+    const registry = loadShortcutConfig();
+    const entry = registry.lookupChordEntry(['r', 'i'], 'list');
     expect(entry).toBeDefined();
     expect(entry?.focus).toBe(true);
   });
