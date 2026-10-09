@@ -76,6 +76,8 @@ import {
   buildDowntimePaneArgs,
   spawnDowntimePane,
   buildDowntimeSpawnOptions,
+  scrubRepositoryOverrides,
+  REPOSITORY_OVERRIDE_ENV_VARS,
   BLOCKED_QUESTIONS_INSTRUCTION,
   parseNextItemOutput,
   parseNextCandidatesOutput,
@@ -105,6 +107,7 @@ import {
   clampDowntimeNonTerminalCooldownMs,
   clampDowntimeMarkerStaleWindowMs,
   clampDowntimeMaxAttempts,
+  resumeStalledWorkIfAble,
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DOWNTIME_MAX_ATTEMPTS_MIN,
   DOWNTIME_MAX_ATTEMPTS_MAX,
@@ -203,6 +206,12 @@ import {
   jsonResponseFixture,
   type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
+import {
+  resumeStalledPane,
+  _resetStalledResumeInFlight,
+  type ResumeStalledPaneDeps,
+  type StalledPaneCandidate,
+} from './stalled-work.js';
 
 
 /** Shared deps mock for dispatch tests. */
@@ -279,7 +288,6 @@ describe('downtime worker fixtures', () => {
 describe('idle detection (isIdleStatus)', () => {
   const idle: LlamaStatus = {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
@@ -304,7 +312,6 @@ describe('idle detection (isIdleStatus)', () => {
     // the worker must never dispatch on an unverifiable busy signal.
     const partial: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 4,
@@ -313,11 +320,11 @@ describe('idle detection (isIdleStatus)', () => {
     expect(isIdleStatus(partial, 0)).toBe(false);
   });
 
-  it('is idle during remote-only traffic when local_active_query=false (global active_query true)', () => {
-    // Remote provider streams keep the GLOBAL active_query true while the
+  it('is idle during remote-only traffic when local_active_query=false', () => {
+    // Remote provider streams keep the global query signal true while the
     // local model is idle with free slots; the proxy's local_active_query is
     // the local-only signal (LP-0MSL2ZLLS009RVKR) and must not block dispatch.
-    expect(isIdleStatus({ ...idle, active_query: true, local_active_query: false }, 0)).toBe(true);
+    expect(isIdleStatus({ ...idle, local_active_query: false }, 0)).toBe(true);
   });
 
   it('is busy while a model switch is in progress', () => {
@@ -3757,7 +3764,6 @@ describe('endpoint failures and poller', () => {
   it('derives local_lease_active from the lease fields when the boolean is absent', async () => {
     const status = parseLlamaStatus({
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
       total_slots: 4,
@@ -3815,7 +3821,6 @@ describe('endpoint failures and poller', () => {
 describe('parseLlamaStatus local_active_query', () => {
   const base = {
     llama_server_running: true,
-    active_query: false,
     model_switch_in_progress: false,
     available_slots: 4,
     total_slots: 4,
@@ -3849,7 +3854,6 @@ describe('parseLlamaStatus local_active_query', () => {
 describe('runtime idle evaluation (evaluateIdle)', () => {
   const idle: LlamaStatus = {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
@@ -3857,29 +3861,53 @@ describe('runtime idle evaluation (evaluateIdle)', () => {
     total_slots: 4,
   };
 
-  it('N=0 (default) requires all slots free', () => {
-    expect(evaluateIdle(idle, 0)).toBe(true);
+  function slotsFor(processing: number[], total = 4): LlamaSlot[] {
+    return Array.from({ length: total }, (_, i) => ({
+      slot_id: `s${i + 1}`,
+      is_processing: processing.includes(i + 1),
+    }));
+  }
+
+  it('fails closed when per-slot detail is absent (never admits the count)', () => {
+    // Fail-closed contract (WL-0MUXVPXAZ005RESW): the untrusted
+    // `available_slots` count is never a dispatch budget — absent `slots`
+    // means no trustworthy signal, so even a full count is busy.
+    expect(evaluateIdle(idle, 0)).toBe(false);
     expect(evaluateIdle({ ...idle, available_slots: 3 }, 0)).toBe(false);
+    expect(evaluateIdle({ ...idle, available_slots: 4 }, 2)).toBe(false);
   });
 
-  it('degrades 0 < N < total slots to ALL slots free (fail-closed, no per-slot data)', () => {
-    // Without per-slot identity (LP-0MSG5TA7Y002GN39), N=2 with 4 slots
-    // must NOT dispatch on "any 2 free" — it requires all 4 free.
-    expect(evaluateIdle({ ...idle, available_slots: 2 }, 2)).toBe(false);
-    expect(evaluateIdle({ ...idle, available_slots: 4 }, 2)).toBe(true);
+  it('fails closed when per-slot detail is empty or stale', () => {
+    expect(evaluateIdle({ ...idle, slots: [] }, 0)).toBe(false);
+    expect(
+      evaluateIdle(
+        { ...idle, slots: slotsFor([]), slots_stale: true },
+        0,
+      ),
+    ).toBe(false);
+  });
+
+  it('N=0 (default) requires all slots free from the per-slot array', () => {
+    expect(evaluateIdle({ ...idle, slots: slotsFor([]) }, 0)).toBe(true);
+    // available_slots still says 4 but the per-slot array shows one busy → busy.
+    expect(
+      evaluateIdle({ ...idle, slots: slotsFor([4]) }, 0),
+    ).toBe(false);
   });
 
   it('N == total slots behaves like all slots free', () => {
-    expect(evaluateIdle({ ...idle, available_slots: 4 }, 4)).toBe(true);
-    expect(evaluateIdle({ ...idle, available_slots: 3 }, 4)).toBe(false);
+    expect(evaluateIdle({ ...idle, slots: slotsFor([]) }, 4)).toBe(true);
+    expect(evaluateIdle({ ...idle, slots: slotsFor([4]) }, 4)).toBe(false);
   });
 
   it('N > total slots can never be idle (never dispatches)', () => {
-    expect(evaluateIdle({ ...idle, available_slots: 4 }, 5)).toBe(false);
+    expect(evaluateIdle({ ...idle, slots: slotsFor([]) }, 5)).toBe(false);
   });
 
   it('ambiguous responses (total_slots 0) are busy', () => {
-    expect(evaluateIdle({ ...idle, total_slots: 0, available_slots: 0 }, 0)).toBe(false);
+    expect(
+      evaluateIdle({ ...idle, total_slots: 0, available_slots: 0 }, 0),
+    ).toBe(false);
   });
 });
 
@@ -4480,6 +4508,44 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
+  it('buildDowntimeSpawnOptions scrubs repository-override git vars (WL-0MV0TZEWZ003ZXEB)', () => {
+    const saved = new Map<string, string | undefined>();
+    for (const key of REPOSITORY_OVERRIDE_ENV_VARS) {
+      saved.set(key, process.env[key]);
+      process.env[key] = `/tmp/leaked/${key}`;
+    }
+    try {
+      const options = buildDowntimeSpawnOptions('/repo');
+      for (const key of REPOSITORY_OVERRIDE_ENV_VARS) {
+        expect(options.env[key]).toBeUndefined();
+      }
+      // The scrub must not discard unrelated forwarding.
+      expect(options.env.HERDR_RESOLVED_CWD).toBe('/repo');
+    } finally {
+      for (const key of REPOSITORY_OVERRIDE_ENV_VARS) {
+        const previous = saved.get(key);
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      }
+    }
+  });
+
+  it('scrubRepositoryOverrides removes only override vars and never mutates its input', () => {
+    const input = {
+      PATH: '/usr/bin',
+      GIT_DIR: '/leak/.git',
+      GIT_WORK_TREE: '/leak',
+      HERDR_ENV: '1',
+    };
+
+    const cleaned = scrubRepositoryOverrides(input);
+
+    expect(cleaned).toEqual({ PATH: '/usr/bin', HERDR_ENV: '1' });
+    // Input mapping is untouched.
+    expect(input.GIT_DIR).toBe('/leak/.git');
+    expect(input.GIT_WORK_TREE).toBe('/leak');
+  });
+
   // ── Mode-aware PARALLELISM (WL-0MT50S9JW001DHME) ──────────────────
 
   it('buildDowntimeSpawnOptions defaults to PARALLELISM=1 when config is absent', () => {
@@ -4639,11 +4705,11 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
   });
 
   it('treats remote-only traffic as idle and dispatches after the threshold (local_active_query=false)', async () => {
-    // Integration (AC2): a stub status with global active_query=true but
-    // local_active_query=false (remote streams in flight, local slots free)
-    // must be treated as idle and dispatch after the idle threshold.
+    // Integration (AC2): a stub status with local_active_query=false
+    // (remote streams in flight, local slots free) must be treated as idle
+    // and dispatch after the idle threshold.
     const { worker, deps, cfg } = makeWorker({
-      status: { ...idleAllSlotsFree, active_query: true, local_active_query: false },
+      status: { ...idleAllSlotsFree, local_active_query: false },
     });
     const start = 1_000_000;
     vi.setSystemTime(start);
@@ -5578,7 +5644,6 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
 describe('parseLlamaStatus per-slot slots array', () => {
   const base = {
     llama_server_running: true,
-    active_query: false,
     model_switch_in_progress: false,
     available_slots: 4,
     total_slots: 4,
@@ -5661,7 +5726,6 @@ describe('parseLlamaStatus per-slot slots array', () => {
     // zero-dispatch regression. Mirror the live payload exactly.
     const livePayload = {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
@@ -5785,7 +5849,6 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
   const busy = (id: string): LlamaSlot => ({ slot_id: id, is_processing: true });
   const perSlot = (slots: LlamaSlot[], available: number, total: number): LlamaStatus => ({
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
@@ -5806,7 +5869,7 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
     // mode ONLY llama_server_running and model_switch_in_progress remain
     // global gates — query/lease signals are superseded by per-slot
     // is_processing (a busy slot's query/lease is the operator's own session).
-    expect(evaluateIdle({ ...twoFree, active_query: true }, 2)).toBe(true); // relaxed: query does NOT block
+    expect(evaluateIdle(twoFree, 2)).toBe(true); // relaxed: query does NOT block
     expect(evaluateIdle({ ...twoFree, local_active_query: true }, 2)).toBe(true); // relaxed
     expect(evaluateIdle({ ...twoFree, local_lease_active: true }, 2)).toBe(true); // relaxed: lease does NOT block
     expect(evaluateIdle({ ...twoFree, model_switch_in_progress: true }, 2)).toBe(false); // still global
@@ -5840,7 +5903,6 @@ describe('evaluateIdle per-slot mode (0 < N < total with slots present)', () => 
 function perSlotThreeOfFourFreeActiveQuery(): LlamaStatus {
   return {
     llama_server_running: true,
-    active_query: true,
     model_switch_in_progress: false,
     local_lease_active: true,
     available_slots: 3,
@@ -5855,11 +5917,11 @@ function perSlotThreeOfFourFreeActiveQuery(): LlamaStatus {
 }
 
 describe('spare-capacity dispatch: relaxed global idle gate (per-slot mode)', () => {
-  it('per-slot mode: a mid-query (active_query) busy slot does NOT block dispatch into free slots (AC1)', () => {
-    // 3 of 4 slots free with active_query=true, local_active_query=true,
-    // local_lease_active=true. In the relaxed global gate (AC1), these
-    // per-slot query/lease signals are superseded by per-slot is_processing.
-    // Only llama_server_running and model_switch_in_progress stay global.
+  it('per-slot mode: a mid-query busy slot does NOT block dispatch into free slots (AC1)', () => {
+    // 3 of 4 slots free with local_active_query=true, local_lease_active=true.
+    // In the relaxed global gate (AC1), these per-slot query/lease signals
+    // are superseded by per-slot is_processing. Only llama_server_running and
+    // model_switch_in_progress stay global.
     const status = perSlotThreeOfFourFreeActiveQuery();
     // The new relaxed check: active_query/local_active_query/local_lease
     // are NOT blocking in per-slot mode — 3 free >= N=2.
@@ -5869,7 +5931,6 @@ describe('spare-capacity dispatch: relaxed global idle gate (per-slot mode)', ()
   it('per-slot mode: local_lease_active on a busy slot does NOT block dispatch (AC1)', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: true,
       available_slots: 3,
@@ -5888,7 +5949,6 @@ describe('spare-capacity dispatch: relaxed global idle gate (per-slot mode)', ()
   it('per-slot mode: local_active_query on a busy slot does NOT block dispatch (AC2)', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: true,
       model_switch_in_progress: false,
       local_active_query: true,
       local_lease_active: false,
@@ -5930,7 +5990,6 @@ describe('spare-capacity dispatch: pre-fix proxy (no local_active_query) fails c
     // fails closed (busy) on an absent signal — no silent degraded dispatch.
     const noLocalQuery: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 2,
@@ -5942,7 +6001,6 @@ describe('spare-capacity dispatch: pre-fix proxy (no local_active_query) fails c
     // Even with all slots free, absent local_active_query → busy.
     const allFree: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 4,
@@ -5954,7 +6012,6 @@ describe('spare-capacity dispatch: pre-fix proxy (no local_active_query) fails c
   it('pre-fix proxy with N=0 (default): absent local_active_query → busy', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 2,
@@ -5969,7 +6026,6 @@ describe('spare-capacity dispatch: ambiguous payloads are busy (AC5)', () => {
   it('missing slot_id fields are treated as busy (fail-closed)', () => {
     const malformed: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 3,
@@ -5987,7 +6043,6 @@ describe('spare-capacity dispatch: ambiguous payloads are busy (AC5)', () => {
   it('total_slots 0 is always busy', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 0,
@@ -5999,7 +6054,6 @@ describe('spare-capacity dispatch: ambiguous payloads are busy (AC5)', () => {
   it('N > total can never be idle', () => {
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
       available_slots: 3,
@@ -6090,7 +6144,6 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     // while the downtime worker uses the spare capacity.
     const operatorSessionPayload = {
       llama_server_running: true,
-      active_query: true,
       local_active_query: true,
       model_switch_in_progress: false,
       local_lease_active: true,
@@ -6138,7 +6191,7 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
 
     // slot-1 goes mid-query while slot-2 stays free; the global query signal
     // also fires. Spare-capacity relaxation: only slot-1's timer resets.
-    fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...perSlotTwoFree, active_query: true }));
+    fetcher.mockResolvedValueOnce(jsonResponseFixture(perSlotTwoFree));
     vi.setSystemTime(start + cfg.thresholdMs - 10_000);
     const mid = await worker.tick();
     expect(mid.idle).toBe(true); // free count still ≥ N=2 (slot-1 busy)
@@ -6156,7 +6209,6 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     // the audit candidate is skipped and the plan pane dispatches instead.
     const oneFreePayload = {
       llama_server_running: true,
-      active_query: true,
       model_switch_in_progress: false,
       local_lease_active: true,
       available_slots: 1,
@@ -6202,7 +6254,6 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     // live payload end-to-end: poll → parse → idle run → threshold → dispatch.
     const livePayload = {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
       available_slots: 4,
@@ -6293,7 +6344,7 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
 
     // model_switch_in_progress is a GLOBAL gate in per-slot mode (spare-
     // capacity relaxation, parent WL-0MT32F90V008UAD2 AC2) — it resets
-    // every slot timer. A per-slot query/lease (active_query) is NOT global
+    // every slot timer. A per-slot query/lease signal is NOT global
     // anymore and is covered by the dedicated spare-capacity tests.
     fetcher.mockResolvedValueOnce(jsonResponseFixture({ ...perSlotAllFree, model_switch_in_progress: true }));
     vi.setSystemTime(start + 10_000);
@@ -6337,24 +6388,25 @@ describe('downtime worker per-slot routing (createDowntimeWorker)', () => {
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
   });
 
-  it('without per-slot data and 0 < N < total, falls back to all-slots-free (never any N slots)', async () => {
-    // No slots array: evaluateIdle degrades to all-slots-free, so 2 of 4
-    // free is BUSY even though N=2 — the worker never dispatches on
-    // any-N availability without per-slot identity.
+  it('without usable per-slot data, fails closed (never dispatches on any-N availability)', async () => {
+    // No usable per-slot detail + 0 < N < total: the worker fails closed
+    // (WL-0MUXVPXAZ005RESW) — never dispatching on the untrusted count —
+    // and records the distinct `slots-unavailable` reason.
     const { worker, deps, cfg, fetcher } = makePerSlotWorker({
       requiredFreeSlots: 2,
-      status: { ...idleAllSlotsFree, available_slots: 2 },
+      status: { ...idleAllSlotsFree, slots: undefined, available_slots: 4 },
     });
     const start = 1_000_000;
     vi.setSystemTime(start);
     const first = await worker.tick();
-    expect(first.idle).toBe(false); // 2 of 4 free without identity → busy
+    expect(first.idle).toBe(false);
+    expect(worker.blockReason).toBe('no-slots');
 
     vi.setSystemTime(start + cfg.thresholdMs);
     const at = await worker.tick();
     expect(at.dispatched).toBe(false);
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-    expect(fetcher).toHaveBeenCalled(); // still polling — never any-N dispatch
+    expect(fetcher).toHaveBeenCalled(); // still polling — just never dispatching
   });
 
   it('with per-slot data but N=0, falls back to all-slots-free (per-slot mode only when 0 < N < total)', async () => {
@@ -8469,7 +8521,6 @@ describe('bounded concurrent dispatch — claim safety regression', () => {
 describe('parseLlamaStatus: contention + per-slot owner (AC5/AC6)', () => {
   const base = {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
@@ -8640,6 +8691,48 @@ describe('parseHerdrPaneListOutput / countRunningDowntimePanes (AC1)', () => {
     const panes = parseHerdrPaneListOutput(`[herdr] starting\n${herdrPaneListRaw}`);
     expect(panes).not.toBeNull();
     expect(countRunningDowntimePanes(panes!)).toHaveLength(2);
+  });
+
+  it('exposes cwd and agent_session on parsed records (WL-0MUYMBMCG000Z4WP AC1)', () => {
+    const raw = JSON.stringify({
+      result: {
+        panes: [
+          {
+            pane_id: 'w2Y:p87',
+            label: 'Manually triggered intake - WL-ABC',
+            agent: 'pi',
+            agent_status: 'working',
+            cwd: '/home/u/projects/OtherRoot',
+            agent_session: { kind: 'path', value: '/tmp/s.jsonl' },
+          },
+        ],
+      },
+    });
+    const panes = parseHerdrPaneListOutput(raw)!;
+    expect(panes[0].cwd).toBe('/home/u/projects/OtherRoot');
+    expect(panes[0].agentSession).toEqual({ kind: 'path', value: '/tmp/s.jsonl' });
+  });
+
+  it('omits cwd / agent_session on missing or malformed fields, without throwing (WL-0MUYMBMCG000Z4WP AC3)', () => {
+    const raw = JSON.stringify({
+      panes: [
+        { pane_id: 'p1', cwd: 7, agent_session: ['x'] },
+        { pane_id: 'p2' },
+      ],
+    });
+    const panes = parseHerdrPaneListOutput(raw)!;
+    expect(panes).toHaveLength(2);
+    expect(panes[0].cwd).toBeUndefined();
+    expect(panes[0].agentSession).toBeUndefined();
+    expect(panes[1].cwd).toBeUndefined();
+    expect(panes[1].agentSession).toBeUndefined();
+  });
+
+  it('shares one parse contract: bare arrays and bracketed log prefixes parse (WL-0MUYMBMCG000Z4WP AC3)', () => {
+    const bare = JSON.stringify([{ pane_id: 'p1', cwd: '/r' }]);
+    expect(parseHerdrPaneListOutput(bare)![0].cwd).toBe('/r');
+    const prefixed = '[herdr] starting\n' + JSON.stringify({ panes: [{ pane_id: 'p1' }] });
+    expect(parseHerdrPaneListOutput(prefixed)![0].paneId).toBe('p1');
   });
 });
 
@@ -8883,14 +8976,18 @@ describe('worker tick: the LLM idle check is the sole concurrency limiter (WL-0M
     vi.useFakeTimers();
     try {
       // Single slot, idle by is_processing, but a live lease is held AND the
-      // worker has a running pane → the owner gate refuses the dispatch.
+      // slot is owned by a live pane → the owner gate refuses the dispatch.
       const { worker, deps } = makeSingleSlotWorker({
         status: {
           ...idleAllSlotsFree,
           available_slots: 1,
           total_slots: 1,
+          local_lease_active: true,
           local_owner_session_id: 'session-live',
           local_owner_lease_remaining_seconds: 120,
+          slots: [
+            { slot_id: 'slot-1', is_processing: false, owner_session_id: 'session-live' },
+          ],
         },
         runningPanes: () => ({ ok: true, count: 1 }),
       });
@@ -10712,7 +10809,6 @@ describe('parseLlamaStatus: array local_owner_session_id (WL-0MU88086A0089US4)',
   function makeBase(): Record<string, unknown> {
     return {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
@@ -10822,7 +10918,6 @@ describe('parseLlamaStatus: local_owner_session_ids normalization (WL-0MU88086A0
   function makeBase(): Record<string, unknown> {
     return {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
       local_lease_active: false,
@@ -10924,7 +11019,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       const ownedSlot = 'http://localhost:8080';
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -10963,7 +11057,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -10997,7 +11090,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       const ownerC = 'http://localhost:8082';
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11039,7 +11131,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       // Only 1 free unowned slot — below audit-tier minimum of 2.
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11079,7 +11170,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11124,7 +11214,6 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11674,20 +11763,21 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
     expect(decisionHeaderToken('code-freeze')).toBe('code-freeze');
   });
 
-  it('AC1: a slot-owned refusal writes one decision line with reason + slot/owner fields', async () => {
-    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-slot-'));
+  it('AC1: a fail-closed refusal writes the distinct slots-unavailable reason + observed fields', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-failclosed-'));
     try {
-      // Count-based (no `slots`), idle (local_lease_active=false) but the
-      // global owner session id is present and a downtime pane is alive →
-      // slotOwned.
+      // The exact live shape (WL-0MUFP30T2003OX1F): stale/empty per-slot
+      // detail with a held owner lease. The dispatcher fails closed and
+      // records the distinct `slots-unavailable` reason (WL-0MUXVPXAZ005RESW).
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
-        local_lease_active: false,
+        local_lease_active: true,
         available_slots: 1,
-        total_slots: 1,
+        total_slots: 3,
+        slots: [],
+        slots_stale: true,
         local_owner_session_id: 'session-live-pane',
         contention_queue_depth: 0,
         contention_queued_count: 0,
@@ -11699,7 +11789,7 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
       });
       const outcome = await worker.tick();
       expect(outcome.dispatched).toBe(false);
-      expect(worker.blockReason).toBe('slot-owner');
+      expect(worker.blockReason).toBe('no-slots');
       await vi.waitFor(async () => {
         const entries = (await readCoordinationLogEntries(root)).filter(
           (e) => e.kind === 'decision',
@@ -11708,11 +11798,11 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
         expect(entries[0]).toMatchObject({
           kind: 'decision',
           operation: 'no-dispatch',
-          reason: 'slot-owned',
-          freeSlots: 1,
-          totalSlots: 1,
+          reason: 'slots-unavailable',
+          freeSlots: 0,
+          totalSlots: 3,
           ownerPresent: true,
-          runningPanes: 1,
+          runningPanes: null,
           contentionDepth: 0,
         });
         expect(typeof entries[0].at).toBe('string');
@@ -11727,12 +11817,17 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: false,
-        available_slots: 1,
-        total_slots: 1,
+        available_slots: 4,
+        total_slots: 4,
+        slots: [
+          { slot_id: 'slot-1', is_processing: false },
+          { slot_id: 'slot-2', is_processing: false },
+          { slot_id: 'slot-3', is_processing: false },
+          { slot_id: 'slot-4', is_processing: false },
+        ],
         contention_queue_depth: 3,
         contention_queued_count: 3,
       };
@@ -11762,7 +11857,6 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
     try {
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: false,
@@ -11835,21 +11929,22 @@ describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () 
     expect(LOCAL_DISPATCH_LEASE_MAX_SECONDS).toBe(1500);
   });
 
-  it('AC1/AC3: a max-TTL unknown/operator lease on a count-based single slot still refuses dispatch', async () => {
+  it('AC1/AC3: a max-TTL operator lease on a single owned slot still refuses dispatch', async () => {
     // The dispatcher must not optimistically assume the lease expired: a lease
-    // at the proxy MAX on a count-based single-slot setup (an unknown/operator
-    // owner) keeps blocking while a downtime pane is alive. local_lease_active
-    // is false so the idle gate passes and the slot-owned gate is the blocker.
+    // at the proxy MAX on a single-slot setup (an unknown/operator owner) keeps
+    // the slot owned, so no free unowned slot remains and dispatch is refused.
     const status: LlamaStatus = {
       llama_server_running: true,
-      active_query: false,
       local_active_query: false,
       model_switch_in_progress: false,
-      local_lease_active: false,
+      local_lease_active: true,
       available_slots: 1,
       total_slots: 1,
       local_owner_session_id: 'operator-session',
       local_owner_lease_remaining_seconds: LOCAL_DISPATCH_LEASE_MAX_SECONDS,
+      slots: [
+        { slot_id: 'slot-1', is_processing: false, owner_session_id: 'operator-session' },
+      ],
       contention_queue_depth: 0,
       contention_queued_count: 0,
     };
@@ -11860,7 +11955,6 @@ describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () 
     });
     const outcome = await worker.tick();
     expect(outcome.dispatched).toBe(false);
-    expect(worker.blockReason).toBe('slot-owner');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 
@@ -11875,7 +11969,6 @@ describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () 
       const ownSession = 'dispatched-pane-session';
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -11911,14 +12004,13 @@ describe('local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG)', () 
   });
 });
 
-// ── Stale/empty slots fallback + count-based spare capacity ───────────
-// (WL-0MUFP30T2003OX1F)
+// ── Fail-closed per-slot contract (WL-0MUXVPXAZ005RESW) ──────────────
+// Supersedes the count-based fallback introduced by WL-0MUFP30T2003OX1F.
 
-describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T2003OX1F)', () => {
+describe('fail-closed on unusable per-slot detail (WL-0MUXVPXAZ005RESW)', () => {
   function makeRaw(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
       llama_server_running: true,
-      active_query: true,
       local_active_query: true,
       model_switch_in_progress: false,
       local_lease_active: false,
@@ -11969,7 +12061,7 @@ describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T20
     return { worker, deps };
   }
 
-  it('AC4: parses slots_stale and preserves the empty slots array', () => {
+  it('parses slots_stale and preserves the empty slots array', () => {
     const status = parseLlamaStatus(makeRaw());
     expect(status).not.toBeNull();
     expect(status!.slots).toEqual([]);
@@ -11979,30 +12071,47 @@ describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T20
     expect(status!.local_owner_session_id).toBe('audit-pane-session');
   });
 
-  it('AC4: a malformed slots_stale fails closed (null)', () => {
+  it('a malformed slots_stale fails closed (null)', () => {
     expect(parseLlamaStatus(makeRaw({ slots_stale: 'yes' }))).toBeNull();
     expect(parseLlamaStatus(makeRaw({ slots_stale: 1 }))).toBeNull();
   });
 
-  it('AC4: empty/stale slots are NOT per-slot identity — evaluateIdle falls back to the count', () => {
-    // Active local query → the leased slot is processing, not reserved → 2 free >= N=2.
-    const active = parseLlamaStatus(makeRaw({ available_slots: 2 }))!;
-    expect(evaluateIdle(active, 2)).toBe(true);
-    // Idle-but-leased (no active query) → reserve the leased slot → 1 < 2.
-    const idleLease = parseLlamaStatus(
-      makeRaw({ available_slots: 2, local_active_query: false, active_query: false }),
+  it('evaluateIdle fails closed for absent, empty, and stale per-slot detail', () => {
+    // The untrusted available_slots count is never a dispatch budget:
+    // absent, empty, or stale per-slot detail all yield busy.
+    const absent = parseLlamaStatus(makeRaw({ available_slots: 3, slots: undefined }))!;
+    expect(absent.slots).toBeUndefined();
+    expect(evaluateIdle(absent, 1)).toBe(false);
+
+    const empty = parseLlamaStatus(makeRaw({ available_slots: 3 }))!;
+    expect(empty.slots).toEqual([]);
+    expect(evaluateIdle(empty, 1)).toBe(false);
+
+    const stale = parseLlamaStatus(
+      makeRaw({ available_slots: 3, slots: [{ slot_id: 0, is_processing: false }] }),
     )!;
-    expect(evaluateIdle(idleLease, 2)).toBe(false);
+    expect(stale.slots_stale).toBe(true);
+    expect(evaluateIdle(stale, 1)).toBe(false);
   });
 
-  it('AC1: live payload (stale/empty slots, lease, live pane) dispatches into the free slot', async () => {
+  it('decisionHeaderToken maps the distinct fail-closed reason to no-slots', () => {
+    expect(decisionHeaderToken('slots-unavailable')).toBe('no-slots');
+    expect(decisionHeaderToken('slots-unavailable')).not.toBe(
+      decisionHeaderToken('slot-owned'),
+    );
+    expect(decisionHeaderToken('slots-unavailable')).not.toBe(
+      decisionHeaderToken('proxy-contention'),
+    );
+  });
+
+  it('AC1/AC4: the exact live payload (stale/empty slots, held lease, live pane) does NOT dispatch', async () => {
     vi.useFakeTimers();
     try {
       // The exact live shape: total=3, available=1, slots:[], slots_stale:true,
-      // an owner lease held by a dispatched pane. N=1 (single-pane dispatch).
+      // an owner lease held by a dispatched pane. The dispatcher must fail
+      // closed and record the distinct `slots-unavailable` reason.
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: true,
         local_active_query: true,
         model_switch_in_progress: false,
         local_lease_active: true,
@@ -12027,73 +12136,47 @@ describe('stale/empty slots fallback + count-based spare capacity (WL-0MUFP30T20
       await worker.tick(); // baseline
       vi.setSystemTime(start + 5_000);
       const outcome = await worker.tick();
-      expect(outcome.dispatched).toBe(true);
-      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('no-slots');
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('AC2: count-based multi-slot with spare capacity and a held lease dispatches', async () => {
+  it('never derives the dispatch budget from available_slots (fail-closed budget)', async () => {
+    // available_slots=3 would previously have admitted a dispatch; with no
+    // usable per-slot detail the worker refuses regardless of the count.
     vi.useFakeTimers();
     try {
-      // 3 slots, 2 free, N=2, an active local query holding the lease: the RCA
-      // window shape. The machine-wide lease must not block the spare capacity.
       const status: LlamaStatus = {
         llama_server_running: true,
-        active_query: true,
         local_active_query: true,
         model_switch_in_progress: false,
-        local_lease_active: true,
-        available_slots: 2,
+        local_lease_active: false,
+        available_slots: 3,
         total_slots: 3,
-        local_owner_session_id: 'dispatched-pane-session',
-        local_owner_session_ids: ['dispatched-pane-session'],
-        local_owner_lease_remaining_seconds: 840,
+        slots: [],
+        slots_stale: true,
         contention_queue_depth: 0,
         contention_queued_count: 0,
       };
       const { worker, deps } = makeStaleWorker({
         status,
-        requiredFreeSlots: 2,
+        requiredFreeSlots: 1,
         thresholdMs: 1_000,
-        runningPanes: 1,
+        runningPanes: 0,
       });
       const start = 2_000_000;
       vi.setSystemTime(start);
       await worker.tick();
       vi.setSystemTime(start + 5_000);
       const outcome = await worker.tick();
-      expect(outcome.dispatched).toBe(true);
-      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      expect(outcome.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }
-  });
-
-  it('AC3: count-based single-slot with a held lease still refuses', async () => {
-    const status: LlamaStatus = {
-      llama_server_running: true,
-      active_query: false,
-      local_active_query: false,
-      model_switch_in_progress: false,
-      local_lease_active: false,
-      available_slots: 1,
-      total_slots: 1,
-      local_owner_session_id: 'operator-session',
-      local_owner_session_ids: ['operator-session'],
-      contention_queue_depth: 0,
-      contention_queued_count: 0,
-    };
-    const { worker, deps } = makeStaleWorker({
-      status,
-      requiredFreeSlots: 1,
-      runningPanes: 1,
-    });
-    const outcome = await worker.tick();
-    expect(outcome.dispatched).toBe(false);
-    expect(worker.blockReason).toBe('slot-owner');
-    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });
 
@@ -12393,4 +12476,628 @@ describe('clampDowntimeMaxAttempts (WL-0MUKYEXMK0033MFK)', () => {
     expect(clampDowntimeMaxAttempts(99)).toBe(DOWNTIME_MAX_ATTEMPTS_MAX);
     expect(clampDowntimeMaxAttempts(4)).toBe(4);
   });
+});
+
+// ── Stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2) ──
+// The dispatcher must, on an idle cycle and BEFORE new-item selection,
+// consult the stalled-work scan; a successful in-place resume short-circuits
+// the cycle (preference ordering) and every failure degrades to the unchanged
+// normal dispatch path (fail-safe).
+
+describe('stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2)', () => {
+  function stalledCandidate(overrides: Partial<StalledPaneCandidate> = {}): StalledPaneCandidate {
+    return {
+      pane: {
+        paneId: 'pane-1',
+        label: 'Downtime triggered implement Some item - WL-STALLED',
+        agent: 'pi',
+        agentStatus: 'idle',
+      },
+      item: {
+        id: 'WL-STALLED',
+        status: 'open',
+        stage: 'plan_complete',
+        title: 'Some item',
+        updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      },
+      cwd: '/repo',
+      kind: 'implement',
+      ...overrides,
+    };
+  }
+
+  const implementHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Implement ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'high',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 10,
+  });
+
+  it('dispatchDowntimeWork: a successful resume short-circuits new-item dispatch', async () => {
+    const scanStalledPanes = vi.fn().mockResolvedValue([stalledCandidate()]);
+    const resumeStalledPane = vi.fn().mockResolvedValue({
+      resumed: true,
+      via: 'prompt',
+      paneId: 'pane-1',
+      itemId: 'WL-STALLED',
+      kind: 'implement',
+    });
+    const deps = makeDeps({
+      scanStalledPanes,
+      resumeStalledPane,
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome).toEqual({ dispatched: false, reason: 'stalled-resume' });
+    expect(scanStalledPanes).toHaveBeenCalledTimes(1);
+    expect(resumeStalledPane).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: '/repo', kind: 'implement' }),
+      expect.objectContaining({ enabled: true, thresholdMs: expect.any(Number) }),
+    );
+    // New-item selection never ran and no pane was spawned.
+    expect(deps.getHerdrListHead).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('dispatchDowntimeWork: an unresumable candidate falls through to normal dispatch', async () => {
+    const resumeStalledPane = vi.fn().mockResolvedValue({
+      resumed: false,
+      reason: 'agent-blocked',
+      paneId: 'pane-1',
+      itemId: 'WL-STALLED',
+      kind: 'implement',
+    });
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane,
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-1');
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('dispatchDowntimeWork: a thrown scan degrades to normal dispatch (never a crash)', async () => {
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockRejectedValue(new Error('herdr down')),
+      resumeStalledPane: vi.fn(),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-1');
+  });
+
+  it('dispatchDowntimeWork: unwired scan deps degrade to normal dispatch', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
+
+    expect(outcome.dispatched).toBe(true);
+  });
+
+  it('dispatchDowntimeWork: a disabled scan never consults the scan dep', async () => {
+    const scanStalledPanes = vi.fn();
+    const deps = makeDeps({
+      scanStalledPanes,
+      resumeStalledPane: vi.fn(),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      stallScanEnabled: false,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(scanStalledPanes).not.toHaveBeenCalled();
+  });
+
+  it('dispatchFromCoordination: a successful resume short-circuits the offer dispatch', async () => {
+    const fetchItem = vi.fn();
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: vi.fn().mockResolvedValue({
+        resumed: true,
+        via: 'prompt',
+        paneId: 'pane-1',
+        itemId: 'WL-STALLED',
+        kind: 'implement',
+      }),
+      fetchItem,
+    });
+
+    const entry: CoordinationEntry = {
+      instanceId: 'i1',
+      workItemId: 'WL-1',
+      directory: '/repo',
+      worklogRoot: '/repo',
+      assignedAt: new Date().toISOString(),
+      lastUpdated: new Date().toISOString(),
+    };
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: '/coord',
+      freeSlots: 2,
+    });
+
+    expect(outcome).toEqual({ dispatched: false, reason: 'stalled-resume' });
+    expect(fetchItem).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('computeMostImportantItem: a successful resume reports stalledResume and offers nothing', async () => {
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: vi.fn().mockResolvedValue({
+        resumed: true,
+        via: 'prompt',
+        paneId: 'pane-1',
+        itemId: 'WL-STALLED',
+        kind: 'implement',
+      }),
+      getHerdrListHead: vi.fn(),
+    });
+
+    const result = await computeMostImportantItem(
+      deps,
+      '/repo',
+      Date.now(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      300_000,
+    );
+
+    expect(result).toEqual({ ok: true, stalledResume: true });
+    expect(deps.getHerdrListHead).not.toHaveBeenCalled();
+  });
+
+  it('computeMostImportantItem: no resume → the normal offer computation runs', async () => {
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([]),
+      resumeStalledPane: vi.fn(),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const result = await computeMostImportantItem(
+      deps,
+      '/repo',
+      Date.now(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      true,
+      300_000,
+    );
+
+    expect(result).toMatchObject({ ok: true, candidate: { id: 'WL-1' } });
+    expect(deps.getHerdrListHead).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── Stalled-work cross-root / idempotence / fail-safe integration (WL-0MUYMBUAK007H10J) ──
+// End-to-end verification over the REAL `resumeStalledPane` orchestrator (the
+// scan dep's candidates are stubbed at the dispatch boundary, so the resume
+// path itself — re-classification, the in-process (paneId,itemId) guard, the
+// CLI-failure mapping and the fail-open attempt record — is exercised as it
+// runs in production).
+
+describe('stalled-work cross-root, idempotence and fail-safe integration (WL-0MUYMBUAK007H10J)', () => {
+  const NOW = Date.now();
+
+  function stalledCandidate(overrides: Partial<StalledPaneCandidate> = {}): StalledPaneCandidate {
+    return {
+      pane: {
+        paneId: 'pane-1',
+        label: 'Downtime triggered implement Some item - WL-STALLED',
+        agent: 'pi',
+        agentStatus: 'idle',
+      },
+      item: {
+        id: 'WL-STALLED',
+        status: 'open',
+        stage: 'plan_complete',
+        title: 'Some item',
+        updatedAt: new Date(NOW - 10 * 60 * 1000).toISOString(),
+      },
+      cwd: '/foreign/root',
+      kind: 'implement',
+      ...overrides,
+    };
+  }
+
+  const implementHead = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Implement ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'high',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 10,
+  });
+
+  function realResumeDep(overrides: Partial<ResumeStalledPaneDeps> = {}) {
+    return (cand: StalledPaneCandidate, opts: { nonTerminalCooldownMs: number; thresholdMs: number }) =>
+      resumeStalledPane(
+        {
+          pane: cand.pane,
+          item: cand.item,
+          cwd: cand.cwd,
+          kind: cand.kind,
+          nonTerminalCooldownMs: opts.nonTerminalCooldownMs,
+          thresholdMs: opts.thresholdMs,
+        },
+        {
+          promptAgent: vi.fn().mockResolvedValue({ ok: true }),
+          startAgent: vi.fn().mockResolvedValue({ ok: true }),
+          readEntries: async () => [],
+          recordAttempt: async () => undefined,
+          markNeedsProducerReview: async () => true,
+          maxAttempts: 3,
+          now: () => NOW,
+          ...overrides,
+        },
+      );
+  }
+
+  beforeEach(() => {
+    _resetStalledResumeInFlight();
+  });
+
+  it('reaper race: a pane that vanishes mid-resume is a neutral skip; dispatch falls through with no duplicate prompt', async () => {
+    const promptAgent = vi.fn().mockResolvedValue({ ok: false, reason: 'pane-vanished' });
+    const recordAttempt = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: realResumeDep({ promptAgent, recordAttempt }),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/leader' });
+
+    // The vanished pane did not resume and did not block the cycle: the
+    // normal dispatch path proceeded and opened exactly one NEW pane.
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-1');
+    expect(promptAgent).toHaveBeenCalledTimes(1);
+    expect(recordAttempt).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('a thrown resume is neutral: normal dispatch proceeds, no crash, no duplicate', async () => {
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: vi.fn().mockRejectedValue(new Error('herdr exploded')),
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [implementHead('WL-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/leader' });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-1');
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('prevents a concurrent double-resume of the same pane/item (neutral skip, single prompt)', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const promptAgent = vi.fn().mockImplementation(async () => {
+      await gate;
+      return { ok: true };
+    });
+    const recordAttempt = vi.fn().mockResolvedValue(undefined);
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([stalledCandidate()]),
+      resumeStalledPane: realResumeDep({ promptAgent, recordAttempt }),
+    });
+    const opts = {
+      enabled: true,
+      frozen: false,
+      thresholdMs: 5 * 60 * 1000,
+      nonTerminalCooldownMs: 10 * 60 * 1000,
+      maxAttempts: 3,
+      now: NOW,
+    };
+
+    const first = resumeStalledWorkIfAble(deps, '/leader', opts);
+    const second = resumeStalledWorkIfAble(deps, '/leader', opts);
+
+    // The second concurrent cycle is a neutral skip (normal dispatch proceeds).
+    expect(await second).toBe(false);
+    expect(promptAgent).toHaveBeenCalledTimes(1);
+    // Release the first resume: it succeeds, still with a single prompt/record.
+    release();
+    expect(await first).toBe(true);
+    expect(promptAgent).toHaveBeenCalledTimes(1);
+    expect(recordAttempt).toHaveBeenCalledTimes(1);
+  });
+
+  it('degrades to no stalled resume when the scan/resume seams are unwired', async () => {
+    const opts = {
+      enabled: true,
+      frozen: false,
+      thresholdMs: 5 * 60 * 1000,
+      nonTerminalCooldownMs: 10 * 60 * 1000,
+      maxAttempts: 3,
+      now: NOW,
+    };
+    const c = stalledCandidate();
+
+    expect(await resumeStalledWorkIfAble({} as DowntimeWorkerDeps, '/leader', opts)).toBe(false);
+    // Only the scan wired: no resume attempted.
+    expect(
+      await resumeStalledWorkIfAble(
+        { scanStalledPanes: vi.fn().mockResolvedValue([c]) } as unknown as DowntimeWorkerDeps,
+        '/leader',
+        opts,
+      ),
+    ).toBe(false);
+    // Only the resume wired: the scan is never consulted.
+    const resume = vi.fn();
+    expect(
+      await resumeStalledWorkIfAble(
+        { resumeStalledPane: resume } as unknown as DowntimeWorkerDeps,
+        '/leader',
+        opts,
+      ),
+    ).toBe(false);
+    expect(resume).not.toHaveBeenCalled();
+    // A scan that resolves a non-array (unparseable) is a neutral no-resume.
+    expect(
+      await resumeStalledWorkIfAble(
+        {
+          scanStalledPanes: vi.fn().mockResolvedValue(null),
+          resumeStalledPane: resume,
+        } as unknown as DowntimeWorkerDeps,
+        '/leader',
+        opts,
+      ),
+    ).toBe(false);
+    expect(resume).not.toHaveBeenCalled();
+  });
+});
+
+// ── Own-backlog fallback safety gates (WL-0MUZPBRX3007STFK, parent AC7) ──
+//
+// The own-backlog candidate is a dispatch candidate like any other: every
+// existing safety gate must still apply to it as a SEQUENTIAL FILTER, never
+// as a fallback ordering. Each test hides an eligible out-of-view item behind
+// a gate and asserts the gate is not bypassed — the gated item is never
+// claimed, and the fallback continues to the next eligible out-of-view item
+// where one exists. The offer-list gate tests already exist above; these pin
+// the same gates on the fallback path.
+//
+// RED WITNESS. The fallback does not exist yet, so every body asserts the
+// post-implementation behaviour and is committed with `it.fails` — the suite
+// stays GREEN while the assertions are RED (the repo's documented TDD pattern;
+// see `docs/dev/downtime-dispatcher-post-fix-verification.md`). The
+// implementation child WL-0MUPBSYW004I5D3 flips each `it.fails` to `it` once
+// the fallback lands (the RED→GREEN transition is the dependency evidence).
+describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
+  const SPRINT = 20;
+  // 1s marker-stale window so same-stage markers written in the past are
+  // RELEASED (the dispatched-marker guard) while the attempt-budget filter
+  // still counts them.
+  const WINDOW_MS = 1_000;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  function makeDir(prefix: string): string {
+    const dir = mkdtempSync(join(tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  /** An eligible non-critical plan_complete out-of-view item (implement tier). */
+  const eligibleBacklog = (
+    id: string,
+    overrides: Partial<DowntimeHerdrItem> = {},
+  ): DowntimeHerdrItem => ({
+    id,
+    title: `Backlog ${id}`,
+    status: 'open',
+    stage: 'plan_complete',
+    priority: 'high',
+    risk: 'Low',
+    effort: 'S',
+    sortIndex: 1000,
+    ...overrides,
+  });
+
+  /** An eligible plan-tier out-of-view item (idea → intake; unaffected by the freeze/review gates). */
+  const eligiblePlan = (id: string): DowntimeHerdrItem => ({
+    id,
+    title: `Plan ${id}`,
+    status: 'open',
+    stage: 'idea',
+    priority: 'high',
+    sortIndex: 3000,
+  });
+
+  /** In-view filler that is never dispatchable (the retired `in_review` stage). */
+  const inView = (): DowntimeHerdrItem[] =>
+    Array.from({ length: SPRINT }, (_, i) => ({
+      id: `WL-VIEW-${i}`,
+      title: `In-view ${i}`,
+      status: 'open',
+      stage: 'in_review',
+      priority: 'medium',
+      risk: 'Low',
+      effort: 'S',
+      sortIndex: i,
+    }));
+
+  /**
+   * Own-root head: the in-view window at/below SPRINT, then the hinted
+   * out-of-view tail once the dispatcher widens the window. Mirrors the
+   * canonical ranking path (the same head, just more items included).
+   */
+  const ownRoot = (tail: DowntimeHerdrItem[]) =>
+    vi.fn(async (_cwd: string, limit = SPRINT) => ({
+      ok: true as const,
+      items: limit <= SPRINT ? inView() : [...inView(), ...tail],
+    }));
+
+  const dispatchFallback = (
+    deps: DowntimeWorkerDeps,
+    coordinationDir: string,
+    cwd: string,
+    extra: Record<string, unknown> = {},
+  ) =>
+    dispatchFromCoordination(
+      // `fetchItem` is REQUIRED by the coordination leader path (fail-closed
+      // guard). These fallback tests pass no coordination entries, so it is
+      // never invoked — this default only satisfies the guard so the
+      // own-backlog fallback is reachable.
+      { fetchItem: vi.fn().mockResolvedValue({ ok: false }), ...deps },
+      [],
+      {
+        model: 'plan',
+        cwd,
+        coordinationDir,
+        browseItemCount: SPRINT,
+        ...extra,
+      },
+    );
+
+  it(
+    'AC7 code-freeze: an out-of-view implement is held; a plan fallback still dispatches',
+    async () => {
+      const coordinationDir = makeDir('dt-oov-freeze-');
+      const cwd = makeDir('dt-oov-freeze-root-');
+      const deps = makeDeps({
+        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOV-IMPL'), eligiblePlan('WL-OOV-PLAN')]),
+        readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+      });
+
+      const outcome = await dispatchFallback(deps, coordinationDir, cwd);
+
+      // The fallback was attempted (post-implementation) — RED before it lands.
+      expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
+      // The frozen implement is never claimed; the plan fallback dispatches.
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-OOV-PLAN');
+      expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-IMPL', expect.anything(), expect.anything());
+    },
+  );
+
+  it(
+    'AC7 review-queue hold: a deep queue holds an out-of-view non-critical implement, the plan dispatches',
+    async () => {
+      const coordinationDir = makeDir('dt-oov-reviewqueue-');
+      const cwd = makeDir('dt-oov-reviewqueue-root-');
+      const deps = makeDeps({
+        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOV-IMPL'), eligiblePlan('WL-OOV-PLAN')]),
+        // A completed/in_review queue at/over the sprint threshold = deep.
+        getReviewQueueCount: vi.fn().mockResolvedValue(SPRINT),
+      });
+
+      const outcome = await dispatchFallback(deps, coordinationDir, cwd);
+
+      expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-OOV-PLAN');
+      expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-IMPL', expect.anything(), expect.anything());
+    },
+  );
+
+  it(
+    'AC7 attempt budget: a budget-exhausted out-of-view item is filtered, the next eligible dispatches',
+    async () => {
+      const coordinationDir = makeDir('dt-oov-budget-');
+      const cwd = makeDir('dt-oov-budget-root-');
+      // Three same-stage implement markers exhaust the per-item/per-kind cap.
+      mkdirSync(join(cwd, '.worklog'), { recursive: true });
+      writeFileSync(
+        join(cwd, '.worklog', DOWNTIME_LOG_FILE),
+        [0, 1, 2]
+          .map(() =>
+            JSON.stringify({
+              itemId: 'WL-OOV-BUDGET',
+              kind: 'implement',
+              stage: 'plan_complete',
+              dispatchedAt: ago(60_000),
+            }),
+          )
+          .join('\n') + '\n',
+        'utf8',
+      );
+      const deps = makeDeps({
+        getHerdrListHead: ownRoot([
+          eligibleBacklog('WL-OOV-BUDGET', { sortIndex: 1000 }),
+          eligibleBacklog('WL-OOV-FRESH', { sortIndex: 2000 }),
+        ]),
+        markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+      });
+
+      const outcome = await dispatchFallback(deps, coordinationDir, cwd, {
+        maxAttempts: 3,
+        markerStaleWindowMs: WINDOW_MS,
+      });
+
+      expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
+      // The exhausted item is flagged and skipped; the next eligible dispatches.
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-OOV-FRESH');
+      expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('WL-OOV-BUDGET', cwd);
+      expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-BUDGET', expect.anything(), expect.anything());
+    },
+  );
+
+  it(
+    'AC7 in-flight: a critical out-of-view item with a live working pane is held',
+    async () => {
+      const coordinationDir = makeDir('dt-oov-inflight-');
+      const cwd = makeDir('dt-oov-inflight-root-');
+      const deps = makeDeps({
+        getHerdrListHead: ownRoot([eligibleBacklog('WL-OOV-CRIT', { priority: 'critical' })]),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true,
+          count: 1,
+          paneIds: ['w1:p1'],
+          records: [
+            {
+              paneId: 'w1:p1',
+              label: 'Downtime triggered implement Backlog - WL-OOV-CRIT',
+              agent: 'pi',
+              agentStatus: 'working',
+            },
+          ],
+        }),
+      });
+
+      const outcome = await dispatchFallback(deps, coordinationDir, cwd);
+
+      expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
+      expect(outcome.dispatched).toBe(false);
+      expect(outcome.reason).toBe('in-flight-pane');
+      expect(deps.claimItem).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -16,6 +16,7 @@ import {
   ContinuationState,
   interruptibleSleep,
   removeErrorFromMessages,
+  DEFAULT_BACKOFF_CONFIG,
   type BackoffConfig,
   type InterruptibleSleepState,
 } from './retry-logic.js';
@@ -332,6 +333,72 @@ describe('interruptibleSleep', () => {
     vi.advanceTimersByTime(60);
 
     await expect(promise).resolves.toBe(true);
+  });
+});
+
+// ── Interruptible Sleep: long server-hint waits (AC6) ─────────────────
+//
+// A multi-hour `Retry-After` must remain abortable by ESC (userAborted) and
+// by a session switch (sessionGeneration change) — no non-interruptible
+// timer. LONG_WAIT_MS (2 min) is deliberately > 60s to exercise the long
+// path without slowing the suite.
+
+describe('interruptibleSleep (long waits)', () => {
+  const LONG_WAIT_MS = 120_000;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('can be aborted by ESC during a long (>60s) wait', async () => {
+    const state: InterruptibleSleepState = { userAborted: false, sessionGeneration: 1 };
+    const promise = interruptibleSleep(LONG_WAIT_MS, state, 1);
+
+    // Only 100ms has elapsed when the operator hits ESC.
+    await vi.advanceTimersByTimeAsync(100);
+    state.userAborted = true;
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(promise).resolves.toBe(true);
+  });
+
+  it('can be aborted by a session switch during a long (>60s) wait', async () => {
+    const state: InterruptibleSleepState = { userAborted: false, sessionGeneration: 1 };
+    const promise = interruptibleSleep(LONG_WAIT_MS, state, 1);
+
+    await vi.advanceTimersByTimeAsync(100);
+    state.sessionGeneration = 2;
+    await vi.advanceTimersByTimeAsync(100);
+
+    await expect(promise).resolves.toBe(true);
+  });
+
+  it('does not resolve a long wait before the delay elapses', async () => {
+    const state: InterruptibleSleepState = { userAborted: false, sessionGeneration: 1 };
+    let settled = false;
+    const promise = interruptibleSleep(LONG_WAIT_MS, state, 1).then((interrupted) => {
+      settled = true;
+      return interrupted;
+    });
+
+    await vi.advanceTimersByTimeAsync(LONG_WAIT_MS - 100);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(100);
+    await expect(promise).resolves.toBe(false);
+  });
+});
+
+// ── Backoff config shape (AC7) ────────────────────────────────────────
+
+describe('DEFAULT_BACKOFF_CONFIG (server-hint ceiling)', () => {
+  it('keeps the 60s exponential cap and adds a 6h server-hint ceiling (AC7)', () => {
+    expect(DEFAULT_BACKOFF_CONFIG.maxDelayMs).toBe(60_000);
+    expect(DEFAULT_BACKOFF_CONFIG.serverHintMaxDelayMs).toBe(21_600_000);
   });
 });
 

@@ -48,12 +48,19 @@ function advance(ms: number): void {
 function idleStatus(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
   return {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
     available_slots: 3,
     total_slots: 3,
+    // Per-slot detail is required under the fail-closed contract
+    // (WL-0MUXVPXAZ005RESW); the idle fixture therefore carries a consistent
+    // all-free slot array.
+    slots: [
+      { slot_id: 'slot-1', is_processing: false },
+      { slot_id: 'slot-2', is_processing: false },
+      { slot_id: 'slot-3', is_processing: false },
+    ],
     ...overrides,
   };
 }
@@ -79,7 +86,6 @@ function perSlotStatus(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
 function rawStatusPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     llama_server_running: true,
-    active_query: false,
     local_active_query: false,
     model_switch_in_progress: false,
     local_lease_active: false,
@@ -384,21 +390,23 @@ describe('cheap switch trigger', () => {
     expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'cheap' }));
   });
 
-  it('a busy proxy (active local query) delays the switch', async () => {
+  it('a proxy with unusable per-slot detail delays the switch (fail-closed)', async () => {
     clock = 1_000_000;
     const api = mockAdminApi();
     const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
     advance(900_000);
+    // Fail-closed contract (WL-0MUXVPXAZ005RESW): without usable per-slot
+    // detail the proxy is not idle, so the cheap switch is delayed.
     await worker.tick({
       enabled: true,
       idleThresholdMs: 900_000,
       proxyUrl: 'http://proxy',
-      proxyStatus: idleStatus({ local_active_query: true, active_query: true }),
+      proxyStatus: idleStatus({ slots: [] }),
     });
     await flushAsync();
     expect(setModePosts(api)).toHaveLength(0);
 
-    // Once the proxy goes idle again, the switch fires (delayed, not blocked).
+    // Once usable per-slot detail is served, the switch fires (delayed, not blocked).
     await worker.tick({
       enabled: true,
       idleThresholdMs: 900_000,
@@ -615,7 +623,6 @@ describe('fetchProxyStatus', () => {
       status: 200,
       json: async () => ({
         llama_server_running: true,
-        active_query: false,
         local_active_query: false,
         model_switch_in_progress: false,
         local_lease_active: false,
@@ -657,12 +664,16 @@ describe('fetchProxyStatus', () => {
           status: 200,
           json: async () => ({
             llama_server_running: true,
-            active_query: false,
             local_active_query: false,
             model_switch_in_progress: false,
             local_lease_active: false,
             available_slots: 3,
             total_slots: 3,
+            slots: [
+              { slot_id: 'slot-1', is_processing: false },
+              { slot_id: 'slot-2', is_processing: false },
+              { slot_id: 'slot-3', is_processing: false },
+            ],
           }),
         };
       }
@@ -760,7 +771,6 @@ describe('admin API client', () => {
  */
 function perSlotOperatorFree(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
   return perSlotStatus({
-    active_query: true,
     local_active_query: true,
     local_lease_active: true,
     available_slots: 1,
@@ -844,23 +854,33 @@ describe('per-slot operator gate', () => {
     expect(setModePosts(api)).toHaveLength(1);
   });
 
-  it('AC4: no per-slot data (slots absent) → only all-free fires; 1-of-3 free yields NO switch', async () => {
+  it('AC4: no usable per-slot data → fail closed (no switch)', async () => {
     clock = 1_000_000;
     const api = mockAdminApi();
     const worker = createModeSwitchWorker({ fetcher: api.fetcher, now });
     advance(900_000);
-    // 1-of-3 free, no slots[] identity: unchanged all-slots-free fallback
-    // (evaluateIdle(proxyStatus, 0)) — the switch must NOT fire.
+    // Absent/empty per-slot detail is unusable under the fail-closed
+    // contract (WL-0MUXVPXAZ005RESW): the switch must NOT fire even when the
+    // count claims all slots are free. 1-of-3 free with no identity also fails.
     await worker.tick({
       enabled: true,
       idleThresholdMs: 900_000,
       proxyUrl: 'http://proxy',
-      proxyStatus: idleStatus({ available_slots: 1, total_slots: 3 }),
+      proxyStatus: idleStatus({ slots: undefined, available_slots: 1, total_slots: 3 }),
     });
     await flushAsync();
     expect(setModePosts(api)).toHaveLength(0);
 
-    // All slots free (no per-slot identity) → the switch fires as before.
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus({ slots: [] }),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(0);
+
+    // With usable per-slot detail the switch fires.
     api.reset();
     await worker.tick({
       enabled: true,

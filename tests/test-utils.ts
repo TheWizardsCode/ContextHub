@@ -463,6 +463,8 @@ export function createTuiTestContext(options?: { prefix?: string }) {
     utils: Object.assign({}, utils, {
       // Commander-like helpers used by CLI commands under test
       normalizeCliId: (id: string, _prefix?: string) => id,
+      normalizeParentId: (id?: string, _prefix?: string) =>
+        id && !['null', 'none', 'nil', '-'].includes(id.trim().toLowerCase()) ? id : null,
       getConfig: () => ({}),
       isJsonMode: () => false,
       // Expose the small in-memory db implementation (get + update)

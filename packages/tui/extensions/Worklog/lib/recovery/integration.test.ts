@@ -41,6 +41,14 @@ describe('classification → dispatch mapping', () => {
     expect(classifyError(msg)).toBe(ErrorCategory.SERVER_ERROR);
   });
 
+  it('proxy scheduled-window 503 body is classified as SERVER_ERROR (retryable)', () => {
+    const msg = makeAssistantMsg(
+      'All providers unavailable: no provider is available during the current scheduled time window',
+    );
+    expect(classifyError(msg)).toBe(ErrorCategory.SERVER_ERROR);
+    expect(classifyError(msg)).not.toBe(ErrorCategory.UNKNOWN);
+  });
+
   // Auth error → AUTH_ERROR (checkpoint + terminate)
   it('auth error 401 is classified as AUTH_ERROR', () => {
     const msg = makeAssistantMsg('401 Unauthorized');

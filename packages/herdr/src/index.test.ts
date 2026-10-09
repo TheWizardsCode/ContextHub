@@ -20,6 +20,10 @@ import {
   spawnBackgroundPi,
   formatBackgroundFailure,
   CAPTURE_TIMEOUT_MS,
+  extractWorkItemId,
+  defaultStalledPaneRootResolver,
+  defaultStalledPanesLister,
+  worklogRootFromPiSessionPath,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
 import {
@@ -28,7 +32,7 @@ import {
   readActiveAuditMarker,
   isHostAuditActive,
 } from './machine-coordination.js';
-import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork, type ScheduledPrompt } from './downtime-worker.js';
+import { DOWNTIME_WL_TIMEOUT_MS, dispatchDowntimeWork, type HerdrPaneRecord, type ScheduledPrompt } from './downtime-worker.js';
 import { SCHEDULED_PROMPTS_FILE, scheduledPromptsPath } from './scheduled-prompts.js';
 import {
   fetchItemsByStage,
@@ -37,6 +41,12 @@ import {
   setExecFileAsync,
   setWorklogDir,
 } from './fetcher.js';
+import type {
+  DispatcherAnchorDeps,
+  DispatcherPaneInfo,
+  DispatcherTabInfo,
+  ItemTabAnchor,
+} from './dispatcher-anchor.js';
 
 // ---------------------------------------------------------------------------
 // buildSendToPiArgs tests (WL-0MSD48ZFC0043AO3)
@@ -194,6 +204,541 @@ describe('buildRunInPaneArgs', () => {
 
   it('omits --pane-name when none is provided', () => {
     expect(buildRunInPaneArgs('ls -la', '/project')).not.toContain('--pane-name');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Interactive item-tab anchor placement (WL-0MUYI3ITQ004DDCQ, test-first)
+//
+// TDD red phase: the interactive dispatch path does NOT yet route ID-carrying
+// dispatches into a work-item-ID tab, so `buildSendToPiArgs` /
+// `buildRunInPaneArgs` do not accept an `anchor` argument and
+// `resolveInteractiveWorkspaceId` / `resolveInteractiveItemAnchor` are not
+// exported. These tests pin the interface agreed with the sibling
+// implementation child (WL-0MUYI3JAO002BTNL) and go green when it lands
+// (parent WL-0MUKZGEQ2007FECS, AC1–AC6). The dynamic import in
+// `loadInteractiveAnchorHelpers` keeps the existing index.test.ts suite green
+// in the red phase — only these new cases fail.
+// ---------------------------------------------------------------------------
+
+type InteractiveAnchorHelpers = {
+  resolveInteractiveWorkspaceId?: (
+    env?: Record<string, string | undefined>,
+  ) => string | null;
+  resolveInteractiveItemAnchor?: (
+    cwd: string,
+    workspaceId: string,
+    itemId: string,
+    deps?: DispatcherAnchorDeps,
+    onCreate?: (anchor: ItemTabAnchor) => void,
+  ) => Promise<ItemTabAnchor | null>;
+};
+
+async function loadInteractiveAnchorHelpers(): Promise<InteractiveAnchorHelpers> {
+  return (await import('./index.js')) as unknown as InteractiveAnchorHelpers;
+}
+
+/** Minimal `DispatcherAnchorDeps` stub for the interactive item-tab tests. */
+function makeInteractiveAnchorDeps(
+  over: Partial<DispatcherAnchorDeps> = {},
+): DispatcherAnchorDeps {
+  return {
+    createWorkspace: async () => ({ workspaceId: 'wDefault', paneId: 'wDefault:p1' }),
+    isPaneAlive: async () => true,
+    listTabs: async () => [] as DispatcherTabInfo[],
+    createTab: async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }),
+    listPanes: async () => [] as DispatcherPaneInfo[],
+    ...over,
+  } as DispatcherAnchorDeps;
+}
+
+describe('buildSendToPiArgs — interactive item-tab anchor (AC1/AC6)', () => {
+  it('appends --anchor <paneId> when an anchor is supplied', () => {
+    expect(
+      buildSendToPiArgs('/skill:implement WL-1', '/project', 'code', undefined, undefined, false, 'w9:p7'),
+    ).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      '--model',
+      'code',
+      '--anchor',
+      'w9:p7',
+      '/skill:implement WL-1',
+    ]);
+  });
+
+  it('forwards --anchor as a head option (value follows, prompt stays last)', () => {
+    const args = buildSendToPiArgs(
+      '/skill:implement WL-1',
+      '/project',
+      'code',
+      '/tmp/pane.json',
+      'Manually triggered implement - WL-1',
+      true,
+      'w9:p7',
+    );
+    const at = args.indexOf('--anchor');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(args[at + 1]).toBe('w9:p7');
+    expect(args[args.length - 1]).toBe('/skill:implement WL-1');
+  });
+
+  it('omits --anchor when it is undefined (no-ID / fail-open fallback)', () => {
+    expect(buildSendToPiArgs('/skill:implement WL-1', '/project', 'code')).not.toContain('--anchor');
+  });
+
+  it('omits --anchor when it is an empty string', () => {
+    expect(
+      buildSendToPiArgs('/skill:implement WL-1', '/project', 'code', undefined, undefined, false, ''),
+    ).not.toContain('--anchor');
+  });
+});
+
+describe('buildRunInPaneArgs — interactive item-tab anchor (AC2/AC6)', () => {
+  it('appends --anchor <paneId> when an anchor is supplied', () => {
+    expect(
+      buildRunInPaneArgs('wl update WL-1 --priority high', '/project', undefined, false, 'w9:p7'),
+    ).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      '--anchor',
+      'w9:p7',
+      'wl update WL-1 --priority high',
+    ]);
+  });
+
+  it('forwards --anchor as a head option (value follows, command stays last)', () => {
+    const args = buildRunInPaneArgs(
+      'wl update WL-1 --priority high',
+      '/project',
+      'Shell: wl update WL-1 WL-1',
+      true,
+      'w9:p7',
+    );
+    const at = args.indexOf('--anchor');
+    expect(at).toBeGreaterThanOrEqual(0);
+    expect(args[at + 1]).toBe('w9:p7');
+    expect(args[args.length - 1]).toBe('wl update WL-1 --priority high');
+  });
+
+  it('omits --anchor when it is undefined', () => {
+    expect(buildRunInPaneArgs('ls -la', '/project')).not.toContain('--anchor');
+  });
+
+  it('omits --anchor when it is an empty string', () => {
+    expect(buildRunInPaneArgs('ls -la', '/project', undefined, false, '')).not.toContain('--anchor');
+  });
+
+  // split-confirmation channel for root-pane cleanup (WL-0MUYI3K8H007MPKF)
+  it('forwards --pane-id-file as a head option (command stays last)', () => {
+    expect(
+      buildRunInPaneArgs(
+        'wl update WL-1 --priority high',
+        '/project',
+        'Shell: wl update WL-1 WL-1',
+        false,
+        'w9:p7',
+        '/tmp/pane.json',
+      ),
+    ).toEqual([
+      '--no-focus',
+      '--cwd',
+      '/project',
+      '--pane-name',
+      'Shell: wl update WL-1 WL-1',
+      '--anchor',
+      'w9:p7',
+      '--pane-id-file',
+      '/tmp/pane.json',
+      'wl update WL-1 --priority high',
+    ]);
+  });
+
+  it('omits --pane-id-file when absent/empty', () => {
+    expect(buildRunInPaneArgs('ls -la', '/project')).not.toContain('--pane-id-file');
+    expect(
+      buildRunInPaneArgs('ls -la', '/project', undefined, false, undefined, ''),
+    ).not.toContain('--pane-id-file');
+  });
+});
+
+describe('extractWorkItemId — no-ID fallback (AC4)', () => {
+  it('returns undefined for a blank /prompt: session (Open Pi Agent / P n)', () => {
+    expect(extractWorkItemId('/prompt:')).toBeUndefined();
+  });
+
+  it('returns undefined for generic commands with no work-item ID', () => {
+    expect(extractWorkItemId('ls -la')).toBeUndefined();
+    expect(extractWorkItemId('wl search test')).toBeUndefined();
+    expect(extractWorkItemId('wl update <id> --priority high')).toBeUndefined();
+  });
+
+  it('returns the work-item ID when one is present (both channels)', () => {
+    expect(extractWorkItemId('/skill:implement WL-ABC')).toBe('WL-ABC');
+    expect(extractWorkItemId('!!wl update WL-ABC --priority high')).toBe('WL-ABC');
+  });
+});
+
+describe('resolveInteractiveWorkspaceId (AC1/AC2)', () => {
+  it('returns HERDR_WORKSPACE_ID when set', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.resolveInteractiveWorkspaceId!({ HERDR_WORKSPACE_ID: 'w45' })).toBe('w45');
+  });
+
+  it('returns null when HERDR_WORKSPACE_ID is unset', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.resolveInteractiveWorkspaceId!({})).toBeNull();
+  });
+
+  it('treats a blank HERDR_WORKSPACE_ID as absent (fail-open to the current pane)', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    expect(helpers.resolveInteractiveWorkspaceId!({ HERDR_WORKSPACE_ID: '' })).toBeNull();
+    expect(helpers.resolveInteractiveWorkspaceId!({ HERDR_WORKSPACE_ID: '   ' })).toBeNull();
+  });
+
+  it('defaults to process.env.HERDR_WORKSPACE_ID', async () => {
+    const saved = process.env.HERDR_WORKSPACE_ID;
+    process.env.HERDR_WORKSPACE_ID = 'w77';
+    try {
+      const helpers = await loadInteractiveAnchorHelpers();
+      expect(helpers.resolveInteractiveWorkspaceId!()).toBe('w77');
+    } finally {
+      if (saved === undefined) delete process.env.HERDR_WORKSPACE_ID;
+      else process.env.HERDR_WORKSPACE_ID = saved;
+    }
+  });
+});
+
+describe('resolveInteractiveItemAnchor (AC3/AC5)', () => {
+  let coordDir: string;
+  let savedCoord: string | undefined;
+
+  beforeEach(() => {
+    coordDir = mkdtempSync(join(tmpdir(), 'interactive-anchor-'));
+    savedCoord = process.env.HERDR_COORDINATION_DIR;
+    process.env.HERDR_COORDINATION_DIR = coordDir;
+  });
+
+  afterEach(() => {
+    if (savedCoord === undefined) delete process.env.HERDR_COORDINATION_DIR;
+    else process.env.HERDR_COORDINATION_DIR = savedCoord;
+    try { rmSync(coordDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  });
+
+  it('AC3: first call creates the exact item-ID tab and returns its anchor pane', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const createTab = vi.fn(async (ws: string, label: string) => ({
+      tabId: `${ws}:t${label}`,
+      paneId: `${ws}:t${label}:p1`,
+    }));
+    const deps = makeInteractiveAnchorDeps({ createTab });
+
+    const got = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps);
+
+    expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(createTab).toHaveBeenCalledWith('w9', 'WL-ABC');
+  });
+
+  it('AC3: second call for the same workspace + item reuses the tab (no duplicate create)', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const tabs: DispatcherTabInfo[] = [];
+    const createTab = vi.fn(async (ws: string, label: string) => {
+      const anchor = { tabId: `${ws}:t${label}`, paneId: `${ws}:t${label}:p1` };
+      tabs.push({ tabId: anchor.tabId, label });
+      return anchor;
+    });
+    const deps = makeInteractiveAnchorDeps({
+      createTab,
+      listTabs: async () => tabs.map((t) => ({ ...t })),
+      listPanes: async () => tabs.map((t) => ({ paneId: `${t.tabId}:p1`, tabId: t.tabId })),
+      isPaneAlive: async () => true,
+    });
+
+    const first = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps);
+    const second = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps);
+
+    expect(first).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(second).toEqual(first);
+    expect(createTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC5 fail-open: tab resolution throws → null (never throws)', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const deps = makeInteractiveAnchorDeps({
+      listTabs: async () => { throw new Error('herdr tab list failed'); },
+    });
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps)).resolves.toBeNull();
+  });
+
+  it('AC5 fail-open: tab creation returns null → null', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const deps = makeInteractiveAnchorDeps({ createTab: async () => null });
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps)).resolves.toBeNull();
+  });
+
+  it('AC5 fail-open: tab creation throws → null', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const deps = makeInteractiveAnchorDeps({
+      createTab: async () => { throw new Error('herdr tab create failed'); },
+    });
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps)).resolves.toBeNull();
+  });
+
+  it('AC5 guard: empty workspace id or item id → null', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const deps = makeInteractiveAnchorDeps();
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', '', 'WL-ABC', deps)).resolves.toBeNull();
+    await expect(helpers.resolveInteractiveItemAnchor!('/repo', 'w9', '', deps)).resolves.toBeNull();
+  });
+
+  // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF, AC7): the observer fires ONLY
+  // when the tab is provisioned, so the interactive path can gate cleanup on a
+  // genuine create.
+  it('AC7: forwards the onCreate observer when the tab is provisioned', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const onCreate = vi.fn();
+    const deps = makeInteractiveAnchorDeps();
+    await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps, onCreate);
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(onCreate).toHaveBeenCalledWith({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+  });
+
+  it('AC7: does NOT forward the onCreate observer when the tab is reused', async () => {
+    const helpers = await loadInteractiveAnchorHelpers();
+    const onCreate = vi.fn();
+    const deps = makeInteractiveAnchorDeps({
+      listTabs: async () => [{ tabId: 'w9:tWL-ABC', label: 'WL-ABC' }],
+      listPanes: async () => [{ paneId: 'w9:tWL-ABC:p1', tabId: 'w9:tWL-ABC' }],
+    });
+    const got = await helpers.resolveInteractiveItemAnchor!('/repo', 'w9', 'WL-ABC', deps, onCreate);
+    expect(got).toEqual({ tabId: 'w9:tWL-ABC', paneId: 'w9:tWL-ABC:p1' });
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Default interactive liveness resolver (WL-0MUYI3K8H007MPKF, AC7)
+//
+// The helper contract is exercised with injected deps above; these tests pin
+// the PRODUCTION resolver's classification: a freshly created placeholder root
+// pane (no agent, no shell label) is excluded, while a live pi agent pane or a
+// shell-command pane is included so a reused anchor survives cleanup.
+// ---------------------------------------------------------------------------
+
+describe('defaultInteractiveLiveTrackedPanesResolver (AC7)', () => {
+  afterEach(() => {
+    resetExecFileAsync();
+  });
+
+  function mockPaneList(panes: unknown[]): void {
+    setExecFileAsync(
+      vi.fn().mockResolvedValue({ stdout: JSON.stringify({ result: { panes } }), stderr: '' }) as never,
+    );
+  }
+
+  it('excludes a placeholder root pane and includes live pi/shell panes', async () => {
+    const { defaultInteractiveLiveTrackedPanesResolver } = await import('./index.js');
+    mockPaneList([
+      { pane_id: 'w9:tWL-ABC:p1', label: '', agent: '', agent_status: '' },
+      { pane_id: 'w9:tWL-ABC:p2', label: 'Manually triggered implement - WL-ABC', agent: 'pi', agent_status: 'working' },
+      { pane_id: 'w9:tWL-ABC:p3', label: 'Shell: wl update WL-ABC', agent: '', agent_status: '' },
+    ]);
+    const result = await defaultInteractiveLiveTrackedPanesResolver('/repo');
+    expect(result.ok).toBe(true);
+    expect(result.paneIds).toEqual(['w9:tWL-ABC:p2', 'w9:tWL-ABC:p3']);
+  });
+
+  it('excludes terminal (done/exited) agent panes', async () => {
+    const { defaultInteractiveLiveTrackedPanesResolver } = await import('./index.js');
+    mockPaneList([
+      { pane_id: 'w9:tWL-ABC:p2', label: 'Manually triggered implement', agent: 'pi', agent_status: 'done' },
+    ]);
+    const result = await defaultInteractiveLiveTrackedPanesResolver('/repo');
+    expect(result).toEqual({ ok: true, paneIds: [] });
+  });
+
+  it('fail-safe: an unparseable pane list resolves {ok:false}', async () => {
+    const { defaultInteractiveLiveTrackedPanesResolver } = await import('./index.js');
+    setExecFileAsync(vi.fn().mockResolvedValue({ stdout: 'not json', stderr: '' }) as never);
+    const result = await defaultInteractiveLiveTrackedPanesResolver('/repo');
+    expect(result.ok).toBe(false);
+  });
+
+  it('fail-safe: a throwing herdr invocation resolves {ok:false}', async () => {
+    const { defaultInteractiveLiveTrackedPanesResolver } = await import('./index.js');
+    setExecFileAsync(vi.fn().mockRejectedValue(new Error('herdr unavailable')) as never);
+    const result = await defaultInteractiveLiveTrackedPanesResolver('/repo');
+    expect(result.ok).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Interactive item-tab root-pane cleanup (WL-0MUYI3JRC006115V, test-first)
+//
+// TDD red phase: the interactive dispatch path does NOT yet close the
+// placeholder root pane after the first pane spawns into a freshly created
+// item tab, so `closeInteractiveTabRootPane` is not exported. These tests pin
+// the interface agreed with the sibling implementation child
+// (WL-0MUYI3K8H007MPKF) and go green when it lands (parent WL-0MUKZGEQ2007FECS,
+// AC7/AC8). The dynamic import keeps the existing index.test.ts suite green in
+// the red phase — only these new cases fail.
+//
+// Pinned contract (parent AC7):
+//   closeInteractiveTabRootPane(anchorPaneId, ctx, deps)
+//     - closes the anchor pane only when liveness POSITIVELY confirms it is
+//       NOT a live tracked pi/shell pane;
+//     - leaves the anchor open when liveness is unknown/unavailable (fail-safe)
+//       or when the anchor IS a live tracked pane;
+//     - never throws (fail-open) — cleanup errors never change the dispatch
+//       outcome.
+//
+// The liveness dep mirrors the downtime path's `getRunningDowntimePanes`
+// (`{ok:true, paneIds}` / `{ok:false}`): `getLiveTrackedPanes(cwd)` returns the
+// ids of panes currently hosting a tracked pi/shell session, or `{ok:false}`
+// when the probe cannot be answered. `closePane(paneId, cwd)` mirrors the
+// existing herdr close convention.
+// ---------------------------------------------------------------------------
+
+type InteractiveRootPaneCleanupDeps = {
+  /** Live tracked pi/shell pane ids, or `{ok:false}` when unknown. */
+  getLiveTrackedPanes?: (cwd: string) => Promise<{ ok: boolean; paneIds?: string[] }>;
+  /** Close a pane; may reject (the helper swallows it). */
+  closePane?: (paneId: string, cwd: string) => Promise<boolean>;
+};
+
+type InteractiveRootPaneCleanupHelpers = {
+  closeInteractiveTabRootPane?: (
+    anchorPaneId: string | undefined,
+    ctx: { cwd: string },
+    deps: InteractiveRootPaneCleanupDeps,
+  ) => Promise<void>;
+};
+
+async function loadInteractiveCleanupHelpers(): Promise<InteractiveRootPaneCleanupHelpers> {
+  return (await import('./index.js')) as unknown as InteractiveRootPaneCleanupHelpers;
+}
+
+describe('closeInteractiveTabRootPane — interactive root-pane cleanup (AC7/AC8)', () => {
+  const ANCHOR = 'w9:tWL-ABC:p1';
+  const CWD = '/repo';
+
+  it('AC7: closes the placeholder root pane after a spawn into a freshly created item tab', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    // A freshly created item tab's placeholder root pane hosts no tracked
+    // pi/shell pane → liveness positively excludes the anchor → close it.
+    await helpers.closeInteractiveTabRootPane!(
+      ANCHOR,
+      { cwd: CWD },
+      {
+        getLiveTrackedPanes: vi.fn().mockResolvedValue({ ok: true, paneIds: [] }),
+        closePane,
+      },
+    );
+    expect(closePane).toHaveBeenCalledTimes(1);
+    expect(closePane).toHaveBeenCalledWith(ANCHOR, CWD);
+  });
+
+  it('AC7: NEVER closes a reused live tracked pane (existing item-tab anchor)', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await helpers.closeInteractiveTabRootPane!(
+      ANCHOR,
+      { cwd: CWD },
+      {
+        getLiveTrackedPanes: vi
+          .fn()
+          .mockResolvedValue({ ok: true, paneIds: ['w9:tWL-ABC:p2', ANCHOR] }),
+        closePane,
+      },
+    );
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-safe: a failed liveness query (ok:false) leaves the anchor open', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await helpers.closeInteractiveTabRootPane!(
+      ANCHOR,
+      { cwd: CWD },
+      {
+        getLiveTrackedPanes: vi
+          .fn()
+          .mockResolvedValue({ ok: false, error: 'herdr unavailable' }),
+        closePane,
+      },
+    );
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-safe: an absent liveness dep leaves the anchor open', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await helpers.closeInteractiveTabRootPane!(ANCHOR, { cwd: CWD }, { closePane });
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-safe: a liveness payload without paneIds is treated as unknown', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await helpers.closeInteractiveTabRootPane!(
+      ANCHOR,
+      { cwd: CWD },
+      { getLiveTrackedPanes: vi.fn().mockResolvedValue({ ok: true }), closePane },
+    );
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-safe: a throwing liveness probe never throws and leaves the anchor open', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    await expect(
+      helpers.closeInteractiveTabRootPane!(
+        ANCHOR,
+        { cwd: CWD },
+        {
+          getLiveTrackedPanes: vi
+            .fn()
+            .mockRejectedValue(new Error('herdr pane list blew up')),
+          closePane,
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(closePane).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-open: a throwing closePane never throws (dispatch outcome unchanged)', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockRejectedValue(new Error('herdr pane close blew up'));
+    await expect(
+      helpers.closeInteractiveTabRootPane!(
+        ANCHOR,
+        { cwd: CWD },
+        {
+          getLiveTrackedPanes: vi.fn().mockResolvedValue({ ok: true, paneIds: [] }),
+          closePane,
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(closePane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC7: a missing anchor (no item tab) is a no-op', async () => {
+    const helpers = await loadInteractiveCleanupHelpers();
+    const closePane = vi.fn().mockResolvedValue(true);
+    const getLiveTrackedPanes = vi.fn().mockResolvedValue({ ok: true, paneIds: [] });
+    await helpers.closeInteractiveTabRootPane!(
+      undefined,
+      { cwd: CWD },
+      { getLiveTrackedPanes, closePane },
+    );
+    expect(getLiveTrackedPanes).not.toHaveBeenCalled();
+    expect(closePane).not.toHaveBeenCalled();
   });
 });
 
@@ -383,6 +928,18 @@ describe('shortcuts.json command routing', () => {
     const pn = parsed.find((e) => Array.isArray(e.chord) && e.chord.join(',') === 'P,n');
     expect(pn).toBeDefined();
     expect(pn!.focus).toBe(true);
+  });
+
+  it('routes the r i producer-interview command with focus:true (WL-0MURJ0LFH002O95I)', () => {
+    const _here2 = dirname(fileURLToPath(import.meta.url));
+    const raw = readFileSync(join(_here2, 'shortcuts.json'), 'utf8');
+    const parsed = JSON.parse(raw) as Array<Record<string, unknown>>;
+    const ri = parsed.find((e) => Array.isArray(e.chord) && e.chord.join(',') === 'r,i');
+    expect(ri).toBeDefined();
+    // The interactive interview pane must receive focus immediately.
+    expect(ri!.focus).toBe(true);
+    // The focus behaviour is documented in the entry's description.
+    expect(String(ri!.description)).toMatch(/focus/i);
   });
 
   it('binds P-p to the free-form prompt, P-a to the audit-gaps prompt, and P-n to a blank session', () => {
@@ -2956,5 +3513,180 @@ describe('spawnBackgroundPi', () => {
       onExit,
     });
     expect(on).toHaveBeenCalledWith('exit', expect.any(Function));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stalled-work production wiring (WL-0MUYMBSA90092QV2)
+// ---------------------------------------------------------------------------
+
+describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
+  let tempDirs: string[] = [];
+
+  beforeEach(() => {
+    tempDirs = [];
+  });
+
+  afterEach(() => {
+    resetExecFileAsync();
+    for (const dir of tempDirs.splice(0)) {
+      try { rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+    }
+  });
+
+  // Hyphen-free prefix so the pi session-path encoding (which replaces `/`
+  // with `-`) round-trips unambiguously back to this root.
+  function makeRoot(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'stallroot'));
+    mkdirSync(join(dir, '.worklog'), { recursive: true });
+    writeFileSync(join(dir, '.worklog', 'initialized'), '');
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  it('createDowntimeDeps wires the scan and resume seams', () => {
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    expect(typeof deps.scanStalledPanes).toBe('function');
+    expect(typeof deps.resumeStalledPane).toBe('function');
+  });
+
+  it('defaultStalledPaneRootResolver resolves the pane cwd root and fails closed otherwise', () => {
+    const root = makeRoot();
+    expect(defaultStalledPaneRootResolver({ paneId: 'p1', cwd: root }, '/fallback')).toBe(root);
+    expect(defaultStalledPaneRootResolver({ paneId: 'p2' }, '/fallback')).toBeNull();
+    expect(defaultStalledPaneRootResolver({ paneId: 'p3', cwd: '/definitely/not/a/repo' }, '/fallback')).toBeNull();
+  });
+
+  it('worklogRootFromPiSessionPath decodes a pi session dir back to the worklog root', () => {
+    const root = makeRoot();
+    const encoded = `${root.replace(/^\//, '').split('/').join('-')}`;
+    const sessionPath = `/home/pi/.pi/agent/sessions/--${encoded}--/log.jsonl`;
+    expect(worklogRootFromPiSessionPath(sessionPath)).toBe(root);
+    expect(worklogRootFromPiSessionPath('not-a-session-path')).toBeUndefined();
+    expect(worklogRootFromPiSessionPath('')).toBeUndefined();
+  });
+
+  it('scanStalledPanes reads the machine-wide pane list and fetches the item against its OWN root', async () => {
+    const root = makeRoot();
+    const panes = JSON.stringify({
+      result: {
+        panes: [
+          {
+            pane_id: 'w1:p1',
+            label: 'Downtime triggered implement Some item - WL-STALLED',
+            agent: 'pi',
+            agent_status: 'idle',
+            cwd: root,
+          },
+        ],
+      },
+    });
+    const showJson = JSON.stringify({
+      success: true,
+      workItem: {
+        id: 'WL-STALLED',
+        title: 'Some item',
+        status: 'open',
+        stage: 'plan_complete',
+        updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      },
+    });
+    const mockExec = vi.fn().mockImplementation((_bin: string, args: string[]) => {
+      if (args.includes('pane') && args.includes('list')) {
+        return Promise.resolve({ stdout: panes, stderr: '' });
+      }
+      if (args.includes('show')) {
+        return Promise.resolve({ stdout: showJson, stderr: '' });
+      }
+      return Promise.resolve({ stdout: '{}', stderr: '' });
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const out = await deps.scanStalledPanes!(root, {
+      enabled: true,
+      frozen: false,
+      thresholdMs: 5 * 60 * 1000,
+      nonTerminalCooldownMs: 10 * 60 * 1000,
+      maxAttempts: 3,
+    });
+
+    expect(out).toHaveLength(1);
+    expect(out[0].cwd).toBe(root);
+    expect(out[0].kind).toBe('implement');
+    // The `wl show` lookup targeted the pane's OWN root, not the leader's root.
+    const showCall = mockExec.mock.calls.find(([, a]) => (a as string[]).includes('show'));
+    expect(showCall?.[1]).toEqual(expect.arrayContaining(['--worklog-dir', join(root, '.worklog')]));
+  });
+
+  it('resumeStalledPane prompts a live agent with the literal continue via herdr', async () => {
+    const calls: Array<[string, string[]]> = [];
+    const mockExec = vi.fn().mockImplementation((bin: string, args: string[]) => {
+      calls.push([bin, args]);
+      return Promise.resolve({ stdout: '', stderr: '' });
+    });
+    setExecFileAsync(mockExec as never);
+
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const out = await deps.resumeStalledPane!(
+      {
+        pane: {
+          paneId: 'w1:p1',
+          label: 'Downtime triggered implement Some item - WL-STALLED',
+          agent: 'pi',
+          agentStatus: 'idle',
+        },
+        item: {
+          id: 'WL-STALLED',
+          status: 'open',
+          stage: 'plan_complete',
+          title: 'Some item',
+          updatedAt: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+        },
+        cwd: makeRoot(),
+        kind: 'implement',
+      },
+      {
+        enabled: true,
+        frozen: false,
+        thresholdMs: 5 * 60 * 1000,
+        nonTerminalCooldownMs: 10 * 60 * 1000,
+        maxAttempts: 3,
+      },
+    );
+
+    expect(out).toMatchObject({ resumed: true, via: 'prompt', paneId: 'w1:p1' });
+    const promptCall = calls.find(([, args]) => args[0] === 'agent' && args[1] === 'prompt');
+    expect(promptCall?.[1]).toEqual(['agent', 'prompt', 'w1:p1', 'continue']);
+  });
+
+  // ── Unparseable pane list / session-path fallback (WL-0MUYMBUAK007H10J) ──
+
+  it('defaultStalledPanesLister returns null for an unparseable pane list (fail-safe)', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: 'not json at all', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    expect(await defaultStalledPanesLister()).toBeNull();
+  });
+
+  it('production scan degrades to no candidates when the pane list is unparseable', async () => {
+    const mockExec = vi.fn().mockResolvedValue({ stdout: '<unparseable>', stderr: '' });
+    setExecFileAsync(mockExec as never);
+    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map');
+    const out = await deps.scanStalledPanes!('/leader/root', {
+      enabled: true,
+      frozen: false,
+      thresholdMs: 5 * 60 * 1000,
+      nonTerminalCooldownMs: 10 * 60 * 1000,
+      maxAttempts: 3,
+    });
+    expect(out).toEqual([]);
+  });
+
+  it('defaultStalledPaneRootResolver falls back to the pi session path when cwd is absent', () => {
+    const root = makeRoot();
+    const encoded = root.replace(/^\//, '').split('/').join('-');
+    const sessionPath = `/home/pi/.pi/agent/sessions/--${encoded}--/log.jsonl`;
+    const pane: HerdrPaneRecord = { paneId: 'p', agentSession: { value: sessionPath } as never };
+    expect(defaultStalledPaneRootResolver(pane, '/fallback')).toBe(root);
   });
 });

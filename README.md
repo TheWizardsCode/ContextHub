@@ -162,7 +162,7 @@ You can get a lot of value from using Worklog as a memory for your agents. But y
 | [docs/SKILL_AUTHORING.md](docs/SKILL_AUTHORING.md) | Skill authoring guide with script best practices |
 | [docs/dev/wl-process-healthcheck.md](docs/dev/wl-process-healthcheck.md) | wl process healthcheck watchdog usage (cron/systemd, thresholds) |
 | [docs/dev/audit-debug-log-retention.md](docs/dev/audit-debug-log-retention.md) | Audit debug log retention policy + runbook: sweep locations/thresholds, dry-run/`--apply`/`--check`, cron install/removal, safety guarantees |
-| [docs/dev/downtime-dispatcher.md](docs/dev/downtime-dispatcher.md) | Leader-election + shared-coordination downtime dispatcher architecture (herdr); critical-first dispatch tier + freeze split-by-skill; dedicated Dispatcher workspace with per-project tabs (one tab per work-item prefix) |
+| [docs/dev/downtime-dispatcher.md](docs/dev/downtime-dispatcher.md) | Leader-election + shared-coordination downtime dispatcher architecture (herdr); critical-first dispatch tier + freeze split-by-skill; automated per-project tabs (one tab per work-item prefix) and interactive item-ID-tab placement (invoking workspace, fail-open) |
 | [docs/pane-triage-skill.md](docs/pane-triage-skill.md) | Approval-gated pane-triage skill and the cross-language pane-close bridge that exposes the shared classifier to Python skills |
 
 ## Tutorials

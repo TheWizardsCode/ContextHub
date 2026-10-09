@@ -177,7 +177,13 @@ import {
   type PaneItemState,
 } from './pane-lifecycle.js';
 import { paneCloseReaperDue } from './pane-close-scheduler.js';
+import { parseHerdrPaneCloseList, type HerdrAgentSession } from './pane-close-herdr.js';
 import { buildDowntimePaneTitle, MAX_PANE_TITLE_LENGTH } from './pane-title.js';
+import type {
+  StalledPaneCandidate,
+  StalledResumeOutcome,
+  StalledScanOptions,
+} from './stalled-work.js';
 import type {
   DispatcherAnchor,
   DispatcherPrefixTabAnchor,
@@ -264,6 +270,8 @@ export function decisionHeaderToken(reason: string): string {
       return 'contention';
     case 'review-queue-hold':
       return 'review-queue';
+    case 'slots-unavailable':
+      return 'no-slots';
     default:
       return reason;
   }
@@ -424,6 +432,32 @@ export const DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS = 60 * 60 * 1000;
 export const DOWNTIME_MARKER_STALE_WINDOW_MAX_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
+ * Default for the pre-dispatch stalled-work scan (WL-0MUYMBK6H005PY16):
+ * enabled. The scan prefers resuming an existing stalled pane over opening a
+ * new one; it can be turned off without a code change.
+ */
+export const DEFAULT_DOWNTIME_STALL_SCAN_ENABLED = true;
+
+/**
+ * Default stall threshold (WL-0MUYMBK6H005PY16): 5 minutes, aligned with the
+ * pane-closure reaper's grace period. A pane is a stall candidate only once
+ * its not-`working` state has persisted at least this long.
+ */
+export const DEFAULT_DOWNTIME_STALL_THRESHOLD_MS = 5 * 60 * 1000;
+
+/**
+ * Hard floor for the stall threshold (60 s): below this the scan would resume
+ * panes that are merely between tool calls, hijacking active sessions.
+ */
+export const MIN_DOWNTIME_STALL_THRESHOLD_MS = 60 * 1000;
+
+/**
+ * Hard ceiling for the stall threshold (60 min): above this a genuinely
+ * stalled pane could sit unattended for over an hour, defeating the feature.
+ */
+export const MAX_DOWNTIME_STALL_THRESHOLD_MS = 60 * 60 * 1000;
+
+/**
  * Three-strike rule: this many consecutive CLI-error dispatch outcomes
  * pause the worker entirely (after logging the persistent error).
  */
@@ -555,16 +589,6 @@ export type CoordinationTierKind = (typeof COORDINATION_TIER_ORDER)[number];
 export interface LlamaStatus {
   llama_server_running: boolean;
   /**
-   * GLOBAL query activity: any request in flight (local AND remote).
-   *
-   * This field is no longer used for idle/busy detection — the worker
-   * exclusively uses `local_active_query`. Remote provider streams keep this
-   * true while the local model is idle with free slots, so it cannot be used
-   * as the busy signal (RCA WL-0MSK9TUCA00206M7). Present in the payload for
-   * backwards compatibility with older proxy versions.
-   */
-  active_query: boolean;
-  /**
    * LOCAL-only query activity (served by proxies exposing the
    * `local_active_queries` counter, LP-0MSL2ZLLS009RVKR). This is the
    * SOLE busy signal for idle detection: `local_active_query=true` means
@@ -609,22 +633,24 @@ export interface LlamaStatus {
    */
   contention_queued_count?: number;
   /**
-   * Proxy degradation flag (LP-0MSVP7XJ6008QPKX, consumed by
-   * WL-0MUFP30T2003OX1F): `true` when the served slot COUNTS came from the
-   * proxy's last-known cache because the fresh `/slots` query failed. When
-   * true the per-slot `slots` detail cannot be trusted/paired with the
-   * counts, so the worker must fall back to the count-based path. ABSENT on
+   * Proxy degradation flag (LP-0MSVP7XJ6008QPKX; fail-closed contract
+   * WL-0MUXVPXAZ005RESW): `true` when the served slot COUNTS came from the
+   * proxy's last-known cache because the fresh `/slots` query failed. The
+   * per-slot `slots` detail then cannot be trusted/paired with the counts,
+   * so per-slot detail is UNUSABLE and the worker fails closed (no
+   * dispatch) rather than falling back to the untrusted count. ABSENT on
    * pre-feature proxies (treated as not stale).
    */
   slots_stale?: boolean;
   /**
    * Per-slot identity (LP-0MSG5TA7Y002GN39): served by proxies that expose
-   * slot-level detail. ABSENT on pre-feature proxies — the worker then
-   * falls back to the count-based all-slots-free logic. When present, the
-   * downtime worker tracks idle duration PER SLOT ID so a configured N
-   * requires the SAME N slots continuously free. An EMPTY array means "no
-   * per-slot detail available" (WL-0MUFP30T2003OX1F) — never "zero free
-   * slots" — and likewise falls back to the count-based path.
+   * slot-level detail, and the ONLY trusted availability source
+   * (WL-0MUXVPXAZ005RESW). When present and non-stale, the downtime worker
+   * tracks idle duration PER SLOT ID so a configured N requires the SAME N
+   * slots continuously free. ABSENT on pre-feature proxies, and an EMPTY
+   * array means "no per-slot detail available" (WL-0MUFP30T2003OX1F) —
+   * never "zero free slots"; in both cases the worker fails closed (no
+   * dispatch) rather than falling back to the count.
    */
   slots?: LlamaSlot[];
 }
@@ -653,10 +679,10 @@ export interface LlamaSlot {
 // ── Idle detection (implemented) ──────────────────────────────────────
 
 /**
- * The FULL global idle checks used by `isIdleStatus` and the count-based
- * (non-per-slot) path of `evaluateIdle`: llama-server up, no active local
- * query (the sole busy signal), no model switch, no local lease. The
- * per-slot branch uses the relaxed `perSlotGlobalIdleChecks` instead
+ * The FULL global idle checks used by `isIdleStatus` and the all-slots-free
+ * (`N ≤ 0` / `N ≥ total`) path of `evaluateIdle`: llama-server up, no active
+ * local query (the sole busy signal), no model switch, no local lease. The
+ * spare-capacity path uses the relaxed `perSlotGlobalIdleChecks` instead
  * (spare-capacity dispatch, parent WL-0MT32F90V008UAD2).
  *
  * `local_active_query` is the SOLE busy signal for the query gate:
@@ -677,13 +703,13 @@ function globalIdleChecks(status: LlamaStatus): boolean {
 /**
  * Per-slot-safe global checks (spare-capacity dispatch, parent
  * WL-0MT32F90V008UAD2): in per-slot identity mode, ONLY llama-server-up and
- * no-model-switch remain GLOBAL gates — `active_query` /
- * `local_active_query` / `local_lease_active` are superseded by the per-slot
+ * no-model-switch remain GLOBAL gates — `local_active_query` /
+ * `local_lease_active` are superseded by the per-slot
  * `is_processing` signal (the busy slot holding the operator's query/lease IS
  * the active work the operator wants to run alongside; it must not block
- * dispatch into the free slots, LP-0MSG5TA7Y002GN39 Q&A). Used exclusively by
- * the per-slot branches of `evaluateIdle` and `createDowntimeWorker.tick()`;
- * the count-based path keeps the full `globalIdleChecks` (fail-closed).
+ * dispatch into the free slots, LP-0MSG5TA7Y002GN39 Q&A). Used by the
+ * spare-capacity path of `evaluateIdle` and `createDowntimeWorker.tick()`;
+ * the all-slots-free path keeps the full `globalIdleChecks` (fail-closed).
  */
 function perSlotGlobalIdleChecks(status: LlamaStatus): boolean {
   if (!status.llama_server_running) return false;
@@ -718,87 +744,20 @@ export function countFreeUnownedSlots(slots: LlamaSlot[]): number {
 }
 
 /**
- * Usable per-slot identity (WL-0MUFP30T2003OX1F): the `slots` array is only
- * trustworthy when it is NON-EMPTY and NOT flagged stale by the proxy. An
- * empty array (`slots: []`) means "no per-slot detail available" — NOT "zero
- * free slots" — and `slots_stale: true` means the counts came from the
- * proxy's last-known cache after a failed /slots query, so the detail cannot
- * be paired with them. In both cases the worker must fall back to the
- * count-based path; `null` is that signal.
+ * Usable per-slot identity (WL-0MUFP30T2003OX1F; fail-closed contract
+ * WL-0MUXVPXAZ005RESW): the `slots` array is only trustworthy when it is
+ * NON-EMPTY and NOT flagged stale by the proxy. An empty array (`slots: []`)
+ * means "no per-slot detail available" — NOT "zero free slots" — and
+ * `slots_stale: true` means the counts came from the proxy's last-known
+ * cache after a failed /slots query, so the detail cannot be paired with
+ * them. `null` signals "unusable"; callers MUST fail closed (no dispatch)
+ * rather than falling back to the untrusted `available_slots` count.
  */
 function usablePerSlotSlots(status: LlamaStatus): LlamaSlot[] | null {
   if (!Array.isArray(status.slots)) return null;
   if (status.slots.length === 0) return null;
   if (status.slots_stale === true) return null;
   return status.slots;
-}
-
-/**
- * Number of local dispatch leases the proxy reports (WL-0MUFP30T2003OX1F):
- * the normalised `local_owner_session_ids` list when present, else the legacy
- * single `local_owner_session_id` string, else 1 when only a positive lease
- * TTL is served. Used both for the owner-lease qualifier and to reserve
- * possibly-idle leased slots when the worker only has count-based data.
- */
-function ownerLeaseCount(status: LlamaStatus): number {
-  if (Array.isArray(status.local_owner_session_ids)) {
-    return status.local_owner_session_ids.length;
-  }
-  if (
-    typeof status.local_owner_session_id === 'string' &&
-    status.local_owner_session_id.length > 0
-  ) {
-    return 1;
-  }
-  if (
-    typeof status.local_owner_lease_remaining_seconds === 'number' &&
-    Number.isFinite(status.local_owner_lease_remaining_seconds) &&
-    status.local_owner_lease_remaining_seconds > 0
-  ) {
-    return 1;
-  }
-  return 0;
-}
-
-/**
- * Slots to reserve for a held lease in the count-based path
- * (WL-0MUFP30T2003OX1F). While the lease owner is actively generating
- * (`local_active_query === true`) its slot is processing and already excluded
- * from `available_slots`, so nothing is reserved; otherwise the owner may be
- * idle-but-leased, and one slot per lease is reserved so an idle leased slot
- * counted as "available" is never dispatched onto.
- */
-function leaseReserve(status: LlamaStatus): number {
-  return status.local_active_query === true ? 0 : ownerLeaseCount(status);
-}
-
-/**
- * Genuinely-free slot count for the count-based path
- * (WL-0MUFP30T2003OX1F): the proxy's `available_slots` minus any reserved
- * lease slots (never negative).
- */
-function countBasedFreeSlots(status: LlamaStatus): number {
-  const available = Number.isFinite(status.available_slots) ? status.available_slots : 0;
-  return Math.max(0, available - leaseReserve(status));
-}
-
-/**
- * Count-based spare-capacity decision (WL-0MUFP30T2003OX1F): with a
- * multi-slot config (0 < N < total) but NO usable per-slot identity, the
- * proxy's `available_slots` count is the only availability signal. A held
- * local lease must not block dispatch into the spare slots, so this mirrors
- * the per-slot spare-capacity relaxation using the count (after reserving
- * possibly-idle leased slots). Fail-closed on ambiguous/missing fields.
- */
-function countBasedSpareCapacity(status: LlamaStatus, requiredFreeSlots: number): boolean {
-  const total = status.total_slots;
-  const available = status.available_slots;
-  if (!status.llama_server_running) return false;
-  if (status.model_switch_in_progress) return false;
-  if (!Number.isFinite(total) || total <= 0) return false;
-  if (!Number.isFinite(available) || available < 0) return false;
-  if (requiredFreeSlots <= 0 || requiredFreeSlots >= total) return false;
-  return countBasedFreeSlots(status) >= requiredFreeSlots;
 }
 
 /**
@@ -829,66 +788,45 @@ export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): bo
 }
 
 /**
- * Runtime idle evaluation (F2). Same conditions as `isIdleStatus`, plus the
- * fail-closed fallback from planning decision Q7: while the proxy does not
- * expose per-slot identity (LP-0MSG5TA7Y002GN39), a configured N with
- * 0 < N < total slots degrades to requiring ALL slots free — stricter than
- * configured, never "any N slots" without same-slot identity. N > total
- * slots never dispatches (carried through `isIdleStatus`).
+ * Runtime idle evaluation. Fail-closed contract (WL-0MUXVPXAZ005RESW): the
+ * per-slot `slots` array is the ONLY trusted availability source. When it is
+ * unusable — absent, empty (`slots: []`), or flagged stale
+ * (`slots_stale: true`) — `usablePerSlotSlots` returns null and this
+ * function returns false, so no dispatch can be admitted from the untrusted
+ * `available_slots` count.
  *
- * Per-slot mode (LP-0MSG5TA7Y002GN39): when the payload serves per-slot
- * identity AND 0 < N < total, the free count comes from the slots array
- * (which identifies WHICH slots are free) so the same N slots can be
- * required; the count-based logic is unchanged for N ≤ 0 / N ≥ total.
- *
- * Spare-capacity relaxation (parent WL-0MT32F90V008UAD2): in per-slot mode
- * the global gate is the per-slot-safe subset (server up + no model switch
- * only) — a query/lease tied to a busy slot is the operator's own session
- * and must not block dispatch into the free slots (F1 tests AC1/AC2).
- *
- * Count-based spare-capacity (WL-0MUFP30T2003OX1F): when per-slot identity is
- * unusable (stale/empty `slots`) but 0 < N < total AND a local lease is held,
- * the same relaxation applies to the proxy's `available_slots` count (after
- * reserving possibly-idle leased slots) instead of stalling for the whole
- * lease.
+ * With usable per-slot detail:
+ *  - spare-capacity mode (0 < N < total): the relaxed global gate applies
+ *    (server up + no model switch only) — a query/lease tied to a busy slot
+ *    is the operator's own session and must not block dispatch into the
+ *    free slots (parent WL-0MT32F90V008UAD2). The budget is the per-slot
+ *    free count.
+ *  - all-slots-free mode (N ≤ 0 / N ≥ total): the full `globalIdleChecks`
+ *    apply (unchanged). N ≤ 0 requires every slot free; N > total can never
+ *    be satisfied.
  */
 export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): boolean {
   const total = status.total_slots;
   if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
 
-  // Per-slot mode: usable per-slot identity present AND 0 < N < total. The
-  // relaxed global gate applies (server up + no model switch); the slot
-  // requirement is the per-slot free count.
+  // Fail-closed (WL-0MUXVPXAZ005RESW): without usable per-slot detail there
+  // is no trustworthy availability signal — never fall back to the count.
   const perSlotSlots = usablePerSlotSlots(status);
-  if (
-    perSlotSlots !== null &&
-    requiredFreeSlots > 0 &&
-    requiredFreeSlots < total
-  ) {
+  if (perSlotSlots === null) return false;
+
+  const spareCapacity = requiredFreeSlots > 0 && requiredFreeSlots < total;
+  if (spareCapacity) {
     if (!perSlotGlobalIdleChecks(status)) return false;
-    // Fail-closed counting: an entry without an explicit boolean
-    // `is_processing` is treated as processing (busy), never free. Owned
-    // slots (live lease) are excluded (AC5, WL-0MTYZXSLN008HZOW).
-    const free = countFreeUnownedSlots(perSlotSlots);
-    return free >= requiredFreeSlots;
+  } else if (!globalIdleChecks(status)) {
+    return false;
   }
 
-  // Count-based spare-capacity (WL-0MUFP30T2003OX1F): multi-slot config with
-  // 0 < N < total but no usable per-slot identity, and a held lease. The
-  // strict all-slots-free fallback below would stall for the whole (adaptive)
-  // lease; the proxy's count says the capacity is real.
-  if (
-    ownerLeaseCount(status) > 0 &&
-    requiredFreeSlots > 0 &&
-    requiredFreeSlots < total
-  ) {
-    return countBasedSpareCapacity(status, requiredFreeSlots);
-  }
-
-  const effective = requiredFreeSlots > 0 && requiredFreeSlots < total
-    ? total
-    : requiredFreeSlots;
-  return isIdleStatus(status, effective);
+  const required = requiredFreeSlots <= 0 ? total : requiredFreeSlots;
+  if (required > total) return false; // N > total_slots can never be idle
+  // Fail-closed counting: an entry without an explicit boolean
+  // `is_processing` is treated as processing (busy), never free. Owned
+  // slots (live lease) are excluded (AC5, WL-0MTYZXSLN008HZOW).
+  return countFreeUnownedSlots(perSlotSlots) >= required;
 }
 
 // ── Idle-duration tracker (implemented — F3) ──────────────────────────
@@ -1049,7 +987,7 @@ function parseLocalOwnerSessionIds(value: unknown): string[] {
 
 /**
  * The first (primary) owner session id — kept for compatibility with existing
- * call sites (`local_lease_active` derivation, `ownerLeaseHeld`). Returns
+ * call sites (`local_lease_active` derivation). Returns
  * `undefined` when no owner session is reported. See
  * {@link parseLocalOwnerSessionIds}.
  */
@@ -1074,7 +1012,6 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
   const o = raw as Record<string, unknown>;
 
   if (typeof o.llama_server_running !== 'boolean') return null;
-  if (typeof o.active_query !== 'boolean') return null;
   if (typeof o.model_switch_in_progress !== 'boolean') return null;
 
   // Local-only signal (LP-0MSL2ZLLS009RVKR): absent on pre-fix proxies.
@@ -1186,7 +1123,6 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
 
   return {
     llama_server_running: o.llama_server_running,
-    active_query: o.active_query,
     local_active_query: localActiveQuery,
     model_switch_in_progress: o.model_switch_in_progress,
     local_lease_active: localLeaseActive,
@@ -1488,6 +1424,8 @@ export type MostImportantItemResult =
   | { ok: true; nonTerminalCooldownHold: true }
   /** The only remaining offerable candidates have exhausted their per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
   | { ok: true; attemptBudgetHold: true }
+  /** A stalled pane was resumed in place this cycle (WL-0MUYMBSA90092QV2): the instance must NOT offer new work — the resumed pane is the preferred work. Neutral: not an error, not a CLI strike, not a no-candidate cooldown. */
+  | { ok: true; stalledResume: true }
   | { ok: false; error?: string };
 
 
@@ -1554,6 +1492,10 @@ export interface HerdrPaneRecord {
   label?: string;
   agent?: string;
   agentStatus?: string;
+  /** Pane working directory (worklog-root hint for cross-root resume). */
+  cwd?: string;
+  /** Raw `agent_session` field (session log path + agent metadata). */
+  agentSession?: HerdrAgentSession;
 }
 
 /**
@@ -1564,53 +1506,28 @@ export interface HerdrPaneRecord {
 export const DOWNTIME_PANE_LABEL_PREFIX = 'Downtime';
 
 /**
- * Parse `herdr pane list` JSON output into records. Tolerates log lines
- * prefixed before the JSON envelope (scan for the first `{`, like
- * `parseAgentListOutput`), the `{result:{panes:[…]}}` envelope, and a bare
- * array. Returns `null` when no pane array can be found (the caller treats
- * this as a failed liveness query → fail-closed).
+ * Parse `herdr pane list` JSON output into records. Thin adapter over the
+ * shared {@link parseHerdrPaneCloseList} contract (WL-0MUYMBMCG000Z4WP): the
+ * reaper and the dispatcher must never drift into two parsers. Tolerates log
+ * lines/prefixes before the JSON envelope, the `{result:{panes:[…]}}` /
+ * `{panes:[…]}` shapes and a bare array. Returns `null` when no pane array can
+ * be found (the caller treats this as a failed liveness query → fail-closed).
+ *
+ * Records carry the pane's `cwd` and raw `agent_session` alongside
+ * `paneId`/`label`/`agent`/`agentStatus` so a stalled pane for an item in
+ * another worklog root can be resumed against that root.
  */
 export function parseHerdrPaneListOutput(raw: string): HerdrPaneRecord[] | null {
-  const start = raw.indexOf('{');
-  if (start < 0) return null;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw.slice(start));
-  } catch {
-    return null;
-  }
-
-  let panes: unknown = null;
-  if (payload && typeof payload === 'object') {
-    const obj = payload as Record<string, unknown>;
-    const result = obj.result;
-    const resultObj =
-      result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
-    if (Array.isArray(resultObj?.panes)) {
-      panes = resultObj.panes;
-    } else if (Array.isArray(obj.panes)) {
-      panes = obj.panes;
-    }
-  }
-  if (!Array.isArray(panes)) return null;
-
-  const records: HerdrPaneRecord[] = [];
-  for (const entry of panes) {
-    if (!entry || typeof entry !== 'object') continue;
-    const rec = entry as Record<string, unknown>;
-    const paneId = rec.pane_id ?? rec.paneId;
-    if (typeof paneId !== 'string' || paneId === '') continue;
-    const label = typeof rec.label === 'string' ? rec.label : undefined;
-    const agent = typeof rec.agent === 'string' ? rec.agent : undefined;
-    const agentStatus =
-      typeof rec.agent_status === 'string'
-        ? rec.agent_status
-        : typeof rec.agentStatus === 'string'
-          ? rec.agentStatus
-          : undefined;
-    records.push({ paneId, label, agent, agentStatus });
-  }
-  return records;
+  const parsed = parseHerdrPaneCloseList(raw);
+  if (parsed === null) return null;
+  return parsed.map((pane) => ({
+    paneId: pane.paneId,
+    label: pane.label,
+    agent: pane.agent,
+    agentStatus: pane.agentStatus,
+    cwd: pane.cwd,
+    agentSession: pane.agentSession,
+  }));
 }
 
 /**
@@ -2228,6 +2145,30 @@ export interface DowntimeWorkerDeps {
    */
   markNeedsProducerReview?(itemId: string, cwd: string): Promise<boolean>;
   /**
+   * Machine-wide stalled-work scan (WL-0MUYMBSA90092QV2 AC1/AC4): scan every
+   * `herdr pane list` record for a pane hosting a non-terminal item whose
+   * agent has stopped working, and return the resumable candidates (each
+   * carrying its OWN worklog root). Consulted ONCE per idle cycle,
+   * immediately before new-item selection. OPTIONAL — when absent (or when
+   * `resumeStalledPane` is absent) the scan degrades to "no stalled resume"
+   * and normal dispatch proceeds unchanged. Must never throw: an
+   * unreadable/unparseable scan resolves an empty array.
+   */
+  scanStalledPanes?(cwd: string, opts: StalledScanOptions): Promise<StalledPaneCandidate[]>;
+  /**
+   * Attempt an in-place resume of ONE stalled candidate (WL-0MUYMBSA90092QV2
+   * AC2/AC6): prompt a live agent with `continue`, or relaunch pi in the SAME
+   * pane continuing its session and then submit `continue`. Records a
+   * dispatch attempt on success so the existing per-item/per-kind cap
+   * applies. OPTIONAL (see `scanStalledPanes`). Must never throw: every
+   * failure is a NEUTRAL `{resumed:false}` outcome — never a strike, never a
+   * crash, never a duplicate pane.
+   */
+  resumeStalledPane?(
+    candidate: StalledPaneCandidate,
+    opts: StalledScanOptions,
+  ): Promise<StalledResumeOutcome>;
+  /**
    * Record a persistent CLI-error event (three consecutive wl failures).
    * Must never throw (fail-closed): logging must not crash the worker.
    */
@@ -2406,6 +2347,16 @@ export interface DowntimeDispatchOutcome {
   timeoutMs?: number;
   /** Work item id being dispatched (set on dispatch-tier failures). */
   workItemId?: string;
+
+  /**
+   * True when this successful dispatch was sourced from the leader's OWN
+   * backlog beyond the sprint-view window by the fallback (parent
+   * WL-0MUU4XFU90008E24 AC1/AC4). The worker loop uses this machine-readable
+   * surface to perform the voluntary `releaseLeadership()` step-down exactly
+   * once per own-backlog dispatch, and never for a normal in-view dispatch.
+   * Absent/false on every other outcome.
+   */
+  ownBacklogDispatch?: boolean;
 }
 
 /**
@@ -2538,6 +2489,7 @@ export async function fetchExtendedHerdrItems(
   deps: DowntimeWorkerDeps,
   cwd: string,
   current: DowntimeHerdrItem[],
+  opts: { includeNonCritical?: boolean } = {},
 ): Promise<DowntimeHerdrItem[]> {
   try {
     const extended = await deps.getHerdrListHead(
@@ -2547,8 +2499,13 @@ export async function fetchExtendedHerdrItems(
     if (!extended.ok) return [];
     const seen = new Set(current.map((i) => i.id));
     // Critical-only escape hatch: a non-critical item beyond the sprint view
-    // is never dispatchable (WL-0MUNS8X97007C9H9 AC2/AC4).
-    return extended.items.filter((i) => !seen.has(i.id) && i.priority === 'critical');
+    // is never dispatchable (WL-0MUNS8X97007C9H9 AC2/AC4). When
+    // `includeNonCritical` is true (used by the own-backlog fallback — parent
+    // WL-0MUU4XFU90008E24), the filter is lifted so any ranked item in the
+    // extended tail is returned.
+    return extended.items.filter((i) =>
+      !seen.has(i.id) && (opts.includeNonCritical === true || i.priority === 'critical'),
+    );
   } catch {
     return []; // fail-open: the extension never breaks a defined outcome
   }
@@ -2646,6 +2603,57 @@ async function flagBudgetExhausted(
   } catch {
     // fail-closed: a flag write failure must never crash the worker
   }
+}
+
+/**
+ * Neutral outcome reason when a stalled pane was resumed in place instead of
+ * dispatching new work (WL-0MUYMBSA90092QV2 AC1/AC3): the cycle short-circuits
+ * with `dispatched:false` and this reason. NEVER a strike, NEVER a cooldown —
+ * the next idle tick re-evaluates from scratch.
+ */
+export const STALLED_RESUME_REASON = 'stalled-resume';
+
+/**
+ * Consult the stalled-work scan ONCE and, if it yields a candidate, attempt to
+ * resume the first one in place (WL-0MUYMBSA90092QV2 AC1/AC4). Returns true
+ * when a stalled pane was successfully resumed — the caller MUST then
+ * short-circuit new-item dispatch for the cycle (preference ordering).
+ *
+ * FAIL-SAFE: unwired deps, a disabled scan, a thrown scan, an unreadable pane
+ * list / unparseable output (the production scan resolves an empty list) and
+ * every `{resumed:false}` outcome all return false, so the existing dispatch
+ * path proceeds unchanged — never a crash, never a duplicate.
+ */
+export async function resumeStalledWorkIfAble(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+  opts: StalledScanOptions,
+): Promise<boolean> {
+  // Unwired deps / disabled scan degrade to normal dispatch (AC2/AC3).
+  if (opts.enabled !== true) return false;
+  if (
+    typeof deps.scanStalledPanes !== 'function' ||
+    typeof deps.resumeStalledPane !== 'function'
+  ) {
+    return false;
+  }
+  let candidates: StalledPaneCandidate[];
+  try {
+    const scanned = await deps.scanStalledPanes(cwd, opts);
+    if (!Array.isArray(scanned)) return false;
+    candidates = scanned;
+  } catch {
+    return false; // fail-safe: never crash dispatch on a broken scan
+  }
+  for (const candidate of candidates) {
+    try {
+      const outcome = await deps.resumeStalledPane(candidate, opts);
+      if (outcome.resumed) return true;
+    } catch {
+      // A thrown resume is neutral — try the next candidate, then fall through.
+    }
+  }
+  return false;
 }
 
 async function dispatchFromHerdrList(
@@ -3583,6 +3591,8 @@ export async function computeMostImportantItem(
   markerStaleWindowMs: number = DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   nonTerminalCooldownMs: number = DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   maxAttempts: number = DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+  stallScanEnabled: boolean = true,
+  stallThresholdMs: number = DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
 ): Promise<MostImportantItemResult> {
   // The check-in (and the worker's no-candidate probe) requires the Herdr
   // head lookup: without it there is no canonical ranking to offer from —
@@ -3592,6 +3602,22 @@ export async function computeMostImportantItem(
   }
   const freezeStatus = deps.readCodeFreezeStatus(cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+
+  // ── Stalled-work scan (WL-0MUYMBSA90092QV2 AC4) ──
+  // Consult the scan FIRST, before any new-item selection: a successfully
+  // resumed stalled pane is the preferred work, so the instance offers
+  // NOTHING this cycle (the caller keeps its entry / does not pause).
+  if (stallScanEnabled) {
+    const resumed = await resumeStalledWorkIfAble(deps, cwd, {
+      enabled: stallScanEnabled,
+      frozen,
+      thresholdMs: stallThresholdMs,
+      nonTerminalCooldownMs,
+      maxAttempts,
+      now,
+    });
+    if (resumed) return { ok: true, stalledResume: true };
+  }
 
   // The dispatch window is the sprint view: the live per-root
   // `browseItemCount`, clamped exactly as the TUI worklist does
@@ -3871,7 +3897,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; spawnConfig?: DowntimeSpawnConfig },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; spawnConfig?: DowntimeSpawnConfig },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -3899,6 +3925,24 @@ export async function dispatchFromCoordination(
     // No slot can host a pane — nothing to dispatch (mirrors the legacy
     // tier chain's 0-free-slots defensive no-candidate).
     return { dispatched: false, reason: 'no-candidate' };
+  }
+
+  // ── Stalled-work scan (WL-0MUYMBSA90092QV2 AC1/AC3/AC4) ──
+  // Idle-gated (free slot present) and immediately before new-item
+  // selection: prefer resuming a stalled pane over opening a new one. A
+  // successful resume short-circuits the cycle with the neutral
+  // 'stalled-resume' reason; any failure (unwired deps, unreadable pane
+  // list, resume failure) falls through to the unchanged path below.
+  {
+    const resumed = await resumeStalledWorkIfAble(deps, opts.cwd, {
+      enabled: opts.stallScanEnabled ?? true,
+      frozen,
+      thresholdMs: opts.stallScanThresholdMs ?? DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+      nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+      maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+      now,
+    });
+    if (resumed) return { dispatched: false, reason: STALLED_RESUME_REASON };
   }
 
   // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
@@ -3941,6 +3985,10 @@ export async function dispatchFromCoordination(
   };
   const cooldownMs = opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
   let cooldownHold = false;
+  // Dispatched-marker staleness window (WL-0MU6UL0RJ008IHGT): forwarded to
+  // the own-backlog fallback's marker exclusion (the offer path consults the
+  // marker through `fetchItem` + staleness maps below).
+  const markerStaleWindowMs = opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS;
   // Per-item/per-kind attempt-budget hold (WL-0MUKYEXMK0033MFK): neutral hold
   // — the backlog is not empty, so the caller must not pause or drop the
   // entry. A flagged set keeps the producer-review flag to at most one write
@@ -4148,6 +4196,134 @@ export async function dispatchFromCoordination(
     };
   }
 
+  // ── Own-backlog fallback (parent WL-0MUU4XFU90008E24 AC1–AC9) ──────
+  // Only reached when the coordination offer list yielded no dispatchable
+  // candidate. The leader MAY then read its OWN backlog beyond the
+  // sprint-view window: a bounded WINDOW EXTENSION of the SAME canonical
+  // ranking (`getHerdrListHead`), never a second ranking, and ONLY against
+  // the leader's own `opts.cwd` (never another instance's root — AC2). Every
+  // existing safety gate is applied as a sequential filter (AC7):
+  // classify (producer review / freshness / caps), dispatched-marker
+  // exclusion, attempt budget, non-terminal cooldown, code-freeze,
+  // audit slot minimum, in-flight (critical) and the review-queue hold.
+  // The window is bounded by `DOWNTIME_DISPATCH_EXTEND_MAX` (AC9).
+  // Fail-open: a `{ok:false}`/thrown/empty lookup resolves `[]`, leaving the
+  // original terminal reason unchanged and never panicking (AC9). A
+  // successful own-backlog dispatch is flagged `ownBacklogDispatch` so the
+  // worker loop steps down leadership exactly once (AC4); a normal in-view
+  // dispatch never reaches this block.
+  {
+    const sprintWindow = resolveSprintViewWindow(opts.browseItemCount);
+    // Fail-open (AC9): a thrown own-root lookup must leave the original
+    // terminal reason unchanged and never panic.
+    let ownHead: DowntimeHerdrListResult | null = null;
+    try {
+      ownHead = await deps.getHerdrListHead(opts.cwd, sprintWindow);
+    } catch {
+      ownHead = null;
+    }
+    if (ownHead !== null && ownHead.ok) {
+      const ownTail = await fetchExtendedHerdrItems(deps, opts.cwd, ownHead.items, {
+        includeNonCritical: true,
+      });
+      if (ownTail.length > 0) {
+        const ownEntries = await cooldownEntriesForRoot(opts.cwd);
+        const ownMarkerMaps: Record<DowntimeSkillKind, Map<string, DispatchMarker>> = {
+          audit: _dispatchedMarkers(ownEntries, 'audit'),
+          implement: _dispatchedMarkers(ownEntries, 'implement'),
+          plan: _dispatchedMarkers(ownEntries, 'plan'),
+          intake: _dispatchedMarkers(ownEntries, 'intake'),
+          'risk-effort': _dispatchedMarkers(ownEntries, 'risk-effort'),
+        };
+        const ownInFlight = await inFlightForRoot(opts.cwd);
+        const flaggedForOwnBudget = new Set<string>();
+        for (const item of ownTail) {
+          // Sequential filters — the same contract as the offer path.
+          const kind = classifyItemForDispatch(item, now);
+          if (kind === null) continue;
+          const marker = ownMarkerMaps[kind]?.get(item.id);
+          if (
+            marker !== undefined &&
+            _markerStillExcludes(
+              marker,
+              item.stage,
+              now,
+              markerStaleWindowMs,
+              kind === 'audit' || kind === 'implement' ? 'id-guard' : 'stage-guard',
+            )
+          ) {
+            continue;
+          }
+          if (isAttemptBudgetExhausted(ownEntries, item.id, kind, item.stage, maxAttempts)) {
+            if (!flaggedForOwnBudget.has(item.id)) {
+              flaggedForOwnBudget.add(item.id);
+              await flagBudgetExhausted(deps, item.id, opts.cwd);
+            }
+            budgetHold = true;
+            continue;
+          }
+          if (_isNonTerminalCooldownActive(ownEntries, item.id, kind, item.stage, cooldownMs, now)) {
+            cooldownHold = true;
+            continue;
+          }
+          if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) continue;
+          if (kind === 'audit' && !auditEligible) continue;
+          if (item.priority === 'critical') {
+            const guard = evaluateCriticalFirstGuard(
+              item.id,
+              ownInFlight,
+              marker?.dispatchedAt,
+              now,
+              markerStaleWindowMs,
+            );
+            if (!guard.escalate) {
+              inFlightHold = true;
+              continue;
+            }
+          }
+          if (kind === 'implement') {
+            const gate = await reviewGateForRoot(opts.cwd);
+            if (isImplementHeldByReviewGate(kind, item, gate)) {
+              reviewHold = true;
+              continue;
+            }
+          }
+          const ownOutcome = await dispatchClaimedTier(
+            deps,
+            kind,
+            {
+              id: item.id,
+              title: item.title,
+              stage: kind === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
+              status: item.status,
+              priority: item.priority,
+              sortIndex: item.sortIndex,
+            },
+            {
+              model: opts.model,
+              cwd: opts.cwd,
+              selectionPath: 'own-backlog',
+              selectionReason: 'own-backlog-fallback',
+              spawnConfig: opts.spawnConfig,
+            },
+          );
+          if (ownOutcome.dispatched) {
+            return { ...ownOutcome, ownBacklogDispatch: true };
+          }
+          // A lost CAS race / marker-recovery rollback applies to one
+          // candidate: try the next ranked own-backlog item.
+          if (ownOutcome.reason === 'claim-failed' || ownOutcome.reason === 'claim-rolled-back') {
+            continue;
+          }
+          // Any other terminal outcome (wl-error / spawn-failed /
+          // anchor-unavailable / marker-write-failed) is returned unchanged
+          // so the caller's strike/skip semantics are preserved.
+          return ownOutcome;
+        }
+      }
+    }
+  }
+
   // No offer survived the dispatch-time filters (or a freeze skip with no
   // plan/intake offers). The caller decides cooldown vs. resume via the
   // same reason semantics as the legacy dispatcher — in the worker tick,
@@ -4198,17 +4374,26 @@ export async function runCoordinationCheckIn(
   now: number = Date.now(),
 ): Promise<{ offered: string | null; updated: boolean }> {
   const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
-  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs, coordinator.nonTerminalCooldownMs, coordinator.maxAttempts);
+  // NOTE (WL-0MUYMBSA90092QV2 AC3): the check-in is NOT idle-gated (it runs
+  // before the proxy poll, for leader and non-leader alike), so the
+  // stalled-work scan is deliberately DISABLED here — resuming a pane is a
+  // dispatch-like side effect that must only run when the dispatcher is
+  // idle-gated and would otherwise dispatch. The idle-gated paths
+  // (`dispatchDowntimeWork` / `dispatchFromCoordination` / the no-candidate
+  // probe below) perform the scan+resume.
+  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs, coordinator.nonTerminalCooldownMs, coordinator.maxAttempts, false);
   if (!result.ok) {
     // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
     return { offered: current?.workItemId ?? null, updated: false };
   }
   if (!('candidate' in result)) {
-    // Genuinely nothing dispatchable (`noCandidate`) OR the deep-queue hold
-    // left nothing offerable (`reviewQueueHold`, WL-0MTTSWC1X005P4VD) —
-    // either way the own entry is removed (no dead offers; the owner
-    // re-offers once work becomes offerable). The caller distinguishes the
-    // two via the probe path (reviewQueueHold must never pause).
+    // Genuinely nothing dispatchable (`noCandidate`), the deep-queue hold
+    // left nothing offerable (`reviewQueueHold`, WL-0MTTSWC1X005P4VD), or a
+    // stalled pane was resumed in place (`stalledResume`,
+    // WL-0MUYMBSA90092QV2) — either way the own entry is removed (no dead
+    // offers; the owner re-offers once work becomes offerable). The caller
+    // distinguishes the reasons via the probe path (reviewQueueHold and
+    // stalledResume must never pause).
     const removed = removeEntry(coordinator.coordinationDir, coordinator.instanceId) !== null;
     // Audit trail (WL-0MSXHAE290067VAL): log the emptied check-in.
     void appendCoordinationLogEntry(coordinator.cwd, {
@@ -4410,6 +4595,19 @@ export async function dispatchDowntimeWork(
      * falls back to `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (3).
      */
     maxAttempts?: number;
+    /**
+     * Stalled-work scan enable (WL-0MUYMBSA90092QV2 AC2/AC3): read live from
+     * `downtimeStallScanEnabled`. Optional — absent defaults to enabled; the
+     * scan is `inert` unless `scanStalledPanes`/`resumeStalledPane` deps are
+     * wired, so an unwired caller is unaffected.
+     */
+    stallScanEnabled?: boolean;
+    /**
+     * Stalled-work stall threshold ms (WL-0MUYMBSA90092QV2): read live from
+     * `downtimeStallThresholdMs` (clamped). Optional — absent falls back to
+     * `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS` (5 min).
+     */
+    stallScanThresholdMs?: number;
     /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
     spawnConfig?: DowntimeSpawnConfig;
   },
@@ -4481,6 +4679,23 @@ export async function dispatchDowntimeWork(
     // implement-kind candidate (Q1 split-by-skill) — see the tier comment.
     const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+
+    // ── Stalled-work scan (WL-0MUYMBSA90092QV2 AC1/AC3/AC4) ──
+    // Idle-gated (a pane slot is free) and immediately before new-item
+    // selection: prefer resuming a stalled pane over opening a new one. A
+    // successful resume short-circuits the cycle with the neutral
+    // 'stalled-resume' reason; any failure (unwired deps, unreadable pane
+    // list, resume failure) falls through to the unchanged path below.
+    if (panesEligible) {
+      const resumed = await resumeStalledWorkIfAble(deps, opts.cwd, {
+        enabled: opts.stallScanEnabled ?? true,
+        frozen,
+        thresholdMs: opts.stallScanThresholdMs ?? DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+        nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+        maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+      });
+      if (resumed) return { dispatched: false, reason: STALLED_RESUME_REASON };
+    }
 
     if (!frozen && panesEligible) {
       const duePrompt = await deps.getDueScheduledPrompt(opts.cwd);
@@ -5040,11 +5255,45 @@ export function buildDowntimeSpawnOptions(
     // no audit-skill change needed. Interactive (non-downtime) panes are
     // unaffected.
     env: {
-      ...process.env,
+      ...scrubRepositoryOverrides(process.env),
       HERDR_RESOLVED_CWD: cwd,
       AUDIT_PHASE2_PARALLELISM: parallelism,
     },
   };
+}
+
+/**
+ * Git environment variables that override the repository a `git` command
+ * operates on. Git honours these over `cwd`, so a value leaked into a
+ * spawned pane can redirect a `git` command into a live checkout
+ * (SA-0MUIZSXEY008NGR8 / WL-0MV0TZEWZ003ZXEB). Mirrors the canonical list in
+ * `skill/shared/git_sandbox.py::REPOSITORY_OVERRIDE_ENV_VARS`.
+ */
+export const REPOSITORY_OVERRIDE_ENV_VARS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_CONFIG',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_NOSYSTEM',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+] as const;
+
+/**
+ * Return a copy of *env* with every repository-override git variable removed.
+ * The input mapping is never mutated. Used by
+ * {@link buildDowntimeSpawnOptions} so a launcher-side leak cannot be
+ * forwarded to the spawned pane and its descendants (test subprocesses).
+ */
+export function scrubRepositoryOverrides(
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const cleaned: NodeJS.ProcessEnv = { ...env };
+  for (const name of REPOSITORY_OVERRIDE_ENV_VARS) {
+    delete cleaned[name];
+  }
+  return cleaned;
 }
 
 /** Default spawn: detached, stdio ignored, resolved cwd forwarded. */
@@ -5337,6 +5586,16 @@ export interface DowntimeWorkerConfig {
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h).
      */
     markerStaleWindowMs?: number;
+    /**
+     * Stalled-work scan enable (WL-0MUYMBSA90092QV2): read live on every tick.
+     * Optional for backward compat — defaults to enabled.
+     */
+    stallScanEnabled?: boolean;
+    /**
+     * Stalled-work stall threshold, ms (WL-0MUYMBSA90092QV2): read live on
+     * every tick. Optional — defaults to `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`.
+     */
+    stallScanThresholdMs?: number;
     /**
      * Pane-lifecycle monitor cadence, ms (WL-0MU308WSF0002JWN). Optional —
      * defaults to `DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS` (30 s). Tests may
@@ -6029,8 +6288,28 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // dispatch, parent WL-0MT32F90V008UAD2). A slot reporting processing
       // resets only its own timer.
       const perSlotSlots = usablePerSlotSlots(status);
+      // Fail-closed precondition (WL-0MUXVPXAZ005RESW): unusable per-slot
+      // detail — absent, empty (`slots: []`), or stale (`slots_stale: true`)
+      // — means there is NO trustworthy availability signal. Refuse to
+      // dispatch and record the distinct `slots-unavailable` reason so the
+      // stop is observable in the decision log and header (never fall back
+      // to the count-based path).
+      if (perSlotSlots === null) {
+        tracker.record(false);
+        perSlotTracker.record([]); // fail-closed: reset every slot timer
+        void recordDecision(cfg.cwd, 'slots-unavailable', {
+          freeSlots: 0,
+          totalSlots: status.total_slots,
+          ownerPresent: status.local_lease_active === true,
+          runningPanes: null,
+          contentionDepth:
+            typeof status.contention_queue_depth === 'number'
+              ? status.contention_queue_depth
+              : 0,
+        });
+        return { polled: true, dispatched: false, idle: false };
+      }
       const perSlotMode =
-        perSlotSlots !== null &&
         cfg.requiredFreeSlots > 0 &&
         cfg.requiredFreeSlots < status.total_slots;
 
@@ -6084,20 +6363,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
 
       // ── Dispatch (parent WL-0MST3OJ8S0001ROL AC4, F5 WL-0MTII48OV008P2QU AC4) ──
       // Single machine-wide slot budget: ONE leader poll → ONE freeSlots
-      // snapshot (per-slot free count when `slots` served, else
-      // `available_slots`), forwarded to the sole dispatch call. No
-      // per-worklog duplication — total concurrently dispatched never exceeds
-      // the shared budget (WL-0MT50LKAK001EF5Q single cap source). Per-tier
-      // minimums (WL-0MT32F90V008UAD2 AC3): audit needs ≥2 (parent + Phase 2
-      // child), single-pane tiers need ≥1; idle-duration gate (configured N)
-      // is unchanged and shared.
-      // Count-based: the proxy's own free-slot count (historical behaviour).
-      // The lease reserve in `countBasedSpareCapacity` is a GATE only — the
-      // reported budget stays the proxy figure so the strict single-slot path
-      // and its decision log are unchanged.
-      const freeSlots = perSlotSlots
-        ? countFreeUnownedSlots(perSlotSlots)
-        : status.available_slots;
+      // snapshot derived from the per-slot array — the ONLY trusted
+      // availability source (fail-closed contract, WL-0MUXVPXAZ005RESW) —
+      // forwarded to the sole dispatch call. No per-worklog duplication —
+      // total concurrently dispatched never exceeds the shared budget
+      // (WL-0MT50LKAK001EF5Q single cap source). Per-tier minimums
+      // (WL-0MT32F90V008UAD2 AC3): audit needs ≥2 (parent + Phase 2 child),
+      // single-pane tiers need ≥1; idle-duration gate (configured N) is
+      // unchanged and shared. The untrusted `available_slots` count is NEVER
+      // used as a dispatch budget.
+      const freeSlots = countFreeUnownedSlots(perSlotSlots);
 
       // Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME): the
       // genuine free-slot snapshot (never the total budget), the current
@@ -6115,21 +6390,21 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
               concurrentDispatchCap: cfg.concurrentDispatchCap ?? DISPATCH_PIPELINE_SINGLE_FLIGHT,
             };
 
-      // ── Running-pane liveness (owner-lease qualifier only) ──
+      // ── Running-pane liveness (decision-log telemetry only) ──
       // Count dispatched downtime panes that are STILL ALIVE (machine-wide,
       // across roots and leader/instance restarts).
       //
       // NOTE (WL-0MU2EP6JL006A1U3): this count is deliberately NOT a dispatch
       // cap. Dispatched panes stay open until an operator closes them, so
       // gating on it allows exactly one dispatch per pane-close (the overnight
-      // stall). It is consulted ONLY to qualify the owner-lease gate below
-      // ("does this worker have a pane of its own?"). Capacity is limited by
+      // stall). With the fail-closed contract (WL-0MUXVPXAZ005RESW) the
+      // ownership gate is derived from the trusted per-slot array, so this
+      // count is reported in the decision log only. Capacity is limited by
       // the local LLM idle / free-slot check alone.
       //
-      // Fail-open: a failed query yields `null` → no known worker pane → the
-      // qualifier is inactive and dispatch proceeds (the proxy's own lease
-      // signal still gates slot capacity). A `herdr pane list` hiccup must
-      // never silently stop the dispatcher.
+      // Fail-open: a failed query yields `null` → no known worker pane is
+      // reported (the proxy's own lease signal still gates slot capacity). A
+      // `herdr pane list` hiccup must never silently stop the dispatcher.
       let runningPanes: number | null = null;
       if (typeof opts.deps.getRunningDowntimePanes === 'function') {
         try {
@@ -6141,46 +6416,18 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       }
 
       // ── Owner-lease + contention gates (AC2/AC5/AC6) ──
-      // `slotOwned`: a non-null global Local Proxy owner lease means the
-      // target slot is owned by a live pane — only dispatch into a truly
-      // unowned slot. When per-slot identity is served, ownership is
-      // already excluded from `freeSlots` above; the global owner is the
-      // fallback signal for count-based (single-slot) setups.
+      // `slotOwned`: no free UNOWNED slot remains (every slot is processing
+      // or lease-owned), so a new pane must not be dispatched. Under the
+      // fail-closed contract (WL-0MUXVPXAZ005RESW) the budget and the
+      // ownership qualifier both come from the SAME per-slot array (the only
+      // trusted availability source), so the two gates can never disagree.
       //
-      // Per-slot gate (WL-0MU8807BI008C9ME): in per-slot mode, the owner
-      // lease must NOT block dispatch into free unowned slots. The gate
-      // fires only when countFreeUnownedSlots === 0 (all slots owned or
-      // busy). In count-based mode the original conservative gate is
-      // preserved: an owned sole slot blocks dispatch when runningPanes > 0.
-      //
-      // Per-slot mode reuses the SAME predicate as the idle-capacity gate
-      // above and `evaluateIdle` (`slots` served AND 0 < N < total). Sharing
-      // one definition keeps the ownership gate from ever being stricter
-      // than the capacity gate that admitted the tick — a divergent check
-      // would re-introduce exactly the stall this RCA fixes.
-      //
-      // `slotOwned` is qualified on a known running-pane count > 0 so an
-      // OPERATOR lease on a spare-capacity multi-slot setup does not block
-      // dispatch into the free slots when the worker has no running pane
-      // of its own. The lease is NOT short-lived: the proxy holds an
-      // ADAPTIVE lease up to `LOCAL_DISPATCH_LEASE_MAX_SECONDS` (default
-      // 1500 s, cross-repo `llm-manager`), so an idle-but-open pane CAN block
-      // the count-based path for its whole run — the historical "~180 s"
-      // assumption was wrong (WL-0MU8809SZ0022VZG). The per-slot path
-      // (WL-0MU8807BI008C9ME) is what keeps a dispatched pane's own lease
-      // from blocking the OTHER free unowned slots.
-      const ownerLeaseHeld = ownerLeaseCount(status) > 0;
-      // Count-based spare-capacity (WL-0MUFP30T2003OX1F): when per-slot
-      // identity is unusable and 0 < N < total, a held lease no longer blocks
-      // dispatch into the proxy-reported spare slots. This mirrors the
-      // `evaluateIdle` relaxation exactly, so the idle gate and the ownership
-      // gate can never disagree.
-      const countBasedSpare =
-        !perSlotMode && countBasedSpareCapacity(status, cfg.requiredFreeSlots);
-      const slotOwned =
-        perSlotMode && perSlotSlots !== null
-          ? countFreeUnownedSlots(perSlotSlots) === 0
-          : ownerLeaseHeld && (runningPanes ?? 0) > 0 && !countBasedSpare;
+      // Per-slot gate (WL-0MU8807BI008C9ME): a busy or owned slot does NOT
+      // block dispatch into the free unowned slots — `slotOwned` fires only
+      // when countFreeUnownedSlots === 0. `ownerPresent` is retained purely
+      // for the decision log (derived from `local_lease_active`).
+      const ownerPresent = status.local_lease_active === true;
+      const slotOwned = countFreeUnownedSlots(perSlotSlots) === 0;
       // LIVE depth only (WL-0MU1DWXO600153OI): `contention_queued_count` is
       // cumulative telemetry and must never gate dispatch.
       const contentionQueueDepth =
@@ -6202,7 +6449,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         void recordDecision(cfg.cwd, 'slot-owned', {
           freeSlots,
           totalSlots: status.total_slots,
-          ownerPresent: ownerLeaseHeld,
+          ownerPresent,
           runningPanes,
           contentionDepth: contentionQueueDepth,
         });
@@ -6212,7 +6459,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         void recordDecision(cfg.cwd, 'proxy-contention', {
           freeSlots,
           totalSlots: status.total_slots,
-          ownerPresent: ownerLeaseHeld,
+          ownerPresent,
           runningPanes,
           contentionDepth: contentionQueueDepth,
         });
@@ -6246,6 +6493,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   browseItemCount: cfg.browseItemCount,
                   nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   maxAttempts: cfg.maxAttempts,
+                  // Dispatched success-marker staleness window
+                  // (WL-0MU6UL0RJ008IHGT): forwarded to the own-backlog
+                  // fallback's marker exclusion.
+                  markerStaleWindowMs: cfg.markerStaleWindowMs,
+                  stallScanEnabled: cfg.stallScanEnabled,
+                  stallScanThresholdMs: cfg.stallScanThresholdMs,
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
@@ -6268,6 +6521,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                 // Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK).
                 maxAttempts: cfg.maxAttempts,
+                // Stalled-work scan before new-item selection
+                // (WL-0MUYMBSA90092QV2).
+                stallScanEnabled: cfg.stallScanEnabled,
+                stallScanThresholdMs: cfg.stallScanThresholdMs,
                 spawnConfig,
               });
         // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
@@ -6279,7 +6536,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           void recordDecision(cfg.cwd, outcome.reason, {
             freeSlots,
             totalSlots: status.total_slots,
-            ownerPresent: ownerLeaseHeld,
+            ownerPresent,
             runningPanes,
             contentionDepth: contentionQueueDepth,
           });
@@ -6292,6 +6549,23 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           // dispatch (AC5).
           tracker.record(false);
           perSlotTracker.record([]);
+          // Voluntary leadership hand-off after an own-backlog fallback
+          // dispatch (parent WL-0MUU4XFU90008E24 AC4/AC5/A3): the fallback
+          // reached beyond the sprint-view window into the leader's own
+          // backlog, so the instance relinquishes leadership so another
+          // instance can win the next election. The claim / marker / spawn
+          // already completed inside `dispatchFromCoordination` before this
+          // point, so the step-down never rolls back a pending dispatch and
+          // the dispatched pane is not orphaned. Exactly once per own-backlog
+          // dispatch (the outcome is consumed here), and never for a normal
+          // in-view dispatch. Setting `leaderState = false` prevents an
+          // immediate self re-election in this tick (the election block runs
+          // at the start of the next tick). Legacy mode (`leaderManager ===
+          // null`) is unchanged.
+          if (outcome.ownBacklogDispatch === true && leaderManager !== null) {
+            leaderManager.releaseLeadership();
+            leaderState = false;
+          }
         } else if (outcome.reason === 'no-candidate') {
           // WL-0MTEZ4XZJ006Y9U7 (AC1): in coordination mode the shared file
           // is an OFFER LIST, not the backlog — after a dispatch the leader
@@ -6312,7 +6586,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           //    and reset the idle tracker (fresh full idle period required
           //    after the pause).
           if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
-            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs, cfg.maxAttempts);
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs, cfg.maxAttempts, cfg.stallScanEnabled, cfg.stallScanThresholdMs);
             if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
               errorStrikes = 0; // the CLI answered — it is healthy
               cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
@@ -7412,6 +7686,21 @@ export function clampDowntimeMaxAttempts(value: number): number {
   return Math.min(
     Math.max(Math.round(value), DOWNTIME_MAX_ATTEMPTS_MIN),
     DOWNTIME_MAX_ATTEMPTS_MAX,
+  );
+}
+
+/**
+ * Clamp the stalled-work scan threshold (WL-0MUYMBK6H005PY16): reject
+ * negative/non-finite (fall back to the 5-minute default) and clamp to
+ * [MIN_DOWNTIME_STALL_THRESHOLD_MS, MAX_DOWNTIME_STALL_THRESHOLD_MS]
+ * (60 s – 60 min) so the scan can neither resume panes that are merely
+ * between tool calls nor leave genuinely stalled panes unattended for hours.
+ */
+export function clampDowntimeStallThresholdMs(value: number): number {
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_STALL_THRESHOLD_MS;
+  return Math.min(
+    Math.max(Math.round(value), MIN_DOWNTIME_STALL_THRESHOLD_MS),
+    MAX_DOWNTIME_STALL_THRESHOLD_MS,
   );
 }
 

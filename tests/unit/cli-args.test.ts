@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { normalizeFieldsArgv } from '../../src/cli-utils.js';
+import { normalizeFieldsArgv, normalizeParentId } from '../../src/cli-utils.js';
 
 describe('normalizeFieldsArgv', () => {
   it('leaves argv without --fields unchanged', () => {
@@ -95,5 +95,56 @@ describe('normalizeFieldsArgv', () => {
       'id, title',
       '--json',
     ]);
+  });
+});
+
+/**
+ * Unit tests for normalizeParentId (WL-0MUJM2LV1000IHKR).
+ *
+ * `wl update <id> --parent null` must detach the item (parentId -> null) rather
+ * than producing the bogus literal `WL-NULL` parent that `normalizeCliId`
+ * would otherwise build. The same sentinel is accepted by `wl create`.
+ */
+describe('normalizeParentId', () => {
+  const PREFIX = 'TEST';
+
+  it('maps the null sentinel to null', () => {
+    expect(normalizeParentId('null', PREFIX)).toBeNull();
+  });
+
+  it('maps the null sentinel case-insensitively', () => {
+    expect(normalizeParentId('NULL', PREFIX)).toBeNull();
+    expect(normalizeParentId('Null', PREFIX)).toBeNull();
+  });
+
+  it('maps none/nil sentinels to null', () => {
+    expect(normalizeParentId('none', PREFIX)).toBeNull();
+    expect(normalizeParentId('NONE', PREFIX)).toBeNull();
+    expect(normalizeParentId('nil', PREFIX)).toBeNull();
+  });
+
+  it('maps a lone dash to null', () => {
+    expect(normalizeParentId('-', PREFIX)).toBeNull();
+  });
+
+  it('maps an empty string to null', () => {
+    expect(normalizeParentId('', PREFIX)).toBeNull();
+  });
+
+  it('maps undefined to null', () => {
+    expect(normalizeParentId(undefined, PREFIX)).toBeNull();
+  });
+
+  it('trims surrounding whitespace before matching a sentinel', () => {
+    expect(normalizeParentId('  null  ', PREFIX)).toBeNull();
+  });
+
+  it('passes a full id through normalizeCliId unchanged', () => {
+    expect(normalizeParentId('wl-0abc123', PREFIX)).toBe('WL-0ABC123');
+    expect(normalizeParentId('WL-0ABC123', PREFIX)).toBe('WL-0ABC123');
+  });
+
+  it('prefixes a bare partial id', () => {
+    expect(normalizeParentId('0abc123', PREFIX)).toBe('TEST-0ABC123');
   });
 });

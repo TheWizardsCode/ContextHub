@@ -6,6 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
 import { validateStatusStageItems } from '../doctor/status-stage-check.js';
 import { validateDependencyEdges } from '../doctor/dependency-check.js';
+import { validateParentReferences } from '../doctor/parent-check.js';
 import { listPendingMigrations, runMigrations } from '../migrations/index.js';
 import { dryRunHooks, upgradeHooks, detectHooksTargetDir, type HookDryRunResult, type HookUpgradeResult } from '../doctor/hook-upgrade.js';
 import { validateFilePaths, applyFilePathsFix, DEFAULT_INTAKE_STAGES } from '../doctor/file-paths-check.js';
@@ -22,6 +23,107 @@ import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, C
 
 interface DoctorOptions {
   prefix?: string;
+}
+
+/**
+ * Pending-upgrade state surfaced by the top-level `wl doctor` action:
+ * schema migrations and git hooks that `wl doctor upgrade` would apply.
+ */
+interface PendingUpgradeState {
+  pendingMigrations: ReturnType<typeof listPendingMigrations>;
+  outdatedHooks: string[];
+  hasPendingUpgrades: boolean;
+}
+
+/**
+ * Detect pending `wl doctor upgrade` work (schema migrations and outdated git
+ * hooks) without applying anything (WL-0MUTVB271007YKJZ). Read-only and
+ * best-effort: any failure degrades to "no pending upgrades" so `wl doctor`
+ * never crashes on a missing DB, a non-git directory or an absent `.githooks/`.
+ */
+function detectPendingUpgrades(): PendingUpgradeState {
+  let pendingMigrations: ReturnType<typeof listPendingMigrations> = [];
+  try {
+    pendingMigrations = listPendingMigrations() ?? [];
+  } catch (_e) {
+    pendingMigrations = [];
+  }
+
+  let outdatedHooks: string[] = [];
+  try {
+    const hooksTargetDir = detectHooksTargetDir();
+    const hooksResult = dryRunHooks('.githooks', hooksTargetDir);
+    outdatedHooks = hooksResult.hooks
+      .filter(h => h.status === 'outdated')
+      .map(h => h.name);
+  } catch (_e) {
+    outdatedHooks = [];
+  }
+
+  return {
+    pendingMigrations,
+    outdatedHooks,
+    hasPendingUpgrades: pendingMigrations.length > 0 || outdatedHooks.length > 0,
+  };
+}
+
+/**
+ * Build the synthetic JSON finding that carries pending-upgrade information.
+ * Emitted additively into the existing findings array so the `wl doctor --json`
+ * top-level shape (a raw array) and its consumers are unchanged.
+ */
+function buildPendingUpgradeFinding(state: PendingUpgradeState): {
+  checkId: string;
+  type: string;
+  severity: string;
+  itemId: string | null;
+  message: string;
+  proposedFix: null;
+  safe: boolean;
+  context: Record<string, unknown>;
+} {
+  const migrationCount = state.pendingMigrations.length;
+  const hookCount = state.outdatedHooks.length;
+  const parts: string[] = [];
+  if (migrationCount > 0) parts.push(`${migrationCount} pending migration${migrationCount === 1 ? '' : 's'}`);
+  if (hookCount > 0) parts.push(`${hookCount} outdated hook${hookCount === 1 ? '' : 's'}`);
+  return {
+    checkId: 'upgrade.pending',
+    type: 'pending-upgrade',
+    severity: 'info',
+    itemId: null,
+    message: `Pending upgrades: ${parts.join(' and ')}. Run \`wl doctor upgrade\`.`,
+    proposedFix: null,
+    safe: false,
+    context: {
+      pendingMigrations: state.pendingMigrations,
+      pendingMigrationCount: migrationCount,
+      outdatedHooks: state.outdatedHooks,
+      outdatedHookCount: hookCount,
+    },
+  };
+}
+
+/**
+ * Print the advisory pending-upgrade notice in human-readable mode. Mirrors
+ * `wl doctor upgrade --dry-run` wording so operators can preview or apply.
+ */
+function printPendingUpgradeNotice(state: PendingUpgradeState): void {
+  console.log('');
+  console.log('Doctor: pending upgrades detected.');
+  if (state.pendingMigrations.length > 0) {
+    console.log(`Pending migrations (${state.pendingMigrations.length}):`);
+    for (const m of state.pendingMigrations) {
+      console.log(` - ${m.id}: ${m.description} (safe=${m.safe})`);
+    }
+  }
+  if (state.outdatedHooks.length > 0) {
+    console.log(`Outdated hooks (${state.outdatedHooks.length}):`);
+    for (const name of state.outdatedHooks) {
+      console.log(` - ${name}`);
+    }
+  }
+  console.log('Run `wl doctor upgrade` to preview pending upgrades, or `wl doctor upgrade --confirm` to apply them.');
 }
 
 export default function register(ctx: PluginContext): void {
@@ -623,6 +725,76 @@ export default function register(ctx: PluginContext): void {
       console.log('Read-only report. Use `wl audit-waive <id> --reason "..."` to record a deliberate exception.');
     });
 
+  // ── Dangling parent references (WL-0MUJM2LV1000IHKR) ────────────────
+  doctor
+    .command('dangling-parents')
+    .description(
+      'Detect items whose parentId references a non-existent work item '
+        + '(e.g. WL-NULL artifacts from --parent null without fix) and '
+        + 'optionally fix them by setting parentId to null.',
+    )
+    .option('--dry-run', 'Show dangling references without modifying them')
+    .option('--apply', 'Fix dangling parentId by setting it to null')
+    .option('--prefix <prefix>', 'Override the default prefix')
+    .action((opts: { dryRun?: boolean; apply?: boolean; prefix?: string }) => {
+      utils.requireInitialized();
+      const db = utils.getDatabase(opts.prefix);
+      const all = db.getAll();
+      const byId = new Map(all.map(item => [item.id, item]));
+
+      const dangling = validateParentReferences(all).map(finding => ({
+        id: finding.itemId,
+        title: byId.get(finding.itemId)?.title || '',
+        parentId: String((finding.context as { parentId?: unknown }).parentId ?? ''),
+      }));
+
+      if (dangling.length === 0) {
+        if (utils.isJsonMode()) {
+          output.json({ success: true, items: [], fixed: [] });
+          return;
+        }
+        console.log('Doctor dangling-parents: no dangling parent references found.');
+        return;
+      }
+
+      // Default is dry-run; --apply is required to change anything.
+      if (opts.dryRun || !opts.apply) {
+        if (utils.isJsonMode()) {
+          const out: any = { dryRun: true, items: dangling, count: dangling.length };
+          if (!opts.dryRun) {
+            out.hint = 'Use --apply to fix by setting parentId to null';
+          }
+          output.json(out);
+          return;
+        }
+        console.log(
+          `Doctor dangling-parents: found ${dangling.length} work item(s) with dangling parent references.`,
+        );
+        for (const d of dangling) {
+          console.log(`  - ${d.id}: "${d.title}" (parentId = ${d.parentId})`);
+        }
+        if (!opts.dryRun) {
+          console.log('');
+          console.log('Use --dry-run to preview or --apply to fix by setting parentId to null.');
+        }
+        return;
+      }
+
+      // --apply: detach every dangling item.
+      const fixed: Array<{ id: string; parentId: string }> = [];
+      for (const d of dangling) {
+        db.update(d.id, { parentId: null });
+        fixed.push({ id: d.id, parentId: d.parentId });
+      }
+      if (utils.isJsonMode()) {
+        output.json({ success: true, fixed });
+        return;
+      }
+      console.log(
+        `Doctor dangling-parents: fixed ${fixed.length} item(s) - parentId set to null.`,
+      );
+    });
+
   doctor
     .command('priority')
     .description('Detect and fix invalid priority values in the database')
@@ -1009,6 +1181,7 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
       let findings: any[] = [
         ...validateStatusStageItems(items, rules),
         ...validateDependencyEdges(items, dependencyEdges),
+        ...validateParentReferences(items),
         ...priorityFindings,
         ...validatePodcastScripts(items),
       ];
@@ -1105,6 +1278,11 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
               if ((f.proposedFix as any).stage) update.stage = (f.proposedFix as any).stage;
               if ((f.proposedFix as any).priority) update.priority = (f.proposedFix as any).priority;
               if ((f.proposedFix as any).description) update.description = (f.proposedFix as any).description;
+              // A `parentId: null` fix is a detach — use hasOwnProperty so the
+              // null value (falsy) is not skipped (WL-0MUJM2LV1000IHKR).
+              if (Object.prototype.hasOwnProperty.call(f.proposedFix, 'parentId')) {
+                update.parentId = (f.proposedFix as any).parentId;
+              }
               if (Object.keys(update).length > 0) {
                 try {
                   db.update(itemId, update);
@@ -1194,13 +1372,28 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
 
       // Human-readable output handled below
 
+      // Pending-upgrade detection (WL-0MUTVB271007YKJZ): read-only scan for
+      // schema migrations and outdated git hooks that `wl doctor upgrade`
+      // would apply. Computed after --fix so the notice reflects the final
+      // findings set.
+      const pendingUpgrade = detectPendingUpgrades();
+
       if (utils.isJsonMode()) {
-        output.json(findings);
+        const jsonFindings = pendingUpgrade.hasPendingUpgrades
+          ? [...findings, buildPendingUpgradeFinding(pendingUpgrade)]
+          : findings;
+        output.json(jsonFindings);
         return;
       }
 
       if (findings.length === 0) {
-        console.log('Doctor: no issues found.');
+        if (!pendingUpgrade.hasPendingUpgrades) {
+          console.log('Doctor: no issues found.');
+          return;
+        }
+        // Pending upgrades exist but validation is clean: emit the advisory
+        // notice instead of a misleading bare "no issues found" (AC2).
+        printPendingUpgradeNotice(pendingUpgrade);
         return;
       }
 
@@ -1273,6 +1466,12 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
             console.log(line);
           }
         }
+      }
+
+      // Pending-upgrade notice is appended after the existing per-item
+      // findings/manual-fix output, without altering it (AC3).
+      if (pendingUpgrade.hasPendingUpgrades) {
+        printPendingUpgradeNotice(pendingUpgrade);
       }
     });
 }

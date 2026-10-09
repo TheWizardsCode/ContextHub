@@ -229,11 +229,14 @@ Defaults: `baseUrl` `http://192.168.0.199:8000/v1`, `model` `compact`,
 `timeoutMs` `15000`. Environment variables `LLM_BASE_URL`, `LLM_MODEL`,
 `LLM_API_KEY` and `LLM_TIMEOUT_MS` are used as fallbacks; config values take
 precedence over environment variables (matching the `embedding.*` precedence).
-Every call is bounded by the timeout and degrades silently to a non-LLM
-fallback on error; the fallback reports the flag reason from the structured
+While a request is in flight the `wl interview` command prints a static
+`Thinking…` status (plus a TTY-only spinner, suppressed for piped output and
+`--json`); every call is bounded by the timeout and degrades to a non-LLM
+fallback on error, printing a brief `LLM unavailable — using structured
+evidence.` notice. The fallback reports the flag reason from the structured
 evidence first (the persisted audit verdict and summary, then an audit waiver,
 then the review comments). See [CLI.md](CLI.md#interview-options-id) for the
-`wl interview --no-llm` opt-out.
+`wl interview --no-llm` opt-out and the full progress-feedback behaviour.
 
 ---
 

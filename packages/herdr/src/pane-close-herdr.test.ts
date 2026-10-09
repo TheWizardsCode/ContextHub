@@ -65,6 +65,59 @@ describe('parseHerdrPaneCloseList', () => {
     expect(parseHerdrPaneCloseList(raw)![0].tabId).toBe('w2V:tT');
   });
 
+  it('parses cwd and the raw agent_session object (WL-0MUYMBMCG000Z4WP AC1)', () => {
+    const raw = JSON.stringify({
+      result: {
+        panes: [
+          {
+            pane_id: 'w2Y:p87',
+            label: 'Manually triggered intake',
+            agent: 'pi',
+            agent_status: 'working',
+            cwd: '/home/u/projects/OtherRoot',
+            agent_session: {
+              agent: 'pi',
+              kind: 'path',
+              source: 'herdr:pi',
+              value: '/tmp/s.jsonl',
+            },
+          },
+        ],
+      },
+    });
+    const panes = parseHerdrPaneCloseList(raw);
+    expect(panes).toHaveLength(1);
+    expect(panes![0].cwd).toBe('/home/u/projects/OtherRoot');
+    expect(panes![0].agentSession).toEqual({
+      agent: 'pi',
+      kind: 'path',
+      source: 'herdr:pi',
+      value: '/tmp/s.jsonl',
+    });
+    // sessionPath stays derived from the same field (back-compat).
+    expect(panes![0].sessionPath).toBe('/tmp/s.jsonl');
+  });
+
+  it('omits cwd / agent_session when absent or malformed, without throwing (WL-0MUYMBMCG000Z4WP AC3)', () => {
+    const raw = JSON.stringify({
+      panes: [
+        { pane_id: 'p1', cwd: 42, agent_session: 'not-an-object' },
+        { pane_id: 'p2' },
+      ],
+    });
+    const panes = parseHerdrPaneCloseList(raw)!;
+    expect(panes).toHaveLength(2);
+    expect(panes[0].cwd).toBeUndefined();
+    expect(panes[0].agentSession).toBeUndefined();
+    expect(panes[1].cwd).toBeUndefined();
+    expect(panes[1].agentSession).toBeUndefined();
+  });
+
+  it('tolerates a bracketed log prefix before the JSON envelope (WL-0MUYMBMCG000Z4WP AC3)', () => {
+    const raw = '[herdr] starting\n' + JSON.stringify({ result: { panes: [{ pane_id: 'p1' }] } });
+    expect(parseHerdrPaneCloseList(raw)![0].paneId).toBe('p1');
+  });
+
   it('tolerates log lines before the JSON envelope', () => {
     const raw = 'some log line\n' + JSON.stringify({ panes: [{ pane_id: 'p1' }] });
     expect(parseHerdrPaneCloseList(raw)![0].paneId).toBe('p1');

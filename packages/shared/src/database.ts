@@ -778,10 +778,15 @@ export class WorklogDatabase {
       const item = ordered[index];
       const nextSortIndex = (index + 1) * gap;
       if (item.sortIndex !== nextSortIndex) {
+        // sortIndex is organizational, not semantic: a sortIndex-only change
+        // must NOT bump `updatedAt`, or a mechanical re-assignment would
+        // invalidate a previously-passing audit (WL-0MTWU4XGP001GDEA /
+        // WL-0MU2O8AQ8000ASDO). Semantic edits still bump `updatedAt` via
+        // `update`/`saveWorkItem`, and the activityAt invariant is preserved
+        // because `saveWorkItem` takes the later of the two.
         const updatedItem = {
           ...item,
           sortIndex: nextSortIndex,
-          updatedAt: new Date().toISOString(),
         };
         this.store.saveWorkItem(updatedItem);
         updated += 1;

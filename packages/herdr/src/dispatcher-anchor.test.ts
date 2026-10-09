@@ -573,6 +573,48 @@ describe('getItemTabAnchor ACs (AC2/AC5)', () => {
     try { fs.unlinkSync(lockPath); } catch { /* ignore */ }
   });
 
+  // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF, AC7): the interactive path
+  // gates its placeholder root-pane cleanup on a genuine create.
+  it('AC7: invokes onCreate with the anchor ONLY when the tab is provisioned', async () => {
+    const onCreate = vi.fn();
+    const deps = makeTabDeps({
+      createTab: async (ws: string, label: string) => ({
+        tabId: `${ws}:t${label}`,
+        paneId: `${ws}:t${label}:p1`,
+      }),
+    });
+    const got = await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC', onCreate);
+    expect(got).toEqual({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+    expect(onCreate).toHaveBeenCalledTimes(1);
+    expect(onCreate).toHaveBeenCalledWith({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+  });
+
+  it('AC7: does NOT invoke onCreate when REUSING an existing tab', async () => {
+    const onCreate = vi.fn();
+    const deps = makeTabDeps({
+      createTab: async () => null,
+      listTabs: async () => [{ tabId: 'wC:tWL-ABC', label: 'WL-ABC' }],
+      listPanes: async () => [{ paneId: 'wC:tWL-ABC:p1', tabId: 'wC:tWL-ABC' }],
+      isPaneAlive: async () => true,
+    });
+    const got = await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC', onCreate);
+    expect(got).toEqual({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+    expect(onCreate).not.toHaveBeenCalled();
+  });
+
+  it('AC7 fail-open: a throwing onCreate never fails provisioning', async () => {
+    const deps = makeTabDeps({
+      createTab: async (ws: string, label: string) => ({
+        tabId: `${ws}:t${label}`,
+        paneId: `${ws}:t${label}:p1`,
+      }),
+    });
+    const got = await getItemTabAnchor('/repo', deps, 'wC', 'WL-ABC', () => {
+      throw new Error('observer boom');
+    });
+    expect(got).toEqual({ tabId: 'wC:tWL-ABC', paneId: 'wC:tWL-ABC:p1' });
+  });
+
   it('machine dir unresolvable → null', async () => {
     const fileAsDir = path.join(tmpDir, 'not-a-dir');
     fs.writeFileSync(fileAsDir, 'x');

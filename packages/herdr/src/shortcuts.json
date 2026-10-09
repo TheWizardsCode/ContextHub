@@ -93,7 +93,8 @@
     "command": "!!wl interview <id>",
     "view": "both",
     "label": "interview",
-    "description": "Walk through outstanding interview questions on the selected work item (r i)."
+    "description": "Walk through outstanding interview questions on the selected work item (r i). Focuses the new pane and its work-item tab immediately (WL-0MURJ0LFH002O95I).",
+    "focus": true
   },
   {
     "chord": [

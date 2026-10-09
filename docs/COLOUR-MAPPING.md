@@ -34,14 +34,13 @@ item (per clarification Q3b on WL-0MSJ2JFMO007PGQ6).
 |-----------|------------|----------------|-------------|
 | Unknown/missing priority | Medium (yellow) | `220` | Falls back to medium/yellow |
 
-### Stage Colours (unchanged — used by the stage filter dialog and separators)
+### Stage Colours (used by the stage filter dialog and separators)
 
 | Stage | CLI Colour | Colour Name |
 |-------|-----------|-------------|
 | `idea` | Gray | `gray` |
 | `intake_complete` | Blue | `blue` |
 | `plan_complete` | Cyan | `cyan` |
-| `in_progress` | Yellow | `yellow` |
 | `in_review` | Green | `green` |
 | `done` | White | `white` |
 

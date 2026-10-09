@@ -29,7 +29,7 @@ export default function register(ctx: PluginContext): void {
     .option('--if-status <status>', 'Only apply the update if the current status matches (CAS guard)')
     .option('--if-stage <stage>', 'Only apply the update if the current stage matches (CAS guard)')
     .option('-p, --priority <priority>', 'New priority')
-    .option('-P, --parent <parentId>', 'New parent ID')
+    .option('-P, --parent <parentId>', 'New parent ID (use "null" to detach / set parentId to null)')
     .option('--tags <tags>', 'New tags (comma-separated)')
     .option('-a, --assignee <assignee>', 'New assignee')
     .option('--stage <stage>', 'New stage')
@@ -158,7 +158,7 @@ export default function register(ctx: PluginContext): void {
       // `--parent` flag. Use hasOwnProperty to detect presence of the option
       // on the parsed options object.
       const parentCandidate = hasProvided('parent')
-        ? (utils.normalizeCliId(String(options.parent), options.prefix) || null)
+        ? utils.normalizeParentId(String(options.parent), options.prefix)
         : undefined;
       const tagsCandidate = hasProvided('tags') && options.tags ? String(options.tags).split(',').map((t: string) => t.trim()) : undefined;
       const assigneeCandidate = hasProvided('assignee') ? options.assignee : undefined;

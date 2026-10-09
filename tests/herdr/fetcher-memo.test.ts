@@ -4,12 +4,17 @@
  * Verifies that racing identical `runWl` read fetches within one process
  * share a single in-flight promise (spawning `wl` once), while sequential
  * reads, writes, different args, and worklog-dir changes always spawn fresh.
+ *
+ * All `fetchItemsByStage` calls use valid CLI stages: since
+ * WL-0MUY1CRS7001UTQJ, invalid/removed stages are rejected without spawning
+ * `wl`, so a bogus stage could not exercise the memo at all.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import {
   fetchItemsByStage,
+  fetchItemsByPriority,
   claimWorkItem,
   setExecFileAsync,
   resetExecFileAsync,
@@ -49,8 +54,8 @@ describe('in-process fetch memoization (F4)', () => {
     const mock = vi.fn().mockReturnValue(d.promise);
     setExecFileAsync(mock as any);
 
-    const p1 = fetchItemsByStage('open');
-    const p2 = fetchItemsByStage('open'); // identical, concurrent
+    const p1 = fetchItemsByStage('plan_complete');
+    const p2 = fetchItemsByStage('plan_complete'); // identical, concurrent
 
     expect(mock).toHaveBeenCalledTimes(1); // ONE spawn for both
 
@@ -63,8 +68,8 @@ describe('in-process fetch memoization (F4)', () => {
     const mock = installMock();
     setExecFileAsync(mock as any);
 
-    await fetchItemsByStage('open');
-    await fetchItemsByStage('open');
+    await fetchItemsByStage('plan_complete');
+    await fetchItemsByStage('plan_complete');
     expect(mock).toHaveBeenCalledTimes(2);
   });
 
@@ -73,10 +78,10 @@ describe('in-process fetch memoization (F4)', () => {
     const mock = vi.fn().mockReturnValueOnce(d.promise).mockResolvedValue({ stdout: EMPTY_OUTPUT });
     setExecFileAsync(mock as any);
 
-    const read1 = fetchItemsByStage('open'); // in-flight read
+    const read1 = fetchItemsByStage('plan_complete'); // in-flight read
     const claim = await claimWorkItem('WL-X', 'alice'); // write → clears memo
     expect(claim.success).toBe(true);
-    const read2 = fetchItemsByStage('open'); // must spawn fresh, not share read1
+    const read2 = fetchItemsByStage('plan_complete'); // must spawn fresh, not share read1
 
     expect(mock).toHaveBeenCalledTimes(3); // read + write + read
 
@@ -90,8 +95,8 @@ describe('in-process fetch memoization (F4)', () => {
     const mock = vi.fn().mockReturnValueOnce(d1.promise).mockReturnValueOnce(d2.promise);
     setExecFileAsync(mock as any);
 
-    const p1 = fetchItemsByStage('open');
-    const p2 = fetchItemsByStage('plan_complete');
+    const p1 = fetchItemsByStage('plan_complete');
+    const p2 = fetchItemsByStage('intake_complete');
     expect(mock).toHaveBeenCalledTimes(2);
 
     d1.resolve({ stdout: EMPTY_OUTPUT });
@@ -106,9 +111,9 @@ describe('in-process fetch memoization (F4)', () => {
     setExecFileAsync(mock as any);
 
     setWorklogDir('/projA/.worklog');
-    const p1 = fetchItemsByStage('open');
+    const p1 = fetchItemsByStage('plan_complete');
     setWorklogDir('/projB/.worklog'); // dir change clears the memo
-    const p2 = fetchItemsByStage('open'); // same args, different dir → fresh spawn
+    const p2 = fetchItemsByStage('plan_complete'); // same args, different dir → fresh spawn
 
     expect(mock).toHaveBeenCalledTimes(2);
     d1.resolve({ stdout: EMPTY_OUTPUT });
@@ -126,8 +131,10 @@ describe('in-process fetch memoization (F4)', () => {
     setExecFileAsync(mock as any);
 
     const promises = [];
+    // 70 distinct fetches via the priority axis (which has no stage guard);
+    // each distinct arg must spawn its own `wl` process.
     for (let i = 0; i < 70; i++) {
-      promises.push(fetchItemsByStage(`stage-${i}`));
+      promises.push(fetchItemsByPriority(`prio-${i}`));
     }
     // 70 distinct in-flight fetches: none deduped, memo capped at 64.
     expect(mock).toHaveBeenCalledTimes(70);

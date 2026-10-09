@@ -31,14 +31,22 @@
  * back to the structured evidence otherwise; it is advisory and never mutates
  * the item (WL-0MUUAMP7M008Z4GK).
  *
+ * Multi-second LLM requests are made visible: the command prints a static
+ * `Thinking…` status (plus a TTY-only spinner) before each request and clears
+ * it before any subsequent output or prompt, suppressing all feedback in
+ * `--json` mode. When a request is unavailable, times out or errors and the
+ * command falls back to structured evidence, it prints a brief
+ * `LLM unavailable — using structured evidence.` notice
+ * (WL-0MUX2W8IN005RW66).
+ *
  * When the item is **not** flagged (or before explaining) and the operator
  * opts in with `--llm` or `interview.intelligent: true`, the command falls
  * back to the local LLM to extract questions from natural prose when the
  * deterministic parser finds none. Extracted questions are confirmed one by
  * one through the same prompt loop and only confirmed answers are written
  * back through the deterministic re-serialiser; an unavailable/failing LLM
- * degrades silently to the deterministic-only behaviour
- * (WL-0MUH7ACKJ0024VGF).
+ * degrades to the deterministic-only behaviour (after the same brief
+ * fallback notice) (WL-0MUH7ACKJ0024VGF, WL-0MUX2W8IN005RW66).
  *
  * WL-0MU55UDBJ008DJ67
  */
@@ -47,6 +55,12 @@ import type { PluginContext } from '../plugin-types.js';
 import type { InterviewOptions } from '../cli-types.js';
 import type { WorkItem, Comment } from '../types.js';
 import { OpenAIChatClient, type ChatClient } from '../lib/llm.js';
+import {
+  startLlmProgress,
+  LLM_FALLBACK_NOTICE,
+  type LlmProgressHandle,
+  type ProgressWriteStream,
+} from '../lib/progress-feedback.js';
 import {
   resolveLlmConfig,
   isIntelligentInterviewEnabled,
@@ -789,6 +803,56 @@ export function buildFallbackExplanation(
 }
 
 /**
+ * Result of {@link buildProducerReviewExplanationResult}. `usedLlm` reports
+ * whether the text came from the LLM (true) or the structured fallback
+ * (false), so the caller can surface a brief fallback notice
+ * (WL-0MUX2W8IN005RW66).
+ */
+export interface ProducerReviewExplanationResult {
+  text: string;
+  usedLlm: boolean;
+}
+
+/**
+ * Produce the producer-review explanation **plus** a signal of whether the
+ * LLM path was actually used.
+ *
+ * Behaves exactly like {@link buildProducerReviewExplanation} but returns
+ * `{ text, usedLlm }` instead of a bare string: `usedLlm` is `false` when the
+ * item is not flagged (result `null`), the LLM is disabled/unavailable, or
+ * the request fails, times out or returns an empty response. The public
+ * {@link buildProducerReviewExplanation} keeps its string contract and
+ * delegates here, so existing callers are unaffected
+ * (WL-0MUX2W8IN005RW66).
+ */
+export async function buildProducerReviewExplanationResult(
+  item: WorkItem,
+  deps: ProducerReviewExplanationDeps,
+): Promise<ProducerReviewExplanationResult | null> {
+  if (!item.needsProducerReview) return null;
+
+  if (!deps.noLlm && deps.chatClient?.available) {
+    try {
+      const response = await deps.chatClient.complete(
+        buildExplanationPrompt(item, deps.comments, deps.auditResult),
+        { timeoutMs: deps.timeoutMs ?? EXPLANATION_TIMEOUT_MS },
+      );
+      const rendered = renderExplanation(response);
+      if (rendered.length > 0) return { text: rendered, usedLlm: true };
+    } catch {
+      // Silent fallback — the explanation is advisory; never surface an error.
+    }
+  }
+
+  return {
+    text: renderExplanation(
+      buildFallbackExplanation(item, deps.comments, deps.auditResult),
+    ),
+    usedLlm: false,
+  };
+}
+
+/**
  * Produce a bounded, readable explanation of **why** the item requires
  * producer review and what clears the flag.
  *
@@ -802,24 +866,8 @@ export async function buildProducerReviewExplanation(
   item: WorkItem,
   deps: ProducerReviewExplanationDeps,
 ): Promise<string | null> {
-  if (!item.needsProducerReview) return null;
-
-  if (!deps.noLlm && deps.chatClient?.available) {
-    try {
-      const response = await deps.chatClient.complete(
-        buildExplanationPrompt(item, deps.comments, deps.auditResult),
-        { timeoutMs: deps.timeoutMs ?? EXPLANATION_TIMEOUT_MS },
-      );
-      const rendered = renderExplanation(response);
-      if (rendered.length > 0) return rendered;
-    } catch {
-      // Silent fallback — the explanation is advisory; never surface an error.
-    }
-  }
-
-  return renderExplanation(
-    buildFallbackExplanation(item, deps.comments, deps.auditResult),
-  );
+  const result = await buildProducerReviewExplanationResult(item, deps);
+  return result ? result.text : null;
 }
 
 // ── LLM-assisted question extraction ─────────────────────────────────────
@@ -904,6 +952,42 @@ export function parseExtractedQuestions(raw: string): string[] {
 }
 
 /**
+ * Result of {@link tryExtractQuestionsWithLlm}. `usedLlm` reports whether the
+ * request actually completed (true, even when it returned no questions) or
+ * failed/was skipped (false), so the caller can surface a fallback notice
+ * (WL-0MUX2W8IN005RW66).
+ */
+export interface LlmExtractionResult {
+  questions: string[];
+  usedLlm: boolean;
+}
+
+/**
+ * Ask the chat client to extract clarifying questions from `description`,
+ * reporting whether the LLM path was actually used.
+ *
+ * Never throws: an unavailable client, a failed/timed-out request or a
+ * malformed response all resolve to `{ questions: [], usedLlm: false }`.
+ * Callers then fall back to the deterministic-only behaviour
+ * (WL-0MUH7ACKJ0024VGF AC5).
+ */
+export async function tryExtractQuestionsWithLlm(
+  chatClient: ChatClient | null | undefined,
+  description: string,
+  timeoutMs: number = EXTRACTION_TIMEOUT_MS,
+): Promise<LlmExtractionResult> {
+  if (!chatClient?.available) return { questions: [], usedLlm: false };
+  try {
+    const raw = await chatClient.complete(buildExtractionPrompt(description), {
+      timeoutMs,
+    });
+    return { questions: parseExtractedQuestions(raw), usedLlm: true };
+  } catch {
+    return { questions: [], usedLlm: false };
+  }
+}
+
+/**
  * Ask the chat client to extract clarifying questions from `description`.
  * Returns `[]` (never throws) when the client is unavailable, the request
  * fails, times out or the response is malformed — callers then fall back
@@ -914,15 +998,12 @@ export async function extractQuestionsWithLlm(
   description: string,
   timeoutMs: number = EXTRACTION_TIMEOUT_MS,
 ): Promise<string[]> {
-  if (!chatClient?.available) return [];
-  try {
-    const raw = await chatClient.complete(buildExtractionPrompt(description), {
-      timeoutMs,
-    });
-    return parseExtractedQuestions(raw);
-  } catch {
-    return [];
-  }
+  const result = await tryExtractQuestionsWithLlm(
+    chatClient,
+    description,
+    timeoutMs,
+  );
+  return result.questions;
 }
 
 /**
@@ -1000,6 +1081,18 @@ export interface InterviewRunOptions {
   chatClient?: ChatClient | null;
   /** Per-call timeout override for the extraction request (ms). */
   timeoutMs?: number;
+  /**
+   * Called immediately before the extraction request is issued, so callers
+   * can show in-flight progress feedback (WL-0MUX2W8IN005RW66).
+   */
+  onLlmStart?: () => void;
+  /**
+   * Called once the extraction request has settled. `usedLlm` is true when
+   * the request completed (even if it returned no questions); false when it
+   * was skipped, failed or timed out — callers use this to surface a fallback
+   * notice (WL-0MUX2W8IN005RW66).
+   */
+  onLlmSettled?: (result: { usedLlm: boolean }) => void;
 }
 
 /** A zeroed outcome; `extracted` is always present. */
@@ -1134,11 +1227,23 @@ export async function runInterview(
       section && section.content.trim() !== ''
         ? section.content
         : item.description;
-    const questions = await extractQuestionsWithLlm(
-      options.chatClient,
-      source,
-      options.timeoutMs,
-    );
+    // Notify the caller so it can show progress feedback around the request,
+    // and always report back whether the LLM path was actually used — even if
+    // the request unexpectedly throws (WL-0MUX2W8IN005RW66).
+    options.onLlmStart?.();
+    let usedLlm = false;
+    let questions: string[] = [];
+    try {
+      const extraction = await tryExtractQuestionsWithLlm(
+        options.chatClient,
+        source,
+        options.timeoutMs,
+      );
+      usedLlm = extraction.usedLlm;
+      questions = extraction.questions;
+    } finally {
+      options.onLlmSettled?.({ usedLlm });
+    }
     if (questions.length > 0) {
       const extractedPairs = buildExtractedPairs(questions);
       return walkQuestions(item, store, io, section, extractedPairs, true);
@@ -1209,6 +1314,13 @@ export interface InterviewCommandDeps {
    * Defaults to a `readline` `(y/N)` prompt on stdin/stdout.
    */
   clearPrompt?: (message: string) => Promise<boolean>;
+  /**
+   * Sink for in-flight LLM progress feedback (defaults to `process.stdout`).
+   * Tests inject a capturing stream to assert the status message, spinner and
+   * fallback notice without writing to the real terminal
+   * (WL-0MUX2W8IN005RW66).
+   */
+  progressOutStream?: ProgressWriteStream;
 }
 
 /**
@@ -1268,6 +1380,8 @@ export default function register(
 
   const promptLoopFactory = deps.promptLoopFactory ?? createPromptLoop;
   const clearPrompt = deps.clearPrompt ?? defaultClearPrompt;
+  const progressStream: ProgressWriteStream =
+    deps.progressOutStream ?? process.stdout;
 
   program
     .command('interview <id>')
@@ -1323,15 +1437,66 @@ export default function register(
       const outstanding = pairs.filter(p => p.unanswered).length;
       const allAnswered = !noSection && !noQuestions && outstanding === 0;
 
+      // ── LLM progress feedback (WL-0MUX2W8IN005RW66) ──────────────────
+      // A static "Thinking…" status plus a TTY-only spinner is shown around
+      // every LLM request; the fallback notice is printed once when the LLM
+      // is unavailable or a request fails and structured evidence is used.
+      let activeProgress: LlmProgressHandle | null = null;
+      let fallbackNoticeEmitted = false;
+
+      /** Begin in-flight feedback for a request about to be issued. */
+      const beginProgress = (): void => {
+        if (jsonMode || activeProgress) return;
+        activeProgress = startLlmProgress({ outStream: progressStream });
+      };
+
+      /** Stop/clear feedback, printing the fallback notice on failure. */
+      const endProgress = (result?: { usedLlm?: boolean }): void => {
+        if (!activeProgress) return;
+        const handle = activeProgress;
+        activeProgress = null;
+        const fallback = result?.usedLlm === false;
+        handle.stop({ fallback: fallback && !fallbackNoticeEmitted });
+        if (fallback) fallbackNoticeEmitted = true;
+      };
+
+      /** Print the fallback notice when no request was issued (unavailable). */
+      const noticeFallbackWithoutRequest = (): void => {
+        if (jsonMode || fallbackNoticeEmitted) return;
+        try {
+          progressStream.write(`${LLM_FALLBACK_NOTICE}\n`);
+        } catch {
+          // Console feedback must never break the command.
+        }
+        fallbackNoticeEmitted = true;
+      };
+
       /** Explanation for the flagged no-question cases, else null. */
       const explanationFor = async (): Promise<string | null> => {
         if (!item.needsProducerReview || !(noSection || noQuestions)) return null;
-        return buildProducerReviewExplanation(item, {
+        const deps = {
           comments: db.getCommentsForWorkItem(item.id),
           auditResult: db.getAuditResult(item.id),
           chatClient,
           noLlm,
-        });
+        };
+        // `--json` must remain byte-for-byte valid: never emit progress.
+        if (jsonMode) {
+          const result = await buildProducerReviewExplanationResult(item, deps);
+          return result ? result.text : null;
+        }
+        const willAttempt = !noLlm && chatClient?.available === true;
+        if (willAttempt) beginProgress();
+        let result: ProducerReviewExplanationResult | null = null;
+        try {
+          result = await buildProducerReviewExplanationResult(item, deps);
+        } finally {
+          if (willAttempt) endProgress({ usedLlm: result?.usedLlm ?? false });
+        }
+        if (!willAttempt && result && !result.usedLlm && !noLlm) {
+          noticeFallbackWithoutRequest();
+        }
+        return result ? result.text : null;
       };
 
       // ── Non-interactive JSON mode: no prompts, no mutation ───────────
@@ -1372,6 +1537,8 @@ export default function register(
             llmFallback: llmFallbackEnabled,
             chatClient,
             timeoutMs: EXTRACTION_TIMEOUT_MS,
+            onLlmStart: beginProgress,
+            onLlmSettled: endProgress,
           },
         );
       } finally {

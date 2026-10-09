@@ -9,12 +9,12 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **View details** — Press Enter on any item to see its full details (description, acceptance criteria, metadata, tags, priority, GitHub issue number, and audit status information such as audit result, review status, and last audit timestamp)
 - **Audit indicators** — The list view shows audit icons next to `in_review` items (✅ audited, ❌ failed, ❓ unaudited). The metadata section (list-mode panel and detail view) mirrors the list's icons with text labels — the selected item's Stage row uses the same audit-aware `in_review` icon (✅/❌/❓ fresh, ⏳ stale-passed, 🔍 otherwise), and the Audit/Reviewed rows pair their icons with text (e.g. `✅ ready to close`, `❌ needs review`). The detail view additionally shows the last audit timestamp. **Child coverage (WL-0MUBVH8QG0020H9L):** a `completed`/`in_review` child whose direct parent has a fresh audit is *covered* — its list row and metadata Stage row show the parent's audit-result symbol in a dimmed/grey style (visually distinct from a bright own-audit icon) and the metadata panel adds a `Covered by <parent-id>` row. Coverage is **derived at read time** (`isCoveredByParent` over the parent's audit freshness inputs via the shared `isAuditFresh` predicate) — nothing is persisted and there is no schema migration. A child with its own audit always shows its own verdict; an uncovered child (no own audit, parent demoted/stale) keeps the plain `🔍` stage icon and is never dispatched (see [audit-tier selection](#audit-tier-dispatch)). In text-only (`noIcons`) mode the covered indicator renders as `[COVERED]`.
 - **Chord shortcuts** — Multi-key chord sequences provide quick actions like updating priorities, stage/status, title, closing/deleting items, running workflows, and toggling review status (configurable via `shortcuts.json`)
-- **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`. Panes spawned from the selection list open **without stealing focus**: the list keeps the keyboard focus while the command-output pane opens in the background (see [Design decisions](#design-decisions)).
+- **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`. Panes spawned from the selection list open **without stealing focus**: the list keeps the keyboard focus while the command-output pane opens in the background (see [Design decisions](#design-decisions)). When the command carries a work-item ID, the pane is placed in that item's work-item-ID tab in the current workspace (see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs)).
 - **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The form is a full-pane page (no border/centering) that wraps text at the pane width and grows downward as content is entered. See [Command input form](#command-input-form).
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back.
 - **Mouse and touch** — Click/tap a row to select; double-click to open detail; mouse wheel or touch-scroll to navigate (list mode) or scroll detail; tap stage options in the filter prompt. Requires SGR mouse reporting (enabled on raw-mode entry, disabled on exit). Terminals without it fall back to keyboard-only. **Alt+m toggles mouse tracking** on/off (WL-0MT0AP2LR000JFWN): while tracking is off, the terminal's native drag-select-to-copy works; press Alt+m again to resume mouse interaction. The current state is shown in the footer (`alt+m mouse on/off`). **Hover tooltip** (WL-0MT9XRZDK006GMUH): hovering the mouse over a row that has an associated agent-pane shows a metadata tooltip in the footer area (ID, Title, Command, Priority, Type, Risk, Effort, Start Time); `Esc` dismisses it until the mouse leaves and re-enters the list.
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
-- **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)).
+- **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)). When the command carries a work-item ID, the pane is placed in that item's work-item-ID tab in the current workspace (reused if it already exists) — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
 - **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items, matches each against live agent panes in the current workspace (the pane title carries the work-item ID), and releases any claim with no matching pane so it re-enters the dispatchable pool: `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). See [Hydrator](#hydrator-self-healing-in_progress-claims).
 - **Mode-switch worker (activity-gated proxy mode switching)** — Automatically switches the llama-proxy between fast (cloud) and cheap (local) modes: agent-route commands fire an immediate fast switch (fail-open), while a full operator-idle window plus a proxy-idle check triggers the cheap switch (fail-closed). The proxy URL reuses `downtimeProxyUrl` and the plugin's switches are manual overrides that the proxy's own time schedule reclaims. See [Mode-switch worker](#mode-switch-worker-activity-gated-proxy-mode-switching-wl-0msn3fwv5008kqe9).
@@ -25,7 +25,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Quit** — Press `q` to exit
 - **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
-- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_progress`, `in_review`, `done` — no custom stage values). Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
+- **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_review`, `done` — no custom stage values). Actively-worked items are identified by `status = in-progress`, not by a stage. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
 - **Inline note links** — Inline `[NOTE <id>: ...]` markers (PRD §7.1) render as clickable links to the note work items: the marker is displayed as `<id>↗`, and the note text is never shown in the viewer. Any markdown document opened in the viewer can also be annotated in place (`n,e` add/edit, `n,d` delete); podcast scripts sync notes to the worklog as child work items (PRD §7.3). See [Inline note links](#inline-note-links).
 - **Code Freeze awareness** — While a ship-it release is in progress the project is in *Code Freeze*: the worklist shows a prominent banner and blocks all implement commands (`/skill:implement*`) with a notice dialog until the release finishes. See [Code Freeze](#code-freeze).
@@ -112,7 +112,7 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `f`, `d` — Show the downtime dispatches grouped into 4-hour time blocks (see [Recent dispatches view](#recent-dispatches-view))
    - Stage, priority, and dispatches filters are **mutually exclusive**: applying one replaces whichever other axis was active (single filter slot, replace semantics). Sprint (`f s s`, `f p s`, or `/wl` with no arguments) clears **all** of them.
    - Type `/wl dispatches` directly to activate the dispatches view (equivalent to `f d`).
-   - `/wl <stage>` accepts shorthand aliases (`idea`, `intake`, `plan`, `progress`, `review`) and canonical stage names (`intake_complete`, `plan_complete`, `in_progress`, `in_review`)
+   - `/wl <stage>` accepts the five CLI stage names (`idea`, `intake_complete`, `plan_complete`, `in_review`, `done`) plus the shorthand aliases `idea`, `intake`, `plan`, and `review`. The removed `progress` alias and the legacy `completed` value no longer apply a filter — they fail soft (no crash, no filter change) exactly like `/wl <bogus>`
    - `/wl --priority <priority>` accepts the canonical priority names `critical`, `high`, `medium`, `low`; unknown values fall back gracefully (no crash, no filter change)
    - `/wl` with no stage/priority argument returns to the default unfiltered browse list
    - Filtered views show every root item matching the filter's rule (see [Selection List Behaviour](#selection-list-behaviour))
@@ -121,7 +121,7 @@ The plugin pane will then be available via the Herdr plugin system.
 4. Workflow shortcuts (single-key):
    - Press `c` — Create a new work item
    - Press `d` — **Toggle downtime dispatch for the current pane** (per-pane only — sibling panes and other worklog roots are unaffected; the header shows `[Downtime Off]` while off and the live status when on. The disable persists across plugin restarts via a `.herdr-downtime-disabled` marker in the worklog root; press `d` again to return to following the global setting. See [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
-   - Press `i` — Run the implement workflow on the selected item (intake_complete, plan_complete, in_progress)
+   - Press `i` — Run the implement workflow on the selected item (intake_complete, plan_complete)
    - Press `n` — Run the intake workflow on the selected item (idea stage)
    - Press `p` — Run the plan workflow on the selected item (intake_complete stage)
    - Press `s` — Insert a search command
@@ -129,7 +129,7 @@ The plugin pane will then be available via the Herdr plugin system.
 
 5. Review chords (press `r` then a key):
    - Press `r`, `p` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
-   - Press `r`, `i` — Walk through outstanding interview questions on the selected item (`wl interview`)
+   - Press `r`, `i` — Walk through outstanding interview questions on the selected item (`wl interview`); the new pane is **focused** so you can answer immediately (see **Focused shortcuts via `focus: true`** below)
 
 6. Priority update chords (press `u` then `p` then a priority key):
    - Press `u`, `p`, `l` — Set priority to low
@@ -338,9 +338,15 @@ dispatches; the other herdr instances coordinate instead of polling:
   (closed/`in_progress`/`done`, audit-now-fresh, `needsProducerReview ===
   true`, above-caps, or otherwise not currently dispatchable) is **removed
   eagerly without pane or dispatched marker**, and dispatch continues to
-  the next offer. The dispatched entry is **removed**; its owner re-offers
-  its next Herdr head at the next check-in. There is **no TTL-based
-  pruning**. **Every per-entry `wl` invocation — the dispatch-time
+  the next offer. If no offer is dispatchable, the leader may fall back to
+  its **own backlog** — a bounded window extension of the same ranking
+  beyond the sprint view, own root only — and, on a successful own-backlog
+  dispatch, voluntarily steps down via `releaseLeadership()` so another
+  instance can take over (WL-0MUU4XFU90008E24; see the *Own-backlog
+  fallback & leadership hand-off* paragraph below). The dispatched entry is
+  **removed**; its owner re-offers its next Herdr head at the next
+  check-in. There is **no TTL-based pruning**. **Every per-entry `wl`
+  invocation — the dispatch-time
   `fetchItem`/audit-enrichment lookups, the CAS claim (`wl update`) and the
   `wl comment add` trail — resolves against the OFFER's own `worklogRoot`
   via stateless per-call `--worklog-dir` (`buildWlArgsForRoot`,
@@ -378,6 +384,19 @@ dispatches; the other herdr instances coordinate instead of polling:
   cycle). Scheduled prompts (no work-item id) keep the `Dispatcher` anchor.
   See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#pane-placement-project-workspace-first-dispatcher-fallback-wl-0mur5fuwd00024xn).
+- **Stalled-work scan and resume (WL-0MUYMBSA90092QV2)** — before selecting a
+  new item on an idle cycle, the dispatcher scans the machine-wide
+  `herdr pane list` and resumes a stalled pane **in place** (reusing its
+  session) rather than opening a new one. A pane is stalled when it hosts a
+  live pi agent, its label parses to a non-terminal work item, its
+  `agent_status` is neither `blocked` nor actively working, and its
+  not-working state has persisted at least `downtimeStallThresholdMs`
+  (default 5 min). A successful resume short-circuits the cycle with the
+  neutral reason `stalled-resume` (no new-item dispatch); every skip/failure
+  is neutral (never a strike, never a cooldown, never a duplicate) and
+  degrades to the unchanged dispatch path. A foreign-root pane is resumed
+  against the root resolved from the pane's `cwd` / `agent_session`. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#stalled-work-scan-and-resume-wl-0muymbsa90092qv2-parent-wl-0muma5omh0024pn1).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
@@ -409,14 +428,32 @@ WL-0MT3FM8VA005XBHE critical).
 WL-0MU6UL3GQ0015AA5 AC1/AC4):** the dispatcher head is the sprint view. Both selection
 paths pass the live per-root `browseItemCount` (clamped 1–50) to `getHerdrListHead`, so
 the head equals the rendered worklist (mandatory items always included, remaining slots
-filled from "other" items). Non-critical work outside the view is never dispatched: when
-the head yields no candidate the dispatcher reports the in-view terminal reason
-(`no-candidate`, `review-queue-hold`, `code-freeze`, …) and does not scan hidden backlog.
+filled from "other" items). Non-critical work outside the view is never dispatched by
+the normal paths: when the head yields no candidate the dispatcher reports the in-view
+terminal reason (`no-candidate`, `review-queue-hold`, `code-freeze`, …) and does not scan
+hidden backlog — except via the coordination own-backlog fallback below, which then hands
+off leadership.
 A bounded out-of-window escape hatch (`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional
 items) re-reads the **same ranking path** but returns **only** `critical` items — because
 critical items are already mandatory in the view this is normally a no-op, and it can
 never surface hidden non-critical work. The TUI worklist still renders exactly
 `browseItemCount` items.
+
+**Own-backlog fallback & leadership hand-off (WL-0MUU4XFU90008E24;
+coordination/leader mode only):** when the coordination offer list yields no
+dispatchable candidate, the leader may read its **own** backlog beyond the
+sprint view — a bounded window extension of the SAME canonical ranking
+(`DOWNTIME_DISPATCH_EXTEND_MAX`, 30 additional items), never a second ranking,
+and **own-root only** (never another instance's hidden backlog). Every safety
+gate still applies as a sequential filter, and the lookup is fail-open (a
+`{ok:false}`/thrown/empty tail leaves the original terminal reason unchanged).
+On a successful own-backlog dispatch (claim → marker → spawn already complete)
+the leader calls `releaseLeadership()` **exactly once** and stops acting as
+leader, so another instance can win the next election; it never steps down
+after a normal in-view dispatch, and a fallback that finds nothing retains
+leadership and the original terminal reason. **Legacy mode** (no
+`leaderManager`) is unchanged. See
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#own-backlog-fallback--leadership-hand-off-wl-0muu4xfu90008e24).
 
 A "valid" audit is defined by the review-icon freshness rule: the audit is
 current — i.e. the review icon is **neither** the hourglass `⏳` (stale passed)
@@ -474,13 +511,28 @@ without per-slot data it fails closed to all-slots-free for `0 < N < total`
   kind — a neutral skip (reason `attempt-budget-exhausted`, never a strike,
   never a no-candidate) reset by a stage advancement (default: `3`, clamped
   to 1 – 10)
+- `downtimeStallScanEnabled` — Enable the pre-dispatch stalled-work scan
+  (default: `true`). When on, the dispatcher prefers resuming an existing
+  stalled pane over opening a new one (see the *Stalled-work scan and
+  resume* bullet above); `false` disables the scan and falls through to the
+  normal dispatch path
+- `downtimeStallThresholdMs` — Minimum continuous not-`working` duration
+  before a pane is considered stalled and resumed in place (default:
+  `300000` = 5 minutes, clamped to 60 s – 60 min; invalid/missing falls back
+  to the default)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
-Idle means: llama-server running, no active **local** query (when the proxy
-serves `local_active_query` — preferred over the global `active_query`, so
-remote-only streams with free local slots do not block dispatch; absent on
-pre-fix proxies, the global `active_query` is used as the fallback), no model
-switch, no active local lease, and the required free-slot condition met.
+Idle means: llama-server running, no active **local** query (the proxy's
+`local_active_query` is the sole busy signal, so remote-only streams with free
+local slots do not block dispatch; absent on pre-fix proxies it is treated as
+busy), no model switch, no active local lease, and the required free-slot
+condition met. **Per-slot detail is mandatory (fail-closed contract,
+WL-0MUXVPXAZ005RESW):** the free-slot budget always comes from the per-slot
+`slots` array, never the `available_slots` count. When per-slot detail is
+absent, empty (`slots: []`), or stale (`slots_stale: true`) the dispatcher
+refuses to dispatch and records the distinct reason `slots-unavailable`
+(header token `no-slots`), so a fail-closed stop is distinguishable from
+`slot-owner` / `contention`.
 **In per-slot identity mode with `0 < N < total` the query/lease checks are
 relaxed** (spare-capacity dispatch, parent WL-0MT32F90V008UAD2): a query or
 lease tied to a busy slot is the operator's own session and must not block
@@ -528,10 +580,11 @@ period; an ambiguous/unparseable poll also resets all timers (fail-closed).
 This assumes `slot_id` values are stable across polls (they identify the
 physical slots on the llama-server). Malformed per-slot data (non-array,
 missing/empty `slot_id`, non-boolean `is_processing`, or duplicate ids) is
-treated as busy (fail-closed). Without per-slot data — or when N is `0` or
-≥ `total` — the worker falls back to the count-based all-slots-free logic
-with the FULL global checks (server, local query, model switch, lease): N
-of `total` slots free never dispatches without per-slot identity.
+treated as busy (fail-closed). **Without usable per-slot detail the worker
+fails closed** (no dispatch, reason `slots-unavailable` / header token
+`no-slots`) rather than falling back to the `available_slots` count. When N
+is `0` or ≥ `total`, the full global checks (server, local query, model
+switch, lease) apply and the free count still comes from the per-slot array.
 
 **Per-tier free-slot minimums** (parent WL-0MT32F90V008UAD2 AC3) — at
 selection time, against the latest polled status, each dispatch tier
@@ -757,6 +810,59 @@ tick), so two instances with identical configuration do not probe in
 lockstep — other machines get a fair chance to win the dispatch race. The
 jitter factor is clamped to `[0.5×, 1.5×]` of the configured interval.
 
+### Interactive pane placement (work-item-ID tabs)
+
+Interactive dispatch from the worklist — an agent command (`/skill:*`,
+`/intake`, `/plan`, `/prompt:`) or a shell/command-output command (`!!`/`!`
+or a plain command) that carries a work-item ID — opens its pane in a **tab
+labelled with the exact work-item ID**, in the **invoking pane's current
+workspace** (WL-0MUYI3JAO002BTNL, parent WL-0MUKZGEQ2007FECS). This groups
+all of one item's panes together and mirrors the automated downtime
+dispatcher's item-ID tabs (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch)),
+with three deliberate differences:
+
+- **Current workspace, not project workspace** — the item tab lives in the
+  workspace of the pane that invoked the shortcut. The plugin reads
+  `HERDR_WORKSPACE_ID` from its environment and falls back to the workspace
+  component of `HERDR_PANE_ID`; there is no `/proc`-based project
+  resolution on this path.
+- **Fail-open** — if the item tab cannot be resolved or created (no work-item
+  ID, no workspace id, provisioning error), the dispatch falls back to
+  today's current-pane split. The operator's dispatch is never dropped or
+  blocked. (Tab provisioning itself stays fail-closed internally: it never
+  places the pane in a wrong tab.) The automated downtime path, by contrast,
+  is fail-closed (`anchor-unavailable`).
+- **Both channels** — the placement applies to agent panes (`send-to-pi.sh`)
+  **and** to shell/command-output panes (`run-in-pane.sh`), which gained a
+  `--anchor <paneId>` flag mirroring `send-to-pi.sh` (with `--anchor` it runs
+  `herdr pane split --pane <id>` instead of `--current`).
+
+Semantics:
+
+- **Create on first use, reuse thereafter** — the tab label is the key
+  (`herdr tab list`); the shared `getItemTabAnchor` helper creates the tab
+  under the coordination lock with a double-check, and a second dispatch for
+  the same workspace + item adds a pane to the existing tab rather than
+  creating a duplicate.
+- **No-ID panes unchanged** — commands with no work-item association (the
+  unbound **Open Pi Agent** action, the `P n` blank-prompt session, generic
+  commands) still split the current pane in the current tab.
+- **Root-pane cleanup** — when a dispatch creates a fresh item tab, the
+  tab's placeholder root pane (used only as the first split anchor) is closed
+  once the new pane has spawned. Cleanup is **fail-safe** (the anchor is
+  closed only when liveness positively confirms it is not a live tracked
+  pi/shell pane — a reused tab's live pane survives; unknown liveness leaves
+  it open) and **fail-open** (an error never blocks or changes the dispatch).
+  A later dispatch for the same item reuses the surviving pane as the split
+  anchor.
+- **No focus stealing** — item tabs are created with `--no-focus` and the
+  existing no-focus dispatch default is preserved, so the selection list
+  keeps the keyboard focus.
+
+See [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#interactive-dispatch-pane-placement-wl-0muyi3jao002btnl)
+for the implementation-level detail and the automated-vs-interactive
+comparison.
+
 ### Pane-closure reaper (WL-0MUJL1NAH0042GOS)
 
 Agent panes launched in Herdr run `pi` in interactive mode. A skill that
@@ -873,9 +979,11 @@ proxy idle state:
   the dispatcher's query/lease — no longer block the switch: a downtime pane
   is exactly the work the operator wants running while the proxy runs cheap.
   Accepted tradeoff: a fast-mode downtime request in flight during the mode
-  restart is killed and retried by its client. Without per-slot data the
-  all-slots-free fail-closed fallback is unchanged (server up, no query,
-  no model switch, no lease, ALL slots free). Any ambiguity — an
+  restart is killed and retried by its client. Under the shared fail-closed
+  contract (WL-0MUXVPXAZ005RESW) `evaluateIdle` returns false when per-slot
+  detail is unusable, so a proxy that cannot serve `slots[]` delays the
+  cheap switch rather than switching on an unverifiable count. Any
+  ambiguity — an
   unparseable status payload (including malformed/ambiguous per-slot
   identity), a non-2xx admin response, or a fetch failure —
   is treated as busy (fail-closed) so the proxy is never switched cheap
@@ -1392,6 +1500,26 @@ above.
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
 
+### Review-queue-depth footer banner
+
+When the root-only `completed`/`in_review` count reaches `browseItemCount`
+(default 20, re-read live from settings), the selection-list footer shows a
+review-queue-depth banner (WL-0MTHSHN5V008R5L0). Its copy reflects the audit
+state of the queue (WL-0MUDYTQ55002NUSJ):
+
+- **Outstanding audit** — at least one root-level `in_review` item has no
+  stored audit or a non-current (stale) audit, per the shared `isAuditFresh`
+  predicate — the banner reads
+  `Review queue deep (<n> of <browseItemCount> completed/in_review) — focus on audits`.
+- **Every item freshly audited** — the banner reads
+  `Ready to Ship (shortcut 'S')`, prompting the `S` Ship It shortcut.
+
+The banner is gated by `showHelpText` and is **display-only**: it never
+disables downtime dispatch and never writes or clears the
+`.herdr-downtime-disabled` marker (queue depth must never halt coordination —
+see the sprint-complete auto-disable removal in
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md)).
+
 ### Fold indicators (below-the-fold / above-the-fold markers)
 
 When the display-rows list (headings + items) has more rows than fit in
@@ -1458,9 +1586,10 @@ first rows), so a long list never scrolls off the top.
   the row is omitted entirely when there are no `.md` Key Files. The row is
   **display-only** — opening a document happens from the detail view's
   Related Docs table of contents (see [Markdown viewer](#markdown-viewer)).
-- For items whose stage is `in_progress`, the panel additionally shows
-  **`Last command:`** — the most recent command the plugin dispatched
-  against that item (`none yet` until the first dispatch).
+- For actively-worked items (`status = in-progress`), the panel
+  additionally shows **`Last command:`** — the most recent command the
+  plugin dispatched against that item (`none yet` until the first
+  dispatch).
 - When the item has a description, the panel shows a **`Description`**
   preview: the first up-to-3 non-empty lines of the description (markdown
   source as-is, each line truncated to the pane width), so you can see what
@@ -1478,7 +1607,7 @@ first rows), so a long list never scrolls off the top.
 
 Work items are grouped by their Worklog **stage** using the standard
 lifecycle stages only — `idea`, `intake_complete`, `plan_complete`,
-`in_progress`, `in_review`, `done`. No custom stage values are required for
+`in_review`, `done`. No custom stage values are required for
 grouping, so podcast episode items group exactly as their frontmatter
 `pipeline_stage` maps 1:1 onto the Worklog stages (PRD §7.2). Groups render
 in the canonical order (Critical → Group N → Idea → Other → In Review) as
@@ -1488,10 +1617,12 @@ while a heading is selected collapses/expands that group — collapsed groups
 hide their items from both the render and navigation (the heading itself
 stays). Counts reflect the top-level items in the group (post stage-filter)
 regardless of collapse state. Stage changes re-group items on the next
-refresh. Non-critical `in_progress` items join the file-path-partitioned
-`Group N` lists alongside `plan_complete`/`intake_complete` items and sort
-ahead of them (actively-worked items first); "Other" remains only as a
-safety net for unknown/custom stages.
+refresh. Non-critical actively-worked items (`status = in-progress`) join
+the file-path-partitioned `Group N` lists alongside
+`plan_complete`/`intake_complete` items and sort ahead of them
+(actively-worked items first); "Other" remains only as a safety net for
+unknown/custom stages (including the removed `in_progress`/`completed`
+stage values), so legacy rows still render deterministically.
 
 **In Review** items are sorted within the group using a deterministic
 **6-bucket predicate** (WL-0MSLPM5ZB003TADT):
@@ -1746,10 +1877,10 @@ packages/herdr/
 - **Command routing via callback** — When a chord resolves to a non-`/wl` command, it is passed to an `onCommand` callback (set by the entry point) which routes it by prefix:
   - `!!`/`!` prefixed commands (shell-executed shortcuts such as audit approve/reject, priority updates, close/delete) are run **visibly in a new herdr pane** via `scripts/run-in-pane.sh` — the wrapper keeps the pane's process alive so the pane stays open (exit status reported; dismiss with Enter or close with `prefix+x`) so the user can inspect the command output.
   - Everything else is written to stdout with a `CMD:` prefix for the calling framework (Herdr) to execute.
-- **Selection-list dispatch keeps focus** — Every pane spawned from the worklist selection list (pi agent panes via `send-to-pi.sh`, and command-output panes via `run-in-pane.sh`) opens **without moving focus** by default (WL-0MSHIA53D009DJOT): the dispatch passes `--no-focus` to both launchers, so the final zoom/focus step is skipped and the selection list keeps the keyboard focus. The user can read dispatch feedback via toasts and inspect the opened pane with herdr pane navigation (`prefix+o`, `prefix+x` to close). The `P n` shortcut opts in to **focus the new pane immediately** (see **Focused shortcuts via `focus: true`** below). Out of scope and unchanged: the downtime worker (already `--no-focus`), the `open-pi-agent` unbound plugin action, and `open.sh`/`toggle.sh`.
-- **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right, creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". The dispatch passes `--no-focus` (selection-list dispatch keeps focus, see above) unless the shortcut opts in to **focus the new pane** (`focus: true` — only `P n` today, see **Focused shortcuts via `focus: true`** above), in which case `--focus` is passed and the new pane is zoomed. Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
+- **Selection-list dispatch keeps focus** — Every pane spawned from the worklist selection list (pi agent panes via `send-to-pi.sh`, and command-output panes via `run-in-pane.sh`) opens **without moving focus** by default (WL-0MSHIA53D009DJOT): the dispatch passes `--no-focus` to both launchers, so the final zoom/focus step is skipped and the selection list keeps the keyboard focus. The user can read dispatch feedback via toasts and inspect the opened pane with herdr pane navigation (`prefix+o`, `prefix+x` to close). The `P n` and `r i` shortcuts opt in to **focus the new pane immediately** (see **Focused shortcuts via `focus: true`** below). Out of scope and unchanged: the downtime worker (already `--no-focus`), the `open-pi-agent` unbound plugin action, and `open.sh`/`toggle.sh`.
+- **Pi agent dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are intercepted by the entry point and routed to a new pi agent pane. The `send-to-pi.sh` script splits the current pane to the right (or, when the command carries a work-item ID, the item-ID tab's anchor pane — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs)), creates a new pane, runs `pi` with the command as the initial prompt, and renames the pane to "Pi Agent". The dispatch passes `--no-focus` (selection-list dispatch keeps focus, see above) unless the shortcut opts in to **focus the new pane** (`focus: true`, see **Focused shortcuts via `focus: true`** above), in which case `--focus` is passed and the new pane is zoomed. Agent commands are routed before any prefix handling, so they are unaffected by `!!`/`!` processing.
 - **No-pane dispatch via `open_pane: false`** — A shortcut entry may carry an optional `open_pane: false` flag (WL-0MSJLD1I70045ZUL) to run its command **in the background without opening a pane**: shell (`!!`/`!`) commands execute via detached `bash -c` and agent commands run headless (`pi -p --mode json`, honoring the entry's `model`), with stdout/stderr captured to a per-run log file under `<tmpdir>/herdr-background-logs/` (the path is written to stderr so it can be located for inspection). No pane is created, so the work-item ↔ pane association is skipped for agent commands. The bundled quiet state-change shortcuts use it: `a-y` audit approve, `a-r` audit reject, `u-p-*` priority updates, and `x-c`/`x-d` close/delete — they complete silently and the worklist refresh shows the updated state. If a background command exits non-zero, a **failure toast** is shown with the command, its exit code (or termination signal) and a short excerpt of its output (WL-0MUEBQLRD00288VV); the full output remains in the per-run log file. Shortcuts without the flag (all other bundled entries) open a pane exactly as today.
-- **Focused shortcuts via `focus: true`** — A shortcut entry may carry an optional `focus: true` flag (WL-0MT70LC6B009TL3Q) to **focus the newly opened pane** immediately after it spawns. When absent or `false` (the default) the selection list keeps focus (the behaviour above). The flag is orthogonal to `open_pane: false` (no pane → focus is moot) and invalid values are logged and treated as absent (no-focus). The only bundled entry with the flag is `P n` (new Pi session — blank `/prompt:`) so pressing `P n` puts the cursor straight in the new Pi pane for immediate typing without an extra `prefix+o` step. Any future shortcut can opt in with the same field without a schema change.
+- **Focused shortcuts via `focus: true`** — A shortcut entry may carry an optional `focus: true` flag (WL-0MT70LC6B009TL3Q) to **focus the newly opened pane** immediately after it spawns. When absent or `false` (the default) the selection list keeps focus (the behaviour above). The flag is orthogonal to `open_pane: false` (no pane → focus is moot) and invalid values are logged and treated as absent (no-focus). Focus is applied to the pane's **tab** as well as the pane itself (`run-in-pane.sh` resolves the new pane's tab via `herdr pane get` and runs `herdr tab focus` before the pane zoom, WL-0MURJ0LFH002O95I): a focused ID-carrying dispatch is anchored to the work-item-ID tab (see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs)), and `pane zoom` alone cannot switch tabs — without the tab focus the new pane would open in a background tab and the selection list would keep focus. The bundled entries with the flag are `P n` (new Pi session — blank `/prompt:`) and `r i` (producer interview — `wl interview`): `P n` puts the cursor straight in the new Pi pane for immediate typing, and `r i` puts the cursor straight in the interview pane so the producer can answer outstanding questions without an extra `prefix+o` step. Any future shortcut can opt in with the same field without a schema change.
 - **Model lease release on pane close** — Pi agent panes launched by `send-to-pi.sh` or `open-pi-agent.sh` run pi via `shared/run-pi-agent.sh`, which gives the session a deterministic id (`pi --session-id herdr-<timestamp>-<pid>-<rand>`) and registers EXIT/TERM/HUP/INT traps. When the pi session ends — normal exit or pane close (`prefix+x`) — the wrapper runs `shared/release-lease-on-exit.mjs`, which posts to the Local Proxy's `POST {baseUrl}/leases/release` using the **same shared implementation** as the Pi extension (`@worklog/shared/lease-release`), so the proxy's dispatch lease is reclaimed promptly instead of lingering until timeout. The release is strictly best-effort: failures (unreachable proxy, missing `~/.pi/agent/models.json`, unconfigured provider) are silently discarded, a 5s request timeout bounds the pane-close path, and the wrapper always propagates pi's exit status (WL-0MSGI7UIH008USVB).
 - **Worklog tab naming** — `herdr plugin pane open` creates tabs with generated numeric labels. The `open-podcast-editor-tab` action wraps the same pane-open command and renames the created tab to "Worklog" via `herdr tab rename` (socket API, not session-state editing), so the worklog pane is instantly recognisable in the tab row. Each press still opens a new tab; only the label changes.
 - **Model selection per shortcut** — Each LLM-bound shortcut entry in `shortcuts.json` may carry an optional `model` field (a pi model pattern such as `plan`, `code`, or `author`). When the command is dispatched to the agent channel, `--model <pattern>` is forwarded to the spawned `pi` CLI (e.g. `pi --model code '/skill:implement <id>'`), so every workflow runs on an appropriately specialised model without manual model switching. Agent-bound entries without a `model` field default to `plan`; shell (`!!`) and `/wl` filter entries never carry a model and never receive a `--model` flag. The default mapping in `src/shortcuts.json`: `/plan`, `/intake`, `/skill:audit`, `/prompt:` → `plan`; `/skill:implement` → `code`.

@@ -242,7 +242,14 @@ async function showActivityWithTitleLookup(ctx: StatusContext, text: string, sho
   // The command is formatted via formatCommandContext (e.g., /skill:audit → audit).
   const commandCtx = formatCommandContext(text);
   const display = `${commandCtx} ${truncateWorkItemId(id)} ${title}`;
-  showActivity(ctx, display, showIndicator);
+
+  // Guard against stale ctx after the async boundary (WL-0MUL1BG09005VRBO).
+  // A session replacement during resolveWorkItemTitle would invalidate ctx.
+  try {
+    showActivity(ctx, display, showIndicator);
+  } catch {
+    // ctx is stale — skip silently (session was replaced/reloaded).
+  }
 }
 
 /**

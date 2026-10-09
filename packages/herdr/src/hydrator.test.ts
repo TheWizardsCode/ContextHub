@@ -7,8 +7,15 @@
  * and the test asserts observable behaviour (which items were released and
  * to what status/stage), plus the fail-open paths.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { resetExecFileAsync, setExecFileAsync } from './fetcher.js';
 import {
+  hydratorExecRouter,
+  makeWorstCaseItems,
+  makeWorstCasePanes,
+} from './hydrator.fixtures.js';
+import {
+  ALLOWED_STAGES_BY_STATUS,
   collectPaneWorkItemIds,
   compatibleStage,
   createHydratorRunner,
@@ -18,6 +25,8 @@ import {
   isActiveBlocker,
   isActivePaneMatch,
   runHydrationOnce,
+  type HydrationResult,
+  type HydratorDepTarget,
   type HydratorDeps,
   type HydratorItem,
   type HydratorPane,
@@ -31,12 +40,28 @@ interface AppliedDemotion {
   stage: string;
 }
 
-function makeDeps(overrides: Partial<HydratorDeps> = {}): {
-  deps: HydratorDeps;
+/**
+ * The injected-deps contract for the responsiveness fix. The clock, per-step
+ * timeout and per-tick cap are part of the target contract and are added to
+ * `HydratorDeps` by the implementation children (WL-0MUY1CXSV008F8TZ,
+ * WL-0MUY1CYV6008BQWX). Declaring them here lets the test seams carry them
+ * without changing the production type until the implementation lands.
+ */
+interface ContractDeps extends HydratorDeps {
+  /** Injectable monotonic clock (ms). */
+  now?: () => number;
+  /** Per-step timeout (ms); must be below the scheduler watchdog. */
+  stepTimeoutMs?: number;
+  /** Maximum candidates processed per hydrate tick. */
+  maxItemsPerTick?: number;
+}
+
+function makeDeps(overrides: Partial<ContractDeps> = {}): {
+  deps: ContractDeps;
   applied: AppliedDemotion[];
 } {
   const applied: AppliedDemotion[] = [];
-  const deps: HydratorDeps = {
+  const deps: ContractDeps = {
     listInProgressItems: async () => [],
     listActivePanes: async () => [],
     listOutboundDeps: async () => [],
@@ -139,6 +164,21 @@ describe('compatibleStage', () => {
 
   it('repairs an invalid stage (blocked cannot sit at in_progress)', () => {
     expect(compatibleStage('in_progress', 'blocked')).toBe('plan_complete');
+  });
+
+  it('never allows the removed in_progress stage for any status (WL-0MUY1CSQG007TCYX)', () => {
+    for (const status of Object.keys(ALLOWED_STAGES_BY_STATUS)) {
+      expect(ALLOWED_STAGES_BY_STATUS[status]).not.toContain('in_progress');
+    }
+    // The legacy stage is therefore always repaired to a CLI-valid stage.
+    expect(compatibleStage('in_progress', 'open')).toBe('plan_complete');
+    expect(compatibleStage('in_progress', 'in-progress')).toBe('plan_complete');
+    expect(compatibleStage('in_progress', 'blocked')).toBe('plan_complete');
+  });
+
+  it('keeps the CLI-valid stages allowed for open and in-progress', () => {
+    expect(ALLOWED_STAGES_BY_STATUS.open).toEqual(['idea', 'intake_complete', 'plan_complete']);
+    expect(ALLOWED_STAGES_BY_STATUS['in-progress']).toEqual(['intake_complete', 'plan_complete']);
   });
 });
 
@@ -352,5 +392,289 @@ describe('createProductionHydratorDeps', () => {
     expect(typeof deps.listActivePanes).toBe('function');
     expect(typeof deps.listOutboundDeps).toBe('function');
     expect(typeof deps.applyDemotion).toBe('function');
+  });
+});
+
+// ── Responsiveness-fix contract (WL-0MUY1CX9900258E6) ─────────────────
+//
+// Test-first contract for the hydrate-responsiveness fix. The assertions in
+// this section are RED until the implementation children land:
+//   • WL-0MUY1CXSV008F8TZ — per-step timing and bounded timeouts (AC2, AC3)
+//   • WL-0MUY1CYCB003DTKO — isolate child-process stdio         (AC1)
+//   • WL-0MUY1CYV6008BQWX — trim per-tick work                  (AC4, AC5)
+//
+// Contract pinned here (implement to this):
+//   • every hydrator CLI spawn passes `{ stdin: 'ignore', stderr: 'pipe' }`;
+//   • `runHydrationOnce` passes the workspace id to `listActivePanes`, which
+//     the production deps translate to `herdr pane list [--workspace <id>]`;
+//   • each step runs under a per-step timeout (`HydratorDeps.stepTimeoutMs`,
+//     default below the 20 s watchdog); a timeout aborts the run with
+//     `ok: false` and a `reason` containing the step label;
+//   • each step logs `... <label> ... elapsed <n>ms ...` measured with the
+//     injected `HydratorDeps.now` clock;
+//   • at most `HydratorDeps.maxItemsPerTick` candidates are processed per tick
+//     (default 50), each checked against its pane/dependency before demotion.
+// Step labels: `in-progress-list`, `pane-list`, `dep-list`, `demotion-apply`.
+
+// Restore the injectable exec seam after every test in this file.
+afterEach(() => {
+  resetExecFileAsync();
+});
+
+// ── AC1: stdio isolation on every hydrator CLI spawn ──────────────────
+
+describe('hydrator CLI stdio isolation (AC1)', () => {
+  it('passes stdin:ignore and stderr:pipe on every hydrator CLI spawn', async () => {
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+
+    const deps = createProductionHydratorDeps();
+    await deps.listInProgressItems();
+    await deps.listActivePanes();
+    await deps.listOutboundDeps(WL);
+    await deps.applyDemotion(WL, 'open', 'plan_complete');
+
+    // All four hydrator spawn shapes were exercised (in-progress list, pane
+    // list, per-item dep list, demotion apply).
+    expect(calls).toHaveLength(4);
+    expect(calls.some((call) => call.args.includes('pane'))).toBe(true);
+    expect(calls.some((call) => call.args.includes('dep'))).toBe(true);
+    expect(calls.some((call) => call.args.includes('update'))).toBe(true);
+    for (const call of calls) {
+      expect(call.options).toMatchObject({ stdin: 'ignore', stderr: 'pipe' });
+    }
+  });
+});
+
+// ── AC4: workspace-scoped pane listing ────────────────────────────────
+
+describe('workspace-scoped pane listing (AC4)', () => {
+  it('passes the current workspace id to the pane-list seam', async () => {
+    const seen: Array<string | undefined> = [];
+    const { deps } = makeDeps({
+      listInProgressItems: async () => [],
+      listActivePanes: (async (workspaceId?: string) => {
+        seen.push(workspaceId);
+        return [];
+      }) as HydratorDeps['listActivePanes'],
+    });
+
+    await runHydrationOnce(deps, 'wCurrent');
+
+    expect(seen).toEqual(['wCurrent']);
+  });
+
+  it('runs "herdr pane list --workspace <id>" when the workspace id is known', async () => {
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps();
+    const listActivePanes = deps.listActivePanes as (
+      workspaceId?: string,
+    ) => Promise<HydratorPane[] | null>;
+
+    await listActivePanes('wCurrent');
+
+    const paneCall = calls.find((call) => call.args.includes('pane'));
+    expect(paneCall).toBeDefined();
+    const index = paneCall!.args.indexOf('--workspace');
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(paneCall!.args[index + 1]).toBe('wCurrent');
+  });
+
+  it('omits the --workspace filter when the workspace id is unknown', async () => {
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps();
+
+    await deps.listActivePanes();
+
+    const paneCall = calls.find((call) => call.args.includes('pane'));
+    expect(paneCall).toBeDefined();
+    expect(paneCall!.args).not.toContain('--workspace');
+  });
+});
+
+// ── AC2: per-step timeouts abort and name the offending step ──────────
+
+describe('per-step timeouts (AC2)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('aborts the run and names the first step when it exceeds its budget', async () => {
+    const listOutboundDeps = vi.fn(async () => []);
+    const applyDemotion = vi.fn(async () => true);
+    const { deps } = makeDeps({
+      // The first lookup wedges like a hung `wl`/`herdr` child.
+      listInProgressItems: () => new Promise<HydratorItem[]>(() => {}),
+      listActivePanes: async () => [],
+      listOutboundDeps,
+      applyDemotion,
+      stepTimeoutMs: 1_000,
+      log: () => {},
+    });
+
+    let result: HydrationResult | undefined;
+    void runHydrationOnce(deps).then((r) => {
+      result = r;
+    });
+
+    await vi.advanceTimersByTimeAsync(1_001);
+
+    expect(result).toBeDefined();
+    expect(result?.ok).toBe(false);
+    expect(result?.reason ?? '').toMatch(/timeout/i);
+    expect(result?.reason ?? '').toContain('in-progress-list');
+    expect(listOutboundDeps).not.toHaveBeenCalled();
+    expect(applyDemotion).not.toHaveBeenCalled();
+  });
+
+  it('stops the item loop when a per-item dep-list step times out', async () => {
+    const items: HydratorItem[] = [
+      { id: 'WL-AAA0000000001', status: 'in-progress', stage: 'plan_complete' },
+      { id: 'WL-BBB0000000002', status: 'in-progress', stage: 'plan_complete' },
+    ];
+    const listOutboundDeps = vi.fn(
+      () => new Promise<HydratorDepTarget[]>(() => {}),
+    );
+    const applyDemotion = vi.fn(async () => true);
+    const { deps } = makeDeps({
+      listInProgressItems: async () => items,
+      listActivePanes: async () => [],
+      listOutboundDeps,
+      applyDemotion,
+      stepTimeoutMs: 500,
+      log: () => {},
+    });
+
+    let result: HydrationResult | undefined;
+    void runHydrationOnce(deps).then((r) => {
+      result = r;
+    });
+
+    await vi.advanceTimersByTimeAsync(501);
+
+    expect(result?.ok).toBe(false);
+    expect(result?.reason ?? '').toContain('dep-list');
+    // The loop stopped after the timed-out item: one dep-list, no demotion,
+    // and the deferred second item was never looked up.
+    expect(listOutboundDeps).toHaveBeenCalledTimes(1);
+    expect(applyDemotion).not.toHaveBeenCalled();
+  });
+});
+
+// ── AC3: per-step timing logs via the injected clock ──────────────────
+
+describe('per-step timing logs (AC3)', () => {
+  it('emits a labelled elapsed-ms log for every step using the injected clock', async () => {
+    const logs: string[] = [];
+    // Each seam advances the injected clock by its own duration, so the
+    // elapsed value is deterministic and independent of how often the
+    // implementation reads `now()`. The clock deltas are 7/3/5/12 ms.
+    let clock = 1_000;
+    const { deps } = makeDeps({
+      now: () => clock,
+      listInProgressItems: async () => {
+        clock += 7;
+        return [{ id: WL, status: 'in-progress', stage: 'plan_complete' }];
+      },
+      listActivePanes: async () => {
+        clock += 3;
+        return [];
+      },
+      listOutboundDeps: async () => {
+        clock += 5;
+        return [];
+      },
+      applyDemotion: async () => {
+        clock += 12;
+        return true;
+      },
+      log: (message) => logs.push(message),
+    });
+
+    await runHydrationOnce(deps);
+
+    const lineFor = (label: string): string | undefined =>
+      logs.find((line) => line.includes(label));
+    expect(lineFor('in-progress-list')).toMatch(/elapsed 7ms/);
+    expect(lineFor('pane-list')).toMatch(/elapsed 3ms/);
+    expect(lineFor('dep-list')).toMatch(/elapsed 5ms/);
+    expect(lineFor('demotion-apply')).toMatch(/elapsed 12ms/);
+  });
+});
+
+// ── AC5: per-tick processing cap ──────────────────────────────────────
+
+describe('per-tick processing cap (AC5)', () => {
+  it('processes at most maxItemsPerTick candidates, each with its check', async () => {
+    const items = makeWorstCaseItems(25);
+    const depChecked: string[] = [];
+    const demoted: string[] = [];
+    const { deps } = makeDeps({
+      listInProgressItems: async () => items,
+      listActivePanes: async () => [],
+      listOutboundDeps: async (id) => {
+        depChecked.push(id);
+        return [];
+      },
+      applyDemotion: async (id) => {
+        demoted.push(id);
+        return true;
+      },
+      maxItemsPerTick: 10,
+    });
+
+    const result = await runHydrationOnce(deps, 'wCurrent');
+
+    expect(demoted).toHaveLength(10);
+    expect(depChecked).toHaveLength(10);
+    // Every demotion was preceded by its own pane/dependency check.
+    for (const id of demoted) expect(depChecked).toContain(id);
+    // Deferred candidates were never touched this tick.
+    for (const id of items.slice(10).map((item) => item.id)) {
+      expect(depChecked).not.toContain(id);
+      expect(demoted).not.toContain(id);
+    }
+    expect(result.demoted).toBe(10);
+  });
+
+  it('honours the cap under a 60-pane / 25-item worst case', async () => {
+    const panes = makeWorstCasePanes(60);
+    const items = makeWorstCaseItems(25);
+    const depChecked: string[] = [];
+    const { deps } = makeDeps({
+      listInProgressItems: async () => items,
+      listActivePanes: async () => panes,
+      listOutboundDeps: async (id) => {
+        depChecked.push(id);
+        return [];
+      },
+      applyDemotion: async () => true,
+      maxItemsPerTick: 5,
+    });
+
+    const result = await runHydrationOnce(deps, 'wCurrent');
+
+    expect(result.demoted).toBe(5);
+    expect(depChecked).toHaveLength(5);
+  });
+
+  it('applies a default cap of at most 50 candidates', async () => {
+    const items = makeWorstCaseItems(60);
+    const { deps } = makeDeps({
+      listInProgressItems: async () => items,
+      listActivePanes: async () => [],
+      listOutboundDeps: async () => [],
+      applyDemotion: async () => true,
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    expect(result.demoted).toBeLessThanOrEqual(50);
   });
 });

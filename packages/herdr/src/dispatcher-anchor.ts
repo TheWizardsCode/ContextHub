@@ -1218,12 +1218,21 @@ export async function resolveProjectWorkspace(
  * unparseable `tab list`/`tab create`/`pane list`, or a matching tab whose
  * anchor pane cannot be resolved) — the caller fails closed (never a
  * wrong-project placement).
+ *
+ * @param onCreate Optional callback invoked with the freshly-provisioned
+ *   anchor when this call CREATED the tab (as opposed to adopting an existing
+ *   one). Lets the interactive dispatch path gate its fail-safe root-pane
+ *   cleanup on a genuine create-vs-reuse signal without a second `tab list`
+ *   round-trip (WL-0MUYI3K8H007MPKF, parent WL-0MUKZGEQ2007FECS, AC7). A
+ *   throwing callback is swallowed — provisioning must never fail because a
+ *   best-effort observer threw.
  */
 export async function getItemTabAnchor(
   cwd: string,
   deps: DispatcherAnchorDeps,
   workspaceId: string,
   itemId: string,
+  onCreate?: (anchor: ItemTabAnchor) => void,
 ): Promise<ItemTabAnchor | null> {
   if (workspaceId === '' || itemId === '') return null;
   const dir = getMachineCoordinationDir();
@@ -1259,7 +1268,19 @@ export async function getItemTabAnchor(
       return null;
     }
     if (created === null) return null;
-    return { tabId: created.tabId, paneId: created.paneId };
+    const anchor: ItemTabAnchor = { tabId: created.tabId, paneId: created.paneId };
+    // Create-vs-reuse signal (WL-0MUYI3K8H007MPKF): only the provisioning
+    // branch invokes the observer, so the interactive path can close the
+    // placeholder root pane after the first dispatch. Best-effort: a throwing
+    // observer must never fail provisioning.
+    if (typeof onCreate === 'function') {
+      try {
+        onCreate(anchor);
+      } catch {
+        // fail-open: an observer error never breaks tab provisioning
+      }
+    }
+    return anchor;
   } finally {
     release();
   }

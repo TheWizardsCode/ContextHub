@@ -65,16 +65,24 @@ describe('STAGE_STATUS — fetchItemsByStage --status per stage', () => {
     expect(callArgs[statusIdx + 1]).toBe('open');
   });
 
-  it('completed stage uses open-only status', async () => {
+  it('rejects removed stage "completed" without issuing a CLI call (WL-0MUY1CRS7001UTQJ)', async () => {
     const mockFn = vi.fn().mockResolvedValue({ stdout: JSON.stringify({ workItems: [] }), stderr: '' });
     setExecFileAsync(mockFn as any);
 
     await fetchItemsByStage('completed');
 
-    const callArgs = mockFn.mock.calls[0][1] as string[];
-    const statusIdx = callArgs.indexOf('--status');
-    expect(statusIdx).toBeGreaterThan(-1);
-    expect(callArgs[statusIdx + 1]).toBe('open');
+    // Removed stages must never produce a CLI invocation
+    expect(mockFn).not.toHaveBeenCalled();
+  });
+
+  it('rejects removed stage "in_progress" without issuing a CLI call (WL-0MUY1CRS7001UTQJ)', async () => {
+    const mockFn = vi.fn().mockResolvedValue({ stdout: JSON.stringify({ workItems: [] }), stderr: '' });
+    setExecFileAsync(mockFn as any);
+
+    await fetchItemsByStage('in_progress');
+
+    // Removed stages must never produce a CLI invocation
+    expect(mockFn).not.toHaveBeenCalled();
   });
 
   it('done stage uses open-only status', async () => {
@@ -89,15 +97,13 @@ describe('STAGE_STATUS — fetchItemsByStage --status per stage', () => {
     expect(callArgs[statusIdx + 1]).toBe('open');
   });
 
-  it('unknown stages fall back to open-only status', async () => {
+  it('rejects unknown stages without issuing a CLI call (WL-0MUY1CRS7001UTQJ)', async () => {
     const mockFn = vi.fn().mockResolvedValue({ stdout: JSON.stringify({ workItems: [] }), stderr: '' });
     setExecFileAsync(mockFn as any);
 
-    await fetchItemsByStage('some_unknown_stage');
+    await fetchItemsByStage('bogus');
 
-    const callArgs = mockFn.mock.calls[0][1] as string[];
-    const statusIdx = callArgs.indexOf('--status');
-    expect(statusIdx).toBeGreaterThan(-1);
-    expect(callArgs[statusIdx + 1]).toBe('open');
+    // Unknown stages must never produce a CLI invocation
+    expect(mockFn).not.toHaveBeenCalled();
   });
 });

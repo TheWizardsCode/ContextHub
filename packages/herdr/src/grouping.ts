@@ -115,6 +115,10 @@ function isFilePath(candidate: string): boolean {
 export interface GroupableItem {
   id: string;
   stage?: string;
+  /** Lifecycle status (`wl` status vocabulary). Used to detect actively-worked
+   * items (`status === 'in-progress'`), which replaced the removed
+   * `in_progress` stage (WL-0MUY1CSQG007TCYX). */
+  status?: string;
   filePaths: string[];
   priority?: string;
   // Optional audit fields — used for in_review bucket sort
@@ -207,8 +211,9 @@ export function groupItemsByFilePaths(
  * Group display order (most actionable first):
  * - **Critical Group N** — critical items partitioned by file-path conflicts
  *   (per-category label counter, no single all-inclusive "Critical" group).
- * - **Group N** — non-critical `in_progress` + `plan_complete` + `intake_complete`
- *   items partitioned by file-path conflicts (no stage prefix in the label).
+ * - **Group N** — non-critical actively-worked (`status === 'in-progress'`)
+ *   + `plan_complete` + `intake_complete` items partitioned by file-path
+ *   conflicts (no stage prefix in the label).
  * - **Idea** — single group for all `idea` items.
  * - **Other** — single group for all remaining non-critical items (safety net
  *   for unknown/custom stages, `done`, etc.).
@@ -249,11 +254,13 @@ export function assignItemGroups(
     nextGroup += count;
   }
 
-  // 1. Group N (in_progress + plan_complete + intake_complete).
+  // 1. Group N (actively worked + plan_complete + intake_complete).
+  // `in_progress` is no longer a CLI stage; "actively worked" is derived from
+  // `status === 'in-progress'` (WL-0MUY1CSQG007TCYX).
   const groupNItems = items.filter(
     item =>
       item.priority !== 'critical' &&
-      (item.stage === 'in_progress' || item.stage === 'plan_complete' || item.stage === 'intake_complete'),
+      (item.status === 'in-progress' || item.stage === 'plan_complete' || item.stage === 'intake_complete'),
   );
   if (groupNItems.length > 0) {
     const groupNGroups = groupItemsByFilePaths(groupNItems, maxFilePathGroups);
@@ -276,11 +283,14 @@ export function assignItemGroups(
   }
 
   // 3. Other.
+  // Safety net for remaining non-critical items (unknown/legacy stages such
+  // as the removed `in_progress`, `done`, etc.). Excludes actively-worked
+  // items because they belong to Group N via `status === 'in-progress'`.
   const otherItems = items.filter(
     item =>
       item.priority !== 'critical' &&
+      item.status !== 'in-progress' &&
       item.stage !== 'in_review' &&
-      item.stage !== 'in_progress' &&
       item.stage !== 'plan_complete' &&
       item.stage !== 'intake_complete' &&
       item.stage !== 'idea',
@@ -318,16 +328,27 @@ function buildLabelCounter(fileGroups: Map<string, number>): Map<number, number>
 // ── Within-group ordering ─────────────────────────────────────────────
 
 /**
- * Stage sub-order within a group: in_progress first (actively being worked),
- * then plan_complete, then intake_complete, then all remaining stages.
+ * Stage sub-order within a group: actively-worked items first
+ * (derived from `status === 'in-progress'`), then plan_complete, then
+ * intake_complete, then all remaining stages.
  * No headings are rendered between sub-groups.
  */
 const WITHIN_GROUP_STAGE_ORDER: Record<string, number> = {
-  in_progress: 0,
   plan_complete: 1,
   intake_complete: 2,
 };
 const REMAINING_STAGE_ORDER = 3;
+
+/**
+ * Within-group sub-order for an item. Actively-worked items
+ * (`status === 'in-progress'`) sort before every stage sub-group; the
+ * `in_progress` stage no longer exists in the CLI vocabulary
+ * (WL-0MUY1CSQG007TCYX). All other items fall back to the stage sub-order.
+ */
+function withinGroupStageOrder(item: GroupableItem): number {
+  if (item.status === 'in-progress') return 0;
+  return WITHIN_GROUP_STAGE_ORDER[item.stage ?? ''] ?? REMAINING_STAGE_ORDER;
+}
 
 /**
  * Priority order for within-group sorting: high → medium → low.
@@ -429,9 +450,9 @@ export function compareInReviewItems(a: GroupableItem & {
 
 /**
  * Compare two items for within-group display order:
- * stage sub-sort (in_progress → plan_complete → intake_complete → remaining
- * stages), then priority (high → medium → low), then id as a deterministic
- * tie-break.
+ * stage sub-sort (actively worked → plan_complete → intake_complete →
+ * remaining stages), then priority (high → medium → low), then id as a
+ * deterministic tie-break.
  *
  * When BOTH items have stage === 'in_review', the 6-bucket predicate
  * (see `compareInReviewItems`) takes priority over the default stage
@@ -449,8 +470,8 @@ export function compareGroupableItems(a: GroupableItem, b: GroupableItem): numbe
     if (bucketCmp !== 0) return bucketCmp;
   }
 
-  const stageA = WITHIN_GROUP_STAGE_ORDER[a.stage ?? ''] ?? REMAINING_STAGE_ORDER;
-  const stageB = WITHIN_GROUP_STAGE_ORDER[b.stage ?? ''] ?? REMAINING_STAGE_ORDER;
+  const stageA = withinGroupStageOrder(a);
+  const stageB = withinGroupStageOrder(b);
   if (stageA !== stageB) return stageA - stageB;
   const prioA = WITHIN_GROUP_PRIORITY_ORDER[a.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
   const prioB = WITHIN_GROUP_PRIORITY_ORDER[b.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
@@ -472,6 +493,8 @@ export function compareGroupableItems(a: GroupableItem, b: GroupableItem): numbe
 export function regroupWorkItems<T extends {
   id: string;
   stage?: string;
+  /** Lifecycle status — drives actively-worked Group N membership/ordering. */
+  status?: string;
   priority?: string;
   description?: string;
   group?: number;
@@ -488,6 +511,7 @@ export function regroupWorkItems<T extends {
   const groupable = items.map(item => ({
     id: item.id,
     stage: item.stage,
+    status: item.status,
     priority: item.priority,
     filePaths: extractFilePaths(item.description ?? ''),
     needsProducerReview: item.needsProducerReview,
@@ -502,13 +526,13 @@ export function regroupWorkItems<T extends {
     const gb = groupMap.get(b.id)?.group ?? Number.MAX_SAFE_INTEGER;
     if (ga !== gb) return ga - gb;
     return compareGroupableItems(
-      { id: a.id, stage: a.stage, priority: a.priority, filePaths: [],
+      { id: a.id, stage: a.stage, status: a.status, priority: a.priority, filePaths: [],
         needsProducerReview: a.needsProducerReview,
         auditResult: a.auditResult,
         auditedAt: a.auditedAt,
         updatedAt: a.updatedAt,
       },
-      { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
+      { id: b.id, stage: b.stage, status: b.status, priority: b.priority, filePaths: [],
         needsProducerReview: b.needsProducerReview,
         auditResult: b.auditResult,
         auditedAt: b.auditedAt,

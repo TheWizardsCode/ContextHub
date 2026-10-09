@@ -191,6 +191,8 @@ function createDelegateTestContext() {
       requireInitialized: () => {},
       getDatabase: () => db,
       normalizeCliId: (id: string) => id,
+      normalizeParentId: (id?: string) =>
+        id && !['null', 'none', 'nil', '-'].includes(id.trim().toLowerCase()) ? id : null,
       isJsonMode: () => false,
     },
   };

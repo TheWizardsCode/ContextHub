@@ -57,7 +57,7 @@ export default function register(ctx: PluginContext): void {
     .option('--description-file <file>', 'Read description from a file')
     .option('-s, --status <status>', 'Status (open, in-progress, completed, blocked, deleted)', 'open')
     .option('-p, --priority <priority>', 'Priority (low, medium, high, critical)', 'medium')
-    .option('-P, --parent <parentId>', 'Parent work item ID')
+    .option('-P, --parent <parentId>', 'Parent work item ID (use "null" to create a top-level item)')
     .option('--tags <tags>', 'Comma-separated list of tags')
     .option('-a, --assignee <assignee>', 'Assignee of the work item')
     .option('--stage <stage>', 'Stage of the work item in the workflow')
@@ -195,7 +195,7 @@ export default function register(ctx: PluginContext): void {
         };
       }
 
-      const parentId = utils.normalizeCliId(options.parent, options.prefix) || null;
+      const parentId = utils.normalizeParentId(options.parent, options.prefix);
 
       // ── Dedup guard (WL-0MSTNG2QF0049B97) ──────────────────────────
       // Retrying an identical `wl create` (common when agents lose the tool

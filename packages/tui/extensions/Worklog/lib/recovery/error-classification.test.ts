@@ -18,6 +18,7 @@ import {
   isTimeout,
   isTerminated,
   isParseError,
+  isCompactionGate,
   ErrorCategory,
   type RecoveryConfig,
 } from './error-patterns.js';
@@ -75,6 +76,31 @@ describe('isServerError', () => {
     expect(isServerError(makeErrorMsg('No provider available'))).toBe(true);
     expect(isServerError(makeErrorMsg('no provider available'))).toBe(true);
     expect(isServerError(makeErrorMsg('NO PROVIDER AVAILABLE'))).toBe(true);
+  });
+
+  it('detects "all providers unavailable" scheduled-window wording', () => {
+    expect(isServerError(makeErrorMsg('All providers unavailable'))).toBe(true);
+    expect(isServerError(makeErrorMsg('all providers unavailable'))).toBe(true);
+    expect(isServerError(makeErrorMsg('ALL PROVIDERS UNAVAILABLE'))).toBe(true);
+  });
+
+  it('detects "no provider is available" scheduled-window wording', () => {
+    expect(isServerError(makeErrorMsg('No provider is available'))).toBe(true);
+    expect(isServerError(makeErrorMsg('no provider is available'))).toBe(true);
+    expect(isServerError(makeErrorMsg('NO PROVIDER IS AVAILABLE'))).toBe(true);
+    // The earlier "no provider available" phrasing remains matched by the
+    // widened pattern (WL-0MT656GDS0052FTK).
+    expect(isServerError(makeErrorMsg('No provider available'))).toBe(true);
+  });
+
+  it('detects "scheduled time window" scheduled-window wording', () => {
+    expect(isServerError(makeErrorMsg('during the current scheduled time window'))).toBe(true);
+    expect(isServerError(makeErrorMsg('During The Current Scheduled Time Window'))).toBe(true);
+  });
+
+  it('detects "outside its available_times" scheduled-window wording', () => {
+    expect(isServerError(makeErrorMsg('provider is outside its available_times'))).toBe(true);
+    expect(isServerError(makeErrorMsg('Outside Its available_times'))).toBe(true);
   });
 
   it('detects 5xx status codes', () => {
@@ -316,6 +342,30 @@ describe('classifyError', () => {
   it('classifies "all providers exhausted" as SERVER_ERROR (auto-retry)', () => {
     expect(classifyError(makeErrorMsg('All providers exhausted'))).toBe(ErrorCategory.SERVER_ERROR);
     expect(classifyError(makeErrorMsg('No provider available'))).toBe(ErrorCategory.SERVER_ERROR);
+  });
+
+  it('classifies the proxy scheduled-window 503 body as SERVER_ERROR (auto-retry)', () => {
+    // Exact llm-proxy time-window exhaustion body (WL-0MU56ZSSB0054D8W).
+    const proxyBody =
+      'All providers unavailable: no provider is available during the current scheduled time window';
+    expect(classifyError(makeErrorMsg(proxyBody))).toBe(ErrorCategory.SERVER_ERROR);
+    expect(classifyError(makeErrorMsg(proxyBody))).not.toBe(ErrorCategory.UNKNOWN);
+
+    // The classifier checks TIMEOUT before SERVER_ERROR, so assert no new
+    // pattern is subsumed by an earlier, broader category (AC2/constraint).
+    const scheduledWindowVariants = [
+      proxyBody,
+      'All providers unavailable',
+      'No provider is available',
+      'scheduled time window',
+      'outside its available_times',
+    ];
+    for (const variant of scheduledWindowVariants) {
+      expect(isTimeout(makeErrorMsg(variant))).toBe(false);
+      expect(isContextLengthExceeded(makeErrorMsg(variant))).toBe(false);
+      expect(isCompactionGate(makeErrorMsg(variant))).toBe(false);
+    }
+    expect(isTerminated(makeErrorMsg(proxyBody))).toBe(false);
   });
 
   it('classifies auth errors', () => {
