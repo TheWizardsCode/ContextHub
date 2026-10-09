@@ -114,9 +114,23 @@ describe('resolveRetryDelay with a header hint', () => {
     expect(result.delayMs).toBe(3000);
   });
 
-  it('caps a large header hint at the configured maximum', () => {
-    const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, noJitter, 90_000);
-    expect(result.delayMs).toBe(60_000);
+  it('honours a header hint above the exponential cap up to the server-hint ceiling', () => {
+    // 90s exceeds the 60s exponential cap but is below the 6h server-hint
+    // ceiling, so the header hint is honoured in full rather than clamped
+    // back to `maxDelayMs` (AC1).
+    const honoured = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, noJitter, 90_000);
+    expect(honoured.delayMs).toBe(90_000);
+    expect(honoured.delayMs).toBeGreaterThan(DEFAULT_BACKOFF_CONFIG.maxDelayMs);
+
+    // A hint beyond the ceiling (default 6h) is still bounded.
+    const bounded = resolveRetryDelay(
+      1,
+      undefined,
+      DEFAULT_BACKOFF_CONFIG,
+      noJitter,
+      100 * 60 * 60 * 1000,
+    );
+    expect(bounded.delayMs).toBe(DEFAULT_BACKOFF_CONFIG.serverHintMaxDelayMs);
   });
 
   it('does not let a grown local backoff override the header hint', () => {

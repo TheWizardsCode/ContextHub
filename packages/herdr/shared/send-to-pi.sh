@@ -49,6 +49,13 @@
 
 set -uo pipefail
 
+# Defence-in-depth (SA-0MUIZSXEY008NGR8 / WL-0MV0TZEWZ003ZXEB): do not forward a
+# repository-override git variable to the spawned pane. Git honours GIT_DIR over
+# cwd, so a leaked value could make an agent/test `git` command operate on the
+# live checkout instead of the pane's own project.
+unset GIT_DIR GIT_WORK_TREE GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM \
+      GIT_CONFIG_NOSYSTEM GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 # ── Help ────────────────────────────────────────────────────────────────
 show_help() {
   sed -n '/^# Usage/,/^$/p' "$0" | sed 's/^# //; s/^#$//'

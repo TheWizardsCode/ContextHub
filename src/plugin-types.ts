@@ -58,6 +58,12 @@ export interface PluginContext {
     getPrefix: (overridePrefix?: string) => string;
     /** Normalize a CLI-provided ID by applying default prefix if missing */
     normalizeCliId: (id?: string, overridePrefix?: string) => string | undefined;
+    /**
+     * Normalize a CLI-provided `--parent` value. Detach sentinels
+     * (`null`/`none`/`nil`/`-`/empty, case-insensitive) return `null`;
+     * otherwise the value is delegated to `normalizeCliId`.
+     */
+    normalizeParentId: (id?: string, overridePrefix?: string) => string | null;
     /** Check if in JSON output mode */
     isJsonMode: () => boolean;
   };

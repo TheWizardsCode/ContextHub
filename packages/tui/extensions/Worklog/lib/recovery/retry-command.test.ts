@@ -250,6 +250,33 @@ describe('executeRetryCommand', () => {
     expect(mockOptions.triggerRetry).toHaveBeenCalled();
   });
 
+  // /retry with the proxy scheduled-window 503 body
+  it('/retry with the proxy scheduled-window body routes to the retryable path', async () => {
+    mockCtx.sessionManager.getEntries = vi.fn().mockReturnValue([
+      {
+        type: 'message',
+        message: {
+          role: 'assistant',
+          stopReason: 'error',
+          errorMessage:
+            'All providers unavailable: no provider is available during the current scheduled time window',
+        },
+      },
+    ]);
+
+    await executeRetryCommand('', mockCtx, mockOptions);
+
+    // SERVER_ERROR is retryable — routed to triggerRetry (which fires
+    // triggerInvisibleContinue in the live wiring), never the UNKNOWN
+    // "No retryable error detected" no-retry branch.
+    expect(mockOptions.triggerRetry).toHaveBeenCalledWith(ErrorCategory.SERVER_ERROR);
+    expect(mockOptions.triggerCompactContinue).not.toHaveBeenCalled();
+    expect(mockCtx.ui.notify).not.toHaveBeenCalledWith(
+      expect.stringContaining('No retryable error detected'),
+      expect.any(String),
+    );
+  });
+
   // /retry with auth error
   it('/retry with auth error triggers retry (manual override)', async () => {
     mockCtx.sessionManager.getEntries = vi.fn().mockReturnValue([

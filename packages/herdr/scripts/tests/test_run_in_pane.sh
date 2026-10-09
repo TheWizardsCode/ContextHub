@@ -8,6 +8,11 @@
 #   - --no-focus skips the final pane zoom (selection list keeps focus)
 #   - omitting --no-focus preserves the current focus/zoom behavior
 #   - --no-focus does not affect pane creation / command execution
+# Covers the --focus flag and tab focus (WL-0MURJ0LFH002O95I):
+#   - --focus is consumed by the parser, never leaked into the command
+#   - a focused run focuses the new pane's tab (item-ID anchor placement)
+#   - --no-focus skips tab focus too
+#   - tab focus fails open when the tab id cannot be resolved
 #
 # Run from the repo root (or anywhere):
 #   bash packages/herdr/scripts/tests/test_run_in_pane.sh
@@ -108,10 +113,23 @@ case "\$1" in
       run)
         echo "mock: ran"
         ;;
+      get)
+        echo '{"result":{"pane":{"pane_id":"test-pane-main","tab_id":"w1:t9"}}}'
+        ;;
       rename|zoom)
         ;;
       *)
         echo "mock: unknown pane subcommand \$2" >&2
+        exit 1
+        ;;
+    esac
+    ;;
+  tab)
+    case "\$2" in
+      focus)
+        ;;
+      *)
+        echo "mock: unknown tab subcommand \$2" >&2
         exit 1
         ;;
     esac
@@ -142,6 +160,86 @@ else
   fail "without --no-focus the zoom must still run (log: $(cat "$HERDR_LOG" 2>/dev/null))"
 fi
 
+# --focus is consumed as an option, never passed to the executed command
+# (WL-0MURJ0LFH002O95I): before the fix the parser did not know --focus, so it
+# fell through and the pane ran `--focus --cwd … <command>` — the command never
+# executed.
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --focus --cwd /tmp "echo FOCUS_OK" < /dev/null >/dev/null 2>&1
+if grep -q "pane run" "$HERDR_LOG" 2>/dev/null && grep -q "FOCUS_OK" "$HERDR_LOG" 2>/dev/null && ! grep -q -- "--focus" "$HERDR_LOG" 2>/dev/null; then
+  pass "--focus is consumed and never leaked into the executed command"
+else
+  fail "--focus must not leak into the command (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+# A focused run focuses the TAB the new pane lives in: an ID-carrying
+# interactive dispatch anchors the split to the work-item-ID tab, and
+# `pane zoom` alone cannot switch tabs (WL-0MURJ0LFH002O95I).
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "tab focus w1:t9" "$HERDR_LOG" 2>/dev/null; then
+  pass "--focus focuses the new pane's tab (tab focus w1:t9)"
+else
+  fail "--focus must focus the new pane's tab (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+# --no-focus skips tab focus as well, so the selection list keeps focus.
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --no-focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "tab focus" "$HERDR_LOG" 2>/dev/null; then
+  fail "--no-focus must not focus the pane's tab (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+else
+  pass "--no-focus skips tab focus (selection list keeps focus)"
+fi
+
+# The anchored (item-ID tab) focused dispatch focuses that tab.
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --anchor w9:p7 --focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "pane split --pane w9:p7" "$HERDR_LOG" 2>/dev/null && grep -q "tab focus w1:t9" "$HERDR_LOG" 2>/dev/null; then
+  pass "anchored focused run focuses the item tab (--anchor + tab focus)"
+else
+  fail "anchored focused run must focus the item tab (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+# Tab focus is best-effort: when the tab id cannot be resolved (pane get
+# fails), the run still succeeds and the pane zoom is attempted.
+MOCK_HERDR_NOTAB="$SANDBOX/mock-herdr-notab"
+cat > "$MOCK_HERDR_NOTAB" <<MOCK
+#!/usr/bin/env bash
+echo "herdr:\$*" >> "$HERDR_LOG"
+case "\$1" in
+  pane)
+    case "\$2" in
+      split)
+        echo '{"pane_id":"test-pane-main","success":true}'
+        ;;
+      run)
+        echo "mock: ran"
+        ;;
+      get)
+        exit 1
+        ;;
+      rename|zoom)
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+MOCK
+chmod +x "$MOCK_HERDR_NOTAB"
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR_NOTAB" bash "$RUN_IN_PANE" --focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "zoom" "$HERDR_LOG" 2>/dev/null && ! grep -q "tab focus" "$HERDR_LOG" 2>/dev/null; then
+  pass "tab focus fails open when the tab id is unavailable (zoom still runs)"
+else
+  fail "tab focus must fail open when the tab id is unavailable (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
 # --cwd is still honoured alongside --no-focus (the command still runs)
 rm -f "$HERDR_LOG"
 HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --no-focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
@@ -149,6 +247,59 @@ if grep -q "pane run" "$HERDR_LOG" 2>/dev/null; then
   pass "--no-focus does not affect pane creation / command execution"
 else
   fail "--no-focus must not skip pane run (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+# --anchor <paneId> splits the given pane instead of --current (AC2/AC6):
+# an ID-carrying interactive dispatch anchors to the item tab's root pane.
+# TDD red phase: run-in-pane.sh does not parse --anchor yet, so these cases
+# fail until the sibling implementation child (WL-0MUYI3JAO002BTNL) lands.
+echo ""
+echo "=== Test: --anchor splits the given pane instead of --current ==="
+
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --anchor w9:p7 --no-focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "pane split --pane w9:p7" "$HERDR_LOG" 2>/dev/null; then
+  pass "--anchor splits the given pane (--pane w9:p7)"
+else
+  fail "--anchor should split --pane w9:p7 (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+if grep -q "pane split --current" "$HERDR_LOG" 2>/dev/null; then
+  fail "--anchor must not split --current"
+else
+  pass "--anchor does not use --current"
+fi
+
+# Omitting --anchor keeps the current-pane split (backward compatible).
+rm -f "$HERDR_LOG"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --no-focus --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if grep -q "pane split --current" "$HERDR_LOG" 2>/dev/null; then
+  pass "omitting --anchor keeps the current-pane split"
+else
+  fail "without --anchor the split must use --current (log: $(cat "$HERDR_LOG" 2>/dev/null))"
+fi
+
+# --pane-id-file writes the split pane id immediately after the split
+# (WL-0MUYI3K8H007MPKF): the interactive dispatch uses this as the
+# split-confirmation channel that gates the fail-safe placeholder cleanup.
+echo ""
+echo "=== Test: --pane-id-file writes the new pane id after the split ==="
+
+ID_FILE="$SANDBOX/pane-id.json"
+rm -f "$HERDR_LOG" "$ID_FILE"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --pane-id-file "$ID_FILE" --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if [ -f "$ID_FILE" ] && grep -q '"pane_id":"test-pane-main"' "$ID_FILE"; then
+  pass "--pane-id-file writes the split pane id JSON"
+else
+  fail "--pane-id-file should write the split pane id (file: $(cat "$ID_FILE" 2>/dev/null))"
+fi
+
+# Omitting --pane-id-file writes nothing (opt-in channel, backward compatible).
+rm -f "$ID_FILE"
+HERDR_BIN_PATH="$MOCK_HERDR" bash "$RUN_IN_PANE" --cwd /tmp "echo hi" < /dev/null >/dev/null 2>&1
+if [ ! -f "$ID_FILE" ]; then
+  pass "omitting --pane-id-file writes no file"
+else
+  fail "without --pane-id-file no file should be written"
 fi
 
 rm -rf "$SANDBOX"

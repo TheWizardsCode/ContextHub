@@ -57,7 +57,7 @@ across the CLI (chalk) and TUI rendering paths. It covers:
 | intake_complete  | `📥`   | `[INTAKE]`    | "Stage: Intake Complete"       |
 | plan_complete    | `📋`   | `[PLAN]`      | "Stage: Plan Complete"         |
 | in_review        | `🔍`   | `[REVIEW]`    | "Stage: In Review"             |
-| done             | `🏁`   | `[DONE]`      | "Stage: Done"                  |
+| done             | `✔️`   | `[DONE]`      | "Stage: Done"                  |
 
 ## 3. Audit Result Icons
 

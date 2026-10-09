@@ -24,6 +24,13 @@
 
 set -uo pipefail
 
+# Defence-in-depth (SA-0MUIZSXEY008NGR8 / WL-0MV0TZEWZ003ZXEB): never carry a
+# repository-override git variable into the agent session. Git honours GIT_DIR
+# over cwd, so a value leaked in from the launcher environment could redirect a
+# `git` command (or a test subprocess) into the live checkout.
+unset GIT_DIR GIT_WORK_TREE GIT_CONFIG GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM \
+      GIT_CONFIG_NOSYSTEM GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 lease_session_id="${1:-}"
 shift || true
 

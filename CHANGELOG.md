@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.20 (2026-10-09)
+> **Release focus:** This release focuses on reliability and resilience across agent sessions, fixing issues that could cause stalled work, shared slots, and interrupted sessions while adding automatic retries for connection errors and unavailable AI providers. It also improves day-to-day usability with multi-item deletion, a dedicated work item tab, an interview "Thinking…" indicator, and clearer guidance from the review queue and doctor.
+### Features
+- The dispatcher now refuses to start downtime work when slot info is unreliable, preventing two agents from sharing one slot. (WL-0MUXVPXAZ005RESW)
+- The interview command now shows a "Thinking…" indicator during AI requests so it no longer looks frozen. (WL-0MUX2W8IN005RW66)
+- Keeps work flowing when the sprint view is empty, while sharing leadership fairly. (WL-0MUU4XFU90008E24)
+- Delete multiple work items in one command with a single sync. (WL-0MUI83ZTX005RN93)
+- Stalled work now resumes automatically instead of being left unfinished. (WL-0MUMA5OMH0024PN1)
+- The client now waits as long as the server asks before retrying, so overnight sessions resume cleanly instead of spamming errors. (WL-0MUR5EGH7003VOHM)
+- Doctor now warns you when upgrades are pending instead of falsely reporting no issues. (WL-0MUTVB271007YKJZ)
+- Work on a work item now opens in its own tab, keeping all related panes together. (WL-0MUKZGEQ2007FECS)
+- Pressing r i now focuses the interview pane so you can answer questions right away. (WL-0MURJ0LFH002O95I)
+### Bug Fixes
+- Temporary connection errors now retry automatically instead of failing your task. (WL-0MUQO8AEE003G1Z2)
+- The HERDR plugin no longer freezes or drops your commands during background updates. (WL-0MUY0RDBQ001H74P)
+- Idle mode switching now waits for active work to finish, so your sessions won't be interrupted. (WL-0MUL0KO7Q003O7YJ)
+- Prevents stray git settings from breaking agent sessions and corrupting your game files. (WL-0MV0TZEWZ003ZXEB)
+- Fixed a test so the r i shortcut correctly focuses the interview pane. (WL-0MUZZW8KJ006HAPF)
+- You can now detach items with --parent null instead of creating a broken parent link. (WL-0MUJM2LV1000IHKR)
+- Prevents rare crashes when reloading sessions during headless runs. (WL-0MUL1BG09005VRBO)
+- Long tasks now retry automatically when no AI provider is available instead of stalling. (WL-0MU56ZSSB0054D8W)
+- Audited items no longer lose their ready status after sorting or syncing. (WL-0MU2O8AQ8000ASDO)
+- The review queue banner now tells you whether to keep auditing or ship. (WL-0MUJRJCZV000NG5X)
+- Fixed slot status cards not showing session info and console errors on the home page. (WL-0MUKY4MAX0008I0L)
+- Stage filters now match the real pipeline, so you'll never see empty or broken lists. (WL-0MU624MF7004WYMI)
+
 ## v1.0.19 (2026-10-06)
 > **Release focus:** This release focuses on reliability and workflow polish across task handling, sessions, and audits, fixing issues like endless retries, lost progress from connection errors, and sync conflicts that dropped completed work. It also improves visibility and speed with priority icons, clearer flag explanations, quick-create options, and more accurate reporting from the latest worklog data.
 ### Features

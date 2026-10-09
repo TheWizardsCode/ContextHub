@@ -22,6 +22,8 @@ import registerInterview, {
   rebuildDescription,
   runInterview,
   buildProducerReviewExplanation,
+  buildProducerReviewExplanationResult,
+  tryExtractQuestionsWithLlm,
   buildExplanationPrompt,
   buildFallbackExplanation,
   renderExplanation,
@@ -33,6 +35,11 @@ import registerInterview, {
   EXTRACTION_TIMEOUT_MS,
   MAX_EXTRACTION_DESCRIPTION_BYTES,
 } from '../../src/commands/interview.js';
+import {
+  LLM_THINKING_MESSAGE,
+  LLM_FALLBACK_NOTICE,
+  type ProgressWriteStream,
+} from '../../src/lib/progress-feedback.js';
 import { createTestContext } from '../test-utils.js';
 
 // ── Section extraction ───────────────────────────────────────────────────
@@ -1002,6 +1009,154 @@ describe('buildProducerReviewExplanation', () => {
   });
 });
 
+// ── Fallback signal (WL-0MUX2W8IN005RW66) ────────────────────────────────
+
+describe('buildProducerReviewExplanationResult', () => {
+  const comments = [comment('alice', 'First comment')];
+
+  it('reports usedLlm true when the LLM returns an explanation', async () => {
+    const result = await buildProducerReviewExplanationResult(flaggedItem('desc'), {
+      comments,
+      chatClient: fakeChatClient('LLM reason'),
+    });
+    expect(result).toEqual({ text: 'LLM reason', usedLlm: true });
+  });
+
+  it('reports usedLlm false when the LLM throws (timeout/error)', async () => {
+    const result = await buildProducerReviewExplanationResult(flaggedItem('desc'), {
+      comments,
+      chatClient: fakeChatClient(new Error('Chat API request timed out')),
+    });
+    expect(result?.usedLlm).toBe(false);
+    expect(result?.text).toBeTruthy();
+  });
+
+  it('reports usedLlm false when the client is unavailable or disabled', async () => {
+    const unavailable = await buildProducerReviewExplanationResult(flaggedItem('desc'), {
+      comments,
+      chatClient: null,
+    });
+    expect(unavailable?.usedLlm).toBe(false);
+
+    const disabled = await buildProducerReviewExplanationResult(flaggedItem('desc'), {
+      comments,
+      chatClient: fakeChatClient('unused'),
+      noLlm: true,
+    });
+    expect(disabled?.usedLlm).toBe(false);
+  });
+
+  it('returns null for an unflagged item', async () => {
+    const result = await buildProducerReviewExplanationResult(flaggedItem('desc', false), {
+      comments,
+      chatClient: fakeChatClient('unused'),
+    });
+    expect(result).toBeNull();
+  });
+});
+
+describe('tryExtractQuestionsWithLlm', () => {
+  it('reports usedLlm true and the parsed questions on success', async () => {
+    const chat = {
+      available: true,
+      complete: vi.fn(async () => '[{"question":"Q?"}]'),
+    };
+    const result = await tryExtractQuestionsWithLlm(chat as any, 'desc');
+    expect(result).toEqual({ questions: ['Q?'], usedLlm: true });
+  });
+
+  it('reports usedLlm false when the request throws', async () => {
+    const chat = {
+      available: true,
+      complete: vi.fn(async () => {
+        throw new Error('timeout');
+      }),
+    };
+    const result = await tryExtractQuestionsWithLlm(chat as any, 'desc');
+    expect(result).toEqual({ questions: [], usedLlm: false });
+  });
+
+  it('reports usedLlm false and skips an unavailable client', async () => {
+    const chat = { available: false, complete: vi.fn() };
+    const result = await tryExtractQuestionsWithLlm(chat as any, 'desc');
+    expect(result).toEqual({ questions: [], usedLlm: false });
+    expect(chat.complete).not.toHaveBeenCalled();
+  });
+});
+
+describe('runInterview LLM progress hooks', () => {
+  it('fires onLlmStart before the request and settles with usedLlm true', async () => {
+    const store = makeStore(makeItem('# Task\n\nNo section.'));
+    const events: string[] = [];
+    const chat = {
+      available: true,
+      complete: vi.fn(async () => {
+        events.push('request');
+        return '[]';
+      }),
+    };
+    await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => 'unused' },
+      {
+        llmFallback: true,
+        chatClient: chat as any,
+        onLlmStart: () => events.push('start'),
+        onLlmSettled: info => events.push(`settled:${info.usedLlm}`),
+      },
+    );
+    expect(events).toEqual(['start', 'request', 'settled:true']);
+  });
+
+  it('settles with usedLlm false when the request throws', async () => {
+    const store = makeStore(makeItem('# Task\n\nNo section.'));
+    const settled: boolean[] = [];
+    const chat = {
+      available: true,
+      complete: vi.fn(async () => {
+        throw new Error('timeout');
+      }),
+    };
+    await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => 'unused' },
+      {
+        llmFallback: true,
+        chatClient: chat as any,
+        onLlmSettled: info => settled.push(info.usedLlm),
+      },
+    );
+    expect(settled).toEqual([false]);
+  });
+
+  it('never fires the hooks when deterministic questions exist', async () => {
+    const desc = `# Task
+
+## Appendix: Clarifying questions
+
+- Q: "Existing?" — Answer (user): "Yes". Source: reply.`;
+    const store = makeStore(makeItem(desc));
+    const chat = { available: true, complete: vi.fn(async () => '[]') };
+    let started = 0;
+    await runInterview(
+      store.current(),
+      store,
+      { prompt: async () => 'unused' },
+      {
+        llmFallback: true,
+        chatClient: chat as any,
+        onLlmStart: () => {
+          started += 1;
+        },
+      },
+    );
+    expect(started).toBe(0);
+    expect(chat.complete).not.toHaveBeenCalled();
+  });
+});
+
 describe('interview --json (non-interactive)', () => {
   /** Register the command with a JSON-capturing output and injected comments. */
   function setup(options: {
@@ -1194,6 +1349,7 @@ describe('interview clear-the-flag prompt', () => {
 
     registerInterview(ctx as any, {
       chatClientFactory: () => null,
+      progressOutStream: { write: () => undefined },
       promptLoopFactory: () => ({
         next: async (message: string) => {
           messages.push(message);
@@ -1568,6 +1724,7 @@ describe('interview --llm command', () => {
     });
     registerInterview(ctx as any, {
       chatClientFactory: () => options.chatClient ?? null,
+      progressOutStream: { write: () => undefined },
       promptLoopFactory: () => ({
         next: async (message: string) => {
           messages.push(message);
@@ -1656,6 +1813,243 @@ describe('interview --llm command', () => {
       expect(chat.complete).not.toHaveBeenCalled();
       expect(jsonOutput).toHaveLength(1);
       expect(t.ctx.utils.db.get(t.id).description).not.toContain('Who is the user?');
+    } finally {
+      t.restore();
+    }
+  });
+});
+
+// ── Command-level LLM progress feedback (WL-0MUX2W8IN005RW66) ───────────
+
+describe('interview LLM progress feedback', () => {
+  /** Capturing progress stream with optional TTY emulation and event log. */
+  function makeProgressStream(
+    isTTY?: boolean,
+    events?: string[],
+  ): { stream: ProgressWriteStream; writes: string[] } {
+    const writes: string[] = [];
+    const stream: ProgressWriteStream = {
+      write: (chunk: string) => {
+        writes.push(chunk);
+        if (events) events.push(`write:${chunk}`);
+        return true;
+      },
+    };
+    if (isTTY !== undefined) stream.isTTY = isTTY;
+    return { stream, writes };
+  }
+
+  function setup(options: {
+    description?: string;
+    needsProducerReview?: boolean;
+    chatClient?: any;
+    progressStream: ProgressWriteStream;
+    answers?: string[];
+    jsonOutput?: any[];
+  }) {
+    const ctx = createTestContext();
+    const messages: string[] = [];
+    const answers = [...(options.answers ?? [])];
+    const originalLog = console.log;
+    console.log = (...args: any[]) => { messages.push(args.join(' ')); };
+    if (options.jsonOutput) {
+      ctx.output = {
+        json: (d: any) => options.jsonOutput!.push(d),
+        success: () => {},
+        error: () => {},
+      };
+    }
+    const id = ctx.utils.createSampleItem({});
+    ctx.utils.db.update(id, {
+      description: options.description ?? '# Task\n\nNo section here.',
+      title: 'Progress task',
+      needsProducerReview: options.needsProducerReview ?? true,
+    });
+    const baseGetDatabase = ctx.utils.getDatabase;
+    ctx.utils.getDatabase = (prefix?: string) => ({
+      ...baseGetDatabase(prefix),
+      getCommentsForWorkItem: () => [],
+      getAuditResult: () => null,
+    });
+    registerInterview(ctx as any, {
+      chatClientFactory: () => options.chatClient ?? null,
+      progressOutStream: options.progressStream,
+      promptLoopFactory: () => ({
+        next: async (message: string) => {
+          messages.push(message);
+          return answers.shift() ?? '';
+        },
+        close: () => {},
+      }),
+      clearPrompt: async () => false,
+    });
+    return {
+      ctx,
+      id,
+      messages,
+      restore: () => { console.log = originalLog; },
+    };
+  }
+
+  it('prints the status message before the extraction LLM request (--llm)', async () => {
+    const events: string[] = [];
+    const { stream } = makeProgressStream(undefined, events);
+    const chat = {
+      available: true,
+      complete: vi.fn(async () => {
+        events.push('request');
+        return '[{"question":"Who is the user?"}]';
+      }),
+    };
+    const t = setup({
+      chatClient: chat as any,
+      progressStream: stream,
+      answers: ['Support engineers'],
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id, '--llm']);
+      expect(chat.complete).toHaveBeenCalledTimes(1);
+      const statusIndex = events.findIndex(
+        e => e.startsWith('write:') && e.includes(LLM_THINKING_MESSAGE),
+      );
+      const requestIndex = events.indexOf('request');
+      expect(statusIndex).toBeGreaterThanOrEqual(0);
+      expect(requestIndex).toBeGreaterThan(statusIndex);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('does not emit spinner control characters when stdout is not a TTY', async () => {
+    const { stream, writes } = makeProgressStream(false);
+    const chat = {
+      available: true,
+      complete: vi.fn(async () => '[{"question":"Who is the user?"}]'),
+    };
+    const t = setup({
+      chatClient: chat as any,
+      progressStream: stream,
+      answers: ['Support engineers'],
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id, '--llm']);
+      expect(writes.some(w => w.includes(LLM_THINKING_MESSAGE))).toBe(true);
+      expect(writes.join('')).not.toContain('\r');
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('shows and clears a TTY spinner around the request', async () => {
+    const { stream, writes } = makeProgressStream(true);
+    const chat = {
+      available: true,
+      complete: vi.fn(async () => '[{"question":"Who is the user?"}]'),
+    };
+    const t = setup({
+      chatClient: chat as any,
+      progressStream: stream,
+      answers: ['Support engineers'],
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id, '--llm']);
+      expect(writes.some(w => /\r.*[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/.test(w))).toBe(true);
+      expect(writes.some(w => /^\r +\r$/.test(w))).toBe(true);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('emits no status or spinner in --json mode', async () => {
+    const { stream, writes } = makeProgressStream(true);
+    const jsonOutput: any[] = [];
+    const chat = { available: true, complete: vi.fn(async () => 'Explained') };
+    const t = setup({
+      chatClient: chat as any,
+      progressStream: stream,
+      jsonOutput,
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id, '--json']);
+      expect(writes).toEqual([]);
+      expect(jsonOutput).toHaveLength(1);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('prints the fallback notice when the explanation LLM fails', async () => {
+    const { stream, writes } = makeProgressStream();
+    const chat = {
+      available: true,
+      complete: vi.fn(async () => {
+        throw new Error('Chat API request timed out after 15000 ms');
+      }),
+    };
+    const t = setup({ chatClient: chat as any, progressStream: stream });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(writes.some(w => w.includes(LLM_FALLBACK_NOTICE))).toBe(true);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('prints the fallback notice when no client is available (no status)', async () => {
+    const { stream, writes } = makeProgressStream();
+    const t = setup({
+      chatClient: null,
+      progressStream: stream,
+      needsProducerReview: true,
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id]);
+      expect(writes.some(w => w.includes(LLM_FALLBACK_NOTICE))).toBe(true);
+      // No request was issued, so no "Thinking…" status was shown.
+      expect(writes.some(w => w.includes(LLM_THINKING_MESSAGE))).toBe(false);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('prints the fallback notice when the extraction LLM fails', async () => {
+    const { stream, writes } = makeProgressStream();
+    const chat = {
+      available: true,
+      complete: vi.fn(async () => {
+        throw new Error('timeout');
+      }),
+    };
+    const t = setup({
+      chatClient: chat as any,
+      progressStream: stream,
+      description: '# Task\n\nNo section here.',
+      needsProducerReview: false,
+      answers: [''],
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id, '--llm']);
+      expect(chat.complete).toHaveBeenCalledTimes(1);
+      expect(writes.some(w => w.includes(LLM_FALLBACK_NOTICE))).toBe(true);
+    } finally {
+      t.restore();
+    }
+  });
+
+  it('produces no LLM feedback when deterministic questions already exist', async () => {
+    const desc = `# Task\n\n## Appendix: Clarifying questions\n\n- Q: "Scope?" — Answer (user): "Repo-wide". Source: reply.`;
+    const { stream, writes } = makeProgressStream(true);
+    const chat = { available: true, complete: vi.fn(async () => 'unused') };
+    const t = setup({
+      chatClient: chat as any,
+      progressStream: stream,
+      description: desc,
+      needsProducerReview: true,
+    });
+    try {
+      await t.ctx.runCli(['interview', t.id, '--llm']);
+      expect(chat.complete).not.toHaveBeenCalled();
+      expect(writes).toEqual([]);
     } finally {
       t.restore();
     }

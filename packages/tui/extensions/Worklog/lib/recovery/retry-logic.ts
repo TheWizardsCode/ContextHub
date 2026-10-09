@@ -30,6 +30,20 @@ export interface BackoffConfig {
    * disable jitter.
    */
   serverHintJitterRatio?: number;
+  /**
+   * Ceiling in milliseconds for delays derived from a server-requested retry
+   * delay (`Retry-After` / `retry_after`). Unlike {@link maxDelayMs}, which
+   * caps only the local exponential backoff, this ceiling applies to
+   * server-hint-derived delays so an honest multi-hour `Retry-After` (for
+   * example the llm-proxy "all providers exhausted" 503 during an overnight
+   * provider gap) is waited out in full instead of being clamped to the 60 s
+   * exponential cap.
+   *
+   * Defaults to {@link DEFAULT_SERVER_HINT_MAX_DELAY_MS}. Set to `Infinity`
+   * to remove the additional cap entirely. When omitted, the server-hint path
+   * falls back to {@link maxDelayMs} (legacy behaviour).
+   */
+  serverHintMaxDelayMs?: number;
 }
 
 /**
@@ -39,11 +53,22 @@ export interface BackoffConfig {
  */
 export const DEFAULT_SERVER_HINT_JITTER_RATIO = 0.25;
 
+/**
+ * Default ceiling for server-hint-derived delays (6 hours). Large enough to
+ * absorb an overnight provider gap (the proxy's availability window can span
+ * several hours), while still bounding an arbitrarily large `Retry-After` so
+ * a malformed or hostile hint cannot produce an effectively unbounded sleep.
+ * The wait itself remains interruptible by ESC / session switch; see
+ * {@link interruptibleSleep}.
+ */
+export const DEFAULT_SERVER_HINT_MAX_DELAY_MS = 6 * 60 * 60 * 1000;
+
 export const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
   baseDelayMs: 2000,
   maxDelayMs: 60000,
   multiplier: 2,
   serverHintJitterRatio: DEFAULT_SERVER_HINT_JITTER_RATIO,
+  serverHintMaxDelayMs: DEFAULT_SERVER_HINT_MAX_DELAY_MS,
 };
 
 /**
@@ -212,9 +237,11 @@ export function createRetryHintCapturingFetch(
  *
  * With a usable server hint (from `Retry-After` / `retry_after`): the delay
  * tracks the server-requested delay (plus upward-only jitter, capped at
- * `maxDelayMs`). The local exponential backoff is **not** combined into this
- * value — a growing local backoff must not silently override the server's
- * recommendation.
+ * `serverHintMaxDelayMs`, default {@link DEFAULT_SERVER_HINT_MAX_DELAY_MS} =
+ * 6 h — not the smaller `maxDelayMs` exponential cap). This lets a truthful
+ * multi-hour `Retry-After` be honoured in full. The local exponential backoff
+ * is **not** combined into this value — a growing local backoff must not
+ * silently override the server's recommendation.
  *
  * @remarks
  * The server hint is authoritative when present. An earlier revision used
@@ -253,7 +280,16 @@ export function calculateDelay(
   // requested wait, and the configurable maximum still bounds it.
   const jitterRatio = Math.max(0, config.serverHintJitterRatio ?? DEFAULT_SERVER_HINT_JITTER_RATIO);
   const jittered = serverHintMs * (1 + jitterRatio * random());
-  return Math.min(Math.round(jittered), config.maxDelayMs);
+  // The server hint keeps its own (much larger) ceiling: the local exponential
+  // `maxDelayMs` must not clamp an honest multi-minute/multi-hour wait. A
+  // malformed ceiling (negative/NaN) falls back to `maxDelayMs`; `Infinity`
+  // deliberately removes the additional cap.
+  const configuredCeiling = config.serverHintMaxDelayMs;
+  const hintCeiling =
+    configuredCeiling === undefined || Number.isNaN(configuredCeiling) || configuredCeiling < 0
+      ? config.maxDelayMs
+      : configuredCeiling;
+  return Math.min(Math.round(jittered), hintCeiling);
 }
 
 /**

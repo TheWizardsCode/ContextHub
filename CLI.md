@@ -107,7 +107,7 @@ Options:
 - `--description-file <file>` — Read description from a file (optional).
 - `-s, --status <status>` — Status value from config defaults (optional; default: `open`).
 - `-p, --priority <priority>` — `low|medium|high|critical` (optional; default: `medium`).
-- `-P, --parent <parentId>` — Parent work item ID (optional).
+- `-P, --parent <parentId>` — Parent work item ID (optional). Pass `--parent null` (case-insensitive; aliases: `none`, `nil`, `-`, or `""`) to detach the item (set `parentId` to `null`). Without this flag the item is top-level by default.
 - `--tags <tags>` — Comma-separated tags (optional).
 - `-a, --assignee <assignee>` — Assignee name (optional).
 - `--stage <stage>` — Stage value from config defaults (optional).
@@ -166,6 +166,8 @@ Update fields on one or more existing work items. Accepts multiple IDs. Options 
 > **Auto-revert:** when `--audit-text`/`--audit-file` carries a `Ready to close: No` verdict for an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
 
 > **Reparenting demotion:** when `--parent <id>` attaches an item to a `completed`/`in_review` parent, the parent is demoted to `open`/`plan_complete` so a finished parent never silently gains uncompleted work. Automation-authored telemetry children (tagged `test-failure`, titled `[test-failure]…`, or created by a known bot identity) are exempt and do not rewind the parent (WL-0MTWU4XUD0001ALR). A demotion records an audit-trail comment on the parent naming the attached child, the actor, and the transition (WL-0MTWU4Y82001B3UH).
+
+> **Detach:** pass `--parent null` (case-insensitive; also accepted: `none`, `nil`, `-`, or `""`) to detach an item, setting its `parentId` to `null`. Use `wl doctor dangling-parents` to detect and optionally fix orphaned parent references (e.g. the legacy `WL-NULL` artifact).
 
 Automatic re-sort:
 
@@ -346,19 +348,27 @@ wl audit-unwaive WL-ABC123
 wl audit-unwaive WL-ABC123 --json
 ```
 
-### `delete` [options] <id>
+### `delete` [options] <ids...>
 
-Delete a work item (marks as deleted): this sets the work item status to `deleted` in the local database. If you prefer to set the status explicitly, use `wl update <id> -s deleted` instead.
+Delete one or more work items (marks them as deleted): sets each work item's status to `deleted` in the local database. If you prefer to set the status explicitly, use `wl update <id> -s deleted` instead.
+
+Every id is processed independently. A failure for one id (for example, not found) does not stop the remaining ids; each id is reported in a per-id result. The command exits non-zero if any id failed and zero when all ids succeed. Descendants of a recursively-deleted parent are reported per id, and the automatic git sync runs exactly once after all deletions in the invocation complete (suppressed by `--no-sync`).
 
 Options:
 
-- `--prefix <prefix>` — Operate on a specific prefix (optional).
+- `--prefix <prefix>` — Operate on a specific prefix (optional; applies uniformly to every id in the batch).
+- `--no-recursive` — Delete only the specified items, leaving children orphaned (applies to every id).
+- `--no-sync` — Skip the automatic post-delete sync for the whole batch.
+
+JSON mode returns a per-id `results` array plus an overall `success`/`deleted`/`failed` summary. When exactly one id is supplied, the legacy single-id fields (`deletedId`, `deletedWorkItem`, `recursive`) are preserved for backward compatibility. Duplicate ids, and ids already removed as a descendant earlier in the same batch, are reported as `skipped` (`already deleted`) rather than failing the command.
 
 Examples:
 
 ```sh
-wl delete WL-ABC123            # permanently removes the item and its comments
-wl --json delete WL-ABC123     # machine-readable confirmation (204 on success)
+wl delete WL-ABC123 WL-DEF456 WL-GHI789   # delete several items in one command
+wl delete WL-ABC123 --no-recursive        # delete only the parent, leaving children
+wl delete WL-ABC123 WL-DEF456 --no-sync   # delete a batch without syncing
+wl --json delete WL-ABC123                # single-id machine-readable confirmation
 ```
 
 ### `comment` (subcommands)
@@ -1031,6 +1041,8 @@ wl doctor upgrade --confirm       # Apply pending schema migrations (creates bac
 
 Validate work items against config-driven status/stage rules. Reports invalid values or incompatible combinations.
 
+`wl doctor` also reports pending schema migrations and outdated git hooks (read-only) and instructs you to run `wl doctor upgrade`; when validation is clean but upgrades are pending, it prints the pending-upgrade notice instead of a bare `Doctor: no issues found.`. The notice is advisory and does not change the exit code.
+
 For detailed migration policy, backup behavior, and CI guidance, see [DOCTOR_AND_MIGRATIONS.md](DOCTOR_AND_MIGRATIONS.md).
 
 Options:
@@ -1085,6 +1097,13 @@ Notes:
 
 JSON output is a raw array of findings. Each finding includes:
 `checkId`, `type`, `severity`, `itemId`, `message`, `proposedFix`, `safe`, `context`.
+
+When pending upgrades exist, a synthetic finding with `checkId: "upgrade.pending"`
+and `type: "pending-upgrade"` is appended additively to the same array (top-level
+shape unchanged). Its `context` carries machine-readable pending-upgrade data:
+`pendingMigrations`, `pendingMigrationCount`, `outdatedHooks`, and
+`outdatedHookCount`. Consumers grouping findings by work item should skip this
+entry (`itemId: null`).
 
 ### `re-sort` [options]
 
@@ -1297,8 +1316,32 @@ canonical `## Appendix: Clarifying questions` heading is inserted; when one
 exists the confirmed questions are merged into it, keeping re-runs idempotent.
 
 If no provider is configured, or the request fails, times out or returns
-malformed JSON, the command degrades silently to the deterministic-only
-behaviour described below — no error is surfaced.
+malformed JSON, the command degrades to the deterministic-only behaviour
+described below, after printing a brief
+`LLM unavailable — using structured evidence.` notice so the operator knows
+the questions did not come from the model.
+
+#### In-flight progress feedback
+
+Both LLM paths (question extraction and the producer-review explanation) can
+block for up to 15 s. To make that visible, the command prints a static
+`Thinking…` status message immediately before each request.
+
+- When stdout is a TTY, an animated spinner is rendered on the same line and
+  is cleared deterministically before any subsequent output or prompt, so it
+  never interleaves with the readline prompt.
+- When stdout is not a TTY (piped or captured), only the static message is
+  written — no spinner frames and no control characters — keeping captured
+  output clean.
+- In `--json` mode no status or spinner is emitted at all; stdout stays
+  byte-for-byte valid JSON.
+- When the command falls back to structured evidence (the LLM is unavailable,
+  times out or errors), it prints `LLM unavailable — using structured
+  evidence.` once and clears the spinner. An explicit `--no-llm` opt-out does
+  not print this notice.
+
+No LLM request is issued — and therefore no feedback is shown — when the
+deterministic parser already found clarifying questions.
 
 #### When there are no questions to answer
 
@@ -1322,7 +1365,9 @@ large. The summary and raw-output excerpt are individually bounded so a single
 large audit cannot dominate the prompt.
 
 When the LLM is disabled (`--no-llm`) or unreachable the command falls back
-silently to the **structured evidence**, in priority order:
+to the **structured evidence** (printing the `LLM unavailable — using
+structured evidence.` notice for the unreachable case, but not for an
+explicit `--no-llm` opt-out), in priority order:
 
 1. the latest audit result (verdict and summary);
 2. a durable audit-gap waiver (`auditWaiver`);
@@ -1353,7 +1398,8 @@ Options:
   `needsProducerReview` (boolean), `producerReviewExplanation` (string or
   `null`; multi-line explanations are preserved), `noSection`,
   `noQuestions`, `total`, `outstanding` and `allAnswered`. Performs no
-  prompts, no mutation and (with `--no-llm`) no LLM call.
+  prompts, no mutation, no progress/status output and (with `--no-llm`) no
+  LLM call.
 - `--no-llm` — Disable all LLM use (the producer-review explanation and the
   LLM-assisted question extraction) and use the structured fallback instead
   (default: explanation on, extraction off unless enabled).

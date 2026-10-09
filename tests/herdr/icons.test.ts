@@ -70,16 +70,21 @@ describe('statusIcon', () => {
 });
 
 describe('stageIcon', () => {
-  it('returns an icon for each known stage', () => {
-    const stages = ['idea', 'intake_complete', 'plan_complete', 'in_progress', 'in_review', 'completed'];
+  it('returns an icon for each valid CLI stage', () => {
+    const stages = ['idea', 'intake_complete', 'plan_complete', 'in_review', 'done'];
     for (const s of stages) {
       expect(stageIcon(s)).toBeTruthy();
     }
   });
 
-  it('returns fallback for unknown stage', () => {
-    const result = stageIcon('unknown');
-    expect(result).toBeTruthy();
+  it('maps done to the completed-style checkmark', () => {
+    expect(stageIcon('done')).toBe('\u{2714}\u{FE0F}'); // ✔️
+    expect(stageIcon('done', { noIcons: true })).toBe('[DONE]');
+  });
+
+  it('returns the question-mark fallback for unknown stage', () => {
+    expect(stageIcon('unknown')).toBe('\u{2753}'); // ❓
+    expect(stageIcon('bogus_stage')).toBe('\u{2753}'); // ❓
   });
 
   it('returns text fallback in noIcons mode', () => {
@@ -182,8 +187,8 @@ describe('needsProducerReviewIcon', () => {
 });
 
 describe('stageColor', () => {
-  it('returns a color for each known stage', () => {
-    const stages = ['idea', 'intake_complete', 'plan_complete', 'in_progress', 'in_review', 'completed'];
+  it('returns a color for each valid CLI stage', () => {
+    const stages = ['idea', 'intake_complete', 'plan_complete', 'in_review', 'done'];
     for (const s of stages) {
       const color = stageColor(s);
       expect(typeof color).toBe('number');
@@ -191,8 +196,13 @@ describe('stageColor', () => {
     }
   });
 
+  it('maps done to the completed colour', () => {
+    expect(stageColor('done')).toBe(33);
+  });
+
   it('returns default color for unknown stage', () => {
     expect(stageColor('unknown')).toBe(241);
+    expect(stageColor('bogus_stage')).toBe(241);
   });
 });
 

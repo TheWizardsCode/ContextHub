@@ -270,20 +270,24 @@ describe('fetchItemsByStage', () => {
     expect(items).toEqual([]);
   });
 
-  it('passes --root-only to wl list for stage queries (WL-0MS964SIA0057ABR)', async () => {
-    const mockFn = vi.fn().mockImplementation((_bin: string, args: string[]) => {
-      const stdout = JSON.stringify({ workItems: [] });
-      return Promise.resolve({ stdout, stderr: '' });
-    });
+  it('rejects invalid stages without issuing a CLI call (WL-0MUY1CRS7001UTQJ)', async () => {
+    const mockFn = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
     setExecFileAsync(mockFn as any);
 
-    await fetchItemsByStage('in_progress');
-    const calls = mockFn.mock.calls.map((c: any) => c[1]);
-    expect(calls).toHaveLength(1);
-    // runWl appends --json automatically.
-    // Open items only (WL-0MSDT8X1V003206G): stage-filtered worklists show
-    // every open root item in the stage.
-    expect(calls[0]).toEqual(['list', '--status', 'open', '--stage', 'in_progress', '--root-only', '--json']);
+    // Removed stages should never produce a CLI invocation
+    const inProgressResult = await fetchItemsByStage('in_progress');
+    expect(inProgressResult).toEqual([]);
+    expect(mockFn).not.toHaveBeenCalled();
+
+    mockFn.mockClear();
+    const completedResult = await fetchItemsByStage('completed');
+    expect(completedResult).toEqual([]);
+    expect(mockFn).not.toHaveBeenCalled();
+
+    mockFn.mockClear();
+    const bogusResult = await fetchItemsByStage('bogus');
+    expect(bogusResult).toEqual([]);
+    expect(mockFn).not.toHaveBeenCalled();
   });
 
   it('regroups results priority-first before display (WL-0MSOPHLD1000EWNN)', async () => {
@@ -430,13 +434,15 @@ describe('fetchChildrenForItem', () => {
   });
 
   it('regroups child items priority-first, preserving depth (WL-0MSOPHLD1000EWNN)', async () => {
-    // CLI order is NOT priority-first: a medium in_progress child precedes a
+    // CLI order is NOT priority-first: a medium Group N child precedes a
     // critical one. The regroup wiring must reorder children to the
     // canonical bucket order while keeping the hierarchy `depth` intact.
+    // (The medium child uses a valid lifecycle stage; the removed
+    // `in_progress` stage is no longer a Group N stage — WL-0MUY1CSQG007TCYX.)
     const mockFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
         workItems: [
-          { id: 'WL-001-C1', title: 'In progress child', stage: 'in_progress', priority: 'medium' },
+          { id: 'WL-001-C1', title: 'Medium child', stage: 'intake_complete', priority: 'medium' },
           { id: 'WL-001-C2', title: 'Critical child', stage: 'plan_complete', priority: 'critical' },
         ],
       }),

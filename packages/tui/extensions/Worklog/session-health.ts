@@ -578,101 +578,111 @@ export function registerSessionHealth(pi: ExtensionAPI): void {
           // Theme changed — nothing special to do
         },
         render(width: number): string[] {
-          const lines: string[] = [];
+          // Guard against stale ctx after session replacement (WL-0MUL1BG09005VRBO).
+          // The footer render callback may fire after session_start re-bound
+          // ctx if the TUI does not tear it down promptly on replacement.
+          try {
+            const lines: string[] = [];
 
-          // Subscribe to model changes on first render
-          if (!disposeModelChange) {
-            disposeModelChange = onModelChange(() => tui.requestRender());
-          }
-
-          // Line 1: Extension statuses (activity-indicator, etc.)
-          // These are set via ctx.ui.setStatus() and would be hidden when a
-          // custom footer is active. We include them here so that status
-          // entries remain visible.
-          // Note: The provider/model is no longer shown as a status entry;
-          // it is displayed on Line 3 below.
-          const statuses = footerData.getExtensionStatuses();
-          if (statuses && statuses.length > 0) {
-            const statusLine = statuses.join('  ');
-            lines.push(truncateToTerminalWidth(theme.fg('muted', statusLine), width));
-          }
-
-          // Line 2: Session health
-          lines.push(renderFooter(state, ctx, theme, width));
-
-          // Line 3: Provider/model + initial prompt preview (grey/dim text)
-          // Shows the Pi model alias (e.g. "code", "plan") and, when available,
-          // the provider/model resolved by the router (e.g. "openai/gpt-4").
-          // Also shows a preview of the first user message that started the
-          // session when available. Always visible.
-          const selectedModel = getSelectedModel();
-          const resolvedModel = getResolvedModel();
-          const initialPrompt = state.initialPrompt;
-
-          // Build model portion
-          let modelPart: string;
-          if (selectedModel && resolvedModel) {
-            modelPart = `${selectedModel} → ${resolvedModel}`;
-          } else if (selectedModel) {
-            modelPart = `${selectedModel} → (resolving)`;
-          } else if (resolvedModel) {
-            modelPart = resolvedModel;
-          } else {
-            modelPart = '—';
-          }
-
-          // Separator between the command preview (left) and the model
-          // identifier (right).
-          const separator = '  │  ';
-
-          // Build initial prompt portion — unquoted preview with generous
-          // space allocation. The model part is never capped; the prompt
-          // yields space to it so the full model name always renders.
-          let promptPart: string | null = null;
-          if (initialPrompt) {
-            // Truncate work item IDs to compact form (e.g., WL-0MQL0T5TR0060AEH
-            // → WL...68HD) before applying length truncation.
-            const compacted = truncateWorkItemId(initialPrompt);
-            const separatorWidth = visibleWidth(separator);
-            const modelWidth = visibleWidth(modelPart);
-            // The prompt gets whatever budget remains after reserving room
-            // for the full model and separator.
-            const promptBudget = Math.max(0, width - modelWidth - separatorWidth);
-            const preview =
-              promptBudget > 3 && compacted.length > promptBudget
-                ? `${compacted.slice(0, promptBudget - 3)}...`
-                : compacted;
-            promptPart = promptBudget > 3 ? preview : null;
-          }
-
-          // Right-align the model: its right edge is flush with the terminal
-          // width.  If there is no room for prompt + separator + model
-          // (ultra-narrow), drop the prompt/separator so the model alone
-          // right-aligns.  The final clamp clips only when the model itself
-          // exceeds the terminal width (physically unavoidable).
-          const modelWidth = visibleWidth(modelPart);
-          const separatorWidth = visibleWidth(separator);
-
-          const promptFits =
-            promptPart !== null &&
-            width - visibleWidth(promptPart) - separatorWidth - modelWidth >= 0;
-
-          let label: string;
-          if (promptFits) {
-            const pad = width - visibleWidth(promptPart) - separatorWidth - modelWidth;
-            label = `${promptPart}${' '.repeat(pad)}${separator}${modelPart}`;
-          } else {
-            // Model-only fallback, right-aligned.
-            if (width >= modelWidth) {
-              label = ' '.repeat(width - modelWidth) + modelPart;
-            } else {
-              label = modelPart;
+            // Subscribe to model changes on first render
+            if (!disposeModelChange) {
+              disposeModelChange = onModelChange(() => tui.requestRender());
             }
+
+            // Line 1: Extension statuses (activity-indicator, etc.)
+            // These are set via ctx.ui.setStatus() and would be hidden when a
+            // custom footer is active. We include them here so that status
+            // entries remain visible.
+            // Note: The provider/model is no longer shown as a status entry;
+            // it is displayed on Line 3 below.
+            const statuses = footerData.getExtensionStatuses();
+            if (statuses && statuses.length > 0) {
+              const statusLine = statuses.join('  ');
+              lines.push(truncateToTerminalWidth(theme.fg('muted', statusLine), width));
+            }
+
+            // Line 2: Session health
+            lines.push(renderFooter(state, ctx, theme, width));
+
+            // Line 3: Provider/model + initial prompt preview (grey/dim text)
+            // Shows the Pi model alias (e.g. "code", "plan") and, when available,
+            // the provider/model resolved by the router (e.g. "openai/gpt-4").
+            // Also shows a preview of the first user message that started the
+            // session when available. Always visible.
+            const selectedModel = getSelectedModel();
+            const resolvedModel = getResolvedModel();
+            const initialPrompt = state.initialPrompt;
+
+            // Build model portion
+            let modelPart: string;
+            if (selectedModel && resolvedModel) {
+              modelPart = `${selectedModel} → ${resolvedModel}`;
+            } else if (selectedModel) {
+              modelPart = `${selectedModel} → (resolving)`;
+            } else if (resolvedModel) {
+              modelPart = resolvedModel;
+            } else {
+              modelPart = '—';
+            }
+
+            // Separator between the command preview (left) and the model
+            // identifier (right).
+            const separator = '  │  ';
+
+            // Build initial prompt portion — unquoted preview with generous
+            // space allocation. The model part is never capped; the prompt
+            // yields space to it so the full model name always renders.
+            let promptPart: string | null = null;
+            if (initialPrompt) {
+              // Truncate work item IDs to compact form (e.g., WL-0MQL0T5TR0060AEH
+              // → WL...68HD) before applying length truncation.
+              const compacted = truncateWorkItemId(initialPrompt);
+              const separatorWidth = visibleWidth(separator);
+              const modelWidth = visibleWidth(modelPart);
+              // The prompt gets whatever budget remains after reserving room
+              // for the full model and separator.
+              const promptBudget = Math.max(0, width - modelWidth - separatorWidth);
+              const preview =
+                promptBudget > 3 && compacted.length > promptBudget
+                  ? `${compacted.slice(0, promptBudget - 3)}...`
+                  : compacted;
+              promptPart = promptBudget > 3 ? preview : null;
+            }
+
+            // Right-align the model: its right edge is flush with the terminal
+            // width.  If there is no room for prompt + separator + model
+            // (ultra-narrow), drop the prompt/separator so the model alone
+            // right-aligns.  The final clamp clips only when the model itself
+            // exceeds the terminal width (physically unavoidable).
+            const modelWidth = visibleWidth(modelPart);
+            const separatorWidth = visibleWidth(separator);
+
+            const promptFits =
+              promptPart !== null &&
+              width - visibleWidth(promptPart) - separatorWidth - modelWidth >= 0;
+
+            let label: string;
+            if (promptFits) {
+              const pad = width - visibleWidth(promptPart) - separatorWidth - modelWidth;
+              label = `${promptPart}${' '.repeat(pad)}${separator}${modelPart}`;
+            } else {
+              // Model-only fallback, right-aligned.
+              if (width >= modelWidth) {
+                label = ' '.repeat(width - modelWidth) + modelPart;
+              } else {
+                label = modelPart;
+              }
+            }
+
+            lines.push(truncateToTerminalWidth(theme.fg('dim', label), width));
+
+            return lines;
+          } catch {
+            // ctx is stale (session replaced/reloaded) — return empty footer.
+            // The TUI will tear down the footer on session replacement;
+            // this guard prevents an uncaught exception from crashing pi.
+            return [];
           }
-
-          lines.push(truncateToTerminalWidth(theme.fg('dim', label), width));
-
-          return lines;
         },
       };
     });

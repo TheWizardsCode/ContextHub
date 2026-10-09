@@ -71,6 +71,9 @@ worklog update WI-0J8L1JQ3H8ZQ2K6D -s completed -d "Implementation finished and 
 # Change parent (move in hierarchy)
 worklog update WI-0J8L1JQ3H8ZQ2K6F -P WI-0J8L1JQ3H8ZQ2K6E
 
+# Detach an item (set parentId to null)
+worklog update WI-0J8L1JQ3H8ZQ2K6F -P null
+
 # Add tags
 worklog update WI-0J8L1JQ3H8ZQ2K6D --tags "urgent,reviewed"
 

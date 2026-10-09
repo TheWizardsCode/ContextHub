@@ -39,6 +39,9 @@ export interface HerdrPaneCloseRecord {
   tabId?: string;
   agent_session?: HerdrAgentSession;
   agentSession?: HerdrAgentSession;
+  cwd?: string;
+  foreground_cwd?: string;
+  foregroundCwd?: string;
 }
 
 /** A parsed pane record normalised for the reaper. */
@@ -47,7 +50,10 @@ export interface ParsedHerdrPane {
   label: string;
   agent?: string;
   agentStatus?: string;
+  /** Session log path derived from `agent_session.value` (when present). */
   sessionPath?: string;
+  /** Raw `agent_session` field (session log path + agent metadata). */
+  agentSession?: HerdrAgentSession;
   workspaceId?: string;
   tabId?: string;
   /** Pane working directory, when reported (activity-probe input). */
@@ -57,37 +63,51 @@ export interface ParsedHerdrPane {
 }
 
 /**
- * Parse `herdr pane list` output into normalised records. Tolerates log lines
- * before the JSON envelope and the `{result:{panes:[…]}}` / bare-array shapes.
- * Returns `null` when no pane array can be found (caller fails closed).
+ * Locate the pane array in a raw `herdr pane list` response. Tolerates log
+ * lines before the JSON envelope — including a bracketed prefix such as
+ * `[herdr] starting` — the `{result:{panes:[…]}}` shape, a top-level `{panes}`
+ * object and a bare array. Tries each plausible JSON start (`{` then `[`) and
+ * returns the first payload that yields a pane array, so callers fail closed
+ * (`null`) only when none does.
  */
-export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
+function extractPaneArray(raw: string): unknown[] | null {
+  const candidates: number[] = [];
   const brace = raw.indexOf('{');
   const bracket = raw.indexOf('[');
-  let start: number;
-  if (brace < 0 && bracket < 0) return null;
-  else if (brace < 0) start = bracket;
-  else if (bracket < 0) start = brace;
-  else start = Math.min(brace, bracket);
-  let payload: unknown;
-  try {
-    payload = JSON.parse(raw.slice(start));
-  } catch {
-    return null;
-  }
+  if (brace >= 0) candidates.push(brace);
+  if (bracket >= 0 && bracket !== brace) candidates.push(bracket);
+  candidates.sort((a, b) => a - b);
 
-  let panes: unknown = null;
-  if (Array.isArray(payload)) {
-    panes = payload;
-  } else if (payload && typeof payload === 'object') {
-    const obj = payload as Record<string, unknown>;
-    const result = obj.result;
-    const resultObj =
-      result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
-    if (Array.isArray(resultObj?.panes)) panes = resultObj.panes;
-    else if (Array.isArray(obj.panes)) panes = obj.panes;
+  for (const start of candidates) {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(raw.slice(start));
+    } catch {
+      continue;
+    }
+    if (Array.isArray(payload)) return payload;
+    if (payload && typeof payload === 'object') {
+      const obj = payload as Record<string, unknown>;
+      const result = obj.result;
+      const resultObj =
+        result && typeof result === 'object' ? (result as Record<string, unknown>) : null;
+      if (Array.isArray(resultObj?.panes)) return resultObj.panes;
+      if (Array.isArray(obj.panes)) return obj.panes;
+    }
   }
-  if (!Array.isArray(panes)) return null;
+  return null;
+}
+
+/**
+ * Shared `herdr pane list` parser — the single parse contract used by both the
+ * pane-closure reaper ({@link createHerdrReaperDeps}) and the downtime
+ * dispatcher (`parseHerdrPaneListOutput`). Tolerates log lines before the JSON
+ * envelope, the `{result:{panes:[…]}}` / `{panes:[…]}` shapes and a bare
+ * array; returns `null` when no pane array can be found (caller fails closed).
+ */
+export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
+  const panes = extractPaneArray(raw);
+  if (panes === null) return null;
 
   const parsed: ParsedHerdrPane[] = [];
   for (const entry of panes) {
@@ -102,9 +122,13 @@ export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
           ? rec.agentStatus
           : undefined;
     const session = rec.agent_session ?? rec.agentSession;
+    const agentSession =
+      session && typeof session === 'object' && !Array.isArray(session)
+        ? (session as HerdrAgentSession)
+        : undefined;
     const sessionPath =
-      session && typeof session.value === 'string' && session.value !== ''
-        ? session.value
+      typeof agentSession?.value === 'string' && agentSession.value !== ''
+        ? agentSession.value
         : undefined;
     parsed.push({
       paneId,
@@ -112,6 +136,7 @@ export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
       agent: typeof rec.agent === 'string' ? rec.agent : undefined,
       agentStatus,
       sessionPath,
+      agentSession,
       workspaceId:
         typeof rec.workspace_id === 'string'
           ? rec.workspace_id
@@ -124,14 +149,13 @@ export function parseHerdrPaneCloseList(raw: string): ParsedHerdrPane[] | null {
           : typeof rec.tabId === 'string'
             ? rec.tabId
             : undefined,
-      cwd:
-        typeof (rec as Record<string, unknown>).cwd === 'string'
-          ? ((rec as Record<string, unknown>).cwd as string)
-          : undefined,
+      cwd: typeof rec.cwd === 'string' ? rec.cwd : undefined,
       foregroundCwd:
-        typeof (rec as Record<string, unknown>).foreground_cwd === 'string'
-          ? ((rec as Record<string, unknown>).foreground_cwd as string)
-          : undefined,
+        typeof rec.foreground_cwd === 'string'
+          ? rec.foreground_cwd
+          : typeof rec.foregroundCwd === 'string'
+            ? rec.foregroundCwd
+            : undefined,
     });
   }
   return parsed;

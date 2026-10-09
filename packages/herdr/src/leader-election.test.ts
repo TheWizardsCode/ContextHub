@@ -15,7 +15,7 @@
  *  - Cleanup of stale election files
  */
 
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -351,6 +351,51 @@ describe('releaseLeadership', () => {
     expect(manager.isLeader()).toBe(false);
     expect(existsSync(lockPath)).toBe(false);
     expect(existsSync(leasePath)).toBe(false);
+  });
+
+  // ── Step-down surface (WL-0MUZPBRX3007STFK, parent AC4/AC6) ──
+  // The own-backlog hand-off reuses THIS primitive. The worker wraps it in a
+  // spy to count the voluntary step-down, so pin that a spy observes the
+  // call exactly as the caller made it while the real release still happens.
+
+  it('a spy on releaseLeadership observes the call while the real release still runs', async () => {
+    const manager = makeManager({ instanceId: 'test-instance-1' });
+    await runElectionWithRetry({
+      worklogDir: testDir,
+      instanceId: 'test-instance-1',
+    });
+    const lockPath = join(testDir, LEADER_LOCK_FILE);
+    const leasePath = join(testDir, LEASE_FILE);
+    expect(existsSync(leasePath)).toBe(true);
+
+    const spy = vi.spyOn(manager, 'releaseLeadership');
+    manager.releaseLeadership();
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    // The wrapped real implementation still released the lease/lock.
+    expect(manager.isLeader()).toBe(false);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(existsSync(leasePath)).toBe(false);
+    spy.mockRestore();
+    manager.close();
+  });
+
+  it('is idempotent: a second releaseLeadership() is safe and keeps the files released', async () => {
+    const manager = makeManager({ instanceId: 'test-instance-1' });
+    await runElectionWithRetry({
+      worklogDir: testDir,
+      instanceId: 'test-instance-1',
+    });
+    const lockPath = join(testDir, LEADER_LOCK_FILE);
+    const leasePath = join(testDir, LEASE_FILE);
+
+    manager.releaseLeadership();
+    expect(() => manager.releaseLeadership()).not.toThrow();
+
+    expect(manager.isLeader()).toBe(false);
+    expect(existsSync(lockPath)).toBe(false);
+    expect(existsSync(leasePath)).toBe(false);
+    manager.close();
   });
 });
 

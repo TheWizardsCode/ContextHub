@@ -113,6 +113,36 @@ describe('grouping.ts — duplicated algorithm mirrors core spec', () => {
     const sorted = items.slice().sort(compareGroupableItems);
     expect(sorted.map(i => i.id)).toEqual(['P-high', 'P-med', 'I-high', 'I-low']);
   });
+
+  it('places actively-worked items (status in-progress) in Group N (WL-0MUY1CSQG007TCYX)', () => {
+    const items: GroupableItem[] = [
+      { id: 'WL-active', status: 'in-progress', stage: 'plan_complete', filePaths: ['src/active.ts'], priority: 'medium' },
+      { id: 'WL-idea', stage: 'idea', filePaths: ['src/idea.ts'], priority: 'medium' },
+    ];
+    const groups = assignItemGroups(items, 3);
+    expect(groups.get('WL-active')!.groupLabel).toBe('Group 1');
+    expect(groups.get('WL-idea')!.groupLabel).toBe('Idea');
+    expect(groups.get('WL-active')!.group).toBeLessThan(groups.get('WL-idea')!.group);
+  });
+
+  it('sorts actively-worked items before plan_complete and intake_complete within a group', () => {
+    const items: GroupableItem[] = [
+      { id: 'WL-intake', stage: 'intake_complete', filePaths: [], priority: 'high' },
+      { id: 'WL-plan', stage: 'plan_complete', filePaths: [], priority: 'high' },
+      { id: 'WL-active', status: 'in-progress', stage: 'plan_complete', filePaths: [], priority: 'low' },
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    // Actively-worked first, even at lower priority than the plan/intake rows.
+    expect(sorted.map(i => i.id)).toEqual(['WL-active', 'WL-plan', 'WL-intake']);
+  });
+
+  it('treats the removed in_progress stage as Other (fail-soft legacy rows)', () => {
+    const groups = assignItemGroups(
+      [{ id: 'WL-legacy', stage: 'in_progress', filePaths: ['src/legacy.ts'], priority: 'medium' }],
+      3,
+    );
+    expect(groups.get('WL-legacy')!.groupLabel).toBe('Other');
+  });
 });
 
 describe('regroupWorkItems — merged-list regression (WL-0MSAK8YLB0025EGW)', () => {
@@ -208,6 +238,18 @@ describe('regroupWorkItems — merged-list regression (WL-0MSAK8YLB0025EGW)', ()
     expect(order.indexOf('WL-P-med')).toBeLessThan(order.indexOf('WL-I-low'));
     expect(order.indexOf('WL-I-low')).toBeLessThan(order.indexOf('WL-idea'));
     expect(order.indexOf('WL-idea')).toBeLessThan(order.indexOf('WL-R'));
+  });
+
+  it('treats status=in-progress as Group N and orders it first (WL-0MUY1CSQG007TCYX)', () => {
+    const merged: WorkItem[] = [
+      makeItem('WL-plan', { stage: 'plan_complete', priority: 'high' }),
+      makeItem('WL-active', { stage: 'plan_complete', priority: 'low', status: 'in-progress' }),
+      makeItem('WL-idea', { stage: 'idea', priority: 'low' }),
+    ];
+    const regrouped = regroupWorkItems(merged, 3);
+    expect(regrouped.find(i => i.id === 'WL-active')!.groupLabel).toBe('Group 1');
+    expect(regrouped.find(i => i.id === 'WL-plan')!.groupLabel).toBe('Group 1');
+    expect(regrouped[0].id).toBe('WL-active');
   });
 });
 

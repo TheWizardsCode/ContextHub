@@ -12,6 +12,8 @@ import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
+import { STAGES } from './worklist.js';
+import type { Stage } from './worklist.js';
 import type { AgentState } from './agent-tracker.js';
 import { isAuditFresh, type ParentAuditState } from '@worklog/shared/icons';
 
@@ -637,17 +639,24 @@ const STAGE_STATUS: Record<string, string> = {
 
 /**
  * Fetch work items filtered by stage (via `wl list`).
- * Status per stage:
- * - `in_review` (WL-0MSKCRX730052IIW): `completed`, `in-progress`, `open` —
- *   in_review items carry `completed`/`in-progress` status per the project
+ *
+ * Guards against invalid/unknown stages: returns an empty list without
+ * issuing a CLI call when the requested stage is not in the canonical
+ * `STAGES` list (WL-0MUY1CRS7001UTQJ). This prevents misleading empty
+ * worklists from being populated for removed stages such as `in_progress`
+ * and `completed`.
+ *
+ * Status per valid stage:
+ * - `in_review` (WL-0MSKCRX730052IIW): `completed`, `in-progress`, `open`
+ *   — in_review items carry `completed`/`in-progress` status per the project
  *   workflow.
  * - `plan_complete` / `intake_complete` (WL-0MUIB7D30009KG00): `open`,
  *   `in-progress` — actively-worked items retain their pipeline stage and
  *   flip `status` to `in-progress` (WL-0MTOHS5B4001Y9FX removed the
  *   in_progress stage).
- * - All other stages: `open` only (WL-0MSDT8X1V003206G): items with status
- *   `blocked`, `in-progress`, or `completed` are excluded even when their
- *   stage matches.
+ * - `idea` / `done`: `open` only — items with status `blocked`, `in-progress`,
+ *   or `completed` are excluded even when their stage matches.
+ *
  * Root-only (WL-0MS964SIA0057ABR): stage-filtered top-level lists hide
  * child items; children remain reachable via expand (wl list --parent).
  * Results are regrouped priority-first (WL-0MSOPHLD1000EWNN): priority
@@ -656,6 +665,9 @@ const STAGE_STATUS: Record<string, string> = {
  * priority buckets + id tie-break apply.
  */
 export async function fetchItemsByStage(stage: string): Promise<WorkItem[]> {
+  if (!STAGES.includes(stage as Stage)) {
+    return [];
+  }
   const status = STAGE_STATUS[stage] ?? 'open';
   const output = await runWl(['list', '--status', status, '--stage', stage, '--root-only']);
   const payload = extractJson(output);

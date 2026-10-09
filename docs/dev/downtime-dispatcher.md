@@ -54,13 +54,16 @@ re-read live on every dispatch cycle, so a change applies without a restart. A
 caller that passes no limit falls back to the sprint-view default (20), so an
 unwindowed head is never produced.
 
-**Non-critical work outside the view is never dispatched.** When the head
-yields no candidate the dispatcher reports the terminal reason derived from the
-in-view flags (`no-candidate`, `review-queue-hold`, `code-freeze`,
-`fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`, `in-flight-hold`,
-`wl-error`) and does **not** fall back to a second ranking or an out-of-view
-non-critical scan. When every visible item is filtered by a safety gate (or the
-view is empty) the outcome is a NOP.
+**Non-critical work outside the view is never dispatched by the normal
+paths.** When the head yields no candidate the dispatcher reports the terminal
+reason derived from the in-view flags (`no-candidate`, `review-queue-hold`,
+`code-freeze`, `fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`,
+`in-flight-hold`, `wl-error`) and does **not** fall back to a second ranking or
+an out-of-view non-critical scan. When every visible item is filtered by a
+safety gate (or the view is empty) the outcome is a NOP — **except** on the
+coordination leader path, which has one bounded, own-root escape valve that
+then hands off leadership (see *Own-backlog fallback & leadership hand-off*
+below).
 
 **Critical escape hatch (defensive).** A bounded out-of-window read
 (`fetchExtendedHerdrItems`, `DOWNTIME_DISPATCH_EXTEND_MAX = 30`) re-reads the
@@ -69,7 +72,9 @@ ranking — and returns **only** `critical` items. Because every `critical` item
 is already mandatory in the view, this escape hatch is normally a no-op; it
 exists purely as a safety net so a release blocker can never be windowed out.
 Non-critical items beyond the sprint view are filtered out, so the operator can
-never be surprised by hidden-backlog dispatch. The extension runs on both
+never be surprised by hidden-backlog dispatch. (The critical-only filter is
+lifted **only** for the coordination-mode own-backlog fallback below; the
+defensive escape hatch itself stays critical-only.) The extension runs on both
 dispatch paths; the **TUI worklist is unchanged** (it keeps rendering exactly
 `browseItemCount` items, plus the mandatory set).
 
@@ -87,6 +92,72 @@ behaviour rather than a dispatch.
 caller keeps its entry / reports `wl-error`); a failed or empty extended
 critical read degrades to the original terminal reason, so the escape hatch can
 never convert a defined outcome into a new failure.
+
+### Own-backlog fallback & leadership hand-off (WL-0MUU4XFU90008E24)
+
+The sprint-view-only window above is the **normal** dispatch contract: the
+dispatcher head equals the rendered view and a view with nothing dispatchable
+is a NOP. In **coordination/leader mode** the leader additionally has a
+bounded, self-scoped escape valve so a fleet does not idle when one root's view
+is momentarily empty or fully blocked — with a fairness guard so no instance
+can monopolise leadership by repeatedly reaching into its own hidden backlog.
+
+**Trigger (AC1).** The fallback is evaluated in `dispatchFromCoordination`
+**only after** the coordination offer scan yields no dispatchable candidate —
+i.e. the same terminal-reason set the view can produce (`no-candidate`,
+`review-queue-hold`, `code-freeze`, `fresh-audit-skip`, `audit-in-flight`,
+`audit-host-saturated`, `in-flight-hold`, or a genuinely empty view). It never
+runs when a normal in-view/coordination offer dispatched.
+
+**Own root only (AC2).** The fallback reads the leader's **own** worklog root
+(`opts.cwd`) only — never another instance's or another worklog root's hidden
+backlog. A `{ok:false}` lookup, a thrown error, or an empty extended tail is
+fail-open: the original terminal reason is reported unchanged and nothing
+panics (AC9).
+
+**Bounded window, canonical ranking, gates are filters (AC3/AC7/AC9).** The
+fallback is a **window extension**, never a second ranking: it re-reads the
+SAME canonical ranking path (`getHerdrListHead` → `fetchNextItems` →
+`selectWorkItems` → `regroupWorkItems`) with a larger, bounded window
+(`current.length + DOWNTIME_DISPATCH_EXTEND_MAX`, `= 30` additional items) and
+returns only the newly visible tail. The critical-only filter of the defensive
+escape hatch above is lifted for the fallback (any ranked item in the extended
+tail is eligible), but every existing safety gate still applies as a
+**sequential filter** — classify/producer-review/freshness/caps,
+dispatched-marker exclusion, attempt budget, non-terminal cooldown,
+code-freeze, audit slot minimum, in-flight (critical) guard, and the
+review-queue hold. A gated own-backlog item is skipped exactly like an in-view
+one; a lost CAS race tries the next ranked candidate.
+
+**Leadership hand-off (AC4/AC5/AC6, assumption A3).** A successful dispatch
+sourced from the own backlog (and **only** then) is flagged machine-readably on
+the outcome (`ownBacklogDispatch: true`). After the claim, dispatch marker and
+pane spawn have completed, the worker loop calls the existing
+`LeaderElectionManager.releaseLeadership()` **exactly once** and sets
+`leaderState = false`, so another instance can win the next election. The
+step-down never rolls back the pending dispatch and never orphans the spawned
+pane. It is **not** called after a normal in-view dispatch, and **not** called
+when the fallback finds nothing — in that case leadership is retained and the
+pre-existing terminal reason is reported unchanged. Because there is no
+reliable peer-eligibility predicate (coordination entries are removed on
+dispatch), the step-down is unconditional after a successful fallback dispatch;
+with no peer the same instance simply re-wins the normal election on a later
+tick, bounded by the existing election backoff.
+
+**Scope: coordination/leader mode only.** The fallback lives on the
+coordination leader path (`dispatchFromCoordination`) and the step-down is
+guarded by a non-null `leaderManager`. **Legacy mode** (no `coordinationDir`;
+`leaderManager === null`, `leaderState` hard-coded `true`) is unchanged — there
+is no manager and no peer to hand off to, so the direct/legacy path keeps the
+strict sprint-view-only behaviour (non-critical out-of-view work is never
+dispatched). The TUI worklist is unchanged.
+
+**No contradiction with WL-0MUNS8X97007C9H9.** The sprint-view-only contract
+still governs the dispatcher head and the direct/legacy path; the fallback is a
+bounded, own-root, leadership-handing-off exception on the coordination leader
+path only. It is *not* a reinstatement of the unconditional non-critical
+extension that WL-0MUNS8X97007C9H9 superseded: the window stays bounded, the
+ranking is the same, and the fairness guard removes the monopolisation risk.
 
 **Coordination leader (F3, WL-0MTK1ILM2009QYB2):** the shared coordination file holds ONE
 entry per instance — an **offer** of that instance's own Herdr list head (computed at the
@@ -194,7 +265,12 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    override / round-robin ordering are retired by WL-0MTK1ILM2009QYB2).
    Each entry is eligibility re-checked at dispatch time; stale entries are
    dropped (removed) without a pane or marker (see Lifecycle §2). When a slot
-   opens the first passing offer dispatches in the entry's `worklogRoot`.
+   opens the first passing offer dispatches in the entry's `worklogRoot`. If
+   **no** offer passes, the leader performs one bounded own-backlog fallback
+   against its **own** root (`opts.cwd`) and, on a successful fallback
+   dispatch, voluntarily steps down via `releaseLeadership()` so another
+   instance can take over (WL-0MUU4XFU90008E24; see *Own-backlog fallback &
+   leadership hand-off* above).
 4. The dispatched entry is **removed** from the coordination file. The
    existing dispatched-marker exclusion and CAS claim mechanisms are
    preserved unchanged.
@@ -392,6 +468,160 @@ tick (live) and wired through `DowntimeWorkerConfig.config().maxAttempts`
 into `dispatchDowntimeWork`, `computeMostImportantItem`,
 `runCoordinationCheckIn` and `dispatchFromCoordination`.
 
+### Stalled-work scan and resume (WL-0MUYMBSA90092QV2; parent WL-0MUMA5OMH0024PN1)
+
+Before this feature the dispatcher always took the next item from the Herdr
+head and spawned a **new** pane when local-LLM capacity was idle. An existing
+pane holding a non-terminal item whose agent had stopped working (its pi agent
+went `idle`, or exited as `done`, without the item reaching a terminal stage)
+was ignored, so half-finished work accumulated in workspaces while fresh
+capacity was spent on new work. The dispatcher now performs a **machine-wide
+stalled-work scan and in-place resume** on every idle dispatch cycle, **before**
+selecting a new work item.
+
+The decision half (`classifyStalledPane`, `scanStalledPanes`) and the resume
+half (`resumeStalledPane`, `resumeStalledWorkIfAble`) live in
+`packages/herdr/src/stalled-work.ts`; production I/O seams are wired in
+`createDowntimeDeps` (`packages/herdr/src/index.ts`).
+
+#### Ordering relative to new-item dispatch (parent AC3)
+
+The scan is consulted **once per idle cycle, immediately before new-item
+selection**, on every dispatch entry point:
+
+- `dispatchDowntimeWork` (direct leader dispatch) — after the idle / free-slot
+  gate and before the Herdr-head filters (`dispatchFromHerdrList`);
+- `computeMostImportantItem` (the instance check-in offer) — before reading the
+  Herdr head, so a resumed pane makes the instance offer **nothing** that cycle
+  rather than pausing;
+- `dispatchFromCoordination` (leader dispatch of a remote offer) — before the
+  offer's review-queue / in-flight / cooldown filters.
+
+When the scan yields a resumable candidate and a resume succeeds, the cycle
+**short-circuits** with the neutral reason `stalled-resume`
+(`{dispatched:false, reason:'stalled-resume'}`; `computeMostImportantItem`
+returns `{ok:true, stalledResume:true}`) — **no new item is dispatched in that
+cycle**. When no candidate is resumable the existing dispatch path proceeds
+unchanged. The LLM idle / free-slot check remains the sole concurrency
+limiter; the scan introduces no client-side pane cap.
+
+#### Stall conditions (parent AC1)
+
+A pane is **stalled** only when **all** hold:
+
+1. it hosts a live pi agent — the parsed `herdr pane list` record has an
+   `agent` value;
+2. its label suffix parses to a non-terminal item — status not
+   `completed`/`deleted`, stage not `in_review`/`done` (reuses the canonical
+   `isActiveBlocker` predicate);
+3. its `agent_status` is neither actively working (active set
+   `work`/`working`/`busy`/`running`) nor `blocked`; and
+4. its not-`working` state has persisted at least the stall threshold
+   (`downtimeStallThresholdMs`).
+
+#### Exclusion rules and machine-readable reasons (parent AC4)
+
+Every skip is **neutral** — never a CLI-error strike, never a `no-candidate`
+cooldown, never a duplicate. `classifyStalledPane` returns a single
+machine-readable reason:
+
+| Reason | Meaning |
+|---|---|
+| `no-agent` | The pane hosts no live pi agent. |
+| `no-item-id` | The label has no parseable work-item id. |
+| `kind-unknown` | The label carries no recognisable dispatch kind. |
+| `item-terminal` | The item is completed/deleted or `in_review`/`done`. |
+| `needs-producer-review` | The item is flagged `needsProducerReview === true` (hard exclusion). |
+| `agent-working` | The agent is actively working. |
+| `agent-blocked` | The agent status is `blocked` (never hijacked). |
+| `kind-stale` | The item has already advanced past the pane's dispatched kind. |
+| `cooldown-active` | The non-terminal pane-close cooldown holds the `(item, kind)`. |
+| `attempt-cap-exhausted` | The per-item/per-kind dispatch-attempt cap is reached. |
+| `last-activity-unknown` | No parseable activity timestamp to measure a stall. |
+| `stall-threshold-not-elapsed` | Not-`working` for less than the threshold. |
+
+The dispatched kind is derived from the pane label convention
+`<Downtime|Manually> triggered <kind> …` (the kind token immediately follows
+`triggered`), recognising `implement`, `risk-effort`, `intake`, `audit` and
+`plan`. Other labels — including a free-form `Manually triggered prompt …`
+pane — have no kind and are skipped.
+
+**Kind vs stage progression (`kind-stale`).** Stage ranks are `idea` 0,
+`intake_complete` 1, `plan_complete`/`in_progress` 2, `in_review` 3, `done` 4;
+kind ranks are `intake` 0, `plan` 1, `risk-effort`/`implement` 2, `audit` 3. A
+pane whose item rank exceeds its kind rank (an `intake` pane on an
+`intake_complete` item, an `implement` pane on an `in_review` item) is stale
+and skipped. An unknown stage cannot prove advancement, so it fails open (not
+stale).
+
+**Stall anchor.** The not-working duration is measured from the **later** of
+the item's `updatedAt` and its most recent non-`spawn-failed`,
+non-`enrichment` dispatch marker for that kind, so a pane freshly dispatched
+for an old item is not mistaken for a stall. No parseable anchor → skip
+(`last-activity-unknown`).
+
+#### Resume in place (parent AC2)
+
+Each candidate is resumed **in place** — a new pane is never spawned for the
+item; the resume always targets the candidate's `paneId`:
+
+- a **live agent** receives the literal continuation prompt `continue`
+  (`herdr agent prompt <paneId> continue`, `STALLED_RESUME_PROMPT`);
+- a pane whose agent has **exited** (`agent_status` `done`/`exited`) has pi
+  relaunched in the **same** pane continuing its session
+  (`herdr agent start pi --kind pi --pane <paneId> -- --session <path>`, or
+  `-- --continue` when the pane records no session path), after which the
+  literal `continue` prompt is submitted.
+
+A successful resume records a dispatch attempt for `(item, kind)` in the item
+root's rolling dispatch log, so the existing per-item/per-kind attempt cap
+applies to resumes too; the cap is enforced up front and escalates via
+`needsProducerReview` when exhausted. Concurrent resumes of the same
+`(paneId, itemId)` are prevented by an in-process in-flight guard (a second
+attempt is the neutral `concurrent-resume` skip).
+
+#### Neutral outcome vocabulary and fail-safety (parent AC2/AC6)
+
+Every not-resumed outcome is neutral — never a strike, never a crash, never a
+duplicate. The resume adds these reasons on top of the classifier reasons
+above:
+
+| Reason | Meaning |
+|---|---|
+| `concurrent-resume` | A resume of the same `(paneId, itemId)` is already in flight. |
+| `agent-blocked` | `herdr agent prompt` refused because the agent is `blocked`. |
+| `agent-prompt-stalled` | The submission was accepted but the agent did not reach `working`/`blocked` within the CLI's documented 5 s window (`agent_prompt_stalled`). |
+| `pane-vanished` | The pane/agent disappeared (e.g. the pane-closure reaper closed it) between scan and resume. |
+| `cli-error` | Any other herdr/CLI failure. |
+
+Fail-safe degradation: an unreadable/unparseable `herdr pane list` yields no
+candidates; a per-pane failure (unresolvable root, failed `wl show`, thrown log
+read) skips that pane without aborting the scan; unwired `scanStalledPanes` /
+`resumeStalledPane` deps and a disabled scan both fall through to normal
+dispatch; a thrown resume is neutral and the scan tries the next candidate. A
+code-frozen/ambiguous cycle skips `audit` and `implement` panes (freeze
+split-by-skill), so a resume can never bypass the freeze.
+
+#### Cross-root resume contract (parent AC5)
+
+Each candidate carries the **item's own worklog root**, resolved from the
+pane's `cwd` first and then from the pi session-log path in `agent_session`
+(`defaultStalledPaneRootResolver`). The resume reads the item and its rolling
+log, records the attempt and flags producer review against **that** root —
+never the leader's ambient root. When neither `cwd` nor `agent_session`
+resolves to a valid worklog root the pane is **skipped** (fail closed) rather
+than resumed against the wrong database.
+
+#### Settings
+
+Both settings are re-read from the plugin settings on **every idle tick**
+(never cached), so a change applies live:
+
+| Setting | Default | Clamp |
+|---|---|---|
+| `downtimeStallScanEnabled` | `true` (`DEFAULT_DOWNTIME_STALL_SCAN_ENABLED`) | boolean; `false` disables the scan entirely and falls through to normal dispatch |
+| `downtimeStallThresholdMs` | 5 min / `300000` ms (`DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`) | `[60 s, 60 min]` / `[60000, 3600000]` ms (`clampDowntimeStallThresholdMs`); invalid/missing falls back to the default |
+
 ### Pane placement: project workspace first, `Dispatcher` fallback (WL-0MUR5FUWD00024XN)
 
 Automated downtime panes spawn **inside the owning project's herdr
@@ -580,9 +810,84 @@ Lifecycle (`packages/herdr/src/dispatcher-anchor.ts`):
 
 Duplicate `Dispatcher` workspaces are harmless — the persisted anchor file is
 the authority, not the label count; close surplus idle ones one at a time
-without disturbing active `Downtime triggered …` panes. Manual
-`open-worklist` / `open-pi-agent` flows are unaffected (this placement applies
-only to automated downtime dispatch).
+without disturbing active `Downtime triggered …` panes. `open-worklist` /
+`open-pi-agent` flows are unaffected by the **automated** placement above
+(they carry no work-item ID). The following sub-section documents the
+**interactive** counterpart, which does place worklist-dispatched,
+ID-carrying panes into an item-ID tab.
+
+### Interactive dispatch pane placement (WL-0MUYI3JAO002BTNL)
+
+The sections above describe the **automated downtime** dispatcher. An
+operator-driven **interactive** dispatch (a worklist chord resolving to an
+ID-carrying command) also routes its pane into a tab labelled with the exact
+work-item ID, but it is a deliberately different path: it uses the invoking
+pane's **current** workspace and is **fail-open**. It is the manual
+counterpart of the automated placement (parent work item
+WL-0MUKZGEQ2007FECS).
+
+|  | Automated downtime (above) | Interactive dispatch (this sub-section) |
+|---|---|---|
+| Trigger | idle dispatcher, `dispatchClaimedTier` | operator chord / worklist command (`onCommand`) |
+| Workspace | **project** workspace resolved via `resolveProjectWorkspace` (logical-root match) | **invoking pane's current** workspace (`HERDR_WORKSPACE_ID`) |
+| Channels | agent panes (`send-to-pi.sh`) | agent panes (`send-to-pi.sh`) **and** shell/command-output panes (`run-in-pane.sh`) |
+| No work-item id | scheduled prompts → `Dispatcher` anchor | current-pane split (legacy behaviour, unchanged) |
+| Failure | **fail-closed** — `anchor-unavailable`, no pane | **fail-open** — falls back to the current-pane split, never dropped |
+
+Lifecycle (`packages/herdr/src/index.ts`; shared anchor helper in
+`packages/herdr/src/dispatcher-anchor.ts`):
+
+1. **Workspace resolution** — `resolveInteractiveWorkspaceId(env)` reads
+   `HERDR_WORKSPACE_ID` (present in the plugin pane environment); when it is
+   absent/blank it derives the workspace from the invoking pane id
+   `HERDR_PANE_ID` (`<workspace>:<pane>`), else returns `null` (→ fail-open).
+   There is **no** `/proc`-based project resolution on this path (Q2a), and
+   the pane is never placed in another project's workspace.
+2. **Item-ID tab resolution** — `resolveInteractiveItemAnchor(cwd,
+   workspaceId, itemId, deps?, onCreate?)` wraps the shared
+   `getItemTabAnchor`, so the tab labelled exactly `<itemId>` is created on
+   first use and reused thereafter under the coordination lock with the same
+   double-check and CLI-shape tolerance as the automated path (the tab label
+   is the key; no persistence file, no duplicate tab). `onCreate` fires only
+   when this call actually provisioned the tab — the create-vs-reuse signal
+   consumed by step 4. **Any** resolution/creation error returns `null`
+   (fail-open).
+3. **Anchor forwarding** — the item-tab anchor is resolved once per dispatch
+   and forwarded to both channels by the arg builders:
+   `buildSendToPiArgs(..., anchor)` and `buildRunInPaneArgs(..., anchor)`
+   append `--anchor <paneId>` when it is a non-empty string.
+   `send-to-pi.sh` already supported `--anchor`; `run-in-pane.sh` gained it —
+   with `--anchor` it runs `herdr pane split --pane <paneId> --direction right
+   --no-focus --cwd <cwd>` instead of the legacy `--current`, tolerating the
+   `pane_id` / `paneId` / `id` split-output variants (raw output logged on
+   parse failure, mirroring `send-to-pi.sh`). `--no-focus` is preserved by
+   default, so the item tab never steals focus — **except** for shortcuts
+   that opt in with `focus: true` (currently `r i`, the producer interview,
+   WL-0MURJ0LFH002O95I): their dispatch passes `--focus`, and
+   `run-in-pane.sh` focuses the new pane's item tab (`herdr pane get <pane>`
+   → `herdr tab focus <tabId>`) **before** zooming the pane. Tab focus is
+   required because the pane lives in a tab other than the caller's and
+   `pane zoom` alone cannot switch tabs; it is best-effort/fail-open (an
+   unresolvable tab id falls back to the zoom-only behaviour).
+4. **Root-pane cleanup** — when this dispatch **created** the tab, the
+   placeholder root pane (herdr's initial empty pane, used only as the first
+   split anchor) is closed after the split is **confirmed**: the spawning
+   script writes its new pane id via `--pane-id-file`, and only then does
+   `closeInteractiveTabRootPane(anchorPaneId, { cwd }, deps)` run. Cleanup is
+   **fail-safe** — the anchor is closed only when liveness POSITIVELY
+   confirms it is not a live tracked pi/shell pane
+   (`defaultInteractiveLiveTrackedPanesResolver` → `herdr pane list`; live =
+   a non-terminal pi agent or a `Shell: …` label). Unknown liveness (probe
+   absent, failed, or unparseable) leaves the anchor open, so a reused tab's
+   live pane is never closed. Cleanup is also **fail-open** — any error is
+   swallowed and the dispatch outcome never changes. A later dispatch for the
+   same item reuses the surviving pane as the split anchor.
+
+`getItemTabAnchor` is therefore the single shared create-or-reuse mechanism
+for both placements; only the workspace choice, failure semantics and
+root-pane liveness source differ. The automated path checks the running
+**downtime** pane ids for its cleanup liveness; the interactive path checks
+the live **tracked pi/shell** panes (step 4).
 
 
 ### No-candidate cooldown & the empty offer file
@@ -594,7 +899,10 @@ tracker so a fresh full idle period is required after the pause. A
 `no-candidate` outcome means the *sprint view* — the live `browseItemCount`
 window (plus mandatory items) — held nothing dispatchable: the dispatcher does
 not scan hidden backlog (WL-0MUNS8X97007C9H9; see *Sprint-view-only dispatch
-window* above). In
+window* above) **except** via the coordination leader's bounded own-backlog
+fallback, which dispatches before this reason is returned and then hands off
+leadership (WL-0MUU4XFU90008E24; see *Own-backlog fallback & leadership
+hand-off* above). In
 coordination mode (WL-0MTEZ4XZJ006Y9U7) the shared runtime file
 (`.worklog/downtime-coordination.json`) is an **offer list, not the
 backlog**: the leader removes each entry after dispatching (see step 4
@@ -666,7 +974,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 |---|---|---|---|
 | **Host-wide marker** (this mechanism) | machine-wide, all projects/instances | an audit dispatched by ANY project on this host | skip audit tier; reason `audit-host-saturated` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
-| **Proxy-slot gating** (`available_slots` / `contention_queue_depth` / per-slot ownership) | the Local Proxy | live slot availability, queue depth, live leases | ineligible/skip audit dispatch (per-tier minimum 2 free slots) or `proxy-contention` |
+| **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot ownership) | the Local Proxy | live slot availability, queue depth, live leases | ineligible/skip audit dispatch (per-tier minimum 2 free slots) or `proxy-contention`; unusable per-slot detail → `slots-unavailable` |
 | **`AUDIT_PHASE2_PARALLELISM=1`** | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots |
 
 **Observability.** The skip is logged to stderr as
@@ -995,7 +1303,9 @@ Each machine-wide entry records `worklogRoot` (preferred) + `directory` alias.
 The single leader dispatches offers in **file order** (each offer is its root's
 Herdr list head) **across worklogRoots** and spawns each pane in the entry's
 `worklogRoot`. The slot budget is machine-wide: ONE leader poll →
-ONE `freeSlots` snapshot (per-slot or `available_slots`), forwarded to the sole
+ONE `freeSlots` snapshot **derived from the per-slot array** — the only
+trusted availability source (fail-closed contract, WL-0MUXVPXAZ005RESW) —
+forwarded to the sole
 dispatch call — no per-worklog duplication (F5 WL-0MTII48OV008P2QU;
 WL-0MT50LKAK001EF5Q single cap source). v1 scope is single-machine; a
 multi-machine (real flock/NFS) extension is future work.
@@ -1028,9 +1338,10 @@ an agent on a tool call (wl, bash, tests) left the slot "free", so multiple
    The dispatcher does **not** wait out a lease: it dispatches into genuinely
    free **unowned** slots via the per-slot gate (WL-0MU8807BI008C9ME), and a
    lease held by a dispatched pane (which already owns its own slot) does not
-   block the OTHER free unowned slots. Only the **count-based single-slot**
-   path treats a held lease as blocking (a truly owned sole slot stays
-   protected). The maximum is pinned in code as
+   block the OTHER free unowned slots. The lease is a **decision-log signal
+   only** (`ownerPresent`): the ownership gate itself is derived from the
+   trusted per-slot array (a slot with a live `owner_session_id` is never
+   free). The maximum is pinned in code as
    `LOCAL_DISPATCH_LEASE_MAX_SECONDS`; if `llm-manager` changes the default,
    revisit that constant and this section so the assumption cannot drift
    silently again.
@@ -1038,23 +1349,21 @@ an agent on a tool call (wl, bash, tests) left the slot "free", so multiple
    `owner_session_id`; `countFreeUnownedSlots` excludes owned slots from the
    free count and the per-slot idle tracker resets an owned slot's timer, so
    a slot with a live lease is never considered available for a new pane.
-   A single idle-but-owned slot (count-based path) fails closed via the
-   derived `local_lease_active`.
 
-   **Stale/empty per-slot data (WL-0MUFP30T2003OX1F).** The proxy serves
-   `slots: []` together with `slots_stale: true` when its fresh `/slots`
-   query fails: the slot COUNTS come from the last-known cache but the
-   per-slot detail is unavailable. An empty array is **not** "zero free
-   slots", so the worker treats stale OR empty `slots` as "no per-slot
-   identity" and falls back to the count-based path. In that path, with a
-   multi-slot config (`0 < N < total`) a held lease no longer blocks
-   dispatch into the proxy-reported spare capacity: the count-based gate
-   uses `available_slots`, reserving one slot per lease only when the owner
-   may be idle (`local_active_query !== true` — an active query's slot is
-   already processing and excluded from the count). A single-slot
-   (`total_slots = 1`) or `N <= 0` / `N >= total` setup keeps the strict
-   fail-closed gate. The proxy-side improvement (serve cached per-slot
-   detail when stale) is tracked separately in `llm-manager`.
+   **Fail closed on unusable per-slot detail (WL-0MUXVPXAZ005RESW).** The
+   proxy serves `slots: []` together with `slots_stale: true` when its fresh
+   `/slots` query fails: the slot COUNTS come from the last-known cache but
+   the per-slot detail is unavailable. An empty array is **not** "zero free
+   slots". Under the fail-closed contract, absent, empty, or stale per-slot
+   detail is **unusable**: the worker refuses to dispatch and records the
+   distinct reason `slots-unavailable` (header token `no-slots`), so a
+   fail-closed stop is distinguishable from `slot-owned` / `proxy-contention`
+   in the decision log and herdr header. The inaccurate count-based fallback
+   (and its `countBasedFreeSlots` / `countBasedSpareCapacity` / `leaseReserve`
+   / `ownerLeaseCount` helpers) has been **removed** — `available_slots` is
+   never used as a dispatch budget. The proxy-side improvement (serve cached
+   per-slot detail when stale) is tracked separately in `llm-manager`
+   (LP-0MUFSVXID0039ZAQ).
 3. **Contention feedback (AC6)** — the proxy's LIVE `contention_queue_depth`
    is parsed; while > 0 the dispatcher backs off with outcome reason
    `proxy-contention` until the queue drains. The sibling
@@ -1184,6 +1493,8 @@ status refresh unchanged at 30s.**
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
 | Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
+| Stalled-work scan | enabled (`downtimeStallScanEnabled`; re-read live; `false` disables the pre-dispatch scan and falls through to normal dispatch, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_SCAN_ENABLED` (`downtime-worker.ts`) |
+| Stalled-work threshold | **5 min** / `300000` ms (`downtimeStallThresholdMs`; minimum continuous not-`working` duration before an in-place resume; clamped to 60 s – 60 min; invalid/missing falls back to the default, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`, `clampDowntimeStallThresholdMs` (`downtime-worker.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
 | Pane-closure idle threshold | **0 min** — idle close disabled (`paneCloseIdleThresholdMinutes`; clamped to 0 min – 24 h) | `pane-close-scheduler.ts` |
 | Pane-closure grace period | **5 min** (`paneCloseGracePeriodMinutes`; clamped to 1 min – 24 h; no pane is eligible for close within this window of first dispatch, WL-0MUMM5IUF003EVT8) | `pane-close-scheduler.ts` |
@@ -1202,7 +1513,10 @@ on load
 (`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
 (`clampDowntimeNonTerminalCooldownMs`). The per-item/per-kind attempt cap
 (`downtimeMaxAttempts`) is likewise configurable and clamped on load
-(`clampDowntimeMaxAttempts`).
+(`clampDowntimeMaxAttempts`). The stalled-work scan enable flag
+(`downtimeStallScanEnabled`) and threshold (`downtimeStallThresholdMs`) are
+likewise re-read live every tick and clamped on load
+(`clampDowntimeStallThresholdMs`).
 
 ## Files & runtime artifacts
 
@@ -1212,7 +1526,8 @@ on load
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
-| `packages/herdr/src/downtime-worker.ts` | Worker tick: election, check-in, idle gate, dispatch (anchor-before-claim) |
+| `packages/herdr/src/downtime-worker.ts` | Worker tick: election, check-in, idle gate, dispatch (anchor-before-claim); stalled-work scan wiring (`resumeStalledWorkIfAble`, `STALLED_RESUME_REASON`) |
+| `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
 | `packages/herdr/src/downtime-log.ts` | Coordination/dispatch rolling logs (per worklog root, retained) |
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
 | `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |
@@ -1315,8 +1630,8 @@ duplicate-dispatch RCA is answerable from the log alone:
 
 | Field | Type | Description |
 |---|---|---|
-| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `scheduled-prompt`, or `legacy-tier` |
-| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `scheduled-due`, `critical-tier` |
+| `selectionPath` | string | Which loop selected the candidate: `critical-first`, `normal-scan`, `coordination-offer`, `own-backlog` (coordination own-backlog fallback, WL-0MUU4XFU90008E24), `scheduled-prompt`, or `legacy-tier` |
+| `selectionReason` | string | Machine-readable reason: e.g. `no-live-pane`, `marker-stale-escalation`, `in-flight-pane` (skip), `non-critical`, `leader-offer`, `own-backlog-fallback` (WL-0MUU4XFU90008E24), `scheduled-due`, `critical-tier` |
 | `paneId` | string \| null | (Enrichment entry only) the resolved dispatch pane/session id, or `null` when it could not be resolved — never a guess |
 | `enrichment` | `true` | (Enrichment entry only) discriminator marking a post-spawn enrichment rather than a fresh dispatch |
 
@@ -1462,5 +1777,19 @@ trace.
   review-queue depth gate rewired onto the live Herdr path, sprint-complete
   auto-disable removed, marker manual-only)
 - Package README: `packages/herdr/README.md` → *Downtime worker (local-LLM
-  idle dispatch)*
+  idle dispatch)* and *Interactive pane placement (work-item-ID tabs)*
+- Work item: **WL-0MUYI3JAO002BTNL** / **WL-0MUYI3K8H007MPKF** *Interactive
+  item-ID-tab placement for worklist dispatch (both channels) and its
+  fail-safe placeholder root-pane cleanup* (documented in *Interactive
+  dispatch pane placement* above)
+- Work item: **WL-0MUMA5OMH0024PN1** *When dispatching a new workload first
+  scan all workspaces and panes for stalled work* (+ its children
+  WL-0MUYMBK6H005PY16 settings / WL-0MUYMBMCG000Z4WP pane-record enrichment /
+  WL-0MUYMBO9X000WDF6 classifier / WL-0MUYMBPZ5004LBFX resume orchestrator /
+  WL-0MUYMBSA90092QV2 dispatch wiring / WL-0MUYMBUAK007H10J verification;
+  documented in *Stalled-work scan and resume* above)
+- Work item: **WL-0MUU4XFU90008E24** *Own-backlog dispatch fallback must
+  relinquish leadership* (bounded own-root fallback + voluntary
+  `releaseLeadership()` hand-off; documented in *Own-backlog fallback &
+  leadership hand-off* above)
 - Docs work item: **WL-0MT76H3Z900908TV** (this page)
