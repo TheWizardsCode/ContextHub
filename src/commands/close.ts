@@ -30,6 +30,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { CloseOptions } from '../cli-types.js';
 
 import { classifyAuditGap, type ParentAuditState } from '@worklog/shared/icons';
+import { downgradeCriticalIfTerminal } from '../terminal-priority.js';
 
 /**
  * Build the direct parent's audit state for derived child coverage
@@ -150,6 +151,16 @@ function shouldRecoverOpenChildren(
 }
 
 /**
+ * Result of closing a single item.
+ */
+interface CloseSingleResult {
+  /** The item after the close (post auto-downgrade when one occurred). */
+  item: WorkItem;
+  /** The item when its `critical` priority was auto-downgraded, else null. */
+  downgradedItem: WorkItem | null;
+}
+
+/**
  * Close a single item (no recursion).  Creates the reason comment if one
  * is provided, then updates status/stage.  Returns the updated item or null
  * on failure.
@@ -159,7 +170,7 @@ function closeSingle(
   reason: string | undefined,
   author: string,
   db: any
-): WorkItem | null {
+): CloseSingleResult | null {
   if (reason && reason.trim() !== '') {
     try {
       const comment = db.createComment({
@@ -176,7 +187,12 @@ function closeSingle(
 
   try {
     const updated = db.update(id, { status: 'completed', stage: 'done' });
-    return updated || null;
+    if (!updated) return null;
+    // Closing is a terminal transition: never leave the item at `critical`,
+    // which signals urgent *open* work (WL-0MSJM4EIV001A0V9). Report the
+    // downgrade so the caller can surface it in the command output.
+    const downgradedItem = downgradeCriticalIfTerminal(db, id);
+    return { item: downgradedItem ?? updated, downgradedItem };
   } catch (err) {
     return null;
   }
@@ -195,13 +211,14 @@ function closeDescendants(
   reason: string | undefined,
   author: string,
   db: any
-): { errors: Array<{ id: string; error: string }>; childrenClosed: number; auditGapWarnings: string[] } {
+): { errors: Array<{ id: string; error: string }>; childrenClosed: number; auditGapWarnings: string[]; downgradedItems: WorkItem[] } {
   const errors: Array<{ id: string; error: string }> = [];
   const auditGapWarnings: string[] = [];
+  const downgradedItems: WorkItem[] = [];
 
   // Get all descendants (DFS order: parents before children in each branch)
   const descendants = db.getDescendants(parentId);
-  if (!descendants || descendants.length === 0) return { errors, childrenClosed: 0, auditGapWarnings };
+  if (!descendants || descendants.length === 0) return { errors, childrenClosed: 0, auditGapWarnings, downgradedItems };
 
   // Reverse to close deepest items first
   const deepestFirst = [...descendants].reverse();
@@ -209,13 +226,15 @@ function closeDescendants(
   for (const descendant of deepestFirst) {
     const warning = auditGapWarningFor(descendant, db);
     if (warning) auditGapWarnings.push(warning);
-    const updated = closeSingle(descendant.id, reason, author, db);
-    if (!updated) {
+    const closed = closeSingle(descendant.id, reason, author, db);
+    if (!closed) {
       errors.push({ id: descendant.id, error: 'Failed to close descendant' });
+    } else if (closed.downgradedItem) {
+      downgradedItems.push(closed.downgradedItem);
     }
   }
 
-  return { errors, childrenClosed: descendants.length - errors.length, auditGapWarnings };
+  return { errors, childrenClosed: descendants.length - errors.length, auditGapWarnings, downgradedItems };
 }
 
 export default function register(ctx: PluginContext): void {
@@ -244,7 +263,7 @@ export default function register(ctx: PluginContext): void {
       const author = options.author || 'worklog';
       const force = options.force === true;
 
-      const results: Array<{ id: string; success: boolean; error?: string; childrenClosed?: number; recovered?: boolean; childErrors?: Array<{ id: string; error: string }>; auditGapWarnings?: string[] }> = [];
+      const results: Array<{ id: string; success: boolean; error?: string; childrenClosed?: number; recovered?: boolean; childErrors?: Array<{ id: string; error: string }>; auditGapWarnings?: string[]; downgradedItems?: WorkItem[] }> = [];
 
       for (const rawId of ids) {
         const normalizedId = utils.normalizeCliId(rawId, options.prefix) || rawId;
@@ -264,7 +283,7 @@ export default function register(ctx: PluginContext): void {
             // waiver for an uncovered in_review root so the bypass is auditable.
             recordForceWaiver(item, reason, author, db);
             // Close all descendants first (deepest first), collecting errors
-            const { errors: childErrors, childrenClosed, auditGapWarnings } = closeDescendants(id, reason, author, db);
+            const { errors: childErrors, childrenClosed, auditGapWarnings, downgradedItems } = closeDescendants(id, reason, author, db);
 
             // Now close the parent itself
             const updated = closeSingle(id, reason, author, db);
@@ -286,6 +305,11 @@ export default function register(ctx: PluginContext): void {
             if (auditGapWarnings.length > 0) {
               result.auditGapWarnings = auditGapWarnings;
             }
+            const allDowngraded = [...downgradedItems];
+            if (updated.downgradedItem) allDowngraded.push(updated.downgradedItem);
+            if (allDowngraded.length > 0) {
+              result.downgradedItems = allDowngraded;
+            }
             results.push(result);
           } else {
             // No children — standard single-item close (flag is a no-op)
@@ -295,12 +319,14 @@ export default function register(ctx: PluginContext): void {
               results.push({ id, success: false, error: 'Failed to close item' });
               continue;
             }
-            results.push({ id, success: true });
+            const result: any = { id, success: true };
+            if (updated.downgradedItem) result.downgradedItems = [updated.downgradedItem];
+            results.push(result);
           }
         // ── Audit-gated recursive close ──
         } else if (shouldCloseRecursively(item, db)) {
           // Close descendants first (deepest first), collecting errors without aborting
-          const { errors: childErrors, childrenClosed, auditGapWarnings } = closeDescendants(id, reason, author, db);
+          const { errors: childErrors, childrenClosed, auditGapWarnings, downgradedItems } = closeDescendants(id, reason, author, db);
 
           // Now close the parent itself
           const updated = closeSingle(id, reason, author, db);
@@ -323,12 +349,17 @@ export default function register(ctx: PluginContext): void {
           if (auditGapWarnings.length > 0) {
             result.auditGapWarnings = auditGapWarnings;
           }
+          const allDowngraded = [...downgradedItems];
+          if (updated.downgradedItem) allDowngraded.push(updated.downgradedItem);
+          if (allDowngraded.length > 0) {
+            result.downgradedItems = allDowngraded;
+          }
           results.push(result);
         // ── Recovery path ──
         } else if (shouldRecoverOpenChildren(item, db)) {
           // Recovery path: parent is already completed/done but has open children.
           // Close descendants only — the parent itself is already closed.
-          const { errors: childErrors, childrenClosed, auditGapWarnings } = closeDescendants(id, reason, author, db);
+          const { errors: childErrors, childrenClosed, auditGapWarnings, downgradedItems } = closeDescendants(id, reason, author, db);
 
           const result: any = {
             id,
@@ -342,6 +373,9 @@ export default function register(ctx: PluginContext): void {
           if (auditGapWarnings.length > 0) {
             result.auditGapWarnings = auditGapWarnings;
           }
+          if (downgradedItems.length > 0) {
+            result.downgradedItems = downgradedItems;
+          }
           results.push(result);
 
         } else {
@@ -354,6 +388,7 @@ export default function register(ctx: PluginContext): void {
           }
           const result: any = { id, success: true };
           if (auditGapWarning) result.auditGapWarnings = [auditGapWarning];
+          if (updated.downgradedItem) result.downgradedItems = [updated.downgradedItem];
           results.push(result);
 
           // Warning: parent has orphaned children — determine reason
@@ -403,6 +438,10 @@ export default function register(ctx: PluginContext): void {
               console.log(`Closed ${r.id} (${r.childrenClosed} children closed)`);
             } else {
               console.log(`Closed ${r.id}`);
+            }
+            if (r.downgradedItems && r.downgradedItems.length > 0) {
+              const n = r.downgradedItems.length;
+              console.log(`[Downgraded ${n} item${n === 1 ? '' : 's'} from critical to high]`);
             }
           } else {
             console.error(`Failed to close ${r.id}: ${r.error}`);
