@@ -1,15 +1,18 @@
 # Worklog
 
-A lightweight, Git-friendly issue tracker designed for AI agents and development teams. Track hierarchical work items with a CLI or REST API -- all backed by SQLite with JSONL-based Git syncing.
+A [Herdr](https://herdr.dev) extension that assists with the management and orchestration of teams of AI agents. It browses and selects work from the backlog, dispatches agents into panes, tracks their live status, and releases claims abandoned by agents that have gone away.
+
+At the heart of that orchestration is **Worklog**: a lightweight, Git-friendly issue tracker that also serves as the project's history. Every work item records its description, acceptance criteria, and comment trail, so each agent gets the relevant context for the job it is given. Track hierarchical work items with a CLI or REST API — all backed by SQLite with JSONL-based Git syncing.
 
 ## Features
 
-- **CLI + API**: Manage work items from the command line or a REST API
-- **Git-Friendly Syncing**: JSONL format enables seamless team collaboration via Git with automatic conflict resolution
-- **Hierarchical Work Items**: Parent-child relationships for organizing epics, features, and tasks
-- **Plugin System**: Extend the CLI with custom commands (see [Plugin Guide](PLUGIN_GUIDE.md))
+- **Herdr Orchestration**: Browse and select work items, dispatch Pi agent panes, track live agent status, and self-heal abandoned `in_progress` claims from a Herdr pane (see [Herdr plugin](packages/herdr/README.md))
 - **AI Agent Integration**: Pi agent plugin modules that auto-load into every session — activity indicator, session health, model/provider display, guardrails, error recovery (`/retry`), and skill-path tool (see [Pi extension](packages/tui/extensions/README.md)).
 - **Heartbeat Skill**: Automated work item monitoring via the Pi agent — run `/skill:heartbeat` to flag items needing producer review or to audit completed items for closure readiness (see [skill/heartbeat/SKILL.md](skill/heartbeat/SKILL.md)).
+- **Hierarchical Work Items**: Parent-child relationships for organizing epics, features, and tasks
+- **Plugin System**: Extend the CLI with custom commands (see [Plugin Guide](PLUGIN_GUIDE.md))
+- **CLI + API**: Manage work items from the command line or a REST API
+- **Git-Friendly Syncing**: JSONL format enables seamless team collaboration via Git with automatic conflict resolution
 - **Multi-Project Support**: Custom prefixes for issue IDs per project
 
 ## Installation
