@@ -76,6 +76,8 @@ import {
   buildDowntimePaneArgs,
   spawnDowntimePane,
   buildDowntimeSpawnOptions,
+  scrubRepositoryOverrides,
+  REPOSITORY_OVERRIDE_ENV_VARS,
   BLOCKED_QUESTIONS_INSTRUCTION,
   parseNextItemOutput,
   parseNextCandidatesOutput,
@@ -4504,6 +4506,44 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     // Parent audit + at most one sequential child deep-analysis call fits
     // cheap mode's 2 local slots (WL-0MSORQ1RG005DGUS).
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+  });
+
+  it('buildDowntimeSpawnOptions scrubs repository-override git vars (WL-0MV0TZEWZ003ZXEB)', () => {
+    const saved = new Map<string, string | undefined>();
+    for (const key of REPOSITORY_OVERRIDE_ENV_VARS) {
+      saved.set(key, process.env[key]);
+      process.env[key] = `/tmp/leaked/${key}`;
+    }
+    try {
+      const options = buildDowntimeSpawnOptions('/repo');
+      for (const key of REPOSITORY_OVERRIDE_ENV_VARS) {
+        expect(options.env[key]).toBeUndefined();
+      }
+      // The scrub must not discard unrelated forwarding.
+      expect(options.env.HERDR_RESOLVED_CWD).toBe('/repo');
+    } finally {
+      for (const key of REPOSITORY_OVERRIDE_ENV_VARS) {
+        const previous = saved.get(key);
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      }
+    }
+  });
+
+  it('scrubRepositoryOverrides removes only override vars and never mutates its input', () => {
+    const input = {
+      PATH: '/usr/bin',
+      GIT_DIR: '/leak/.git',
+      GIT_WORK_TREE: '/leak',
+      HERDR_ENV: '1',
+    };
+
+    const cleaned = scrubRepositoryOverrides(input);
+
+    expect(cleaned).toEqual({ PATH: '/usr/bin', HERDR_ENV: '1' });
+    // Input mapping is untouched.
+    expect(input.GIT_DIR).toBe('/leak/.git');
+    expect(input.GIT_WORK_TREE).toBe('/leak');
   });
 
   // ── Mode-aware PARALLELISM (WL-0MT50S9JW001DHME) ──────────────────

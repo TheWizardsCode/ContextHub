@@ -5255,11 +5255,45 @@ export function buildDowntimeSpawnOptions(
     // no audit-skill change needed. Interactive (non-downtime) panes are
     // unaffected.
     env: {
-      ...process.env,
+      ...scrubRepositoryOverrides(process.env),
       HERDR_RESOLVED_CWD: cwd,
       AUDIT_PHASE2_PARALLELISM: parallelism,
     },
   };
+}
+
+/**
+ * Git environment variables that override the repository a `git` command
+ * operates on. Git honours these over `cwd`, so a value leaked into a
+ * spawned pane can redirect a `git` command into a live checkout
+ * (SA-0MUIZSXEY008NGR8 / WL-0MV0TZEWZ003ZXEB). Mirrors the canonical list in
+ * `skill/shared/git_sandbox.py::REPOSITORY_OVERRIDE_ENV_VARS`.
+ */
+export const REPOSITORY_OVERRIDE_ENV_VARS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_CONFIG',
+  'GIT_CONFIG_GLOBAL',
+  'GIT_CONFIG_SYSTEM',
+  'GIT_CONFIG_NOSYSTEM',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+] as const;
+
+/**
+ * Return a copy of *env* with every repository-override git variable removed.
+ * The input mapping is never mutated. Used by
+ * {@link buildDowntimeSpawnOptions} so a launcher-side leak cannot be
+ * forwarded to the spawned pane and its descendants (test subprocesses).
+ */
+export function scrubRepositoryOverrides(
+  env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+  const cleaned: NodeJS.ProcessEnv = { ...env };
+  for (const name of REPOSITORY_OVERRIDE_ENV_VARS) {
+    delete cleaned[name];
+  }
+  return cleaned;
 }
 
 /** Default spawn: detached, stdio ignored, resolved cwd forwarded. */
