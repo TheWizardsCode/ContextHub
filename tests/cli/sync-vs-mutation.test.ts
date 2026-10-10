@@ -108,7 +108,7 @@ async function waitForFile(file: string, timeoutMs = 15000): Promise<void> {
 
 /** Shape of the subset of `wl show --json` this suite asserts on. */
 interface ShowResult {
-  workItem: { id: string; status: string; stage: string; description?: string };
+  workItem: { id: string; status: string; stage: string; title?: string; description?: string };
   comments: Array<{ author: string; comment: string }>;
 }
 
@@ -169,6 +169,21 @@ function setupProject(): Setup {
   ].join('\n');
   const shimPath = path.join(shimDir, 'git');
   fs.writeFileSync(shimPath, shim, { mode: 0o755 });
+
+  // Fake `gh` CLI: returns a single GitHub issue whose body carries a Worklog
+  // marker for $WL_TEST_ID, so `wl github import` updates that existing item
+  // without creating/pushing anything. GraphQL hierarchy queries return an
+  // empty parent/child set.
+  const ghShim = `#!/bin/sh
+if echo "$*" | grep -q graphql; then
+  printf '%s' '{"data":{"repository":{"issue":{"parent":null,"subIssues":{"nodes":[]}}}}}'
+elif echo "$*" | grep -q 'issues?state=all'; then
+  printf '[{"id":1,"number":101,"title":"IMPORTED TITLE","body":"<!-- worklog:id=%s -->","state":"open","labels":[],"updated_at":"2099-01-01T00:00:00Z"}]' "$WL_TEST_ID"
+else
+  printf '%s' '{}'
+fi
+`;
+  fs.writeFileSync(path.join(shimDir, 'gh'), ghShim, { mode: 0o755 });
 
   return { root, remote, local, shimDir, marker, release, realGit };
 }
@@ -478,6 +493,48 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     // The description fix must have survived the sync.
     const after = showItem(s.local, id);
     expect(after.workItem.description ?? '').toContain('**Key Files:**');
+  }, 90000);
+
+  it('AC1/AC2: a concurrent wl github import survives a sync (imported update intact)', async () => {
+    const id = createItem(s.local, 'GitHub import target');
+
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    // The import reads the issue list via the fake `gh` shim, which returns an
+    // issue marked for $WL_TEST_ID; the import updates that item's title.
+    const importEnv = {
+      ...realGitEnv(),
+      PATH: `${s.shimDir}${path.delimiter}${realGitEnv().PATH}`,
+      WL_TEST_ID: id,
+    };
+    const mutation = (async () => {
+      const imp = spawnCli(
+        s.local,
+        ['--json', 'github', 'import', '--repo', 'owner/name'],
+        importEnv,
+      );
+      const impRes = await imp.done;
+      expect(impRes.status, impRes.stderr).toBe(0);
+    })();
+
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The imported title update must have survived the sync.
+    const after = showItem(s.local, id);
+    expect(after.workItem.title).toBe('IMPORTED TITLE');
   }, 90000);
 
   it('AC3: an intentional "Ready to close: No" still reverts to open/plan_complete', () => {
