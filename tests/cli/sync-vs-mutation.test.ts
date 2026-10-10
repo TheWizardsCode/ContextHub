@@ -108,7 +108,7 @@ async function waitForFile(file: string, timeoutMs = 15000): Promise<void> {
 
 /** Shape of the subset of `wl show --json` this suite asserts on. */
 interface ShowResult {
-  workItem: { id: string; status: string; stage: string };
+  workItem: { id: string; status: string; stage: string; description?: string };
   comments: Array<{ author: string; comment: string }>;
 }
 
@@ -439,6 +439,45 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     expect(depList.status, depList.stderr).toBe(0);
     const parsed = JSON.parse(depList.stdout) as { outbound: Array<{ id: string }> };
     expect(parsed.outbound.some(e => e.id === idB)).toBe(false);
+  }, 90000);
+
+  it('AC1/AC3: a concurrent wl doctor file-paths --add-placeholder survives a sync', async () => {
+    // An intake-stage item with no **Key Files:** section is a fixable finding.
+    const create = runCli(s.local, ['--json', 'create', '-t', 'Doctor fix target', '--stage', 'prd_complete']);
+    expect(create.status, create.stderr).toBe(0);
+    const id: string = JSON.parse(create.stdout).workItem?.id ?? JSON.parse(create.stdout).id;
+    expect(id).toBeTruthy();
+
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    const mutation = (async () => {
+      const doctor = spawnCli(
+        s.local,
+        ['--json', 'doctor', 'file-paths', '--add-placeholder'],
+        realGitEnv(),
+      );
+      const doctorRes = await doctor.done;
+      expect(doctorRes.status, doctorRes.stderr).toBe(0);
+    })();
+
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The description fix must have survived the sync.
+    const after = showItem(s.local, id);
+    expect(after.workItem.description ?? '').toContain('**Key Files:**');
   }, 90000);
 
   it('AC3: an intentional "Ready to close: No" still reverts to open/plan_complete', () => {

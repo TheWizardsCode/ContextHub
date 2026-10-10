@@ -15,6 +15,7 @@ import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults, rewriteAndForcePushDataFile } from '../sync.js';
 import { getSyncDefaults } from './sync.js';
 import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 import { buildForeignItemReport, applyForeignItemCleanup } from '../doctor/foreign-items-check.js';
 import { buildAuditGapReport } from '../doctor/audit-gaps-check.js';
 import * as fs from 'fs';
@@ -232,11 +233,11 @@ export default function register(ctx: PluginContext): void {
           try {
             let migrationResult = { applied: [] as any[], backups: [] as string[] };
             if (hasPendingMigrations) {
-              migrationResult = runMigrations({
+              migrationResult = withStoreMutationLock(ctx.dataPath, () => runMigrations({
                 dryRun: false,
                 confirm: true,
                 logger: { info: s => console.error(s), error: s => console.error(s) }
-              });
+              }));
             }
 
             output.json({
@@ -312,7 +313,7 @@ export default function register(ctx: PluginContext): void {
         try {
           let migrationResult = { applied: [] as any[], backups: [] as string[] };
           if (hasPendingMigrations) {
-            migrationResult = runMigrations({ dryRun: false, confirm: true, logger: { info: s => console.error(s), error: s => console.error(s) } });
+            migrationResult = withStoreMutationLock(ctx.dataPath, () => runMigrations({ dryRun: false, confirm: true, logger: { info: s => console.error(s), error: s => console.error(s) } }));
           }
           if (utils.isJsonMode()) {
             output.json({ success: true, applied: migrationResult.applied, backups: migrationResult.backups });
@@ -389,6 +390,7 @@ export default function register(ctx: PluginContext): void {
         const fixed: Array<{ id: string; title: string; from: { status: string; stage: string }; to: { status: string; stage: string } }> = [];
         const errors: Array<{ id: string; error: string }> = [];
 
+        withStoreMutationLock(ctx.dataPath, () => {
         for (const stale of staleItems) {
           try {
             const update: any = {};
@@ -409,6 +411,7 @@ export default function register(ctx: PluginContext): void {
             errors.push({ id: stale.id, error: message });
           }
         }
+        });
 
         if (utils.isJsonMode()) {
           output.json({
@@ -524,6 +527,7 @@ export default function register(ctx: PluginContext): void {
         // deleteWorkItem to perform a hard-delete (removes dependency edges and comments).
         const pruned: string[] = [];
         const storeAny = (db as any).store;
+        await withStoreMutationLock(ctx.dataPath, async () => {
         for (const id of ids) {
           try {
             if (storeAny && typeof storeAny.deleteWorkItem === 'function') {
@@ -546,6 +550,7 @@ export default function register(ctx: PluginContext): void {
             console.error(`Failed to prune ${id}: ${(err instanceof Error) ? err.message : String(err)}`);
           }
         }
+        });
 
         if (utils.isJsonMode()) {
           output.json({ dryRun: false, prunedIds: pruned, skippedIds, count: pruned.length });
@@ -599,7 +604,7 @@ export default function register(ctx: PluginContext): void {
 
       // Destructive path: hard-delete foreign items with full cascade.
       if (opts.apply) {
-        const result = applyForeignItemCleanup(db, report);
+        const result = withStoreMutationLock(ctx.dataPath, () => applyForeignItemCleanup(db, report));
 
         // Optional remote ref rewrite: publish a clean JSONL (only own items)
         // to the project's worklog ref, bypassing the polluted remote history.
@@ -782,10 +787,12 @@ export default function register(ctx: PluginContext): void {
 
       // --apply: detach every dangling item.
       const fixed: Array<{ id: string; parentId: string }> = [];
+      withStoreMutationLock(ctx.dataPath, () => {
       for (const d of dangling) {
         db.update(d.id, { parentId: null });
         fixed.push({ id: d.id, parentId: d.parentId });
       }
+      });
       if (utils.isJsonMode()) {
         output.json({ success: true, fixed });
         return;
@@ -851,6 +858,7 @@ export default function register(ctx: PluginContext): void {
       const fixed: Array<{ id: string; from: string; to: string }> = [];
       const unfixable: Array<{ id: string; current: string }> = [];
 
+      withStoreMutationLock(ctx.dataPath, () => {
       for (const entry of invalid) {
         if (entry.mapped) {
           try {
@@ -863,6 +871,7 @@ export default function register(ctx: PluginContext): void {
           unfixable.push({ id: entry.id, current: entry.current });
         }
       }
+      });
 
       if (utils.isJsonMode()) {
         output.json({ fixed, unfixable, fixedCount: fixed.length, unfixableCount: unfixable.length });
@@ -922,11 +931,13 @@ export default function register(ctx: PluginContext): void {
 
       if (opts.addPlaceholder) {
         const fixed: string[] = [];
+        withStoreMutationLock(ctx.dataPath, () => {
         for (const finding of findings) {
           if (doFix(finding)) {
             fixed.push(finding.itemId);
           }
         }
+        });
         if (utils.isJsonMode()) {
           output.json({
             success: true,
@@ -1035,8 +1046,10 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
           const commentMergeResult = mergeComments(localComments, comments);
           const auditMergeResult = mergeAuditResults(localAudits, auditResults);
           
-          db.import(itemMergeResult.merged, dependencyEdges, auditMergeResult.merged);
-          db.importComments(commentMergeResult.merged);
+          withStoreMutationLock(ctx.dataPath, () => {
+            db.import(itemMergeResult.merged, dependencyEdges, auditMergeResult.merged);
+            db.importComments(commentMergeResult.merged);
+          });
           
           if (utils.isJsonMode()) {
             output.json({
@@ -1062,8 +1075,10 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
           }
         } else {
           // SQLite is empty, just import
-          db.import(items, dependencyEdges, auditResults);
-          db.importComments(comments);
+          withStoreMutationLock(ctx.dataPath, () => {
+            db.import(items, dependencyEdges, auditResults);
+            db.importComments(comments);
+          });
           
           if (utils.isJsonMode()) {
             output.json({
@@ -1264,6 +1279,7 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
 
         // First, apply all safe fixes
         const remainingFindings: any[] = [];
+        withStoreMutationLock(ctx.dataPath, () => {
         for (const f of findings) {
           if (f.safe && f.proposedFix && typeof f.proposedFix === 'object') {
             try {
@@ -1301,6 +1317,7 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
           }
           remainingFindings.push(f);
         }
+        });
 
         // For non-safe actionable findings, prompt interactively unless in JSON/non-interactive mode
         const finalFindings: any[] = [];
@@ -1355,7 +1372,7 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
                 if ((f.proposedFix as any).priority) update.priority = (f.proposedFix as any).priority;
                 if ((f.proposedFix as any).description) update.description = (f.proposedFix as any).description;
                 if (Object.keys(update).length > 0) {
-                  try { db.update(f.itemId, update); continue; } catch (err) { /* fall through to keep in report */ }
+                  try { withStoreMutationLock(ctx.dataPath, () => db.update(f.itemId, update)); continue; } catch (err) { /* fall through to keep in report */ }
                 }
               }
             } catch (err) {
