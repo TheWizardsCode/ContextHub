@@ -13,6 +13,7 @@ import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMe
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
 import { isAutomationAuthoredChild } from '../automation.js';
 import { recordDemotionAuditTrail } from '../demotion-audit.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 
 /**
  * Default dedup match window for `wl create` (WL-0MSTNG2QF0049B97): retried
@@ -77,7 +78,8 @@ export default function register(ctx: PluginContext): void {
     .option('--re-sort-sync', 'Force a synchronous re-sort after creating the item', false)
     .option('--allow-duplicate', 'Allow creating a new item even when a recent non-terminal item with the same title exists (bypasses the dedup guard)')
     .option('--dedup-window <duration>', 'Dedup match window: recent non-terminal same-title items created within this window are reused instead of creating a twin (e.g. 30s, 5m, 1h; default 5m)')
-    .action(async (...rawArgs: any[]) => {
+    .action(async (...rawArgs: any[]) =>
+      withStoreMutationLock(ctx.dataPath, async () => {
       const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','prefix','noReSort','reSortSync','allowDuplicate','dedupWindow']);
       let options: CreateOptions = normalized.options as any || {};
       utils.requireInitialized();
@@ -322,5 +324,6 @@ export default function register(ctx: PluginContext): void {
           else void Promise.resolve().then(() => (db as any).reSort());
         }
       } catch (_e) {}
-    });
+      }),
+    );
 }
