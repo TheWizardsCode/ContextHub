@@ -12,6 +12,7 @@ import { PRE_PUSH_HOOK_CONTENT } from '../doctor/hook-upgrade.js';
 import { getRemoteDataFileContent, gitPushDataFileToBranch, mergeWorkItems, mergeComments, mergeDependencyEdges, mergeAuditResults } from '../sync.js';
 import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
@@ -930,9 +931,13 @@ async function performInitSync(dataPath: string, prefix?: string, isJsonMode: bo
   }
   // SAFETY: db.import() is destructive (clears all items before inserting).
   // This is safe here because itemMergeResult.merged is the complete merged
-  // set of local + remote items — no data is lost.
-  db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
-  db.importComments(commentMergeResult.merged);
+  // set of local + remote items — no data is lost. The whole import runs
+  // under the store mutation lock so a concurrent `wl sync` cannot clobber
+  // the initial population (WL-0MUVSQ4EO00092E7).
+  withStoreMutationLock(dataPath, () => {
+    db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
+    db.importComments(commentMergeResult.merged);
+  });
   if (autoSyncEnabled) {
     db.setAutoSync(true, () => Promise.resolve());
   }
