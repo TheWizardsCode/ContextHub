@@ -7,7 +7,7 @@
  * spawns with no per-step bound and no per-tick cap, so a slow or hung CLI
  * could leave the run in flight for the whole 20 s scheduler watchdog while
  * the HERDR pane felt unresponsive to keyboard input. This suite drives a
- * worst-case hydrate (60 panes, 25 in-progress items) with deliberately slow
+ * worst-case hydrate (60 tabs, 25 in-progress items) with deliberately slow
  * fake seams and samples event-loop delay — the deterministic proxy for
  * command-input lag — while the run is in flight.
  *
@@ -21,9 +21,9 @@ import {
   runHydrationOnce,
   type HydratorDeps,
   type HydratorItem,
-  type HydratorPane,
+  type HydratorTab,
 } from './hydrator.js';
-import { makeWorstCaseItems, makeWorstCasePanes } from './hydrator.fixtures.js';
+import { makeWorstCaseItems, makeWorstCaseTabs } from './hydrator.fixtures.js';
 
 /** Resolve after `ms` on the real event loop. */
 function delay(ms: number): Promise<void> {
@@ -40,7 +40,7 @@ function percentile(samples: number[], p: number): number {
 
 describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
   it('keeps event-loop delay under 100 ms p95 during a worst-case hydrate', async () => {
-    const panes = makeWorstCasePanes(60);
+    const tabs = makeWorstCaseTabs(60);
     const items = makeWorstCaseItems(25);
     const deps: HydratorDeps = {
       // Deliberately slow seams: each CLI-shaped lookup yields the event
@@ -49,9 +49,9 @@ describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
         await delay(4);
         return items;
       },
-      listActivePanes: async () => {
+      listTabs: async () => {
         await delay(4);
-        return panes;
+        return tabs;
       },
       listOutboundDeps: async () => {
         await delay(4);
@@ -93,7 +93,7 @@ describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
     // wall-clock bound well under the 20 s scheduler watchdog.
     const deps: HydratorDeps = {
       listInProgressItems: () => new Promise<HydratorItem[]>(() => {}),
-      listActivePanes: async () => [],
+      listTabs: async () => [],
       listOutboundDeps: async () => [],
       applyDemotion: async () => true,
       stepTimeoutMs: 50,
@@ -116,7 +116,7 @@ describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
     const touched: string[] = [];
     const deps: HydratorDeps = {
       listInProgressItems: async () => items,
-      listActivePanes: async () => [] as HydratorPane[],
+      listTabs: async () => [] as HydratorTab[],
       listOutboundDeps: async (id: string) => {
         touched.push(id);
         return [];

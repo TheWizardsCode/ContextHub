@@ -12,24 +12,24 @@ import { resetExecFileAsync, setExecFileAsync } from './fetcher.js';
 import {
   hydratorExecRouter,
   makeWorstCaseItems,
-  makeWorstCasePanes,
+  makeWorstCaseTabs,
 } from './hydrator.fixtures.js';
 import {
   ALLOWED_STAGES_BY_STATUS,
-  collectPaneWorkItemIds,
+  collectTabWorkItemIds,
   compatibleStage,
   createHydratorRunner,
   createProductionHydratorDeps,
   decideDemotion,
   extractWorkItemIdsFromText,
   isActiveBlocker,
-  isActivePaneMatch,
+  hasItemTab,
   runHydrationOnce,
   type HydrationResult,
   type HydratorDepTarget,
   type HydratorDeps,
   type HydratorItem,
-  type HydratorPane,
+  type HydratorTab,
 } from './hydrator.js';
 
 // ── Test helpers ──────────────────────────────────────────────────────
@@ -63,7 +63,7 @@ function makeDeps(overrides: Partial<ContractDeps> = {}): {
   const applied: AppliedDemotion[] = [];
   const deps: ContractDeps = {
     listInProgressItems: async () => [],
-    listActivePanes: async () => [],
+    listTabs: async () => [],
     listOutboundDeps: async () => [],
     applyDemotion: async (id, status, stage) => {
       applied.push({ id, status, stage });
@@ -104,35 +104,42 @@ describe('extractWorkItemIdsFromText', () => {
   });
 });
 
-// ── Active-pane matching ──────────────────────────────────────────────
+// ── Active-tab matching ───────────────────────────────────────────────
 
-describe('active-pane matching', () => {
-  const pane = (label: string, workspace_id?: string): HydratorPane => ({
-    pane_id: `p-${label.length}-${workspace_id ?? 'x'}`,
+describe('active-tab matching', () => {
+  const tab = (label: string, workspace_id?: string): HydratorTab => ({
+    tab_id: `t-${label.length}-${workspace_id ?? 'x'}`,
     label,
     workspace_id,
   });
 
-  it('matches an item whose ID appears in any live pane title', () => {
-    const panes = [pane(`implement Foo - AA-111111111`), pane(`plan ${WL}`)];
-    expect(isActivePaneMatch(WL, panes)).toBe(true);
-    expect(collectPaneWorkItemIds(panes).has(WL)).toBe(true);
+  it('matches an item whose ID is the exact label of a tab', () => {
+    const tabs = [tab('Work Items'), tab(WL)];
+    expect(hasItemTab(WL, tabs)).toBe(true);
+    expect(collectTabWorkItemIds(tabs).has(WL)).toBe(true);
   });
 
-  it('returns false when no pane carries the ID', () => {
-    const panes = [pane('Manually triggered implement Enable Main Street…')];
-    expect(isActivePaneMatch(WL, panes)).toBe(false);
+  it('rejects a tab label that merely contains the item ID (exact match only)', () => {
+    const tabs = [tab(`implement ${WL}`), tab(`plan ${WL} - extra`)];
+    expect(hasItemTab(WL, tabs)).toBe(false);
+    expect(collectTabWorkItemIds(tabs).has(WL)).toBe(false);
   });
 
-  it('only considers panes in the given workspace', () => {
-    const panes = [pane(`implement ${WL}`, 'wOther')];
-    expect(isActivePaneMatch(WL, panes, 'wCurrent')).toBe(false);
-    expect(isActivePaneMatch(WL, panes, 'wOther')).toBe(true);
+  it('ignores tabs whose label is not a work-item ID', () => {
+    const tabs = [tab('Work Items'), tab('Downtime')];
+    expect(collectTabWorkItemIds(tabs).size).toBe(0);
+    expect(hasItemTab(WL, tabs)).toBe(false);
   });
 
-  it('includes panes with an unknown workspace when filtering (fail-open)', () => {
-    const panes = [pane(`implement ${WL}`)];
-    expect(isActivePaneMatch(WL, panes, 'wCurrent')).toBe(true);
+  it('only considers tabs in the given workspace', () => {
+    const tabs = [tab(WL, 'wOther')];
+    expect(hasItemTab(WL, tabs, 'wCurrent')).toBe(false);
+    expect(hasItemTab(WL, tabs, 'wOther')).toBe(true);
+  });
+
+  it('includes tabs with an unknown workspace when filtering (fail-open)', () => {
+    const tabs = [tab(WL)];
+    expect(hasItemTab(WL, tabs, 'wCurrent')).toBe(true);
   });
 });
 
@@ -218,20 +225,20 @@ describe('decideDemotion', () => {
 // ── Orchestration ─────────────────────────────────────────────────────
 
 describe('runHydrationOnce', () => {
-  it('demotes a pane-less in_review item to completed', async () => {
+  it('demotes a tab-less in_review item to completed', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'in_review' }],
-      listActivePanes: async () => [],
+      listTabs: async () => [],
     });
     const result = await runHydrationOnce(deps);
     expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
     expect(applied).toEqual([{ id: WL, status: 'completed', stage: 'in_review' }]);
   });
 
-  it('demotes a pane-less plain item to open at its claimed stage', async () => {
+  it('demotes a tab-less plain item to open at its claimed stage', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listActivePanes: async () => [],
+      listTabs: async () => [],
     });
     await runHydrationOnce(deps);
     expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
@@ -240,18 +247,18 @@ describe('runHydrationOnce', () => {
   it('demotes to blocked when an outbound dependency is active', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'in_progress' }],
-      listActivePanes: async () => [],
+      listTabs: async () => [],
       listOutboundDeps: async () => [{ id: 'WL-OTHER', status: 'open', stage: 'plan_complete' }],
     });
     await runHydrationOnce(deps);
     expect(applied).toEqual([{ id: WL, status: 'blocked', stage: 'plan_complete' }]);
   });
 
-  it('does not query dependencies when a live pane matches', async () => {
+  it('does not query dependencies when a matching tab exists', async () => {
     const listOutboundDeps = vi.fn(async () => []) as unknown as HydratorDeps['listOutboundDeps'];
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listActivePanes: async () => [{ pane_id: 'p1', label: `implement ${WL}`, workspace_id: 'w1' }],
+      listTabs: async () => [{ tab_id: 't1', label: WL, workspace_id: 'w1' }],
       listOutboundDeps,
     });
     const result = await runHydrationOnce(deps, 'w1');
@@ -260,26 +267,26 @@ describe('runHydrationOnce', () => {
     expect(listOutboundDeps).not.toHaveBeenCalled();
   });
 
-  it('leaves a live-pane item untouched even when the dep list would block', async () => {
+  it('leaves a tab-matched item untouched even when the dep list would block', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'in_review' }],
-      listActivePanes: async () => [{ pane_id: 'p1', label: `implement ${WL}` }],
+      listTabs: async () => [{ tab_id: 't1', label: WL }],
       listOutboundDeps: async () => [{ id: 'WL-OTHER', status: 'open' }],
     });
     await runHydrationOnce(deps);
     expect(applied).toEqual([]);
   });
 
-  it('fails open (no demotion) when the pane list is unavailable', async () => {
+  it('fails open (no demotion) when the tab list is unavailable', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listActivePanes: async () => {
+      listTabs: async () => {
         throw new Error('herdr missing');
       },
     });
     const result = await runHydrationOnce(deps);
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain('pane list');
+    expect(result.reason).toContain('tab list');
     expect(applied).toEqual([]);
   });
 
@@ -288,7 +295,7 @@ describe('runHydrationOnce', () => {
       listInProgressItems: async () => {
         throw new Error('wl missing');
       },
-      listActivePanes: async () => [],
+      listTabs: async () => [],
     });
     const result = await runHydrationOnce(deps);
     expect(result.ok).toBe(false);
@@ -298,7 +305,7 @@ describe('runHydrationOnce', () => {
   it('counts a failed demotion as skipped, not demoted', async () => {
     const { deps } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listActivePanes: async () => [],
+      listTabs: async () => [],
       applyDemotion: async () => false,
     });
     const result = await runHydrationOnce(deps);
@@ -308,7 +315,7 @@ describe('runHydrationOnce', () => {
   it('treats a throwing dependency lookup as not-blocked and still releases the item', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listActivePanes: async () => [],
+      listTabs: async () => [],
       listOutboundDeps: async () => {
         throw new Error('dep lookup failed');
       },
@@ -325,7 +332,7 @@ describe('runHydrationOnce', () => {
         { id: WL, status: 'in-progress', stage: 'in_review' },
         { id: other, status: 'in-progress', stage: 'plan_complete' },
       ],
-      listActivePanes: async () => [],
+      listTabs: async () => [],
     });
     const result = await runHydrationOnce(deps);
     expect(result.demoted).toBe(2);
@@ -352,7 +359,7 @@ describe('createHydratorRunner', () => {
   it('runs the hydration cycle when visible', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listActivePanes: async () => [],
+      listTabs: async () => [],
     });
     const run = createHydratorRunner(deps, { isVisible: async () => true });
     const result = await run();
@@ -367,7 +374,7 @@ describe('createHydratorRunner', () => {
     ]);
     const { deps, applied } = makeDeps({
       listInProgressItems,
-      listActivePanes: async () => [],
+      listTabs: async () => [],
     });
     const run = createHydratorRunner(deps, { isVisible: async () => visible });
 
@@ -389,7 +396,7 @@ describe('createProductionHydratorDeps', () => {
   it('exposes the four injectable seams', () => {
     const deps = createProductionHydratorDeps();
     expect(typeof deps.listInProgressItems).toBe('function');
-    expect(typeof deps.listActivePanes).toBe('function');
+    expect(typeof deps.listTabs).toBe('function');
     expect(typeof deps.listOutboundDeps).toBe('function');
     expect(typeof deps.applyDemotion).toBe('function');
   });
@@ -405,16 +412,16 @@ describe('createProductionHydratorDeps', () => {
 //
 // Contract pinned here (implement to this):
 //   • every hydrator CLI spawn passes `{ stdin: 'ignore', stderr: 'pipe' }`;
-//   • `runHydrationOnce` passes the workspace id to `listActivePanes`, which
-//     the production deps translate to `herdr pane list [--workspace <id>]`;
+//   • `runHydrationOnce` passes the workspace id to `listTabs`, which
+//     the production deps translate to `herdr tab list [--workspace <id>]`;
 //   • each step runs under a per-step timeout (`HydratorDeps.stepTimeoutMs`,
 //     default below the 20 s watchdog); a timeout aborts the run with
 //     `ok: false` and a `reason` containing the step label;
 //   • each step logs `... <label> ... elapsed <n>ms ...` measured with the
 //     injected `HydratorDeps.now` clock;
 //   • at most `HydratorDeps.maxItemsPerTick` candidates are processed per tick
-//     (default 50), each checked against its pane/dependency before demotion.
-// Step labels: `in-progress-list`, `pane-list`, `dep-list`, `demotion-apply`.
+//     (default 50), each checked against its tab/dependency before demotion.
+// Step labels: `in-progress-list`, `tab-list`, `dep-list`, `demotion-apply`.
 
 // Restore the injectable exec seam after every test in this file.
 afterEach(() => {
@@ -430,14 +437,14 @@ describe('hydrator CLI stdio isolation (AC1)', () => {
 
     const deps = createProductionHydratorDeps();
     await deps.listInProgressItems();
-    await deps.listActivePanes();
+    await deps.listTabs();
     await deps.listOutboundDeps(WL);
     await deps.applyDemotion(WL, 'open', 'plan_complete');
 
-    // All four hydrator spawn shapes were exercised (in-progress list, pane
+    // All four hydrator spawn shapes were exercised (in-progress list, tab
     // list, per-item dep list, demotion apply).
     expect(calls).toHaveLength(4);
-    expect(calls.some((call) => call.args.includes('pane'))).toBe(true);
+    expect(calls.some((call) => call.args.includes('tab'))).toBe(true);
     expect(calls.some((call) => call.args.includes('dep'))).toBe(true);
     expect(calls.some((call) => call.args.includes('update'))).toBe(true);
     for (const call of calls) {
@@ -446,17 +453,17 @@ describe('hydrator CLI stdio isolation (AC1)', () => {
   });
 });
 
-// ── AC4: workspace-scoped pane listing ────────────────────────────────
+// ── AC4: workspace-scoped tab listing ─────────────────────────────────
 
-describe('workspace-scoped pane listing (AC4)', () => {
-  it('passes the current workspace id to the pane-list seam', async () => {
+describe('workspace-scoped tab listing (AC4)', () => {
+  it('passes the current workspace id to the tab-list seam', async () => {
     const seen: Array<string | undefined> = [];
     const { deps } = makeDeps({
       listInProgressItems: async () => [],
-      listActivePanes: (async (workspaceId?: string) => {
+      listTabs: (async (workspaceId?: string) => {
         seen.push(workspaceId);
         return [];
-      }) as HydratorDeps['listActivePanes'],
+      }) as HydratorDeps['listTabs'],
     });
 
     await runHydrationOnce(deps, 'wCurrent');
@@ -464,21 +471,21 @@ describe('workspace-scoped pane listing (AC4)', () => {
     expect(seen).toEqual(['wCurrent']);
   });
 
-  it('runs "herdr pane list --workspace <id>" when the workspace id is known', async () => {
+  it('runs "herdr tab list --workspace <id>" when the workspace id is known', async () => {
     const { calls, exec } = hydratorExecRouter();
     setExecFileAsync(exec as never);
     const deps = createProductionHydratorDeps();
-    const listActivePanes = deps.listActivePanes as (
+    const listTabs = deps.listTabs as (
       workspaceId?: string,
-    ) => Promise<HydratorPane[] | null>;
+    ) => Promise<HydratorTab[] | null>;
 
-    await listActivePanes('wCurrent');
+    await listTabs('wCurrent');
 
-    const paneCall = calls.find((call) => call.args.includes('pane'));
-    expect(paneCall).toBeDefined();
-    const index = paneCall!.args.indexOf('--workspace');
+    const tabCall = calls.find((call) => call.args.includes('tab'));
+    expect(tabCall).toBeDefined();
+    const index = tabCall!.args.indexOf('--workspace');
     expect(index).toBeGreaterThanOrEqual(0);
-    expect(paneCall!.args[index + 1]).toBe('wCurrent');
+    expect(tabCall!.args[index + 1]).toBe('wCurrent');
   });
 
   it('omits the --workspace filter when the workspace id is unknown', async () => {
@@ -486,11 +493,11 @@ describe('workspace-scoped pane listing (AC4)', () => {
     setExecFileAsync(exec as never);
     const deps = createProductionHydratorDeps();
 
-    await deps.listActivePanes();
+    await deps.listTabs();
 
-    const paneCall = calls.find((call) => call.args.includes('pane'));
-    expect(paneCall).toBeDefined();
-    expect(paneCall!.args).not.toContain('--workspace');
+    const tabCall = calls.find((call) => call.args.includes('tab'));
+    expect(tabCall).toBeDefined();
+    expect(tabCall!.args).not.toContain('--workspace');
   });
 });
 
@@ -511,7 +518,7 @@ describe('per-step timeouts (AC2)', () => {
     const { deps } = makeDeps({
       // The first lookup wedges like a hung `wl`/`herdr` child.
       listInProgressItems: () => new Promise<HydratorItem[]>(() => {}),
-      listActivePanes: async () => [],
+      listTabs: async () => [],
       listOutboundDeps,
       applyDemotion,
       stepTimeoutMs: 1_000,
@@ -544,7 +551,7 @@ describe('per-step timeouts (AC2)', () => {
     const applyDemotion = vi.fn(async () => true);
     const { deps } = makeDeps({
       listInProgressItems: async () => items,
-      listActivePanes: async () => [],
+      listTabs: async () => [],
       listOutboundDeps,
       applyDemotion,
       stepTimeoutMs: 500,
@@ -582,7 +589,7 @@ describe('per-step timing logs (AC3)', () => {
         clock += 7;
         return [{ id: WL, status: 'in-progress', stage: 'plan_complete' }];
       },
-      listActivePanes: async () => {
+      listTabs: async () => {
         clock += 3;
         return [];
       },
@@ -602,7 +609,7 @@ describe('per-step timing logs (AC3)', () => {
     const lineFor = (label: string): string | undefined =>
       logs.find((line) => line.includes(label));
     expect(lineFor('in-progress-list')).toMatch(/elapsed 7ms/);
-    expect(lineFor('pane-list')).toMatch(/elapsed 3ms/);
+    expect(lineFor('tab-list')).toMatch(/elapsed 3ms/);
     expect(lineFor('dep-list')).toMatch(/elapsed 5ms/);
     expect(lineFor('demotion-apply')).toMatch(/elapsed 12ms/);
   });
@@ -617,7 +624,7 @@ describe('per-tick processing cap (AC5)', () => {
     const demoted: string[] = [];
     const { deps } = makeDeps({
       listInProgressItems: async () => items,
-      listActivePanes: async () => [],
+      listTabs: async () => [],
       listOutboundDeps: async (id) => {
         depChecked.push(id);
         return [];
@@ -633,7 +640,7 @@ describe('per-tick processing cap (AC5)', () => {
 
     expect(demoted).toHaveLength(10);
     expect(depChecked).toHaveLength(10);
-    // Every demotion was preceded by its own pane/dependency check.
+    // Every demotion was preceded by its own tab/dependency check.
     for (const id of demoted) expect(depChecked).toContain(id);
     // Deferred candidates were never touched this tick.
     for (const id of items.slice(10).map((item) => item.id)) {
@@ -643,13 +650,13 @@ describe('per-tick processing cap (AC5)', () => {
     expect(result.demoted).toBe(10);
   });
 
-  it('honours the cap under a 60-pane / 25-item worst case', async () => {
-    const panes = makeWorstCasePanes(60);
+  it('honours the cap under a 60-tab / 25-item worst case', async () => {
+    const tabs = makeWorstCaseTabs(60);
     const items = makeWorstCaseItems(25);
     const depChecked: string[] = [];
     const { deps } = makeDeps({
       listInProgressItems: async () => items,
-      listActivePanes: async () => panes,
+      listTabs: async () => tabs,
       listOutboundDeps: async (id) => {
         depChecked.push(id);
         return [];
@@ -668,7 +675,7 @@ describe('per-tick processing cap (AC5)', () => {
     const items = makeWorstCaseItems(60);
     const { deps } = makeDeps({
       listInProgressItems: async () => items,
-      listActivePanes: async () => [],
+      listTabs: async () => [],
       listOutboundDeps: async () => [],
       applyDemotion: async () => true,
     });

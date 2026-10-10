@@ -2,31 +2,31 @@
  * packages/herdr/src/hydrator.ts — Herdr hydrator (WL-0MSOJLZD9004P8PI)
  *
  * Self-heals the work queue: periodically fetches every `in-progress` work
- * item, matches each against a live agent pane in the current workspace
- * (the pane's title carries the work-item ID), and DEMOTES any item with no
- * matching pane so it re-enters the dispatchable pool instead of lingering
- * in `in-progress` forever.
+ * item, matches each against the tabs of the current workspace (each
+ * dispatched item gets a tab labelled with its exact work-item ID), and
+ * DEMOTES any item with no matching tab so it re-enters the dispatchable
+ * pool instead of lingering in `in-progress` forever.
  *
  * Demotion decision (signal-based, mirroring `dispatch` eligibility):
  *  - item is not `in-progress`            → untouched (not in scope)
- *  - a live pane title contains the ID    → untouched (genuinely being worked)
+ *  - a tab is labelled exactly the ID     → untouched (genuinely being worked)
  *  - stage `in_review`                    → `status=completed`, stage `in_review`
  *  - an active outbound dependency blocker→ `status=blocked` (stage made compatible)
  *  - otherwise                            → `status=open`  (stage preserved)
  *
  * Folded-in no-activity/claim-age timeout (WL-0MTTSWE0G008M1VA, 2026-09-13):
- * the pane-absent signal is the primary "stuck" signal. A claim with no live
- * pane is stale regardless of activity age, so it is released (reset to
- * `open` at the claimed stage) — the 2 h dispatch stale window
+ * the tab-absent signal is the primary "stuck" signal. A claim with no
+ * matching tab is stale regardless of activity age, so it is released (reset
+ * to `open` at the claimed stage) — the 2 h dispatch stale window
  * (`DOWNTIME_AUDIT_STALE_WINDOW_MS`) is the activity bound an operator can
  * use to reason about abandoned claims. Every release is logged (who/why/age
  * is carried by the work-item audit trail from the `wl` mutation itself).
  *
- * Fail-open by design: an unavailable/unparseable `wl list` or `herdr pane
+ * Fail-open by design: an unavailable/unparseable `wl list` or `herdr tab
  * list` aborts the cycle WITHOUT demoting — a transient CLI error must never
- * trigger a false demotion. Matching pane titles are produced by the shared
- * `pane-title.ts` builders, which preserve the work-item ID suffix under
- * truncation so live panes always carry their ID.
+ * trigger a false demotion. Matching tabs are created by the shared
+ * dispatcher-anchor builders (`getItemTabAnchor`), which label the tab with
+ * the exact work-item ID (`findTabByLabel` matches exact labels only).
  *
  * Bounded, responsive runs (WL-0MUY1CXSV008F8TZ, WL-0MUY1CYV6008BQWX,
  * WL-0MUY1CYCB003DTKO): every step races a per-step budget so a hung
@@ -44,6 +44,7 @@
 
 import type { ExecFileOptionsWithStringEncoding } from 'node:child_process';
 import { getExecFileAsync, buildWlArgs, extractJson } from './fetcher.js';
+import { parseTabListOutput } from './dispatcher-anchor.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -55,7 +56,7 @@ export const HYDRATOR_RUN_TIMEOUT_MS = 20_000;
 
 /**
  * Soft budget for a single hydrate step (ms). Each step (in-progress list,
- * pane list, per-item dep list, demotion apply) races its lookup against
+ * tab list, per-item dep list, demotion apply) races its lookup against
  * this timer so a hung `wl`/`herdr` child cannot wedge the run until the
  * 20 s scheduler watchdog (which abandons the awaited promise but cannot
  * cancel the child). Kept well below `HYDRATOR_RUN_TIMEOUT_MS` so the run
@@ -87,6 +88,15 @@ export const HYDRATOR_MAX_ITEMS_PER_TICK = 50;
 export const WORK_ITEM_ID_REGEX = /[A-Z][A-Z0-9]*-[0-9A-Z]{6,}/g;
 
 /**
+ * Anchored matcher for a label that IS exactly one work-item ID.
+ *
+ * Tab matching requires exact equality (`findTabByLabel` semantics): a tab
+ * labelled `implement WL-…` is not that item's tab. Anchoring the whole
+ * string (rather than scanning with `WORK_ITEM_ID_REGEX`) keeps that rule
+ * explicit and lets `collectTabWorkItemIds` ignore non-ID labels entirely.
+ */
+const EXACT_WORK_ITEM_ID_REGEX = /^[A-Z][A-Z0-9]*-[0-9A-Z]{6,}$/;
+/**
  * Status → allowed stages, mirroring the project's status/stage
  * compatibility rules (`src/config.ts`, `deriveStageStatusCompatibility`).
  * Used only to keep a demotion valid; a demotion that would violate the
@@ -114,10 +124,16 @@ export interface HydratorItem {
   stage?: string;
 }
 
-/** The subset of a `herdr pane list` entry the hydrator needs. */
-export interface HydratorPane {
-  pane_id?: string;
-  label?: string;
+/** The subset of a `herdr tab list` entry the hydrator needs. */
+export interface HydratorTab {
+  tab_id: string;
+  label: string;
+  /**
+   * Workspace the tab belongs to when known. `herdr tab list --workspace`
+   * already scopes production output, so the field is normally omitted; it
+   * lets the pure helpers enforce (and tests exercise) the same scoping
+   * contract on an unscoped payload.
+   */
   workspace_id?: string;
 }
 
@@ -141,7 +157,7 @@ export interface HydrationResult {
   considered: number;
   /** Number of items actually demoted. */
   demoted: number;
-  /** Number of items left untouched (live pane, non-candidate, or failure). */
+  /** Number of items left untouched (matching tab, non-candidate, or failure). */
   skipped: number;
   /** Human-readable failure reason when `ok` is false. */
   reason?: string;
@@ -155,11 +171,11 @@ export interface HydratorDeps {
   /** `wl list --status in-progress` → items, or null when unavailable. */
   listInProgressItems: () => Promise<HydratorItem[] | null>;
   /**
-   * `herdr pane list [--workspace <id>]` → panes, or null when unavailable.
+   * `herdr tab list [--workspace <id>]` → tabs, or null when unavailable.
    * The current workspace id is passed so the payload does not scale with
-   * panes outside it (WL-0MUY1CYV6008BQWX).
+   * tabs outside it (WL-0MUY1CYV6008BQWX).
    */
-  listActivePanes: (workspaceId?: string) => Promise<HydratorPane[] | null>;
+  listTabs: (workspaceId?: string) => Promise<HydratorTab[] | null>;
   /** `wl dep list <id>` → outbound targets, or null when unavailable. */
   listOutboundDeps: (itemId: string) => Promise<HydratorDepTarget[] | null>;
   /** Apply a demotion via `wl update`; true when it was persisted. */
@@ -177,15 +193,18 @@ export interface HydratorDeps {
 /** Stable labels for the bounded hydrate steps (logs / diagnostics). */
 export type HydratorStepLabel =
   | 'in-progress-list'
-  | 'pane-list'
+  | 'tab-list'
   | 'dep-list'
   | 'demotion-apply';
 
 // ── Pure helpers ──────────────────────────────────────────────────────
 
 /**
- * Extract every work-item ID appearing in `text` (e.g. a pane label).
- * Always returns a fresh array; no shared regex state.
+ * Extract every work-item ID appearing in `text` (e.g. a shell command line
+ * or tab/window title). Always returns a fresh array; no shared regex state.
+ *
+ * Retained for `ship-guard.ts`; it is NOT used for active-tab matching, which
+ * requires exact label equality (see `collectTabWorkItemIds`).
  */
 export function extractWorkItemIdsFromText(text: string): string[] {
   if (typeof text !== 'string' || text.length === 0) return [];
@@ -193,40 +212,46 @@ export function extractWorkItemIdsFromText(text: string): string[] {
 }
 
 /**
- * Collect the set of work-item IDs carried by active pane titles.
+ * Collect the set of work-item IDs whose tab label is *exactly* an ID.
  *
- * When `workspaceId` is provided, only panes in that workspace are
- * considered (a pane in another workspace must not make an item look
- * active). Panes without a `workspace_id` are always included (fail-open
- * toward "active" — safer against false demotion).
+ * Exact equality (never substring/prefix) mirrors `findTabByLabel`: a tab
+ * labelled `implement WL-…` is not the item's tab and contributes nothing.
+ * Tabs whose label is not a work-item ID (e.g. `Work Items`, `Downtime`) are
+ * ignored.
+ *
+ * When `workspaceId` is provided, only tabs in that workspace are considered
+ * (a tab in another workspace must not make an item look active). Tabs
+ * without a `workspace_id` are always included (fail-open toward "active" —
+ * safer against false demotion); the production `herdr tab list --workspace`
+ * payload omits the field because the CLI already scoped it.
  */
-export function collectPaneWorkItemIds(
-  panes: readonly HydratorPane[],
+export function collectTabWorkItemIds(
+  tabs: readonly HydratorTab[],
   workspaceId?: string,
 ): Set<string> {
   const ids = new Set<string>();
-  for (const pane of panes) {
+  for (const tab of tabs) {
     if (
       workspaceId &&
-      typeof pane.workspace_id === 'string' &&
-      pane.workspace_id.length > 0 &&
-      pane.workspace_id !== workspaceId
+      typeof tab.workspace_id === 'string' &&
+      tab.workspace_id.length > 0 &&
+      tab.workspace_id !== workspaceId
     ) {
       continue;
     }
-    const label = typeof pane.label === 'string' ? pane.label : '';
-    for (const id of extractWorkItemIdsFromText(label)) ids.add(id);
+    const label = typeof tab.label === 'string' ? tab.label : '';
+    if (EXACT_WORK_ITEM_ID_REGEX.test(label)) ids.add(label);
   }
   return ids;
 }
 
-/** True when a live pane in the workspace carries the item's ID. */
-export function isActivePaneMatch(
+/** True when a tab in the workspace is labelled exactly the item's ID. */
+export function hasItemTab(
   itemId: string,
-  panes: readonly HydratorPane[],
+  tabs: readonly HydratorTab[],
   workspaceId?: string,
 ): boolean {
-  return collectPaneWorkItemIds(panes, workspaceId).has(itemId);
+  return collectTabWorkItemIds(tabs, workspaceId).has(itemId);
 }
 
 /**
@@ -259,7 +284,10 @@ export function compatibleStage(stage: string, status: string): string {
 
 /**
  * Pure demotion decision. Returns `null` when the item must be left alone
- * (not `in-progress`, or a live pane is attached).
+ * (not `in-progress`, or a matching tab exists).
+ *
+ * The `hasActivePane` context key is retained for source compatibility; its
+ * value now comes from exact tab membership (see `hasItemTab`).
  */
 export function decideDemotion(
   item: HydratorItem,
@@ -345,7 +373,7 @@ async function runStep<T>(
  * focus re-checks without waiting for the next 30 s tick.
  *
  * @param deps         Injectable seams (production or test fakes).
- * @param workspaceId  Current herdr workspace id (undefined → all panes).
+ * @param workspaceId  Current herdr workspace id (undefined → all tabs).
  * @param isVisible    Visibility probe (normally `paneGate.visible`).
  */
 export function createHydratorRunner(
@@ -359,12 +387,12 @@ export function createHydratorRunner(
 }
 
 /**
- * Run one hydration cycle: fetch in-progress items + active panes, decide a
+ * Run one hydration cycle: fetch in-progress items + workspace tabs, decide a
  * demotion per item, and apply it. Fail-open at every boundary — an
  * unavailable lookup aborts the cycle without demoting.
  *
  * @param deps        Injectable seams (production or test fakes).
- * @param workspaceId Current herdr workspace id (undefined → all panes).
+ * @param workspaceId Current herdr workspace id (undefined → all tabs).
  */
 export async function runHydrationOnce(
   deps: HydratorDeps,
@@ -403,33 +431,33 @@ export async function runHydrationOnce(
   const items = inProgressStep.value;
   const considered = Math.min(items.length, Math.max(0, maxItemsPerTick));
 
-  const paneStep = await runStep(
-    'pane-list',
+  const tabStep = await runStep(
+    'tab-list',
     stepTimeoutMs,
     now,
     log,
-    () => deps.listActivePanes(workspaceId),
+    () => deps.listTabs(workspaceId),
   );
-  if (paneStep.status === 'timeout') {
+  if (tabStep.status === 'timeout') {
     return {
       ok: false,
       considered,
       demoted: 0,
       skipped: 0,
-      reason: 'pane-list step timeout (no demotion on ambiguous evidence)',
+      reason: 'tab-list step timeout (no demotion on ambiguous evidence)',
     };
   }
-  if (paneStep.status === 'error' || paneStep.value === null) {
+  if (tabStep.status === 'error' || tabStep.value === null) {
     return {
       ok: false,
       considered,
       demoted: 0,
       skipped: 0,
-      reason: 'pane list unavailable (no demotion on ambiguous evidence)',
+      reason: 'tab list unavailable (no demotion on ambiguous evidence)',
     };
   }
-  const panes = paneStep.value;
-  const activeIds = collectPaneWorkItemIds(panes, workspaceId);
+  const tabs = tabStep.value;
+  const activeIds = collectTabWorkItemIds(tabs, workspaceId);
 
   let demoted = 0;
   let skipped = 0;
@@ -439,9 +467,9 @@ export async function runHydrationOnce(
     if (!item || typeof item.id !== 'string' || item.id.length === 0) continue;
     processed += 1;
 
-    const hasActivePane = activeIds.has(item.id);
+    const hasActiveTab = activeIds.has(item.id);
     let blocked = false;
-    if (!hasActivePane) {
+    if (!hasActiveTab) {
       const depStep = await runStep(
         'dep-list',
         stepTimeoutMs,
@@ -469,7 +497,7 @@ export async function runHydrationOnce(
         depStep.value.some(isActiveBlocker);
     }
 
-    const decision = decideDemotion(item, { hasActivePane, blocked });
+    const decision = decideDemotion(item, { hasActivePane: hasActiveTab, blocked });
     if (decision === null) {
       skipped += 1;
       continue;
@@ -494,7 +522,7 @@ export async function runHydrationOnce(
     if (applyStep.status === 'ok' && applyStep.value === true) {
       demoted += 1;
       log(
-        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (no live pane)`,
+        `[hydrator] released ${item.id}: in-progress/${item.stage ?? '?'} → ${decision.status}/${decision.stage} (no matching tab)`,
       );
     } else {
       skipped += 1;
@@ -570,10 +598,10 @@ export function createProductionHydratorDeps(): HydratorDeps {
         .filter((item): item is HydratorItem => item !== null);
     },
 
-    listActivePanes: async (workspaceId?: string) => {
-      // Scope the pane payload to the current workspace when known so it
-      // does not scale with panes elsewhere (WL-0MUY1CYV6008BQWX).
-      const args = ['pane', 'list'];
+    listTabs: async (workspaceId?: string) => {
+      // Scope the tab payload to the current workspace when known so it
+      // does not scale with tabs elsewhere (WL-0MUY1CYV6008BQWX).
+      const args = ['tab', 'list'];
       if (typeof workspaceId === 'string' && workspaceId.length > 0) {
         args.push('--workspace', workspaceId);
       }
@@ -582,11 +610,10 @@ export function createProductionHydratorDeps(): HydratorDeps {
         args,
         hydratorExecOptions(8 * 1024 * 1024),
       );
-      const payload = extractJson(stdout) as
-        | { result?: { panes?: unknown } }
-        | null;
-      const panes = payload?.result?.panes;
-      return Array.isArray(panes) ? (panes as HydratorPane[]) : null;
+      // Reuse the shared dispatcher-anchor parser (no second parser).
+      const parsed = parseTabListOutput(stdout);
+      if (parsed === null) return null;
+      return parsed.map((tab) => ({ tab_id: tab.tabId, label: tab.label }));
     },
 
     listOutboundDeps: async (itemId: string) => {

@@ -6389,8 +6389,8 @@ export async function runWorklistTui(
 
   // ── Hydrator (WL-0MSOJLZD9004P8PI) ──────────────────────────────────
   // Self-heals the queue: periodically re-checks `in_progress` items against
-  // live agent panes in the current workspace and releases (demotes) any
-  // item claimed with no running pane. Visibility-gated via
+  // the current workspace's item-ID tabs and releases (demotes) any item
+  // claimed with no matching tab. Visibility-gated via
   // createHydratorRunner, so a hidden tab spawns zero `wl`/`herdr`
   // processes (AC5). The SAME runner is invoked immediately on the
   // hidden→visible resume below, so regaining focus re-checks without
@@ -6537,8 +6537,8 @@ export async function runWorklistTui(
         doRefresh(true);
         // Hydrator focus-resume (AC4): the hidden→visible transition also
         // re-checks `in_progress` claims immediately — the same runner the
-        // 30 s hydrate task uses — so a claim whose pane died while the tab
-        // was hidden is released as soon as the tab regains focus (no wait
+        // 30 s hydrate task uses — so a claim whose item tab was closed while
+        // the pane was hidden is released as soon as focus returns (no wait
         // for the next hydrate tick). `paneGate.visible()` is already cached
         // true here, so the runner proceeds without a new visibility probe.
         void runHydrator();
@@ -6547,10 +6547,10 @@ export async function runWorklistTui(
   });
 
   // Hydrator task — self-healing `in_progress` claims (WL-0MSOJLZD9004P8PI):
-  // every 30 s it fetches `in_progress` items, matches each against live
-  // pane titles (the work-item ID embedded by pane-title.ts) in the current
-  // workspace, and demotes any item with no matching pane so the claim
-  // re-enters the dispatchable pool. Visibility-gated via the runner
+  // every 30 s it fetches `in_progress` items, matches each against the exact
+  // item-ID tab labels of the current workspace (`herdr tab list`), and
+  // demotes any item with no matching tab so the claim re-enters the
+  // dispatchable pool. Visibility-gated via the runner
   // (AC5 — a hidden tab spawns zero wl/herdr processes); single-flight +
   // scheduler-level watchdog so a hung `wl`/`herdr` run is abandoned after
   // HYDRATOR_RUN_TIMEOUT_MS and retried on the next tick.
