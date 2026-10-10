@@ -6,6 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { MigrateOptions } from '../cli-types.js';
 import { importFromJsonl } from '../jsonl.js';
 import { mergeWorkItems, mergeComments, mergeAuditResults } from '../sync.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 import * as fs from 'fs';
 
 const DEFAULT_SORT_GAP = 100;
@@ -49,7 +50,7 @@ export default function register(ctx: PluginContext): void {
         return;
       }
 
-      const result = db.assignSortIndexValues(gap);
+      const result = withStoreMutationLock(ctx.dataPath, () => db.assignSortIndexValues(gap));
       if (utils.isJsonMode()) {
         output.json({ success: true, updated: result.updated, gap });
         return;
@@ -98,8 +99,10 @@ export default function register(ctx: PluginContext): void {
           const commentMergeResult = mergeComments(existingComments, comments);
           const auditMergeResult = mergeAuditResults(existingAudits, auditResults);
           
-          db.import(itemMergeResult.merged, dependencyEdges, auditMergeResult.merged);
-          db.importComments(commentMergeResult.merged);
+          withStoreMutationLock(ctx.dataPath, () => {
+            db.import(itemMergeResult.merged, dependencyEdges, auditMergeResult.merged);
+            db.importComments(commentMergeResult.merged);
+          });
           
           if (utils.isJsonMode()) {
             output.json({
@@ -120,8 +123,10 @@ export default function register(ctx: PluginContext): void {
           }
         } else {
           // SQLite is empty, just import
-          db.import(items, dependencyEdges, auditResults);
-          db.importComments(comments);
+          withStoreMutationLock(ctx.dataPath, () => {
+            db.import(items, dependencyEdges, auditResults);
+            db.importComments(comments);
+          });
           
           if (utils.isJsonMode()) {
             output.json({
