@@ -1,0 +1,414 @@
+{
+  "generated_at": "2026-01-23",
+  "primary_metrics": {
+    "total_commits": 2226,
+    "total_feature": 1666,
+    "feature_pct": 74.8,
+    "commits_touching_test": 1017,
+    "test_touch_pct": 61.0,
+    "commits_with_rewrites": 450,
+    "rewrite_pct": 27.0,
+    "commits_with_new_tests": 0,
+    "new_test_pct": 0.0,
+    "total_test_deletions": 9629,
+    "total_test_additions": 35921,
+    "rewrite_ratio": 21.1,
+    "rewrite_lines_total": 45550,
+    "avg_rewrite_lines": 101.0,
+    "generated_at": "2026-01-23"
+  },
+  "area_stats": {
+    "other-test": {
+      "feature_commits": 316,
+      "rewrites": 316,
+      "new_files": 0,
+      "total_deleted": 3029,
+      "total_added": 9451
+    },
+    "cli": {
+      "feature_commits": 71,
+      "rewrites": 71,
+      "new_files": 0,
+      "total_deleted": 421,
+      "total_added": 1962
+    },
+    "legacy": {
+      "feature_commits": 17,
+      "rewrites": 17,
+      "new_files": 0,
+      "total_deleted": 110,
+      "total_added": 719
+    },
+    "unit": {
+      "feature_commits": 31,
+      "rewrites": 31,
+      "new_files": 0,
+      "total_deleted": 739,
+      "total_added": 1008
+    },
+    "integration": {
+      "feature_commits": 9,
+      "rewrites": 9,
+      "new_files": 0,
+      "total_deleted": 176,
+      "total_added": 247
+    },
+    "tui-unit": {
+      "feature_commits": 43,
+      "rewrites": 43,
+      "new_files": 0,
+      "total_deleted": 642,
+      "total_added": 3567
+    },
+    "herdr-integration": {
+      "feature_commits": 47,
+      "rewrites": 47,
+      "new_files": 0,
+      "total_deleted": 490,
+      "total_added": 2145
+    },
+    "herdr-unit": {
+      "feature_commits": 239,
+      "rewrites": 239,
+      "new_files": 0,
+      "total_deleted": 3958,
+      "total_added": 16433
+    },
+    "shared-unit": {
+      "feature_commits": 9,
+      "rewrites": 9,
+      "new_files": 0,
+      "total_deleted": 64,
+      "total_added": 389
+    }
+  },
+  "temporal_trends": [
+    {
+      "quarter": "2026-01",
+      "feature_commits": 250,
+      "feature_commits_with_rewrites": 16,
+      "rewrite_rate_pct": 6.4,
+      "lines_deleted": 209,
+      "lines_added": 658
+    },
+    {
+      "quarter": "2026-02",
+      "feature_commits": 221,
+      "feature_commits_with_rewrites": 81,
+      "rewrite_rate_pct": 36.7,
+      "lines_deleted": 691,
+      "lines_added": 3940
+    },
+    {
+      "quarter": "2026-03",
+      "feature_commits": 110,
+      "feature_commits_with_rewrites": 27,
+      "rewrite_rate_pct": 24.5,
+      "lines_deleted": 215,
+      "lines_added": 287
+    },
+    {
+      "quarter": "2026-04",
+      "feature_commits": 94,
+      "feature_commits_with_rewrites": 40,
+      "rewrite_rate_pct": 42.6,
+      "lines_deleted": 218,
+      "lines_added": 549
+    },
+    {
+      "quarter": "2026-05",
+      "feature_commits": 70,
+      "feature_commits_with_rewrites": 76,
+      "rewrite_rate_pct": 108.6,
+      "lines_deleted": 397,
+      "lines_added": 1304
+    },
+    {
+      "quarter": "2026-06",
+      "feature_commits": 217,
+      "feature_commits_with_rewrites": 140,
+      "rewrite_rate_pct": 64.5,
+      "lines_deleted": 1866,
+      "lines_added": 5126
+    },
+    {
+      "quarter": "2026-07",
+      "feature_commits": 165,
+      "feature_commits_with_rewrites": 66,
+      "rewrite_rate_pct": 40.0,
+      "lines_deleted": 905,
+      "lines_added": 3774
+    },
+    {
+      "quarter": "2026-08",
+      "feature_commits": 288,
+      "feature_commits_with_rewrites": 176,
+      "rewrite_rate_pct": 61.1,
+      "lines_deleted": 2718,
+      "lines_added": 10266
+    },
+    {
+      "quarter": "2026-09",
+      "feature_commits": 168,
+      "feature_commits_with_rewrites": 107,
+      "rewrite_rate_pct": 63.7,
+      "lines_deleted": 1655,
+      "lines_added": 6398
+    },
+    {
+      "quarter": "2026-10",
+      "feature_commits": 83,
+      "feature_commits_with_rewrites": 53,
+      "rewrite_rate_pct": 63.9,
+      "lines_deleted": 755,
+      "lines_added": 3619
+    }
+  ],
+  "file_stability": {
+    "total_test_files_modified": 474,
+    "top_20_by_commits": [
+      {
+        "file": "packages/herdr/src/downtime-worker.test.ts",
+        "commits": 107,
+        "total_additions": 14532,
+        "total_deletions": 985,
+        "area": "herdr-unit"
+      },
+      {
+        "file": "packages/herdr/src/worklist.test.ts",
+        "commits": 84,
+        "total_additions": 6737,
+        "total_deletions": 251,
+        "area": "herdr-unit"
+      },
+      {
+        "file": "tests/database.test.ts",
+        "commits": 70,
+        "total_additions": 11894,
+        "total_deletions": 8824,
+        "area": "other-test"
+      },
+      {
+        "file": "packages/herdr/src/index.test.ts",
+        "commits": 66,
+        "total_additions": 4169,
+        "total_deletions": 477,
+        "area": "herdr-unit"
+      },
+      {
+        "file": "tests/extensions/worklog-browse-extension.test.ts",
+        "commits": 52,
+        "total_additions": 7469,
+        "total_deletions": 7800,
+        "area": "other-test"
+      },
+      {
+        "file": "packages/herdr/src/coordination-dispatch.test.ts",
+        "commits": 26,
+        "total_additions": 2445,
+        "total_deletions": 186,
+        "area": "herdr-unit"
+      },
+      {
+        "file": "tests/sync.test.ts",
+        "commits": 24,
+        "total_additions": 4461,
+        "total_deletions": 3063,
+        "area": "other-test"
+      },
+      {
+        "file": "tests/cli/issue-status.test.ts",
+        "commits": 23,
+        "total_additions": 2389,
+        "total_deletions": 2137,
+        "area": "cli"
+      },
+      {
+        "file": "tests/cli/issue-management.test.ts",
+        "commits": 23,
+        "total_additions": 3024,
+        "total_deletions": 2634,
+        "area": "cli"
+      },
+      {
+        "file": "tests/unit/icons.test.ts",
+        "commits": 23,
+        "total_additions": 3679,
+        "total_deletions": 2627,
+        "area": "unit"
+      },
+      {
+        "file": "packages/tui/tests/browse-auto-refresh.test.ts",
+        "commits": 22,
+        "total_additions": 4070,
+        "total_deletions": 4070,
+        "area": "other-test"
+      },
+      {
+        "file": "packages/herdr/src/shortcut-config.test.ts",
+        "commits": 20,
+        "total_additions": 1092,
+        "total_deletions": 46,
+        "area": "herdr-unit"
+      },
+      {
+        "file": "tests/next-regression.test.ts",
+        "commits": 19,
+        "total_additions": 7518,
+        "total_deletions": 6129,
+        "area": "other-test"
+      },
+      {
+        "file": "packages/tui/tests/browse-hierarchical-navigation.test.ts",
+        "commits": 19,
+        "total_additions": 3459,
+        "total_deletions": 3459,
+        "area": "other-test"
+      },
+      {
+        "file": "packages/tui/extensions/Worklog/session-health.test.ts",
+        "commits": 19,
+        "total_additions": 3917,
+        "total_deletions": 2542,
+        "area": "tui-unit"
+      },
+      {
+        "file": "packages/herdr/src/downtime-log.test.ts",
+        "commits": 19,
+        "total_additions": 1520,
+        "total_deletions": 25,
+        "area": "herdr-unit"
+      },
+      {
+        "file": "test/tui-integration.test.ts",
+        "commits": 18,
+        "total_additions": 881,
+        "total_deletions": 90,
+        "area": "legacy"
+      },
+      {
+        "file": "packages/herdr/src/settings.test.ts",
+        "commits": 18,
+        "total_additions": 658,
+        "total_deletions": 139,
+        "area": "herdr-unit"
+      },
+      {
+        "file": "tests/cli/init.test.ts",
+        "commits": 17,
+        "total_additions": 1121,
+        "total_deletions": 827,
+        "area": "cli"
+      },
+      {
+        "file": "packages/tui/extensions/shortcut-config.test.ts",
+        "commits": 17,
+        "total_additions": 2908,
+        "total_deletions": 2908,
+        "area": "tui-unit"
+      }
+    ]
+  },
+  "domain_churn": {
+    "src": {
+      "total_test_files": 0,
+      "total_src_files": 351970,
+      "rewrites": 338,
+      "new_tests": 0,
+      "total_deletions": 5188,
+      "total_additions": 21452
+    },
+    "other-test": {
+      "total_test_files": 0,
+      "total_src_files": 50831,
+      "rewrites": 269,
+      "new_tests": 0,
+      "total_deletions": 2505,
+      "total_additions": 8388
+    },
+    "legacy": {
+      "total_test_files": 0,
+      "total_src_files": 7127,
+      "rewrites": 17,
+      "new_tests": 0,
+      "total_deletions": 110,
+      "total_additions": 719
+    },
+    "cli": {
+      "total_test_files": 0,
+      "total_src_files": 43168,
+      "rewrites": 71,
+      "new_tests": 0,
+      "total_deletions": 421,
+      "total_additions": 1962
+    },
+    "unit": {
+      "total_test_files": 0,
+      "total_src_files": 13619,
+      "rewrites": 31,
+      "new_tests": 0,
+      "total_deletions": 739,
+      "total_additions": 1008
+    },
+    "integration": {
+      "total_test_files": 0,
+      "total_src_files": 4433,
+      "rewrites": 9,
+      "new_tests": 0,
+      "total_deletions": 176,
+      "total_additions": 247
+    },
+    "herdr-integration": {
+      "total_test_files": 0,
+      "total_src_files": 254,
+      "rewrites": 47,
+      "new_tests": 0,
+      "total_deletions": 490,
+      "total_additions": 2145
+    }
+  },
+  "test_first_signal": {
+    "test_first_commits": 1029,
+    "test_first_pct": 86.0,
+    "test_first_lines": 314407,
+    "retrofit_commits": 167,
+    "retrofit_pct": 14.0,
+    "retrofit_lines": 20749
+  },
+  "rewrite_intensity": {
+    "total_rewrite_commits": 450,
+    "min": 2,
+    "max": 1052,
+    "mean": 101,
+    "median": 56,
+    "p95": 355,
+    "p99": 529,
+    "stddev": 127,
+    "distribution": {
+      "0-10_lines": 70,
+      "11-50_lines": 142,
+      "51-100_lines": 85,
+      "101-250_lines": 104,
+      "251-500_lines": 43,
+      "500+_lines": 6
+    }
+  },
+  "source_correlation": {
+    "correlation": 0.023,
+    "data_points": 1666,
+    "avg_src_lines_per_feature": 415,
+    "avg_test_rewrites_per_feature": 27
+  },
+  "efficiency_metrics": {
+    "total_src_files_touched": 5536,
+    "total_test_files_touched": 2830,
+    "total_src_lines_changed": 691552,
+    "total_test_lines_churned": 498939,
+    "test_to_source_ratio": 0.51,
+    "test_churn_per_source_line": 0.72
+  },
+  "commit_patterns": {
+    "modify_only": 1216,
+    "rewrite_only": 450
+  }
+}
