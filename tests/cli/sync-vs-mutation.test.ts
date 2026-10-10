@@ -109,7 +109,7 @@ async function waitForFile(file: string, timeoutMs = 15000): Promise<void> {
 /** Shape of the subset of `wl show --json` this suite asserts on. */
 interface ShowResult {
   workItem: { id: string; status: string; stage: string; title?: string; description?: string; needsProducerReview?: boolean; auditWaiver?: { reason: string; author?: string } | null; sortIndex?: number };
-  comments: Array<{ author: string; comment: string }>;
+  comments: Array<{ id?: string; author: string; comment: string }>;
 }
 
 function showItem(cwd: string, id: string): ShowResult {
@@ -638,6 +638,85 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     // The re-sort's sortIndex assignments must have survived the sync.
     expect(showItem(s.local, idB).workItem.sortIndex).toBe(100);
     expect(showItem(s.local, idA).workItem.sortIndex).toBe(200);
+  }, 90000);
+
+  it('AC1: a concurrent wl comment update survives a sync (edited text intact)', async () => {
+    const id = createItem(s.local, 'Comment update target');
+    const addRes = runCli(s.local, ['--json', 'comment', 'add', id, '-a', 'tester', '-c', 'original text']);
+    expect(addRes.status, addRes.stderr).toBe(0);
+    const commentId: string = JSON.parse(addRes.stdout).comment?.id;
+    expect(commentId).toBeTruthy();
+
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    const mutation = (async () => {
+      const up = spawnCli(
+        s.local,
+        ['--json', 'comment', 'update', commentId, '-c', 'updated concurrently'],
+        realGitEnv(),
+      );
+      const upRes = await up.done;
+      expect(upRes.status, upRes.stderr).toBe(0);
+    })();
+
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The edited text must survive the sync.
+    const after = showItem(s.local, id);
+    expect(after.comments.some(c => c.comment.includes('updated concurrently'))).toBe(true);
+    expect(after.comments.some(c => c.comment.includes('original text'))).toBe(false);
+  }, 90000);
+
+  it('AC1: a concurrent wl comment delete survives a sync (comment stays deleted)', async () => {
+    const id = createItem(s.local, 'Comment delete target');
+    const addRes = runCli(s.local, ['--json', 'comment', 'add', id, '-a', 'tester', '-c', 'to be deleted']);
+    expect(addRes.status, addRes.stderr).toBe(0);
+    const commentId: string = JSON.parse(addRes.stdout).comment?.id;
+    expect(commentId).toBeTruthy();
+
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    const mutation = (async () => {
+      const del = spawnCli(
+        s.local,
+        ['--json', 'comment', 'delete', commentId],
+        realGitEnv(),
+      );
+      const delRes = await del.done;
+      expect(delRes.status, delRes.stderr).toBe(0);
+    })();
+
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The deletion must survive the sync (comment not resurrected).
+    const after = showItem(s.local, id);
+    expect(after.comments.some(c => c.comment.includes('to be deleted'))).toBe(false);
   }, 90000);
 
   it('AC3: an intentional "Ready to close: No" still reverts to open/plan_complete', () => {
