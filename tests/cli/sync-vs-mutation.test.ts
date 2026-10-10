@@ -108,7 +108,7 @@ async function waitForFile(file: string, timeoutMs = 15000): Promise<void> {
 
 /** Shape of the subset of `wl show --json` this suite asserts on. */
 interface ShowResult {
-  workItem: { id: string; status: string; stage: string; title?: string; description?: string };
+  workItem: { id: string; status: string; stage: string; title?: string; description?: string; needsProducerReview?: boolean };
   comments: Array<{ author: string; comment: string }>;
 }
 
@@ -535,6 +535,37 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     // The imported title update must have survived the sync.
     const after = showItem(s.local, id);
     expect(after.workItem.title).toBe('IMPORTED TITLE');
+  }, 90000);
+
+  it('AC1/AC3: a concurrent wl reviewed survives a sync (needsProducerReview flag intact)', async () => {
+    const id = createItem(s.local, 'Reviewed flag target');
+
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    const mutation = (async () => {
+      const rv = spawnCli(s.local, ['--json', 'reviewed', id, 'true'], realGitEnv());
+      const rvRes = await rv.done;
+      expect(rvRes.status, rvRes.stderr).toBe(0);
+    })();
+
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The flag set during the parked sync must survive it.
+    const after = showItem(s.local, id);
+    expect(after.workItem.needsProducerReview).toBe(true);
   }, 90000);
 
   it('AC3: an intentional "Ready to close: No" still reverts to open/plan_complete', () => {
