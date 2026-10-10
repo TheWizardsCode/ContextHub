@@ -108,7 +108,7 @@ async function waitForFile(file: string, timeoutMs = 15000): Promise<void> {
 
 /** Shape of the subset of `wl show --json` this suite asserts on. */
 interface ShowResult {
-  workItem: { id: string; status: string; stage: string; title?: string; description?: string; needsProducerReview?: boolean; auditWaiver?: { reason: string; author?: string } | null };
+  workItem: { id: string; status: string; stage: string; title?: string; description?: string; needsProducerReview?: boolean; auditWaiver?: { reason: string; author?: string } | null; sortIndex?: number };
   comments: Array<{ author: string; comment: string }>;
 }
 
@@ -601,6 +601,43 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     // The waiver recorded during the parked sync must survive it.
     const after = showItem(s.local, id);
     expect(after.workItem.auditWaiver?.reason).toBe('test waiver');
+  }, 90000);
+
+  it('AC1: a concurrent wl re-sort survives a sync (sortIndex changes intact)', async () => {
+    const idA = createItem(s.local, 'Re-sort target A');
+    const idB = createItem(s.local, 'Re-sort target B');
+
+    // Raise B's score without triggering the automatic re-sort, so a later
+    // explicit `wl re-sort` produces a detectable sortIndex change.
+    const bump = runCli(s.local, ['--json', 'update', idB, '--priority', 'critical', '--no-re-sort']);
+    expect(bump.status, bump.stderr).toBe(0);
+
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    const mutation = (async () => {
+      const rs = spawnCli(s.local, ['--json', 're-sort'], realGitEnv());
+      const rsRes = await rs.done;
+      expect(rsRes.status, rsRes.stderr).toBe(0);
+    })();
+
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The re-sort's sortIndex assignments must have survived the sync.
+    expect(showItem(s.local, idB).workItem.sortIndex).toBe(100);
+    expect(showItem(s.local, idA).workItem.sortIndex).toBe(200);
   }, 90000);
 
   it('AC3: an intentional "Ready to close: No" still reverts to open/plan_complete', () => {
