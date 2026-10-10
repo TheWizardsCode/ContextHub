@@ -195,6 +195,26 @@ wl migrate jsonl --delete
 - **Push failure**: JSONL retained for retry
 - **Import errors**: SQLite transaction rollback
 
+### Concurrent access & the store mutation lock
+
+`wl sync` holds the per-store advisory file lock (`withFileLock`,
+`getLockPathForJsonl`) for its entire fetch → merge → write-back → push
+operation. Every DB-writing command acquires that same lock around its
+read-modify-write via `withStoreMutationLock(dataPath, fn)`
+(`src/mutation-lock.ts`), so a mutation and a sync can never interleave and a
+mutation can never be silently reverted by the sync's stale snapshot
+(WL-0MUV2U9QF002S9J1, WL-0MUVSQ4EO00092E7). `withFileLock` is reentrant per
+process, so a mutation that internally triggers a sync (e.g. `wl delete`'s
+auto-sync) does not deadlock.
+
+The locked commands are: `wl update`; `wl comment add/update/delete`;
+`wl audit-set`; `wl close`; `wl delete`; `wl dep add/rm`; `wl create`;
+`wl reviewed`; `wl interview`; `wl audit-waive/unwaive`; `wl re-sort`; the
+writing `wl doctor` subcommands; `wl github import`; `wl github push`;
+`wl import`; `wl init`; and `wl migrate`. See
+[docs/design/incremental-sync.md § 9](design/incremental-sync.md#9-concurrency--existing-protections)
+and `tests/cli/sync-vs-mutation.test.ts`.
+
 ## Worklog Root Resolution
 
 The project root that owns a `.worklog/` directory is resolved by a single

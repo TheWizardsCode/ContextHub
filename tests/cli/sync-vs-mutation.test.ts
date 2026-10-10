@@ -754,6 +754,61 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     expect(JSON.parse(show.stdout).workItem.id).toBe(createdId);
   }, 90000);
 
+  it('AC1/AC2: cross-command mutations during one parked sync all survive', async () => {
+    const idA = createItem(s.local, 'Cross-command A (reviewed)');
+    const idB = createItem(s.local, 'Cross-command B (comment)');
+    const idC = createItem(s.local, 'Cross-command C (dep)');
+    const idD = createItem(s.local, 'Cross-command D (dep target)');
+
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    // Four different command classes contend for the same store lock while
+    // the sync holds it. They must all block, then persist after release.
+    const mutate = (args: string[]): Promise<void> =>
+      new Promise<void>((resolve, reject) => {
+        const spawned = spawnCli(s.local, args, realGitEnv());
+        spawned.done
+          .then(r => {
+            try {
+              expect(r.status, r.stderr).toBe(0);
+              resolve();
+            } catch (err) {
+              reject(err);
+            }
+          })
+          .catch(reject);
+      });
+
+    const mutations = Promise.all([
+      mutate(['--json', 'reviewed', idA, 'true']),
+      mutate(['--json', 'comment', 'add', idB, '-a', 'tester', '-c', 'cross-command comment']),
+      mutate(['--json', 'dep', 'add', idC, idD]),
+      mutate(['--json', 're-sort']),
+    ]);
+
+    // Let the mutations queue on the lock, then release the parked sync.
+    await new Promise(r => setTimeout(r, 1000));
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutations;
+
+    // Every command class's mutation must have survived the single sync.
+    expect(showItem(s.local, idA).workItem.needsProducerReview).toBe(true);
+    expect(
+      showItem(s.local, idB).comments.some(c => c.comment.includes('cross-command comment')),
+    ).toBe(true);
+    const depList = runCli(s.local, ['--json', 'dep', 'list', idC]);
+    expect(depList.status, depList.stderr).toBe(0);
+    const parsed = JSON.parse(depList.stdout) as { outbound: Array<{ id: string }> };
+    expect(parsed.outbound.some(e => e.id === idD)).toBe(true);
+  }, 90000);
+
   it('AC3: an intentional "Ready to close: No" still reverts to open/plan_complete', () => {
     const id = createItem(s.local, 'Intentional revert target');
 
