@@ -315,6 +315,50 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     ).toBe(true);
   }, 90000);
 
+  it('AC1/AC3: a concurrent wl delete --no-sync survives a sync (item stays deleted)', async () => {
+    const id = createItem(s.local, 'Concurrent delete target');
+
+    // Seed the remote with a first full snapshot (also establishes the
+    // watermark baseline so the second sync exercises the merge write-back).
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    // Park the sync inside `git fetch` (after it has taken its local
+    // snapshot, before it writes the merged set back).
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    // Soft-delete the item while the sync is parked. --no-sync keeps the
+    // mutation local (and exercises the --no-sync path, AC3): on the fixed
+    // code the delete waits for the sync's lock; on the buggy code it lands
+    // inside the window and is clobbered (item reappears).
+    const mutation = (async () => {
+      const del = spawnCli(
+        s.local,
+        ['--json', 'delete', id, '--no-sync'],
+        realGitEnv(),
+      );
+      const delRes = await del.done;
+      expect(delRes.status, delRes.stderr).toBe(0);
+    })();
+
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    // Release the parked fetch and let both processes finish.
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The deletion must have survived the sync.
+    const after = showItem(s.local, id);
+    expect(after.workItem.status).toBe('deleted');
+  }, 90000);
+
   it('AC3: an intentional "Ready to close: No" still reverts to open/plan_complete', () => {
     const id = createItem(s.local, 'Intentional revert target');
 
