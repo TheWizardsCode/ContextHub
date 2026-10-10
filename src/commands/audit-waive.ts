@@ -11,6 +11,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import type { AuditWaiveOptions, AuditUnwaiveOptions } from '../cli-types.js';
 import { resolveAuditAuthor } from '../audit.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 
 function notFound(output: PluginContext['output'], id: string): void {
   output.error(`Work item not found: ${id}`, {
@@ -34,7 +35,8 @@ export default function register(ctx: PluginContext): void {
     .option('-r, --reason <reason>', 'Why the audit gap is deliberately accepted (required)')
     .option('-a, --author <author>', 'Who recorded the waiver (defaults to the current user)')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action((id: string, options: AuditWaiveOptions) => {
+    .action((id: string, options: AuditWaiveOptions) =>
+      withStoreMutationLock(ctx.dataPath, () => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
 
@@ -76,14 +78,16 @@ export default function register(ctx: PluginContext): void {
       console.log(`  Reason: ${updated.auditWaiver?.reason ?? reason}`);
       console.log(`  Author: ${updated.auditWaiver?.author ?? author}`);
       console.log(`  Waived at: ${updated.auditWaiver?.waivedAt ?? waivedAt}`);
-    });
+      }),
+    );
 
   // ── wl audit-unwaive <id> ──────────────────────────────────────────
   program
     .command('audit-unwaive <id>')
     .description('Remove an explicit audit-gap waiver from a work item.')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action((id: string, options: AuditUnwaiveOptions) => {
+    .action((id: string, options: AuditUnwaiveOptions) =>
+      withStoreMutationLock(ctx.dataPath, () => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
 
@@ -109,5 +113,6 @@ export default function register(ctx: PluginContext): void {
         return;
       }
       console.log(`Removed audit waiver for ${normalizedId}.`);
-    });
+      }),
+    );
 }
