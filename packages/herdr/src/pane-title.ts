@@ -21,12 +21,16 @@ export function truncatePaneTitle(title: string): string {
  * Truncate a pane title while keeping a trailing `suffix` (e.g. the
  * work-item ID ` - WL-…`) intact, truncating the `prefix` instead.
  *
- * Why: the Herdr hydrator (WL-0MSOJLZD9004P8PI) matches an `in_progress`
- * work item to a live pane by the work-item ID embedded in the pane title.
- * Plain {@link truncatePaneTitle} cuts the ID off long titles, so an
- * actively-worked item whose pane title truncated before the ID would look
- * pane-less and be wrongly demoted. Preserving the suffix guarantees every
- * spawned pane carries its work-item ID.
+ * Why: a pane title is a human-readable label, and the trailing work-item ID
+ * is the identifying context an operator scans for. Plain
+ * {@link truncatePaneTitle} cuts the ID off long titles, so preserving the
+ * suffix keeps every spawned pane's ID visible.
+ *
+ * Historically this was also load-bearing for hydrator matching: the hydrator
+ * used to match an `in_progress` work item to a live pane by the ID embedded
+ * in the pane title (WL-0MSOJLZD9004P8PI). It now matches the **exact** label
+ * of a workspace tab (WL-0MV24RM9I0051GEF), so the pane-title suffix is no
+ * longer a correctness signal for demotion.
  *
  * When the suffix alone does not fit the bound, this falls back to plain
  * truncation (never exceeds {@link MAX_PANE_TITLE_LENGTH}).
@@ -134,7 +138,7 @@ export function buildManuallyTriggeredPaneTitle(
   }
 
   // Append work-item context when available. The ID suffix is preserved
-  // under truncation so the hydrator can match live panes to items.
+  // under truncation so it stays visible in the pane title.
   const titlePart = workItemTitle ? ` ${workItemTitle}` : '';
   const idPart = workItemId ? ` - ${workItemId}` : '';
   return truncatePaneTitlePreservingSuffix(`${base}${titlePart}`, idPart);

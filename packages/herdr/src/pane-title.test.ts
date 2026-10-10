@@ -136,7 +136,7 @@ describe('buildManuallyTriggeredPaneTitle', () => {
     const longTitle = 'A very long work item title '.repeat(5);
     const result = buildManuallyTriggeredPaneTitle('/skill:implement WL-1', longTitle, 'WL-1');
     expect(result.length).toBeLessThanOrEqual(MAX_PANE_TITLE_LENGTH);
-    // The work-item ID must survive truncation so the hydrator can match panes.
+    // The work-item ID must survive truncation so it stays visible.
     expect(result.endsWith(' - WL-1')).toBe(true);
   });
 });
