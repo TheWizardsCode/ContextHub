@@ -265,6 +265,56 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     ).toBe(true);
   }, 90000);
 
+  it('AC1: a concurrent wl close --force survives a sync (item stays completed/done, comment intact)', async () => {
+    const id = createItem(s.local, 'Concurrent close target');
+
+    // Seed the remote with a first full snapshot (also establishes the
+    // watermark baseline so the second sync exercises the merge write-back).
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    // Park the sync inside `git fetch` (after it has taken its local
+    // snapshot, before it writes the merged set back).
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    // Close the item while the sync is parked. On the fixed code the close
+    // waits for the sync's lock; on the buggy code it lands inside the
+    // window and is clobbered (item reverts to open, comment dropped).
+    const mutation = (async () => {
+      const close = spawnCli(
+        s.local,
+        ['--json', 'close', id, '--force', '--reason', 'closed concurrently'],
+        realGitEnv(),
+      );
+      const closeRes = await close.done;
+      expect(closeRes.status, closeRes.stderr).toBe(0);
+    })();
+
+    // Give the mutation a chance to complete before we release the sync. On
+    // the buggy code it finishes here; on the fixed code it is still blocked
+    // on the store lock and will finish after the sync releases it.
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    // Release the parked fetch and let both processes finish.
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The terminal state and the close comment must both have survived.
+    const after = showItem(s.local, id);
+    expect(after.workItem.status).toBe('completed');
+    expect(after.workItem.stage).toBe('done');
+    expect(
+      after.comments.some(c => c.comment.includes('closed concurrently')),
+    ).toBe(true);
+  }, 90000);
+
   it('AC3: an intentional "Ready to close: No" still reverts to open/plan_complete', () => {
     const id = createItem(s.local, 'Intentional revert target');
 

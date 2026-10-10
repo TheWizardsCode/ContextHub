@@ -30,6 +30,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { CloseOptions } from '../cli-types.js';
 
 import { classifyAuditGap, type ParentAuditState } from '@worklog/shared/icons';
+import { withStoreMutationLock } from '../mutation-lock.js';
 import { downgradeCriticalIfTerminal } from '../terminal-priority.js';
 
 /**
@@ -255,7 +256,8 @@ export default function register(ctx: PluginContext): void {
     .option('--force', 'Close the item and all its descendants unconditionally, '
       + 'bypassing the audit/stage checks. For items without children, '
       + 'this is equivalent to a standard close.')
-    .action((ids: string[], options: CloseOptions) => {
+    .action((ids: string[], options: CloseOptions) =>
+      withStoreMutationLock(ctx.dataPath, () => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       const isJsonMode = utils.isJsonMode();
@@ -461,5 +463,6 @@ export default function register(ctx: PluginContext): void {
         }
       }
       if (!results.every(r => r.success)) process.exit(1);
-    });
+      }),
+    );
 }
