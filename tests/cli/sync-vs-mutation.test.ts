@@ -359,6 +359,88 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     expect(after.workItem.status).toBe('deleted');
   }, 90000);
 
+  it('AC1: a concurrent wl dep add survives a sync (edge + blocked status intact)', async () => {
+    const idA = createItem(s.local, 'Concurrent dep add target');
+    const idB = createItem(s.local, 'Concurrent dep add depends-on');
+
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    const mutation = (async () => {
+      const dep = spawnCli(
+        s.local,
+        ['--json', 'dep', 'add', idA, idB],
+        realGitEnv(),
+      );
+      const depRes = await dep.done;
+      expect(depRes.status, depRes.stderr).toBe(0);
+    })();
+
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The dependency edge and the derived blocked status must both survive.
+    const after = showItem(s.local, idA);
+    expect(after.workItem.status).toBe('blocked');
+    const depList = runCli(s.local, ['--json', 'dep', 'list', idA]);
+    expect(depList.status, depList.stderr).toBe(0);
+    const parsed = JSON.parse(depList.stdout) as { outbound: Array<{ id: string }> };
+    expect(parsed.outbound.some(e => e.id === idB)).toBe(true);
+  }, 90000);
+
+  it('AC1: a concurrent wl dep rm survives a sync (edge stays removed)', async () => {
+    const idA = createItem(s.local, 'Concurrent dep rm target');
+    const idB = createItem(s.local, 'Concurrent dep rm depends-on');
+
+    // Establish the edge before the parked sync takes its snapshot.
+    const add = runCli(s.local, ['--json', 'dep', 'add', idA, idB]);
+    expect(add.status, add.stderr).toBe(0);
+
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+    expect(seed.stdout).toContain('"success": true');
+
+    const sync = spawnCli(s.local, ['--json', 'sync'], shimEnv(s));
+    await waitForFile(s.marker, 20000);
+
+    const mutation = (async () => {
+      const dep = spawnCli(
+        s.local,
+        ['--json', 'dep', 'rm', idA, idB],
+        realGitEnv(),
+      );
+      const depRes = await dep.done;
+      expect(depRes.status, depRes.stderr).toBe(0);
+    })();
+
+    await Promise.race([
+      mutation,
+      new Promise(r => setTimeout(r, 3000)),
+    ]);
+
+    fs.writeFileSync(s.release, 'go');
+    const syncRes = await sync.done;
+    expect(syncRes.status, syncRes.stderr).toBe(0);
+    await mutation;
+
+    // The removal must survive the sync (edge not resurrected).
+    const depList = runCli(s.local, ['--json', 'dep', 'list', idA]);
+    expect(depList.status, depList.stderr).toBe(0);
+    const parsed = JSON.parse(depList.stdout) as { outbound: Array<{ id: string }> };
+    expect(parsed.outbound.some(e => e.id === idB)).toBe(false);
+  }, 90000);
+
   it('AC3: an intentional "Ready to close: No" still reverts to open/plan_complete', () => {
     const id = createItem(s.local, 'Intentional revert target');
 

@@ -6,6 +6,7 @@ import chalk from 'chalk';
 import type { PluginContext } from '../plugin-types.js';
 import type { DepOptions } from '../cli-types.js';
 import { normalizeActionArgs } from './cli-utils.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -18,7 +19,8 @@ export default function register(ctx: PluginContext): void {
     .command('add <itemId> <dependsOnId>')
     .description('Add a dependency edge (item depends on dependsOn)')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action((itemId: string, dependsOnId: string, ...rawArgs: any[]) => {
+    .action((itemId: string, dependsOnId: string, ...rawArgs: any[]) =>
+      withStoreMutationLock(ctx.dataPath, () => {
       const normalized = normalizeActionArgs(rawArgs, ['prefix']);
       let options: DepOptions = normalized.options as any || {};
       utils.requireInitialized();
@@ -68,13 +70,15 @@ export default function register(ctx: PluginContext): void {
         console.log(`${itemLabel} ${chalk.green('which depends on')}`);
         console.log(`${dependsOnLabel}.`);
       }
-    });
+      }),
+    );
 
   depCommand
     .command('rm <itemId> <dependsOnId>')
     .description('Remove a dependency edge (item depends on dependsOn)')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action((itemId: string, dependsOnId: string, ...rawArgs: any[]) => {
+    .action((itemId: string, dependsOnId: string, ...rawArgs: any[]) =>
+      withStoreMutationLock(ctx.dataPath, () => {
       const normalized = normalizeActionArgs(rawArgs, ['prefix']);
       let options: DepOptions = normalized.options as any || {};
       utils.requireInitialized();
@@ -118,7 +122,8 @@ export default function register(ctx: PluginContext): void {
       if (removed && item && !['completed', 'deleted'].includes(item.status)) {
         db.reconcileDependentStatus(itemIdLookup);
       }
-    });
+      }),
+    );
 
   depCommand
     .command('list <itemId>')
