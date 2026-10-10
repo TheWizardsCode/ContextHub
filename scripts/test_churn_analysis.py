@@ -9,15 +9,12 @@ for or against the value of test-driven development (TDD).
 Scope: mainline (dev) only, non-merge commits.
 """
 
-import subprocess
-import sys
 import json
 import os
-import re
+import subprocess
+import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Optional
-
 
 # ---------------------------------------------------------------------------
 # Data types
@@ -30,7 +27,7 @@ class FileChange:
     status: str  # A, M, D, R
     additions: int = 0
     deletions: int = 0
-    rename_target: Optional[str] = None
+    rename_target: str | None = None
 
 
 @dataclass
@@ -188,7 +185,7 @@ def parse_commits(commits_data: list[dict]) -> list[Commit]:
             ))
         except Exception as e:
             sys.stderr.write(f"\nError parsing {cd['sha']}: {e}\n")
-    sys.stderr.write(f"\n")
+    sys.stderr.write("\n")
     return commits
 
 
@@ -542,7 +539,7 @@ def generate_report(analysis: dict, temporal: list[dict], file_stability: dict,
     report.append("=" * 80)
     report.append("")
     report.append(f"Generated: {analysis.get('generated_at', 'N/A')}")
-    report.append(f"Scope: mainline (dev) only, non-merge commits")
+    report.append("Scope: mainline (dev) only, non-merge commits")
     report.append("")
 
     # Methodology
@@ -582,10 +579,10 @@ def generate_report(analysis: dict, temporal: list[dict], file_stability: dict,
     report.append(f"  Lines added to tests:               {analysis['total_test_additions']:,}")
     report.append(f"  Total test lines changed:           {analysis['rewrite_lines_total']:,}")
     report.append("")
-    report.append(f"  ════════════════════════════════════════════")
+    report.append("  ════════════════════════════════════════════")
     report.append(f"  REWRITE RATIO: {analysis['rewrite_ratio']}%")
-    report.append(f"  ════════════════════════════════════════════")
-    report.append(f"  (Deleted / (Deleted + Added))")
+    report.append("  ════════════════════════════════════════════")
+    report.append("  (Deleted / (Deleted + Added))")
     report.append("")
 
     # Temporal trends
@@ -667,13 +664,13 @@ def generate_report(analysis: dict, temporal: list[dict], file_stability: dict,
     report.append(f"  Avg test rewrites per feature: {correlation['avg_test_rewrites_per_feature']:,}")
     if correlation['correlation'] is not None:
         if correlation['correlation'] > 0.5:
-            report.append(f"  Interpretation: STRONG POSITIVE — More source churn correlates with more test rewrites.")
+            report.append("  Interpretation: STRONG POSITIVE — More source churn correlates with more test rewrites.")
         elif correlation['correlation'] > 0.2:
-            report.append(f"  Interpretation: MODERATE POSITIVE — Some correlation between source and test churn.")
+            report.append("  Interpretation: MODERATE POSITIVE — Some correlation between source and test churn.")
         elif correlation['correlation'] > -0.2:
-            report.append(f"  Interpretation: WEAK NEGLIGIBLE — Little relationship between source and test churn.")
+            report.append("  Interpretation: WEAK NEGLIGIBLE — Little relationship between source and test churn.")
         else:
-            report.append(f"  Interpretation: NEGATIVE — Unusual inverse relationship.")
+            report.append("  Interpretation: NEGATIVE — Unusual inverse relationship.")
     report.append("")
 
     # Efficiency metrics
@@ -724,37 +721,37 @@ def generate_report(analysis: dict, temporal: list[dict], file_stability: dict,
 
     if rewrite_ratio > 50:
         report.append(f"  ⚠  HIGH REWRITE RATE ({rewrite_ratio}%):")
-        report.append(f"     Nearly half of all test code changes are rewrites of existing")
-        report.append(f"     test code. This suggests that tests are frequently written in")
-        report.append(f"     a form that doesn't survive subsequent feature development.")
+        report.append("     Nearly half of all test code changes are rewrites of existing")
+        report.append("     test code. This suggests that tests are frequently written in")
+        report.append("     a form that doesn't survive subsequent feature development.")
     elif rewrite_ratio > 30:
         report.append(f"  ⚡ MODERATE REWRITE RATE ({rewrite_ratio}%):")
-        report.append(f"     A significant portion of test code is being rewritten. This")
-        report.append(f"     may indicate that test-writing discipline could be improved,")
-        report.append(f"     or that the codebase architecture causes cascading test changes.")
+        report.append("     A significant portion of test code is being rewritten. This")
+        report.append("     may indicate that test-writing discipline could be improved,")
+        report.append("     or that the codebase architecture causes cascading test changes.")
     else:
         report.append(f"  ✓ LOW REWRITE RATE ({rewrite_ratio}%):")
-        report.append(f"     Test code is relatively stable. This is a positive sign for")
-        report.append(f"     test-driven development practices.")
+        report.append("     Test code is relatively stable. This is a positive sign for")
+        report.append("     test-driven development practices.")
     report.append("")
 
     if test_first_pct > 60:
         report.append(f"  ✓ TEST-FIRST DOMINANT ({test_first_pct}%):")
-        report.append(f"     The majority of test additions occur alongside source code,")
-        report.append(f"     suggesting test-first development is the dominant pattern.")
+        report.append("     The majority of test additions occur alongside source code,")
+        report.append("     suggesting test-first development is the dominant pattern.")
     else:
         report.append(f"  ⚠ TEST-FIRST RISES ({test_first_pct}%):")
-        report.append(f"     While test-first is common, retrofitting tests represents")
-        report.append(f"     a significant minority. This may indicate inconsistent")
-        report.append(f"     test-writing discipline.")
+        report.append("     While test-first is common, retrofitting tests represents")
+        report.append("     a significant minority. This may indicate inconsistent")
+        report.append("     test-writing discipline.")
     report.append("")
 
     if correlation_val is not None and correlation_val > 0.3:
         report.append(f"  ✓ CORRELATED EXPECTATION (r={correlation_val}):")
-        report.append(f"     The positive correlation between source churn and test")
-        report.append(f"     rewrites is expected — changes to code naturally require")
-        report.append(f"     test updates. The key question is whether the rewrite")
-        report.append(f"     rate is proportionally reasonable.")
+        report.append("     The positive correlation between source churn and test")
+        report.append("     rewrites is expected — changes to code naturally require")
+        report.append("     test updates. The key question is whether the rewrite")
+        report.append("     rate is proportionally reasonable.")
     report.append("")
 
     report.append("  Conclusions:")
@@ -773,28 +770,28 @@ def generate_report(analysis: dict, temporal: list[dict], file_stability: dict,
         score += 1
 
     if score >= 3:
-        report.append(f"  ════════════════════════════════════════════════════")
-        report.append(f"  OVERALL: TDD PRACTICE IS REASONABLY EFFECTIVE")
-        report.append(f"  ════════════════════════════════════════════════════")
-        report.append(f"  The rewrite rate and test-first dominance suggest that")
-        report.append(f"  writing tests before implementation is delivering value.")
-        report.append(f"  The test suite is a reliable regression guard.")
+        report.append("  ════════════════════════════════════════════════════")
+        report.append("  OVERALL: TDD PRACTICE IS REASONABLY EFFECTIVE")
+        report.append("  ════════════════════════════════════════════════════")
+        report.append("  The rewrite rate and test-first dominance suggest that")
+        report.append("  writing tests before implementation is delivering value.")
+        report.append("  The test suite is a reliable regression guard.")
     elif score >= 2:
-        report.append(f"  ════════════════════════════════════════════════════")
-        report.append(f"  OVERALL: MIXED RESULTS — TDD HAS PARTIAL VALUE")
-        report.append(f"  ════════════════════════════════════════════════════")
-        report.append(f"  There is evidence of TDD value (test-first patterns) but")
-        report.append(f"  the rewrite rate suggests tests are not fully insulated")
-        report.append(f"  from implementation changes. Consider reviewing test")
-        report.append(f"  architecture and mocking strategies.")
+        report.append("  ════════════════════════════════════════════════════")
+        report.append("  OVERALL: MIXED RESULTS — TDD HAS PARTIAL VALUE")
+        report.append("  ════════════════════════════════════════════════════")
+        report.append("  There is evidence of TDD value (test-first patterns) but")
+        report.append("  the rewrite rate suggests tests are not fully insulated")
+        report.append("  from implementation changes. Consider reviewing test")
+        report.append("  architecture and mocking strategies.")
     else:
-        report.append(f"  ════════════════════════════════════════════════════")
-        report.append(f"  OVERALL: TDD VALUE IS QUESTIONABLE")
-        report.append(f"  ════════════════════════════════════════════════════")
-        report.append(f"  High rewrite rates and significant retrofitting suggest")
-        report.append(f"  that tests are tightly coupled to implementation details")
-        report.append(f"  rather than behaviour. Consider refactoring tests to")
-        report.append(f"  focus on interfaces and contracts rather than internals.")
+        report.append("  ════════════════════════════════════════════════════")
+        report.append("  OVERALL: TDD VALUE IS QUESTIONABLE")
+        report.append("  ════════════════════════════════════════════════════")
+        report.append("  High rewrite rates and significant retrofitting suggest")
+        report.append("  that tests are tightly coupled to implementation details")
+        report.append("  rather than behaviour. Consider refactoring tests to")
+        report.append("  focus on interfaces and contracts rather than internals.")
     report.append("")
 
     report.append("  Recommendations:")
