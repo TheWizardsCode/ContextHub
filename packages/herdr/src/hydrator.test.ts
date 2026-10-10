@@ -423,6 +423,148 @@ describe('createProductionHydratorDeps', () => {
 //     (default 50), each checked against its tab/dependency before demotion.
 // Step labels: `in-progress-list`, `tab-list`, `dep-list`, `demotion-apply`.
 
+// ── Verification edge cases (WL-0MV24T2VJ007Q49J) ──────────────────────
+
+describe('pane-title-only ID no longer counts (verification)', () => {
+  it('demotes an in-progress item whose ID appears only in a tab label that contains (not equals) the ID', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      // Simulates the old pane-title behaviour: a tab whose label *contains*
+      // the ID but is not the exact ID (e.g. "implement WL-0MSOJLZD9004P8PI").
+      // Under the tab-matching contract this does NOT count as active.
+      listTabs: async () => [
+        { tab_id: 't1', label: `implement ${WL}`, workspace_id: 'wCurrent' },
+      ],
+    });
+
+    const result = await runHydrationOnce(deps, 'wCurrent');
+
+    expect(result.ok).toBe(true);
+    expect(result.demoted).toBe(1);
+    // The item is demoted because its ID is not an *exact* tab label match.
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
+  });
+});
+
+describe('workspace scoping at orchestration level', () => {
+  it('demotes when the only matching tab is in a different workspace', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      listTabs: async () => [
+        { tab_id: 't1', label: WL, workspace_id: 'wOther' },
+      ],
+    });
+
+    await runHydrationOnce(deps, 'wCurrent');
+
+    // Tab exists but in the wrong workspace → item demoted.
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
+  });
+
+  it('keeps an item when a matching tab is in the current workspace', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      listTabs: async () => [
+        { tab_id: 't1', label: 'Work Items' },
+        { tab_id: 't2', label: WL, workspace_id: 'wCurrent' },
+      ],
+    });
+
+    await runHydrationOnce(deps, 'wCurrent');
+
+    // Exact tab in current workspace → item not demoted.
+    expect(applied).toEqual([]);
+  });
+});
+
+describe('unparseable tab list output fails open', () => {
+  it('does not demote when parseTabListOutput returns null (unparseable output)', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      // Simulates parseTabListOutput returning null (e.g. garbled JSON output).
+      // This is the unparseable path of the tab-list seam.
+      listTabs: async () => null,
+    });
+
+    const result = await runHydrationOnce(deps, 'wCurrent');
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain('tab list');
+    expect(applied).toEqual([]);
+  });
+});
+
+describe('no pane list in production hydrator spawns', () => {
+  it('asserts that every hydrator CLI spawn uses tab list, never pane list', async () => {
+    const { calls, exec } = hydratorExecRouter();
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps();
+
+    await deps.listInProgressItems();
+    await deps.listTabs();
+    await deps.listOutboundDeps(WL);
+    await deps.applyDemotion(WL, 'open', 'plan_complete');
+
+    // Every recorded spawn must not include `pane`.
+    expect(calls).toHaveLength(4);
+    for (const call of calls) {
+      expect(call.args.join(' ')).not.toContain('pane');
+    }
+    // The second call (listTabs) must use `herdr tab list` (bin may be a
+    // full path when HERDR_BIN_PATH is set).
+    const tabCall = calls.find((call) => call.args.includes('tab'));
+    expect(tabCall).toBeDefined();
+    expect(tabCall!.bin.endsWith('herdr')).toBe(true);
+    expect(tabCall!.args).toEqual(['tab', 'list']);
+  });
+});
+
+describe('closed tab clears the in-progress marker (cadence re-evaluation)', () => {
+  it('a tab present keeps the item; removing the tab demotes on next run', async () => {
+    let visibleTab: string | undefined = WL;
+    const applied: AppliedDemotion[] = [];
+    const { deps } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      listTabs: async () =>
+        visibleTab
+          ? [{ tab_id: 't1', label: visibleTab, workspace_id: 'wCurrent' }]
+          : [],
+      applyDemotion: async (id, status, stage) => {
+        applied.push({ id, status, stage });
+        return true;
+      },
+    });
+    const run = createHydratorRunner(deps, {
+      isVisible: async () => true,
+    });
+
+    // Tab is present — no demotion.
+    const result1 = await run();
+    expect(result1?.ok).toBe(true);
+    expect(result1?.demoted).toBe(0);
+    expect(applied).toHaveLength(0);
+
+    // Simulate the user closing the work-item tab.
+    visibleTab = undefined;
+
+    // Next cadence run — tab gone → demotion.
+    const result2 = await run();
+    expect(result2?.ok).toBe(true);
+    expect(result2?.demoted).toBe(1);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
+  });
+});
+
 // Restore the injectable exec seam after every test in this file.
 afterEach(() => {
   resetExecFileAsync();
