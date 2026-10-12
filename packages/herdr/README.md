@@ -1378,6 +1378,68 @@ process churn and memory pressure (WL-0MSB1N0HB0007N6N).
   the visibility gate (approved plan, WL-0MSJNJPRM009RM35).
 - **No settings toggle** — pause-when-hidden is always on.
 
+### Event-driven DB-change watch (fast refresh after agent writes)
+
+When an agent writes to a work item (`wl update`, `wl close`, `wl comment`,
+…), the pane reflects the change within ~2 s instead of waiting for the 30 s
+auto-refresh tick (parent `WL-0MV02VA29009WBEN`).
+
+- **Watch target** — `db-change.ts` `watchDbChanges()` watches the same
+  cross-process signal the `DbChangeTracker` reads: the per-worklog state
+  counter (`<cacheDir>/state/<sha256(worklogDir)>.json`) and the SQLite
+  `worklog.db` / `worklog.db-wal` / `worklog.db-shm` files.
+- **Debounced, single-flight** — a burst of write events is coalesced into at
+  most one trailing callback, which feeds the existing gated `doRefresh`
+  (typing + visibility gates, then `doRefresh`'s own single-flight + trailing
+  coalescing). The watch never bypasses those guards, so a burst cannot cause
+  a refresh storm.
+- **Fail-open** — if no watch target can be established (`fs.watch` throws),
+  the watch reports `active === false`, the pane keeps running, and the 30 s
+  tick remains the fallback. The zero-spawn-when-idle guarantee is preserved
+  because the tick is still gated by `isDbUnchanged`.
+- **Teardown** — the watch is disposed on pane exit, closing every
+  `fs.watch` handle and clearing any pending debounce timer.
+
+#### Verification harness
+
+The event-driven path is guarded by automated tests:
+
+- `packages/herdr/src/db-change.test.ts` — `watchDbChanges` unit contract:
+  debounce/coalescing, per-file filtering, fail-open, teardown, and a real
+  `fs.watch` write test.
+- `packages/herdr/src/worklist-watch.test.ts` — integration: a state-counter
+  write (the same signal a `wl` write bumps) triggers a refresh within 2 s,
+  well before the 30 s tick; unrelated writes do not; an unavailable watch
+  fails open and the idle no-spawn guarantee holds; the watch is disposed on
+  exit.
+
+Run them directly:
+
+```bash
+npx vitest run packages/herdr/src/db-change.test.ts packages/herdr/src/worklist-watch.test.ts
+```
+
+#### Refresh benchmark
+
+`bench/herdr-refresh-perf.ts` seeds a real temp worklog (≥ 1000 items and
+≥ 20 expanded parents), drives the default-view refresh data path (`wl next` +
+mandatory subsets, actionable count, review-queue state, and one `wl list
+--parent` per expanded parent), and reports warm/cold latency plus the number
+of `wl` child processes spawned:
+
+```bash
+npm run benchmark:herdr-refresh          # text output
+npm run benchmark:herdr-refresh:json     # JSON for agents
+
+# smaller/faster run
+npx tsx bench/herdr-refresh-perf.ts --items 200 --parents 10 --iterations 1
+```
+
+The ≤ 2 s target is host-dependent, so the benchmark reports `withinTarget`
+rather than exiting non-zero on it; the paired `wl` spawn count is the
+regression guard. The harness contract is covered by
+`tests/bench/herdr-refresh-perf.test.ts`.
+
 ### Typing gate (pause background work while a form is open)
 
 While any text-input overlay is open, the auto-refresh and auto-sync timer

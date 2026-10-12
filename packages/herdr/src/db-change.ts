@@ -8,6 +8,14 @@
  * Fail-open: any read error returns `changed = true`, so the refresh/sync
  * cycle always runs when the signal is unavailable.
  *
+ * `watchDbChanges` is the event-driven companion: it watches the same
+ * cross-process signal (the state-counter file and the SQLite
+ * `worklog.db`/`-wal`/`-shm` files) so the pane can react to an agent write
+ * promptly instead of waiting for the 30 s auto-refresh tick. The watch is
+ * debounced (one trailing callback per burst), fails open (an unusable watch
+ * is reported as inactive so the caller keeps polling), and is disposable
+ * (`dispose()` closes every `fs.watch` handle and clears pending timers).
+ *
  * @module db-change
  */
 
@@ -122,4 +130,150 @@ export class DbChangeTracker {
       return true;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// watchDbChanges — event-driven companion to DbChangeTracker
+// ---------------------------------------------------------------------------
+
+/** Default debounce window for coalescing a burst of watch events. */
+export const DEFAULT_WATCH_DEBOUNCE_MS = 150;
+
+/** Minimal shape of an `fs.watch` handle (closeable). */
+export interface WatchHandle {
+  close(): void;
+}
+
+/** A filesystem watch listener, matching the `fs.watch` callback signature. */
+export type WatchListener = (eventType: string, filename: string | Buffer | null) => void;
+
+/** Injectable `fs.watch` seam (defaults to the real `node:fs` implementation). */
+export type WatchFn = (path: string, listener: WatchListener) => WatchHandle;
+
+/** Injectable timer seam so debounce behaviour is deterministic in tests. */
+export type WatchTimerFn = (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
+export type WatchClearTimerFn = (handle: ReturnType<typeof setTimeout>) => void;
+
+export interface WatchDbChangesOptions {
+  /** Debounce window in ms (default {@link DEFAULT_WATCH_DEBOUNCE_MS}). */
+  debounceMs?: number;
+  /** `fs.watch` implementation; defaults to the real one. */
+  watch?: WatchFn;
+  /** `setTimeout` implementation; defaults to the global. */
+  setTimeoutFn?: WatchTimerFn;
+  /** `clearTimeout` implementation; defaults to the global. */
+  clearTimeoutFn?: WatchClearTimerFn;
+  /** Called for each failed watch target (fail-open; never throws). */
+  onError?: (error: unknown) => void;
+}
+
+/** A running DB-change watch. */
+export interface DbChangeWatch {
+  /**
+   * True while at least one underlying `fs.watch` handle is active. `false`
+   * means the watch could not be established (fail open): the caller must
+   * keep the 30 s polling tick as its fallback.
+   */
+  readonly active: boolean;
+  /** Stop watching and clear any pending debounce timer. Idempotent. */
+  dispose(): void;
+}
+
+interface WatchTarget {
+  dir: string;
+  matches: (filename: string) => boolean;
+}
+
+/**
+ * Watch the cross-process DB-change signal for a worklog dir.
+ *
+ * Watches two directories (when they exist): the state-counter directory
+ * (`<cacheDir>/state/`, filtered to this worklog's counter file) and the
+ * worklog directory itself (filtered to the SQLite `worklog.db`, `-wal` and
+ * `-shm` files). Either target alone is enough to observe a `wl` write; a
+ * burst of events is coalesced into at most ONE trailing `onChange()` call
+ * after `debounceMs` of quiet.
+ *
+ * Fail-open: a target whose `fs.watch` throws is skipped; when no target
+ * could be watched the returned watch reports `active === false` and the
+ * caller keeps its polling fallback. Errors are surfaced via `onError` and
+ * never thrown into the TUI event loop.
+ */
+export function watchDbChanges(
+  cacheDir: string,
+  worklogDir: string,
+  onChange: () => void,
+  opts: WatchDbChangesOptions = {},
+): DbChangeWatch {
+  const watchFn: WatchFn = opts.watch ?? ((target, listener) => fs.watch(target, listener));
+  const setT: WatchTimerFn = opts.setTimeoutFn ?? ((fn, ms) => setTimeout(fn, ms));
+  const clearT: WatchClearTimerFn = opts.clearTimeoutFn ?? ((handle) => clearTimeout(handle));
+  const debounceMs = opts.debounceMs ?? DEFAULT_WATCH_DEBOUNCE_MS;
+
+  const counterFile = stateCounterFilePath(cacheDir, worklogDir);
+  const counterName = path.basename(counterFile);
+  const dbFilenames = new Set(['worklog.db', 'worklog.db-wal', 'worklog.db-shm']);
+
+  const targets: WatchTarget[] = [
+    { dir: path.dirname(counterFile), matches: (name) => name === counterName },
+    { dir: worklogDir, matches: (name) => dbFilenames.has(name) },
+  ];
+
+  const handles: WatchHandle[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+
+  const fire = (): void => {
+    timer = null;
+    if (!disposed) onChange();
+  };
+
+  const schedule = (): void => {
+    if (disposed) return;
+    if (timer !== null) clearT(timer);
+    timer = setT(fire, debounceMs);
+  };
+
+  for (const target of targets) {
+    try {
+      const handle = watchFn(target.dir, (_eventType, filename) => {
+        if (disposed) return;
+        const name = typeof filename === 'string'
+          ? filename
+          : filename
+            ? filename.toString()
+            : '';
+        // Some platforms/filesystems omit the filename; treat that as a
+        // possible match (fail-open toward reacting) rather than ignoring it.
+        if (name === '' || target.matches(name)) schedule();
+      });
+      handles.push(handle);
+    } catch (error) {
+      // Fail-open: a target that cannot be watched is skipped. The caller
+      // still has the polling fallback (and any other target).
+      opts.onError?.(error);
+    }
+  }
+
+  return {
+    get active(): boolean {
+      return handles.length > 0;
+    },
+    dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      if (timer !== null) {
+        clearT(timer);
+        timer = null;
+      }
+      for (const handle of handles) {
+        try {
+          handle.close();
+        } catch {
+          // A close failure must never break teardown.
+        }
+      }
+      handles.length = 0;
+    },
+  };
 }

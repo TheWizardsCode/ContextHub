@@ -28,6 +28,8 @@
     "benchmark:wl-next:json": "tsx bench/wl-next-perf.ts --json",
     "benchmark:wal-read-latency": "tsx bench/wal-read-latency.ts",
     "benchmark:wal-read-latency:json": "tsx bench/wal-read-latency.ts --json",
+    "benchmark:herdr-refresh": "tsx bench/herdr-refresh-perf.ts",
+    "benchmark:herdr-refresh:json": "tsx bench/herdr-refresh-perf.ts --json",
     "install": "npm run install:plugin && npm run install:pi-extension",
     "install:plugin": "bash ./scripts/install-herdr.sh",
     "install:pi-extension": "bash ./scripts/install-pi-extension.sh",

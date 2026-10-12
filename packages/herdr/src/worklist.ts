@@ -46,7 +46,13 @@ import {
 } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
-import { DbChangeTracker, resolveCacheDir } from './db-change.js';
+import {
+  DbChangeTracker,
+  resolveCacheDir,
+  watchDbChanges,
+  type DbChangeWatch,
+  type WatchDbChangesOptions,
+} from './db-change.js';
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
 import { groupRecentDispatchesByTimeBlock, recentDispatchedItems } from './downtime-log.js';
 import { buildDispatchWorkItem, mergeDispatchRow } from './dispatch-view.js';
@@ -4845,7 +4851,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; applyActiveTabMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; applyActiveTabMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -4872,6 +4878,8 @@ export async function runWorklistTui(
     onRefresh: options?.onRefresh,
     cwd: options?.cwd,
     shipGuardQuery: options?.shipGuardQuery ?? createProductionShipGuardQuery(options?.cwd),
+    dbWatch: options?.dbWatch ?? watchDbChanges,
+    dbWatchOptions: options?.dbWatchOptions,
   };
 
   let termSize = getTermSize();
@@ -6493,6 +6501,37 @@ export async function runWorklistTui(
     });
   }
 
+  // Event-driven DB-change watch (parent WL-0MV02VA29009WBEN): react to an
+  // agent write within ~2 s instead of waiting for the 30 s refresh tick.
+  // The watch feeds the EXISTING gated path — `requestWatchRefresh` applies
+  // the typing + visibility gates and then calls `doRefresh`, which owns the
+  // single-flight + trailing-coalescing guards (no bypass, no storm).
+  // Fail-open: when the watch cannot start (`active === false`), the 30 s
+  // tick remains the fallback and the zero-spawn-when-idle guarantee holds
+  // because the tick is still gated by `isDbUnchanged`.
+  const requestWatchRefresh = async (): Promise<void> => {
+    if (inputActive()) return;
+    if (!(await paneGate.visible())) return;
+    void doRefresh(false);
+  };
+
+  let dbChangeWatch: DbChangeWatch | null = null;
+  if (opts.autoRefresh && worklogDir) {
+    try {
+      dbChangeWatch = opts.dbWatch(
+        resolveCacheDir(),
+        worklogDir,
+        () => {
+          void requestWatchRefresh();
+        },
+        opts.dbWatchOptions,
+      );
+    } catch {
+      // Fail-open: a watch construction failure must never break the pane.
+      dbChangeWatch = null;
+    }
+  }
+
   // Auto-sync task (background wl sync) — the only auto-sync source. Uses
   // the single-flight + lock-aware (--if-idle) guard so concurrent
   // panes/TUI instances skip instead of piling up under lock contention,
@@ -6672,6 +6711,7 @@ export async function runWorklistTui(
   // Cleanup on promise resolution
   promise.finally(() => {
     scheduler.stop();
+    dbChangeWatch?.dispose();
     closeEventSubscriber();
     cleanup();
     process.stdout.removeListener('resize', onResize);
