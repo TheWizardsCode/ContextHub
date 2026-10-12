@@ -12,6 +12,8 @@ repositories (e.g., ContextHub, open_source_llm).
 | `open-pi-agent.sh` | Open an interactive Pi session in a new pane. Generalized with `--pane-name`, `--focus`/`--no-focus`, `--resize`/`--no-resize`, and `--cwd` options. |
 | `grid.py` | Python grid-rebalance helper: grows an even-completion 2-column grid to the right of the anchor pane (validated against herdr 0.7.5). Accepts an optional `--cwd <path>` forwarded to the `pane.split` RPC. |
 | `herdr-agent-state-protocol.md` | Specification for Herdr Unix socket agent state reporting protocol. |
+| `run-pi-agent.sh` | Run a pi agent session in a Herdr pane with automatic Local Proxy model lease release on exit. |
+| `release-lease-on-exit.mjs` | Release the Local Proxy model lease for a terminated pi session (best-effort, fire-and-forget). |
 
 ## Pane-launch modes: `--resize` (default) / `--no-resize`
 
