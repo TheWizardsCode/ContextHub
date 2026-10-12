@@ -1046,6 +1046,16 @@ proxy idle state:
     unbounded (so the proxy can never be pinned in fast mode).
   - **Fast path unaffected:** `onOperatorCommand` never reads the cooldown
     signal, so a cooldown can never suppress the fast-on-command switch.
+  - **Contract of record:** the on-disk format (file `model-cooldowns.json`,
+    `schemaVersion: 1`, entry fields, tolerant/fail-closed read rules) is
+    documented once in the header of
+    `packages/shared/src/model-cooldown.ts`; the recovery-loop code comments and
+    `docs/design/mode-switch-worker.md` cross-reference it rather than restating
+    the field list.
+  - **Must not regress (WL-0MUWIHUL2000JEFR):** this gate is **not** the
+    withdrawn client drain — no client-side slot-count completion gate, no
+    `drainPaused` dispatch pause, no unbounded latch. See
+    `docs/design/mode-switch-worker.md`.
 
 New settings (all optional):
 

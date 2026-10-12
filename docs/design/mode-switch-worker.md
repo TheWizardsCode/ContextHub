@@ -101,6 +101,46 @@ provider-exhaustion window.
   suppress the switch.
 - **Fast path unaffected:** `onOperatorCommand` never reads the cooldown
   signal, so a cooldown can never suppress the fast-on-command switch.
+- **Contract of record.** The on-disk format — the file
+  (`model-cooldowns.json`), `schemaVersion: 1`, the entry fields (`paneId` /
+  `sessionId` key, best-effort `itemId` / `kind`, `reason`, `createdAt`,
+  `cooldownUntil`) and the tolerant/fail-closed read rules — is documented
+  once, in the header of `packages/shared/src/model-cooldown.ts`. This
+  document, `packages/herdr/README.md` and the TUI recovery-loop code comments
+  cross-reference that header instead of restating the field list.
+- **Bounded default (WL-0MV5639X70029BOI).** An absent or malformed
+  `Retry-After` hint yields a *bounded* default cooldown
+  (`DEFAULT_RECOVERY_CONFIG.cooldown`, clamped into `[floorMs, ceilingMs]` —
+  `1000 ms`–`6 h`, default `10 min`) rather than a zero or unbounded hold, so
+  the gate can neither open prematurely nor pin the proxy in fast mode.
+- **Fail-closed direction (explicit).** Unreadable ⇒ hold fast; absent ⇒ normal
+  decision. The two never collapse: `readModelCooldowns` returns `null` for
+  unreadable/corrupt and `[]` for absent/empty.
+
+### Withdrawn client drain — must not regress (WL-0MUWIHUL2000JEFR)
+
+The earlier "drain before switching to cheap" design (WL-0MUL0KO7Q003O7YJ) was
+withdrawn. It introduced a **client-side** drain whose cheap-switch completion
+gate (`freeSlots >= 2`) was unsatisfiable with the live pool sizes (fast = 1
+slot, cheap = 3 slots — `WL-0MUWF763Q003MGUM`), and whose drain was unbounded,
+so it latched and paused the dispatcher. The proxy's own **server-side bounded
+drain** is unchanged and stays authoritative.
+
+A future change **must not** reintroduce any part of the withdrawn client
+drain:
+
+- **No client-side slot-count completion gate** — the mode-switch worker must
+  not gate the cheap switch on a free-slot count (`MODE_SWITCH_DRAIN_FREE_SLOTS`
+  / `DOWNTIME_AUDIT_MIN_FREE_SLOTS`); the only cheap path is "operator idle +
+  proxy idle + no active model cooldown".
+- **No dispatch pause** — the downtime dispatcher must not carry a
+  `drainPaused` config field or refuse new dispatch while a drain is in
+  progress.
+- **No unbounded latch** — the cheap-switch hold is bounded solely by
+  `cooldownUntil`; there is no persistent "draining" state that can get stuck.
+
+The model-cooldown gate exists to *avoid adding concurrency* during known
+provider exhaustion; it is not a resumption of the withdrawn drain.
 
 ## 3. Settings (re-read every tick — apply without plugin restart)
 

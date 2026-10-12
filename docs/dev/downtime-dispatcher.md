@@ -615,6 +615,14 @@ the marker and records no attempt, so it stays bounded by `cooldownUntil` and
 the attempt cap. An unreadable/absent cooldown signal is fail-safe — the scan
 simply has no cooldown candidates and the generic path is unchanged.
 
+> **Must not regress — no client drain (WL-0MUWIHUL2000JEFR).** This wake is
+> **not** a resurrection of the withdrawn "drain before switching to cheap"
+> design: there is **no** client-side slot-count completion gate, **no**
+> `drainPaused` dispatch pause and **no** unbounded latch. The scan is bounded
+> by `cooldownUntil`, resumes at most one pane per cycle, and the proxy's own
+> server-side bounded drain remains authoritative. See the "Withdrawn client
+> drain — must not regress" section of `docs/design/mode-switch-worker.md`.
+
 #### Neutral outcome vocabulary and fail-safety (parent AC2/AC6)
 
 Every not-resumed outcome is neutral — never a strike, never a crash, never a

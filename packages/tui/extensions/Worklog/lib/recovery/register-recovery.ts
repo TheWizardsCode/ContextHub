@@ -12,7 +12,11 @@
  * - /retry command registration
  * - Durable model-cooldown marker: an exhaustion SERVER_ERROR records a
  *   machine-wide cooldown (best-effort), cleared on the next 2xx provider
- *   response (WL-0MV5638J1006URXA)
+ *   response (WL-0MV5638J1006URXA). This module is the *writer* only; the
+ *   on-disk contract of record (file name, `schemaVersion`, entry fields and
+ *   tolerant/fail-closed read rules) lives in the header of
+ *   `packages/shared/src/model-cooldown.ts`
+ *   (`@worklog/shared/model-cooldown`).
  *
  * Notify/ctx lifecycle:
  *   _notifyFn is captured from ctx.ui.notify in agent_end, turn_end, and
