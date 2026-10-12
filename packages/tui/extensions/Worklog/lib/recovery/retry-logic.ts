@@ -24,7 +24,7 @@ import {
   clearModelCooldown,
   type ModelCooldownKind,
 } from '@worklog/shared/model-cooldown';
-import { isExhaustionServerError } from './error-patterns.js';
+import { isExhaustionServerError, DEFAULT_RECOVERY_CONFIG, type RecoveryCooldownConfig } from './error-patterns.js';
 
 // ── Backoff configuration ─────────────────────────────────────────────
 
@@ -82,6 +82,44 @@ export const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
   serverHintJitterRatio: DEFAULT_SERVER_HINT_JITTER_RATIO,
   serverHintMaxDelayMs: DEFAULT_SERVER_HINT_MAX_DELAY_MS,
 };
+
+/**
+ * Clamp a durable model-cooldown duration into the bounded-default window
+ * (WL-0MV5639X70029BOI).
+ *
+ * This is distinct from {@link calculateDelay}, which bounds the *retry-sleep*
+ * backoff. The durable cooldown marker written for a provider-exhaustion
+ * `SERVER_ERROR` must be best-effort but never unbounded and never zero:
+ *
+ * - an absent/malformed/unusable candidate (including a negative or
+ *   non-finite value) falls back to `config.defaultMs`;
+ * - the result is floored at `config.floorMs` so a `Retry-After: 0` (or a
+ *   default of zero) can never open a zero-length cheap-switch window;
+ * - the result is capped at `config.ceilingMs` so a malformed or absurd hint
+ *   cannot pin the cooldown open.
+ *
+ * A usable (finite, non-negative) candidate is authoritative within the
+ * clamp — a truthful short hint is honoured rather than widened to the default.
+ *
+ * @param candidateMs - Server-requested delay in ms, or undefined/null when
+ *   absent or malformed.
+ * @param config - Bounded default cooldown policy (defaults to
+ *   {@link DEFAULT_RECOVERY_CONFIG.cooldown}).
+ * @returns A finite, non-negative cooldown duration in ms.
+ */
+export function clampCooldownMs(
+  candidateMs: number | undefined | null,
+  config: RecoveryCooldownConfig = DEFAULT_RECOVERY_CONFIG.cooldown,
+): number {
+  const usable =
+    typeof candidateMs === 'number' && Number.isFinite(candidateMs) && candidateMs >= 0
+      ? candidateMs
+      : config.defaultMs;
+  const floor = Number.isFinite(config.floorMs) && config.floorMs > 0 ? config.floorMs : 0;
+  const ceiling =
+    Number.isFinite(config.ceilingMs) && config.ceilingMs >= floor ? config.ceilingMs : floor;
+  return Math.min(Math.max(Math.round(usable), floor), ceiling);
+}
 
 /**
  * Parse a server-requested retry delay from an error message.
@@ -329,8 +367,10 @@ export function calculateDelay(
  * @param now - Epoch-ms "now" used to derive `cooldownUntil` (defaults to
  *   `Date.now()`); injectable for deterministic tests
  * @returns The delay in milliseconds, the parsed server hint (if any), which
- *   source produced it, and the epoch-ms instant the delay expires
- *   (`cooldownUntil = now + delayMs`)
+ *   source produced it, and the epoch-ms instant the durable cooldown expires.
+ *   The cooldown expiry is **not** `now + delayMs`: the retry sleep uses the
+ *   exponential/hint delay while the durable marker uses the bounded default
+ *   clamp (see {@link clampCooldownMs}, WL-0MV5639X70029BOI).
  */
 export function resolveRetryDelay(
   attempt: number,
@@ -349,12 +389,18 @@ export function resolveRetryDelay(
   const hintSource = headerHint !== undefined ? 'header' : messageHint !== undefined ? 'message' : undefined;
   const delayMs = calculateDelay(attempt, config, serverHintMs, random);
 
+  // The durable cooldown is a separate policy from the retry sleep: it uses
+  // the bounded default when there is no usable server hint and is always
+  // clamped into [floorMs, ceilingMs] (WL-0MV5639X70029BOI). The `delayMs`
+  // above is unchanged.
+  const cooldownUntil = now + clampCooldownMs(serverHintMs);
+
   const result: {
     delayMs: number;
     serverHintMs?: number;
     hintSource?: 'header' | 'message';
     cooldownUntil: number;
-  } = { delayMs, cooldownUntil: now + delayMs };
+  } = { delayMs, cooldownUntil };
   if (serverHintMs !== undefined) result.serverHintMs = serverHintMs;
   if (hintSource !== undefined) result.hintSource = hintSource;
   return result;

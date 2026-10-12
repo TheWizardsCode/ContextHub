@@ -57,9 +57,9 @@
  *    (cheap has more slots than fast) during provider exhaustion. The hold
  *    is bounded by `cooldownUntil` (no latch) and machine-wide, so a
  *    cooldown for any worklog root suppresses the shared switch (AC4). An
- *    unreadable/corrupt signal is fail-closed (hold fast, logged); a
- *    *missing* signal is `[]` and does not suppress the switch. The
- *    fast-on-command path is unaffected.
+ *    unreadable/corrupt signal is fail-closed (hold fast, logged); an
+ *    *absent/empty* signal is `[]` and does not suppress the switch
+ *    (WL-0MV5639X70029BOI). The fast-on-command path is unaffected.
  *  - **No redundant switching / no hammering:** the worker skips a switch when
  *    the persisted mode already matches the target (tracking last-known mode,
  *    refreshed via `GET /admin/mode` on each poll). At most one switch per
@@ -592,8 +592,11 @@ export function createModeSwitchWorker(deps?: ModeSwitchWorkerOptions): ModeSwit
       if (coordinationDir !== undefined) {
         const activeCooldowns = readModelCooldowns(coordinationDir, now());
         if (activeCooldowns === null) {
+          // An unreadable/corrupt signal is fail-closed (hold fast) and
+          // logged. An absent/empty signal is `[]` and does NOT reach here:
+          // the normal cheap decision runs (WL-0MV5639X70029BOI).
           console.error(
-            '[mode-switch] model-cooldown signal unreadable — holding fast (fail-closed)',
+            '[mode-switch] model-cooldown signal unreadable/corrupt — holding fast (fail-closed)',
           );
           return;
         }

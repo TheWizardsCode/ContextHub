@@ -244,6 +244,16 @@ describe('missing vs unreadable/corrupt reads', () => {
     expect(readModelCooldowns(join(dir, 'not-created'), NOW)).toEqual([]);
   });
 
+  it('distinguishes absent vs empty: a valid document with no active entries is [] (not null)', () => {
+    writeRaw({ schemaVersion: 1, cooldowns: [] });
+    expect(readModelCooldowns(dir, NOW)).toEqual([]);
+  });
+
+  it('distinguishes empty vs expired: a document whose only entry has expired is [] (not null)', () => {
+    writeRaw({ schemaVersion: 1, cooldowns: [{ paneId: 'past', cooldownUntil: NOW - 1 }] });
+    expect(readModelCooldowns(dir, NOW)).toEqual([]);
+  });
+
   it('returns null when the file is not valid JSON', () => {
     writeRaw('{ this is not json');
     expect(readModelCooldowns(dir, NOW)).toBeNull();

@@ -1020,6 +1020,32 @@ proxy idle state:
   independent scheduler task, so an item dispatched during downtime is served
   by the cheap pool. The scheduler task remains as the fallback when the
   downtime worker is not polling (disabled, non-leader, or paused).
+- **Model-cooldown gate (WL-0MV5638ZS005I5XQ, WL-0MV5639X70029BOI)** — before
+  the cheap decision the leader reads the machine-wide cooldown signal
+  (`readModelCooldowns` from `@worklog/shared/model-cooldown`, the same
+  coordination directory as `mode-activity.json`). While any entry is active
+  (`cooldownUntil` in the future) the worker holds **fast**: a pane sitting in
+  proxy backoff holds no slot, so the proxy looks idle and the cheap switch
+  would add concurrency (cheap has more slots than fast) during a known
+  provider-exhaustion window. The hold is bounded by `cooldownUntil` (no latch)
+  and machine-wide, so a cooldown recorded in any worklog root suppresses the
+  shared switch.
+  - **Fail-closed, logged:** an unreadable or corrupt signal (`null`) holds
+    fast rather than switching on an unverifiable signal, and logs the
+    condition (`[mode-switch] model-cooldown signal unreadable/corrupt —
+    holding fast (fail-closed)`).
+  - **Absent/empty is not fail-closed:** a missing file or an empty document
+    (`[]`) means "nothing recorded", so the normal cheap decision runs.
+  - **Bounded default (WL-0MV5639X70029BOI):** the marker's `cooldownUntil` is
+    derived from the server `Retry-After` hint when available; when the hint is
+    absent or malformed the TUI recovery loop uses a bounded default
+    (`DEFAULT_RECOVERY_CONFIG.cooldown`, documented in
+    `packages/tui/extensions/Worklog/lib/recovery/error-patterns.ts`) clamped
+    into `[floorMs, ceilingMs]` (`1000 ms` – `6 h`, default `10 min`). The
+    default is never zero (so the gate can never open prematurely) and never
+    unbounded (so the proxy can never be pinned in fast mode).
+  - **Fast path unaffected:** `onOperatorCommand` never reads the cooldown
+    signal, so a cooldown can never suppress the fast-on-command switch.
 
 New settings (all optional):
 

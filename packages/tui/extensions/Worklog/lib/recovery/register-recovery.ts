@@ -154,8 +154,12 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
           state.startRetry(errorMsg);
           // Don't endRetry here — the retry loop owns the state
           if (isExhaustionServerError(lastAssistant)) {
-            // Resolve the backoff once and expose the expiry so the marker
-            // and the retry loop agree on `cooldownUntil = now + delayMs`.
+            // Resolve the durable cooldown expiry from the server hint (if
+            // any). `resolveRetryDelay` applies the bounded default cooldown
+            // (default/floor/ceiling) so an absent or malformed `Retry-After`
+            // can never produce an unbounded or zero marker
+            // (WL-0MV5639X70029BOI); the retry-sleep `delayMs` it also returns
+            // is intentionally separate.
             const { cooldownUntil } = resolveRetryDelay(
               1,
               errorMsg,

@@ -19,6 +19,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { DEFAULT_RECOVERY_CONFIG } from './error-patterns.js';
 
 const sharedMocks = vi.hoisted(() => ({
   writeModelCooldown: vi.fn(() => true as boolean),
@@ -115,7 +116,9 @@ describe('register-recovery durable cooldown wiring', () => {
       kind: 'implement',
       reason: 'provider exhaustion',
     });
-    expect(entry.cooldownUntil).toBeGreaterThanOrEqual(before + 2000);
+    expect(entry.cooldownUntil).toBeGreaterThanOrEqual(
+      before + DEFAULT_RECOVERY_CONFIG.cooldown.defaultMs,
+    );
   });
 
   it('records nothing for a plain retryable 5xx', async () => {

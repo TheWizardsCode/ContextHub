@@ -56,6 +56,45 @@ export interface RecoveryCategoryConfig {
 }
 
 /**
+ * Bounded default cooldown policy for the durable model-cooldown marker
+ * (WL-0MV5639X70029BOI).
+ *
+ * When the recovery loop classifies a provider-exhaustion `SERVER_ERROR` it
+ * records a machine-wide cooldown marker so the cheap-switch worker holds the
+ * shared proxy in fast mode instead of adding concurrency during a known
+ * provider-exhaustion window. The marker's `cooldownUntil` tracks the
+ * server-requested `Retry-After` when one is available; when the hint is
+ * absent or malformed the loop falls back to {@link RecoveryCooldownConfig.defaultMs}.
+ *
+ * Every value is clamped into `[floorMs, ceilingMs]` so the marker can never
+ * be a **zero hold** (which would let the cheap switch fire while the pane is
+ * still backing off) and can never be an **unbounded hold** (which would pin
+ * the shared proxy in fast mode forever). This is documented alongside the
+ * per-category `baseDelayMs`/`maxDelayMs` values: those bound the retry-sleep
+ * backoff, whereas these bound the durable cooldown signal.
+ */
+export interface RecoveryCooldownConfig {
+  /**
+   * Default cooldown (ms) used when the recovery loop has no usable server
+   * hint. Aligned with the retry-loop exponential ceiling so the marker
+   * covers the longest inter-attempt wait the loop can take.
+   */
+  defaultMs: number;
+  /**
+   * Clamp floor (ms): the default is never shorter than this, so a
+   * zero/degenerate cooldown can never open a premature cheap-switch window.
+   * Must be greater than zero.
+   */
+  floorMs: number;
+  /**
+   * Clamp ceiling (ms): the default (and any server hint) is never longer
+   * than this, so a malformed or absurd value cannot pin the cooldown open.
+   * Aligned with `DEFAULT_SERVER_HINT_MAX_DELAY_MS` (6 h).
+   */
+  ceilingMs: number;
+}
+
+/**
  * Complete recovery configuration covering all error categories.
  */
 export interface RecoveryConfig {
@@ -68,6 +107,12 @@ export interface RecoveryConfig {
   terminated: RecoveryCategoryConfig;
   parseError: RecoveryCategoryConfig;
   compactionGate: RecoveryCategoryConfig;
+  /**
+   * Bounded default cooldown policy for the durable model-cooldown marker
+   * (WL-0MV5639X70029BOI). Not an error category: it carries no `patterns`
+   * and bounds the marker, not the retry-sleep backoff.
+   */
+  cooldown: RecoveryCooldownConfig;
 }
 
 // ── Type guard ─────────────────────────────────────────────────────────
@@ -294,6 +339,16 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
     baseDelayMs: 1000,
     maxDelayMs: 10000,
     continuationPrompt: 'Please continue from where you left off.',
+  },
+  // Bounded default cooldown for the durable model-cooldown marker
+  // (WL-0MV5639X70029BOI). The default matches the retry-loop exponential
+  // ceiling (WL-0MUY9GDPG0062NWF); the floor prevents a zero hold; the
+  // ceiling reuses the 6-hour server-hint bound (WL-0MUR5EGH7003VOHM) so a
+  // malformed or absurd hint can never pin the cooldown open.
+  cooldown: {
+    defaultMs: 600000, // 10 min — aligns with serverError/timeout maxDelayMs
+    floorMs: 1000, // 1 s — never a zero hold
+    ceilingMs: 6 * 60 * 60 * 1000, // 6 h — aligns with DEFAULT_SERVER_HINT_MAX_DELAY_MS
   },
 };
 

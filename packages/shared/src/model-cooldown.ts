@@ -50,13 +50,18 @@
  * {@link readModelCooldowns} is the ONLY supported read path. It:
  *  - returns only active entries (`cooldownUntil > now`);
  *  - ignores unknown fields and skips malformed entries without throwing;
- *  - returns `[]` when the file is **missing** (nothing was ever recorded);
- *  - returns `null` when the file is **unreadable or corrupt**, or when the
- *    coordination directory cannot be resolved. `null` is the fail-closed
+ *  - returns `[]` when the file is **absent** (missing file/directory —
+ *    nothing was ever recorded) or **empty** (a valid document whose active
+ *    set is empty). Callers may treat `[]` as "no cooldown recorded" and take
+ *    the normal decision.
+ *  - returns `null` when the file is **unreadable** (permission/IO error) or
+ *    **corrupt** (invalid JSON or a structurally invalid document), or when
+ *    the coordination directory cannot be resolved. `null` is the fail-closed
  *    signal: a consumer MUST treat it as "a cooldown may be active" and take
  *    the conservative branch (for the mode-switch gate: do not switch to
  *    cheap). `[]` and `null` are deliberately distinguishable so "no cooldown"
- *    and "cannot read the cooldown signal" never collapse.
+ *    and "cannot read the cooldown signal" never collapse, and the four
+ *    sub-cases (absent/empty vs unreadable/corrupt) are pinned by tests.
  *
  * ## Writer contract (atomic, keyed, pruning)
  *

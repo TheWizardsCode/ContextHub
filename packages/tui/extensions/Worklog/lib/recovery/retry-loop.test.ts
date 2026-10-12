@@ -28,6 +28,7 @@ import {
   type BackoffConfig,
   type InterruptibleSleepState,
 } from './retry-logic.js';
+import { DEFAULT_RECOVERY_CONFIG } from './error-patterns.js';
 
 // ── Exponential Backoff ───────────────────────────────────────────────
 
@@ -500,25 +501,34 @@ function makeUserEntry(content: unknown): unknown {
 }
 
 describe('resolveRetryDelay cooldownUntil', () => {
-  it('exposes cooldownUntil = now + delayMs without changing delayMs', () => {
+  it('uses the bounded default for cooldownUntil while leaving delayMs as the exponential backoff', () => {
     const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, () => 0, undefined, COOLDOWN_NOW);
+    // Retry sleep: unchanged exponential backoff.
     expect(result.delayMs).toBe(2000);
     expect(result.serverHintMs).toBeUndefined();
-    expect(result.cooldownUntil).toBe(COOLDOWN_NOW + 2000);
+    // Durable marker: the bounded default (never zero, never unbounded).
+    expect(result.cooldownUntil).toBe(COOLDOWN_NOW + DEFAULT_RECOVERY_CONFIG.cooldown.defaultMs);
+    expect(result.cooldownUntil).toBeGreaterThan(COOLDOWN_NOW + result.delayMs);
   });
 
-  it('tracks a server-provided retry hint', () => {
+  it('tracks a server-provided retry hint inside the clamp window', () => {
     const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, () => 0, 11_000, COOLDOWN_NOW);
     expect(result.delayMs).toBe(11_000);
     expect(result.serverHintMs).toBe(11_000);
     expect(result.cooldownUntil).toBe(COOLDOWN_NOW + 11_000);
   });
 
+  it('clamps an over-ceiling hint in cooldownUntil', () => {
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, () => 0, oneDayMs, COOLDOWN_NOW);
+    expect(result.cooldownUntil).toBe(COOLDOWN_NOW + DEFAULT_RECOVERY_CONFIG.cooldown.ceilingMs);
+  });
+
   it('defaults now to the current clock', () => {
     const before = Date.now();
     const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, () => 0);
-    expect(result.cooldownUntil).toBeGreaterThanOrEqual(before + 2000);
-    expect(result.cooldownUntil).toBeLessThanOrEqual(Date.now() + 2000);
+    expect(result.cooldownUntil).toBeGreaterThanOrEqual(before + DEFAULT_RECOVERY_CONFIG.cooldown.defaultMs);
+    expect(result.cooldownUntil).toBeLessThanOrEqual(Date.now() + DEFAULT_RECOVERY_CONFIG.cooldown.defaultMs);
   });
 });
 

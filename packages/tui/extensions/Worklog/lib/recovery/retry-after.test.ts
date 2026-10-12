@@ -19,9 +19,12 @@ import {
   computeRetryDelay,
   resolveRetryDelay,
   parseServerRetryDelayMs,
+  clampCooldownMs,
   DEFAULT_BACKOFF_CONFIG,
+  DEFAULT_SERVER_HINT_MAX_DELAY_MS,
   type BackoffConfig,
 } from './retry-logic.js';
+import { DEFAULT_RECOVERY_CONFIG } from './error-patterns.js';
 
 // A representative llm-proxy 503 startup-ramp error message as it reaches the
 // extension (pi's formatProviderError renders "<status>: <body>").
@@ -275,6 +278,64 @@ describe('calculateDelay with a long server hint (server-hint ceiling)', () => {
   });
 });
 
+// ── Bounded default cooldown (WL-0MV5639X70029BOI) ────────────────────
+//
+// The durable model-cooldown marker must be best-effort but never unbounded
+// and never zero: an absent/malformed `Retry-After` yields the bounded
+// default, an explicit hint inside the window is honoured, and an over-ceiling
+// (or absurd) hint is clamped to the 6-hour ceiling.
+
+describe('clampCooldownMs (bounded default cooldown)', () => {
+  const { defaultMs, floorMs, ceilingMs } = DEFAULT_RECOVERY_CONFIG.cooldown;
+
+  it('falls back to the bounded default when the hint is absent', () => {
+    expect(clampCooldownMs(undefined)).toBe(defaultMs);
+    expect(clampCooldownMs(null)).toBe(defaultMs);
+  });
+
+  it('falls back to the bounded default for a malformed hint', () => {
+    expect(clampCooldownMs(Number.NaN)).toBe(defaultMs);
+    expect(clampCooldownMs(Number.POSITIVE_INFINITY)).toBe(defaultMs);
+    expect(clampCooldownMs(Number.NEGATIVE_INFINITY)).toBe(defaultMs);
+    expect(clampCooldownMs(-1)).toBe(defaultMs);
+  });
+
+  it('never yields a zero hold for an explicit zero hint (floors it)', () => {
+    expect(clampCooldownMs(0)).toBe(floorMs);
+    expect(clampCooldownMs(999)).toBe(floorMs);
+  });
+
+  it('honours a truthful short hint inside the window', () => {
+    expect(clampCooldownMs(7000)).toBe(7000);
+    expect(clampCooldownMs(11_000)).toBe(11_000);
+  });
+
+  it('clamps an honest hint above the ceiling rather than honouring it unbounded', () => {
+    const tenHours = 10 * 60 * 60 * 1000;
+    expect(clampCooldownMs(tenHours)).toBe(ceilingMs);
+    expect(ceilingMs).toBe(DEFAULT_SERVER_HINT_MAX_DELAY_MS);
+  });
+
+  it('keeps the floor at or below the default and the default at or below the ceiling', () => {
+    expect(floorMs).toBeGreaterThan(0);
+    expect(defaultMs).toBeGreaterThanOrEqual(floorMs);
+    expect(ceilingMs).toBeGreaterThanOrEqual(defaultMs);
+  });
+
+  it('supports a per-instance clamp configuration', () => {
+    const config = { defaultMs: 120_000, floorMs: 5000, ceilingMs: 300_000 };
+    expect(clampCooldownMs(undefined, config)).toBe(120_000);
+    expect(clampCooldownMs(0, config)).toBe(5000);
+    expect(clampCooldownMs(10 * 60 * 1000, config)).toBe(300_000);
+    expect(clampCooldownMs(60_000, config)).toBe(60_000);
+  });
+
+  it('rounds fractional millisecond candidates to a whole number', () => {
+    expect(clampCooldownMs(7000.4)).toBe(7000);
+    expect(clampCooldownMs(7000.6)).toBe(7001);
+  });
+});
+
 // ── calculateDelay: unchanged fallback (AC3) ──────────────────────────
 
 describe('calculateDelay without a usable hint', () => {
@@ -317,6 +378,26 @@ describe('resolveRetryDelay', () => {
     const result = resolveRetryDelay(1, PROXY_RAMP_503, DEFAULT_BACKOFF_CONFIG, () => 0);
     expect(result.serverHintMs).toBe(7000);
     expect(result.delayMs).toBe(7000);
+  });
+
+  it('exposes a bounded cooldownUntil from the no-hint default, distinct from delayMs', () => {
+    const result = resolveRetryDelay(1, 'plain server error', DEFAULT_BACKOFF_CONFIG, () => 0, undefined, 1_000_000);
+    // The retry-sleep delay is the (unchanged) exponential backoff...
+    expect(result.delayMs).toBe(2000);
+    // ...but the durable marker uses the bounded default.
+    expect(result.cooldownUntil).toBe(1_000_000 + DEFAULT_RECOVERY_CONFIG.cooldown.defaultMs);
+  });
+
+  it('exposes a hint-derived cooldownUntil inside the clamp window', () => {
+    const result = resolveRetryDelay(1, '503: {"retry_after": 11}', DEFAULT_BACKOFF_CONFIG, () => 0, undefined, 1_000_000);
+    expect(result.delayMs).toBe(11_000);
+    expect(result.cooldownUntil).toBe(1_011_000);
+  });
+
+  it('clamps an over-ceiling honest hint in cooldownUntil', () => {
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, () => 0, oneDayMs, 1_000_000);
+    expect(result.cooldownUntil).toBe(1_000_000 + DEFAULT_RECOVERY_CONFIG.cooldown.ceilingMs);
   });
 
   it('omits the server hint when the error carries none', () => {
