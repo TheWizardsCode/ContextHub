@@ -225,9 +225,116 @@ Full suite green after the cooldown epic and its regression guard (374 passed
 drain is pinned as not reintroduced (see
 `packages/herdr/src/drain-regression-guard.test.ts`).
 
+## `downtime-worker` test-split runtime (WL-0MV4VTFYE0073POG)
+
+**Work item:** WL-0MV4VTFYE0073POG (child of WL-0MV28X3SL005R5KX — "Split
+`downtime-worker.test.ts` and cap mocks per test")
+**Measured:** 2026-10-12, from the child worktree at dev HEAD `1f701621`
+**Scope:** the `downtime-worker` test module only (not the full suite)
+**Host:** 16 cores; load average 12–19 during runs (several concurrent
+`implement.py` operations)
+
+### Purpose
+
+Parent AC6 requires the `downtime-worker` test-suite runtime to be measured
+before and after the split. This section records the method and the results.
+
+### Method
+
+The "before" state is the last pre-split revision of the monolith,
+`daa7d2a9:packages/herdr/src/downtime-worker.test.ts` (13,103 lines, 715
+tests, 129 describe suites). The "after" state is all 13
+`packages/herdr/src/downtime-worker*.test.ts` files (13,697 lines, 725 tests,
+146 describe suites).
+
+```bash
+# Pre-split baseline (reconstructed from git into a temporary test file)
+git show daa7d2a9:packages/herdr/src/downtime-worker.test.ts \
+  > packages/herdr/src/downtime-worker.presplit.test.ts
+npx vitest run --config vitest.measure.config.ts \
+  packages/herdr/src/downtime-worker.presplit.test.ts
+
+# Post-split (all split files)
+npx vitest run --config vitest.measure.config.ts \
+  packages/herdr/src/downtime-worker*.test.ts
+```
+
+Five alternating iterations of each state were run; the **median** is quoted
+(the host was too loaded for a single run to be meaningful).
+
+> **Isolation note.** `vitest.measure.config.ts` extends `vitest.config.ts`
+> and aliases `@worklog/shared` (and its subpaths) to the worktree's own
+> freshly built `packages/shared/dist`. This was required because concurrent
+> `implement.py` builds in other worktrees repeatedly overwrite the main
+> checkout's `packages/herdr/node_modules/@worklog/shared` copy (via
+> `install-herdr.sh`), causing intermittent `ERR_MODULE_NOT_FOUND` collection
+> failures. The alias does not change any test semantics.
+
+### Results
+
+| Metric | Pre-split | Post-split | Δ |
+|---|---|---|---|
+| Test files | 1 | 13 | +12 |
+| Tests (all passing) | 715 | 725 | +10 |
+| Describe suites | 129 | 146 | +17 |
+| Wall clock (median of 5) | **5.80 s** | **5.83 s** | **+0.03 s (+0.5%)** |
+| Wall clock (min of 5) | 5.19 s | 5.59 s | +0.40 s |
+| Vitest duration (median) | 3.90 s | 4.19 s | +0.29 s (+7.4%) |
+| `tests` time (median) | 1.65 s | 2.54 s | +0.89 s (+53.9%) |
+| `transform` aggregate (median) | 3.27 s | 8.05 s | +4.78 s (+146%) |
+| `import` aggregate (median) | 1.81 s | 6.65 s | +4.84 s (+267%) |
+| `setup` aggregate (median) | ~0.12 s | ~0.77 s | ~+540% |
+
+Post-split test counts per file:
+
+| File | Tests |
+|---|---|
+| `downtime-worker.audit-tier.test.ts` | 55 |
+| `downtime-worker.critical-first.test.ts` | 117 |
+| `downtime-worker.dispatch.test.ts` | 40 |
+| `downtime-worker.fixtures.test.ts` | 8 |
+| `downtime-worker.gates.test.ts` | 16 |
+| `downtime-worker.idle.test.ts` | 50 |
+| `downtime-worker.orchestrator.test.ts` | 72 |
+| `downtime-worker.pane.test.ts` | 68 |
+| `downtime-worker.parse.test.ts` | 34 |
+| `downtime-worker.settings.test.ts` | 57 |
+| `downtime-worker.sprint-view.test.ts` | 57 |
+| `downtime-worker.test.ts` (residual) | 49 |
+| `downtime-worker.tiers.test.ts` | 102 |
+| **Total** | **725** |
+
+### Interpretation
+
+- **Wall clock is effectively neutral** (+0.5% median, within host-load
+  noise). Vitest's own reported duration rises ~7%.
+- The split replaces one module graph with 13 isolated ones
+  (`singleFork: true`, `isolate: true`), so the **aggregate**
+  transform/import/setup work rises 2.5–6.5×. On this loaded host, warm
+  caches largely absorb that overhead, so it barely surfaces in wall clock;
+  on an idle host or a cold CI cache the per-file isolation overhead may be
+  more visible.
+- **No meaningful runtime improvement or regression.** The split's benefit is
+  maintainability (≤2,000-line files, bounded mocks per test), not speed.
+
+### Caveats
+
+- The pre-split baseline is reconstructed from commit `daa7d2a9` using the
+  current (HEAD) production code. Production code is unchanged by the split
+  apart from a JSDoc-only edit to `downtime-worker.ts`, so the comparison is
+  like-for-like.
+- The host was shared and heavily loaded (load average 12–19 on 16 cores; a
+  `tce-main-street` vitest run, other `ContextHub` worktrees, and pytest were
+  active). Wall-clock figures are noisy; medians and minima of 5 alternating
+  runs are reported rather than a single sample.
+- Vitest's `transform`/`import`/`setup` totals are aggregates across all test
+  files in the run.
+
 ## Related
 
 - Parent epic: WL-0MV28X3BT0079JM3 — Deduplicate legacy `test/` vs `tests/`
+- `downtime-worker` test split: WL-0MV28X3SL005R5KX
+- Runtime measurement child: WL-0MV4VTFYE0073POG
   files and delete verbatim subsets
 - Post-change measurement: WL-0MV4V0IF9008214R
 - Model-cooldown epic: WL-0MV54ZP3Y00514Y9 — Resume model-exhausted jobs
