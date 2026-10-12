@@ -18,6 +18,7 @@
 #   bash packages/herdr/scripts/tests/test_run_in_pane.sh
 
 set -uo pipefail
+set -m  # Enable job control so background processes get their own process group
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 RUN_IN_PANE="$SCRIPT_DIR/run-in-pane.sh"
@@ -28,9 +29,9 @@ pass() { PASS=$((PASS+1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL: $1"; }
 
 cleanup() {
-  # Kill any remaining background test processes
+  # Kill entire process groups (parent + grandchildren like sleep infinity)
   for pid in "${TEST_PIDS[@]:-}"; do
-    kill "$pid" 2>/dev/null
+    kill -TERM -"$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
   done
 }
@@ -40,7 +41,7 @@ TEST_PIDS=()
 # ── Test: non-TTY + HERDR_PANE_ID stays alive with ~0% CPU ──────────────
 echo "=== Test: --exec with HERDR_PANE_ID blocks (0% CPU, stays alive) ==="
 
-HERDR_PANE_ID="test-pane-1" bash "$RUN_IN_PANE" --exec "echo test_output" "test-pane-1" < /dev/null &
+HERDR_PANE_ID="test-pane-1" bash "$RUN_IN_PANE" --exec "echo test_output" "test-pane-1" < /dev/null > /dev/null 2>&1 &
 PID=$!
 TEST_PIDS+=($PID)
 
