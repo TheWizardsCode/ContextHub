@@ -1418,7 +1418,11 @@ auto-refresh tick (parent `WL-0MV02VA29009WBEN`).
   most one trailing callback, which feeds the existing gated `doRefresh`
   (typing + visibility gates, then `doRefresh`'s own single-flight + trailing
   coalescing). The watch never bypasses those guards, so a burst cannot cause
-  a refresh storm.
+  a refresh storm. On a successful trigger it also consumes the
+  `DbChangeTracker` baseline, so the next periodic tick sees the change as
+  already handled and stays a no-op (`WL-0MSJ1OLTL009N4IQ`). When a gate
+  skips the refresh (overlay open / tab hidden) the change is deliberately
+  left unconsumed so the fallback tick refreshes once the gate clears.
 - **Fail-open** — if no watch target can be established (`fs.watch` throws),
   the watch reports `active === false`, the pane keeps running, and the 30 s
   tick remains the fallback. The zero-spawn-when-idle guarantee is preserved
@@ -1437,7 +1441,11 @@ The event-driven path is guarded by automated tests:
   write (the same signal a `wl` write bumps) triggers a refresh within 2 s,
   well before the 30 s tick; unrelated writes do not; an unavailable watch
   fails open and the idle no-spawn guarantee holds; the watch is disposed on
-  exit.
+  exit. It also pins the gated-watch contract (`WL-0MV5CBPI400508MK`): a
+  watch-triggered refresh consumes the DB-change signal so the next 30 s tick
+  is a no-op, the typing and visibility gates skip watch refreshes, and a
+  burst of watch callbacks during an in-flight refresh coalesces into one
+  trailing refresh.
 
 Run them directly:
 

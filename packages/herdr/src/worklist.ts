@@ -6512,6 +6512,13 @@ export async function runWorklistTui(
   const requestWatchRefresh = async (): Promise<void> => {
     if (inputActive()) return;
     if (!(await paneGate.visible())) return;
+    // Consume the DB-change signal BEFORE refreshing, so the next periodic
+    // tick sees the change as already handled and stays a no-op — the watch
+    // must not leave the `DbChangeTracker` baseline stale (idle zero-spawn
+    // guarantee, WL-0MSJ1OLTL009N4IQ). Do NOT consume when a gate above
+    // skipped the work: an unconsumed change is what lets the fallback tick
+    // (or the resume-poll) refresh once the overlay closes / the tab returns.
+    tracker?.dbChanged();
     void doRefresh(false);
   };
 

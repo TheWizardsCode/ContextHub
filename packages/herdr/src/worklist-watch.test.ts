@@ -39,6 +39,8 @@ vi.mock('./notify.js', () => ({
 
 import { runWorklistTui } from './worklist.js';
 import { setExecFileAsync, resetExecFileAsync, setWorklogDir, resetWorklogDir } from './fetcher.js';
+import type { WorkItem } from './fetcher.js';
+import { loadShortcutConfig } from './shortcut-config.js';
 import { stateCounterFilePath, watchDbChanges, type DbChangeWatch } from './db-change.js';
 
 // ---------------------------------------------------------------------------
@@ -294,5 +296,177 @@ describe('worklist event-driven DB-change watch (WL-0MV5CBO820024S5A F1)', () =>
 
     await quit(p);
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gated-refresh integration (WL-0MV5CBPI400508MK F3)
+// ---------------------------------------------------------------------------
+// These tests exercise the WATCH -> gated refresh path with a synchronously
+// controllable watch (the real `watchDbChanges` debounce is covered in
+// db-change.test.ts). They pin the guarantees the parent epic
+// (WL-0MV02VA29009WBEN) requires: the watch feeds the EXISTING gates,
+// consumes the DB-change signal so the 30 s tick stays idle, and a burst of
+// watch callbacks during an in-flight refresh coalesces into one trailing run.
+
+describe('worklist gated watch refresh (WL-0MV5CBPI400508MK F3)', () => {
+  interface ControllableWatch {
+    dbWatch: ReturnType<typeof vi.fn>;
+    fire: () => void;
+    dispose: ReturnType<typeof vi.fn>;
+  }
+
+  /** A watch whose onChange is invoked explicitly by the test. */
+  function controllableWatch(): ControllableWatch {
+    let onChange: (() => void) | null = null;
+    const dispose = vi.fn();
+    const dbWatch = vi.fn((_cache: string, _dir: string, cb: () => void): DbChangeWatch => {
+      onChange = cb;
+      return { active: true, dispose };
+    });
+    return { dbWatch, dispose, fire: () => onChange?.() };
+  }
+
+  /** Benign exec mock: `herdr tab get` reports the requested focus state. */
+  function makeGateExecMock(tabFocused: boolean): ReturnType<typeof vi.fn> {
+    return vi.fn(async (_bin: string, args: string[]) => {
+      if (args[0] === 'tab' && args[1] === 'get') {
+        return {
+          stdout: JSON.stringify({ result: { tab: { focused: tabFocused } } }),
+          stderr: '',
+        };
+      }
+      return { stdout: JSON.stringify({ workItems: [] }), stderr: '' };
+    });
+  }
+
+  /**
+   * Start the pane with a real worklog/cache dir (so the `DbChangeTracker`
+   * is created), an armed controllable watch, and a seeded state counter.
+   */
+  async function startPane(opts: {
+    exec: ReturnType<typeof vi.fn>;
+    fetcher: ReturnType<typeof vi.fn>;
+    watch: ControllableWatch;
+    shortcuts?: Parameters<typeof runWorklistTui>[2];
+  }): Promise<{ p: Promise<WorkItem | undefined> }> {
+    setExecFileAsync(opts.exec as any);
+    const cacheDir = tempDir('wl-watch-cache-');
+    const worklogDir = tempDir('wl-watch-log-');
+    process.env.WL_CACHE_DIR = cacheDir;
+    setWorklogDir(worklogDir);
+
+    const counterFile = stateCounterFilePath(cacheDir, worklogDir);
+    fsReal.mkdirSync(path.dirname(counterFile), { recursive: true });
+    fsReal.writeFileSync(counterFile, JSON.stringify({ state: 1 }), 'utf-8');
+
+    const p = runWorklistTui(opts.fetcher as any, [], opts.shortcuts, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+      dbWatch: opts.watch.dbWatch as any,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    return { p };
+  }
+
+  it('a watch-triggered refresh consumes the DB-change signal, so the next 30 s tick is a no-op', async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => []);
+    const watch = controllableWatch();
+    const { p } = await startPane({ exec: makeGateExecMock(true), fetcher, watch });
+    expect(watch.dbWatch).toHaveBeenCalledTimes(1);
+
+    // The watch observes an agent write and refreshes immediately (no tick).
+    watch.fire();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // The next periodic tick must NOT refresh again: the change was already
+    // reflected and its signal consumed (idle zero-spawn, WL-0MSJ1OLTL009N4IQ).
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await quit(p);
+  });
+
+  it('typing gate: the watch skips refresh while a text-input overlay is open, then resumes', async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => []);
+    const watch = controllableWatch();
+    const { p } = await startPane({
+      exec: makeGateExecMock(true),
+      fetcher,
+      watch,
+      shortcuts: loadShortcutConfig(),
+    });
+    fetcher.mockClear();
+
+    // Open the `s` Search form (a text-input overlay).
+    dataHandler?.(Buffer.from('s'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    // A watch-triggered refresh must be skipped while typing.
+    watch.fire();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    // Closing the overlay lets the next tick refresh again.
+    dataHandler?.(Buffer.from('\x1b'));
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).toHaveBeenCalled();
+
+    await quit(p);
+  });
+
+  it('visibility gate: the watch skips refresh while the pane tab is hidden', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_TAB_ID = 'w1:t11';
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => []);
+    const watch = controllableWatch();
+    const { p } = await startPane({ exec: makeGateExecMock(false), fetcher, watch });
+
+    watch.fire();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    // The fallback 30 s tick is gated while hidden too (pause-when-hidden).
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetcher).not.toHaveBeenCalled();
+
+    await quit(p);
+  });
+
+  it('coalesces a burst of watch callbacks during an in-flight refresh into one trailing refresh', async () => {
+    vi.useFakeTimers();
+    let resolveFetch!: (items: WorkItem[]) => void;
+    const deferred = new Promise<WorkItem[]>((resolve) => {
+      resolveFetch = resolve;
+    });
+    const fetcher = vi.fn((): Promise<WorkItem[]> => deferred);
+    const watch = controllableWatch();
+    const { p } = await startPane({ exec: makeGateExecMock(true), fetcher, watch });
+    fetcher.mockClear();
+
+    // First fire starts a refresh that stays in-flight.
+    watch.fire();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // A burst of further fires while in-flight must coalesce, not queue.
+    for (let i = 0; i < 5; i++) {
+      watch.fire();
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // Exactly ONE trailing refresh runs when the in-flight cycle settles.
+    resolveFetch([]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    await quit(p);
   });
 });
