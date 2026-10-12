@@ -23,6 +23,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:timings": "node ./scripts/test-timings.cjs",
+    "test:mock-budget": "tsx scripts/check-mock-budget.ts",
     "benchmark:sort-index": "tsx scripts/benchmark-sort-index.ts",
     "benchmark:wl-next": "tsx bench/wl-next-perf.ts",
     "benchmark:wl-next:json": "tsx bench/wl-next-perf.ts --json",

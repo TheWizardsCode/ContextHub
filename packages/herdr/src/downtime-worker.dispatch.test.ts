@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { dispatchDowntimeWork, buildDowntimePaneArgs } from './downtime-worker.js';
+import { dispatchDowntimeWork, buildDowntimePaneArgs, type DowntimeWorkerDeps } from './downtime-worker.js';
 import { makeDeps } from './downtime-worker.fixtures.js';
 import type { StalledPaneCandidate } from './stalled-work.js';
 
@@ -450,6 +450,39 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
     status: 'open',
   };
 
+  /**
+   * Build deps for a single project root: its project workspace, its item-ID
+   * tab anchor and a plan candidate. Factored out of the per-project
+   * separation test so each root's setup stays small and within the per-test
+   * mock budget (WL-0MV4VSNI00002WFM).
+   */
+  const makeRootDeps = (opts: {
+    workspaceId: string;
+    paneId: string;
+    tabId: string;
+    anchorTabId: string;
+    anchorPaneId: string;
+    itemId: string;
+    itemTitle: string;
+  }): DowntimeWorkerDeps =>
+    makeDeps({
+      resolveProjectWorkspace: vi
+        .fn()
+        .mockResolvedValue({ paneId: opts.paneId, workspaceId: opts.workspaceId, tabId: opts.tabId }),
+      getItemTabAnchor: vi
+        .fn()
+        .mockResolvedValue({ tabId: opts.anchorTabId, paneId: opts.anchorPaneId }),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: {
+          id: opts.itemId,
+          title: opts.itemTitle,
+          stage: 'intake_complete',
+          status: 'open',
+        },
+      }),
+    });
+
   it('AC1/AC2: resolves the project workspace, ensures the item-ID tab and forwards its anchor pane', async () => {
     const resolveProjectWorkspace = vi
       .fn()
@@ -597,25 +630,23 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
   });
 
   it('AC1/AC2 per-project separation: each root resolves its own workspace and tab', async () => {
-    const wl = makeDeps({
-      resolveProjectWorkspace: vi
-        .fn()
-        .mockResolvedValue({ paneId: 'wC:pB', workspaceId: 'wC', tabId: 'wC:t1' }),
-      getItemTabAnchor: vi.fn().mockResolvedValue({ tabId: 'wC:tWL-1', paneId: 'wC:tWL-1:p1' }),
-      getNextItem: vi.fn().mockResolvedValue({
-        ok: true,
-        candidate: { id: 'WL-1', title: 'wl', stage: 'intake_complete', status: 'open' },
-      }),
+    const wl = makeRootDeps({
+      workspaceId: 'wC',
+      paneId: 'wC:pB',
+      tabId: 'wC:t1',
+      anchorTabId: 'wC:tWL-1',
+      anchorPaneId: 'wC:tWL-1:p1',
+      itemId: 'WL-1',
+      itemTitle: 'wl',
     });
-    const tce = makeDeps({
-      resolveProjectWorkspace: vi
-        .fn()
-        .mockResolvedValue({ paneId: 'wY:pW', workspaceId: 'wY', tabId: 'wY:t1' }),
-      getItemTabAnchor: vi.fn().mockResolvedValue({ tabId: 'wY:tTCE-2', paneId: 'wY:tTCE-2:p1' }),
-      getNextItem: vi.fn().mockResolvedValue({
-        ok: true,
-        candidate: { id: 'TCE-2', title: 'tce', stage: 'intake_complete', status: 'open' },
-      }),
+    const tce = makeRootDeps({
+      workspaceId: 'wY',
+      paneId: 'wY:pW',
+      tabId: 'wY:t1',
+      anchorTabId: 'wY:tTCE-2',
+      anchorPaneId: 'wY:tTCE-2:p1',
+      itemId: 'TCE-2',
+      itemTitle: 'tce',
     });
 
     const first = await dispatchDowntimeWork(wl, { model: 'plan', cwd: '/repo-wl' });

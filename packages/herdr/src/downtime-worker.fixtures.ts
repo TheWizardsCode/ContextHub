@@ -347,6 +347,26 @@ export const timeoutErrorFixture: Error = Object.assign(
 
 // ── Shared test scaffolding (WL-0MV4V0V8Z003PBQ2) ─────────────────────
 
+// ── Per-test mock budget (WL-0MV4VSNI00002WFM) ────────────────────────
+//
+// The split downtime-worker suite allows at most **5** `vi.fn()` calls per
+// `it()`/`test()` block. The ~20 mocks `makeDeps()` creates are shared
+// infrastructure and are excluded — the budget bounds the *per-test
+// overrides* a reader must hold in their head, which is where the original
+// 13k-line file's 664 mocks came from.
+//
+// Rationale: analysis of the 718 split tests found an average of ~5.2 mocks
+// per original describe block and a maximum of 6 per test. A cap of 5 keeps
+// every focused test green while forcing genuinely overloaded tests to
+// extract setup (the two original 6-mock tests now share a helper instead).
+//
+// Enforcement: `npm run test:mock-budget` (`scripts/check-mock-budget.ts`,
+// Option B of the intake) parses each `downtime-worker*.test.ts` with the
+// TypeScript compiler API and fails when any test exceeds the cap. The same
+// check runs in the unit suite (`tests/unit/mock-budget.test.ts`), so it is
+// part of the normal test gate. Extract extra setup into this module (or a
+// local helper) rather than raising the cap.
+
 /**
  * Default mocked `DowntimeWorkerDeps` for dispatch tests, with every dep
  * answering a neutral "nothing to do" result so a test only overrides the

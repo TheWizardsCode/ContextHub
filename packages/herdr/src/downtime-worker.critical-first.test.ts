@@ -1103,13 +1103,11 @@ describe('needsProducerReview exclusion', () => {
     });
     it('dispatch falls through when every candidate in every tier needs review (no-candidate, not wl-error)', async () => {
       // Every tier returns a flagged candidate (or empty) → no-candidate, never a strike.
+      // Only the audit tier needs an explicit candidate: every other tier is
+      // left at its neutral `makeDeps` default (empty), which already models
+      // "no candidate".
       const deps2 = makeDeps({
         getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: { id: 'A-B', title: 'A-B', stage: 'audit', needsProducerReview: true } }),
-        getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
-        hasFreshAudit: vi.fn().mockResolvedValue(false),
-        getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
-        getNextImplementCandidate: vi.fn().mockResolvedValue(null),
-        getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
       });
       // Audit tier candidate is review-gated → skipped → falls through to no-candidate.
       const outcome = await dispatchDowntimeWork(deps2, { model: 'plan', cwd: '/repo' });
