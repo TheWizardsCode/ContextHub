@@ -37,7 +37,7 @@ describe('DEFAULT_RECOVERY_CONFIG', () => {
   it('server error defaults to retried with backoff', () => {
     expect(DEFAULT_RECOVERY_CONFIG.serverError.enabled).toBe(true);
     expect(DEFAULT_RECOVERY_CONFIG.serverError.baseDelayMs).toBe(2000);
-    expect(DEFAULT_RECOVERY_CONFIG.serverError.maxDelayMs).toBe(60000);
+    expect(DEFAULT_RECOVERY_CONFIG.serverError.maxDelayMs).toBe(600000); // 10-minute ceiling (WL-0MUY9GDPG0062NWF)
   });
 
   it('auth error defaults to NOT retried', () => {
@@ -56,7 +56,7 @@ describe('DEFAULT_RECOVERY_CONFIG', () => {
   it('timeout defaults to retried with backoff', () => {
     expect(DEFAULT_RECOVERY_CONFIG.timeout.enabled).toBe(true);
     expect(DEFAULT_RECOVERY_CONFIG.timeout.baseDelayMs).toBe(2000);
-    expect(DEFAULT_RECOVERY_CONFIG.timeout.maxDelayMs).toBe(60000);
+    expect(DEFAULT_RECOVERY_CONFIG.timeout.maxDelayMs).toBe(600000); // 10-minute ceiling (WL-0MUY9GDPG0062NWF)
   });
 
   it('terminated defaults to NOT retried', () => {

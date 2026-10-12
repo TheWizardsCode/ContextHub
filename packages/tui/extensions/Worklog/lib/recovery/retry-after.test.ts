@@ -5,7 +5,7 @@
  * - Parsing the proxy's `retry_after` body field and `Retry-After` header
  *   (delta-seconds and HTTP-date forms), including escaped JSON.
  * - Honouring the hint in `calculateDelay` / `computeRetryDelay`, bounded by
- *   the configured cap (default 60s), with upward-only jitter.
+ *   the configured cap (default 10 minutes), with upward-only jitter.
  * - Malformed/missing hints falling back to the existing exponential backoff,
  *   unchanged.
  * - Surviving a full 180s startup ramp.
@@ -129,14 +129,14 @@ describe('calculateDelay with a server hint', () => {
   });
 
   it('caps the server-requested delay at the configured maximum', () => {
-    const config: BackoffConfig = { baseDelayMs: 2000, maxDelayMs: 60000, multiplier: 2 };
-    expect(calculateDelay(1, config, 90_000, noJitter)).toBe(60_000);
+    const config: BackoffConfig = { baseDelayMs: 2000, maxDelayMs: 600000, multiplier: 2 };
+    expect(calculateDelay(1, config, 900_000, noJitter)).toBe(600_000);
   });
 
   it('applies upward-only jitter to hint-derived delays', () => {
     const config: BackoffConfig = {
       baseDelayMs: 2000,
-      maxDelayMs: 60000,
+      maxDelayMs: 600000,
       multiplier: 2,
       serverHintJitterRatio: 0.25,
     };
@@ -148,7 +148,7 @@ describe('calculateDelay with a server hint', () => {
 
   it('does not let the local backoff escalate a hint-derived delay across attempts', () => {
     // A constant 7s hint must yield ~7s on every attempt, even at attempt 6
-    // where the local exponential would otherwise be capped at 60s.
+    // where the local exponential would otherwise be capped at 10 minutes.
     for (const attempt of [1, 2, 3, 4, 5, 6, 10]) {
       expect(calculateDelay(attempt, DEFAULT_BACKOFF_CONFIG, 7000, () => 0)).toBe(7000);
     }
@@ -157,7 +157,7 @@ describe('calculateDelay with a server hint', () => {
   it('never retries sooner than the hint under maximum jitter', () => {
     const config: BackoffConfig = {
       baseDelayMs: 2000,
-      maxDelayMs: 60000,
+      maxDelayMs: 600000,
       multiplier: 2,
       serverHintJitterRatio: 0.5,
     };
@@ -168,7 +168,7 @@ describe('calculateDelay with a server hint', () => {
   it('honours a zero jitter ratio exactly', () => {
     const config: BackoffConfig = {
       baseDelayMs: 2000,
-      maxDelayMs: 60000,
+      maxDelayMs: 600000,
       multiplier: 2,
       serverHintJitterRatio: 0,
     };
@@ -178,12 +178,12 @@ describe('calculateDelay with a server hint', () => {
   it('caps a jittered hint-derived delay at the maximum', () => {
     const config: BackoffConfig = {
       baseDelayMs: 2000,
-      maxDelayMs: 60000,
+      maxDelayMs: 600000,
       multiplier: 2,
       serverHintJitterRatio: 0.25,
     };
-    // floor = 60000 (hint), jitter pushes above, cap brings it back to 60000.
-    expect(calculateDelay(1, config, 60_000, () => 1)).toBe(60_000);
+    // floor = 600000 (hint), jitter pushes above, cap brings it back to 600000.
+    expect(calculateDelay(1, config, 600_000, () => 1)).toBe(600_000);
   });
 });
 
@@ -193,7 +193,7 @@ describe('calculateDelay with a server hint', () => {
 // "All providers exhausted" 503 that, during overnight UTC gaps, is minutes
 // to hours. `BackoffConfig.serverHintMaxDelayMs` (default 6h = 21600000ms,
 // documented in retry-logic.ts) bounds those long hints so the client waits
-// the advertised time out instead of re-clamping to the 60s exponential cap.
+// the advertised time out instead of re-clamping to the 10-minute exponential cap.
 
 describe('calculateDelay with a long server hint (server-hint ceiling)', () => {
   const ONE_HOUR_MS = 60 * 60 * 1000;
@@ -210,7 +210,7 @@ describe('calculateDelay with a long server hint (server-hint ceiling)', () => {
     );
   });
 
-  it('does not clamp a long hint to the 60s exponential cap (AC1)', () => {
+  it('does not clamp a long hint to the 10-minute exponential cap (AC1)', () => {
     const delay = calculateDelay(1, DEFAULT_BACKOFF_CONFIG, ONE_HOUR_MS, () => 0);
     expect(delay).toBe(ONE_HOUR_MS);
     expect(delay).toBeGreaterThan(DEFAULT_BACKOFF_CONFIG.maxDelayMs);
@@ -226,7 +226,7 @@ describe('calculateDelay with a long server hint (server-hint ceiling)', () => {
   it('allows the server-hint ceiling to be configured per instance', () => {
     const config: BackoffConfig = {
       baseDelayMs: 2000,
-      maxDelayMs: 60000,
+      maxDelayMs: 600000,
       multiplier: 2,
       serverHintMaxDelayMs: 2 * ONE_HOUR_MS,
     };
@@ -241,8 +241,8 @@ describe('calculateDelay with a long server hint (server-hint ceiling)', () => {
 
   it('keeps the no-hint exponential path capped at maxDelayMs (AC4)', () => {
     // The larger server-hint ceiling must not leak into the no-hint path.
-    expect(calculateDelay(100, DEFAULT_BACKOFF_CONFIG)).toBe(60_000);
-    expect(calculateDelay(50, DEFAULT_BACKOFF_CONFIG, undefined, () => 1)).toBe(60_000);
+    expect(calculateDelay(100, DEFAULT_BACKOFF_CONFIG)).toBe(600_000); // 10-minute ceiling
+    expect(calculateDelay(50, DEFAULT_BACKOFF_CONFIG, undefined, () => 1)).toBe(600_000);
   });
 
   it('applies upward-only jitter to long hints (AC5)', () => {
@@ -282,7 +282,7 @@ describe('calculateDelay without a usable hint', () => {
     expect(calculateDelay(1)).toBe(2000);
     expect(calculateDelay(2)).toBe(4000);
     expect(calculateDelay(3)).toBe(8000);
-    expect(calculateDelay(100)).toBe(60000);
+    expect(calculateDelay(100)).toBe(600000); // 10-minute ceiling (WL-0MUY9GDPG0062NWF)
   });
 
   it('treats NaN/Infinity/negative hints as absent', () => {
@@ -339,7 +339,7 @@ describe('startup-ramp survival (AC4)', () => {
     let attempt = 0;
     const config: BackoffConfig = {
       baseDelayMs: 2000,
-      maxDelayMs: 60000,
+      maxDelayMs: 600000,
       multiplier: 2,
       serverHintJitterRatio: 0.25,
     };
@@ -362,7 +362,7 @@ describe('startup-ramp survival (AC4)', () => {
   it('never waits less than the largest hint seen on an attempt', () => {
     const config: BackoffConfig = {
       baseDelayMs: 2000,
-      maxDelayMs: 60000,
+      maxDelayMs: 600000,
       multiplier: 2,
       serverHintJitterRatio: 0.25,
     };

@@ -10,6 +10,11 @@
  * - RetryState and ContinuationState managers
  * - Interruptible sleep for abort/session-switch detection
  * - Helper to find last assistant message in session entries
+ *
+ * The retry-loop backoff ceiling is 10 minutes (600 000 ms): for outages
+ * lasting longer than a few minutes the loop keeps retrying automatically
+ * but with a backoff that settles at up to one attempt per 10 minutes
+ * (WL-0MUY9GDPG0062NWF).
  */
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
@@ -65,7 +70,7 @@ export const DEFAULT_SERVER_HINT_MAX_DELAY_MS = 6 * 60 * 60 * 1000;
 
 export const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
   baseDelayMs: 2000,
-  maxDelayMs: 60000,
+  maxDelayMs: 600000, // 10-minute ceiling for the retry-loop exponential backoff (WL-0MUY9GDPG0062NWF)
   multiplier: 2,
   serverHintJitterRatio: DEFAULT_SERVER_HINT_JITTER_RATIO,
   serverHintMaxDelayMs: DEFAULT_SERVER_HINT_MAX_DELAY_MS,
@@ -246,7 +251,7 @@ export function createRetryHintCapturingFetch(
  * @remarks
  * The server hint is authoritative when present. An earlier revision used
  * `max(exponential, serverHintMs)`, which let the local exponential override
- * the hint once it outgrew it (e.g. `Retry-After: 7` -> retry at 32s/60s).
+ * the hint once it outgrew it (e.g. `Retry-After: 7` -> retry at 32s/10min).
  * That is the behaviour the producer rejected as "the local retry mechanism
  * overriding the recommended wait duration".
  *

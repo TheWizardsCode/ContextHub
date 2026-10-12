@@ -232,7 +232,7 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
     enabled: true,
     patterns: DEFAULT_SERVER_ERROR_PATTERNS,
     baseDelayMs: 2000,
-    maxDelayMs: 60000,
+    maxDelayMs: 600000, // 10-minute ceiling, aligned with DEFAULT_BACKOFF_CONFIG (WL-0MUY9GDPG0062NWF)
   },
   authError: {
     enabled: false,
@@ -257,7 +257,7 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
     enabled: true,
     patterns: DEFAULT_TIMEOUT_PATTERNS,
     baseDelayMs: 2000,
-    maxDelayMs: 60000,
+    maxDelayMs: 600000, // 10-minute ceiling, aligned with DEFAULT_BACKOFF_CONFIG (WL-0MUY9GDPG0062NWF)
   },
   terminated: {
     enabled: false,

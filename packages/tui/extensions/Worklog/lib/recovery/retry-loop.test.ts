@@ -26,7 +26,7 @@ import {
 describe('calculateDelay', () => {
   it('returns base delay for attempt 1', () => {
     expect(calculateDelay(1)).toBe(2000);
-    expect(calculateDelay(1, { baseDelayMs: 1000, maxDelayMs: 60000, multiplier: 2 })).toBe(1000);
+    expect(calculateDelay(1, { baseDelayMs: 1000, maxDelayMs: 600000, multiplier: 2 })).toBe(1000);
   });
 
   it('doubles for attempt 2 with default multiplier', () => {
@@ -38,7 +38,7 @@ describe('calculateDelay', () => {
   });
 
   it('capped at max delay for high attempt numbers', () => {
-    expect(calculateDelay(100)).toBe(60000); // default max
+    expect(calculateDelay(100)).toBe(600000); // 10-minute default max (WL-0MUY9GDPG0062NWF)
     expect(calculateDelay(10, { baseDelayMs: 1000, maxDelayMs: 5000, multiplier: 3 })).toBe(5000);
   });
 
@@ -50,7 +50,7 @@ describe('calculateDelay', () => {
   });
 
   it('handles custom multiplier', () => {
-    const config: BackoffConfig = { baseDelayMs: 1000, maxDelayMs: 60000, multiplier: 3 };
+    const config: BackoffConfig = { baseDelayMs: 1000, maxDelayMs: 600000, multiplier: 3 };
     expect(calculateDelay(1, config)).toBe(1000);
     expect(calculateDelay(2, config)).toBe(3000);
     expect(calculateDelay(3, config)).toBe(9000);
@@ -396,8 +396,8 @@ describe('interruptibleSleep (long waits)', () => {
 // ── Backoff config shape (AC7) ────────────────────────────────────────
 
 describe('DEFAULT_BACKOFF_CONFIG (server-hint ceiling)', () => {
-  it('keeps the 60s exponential cap and adds a 6h server-hint ceiling (AC7)', () => {
-    expect(DEFAULT_BACKOFF_CONFIG.maxDelayMs).toBe(60_000);
+  it('uses a 10-minute exponential cap and 6h server-hint ceiling (AC7)', () => {
+    expect(DEFAULT_BACKOFF_CONFIG.maxDelayMs).toBe(600_000); // 10-minute ceiling (WL-0MUY9GDPG0062NWF)
     expect(DEFAULT_BACKOFF_CONFIG.serverHintMaxDelayMs).toBe(21_600_000);
   });
 });
