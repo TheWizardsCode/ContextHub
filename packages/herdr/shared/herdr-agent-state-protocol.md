@@ -2,8 +2,8 @@
 
 A shared specification for how Herdr plugins report agent identity and state
 transitions via a Unix domain socket. This protocol is used by multiple Herdr
-plugins across different repositories (e.g., `herdr-podcast-editor` in
-open_source_llm, and planned ContextHub Rust migration).
+plugins across different repositories (e.g., `herdr-notes` and the ContextHub
+`worklog-selection-list` plugin).
 
 ## Overview
 
@@ -81,8 +81,8 @@ Sent to report an agent's presence and current state.
 | Field | Type | Required | Description |
 |---|---|---|---|
 | `pane_id` | string | yes | The pane identifier from `HERDR_PANE_ID` |
-| `source` | string | yes | Integration tracking identifier, e.g. `"herdr:herdr-podcast-editor"` |
-| `agent` | string | yes | Agent name, e.g. `"herdr-podcast-editor"` |
+| `source` | string | yes | Integration tracking identifier, e.g. `"herdr:herdr-notes"` |
+| `agent` | string | yes | Agent name, e.g. `"herdr-notes"` |
 | `state` | string | yes | One of `"idle"`, `"working"`, `"blocked"` |
 | `seq` | integer | yes | Monotonically increasing sequence number |
 | `message` | string | no | Optional human-readable status (e.g. `"Generating TTS..."`) |
@@ -139,7 +139,7 @@ herdr:<source>:<unix_timestamp_millis>:<counter_hex>
 
 Where:
 
-- `<source>` is integration tracking identifier (e.g., `herdr:herdr-podcast-editor`)
+- `<source>` is integration tracking identifier (e.g., `herdr:herdr-notes`)
 - `<unix_timestamp_millis>` is the current system time in milliseconds since Unix epoch
 - `<counter_hex>` is a thread-local integer counter, incremented with each ID generation, formatted in hexadecimal
 
@@ -245,8 +245,7 @@ sequenceDiagram
 
 ### Rust
 
-The Rust implementation lives in `herdr.rs` and is used by the
-`herdr-podcast-editor`. Key design decisions:
+The Rust implementation lives in `herdr.rs`. Key design decisions:
 
 - **`HerdrAgent::new()`** returns `Option<HerdrAgent>` — `None` when env vars
   are missing (no-op outside Herdr pane)
@@ -334,6 +333,6 @@ Event types include `pane_agent_status_changed`, `pane_focused`,
 
 ## Related
 
-- Reference Rust implementation: `herdr.rs` in `herdr-podcast-editor`
+- Reference Rust implementation: `herdr.rs`
 - Shared scripts: `packages/herdr/shared/` in ContextHub
 - Git submodule consumption: `packages/ContextHub/packages/herdr/shared/`

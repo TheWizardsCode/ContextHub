@@ -7,16 +7,19 @@ import { spawnSync } from 'node:child_process';
 // The exact keybinding block scripts/install-herdr.sh must insert.
 const KEYBINDING_BLOCK = `[[keys.command]]
 key = "prefix+l"
-command = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
+command = "herdr plugin action invoke worklog-selection-list.open-worklog-tab"
 description = "Open the Worklog tab (Worklog work item selection pane)."
 `;
 
 // Marker the script uses for its existence check.
-const COMMAND_MARKER = 'worklog-selection-list.open-podcast-editor-tab';
+const COMMAND_MARKER = 'worklog-selection-list.open-worklog-tab';
 
-// Legacy v0.1.x binding that prefix+l previously pointed at; install-herdr.sh
-// migrates it in-place to the new action (never duplicates the key).
+// Legacy bindings that prefix+l previously pointed at; install-herdr.sh
+// migrates each in-place to the new action (never duplicates the key):
+//   - open-worklist: the original v0.1.x action
+//   - open-podcast-editor-tab: the intermediate (misnamed) action
 const LEGACY_BINDING = 'herdr plugin action invoke worklog-selection-list.open-worklist';
+const LEGACY_PODCAST_BINDING = 'herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab';
 
 function runScript(env: Record<string, string>): {
   status: number;
@@ -188,6 +191,25 @@ describe('install-herdr script', () => {
     expect(countOccurrences(content, COMMAND_MARKER)).toBe(1);
     expect(countOccurrences(content, '[[keys.command]]')).toBe(1);
     expect(content).toContain('command = "herdr plugin action invoke ' + COMMAND_MARKER + '"');
+  });
+
+  it('migrates a legacy open-podcast-editor-tab binding in-place to the new action', () => {
+    const tempDir = makeTempDir('worklog-herdr-migrate-podcast-');
+    const configPath = path.join(tempDir, 'config.toml');
+    const legacyBlock = `[[keys.command]]\nkey = "prefix+l"\ncommand = "${LEGACY_PODCAST_BINDING}"\ndescription = "Open the Podcast Editing tab (Worklog work item selection pane)."\n`;
+    fs.writeFileSync(configPath, legacyBlock);
+
+    const result = runScript({ HERDR_CONFIG_PATH: configPath });
+    expect(result.status).toBe(0);
+    const content = fs.readFileSync(configPath, 'utf8');
+    // Intermediate misnamed action replaced in-place; no duplicate keybinding.
+    expect(countOccurrences(content, LEGACY_PODCAST_BINDING)).toBe(0);
+    expect(countOccurrences(content, COMMAND_MARKER)).toBe(1);
+    expect(countOccurrences(content, '[[keys.command]]')).toBe(1);
+    expect(content).toContain('command = "herdr plugin action invoke ' + COMMAND_MARKER + '"');
+    // The stale "Podcast Editing" description is normalised too.
+    expect(content).not.toContain('Podcast Editing');
+    expect(content).toContain('description = "Open the Worklog tab (Worklog work item selection pane)."');
   });
 
   it('links the plugin from the main checkout when run inside a linked worktree', () => {

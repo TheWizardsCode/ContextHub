@@ -19,9 +19,10 @@
 #     dependency install (step 0) also targets the MAIN checkout for the
 #     same reason (WL-0MSRLH52R003CK49).
 #   - The keybinding block is inserted only when a binding for
-#     `worklog-selection-list.open-podcast-editor-tab` is not already present.
-#   - A legacy `open-worklist` prefix+l binding is migrated in-place to the
-#     new open-podcast-editor-tab action (never duplicates the key).
+#     `worklog-selection-list.open-worklog-tab` is not already present.
+#   - Legacy `open-worklist` and `open-podcast-editor-tab` prefix+l bindings
+#     are migrated in-place to the new open-worklog-tab action (never
+#     duplicates the key).
 #   - Missing herdr binary or an unwritable config only warn (exit 0), so
 #     `npm run build` never fails in CI/offline environments.
 set -euo pipefail
@@ -54,14 +55,16 @@ CONFIG_PATH="${HERDR_CONFIG_PATH:-${HOME}/.config/herdr/config.toml}"
 # The keybinding block to insert (only when the binding is absent).
 KEYBINDING_BLOCK='[[keys.command]]
 key = "prefix+l"
-command = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
+command = "herdr plugin action invoke worklog-selection-list.open-worklog-tab"
 description = "Open the Worklog tab (Worklog work item selection pane)."'
 
-# Legacy binding command (v0.1.x) that prefix+l previously pointed at.
-# Migrated in-place to the new action so re-running a build never leaves
-# a stale duplicate keybinding.
-LEGACY_BINDING='herdr plugin action invoke worklog-selection-list.open-worklist'
-NEW_BINDING='herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab'
+# Legacy binding commands that prefix+l previously pointed at: the original
+# `open-worklist` action and the intermediate `open-podcast-editor-tab`
+# action. Both are migrated in-place to the new action so re-running a build
+# never leaves a stale duplicate keybinding.
+LEGACY_BINDING_OPEN_WORKLIST='herdr plugin action invoke worklog-selection-list.open-worklist'
+LEGACY_BINDING_OPEN_PODCAST_TAB='herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab'
+NEW_BINDING='herdr plugin action invoke worklog-selection-list.open-worklog-tab'
 
 # ── Helper: best-effort config reload ──────────────────────────────────────
 # WL-0MSHND11O007FKOU: herdr loads its config once at startup; after we
@@ -127,22 +130,34 @@ if grep -qF "${NEW_BINDING}" "${CONFIG_PATH}" 2>/dev/null; then
   exit 0
 fi
 
-# Migrate a legacy prefix+l binding (open-worklist) to the new action so
-# the podcast editing tab name takes effect without a manual config edit.
-if grep -qF "${LEGACY_BINDING}" "${CONFIG_PATH}" 2>/dev/null; then
+# Migrate a legacy prefix+l binding (open-worklist or open-podcast-editor-tab)
+# to the new action so the Worklog tab name takes effect without a manual
+# config edit.
+if grep -qF "${LEGACY_BINDING_OPEN_WORKLIST}" "${CONFIG_PATH}" 2>/dev/null \
+   || grep -qF "${LEGACY_BINDING_OPEN_PODCAST_TAB}" "${CONFIG_PATH}" 2>/dev/null; then
   if python3 - "${CONFIG_PATH}" <<'PY'
 import sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
-new = "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab"
-old = "herdr plugin action invoke worklog-selection-list.open-worklist"
-if old in text:
-    with open(path, "w") as f:
-        f.write(text.replace(old, new))
+new = "herdr plugin action invoke worklog-selection-list.open-worklog-tab"
+olds = [
+    "herdr plugin action invoke worklog-selection-list.open-worklist",
+    "herdr plugin action invoke worklog-selection-list.open-podcast-editor-tab",
+]
+for old in olds:
+    text = text.replace(old, new)
+# Normalise the stale intermediate description that accompanied the misnamed
+# action, so no "Podcast Editing" wording survives the migration.
+text = text.replace(
+    'description = "Open the Podcast Editing tab (Worklog work item selection pane)."',
+    'description = "Open the Worklog tab (Worklog work item selection pane)."',
+)
+with open(path, "w") as f:
+    f.write(text)
 PY
   then
-    echo "Migrated herdr keybinding (prefix+l -> worklog-selection-list.open-podcast-editor-tab) in ${CONFIG_PATH}"
+    echo "Migrated herdr keybinding (prefix+l -> worklog-selection-list.open-worklog-tab) in ${CONFIG_PATH}"
     try_reload_config
     exit 0
   else
@@ -170,5 +185,5 @@ if ! printf '%s\n' "${KEYBINDING_BLOCK}" >> "${CONFIG_PATH}"; then
   exit 0
 fi
 
-echo "Inserted herdr keybinding (prefix+l -> worklog-selection-list.open-podcast-editor-tab) into ${CONFIG_PATH}"
+echo "Inserted herdr keybinding (prefix+l -> worklog-selection-list.open-worklog-tab) into ${CONFIG_PATH}"
 try_reload_config

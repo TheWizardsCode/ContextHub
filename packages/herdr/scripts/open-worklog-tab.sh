@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# open-podcast-editor-tab.sh — Open the Worklog tab
+# open-worklog-tab.sh — Open the Worklog tab
 #
 # Opens the Worklog work item selection pane in a NEW TAB and renames
 # that tab to "Worklog" so it is instantly recognisable in the tab row
@@ -13,7 +13,7 @@
 # Each invocation opens a new tab — there is deliberately no
 # focus-if-open toggle; only the tab label changes.
 #
-# Usage: open-podcast-editor-tab.sh [cwd]
+# Usage: open-worklog-tab.sh [cwd]
 #   cwd - Optional working directory for the pane (default: resolved from
 #         pane metadata / $PWD, same priority order as open.sh)
 #
