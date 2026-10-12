@@ -1484,6 +1484,39 @@ rather than exiting non-zero on it; the paired `wl` spawn count is the
 regression guard. The harness contract is covered by
 `tests/bench/herdr-refresh-perf.test.ts`.
 
+#### Cold-refresh cost (fewer `wl` spawns)
+
+The default-view refresh once spawned ~5 `wl` processes per cycle (`wl next` +
+two mandatory subsets + actionable count + review-queue state) plus one
+`wl list --parent` per expanded parent. `fetcher.ts` now cuts that to the
+minimum (`WL-0MV5CBQ6L005SPAG`):
+
+- **In-process SQLite reads** — when a worklog dir is resolved and the SQLite
+  store is available (`better-sqlite3` via `@worklog/shared`), the actionable
+  count (`fetchActionableCount`) and every expanded parent's children
+  (`fetchChildrenForItems`) are read in-process from a **fresh**
+  `WorklogDatabase`. The store is loaded lazily, so it stays out of the plugin
+  import graph until a refresh actually needs it, and the in-memory query cache
+  is never trusted across a refresh boundary. When no in-process read is
+  possible the `wl` CLI spawn is the fallback, so behaviour is unchanged on
+  hosts without the store.
+- **Concurrent base + mandatory** — the base `wl next` selection and the
+  mandatory subsets are requested concurrently (`Promise.all`). When a count
+  window applies, the review-queue query and the mandatory `in_review` subset
+  build an **identical** argument vector (`reviewQueueArgs()`), so the
+  in-flight fetch memo (`WL-0MSGAEPOJ002824S`) deduplicates them into one
+  spawn.
+- **One read for all expanded parents** — `fetchChildrenForItems()` resolves
+  every expanded parent in a single in-process query instead of one
+  `wl list --parent` per parent; the per-parent CLI calls remain only as the
+  fallback.
+
+Measured on the benchmark harness (≥ 1000 items, ≥ 20 expanded parents), the
+cold default-view refresh dropped from **25 → 3** `wl` spawns (~88 %), which
+brings the representative end-to-end refresh inside the ≤ 2 s target (see the
+`WL-0MV5CBQ6L005SPAG` verification note and
+[docs/dev/herdr-event-driven-refresh.md](../../docs/dev/herdr-event-driven-refresh.md)).
+
 ### Typing gate (pause background work while a form is open)
 
 While any text-input overlay is open, the auto-refresh and auto-sync timer
