@@ -180,6 +180,29 @@ describe('tab-based active marker (selection list)', () => {
     expect(items[1].status).toBe('completed');
   });
 
+  it('is idempotent: a still-open tab keeps the marker and a closed tab clears it', () => {
+    const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    markItemsActiveByTab(items, new Set([WL]));
+    expect(items[0].status).toBe('in-progress');
+    // Tab still open — a repeated pass must not mistake the marker for the
+    // true status and clobber the base bookkeeping.
+    markItemsActiveByTab(items, new Set([WL]));
+    expect(items[0].status).toBe('in-progress');
+    // Tab closed — the marker clears back to the true worklog status without
+    // any `wl` re-fetch.
+    markItemsActiveByTab(items, new Set());
+    expect(items[0].status).toBe('open');
+    // Tab re-opened — the marker comes back.
+    markItemsActiveByTab(items, new Set([WL]));
+    expect(items[0].status).toBe('in-progress');
+  });
+
+  it('keeps the bookkeeping status out of the serialized item shape', () => {
+    const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    markItemsActiveByTab(items, new Set([WL]));
+    expect(Object.keys(items[0])).toEqual(['id', 'status', 'stage']);
+  });
+
   it('applyActiveTabMarkers scopes the tab lookup to the current workspace', async () => {
     const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
     const seen: Array<string | undefined> = [];

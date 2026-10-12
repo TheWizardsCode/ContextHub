@@ -64,14 +64,22 @@ display overlay:
 
 - `markItemsActiveByTab(items, activeIds)` recursively stamps
   `status = 'in-progress'` on every item whose ID is in the active tab set, so
-  the row renders the in-progress icon and the item is placed in Group N.
+  the row renders the in-progress icon and the item is placed in Group N. It
+  is **idempotent**: each item's pre-marker status is captured on first sight
+  (a non-enumerable `Symbol` property) and restored on every later pass, so a
+  **closed** tab clears the marker back to the true worklog status without a
+  `wl` re-fetch.
 - `applyActiveTabMarkers(items, listTabs, workspaceId)` fetches the workspace
   tabs (fail-open) and applies the marker; the production wiring injects it
   into `runWorklistTui`'s `applyActiveTabMarkers` seam from `index.ts` (the
   same "inject from the caller" pattern as `mergeAgentStates`).
-- The marker is applied on the initial load and on every refresh cycle; it
-  clears the same way — closing the tab removes it from the active set on the
-  next refresh (and the focus-resume hook re-checks immediately).
+- **Update cadence.** Opening or closing a work-item tab does **not** touch the
+  worklog DB, so the DB-change-gated refresh tick can never update this marker
+  for it. The worklist therefore re-applies it on the initial load, on every
+  full refresh, on the `active-tab-marker` scheduler task (the hydrator
+  cadence, `HYDRATOR_INTERVAL_MS`), and on focus-resume. The marker task
+  spawns only `herdr tab list` (never `wl`), so the zero-`wl`-when-idle
+  guarantee holds; it is visibility- and typing-gated like the hydrator.
 - Terminal `in_review`/`completed` items are deliberately left untouched:
   they already carry the review/audit marker and belong in the In Review
   group.
@@ -86,9 +94,10 @@ display overlay:
   (`createProductionHydratorDeps`).
 - `packages/herdr/src/hydrator.test.ts` — unit tests (AC6 map below),
   including the pure tab-marker helper.
-- `packages/herdr/src/worklist.ts` — registers the `hydrate` scheduler task,
-  hooks the focus-resume path, and applies the injected
-  `applyActiveTabMarkers` marker on the initial load and each refresh.
+- `packages/herdr/src/worklist.ts` — registers the `hydrate` and
+  `active-tab-marker` scheduler tasks, hooks the focus-resume path, and
+  applies the injected `applyActiveTabMarkers` marker on the initial load,
+  each refresh, the marker cadence, and focus-resume.
 - `packages/herdr/src/worklist-active-tab-marker.test.ts` — integration tests
   for the selection-list marker wire-up (marker shown/hidden/scope).
 - `packages/herdr/src/index.ts` — production wiring of the

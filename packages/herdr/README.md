@@ -302,8 +302,14 @@ The hydrator detects those claims and releases them:
   set drives the selection list's in-progress marker: an item with an
   exact-match tab is rendered `in-progress` (marker + Group N) even when its
   worklog status is still `open`, and loses the marker when the tab closes.
-  Terminal `in_review`/`completed` items keep their own review marker. Applied
-  on the initial load and every refresh, and re-checked on focus-resume.
+  Terminal `in_review`/`completed` items keep their own review marker. Because
+  opening/closing a work-item tab does not touch the worklog DB (so the
+  DB-change-gated refresh tick cannot update the marker for it), the marker is
+  applied on the initial load and every full refresh, and re-applied by the
+  dedicated `active-tab-marker` scheduler task on the hydrator cadence
+  (`HYDRATOR_INTERVAL_MS`) and on focus-resume. That task spawns only
+  `herdr tab list` (never `wl`), preserving the zero-`wl`-when-idle guarantee;
+  the helper is idempotent, so a closed tab clears the marker.
 
 See [`docs/dev/herdr-hydrator.md`](../../docs/dev/herdr-hydrator.md) for the
 design and test map.

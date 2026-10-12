@@ -36,6 +36,13 @@
  * the demotion loop maintains. The production wiring injects this through
  * the worklist's `applyActiveTabMarkers` seam (`index.ts`).
  *
+ * Opening/closing a work-item tab does NOT touch the worklog DB, so the
+ * DB-change-gated refresh tick can never update this marker for it. The
+ * worklist therefore re-applies the marker on the hydrate cadence and on
+ * focus-resume (see `refreshTabMarkers`), and `markItemsActiveByTab` restores
+ * each item's pre-marker status first so a CLOSED tab clears the marker
+ * without a `wl` re-fetch.
+ *
  * Bounded, responsive runs (WL-0MUY1CXSV008F8TZ, WL-0MUY1CYV6008BQWX,
  * WL-0MUY1CYCB003DTKO): every step races a per-step budget so a hung
  * `wl`/`herdr` child aborts the run and is NAMED (rather than wedging until
@@ -276,14 +283,32 @@ export interface ActiveTabItem {
 }
 
 /**
+ * Non-enumerable per-item record of the work-item's true worklog status
+ * before the tab marker overrode it. A `Symbol` keeps the bookkeeping
+ * invisible to `JSON.stringify`/deep-equal assertions over the work-item
+ * shape; a fresh `wl` fetch yields objects without it, so the true status is
+ * (re)captured on every refresh.
+ */
+const TAB_MARKER_BASE_STATUS = Symbol('tabMarkerBaseStatus');
+
+/** `ActiveTabItem` carrying the tab-marker bookkeeping symbol. */
+type TabMarkedActiveTabItem = ActiveTabItem & {
+  [TAB_MARKER_BASE_STATUS]?: string;
+};
+
+/**
  * Mark every item that has an exact-match workspace tab as `in-progress` so
  * the selection list's in-progress marker (and Group N placement) reflects
  * tab existence, not only the worklog status the demotion loop maintains
  * (WL-0MV1BWETT005GSUJ). Recurses into children.
  *
- * Terminal `in_review`/`completed` items are left untouched: they already
- * carry the review/audit marker and belong in the In Review group, and a
- * lingering tab on a finished item must not re-open it in the list.
+ * Idempotent: each item's pre-marker status is captured on first sight and
+ * restored on every later pass, so calling this again after a tab closes
+ * clears the marker (back to the true worklog status) without a `wl`
+ * re-fetch — the marker refresh spawns only `herdr tab list`. Terminal
+ * `in_review`/`completed` items are left untouched: they already carry the
+ * review/audit marker and belong in the In Review group, and a lingering tab
+ * on a finished item must not re-open it in the list.
  *
  * Pure and synchronous — the caller owns tab fetching (see
  * `applyActiveTabMarkers`).
@@ -293,6 +318,19 @@ export function markItemsActiveByTab(
   activeIds: ReadonlySet<string>,
 ): void {
   for (const item of items) {
+    const marked = item as TabMarkedActiveTabItem;
+    if (TAB_MARKER_BASE_STATUS in marked) {
+      // Restore the true worklog status before re-evaluating, so a tab that
+      // has since closed clears its marker and a still-open tab keeps it.
+      item.status = marked[TAB_MARKER_BASE_STATUS];
+    } else {
+      Object.defineProperty(marked, TAB_MARKER_BASE_STATUS, {
+        value: item.status,
+        writable: true,
+        enumerable: false,
+        configurable: true,
+      });
+    }
     if (activeIds.has(item.id)) {
       const status = (item.status ?? '').toLowerCase();
       const stage = (item.stage ?? '').toLowerCase();

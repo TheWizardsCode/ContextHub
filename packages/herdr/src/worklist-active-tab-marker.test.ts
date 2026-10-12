@@ -201,4 +201,52 @@ describe('worklist — tab-based in-progress marker', () => {
 
     await quit(p);
   });
+
+  it('clears the marker within one hydrator cadence when the tab closes (no DB change, no wl refetch)', async () => {
+    vi.useFakeTimers();
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    process.env.HERDR_WORKSPACE_ID = 'w1';
+    setExecFileAsync(makeExecMock() as any);
+
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
+      { id: ITEM, title: 'Tab is open', status: 'open', stage: 'plan_complete' },
+    ]);
+    // Mutable tab set: the item starts with an exact-ID tab, then the tab is
+    // closed while the worklog DB stays untouched.
+    let tabs: HydratorTab[] = [{ tab_id: 'w1:t1', label: ITEM, workspace_id: 'w1' }];
+    const listTabs = vi.fn(async (): Promise<HydratorTab[]> => tabs);
+
+    const p = runWorklistTui(
+      fetcher,
+      [{ id: ITEM, title: 'Tab is open', status: 'open', stage: 'plan_complete' }],
+      undefined,
+      {
+        autoRefresh: true,
+        // Longer than the marker cadence so ONLY the new active-tab-marker
+        // task (not the DB-gated refresh tick) can update the marker here.
+        refreshIntervalMs: 5 * 60_000,
+        autoSync: false,
+        showHelpText: false,
+        applyActiveTabMarkers: (items) => applyTabMarkersToItems(items, listTabs, 'w1'),
+      },
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    // Initial load marks the item (exact-ID tab is open).
+    expect(writes.join('')).toContain(IN_PROGRESS_ICON);
+
+    // Close the tab; the next marker cadence must clear the marker even though
+    // no worklog write (DB change) happened and the refresh tick is disabled
+    // for the duration of this test.
+    tabs = [];
+    writes.length = 0;
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    const output = writes.join('');
+    expect(output).toContain(ITEM);
+    expect(output).toContain(OPEN_ICON);
+    expect(output).not.toContain(IN_PROGRESS_ICON);
+    expect(listTabs.mock.calls.length).toBeGreaterThan(1);
+
+    await quit(p);
+  });
 });

@@ -492,6 +492,15 @@ export class WorkItemListState {
   /** Currently visible items (after filtering). */
   items: WorkItem[];
 
+  /**
+   * All loaded items (unfiltered). Lets the tab-marker refresh re-evaluate
+   * every item — including those excluded by the active stage/priority
+   * filter — without a `wl` re-fetch (WL-0MV1BWETT005GSUJ).
+   */
+  allItems(): WorkItem[] {
+    return this._allItems;
+  }
+
   /** Currently selected index within `items`. */
   selectedIndex = 0;
 
@@ -4923,6 +4932,20 @@ export async function runWorklistTui(
   });
 
   const state = new WorkItemListState(items, termSize);
+
+  /**
+   * Re-evaluate tab existence against the CURRENT items (no `wl` re-fetch)
+   * and re-render. Called on the hydrate cadence and on focus-resume so an
+   * opened/closed work-item tab changes the marker within one cadence even
+   * though it does not touch the worklog DB (which is why the DB-gated
+   * refresh tick cannot be relied on for this). Spawns only `herdr tab list`,
+   * never `wl`. Fail-open (see `applyTabMarkers`).
+   */
+  const refreshTabMarkers = async (): Promise<void> => {
+    await applyTabMarkers(state.allItems());
+    render();
+  };
+
   // Icons are gated by the getShowIcons getter (re-read on every render so a
   // showIcons setting change applies without a plugin restart — same pattern
   // as getShowHelpText). The renderer is created per-TUI-run with the getter.
@@ -6625,6 +6648,11 @@ export async function runWorklistTui(
         // DB (WL-0MV1BWETT005GSUJ). `paneGate.visible()` is already cached
         // true here, so the runner proceeds without a new visibility probe.
         void runHydrator();
+        // Selection-list marker (WL-0MV1BWETT005GSUJ): re-evaluate tab
+        // existence independently of the DB-change gate below — opening or
+        // closing a work-item tab does not touch the worklog DB, so a
+        // DB-gated refresh can never show/clear its marker.
+        void refreshTabMarkers();
         // DB-change gate: skip the refresh when the DB is unchanged (same as
         // the regular refresh tick).
         if (tracker && !tracker.dbChanged()) {
@@ -6652,6 +6680,26 @@ export async function runWorklistTui(
       await runHydrator();
     },
   });
+
+  // Active-tab marker task (WL-0MV1BWETT005GSUJ): the selection-list marker
+  // must reflect tab existence, but the regular refresh tick is DB-change
+  // gated and opening/closing a work-item tab does NOT touch the worklog DB.
+  // This task re-evaluates tabs on the hydrator cadence and re-renders,
+  // spawning only `herdr tab list` (never `wl`), so the zero-`wl`-when-idle
+  // guarantee holds. Visibility- and typing-gated like the hydrator.
+  if (opts.autoRefresh) {
+    scheduler.addTask({
+      id: 'active-tab-marker',
+      intervalMs: HYDRATOR_INTERVAL_MS,
+      singleFlight: true,
+      runTimeoutMs: HYDRATOR_RUN_TIMEOUT_MS,
+      run: async () => {
+        if (inputActive()) return;
+        if (!(await paneGate.visible())) return;
+        await refreshTabMarkers();
+      },
+    });
+  }
 
   // Downtime-worker task — polls the llama-proxy for idle state and, after
   // the configured idle threshold, dispatches a pi agent pane (parent
