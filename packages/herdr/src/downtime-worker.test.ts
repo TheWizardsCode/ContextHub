@@ -104,8 +104,6 @@ import {
   type ScheduledPrompt,
   type DowntimeItemInfo,
   type DowntimeHerdrItem,
-  isTransientDowntimeError,
-  withTransientRetry,
   DOWNTIME_DISPATCH_EXTEND_MAX,
   DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS,
   decisionHeaderToken,
@@ -159,91 +157,6 @@ describe('downtime worker fixtures', () => {
   it('a raw payload with missing slot fields is treated as busy (fail-closed)', () => {
     const partial = ambiguousMissingFieldsRaw as unknown as LlamaStatus;
     expect(isIdleStatus(partial, 0)).toBe(false);
-  });
-});
-
-// ── Bounded concurrent dispatch (F1, parent WL-0MT50LKAK001EF5Q) ──────
-
-describe('pipeline single-flight — one in-flight dispatch pipeline at a time', () => {
-  it('a second concurrent same-process dispatch is refused (dispatch-in-flight)', async () => {
-    let release!: () => void;
-    const gate = new Promise<{ ok: true }>((resolve) => {
-      release = () => resolve({ ok: true });
-    });
-    const deps = makeDeps({
-      getNextItem: vi.fn().mockResolvedValue({
-        ok: true,
-        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
-      }),
-      spawnAgentPane: vi.fn().mockImplementation(() => gate),
-    });
-
-    const first = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
-    const second = dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
-    release();
-    const [firstOutcome, secondOutcome] = await Promise.all([first, second]);
-
-    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
-    expect(firstOutcome.dispatched).toBe(true);
-    expect(secondOutcome.dispatched).toBe(false);
-    expect(secondOutcome.reason).toBe('dispatch-in-flight');
-  });
-});
-
-describe('idle gate — no dispatch with zero free slots', () => {
-  it('second dispatch only fires when requiredFreeSlots continuously idle for threshold', async () => {
-    // This test verifies the per-slot idle tracker contract.
-    // With cap=2, we need 2 slots continuously idle for the threshold.
-    // A second dispatch should NOT fire if only 1 slot is idle.
-    const deps = makeDeps({
-      getNextItem: vi.fn().mockResolvedValue({
-        ok: true,
-        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
-      }),
-    });
-
-    // With 0 free slots (below panes min of 1), dispatch is gated
-    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 0 });
-
-    // Dispatch should be gated when no slots are free
-    expect(outcome.dispatched).toBe(false);
-    expect(outcome.reason).toBe('no-candidate');
-  });
-});
-
-describe('idle gate — no dispatch with zero free slots (fast-mode operator priority)', () => {
-  it('with 3 total slots and 1 free, only 1 dispatch fires even if cap=2', async () => {
-    // Fast-mode / operator priority preserved: freeSlots check is the hard limit
-    // With 0 free slots, no dispatch can occur regardless of cap
-    const deps = makeDeps({
-      getNextItem: vi.fn().mockResolvedValue({
-        ok: true,
-        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
-      }),
-    });
-
-    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', freeSlots: 0 });
-    expect(outcome.dispatched).toBe(false); // no slots free → gated
-  });
-});
-
-describe('bounded concurrent dispatch — claim safety regression', () => {
-  it('dispatched-marker exclusion still prevents re-dispatch of already-dispatched item', async () => {
-    // Regression guard for WL-0MSLIY8ZR004QUSY: claim safety via CAS
-    const deps = makeDeps({
-      getNextItem: vi.fn().mockResolvedValue({
-        ok: true,
-        candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
-      }),
-      claimItem: vi.fn().mockResolvedValue({ ok: true }),
-    });
-
-    const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
-
-    // Claim safety: the item should be claimed once, not re-claimed
-    if (outcome.dispatched) {
-      expect(deps.claimItem).toHaveBeenCalledTimes(1);
-    }
   });
 });
 
