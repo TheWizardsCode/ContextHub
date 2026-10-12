@@ -177,8 +177,59 @@ Full suite green after deduplication (`370 passed / 1 skipped` files,
 `7952 passed / 5 skipped` tests). No meaningful coverage reduction; all
 removed assertions are accounted for.
 
+## Model-cooldown epic baseline (WL-0MV54ZP3Y00514Y9)
+
+**Work item:** WL-0MV563AU2007FM56 (child of the model-cooldown epic —
+"Cooldown regression guard and full-suite verification")
+**Measured:** 2026-10-12, from the epic worktree with `dist/` built
+(`npm run build`).
+**Command:** `npm --silent test` (vitest run — the complete suite, including
+`packages/`).
+
+The implement/test gates resolve the canonical subset from
+`.pi/test-config.json` (`tests/cli` + `tests/unit`); this record uses the
+**full** vitest suite so the epic's `packages/` changes are covered.
+
+### Before and after the regression guard
+
+The "before" state is the post-cooldown dev base (regression test absent);
+the "after" state adds the withdrawn-drain regression guard
+(`packages/herdr/src/drain-regression-guard.test.ts`, three tests). The only
+functional change in this child is the test file, so the delta is exactly
+the guard.
+
+| Metric | Before | After | Δ |
+|---|---|---|---|
+| Test files (passed / skipped / total) | 373 / 1 / 374 | 374 / 1 / 375 | +1 file |
+| Tests (passed / skipped / total) | 8004 / 5 / 8009 | 8007 / 5 / 8012 | +3 tests |
+| Vitest duration | 256.88 s | 240.13 s | −16.75 s (host load) |
+| Wall clock (`/usr/bin/time -v`) | 4:17.85 | 4:01.10 | −16.75 s |
+
+Both runs are green; the runtime difference is host-load noise (several
+concurrent `implement.py drive` runs were active), not a coverage change.
+
+### Pre-epic context (static)
+
+Tracked test files at the pre-epic commit (`a58d8d6b`, parent of the first
+cooldown child commit `f505eb1f`), counted with `git ls-tree` (no full-suite
+run at that commit): **365** test files (121 under `packages/`, 235 under
+`tests/`, 9 legacy `test/`). The pre-this-child HEAD has **374** (131
+`packages/`, 243 `tests/`). The +9-file delta spans the cooldown epic plus
+unrelated work merged between those commits and is **not** attributable to
+the cooldown epic alone.
+
+### Conclusion
+
+Full suite green after the cooldown epic and its regression guard (374 passed
+/ 1 skipped files, 8007 passed / 5 skipped tests). The withdrawn client-side
+drain is pinned as not reintroduced (see
+`packages/herdr/src/drain-regression-guard.test.ts`).
+
 ## Related
 
 - Parent epic: WL-0MV28X3BT0079JM3 — Deduplicate legacy `test/` vs `tests/`
   files and delete verbatim subsets
 - Post-change measurement: WL-0MV4V0IF9008214R
+- Model-cooldown epic: WL-0MV54ZP3Y00514Y9 — Resume model-exhausted jobs
+  instead of switching to cheap
+- Regression guard + full-suite verification: WL-0MV563AU2007FM56
