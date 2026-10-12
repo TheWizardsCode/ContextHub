@@ -28,14 +28,50 @@ FAIL=0
 pass() { PASS=$((PASS+1)); echo "  PASS: $1"; }
 fail() { FAIL=$((FAIL+1)); echo "  FAIL: $1"; }
 
+# Number of live (non-zombie) processes in process group $1. `set -m` makes
+# every background wrapper its own process-group leader (PGID == PID), so the
+# group is the unit the test cleans up.
+group_member_count() {
+  ps -eo pgid=,stat= 2>/dev/null \
+    | awk -v g="$1" '$1 == g && $2 !~ /Z/ { n++ } END { print n + 0 }'
+}
+
+# Wait up to ~1s for every member of process group $1 to exit. Returns 0 once
+# the group is empty, 1 otherwise.
+wait_for_group_exit() {
+  local i
+  for i in 1 2 3 4 5; do
+    [ "$(group_member_count "$1")" -eq 0 ] && return 0
+    sleep 0.2
+  done
+  [ "$(group_member_count "$1")" -eq 0 ]
+}
+
 cleanup() {
-  # Kill entire process groups (parent + grandchildren like sleep infinity)
+  # Kill entire process groups (parent + grandchildren like sleep infinity).
+  # The `run-in-pane.sh --exec` wrapper spawns `sleep infinity` to keep its
+  # pane alive; killing only the wrapper PID reparents that grandchild to
+  # init and it keeps the test's stdout open forever. A negative-PID kill
+  # reaches the whole group, so the grandchild dies with the wrapper
+  # (WL-0MUYTCF4D000WVKR).
+  local pid
   for pid in "${TEST_PIDS[@]:-}"; do
-    kill -TERM -"$pid" 2>/dev/null || true
+    [ -n "$pid" ] || continue
+    kill -TERM -- "-$pid" 2>/dev/null || true
+  done
+  # Reap the group leaders and force-kill any survivor (e.g. a `sleep
+  # infinity` that outlived the TERM), so no orphan outlives the test.
+  for pid in "${TEST_PIDS[@]:-}"; do
+    [ -n "$pid" ] || continue
     wait "$pid" 2>/dev/null || true
+    kill -KILL -- "-$pid" 2>/dev/null || true
   done
 }
 trap cleanup EXIT
+# External termination (e.g. `timeout 10 bash test_run_in_pane.sh`) must also
+# run cleanup, otherwise the background wrapper group leaks (AC3).
+trap 'exit 130' INT
+trap 'exit 143' TERM
 TEST_PIDS=()
 
 # ── Test: non-TTY + HERDR_PANE_ID stays alive with ~0% CPU ──────────────
@@ -62,10 +98,20 @@ else
   fail "CPU usage too high ($CPU%) — likely busy-looping"
 fi
 
-# Kill the background process
-kill "$PID" 2>/dev/null
+# Kill the wrapper AND its whole process group so the `sleep infinity`
+# grandchild does not leak (WL-0MUYTCF4D000WVKR). `$PID` is the group
+# leader under `set -m`. The entry stays in TEST_PIDS so the EXIT trap can
+# force-kill any survivor as a backstop.
+kill -TERM -- "-$PID" 2>/dev/null || true
 wait "$PID" 2>/dev/null || true
-TEST_PIDS=()
+
+# AC1 regression: no process — in particular no reparented `sleep infinity` —
+# may outlive the process-group kill.
+if wait_for_group_exit "$PID"; then
+  pass "no orphaned process survives the wrapper process-group kill"
+else
+  fail "orphaned process(es) survived the wrapper process-group kill (PGID $PID)"
+fi
 
 # ── Test: non-TTY + no HERDR_PANE_ID exits immediately ──────────────────
 echo ""
