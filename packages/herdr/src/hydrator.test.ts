@@ -16,6 +16,7 @@ import {
 } from './hydrator.fixtures.js';
 import {
   ALLOWED_STAGES_BY_STATUS,
+  applyActiveTabMarkers,
   collectTabWorkItemIds,
   compatibleStage,
   createHydratorRunner,
@@ -24,6 +25,7 @@ import {
   extractWorkItemIdsFromText,
   isActiveBlocker,
   hasItemTab,
+  markItemsActiveByTab,
   runHydrationOnce,
   type HydrationResult,
   type HydratorDepTarget,
@@ -140,6 +142,83 @@ describe('active-tab matching', () => {
   it('includes tabs with an unknown workspace when filtering (fail-open)', () => {
     const tabs = [tab(WL)];
     expect(hasItemTab(WL, tabs, 'wCurrent')).toBe(true);
+  });
+});
+
+// ── Tab-based active marker for the selection list (WL-0MV1BWETT005GSUJ) ──
+
+describe('tab-based active marker (selection list)', () => {
+  const OTHER = 'WL-0MV24T2VJ007Q49J';
+
+  it('marks an item with a matching tab as in-progress even when the worklog status is open', () => {
+    const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    markItemsActiveByTab(items, new Set([WL]));
+    expect(items[0].status).toBe('in-progress');
+  });
+
+  it('leaves an item without a matching tab unchanged', () => {
+    const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    markItemsActiveByTab(items, new Set([OTHER]));
+    expect(items[0].status).toBe('open');
+  });
+
+  it('marks matching children recursively', () => {
+    const child = { id: WL, status: 'open', stage: 'plan_complete' };
+    const parent = { id: 'WL-PARENT000000', status: 'open', stage: 'idea', children: [child] };
+    markItemsActiveByTab([parent], new Set([WL]));
+    expect(parent.status).toBe('open');
+    expect(child.status).toBe('in-progress');
+  });
+
+  it('never re-opens terminal in_review / completed items (they keep their review marker)', () => {
+    const items = [
+      { id: WL, status: 'open', stage: 'in_review' },
+      { id: OTHER, status: 'completed', stage: 'done' },
+    ];
+    markItemsActiveByTab(items, new Set([WL, OTHER]));
+    expect(items[0].status).toBe('open');
+    expect(items[1].status).toBe('completed');
+  });
+
+  it('applyActiveTabMarkers scopes the tab lookup to the current workspace', async () => {
+    const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    const seen: Array<string | undefined> = [];
+    await applyActiveTabMarkers(
+      items,
+      async (workspaceId) => {
+        seen.push(workspaceId);
+        return [{ tab_id: 't1', label: WL, workspace_id: 'wCurrent' }];
+      },
+      'wCurrent',
+    );
+    expect(seen).toEqual(['wCurrent']);
+    expect(items[0].status).toBe('in-progress');
+  });
+
+  it('does not mark an item whose only matching tab is in another workspace', async () => {
+    const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    await applyActiveTabMarkers(
+      items,
+      async () => [{ tab_id: 't1', label: WL, workspace_id: 'wOther' }],
+      'wCurrent',
+    );
+    expect(items[0].status).toBe('open');
+  });
+
+  it('fails open when the tab lookup throws or returns null (no marker cleared)', async () => {
+    const thrown = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    await applyActiveTabMarkers(
+      thrown,
+      async () => {
+        throw new Error('herdr unavailable');
+      },
+      'wCurrent',
+    );
+    expect(thrown[0].status).toBe('open');
+
+    const nulled = [{ id: WL, status: 'open', stage: 'plan_complete' }];
+    await applyActiveTabMarkers(nulled, async () => null, 'wCurrent');
+    expect(nulled[0].status).toBe('open');
   });
 });
 

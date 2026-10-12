@@ -28,6 +28,14 @@
  * dispatcher-anchor builders (`getItemTabAnchor`), which label the tab with
  * the exact work-item ID (`findTabByLabel` matches exact labels only).
  *
+ * Selection-list marker (WL-0MV1BWETT005GSUJ): the same tab set drives the
+ * selection list's in-progress marker via `markItemsActiveByTab` /
+ * `applyActiveTabMarkers` — an item with an exact-match tab is rendered
+ * `in-progress` (marker + Group N) even when its worklog status is still
+ * `open`, so the marker reflects tab existence rather than only the status
+ * the demotion loop maintains. The production wiring injects this through
+ * the worklist's `applyActiveTabMarkers` seam (`index.ts`).
+ *
  * Bounded, responsive runs (WL-0MUY1CXSV008F8TZ, WL-0MUY1CYV6008BQWX,
  * WL-0MUY1CYCB003DTKO): every step races a per-step budget so a hung
  * `wl`/`herdr` child aborts the run and is NAMED (rather than wedging until
@@ -252,6 +260,72 @@ export function hasItemTab(
   workspaceId?: string,
 ): boolean {
   return collectTabWorkItemIds(tabs, workspaceId).has(itemId);
+}
+
+/**
+ * Minimal item shape for tab-based active marking. `WorkItem` structurally
+ * satisfies it (id + optional status/stage/children), so the worklist can
+ * pass live items without this dependency-light module importing a worklog
+ * type.
+ */
+export interface ActiveTabItem {
+  id: string;
+  status?: string;
+  stage?: string;
+  children?: ActiveTabItem[];
+}
+
+/**
+ * Mark every item that has an exact-match workspace tab as `in-progress` so
+ * the selection list's in-progress marker (and Group N placement) reflects
+ * tab existence, not only the worklog status the demotion loop maintains
+ * (WL-0MV1BWETT005GSUJ). Recurses into children.
+ *
+ * Terminal `in_review`/`completed` items are left untouched: they already
+ * carry the review/audit marker and belong in the In Review group, and a
+ * lingering tab on a finished item must not re-open it in the list.
+ *
+ * Pure and synchronous — the caller owns tab fetching (see
+ * `applyActiveTabMarkers`).
+ */
+export function markItemsActiveByTab(
+  items: readonly ActiveTabItem[],
+  activeIds: ReadonlySet<string>,
+): void {
+  for (const item of items) {
+    if (activeIds.has(item.id)) {
+      const status = (item.status ?? '').toLowerCase();
+      const stage = (item.stage ?? '').toLowerCase();
+      if (status !== 'completed' && stage !== 'in_review') {
+        item.status = 'in-progress';
+      }
+    }
+    const children = item.children;
+    if (Array.isArray(children) && children.length > 0) {
+      markItemsActiveByTab(children, activeIds);
+    }
+  }
+}
+
+/**
+ * Fetch `herdr tab list` for `workspaceId` and mark every item with an
+ * exact-match tab as `in-progress` (see `markItemsActiveByTab`). Fail-open:
+ * an unavailable/unparseable tab list leaves the items unchanged, so a
+ * transient CLI error never clears a marker.
+ */
+export async function applyActiveTabMarkers(
+  items: readonly ActiveTabItem[],
+  listTabs: HydratorDeps['listTabs'],
+  workspaceId?: string,
+): Promise<void> {
+  let tabs: HydratorTab[] | null;
+  try {
+    tabs = await listTabs(workspaceId);
+  } catch {
+    return;
+  }
+  if (tabs === null) return;
+  markItemsActiveByTab(items, collectTabWorkItemIds(tabs, workspaceId));
 }
 
 /**

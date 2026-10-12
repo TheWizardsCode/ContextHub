@@ -4845,7 +4845,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; applyActiveTabMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }> },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -4861,6 +4861,7 @@ export async function runWorklistTui(
     downtimeWorker: options?.downtimeWorker,
     downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
     mergeAgentStates: options?.mergeAgentStates,
+    applyActiveTabMarkers: options?.applyActiveTabMarkers,
     subscriber: options?.subscriber ?? null,
     agentTracker: options?.agentTracker ?? null,
     onDowntimeToggle: options?.onDowntimeToggle,
@@ -4875,6 +4876,24 @@ export async function runWorklistTui(
 
   let termSize = getTermSize();
 
+  /**
+   * Apply the tab-based active marker to freshly fetched items: any item with
+   * an exact-match tab in THIS workspace is shown as `in-progress` (marker +
+   * Group N), independent of the worklog status the demotion loop maintains.
+   * This makes the selection list's marker reflect tab existence directly
+   * (WL-0MV1BWETT005GSUJ). The production implementation is injected by
+   * `index.ts` (same pattern as `mergeAgentStates`); when absent it is a
+   * no-op, so tests never spawn `herdr`. Fail-open — a tab lookup failure
+   * leaves every item unchanged.
+   */
+  const applyTabMarkers = async (list: WorkItem[]): Promise<void> => {
+    try {
+      await opts.applyActiveTabMarkers?.(list);
+    } catch {
+      // Fail-open: a marker failure must never break the refresh/render.
+    }
+  };
+
   // Load items
   let items: WorkItem[];
   try {
@@ -4882,6 +4901,10 @@ export async function runWorklistTui(
   } catch {
     items = [];
   }
+  // Reflect open item tabs on the very first render (no 30 s wait). Kicked
+  // off without blocking TUI startup; the marker lands on a follow-up render
+  // once the tab lookup resolves (fail-open).
+  void applyTabMarkers(items).then(() => render());
 
   // Fetch total actionable count (best effort — failure is silent)
   fetchActionableCount().then((count) => {
@@ -5079,6 +5102,10 @@ export async function runWorklistTui(
         panePaused = false;
         stopResumePoll();
         doRefresh(true);
+        // Hydrator focus-resume (AC4): the tab became visible, so re-check
+        // `in_progress` claims immediately — the same runner the 30 s hydrate
+        // task uses (WL-0MSHB7DHO004RHBJ + WL-0MV1BWETT005GSUJ).
+        void runHydrator();
       },
       // Agent-status events update the tracker's cached state map and
       // re-render the icons immediately (no `herdr agent list` exec).
@@ -5303,6 +5330,11 @@ export async function runWorklistTui(
             attachFresh([topLevel]);
           }
         }
+        // Tab-based active marker (WL-0MV1BWETT005GSUJ): items with an
+        // exact-match tab in this workspace are shown in-progress even when
+        // the worklog status is still `open` (e.g. a claim that was released
+        // before the tab was (re)opened). Fail-open.
+        await applyTabMarkers(newItems);
         state.refreshItems(newItems);
         // Re-read the Code Freeze marker so a freeze that started (or ended)
         // since the last refresh is reflected in the banner promptly.
@@ -6524,24 +6556,23 @@ export async function runWorklistTui(
     disabled: true,
     run: async () => {
       if (await paneGate.visible()) {
-        // Hidden → visible transition: refresh immediately (with the
-        // "refreshed" notification) and let the normal cadence resume.
-        // DB-change gate: skip when DB unchanged (same as refresh tick).
-        if (tracker && !tracker.dbChanged()) {
-          stopResumePoll();
-          panePaused = false;
-          return; // DB unchanged — no need to refresh on visibility change
-        }
         stopResumePoll();
         panePaused = false;
-        doRefresh(true);
         // Hydrator focus-resume (AC4): the hidden→visible transition also
         // re-checks `in_progress` claims immediately — the same runner the
         // 30 s hydrate task uses — so a claim whose item tab was closed while
         // the pane was hidden is released as soon as focus returns (no wait
-        // for the next hydrate tick). `paneGate.visible()` is already cached
+        // for the next hydrate tick). This runs BEFORE the DB-change gate
+        // because opening/closing a work-item tab does not touch the worklog
+        // DB (WL-0MV1BWETT005GSUJ). `paneGate.visible()` is already cached
         // true here, so the runner proceeds without a new visibility probe.
         void runHydrator();
+        // DB-change gate: skip the refresh when the DB is unchanged (same as
+        // the regular refresh tick).
+        if (tracker && !tracker.dbChanged()) {
+          return; // DB unchanged — no need to refresh on visibility change
+        }
+        doRefresh(true);
       }
     },
   });

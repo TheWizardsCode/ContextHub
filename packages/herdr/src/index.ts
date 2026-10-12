@@ -50,6 +50,7 @@ import {
   stripAgentPromptPrefix,
 } from './pane-title.js';
 import { showToast } from './notify.js';
+import { applyActiveTabMarkers, createProductionHydratorDeps } from './hydrator.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -2233,6 +2234,13 @@ async function main(): Promise<void> {
     stateFile: wlRoot ? join(wlRoot, '.worklog', AGENT_PANES_FILE) : undefined,
   });
 
+  // Production deps for the selection list's tab-based active marker
+  // (WL-0MV1BWETT005GSUJ): an item with an exact-match tab in this workspace
+  // is rendered as in-progress even when its worklog status is still `open`.
+  // Uses the same `herdr tab list --workspace <id>` lookup as the hydrator.
+  const hydratorDeps = createProductionHydratorDeps();
+  const hydratorWorkspaceId = process.env.HERDR_WORKSPACE_ID ?? undefined;
+
   // Event subscriber (WL-0MSHB7DHO004RHBJ): subscribes to herdr window
   // events (pane focus/visibility + agent status) over the herdr socket so
   // the worklist reacts immediately instead of polling. Fail-open: an
@@ -2428,6 +2436,11 @@ async function main(): Promise<void> {
       // expanded children) on every refresh cycle (WL-0MSBQUJQX005RAT9).
       // Fail-open: herdr errors yield no icons; the list keeps working.
       mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
+      // Tab-based active marker (WL-0MV1BWETT005GSUJ): stamp `in-progress` on
+      // items whose exact-ID tab is open in the current workspace so the
+      // selection list's marker reflects tab existence. Fail-open.
+      applyActiveTabMarkers: (items) =>
+        applyActiveTabMarkers(items, hydratorDeps.listTabs, hydratorWorkspaceId),
       subscriber: eventSubscriber,
       agentTracker,
       modeSwitchWorker,

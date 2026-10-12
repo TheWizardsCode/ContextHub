@@ -54,16 +54,45 @@ like the downtime worker:
 - Single-flight + scheduler watchdog (`HYDRATOR_RUN_TIMEOUT_MS`): a hung
   run is abandoned and retried on the next tick, never wedging the task.
 
+## Selection-list in-progress marker (WL-0MV1BWETT005GSUJ)
+
+Demotion alone is not enough for the selection list: an item whose worklog
+status is still `open` (e.g. a claim released before its tab was re-opened)
+would show no marker even though a work-item tab is open. To make the marker
+reflect tab existence directly, the same exact-label tab lookup also drives a
+display overlay:
+
+- `markItemsActiveByTab(items, activeIds)` recursively stamps
+  `status = 'in-progress'` on every item whose ID is in the active tab set, so
+  the row renders the in-progress icon and the item is placed in Group N.
+- `applyActiveTabMarkers(items, listTabs, workspaceId)` fetches the workspace
+  tabs (fail-open) and applies the marker; the production wiring injects it
+  into `runWorklistTui`'s `applyActiveTabMarkers` seam from `index.ts` (the
+  same "inject from the caller" pattern as `mergeAgentStates`).
+- The marker is applied on the initial load and on every refresh cycle; it
+  clears the same way — closing the tab removes it from the active set on the
+  next refresh (and the focus-resume hook re-checks immediately).
+- Terminal `in_review`/`completed` items are deliberately left untouched:
+  they already carry the review/audit marker and belong in the In Review
+  group.
+
 ## Files
 
 - `packages/herdr/src/hydrator.ts` — module: ID extraction, active-tab
-  matching, demotion decision, compatibility repair, orchestration
-  (`runHydrationOnce`), visibility-gated runner
+  matching, demotion decision, tab-based selection-list marker
+  (`markItemsActiveByTab` / `applyActiveTabMarkers`), compatibility repair,
+  orchestration (`runHydrationOnce`), visibility-gated runner
   (`createHydratorRunner`), production deps
   (`createProductionHydratorDeps`).
-- `packages/herdr/src/hydrator.test.ts` — unit tests (AC6 map below).
-- `packages/herdr/src/worklist.ts` — registers the `hydrate` scheduler task
-  and hooks the focus-resume path.
+- `packages/herdr/src/hydrator.test.ts` — unit tests (AC6 map below),
+  including the pure tab-marker helper.
+- `packages/herdr/src/worklist.ts` — registers the `hydrate` scheduler task,
+  hooks the focus-resume path, and applies the injected
+  `applyActiveTabMarkers` marker on the initial load and each refresh.
+- `packages/herdr/src/worklist-active-tab-marker.test.ts` — integration tests
+  for the selection-list marker wire-up (marker shown/hidden/scope).
+- `packages/herdr/src/index.ts` — production wiring of the
+  `applyActiveTabMarkers` seam.
 - `packages/herdr/src/pane-title.ts` — `truncatePaneTitlePreservingSuffix`
   keeps the work-item ID visible in truncated pane titles (a human-readable
   concern now — the hydrator matches exact tab labels, not pane titles).
@@ -79,6 +108,7 @@ like the downtime worker:
 | else → open | `decideDemotion` + `runHydrationOnce` |
 | stage/status compatibility | `compatibleStage`, blocked-at-`in_progress` case |
 | focus-resume immediate run | `createHydratorRunner` (visibility flip) |
+| selection-list marker (tab → in-progress) | `tab-based active marker (selection list)` + `worklist-active-tab-marker.test.ts` |
 | fail-open error paths | `runHydrationOnce` (missing list, missing tabs, failed demotion) |
 
 ## Related
