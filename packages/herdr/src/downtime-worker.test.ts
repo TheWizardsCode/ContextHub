@@ -169,7 +169,6 @@ import {
 } from './downtime-disable-marker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import {
-  DOWNTIME_LOG_FILE,
   appendDowntimeLogEntry,
   appendPaneCloseLogEntry,
   readDowntimeLogEntries,
@@ -204,6 +203,11 @@ import {
   timeoutErrorFixture,
   httpErrorResponseFixture,
   jsonResponseFixture,
+  makeDeps,
+  createTempDirTracker,
+  ago,
+  writeDowntimeLog,
+  writeRawDowntimeLog,
   type LlamaStatusHttpResponse,
 } from './downtime-worker.fixtures.js';
 import {
@@ -213,59 +217,6 @@ import {
   type StalledPaneCandidate,
 } from './stalled-work.js';
 
-
-/** Shared deps mock for dispatch tests. */
-function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
-  return {
-    // Herdr list head (WL-0MTK1ILM2009QYB2): empty by default so legacy tests that
-    // stub per-tier lookups keep passing (the head path is inert on empty).
-    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
-    getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
-    // Audit tier answers a GENUINELY empty tier by default ({ok:true,
-    // candidate:null}); a wl/parse failure is {ok:false} (WL-0MSLWJ2KP0002SV0).
-    getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
-    // Active-audit single-flight (WL-0MT3PHW4I002SNOV): no active audit by
-    // default ({ok:true, active:false}), so the existing tier tests exercise
-    // the unchanged audit tier (backward-compatible default — the audit
-    // tier proceeds). The dispatcher consults this dep only after F2 lands;
-    // existing tests are unaffected either way.
-    getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
-    getNextImplementCandidate: vi.fn().mockResolvedValue(null),
-    claimItem: vi.fn().mockResolvedValue({ ok: true }),
-    spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
-    recordDispatch: vi.fn().mockResolvedValue(true),
-    recordDispatchFailure: vi.fn().mockResolvedValue(undefined),
-    // Claim rollback (WL-0MT32F908002YFFA): default success so the recovery
-    // paths report 'claim-rolled-back' unless a test forces a failed rollback.
-    rollbackClaim: vi.fn().mockResolvedValue(true),
-    recordError: vi.fn().mockResolvedValue(undefined),
-    // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): no due prompt by
-    // default, so existing tier tests exercise the unchanged backlog tiers.
-    getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
-    recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
-    // Critical-first tier (WL-0MT3FM8VA005XBHE): no critical candidate by
-    // default, so the existing tier tests exercise the unchanged backlog
-    // tiers (regression guard — after F4 the critical tier must fall
-    // through to implement → plan → intake when the critical tier is
-    // genuinely empty).
-    getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
-    // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
-    // existing dispatch tests exercise the unchanged audit/implement tiers.
-    readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
-    // Interim freshness re-check (WL-0MT8KSTOE00871E7): no fresh audit by
-    // default, so existing dispatch tests exercise the unchanged path.
-    hasFreshAudit: vi.fn().mockResolvedValue(false),
-    // Review-queue depth gate (WL-0MT2UQWOR007CYY9): empty queue by default
-    // so the gate is inactive and existing tests exercise the unchanged path.
-    getReviewQueueCount: vi.fn().mockResolvedValue(0),
-    // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F3): an available
-    // query reporting NO live panes by default, so the guard is inert and
-    // existing tests escalate critical items unchanged. Tests that exercise
-    // the guard override this with `records` carrying a live working pane.
-    getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
-    ...overrides,
-  };
-}
 
 // ── Fixture coherence (AC1) ───────────────────────────────────────────
 
@@ -4892,7 +4843,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
   // ── Coordination-dir worker fixture (F2 — cooldown lease maintenance) ──
 
   /** Tmp dirs created by makeCoordinationWorker — cleaned up in afterEach. */
-  const coordinationTmpDirs: string[] = [];
+  const coordinationTmpDirs = createTempDirTracker();
 
   function makeCoordinationWorker(overrides: {
     instanceId?: string;
@@ -4902,8 +4853,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     /** Pre-seed another instance's valid lease BEFORE the worker is created. */
     seedLease?: { instanceId: string; atMs: number };
   } = {}) {
-    const coordDir = mkdtempSync(join(tmpdir(), 'cd-wl-0MTF4A4V3-'));
-    coordinationTmpDirs.push(coordDir);
+    const coordDir = coordinationTmpDirs.make('cd-wl-0MTF4A4V3-');
     const instanceId = overrides.instanceId ?? 'inst-a';
     const leaseTtlSeconds = overrides.leaseTtlSeconds ?? 300;
     if (overrides.seedLease) {
@@ -4946,9 +4896,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
 
   afterEach(() => {
     vi.useRealTimers();
-    for (const dir of coordinationTmpDirs.splice(0)) {
-      rmSync(dir, { recursive: true, force: true });
-    }
+    coordinationTmpDirs.cleanup();
   });
 
   it('enters the cooldown only after a genuine no-candidate outcome', async () => {
@@ -10334,27 +10282,17 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
 // (non-critical-first) filter path.
 describe('dispatched success-marker staleness on the live path (WL-0MU6UL0RJ008IHGT)', () => {
   const WINDOW_MS = 24 * 60 * 60 * 1000; // default 24h
-  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
-  const tempCwds: string[] = [];
+  const tempCwds = createTempDirTracker();
 
   afterEach(() => {
-    for (const dir of tempCwds.splice(0)) rmSync(dir, { recursive: true, force: true });
+    tempCwds.cleanup();
   });
 
   function makeCwd(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'dt-stale-marker-'));
-    tempCwds.push(dir);
-    return dir;
+    return tempCwds.make('dt-stale-marker-');
   }
 
-  function writeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
-    mkdirSync(join(cwd, '.worklog'), { recursive: true });
-    writeFileSync(
-      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
-      entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-      'utf8',
-    );
-  }
+  const writeLog = writeDowntimeLog;
 
   const planHead = (id: string): DowntimeHerdrItem => ({
     id,
@@ -10514,27 +10452,17 @@ describe('dispatched success-marker staleness on the live path (WL-0MU6UL0RJ008I
 
 describe('non-terminal pane-close cooldown on the live paths (WL-0MUKYERLZ006ELL5)', () => {
   const COOLDOWN_MS = DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
-  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
-  const tempCwds: string[] = [];
+  const tempCwds = createTempDirTracker();
 
   afterEach(() => {
-    for (const dir of tempCwds.splice(0)) rmSync(dir, { recursive: true, force: true });
+    tempCwds.cleanup();
   });
 
   function makeCwd(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'dt-nonterminal-cooldown-'));
-    tempCwds.push(dir);
-    return dir;
+    return tempCwds.make('dt-nonterminal-cooldown-');
   }
 
-  function writeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
-    mkdirSync(join(cwd, '.worklog'), { recursive: true });
-    writeFileSync(
-      join(cwd, '.worklog', DOWNTIME_LOG_FILE),
-      entries.map((e) => JSON.stringify(e)).join('\n') + '\n',
-      'utf8',
-    );
-  }
+  const writeLog = writeDowntimeLog;
 
   const planHead = (id: string): DowntimeHerdrItem => ({
     id,
@@ -11289,16 +11217,14 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
 // EXCEPT `implement` panes, which are never auto-closed (AC6). Every boundary
 // is fail-closed (AC7).
 describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', () => {
-  const roots: string[] = [];
+  const roots = createTempDirTracker();
 
   function makeRoot(): string {
-    const root = mkdtempSync(join(tmpdir(), 'pane-lifecycle-'));
-    roots.push(root);
-    return root;
+    return roots.make('pane-lifecycle-');
   }
 
   afterEach(() => {
-    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+    roots.cleanup();
   });
 
   /** Seed a dispatch marker + its post-spawn enrichment (paneId) entry. */
@@ -11634,16 +11560,14 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', ()
 // only active auto-close path. These tests pin that disabled behaviour and
 // that Mechanism A still runs from the tick.
 describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN) [disabled]', () => {
-  const roots: string[] = [];
+  const roots = createTempDirTracker();
 
   afterEach(() => {
-    for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+    roots.cleanup();
   });
 
   function makeRoot(): string {
-    const root = mkdtempSync(join(tmpdir(), 'pane-monitor-tick-'));
-    roots.push(root);
-    return root;
+    return roots.make('pane-monitor-tick-');
   }
 
   async function seedDispatch(root: string, itemId: string, kind: string, paneId: string): Promise<void> {
@@ -12195,27 +12119,18 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
   // RELEASED (otherwise the duplicate-dispatch marker guard would skip the
   // item before the budget filter runs).
   const WINDOW_MS = 1_000;
-  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
-  const tempDirs: string[] = [];
+  const tempDirs = createTempDirTracker();
 
   afterEach(() => {
-    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    tempDirs.cleanup();
   });
 
   function makeCwd(): string {
-    const dir = mkdtempSync(join(tmpdir(), 'dt-attempt-budget-'));
-    tempDirs.push(dir);
-    return dir;
+    return tempDirs.make('dt-attempt-budget-');
   }
 
-  function writeRawLog(cwd: string, raw: string): void {
-    mkdirSync(join(cwd, '.worklog'), { recursive: true });
-    writeFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), raw, 'utf8');
-  }
-
-  function writeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
-    writeRawLog(cwd, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
-  }
+  const writeRawLog = writeRawDowntimeLog;
+  const writeLog = writeDowntimeLog;
 
   const implementHead = (id: string): DowntimeHerdrItem => ({
     id,
@@ -12901,17 +12816,14 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
   // RELEASED (the dispatched-marker guard) while the attempt-budget filter
   // still counts them.
   const WINDOW_MS = 1_000;
-  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
-  const tempDirs: string[] = [];
+  const tempDirs = createTempDirTracker();
 
   afterEach(() => {
-    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    tempDirs.cleanup();
   });
 
   function makeDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
-    tempDirs.push(dir);
-    return dir;
+    return tempDirs.make(prefix);
   }
 
   /** An eligible non-critical plan_complete out-of-view item (implement tier). */
@@ -13033,20 +12945,14 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
       const coordinationDir = makeDir('dt-oov-budget-');
       const cwd = makeDir('dt-oov-budget-root-');
       // Three same-stage implement markers exhaust the per-item/per-kind cap.
-      mkdirSync(join(cwd, '.worklog'), { recursive: true });
-      writeFileSync(
-        join(cwd, '.worklog', DOWNTIME_LOG_FILE),
-        [0, 1, 2]
-          .map(() =>
-            JSON.stringify({
-              itemId: 'WL-OOV-BUDGET',
-              kind: 'implement',
-              stage: 'plan_complete',
-              dispatchedAt: ago(60_000),
-            }),
-          )
-          .join('\n') + '\n',
-        'utf8',
+      writeDowntimeLog(
+        cwd,
+        [0, 1, 2].map(() => ({
+          itemId: 'WL-OOV-BUDGET',
+          kind: 'implement',
+          stage: 'plan_complete',
+          dispatchedAt: ago(60_000),
+        })),
       );
       const deps = makeDeps({
         getHerdrListHead: ownRoot([

@@ -7,9 +7,21 @@
  * query / model switch / local lease / server down / not all slots free),
  * ambiguous (`total_slots` 0 or missing fields), and network error /
  * timeout / HTTP-failure responses for the poller tests (F2).
+ *
+ * Also hosts the shared test scaffolding (WL-0MV4V0V8Z003PBQ2): the
+ * `makeDeps` mock factory, temporary-directory helpers, and downtime-log
+ * writers, so every split test file imports one module instead of
+ * re-implementing the same setup.
  */
 
-import type { LlamaStatus } from './downtime-worker.js';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { vi } from 'vitest';
+
+import { DOWNTIME_LOG_FILE } from './downtime-log.js';
+import type { DowntimeWorkerDeps, LlamaStatus } from './downtime-worker.js';
 
 // ── Status payloads ───────────────────────────────────────────────────
 
@@ -332,3 +344,126 @@ export const timeoutErrorFixture: Error = Object.assign(
   new Error('The operation was aborted'),
   { name: 'AbortError' },
 );
+
+// ── Shared test scaffolding (WL-0MV4V0V8Z003PBQ2) ─────────────────────
+
+/**
+ * Default mocked `DowntimeWorkerDeps` for dispatch tests, with every dep
+ * answering a neutral "nothing to do" result so a test only overrides the
+ * dep it exercises. Merges `overrides` over the defaults (last write wins).
+ */
+export function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
+  return {
+    // Herdr list head (WL-0MTK1ILM2009QYB2): empty by default so legacy tests that
+    // stub per-tier lookups keep passing (the head path is inert on empty).
+    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+    getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Audit tier answers a GENUINELY empty tier by default ({ok:true,
+    // candidate:null}); a wl/parse failure is {ok:false} (WL-0MSLWJ2KP0002SV0).
+    getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Active-audit single-flight (WL-0MT3PHW4I002SNOV): no active audit by
+    // default ({ok:true, active:false}), so the existing tier tests exercise
+    // the unchanged audit tier (backward-compatible default — the audit
+    // tier proceeds). The dispatcher consults this dep only after F2 lands;
+    // existing tests are unaffected either way.
+    getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+    getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+    claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    recordDispatch: vi.fn().mockResolvedValue(true),
+    recordDispatchFailure: vi.fn().mockResolvedValue(undefined),
+    // Claim rollback (WL-0MT32F908002YFFA): default success so the recovery
+    // paths report 'claim-rolled-back' unless a test forces a failed rollback.
+    rollbackClaim: vi.fn().mockResolvedValue(true),
+    recordError: vi.fn().mockResolvedValue(undefined),
+    // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): no due prompt by
+    // default, so existing tier tests exercise the unchanged backlog tiers.
+    getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
+    recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
+    // Critical-first tier (WL-0MT3FM8VA005XBHE): no critical candidate by
+    // default, so the existing tier tests exercise the unchanged backlog
+    // tiers (regression guard — after F4 the critical tier must fall
+    // through to implement → plan → intake when the critical tier is
+    // genuinely empty).
+    getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
+    // existing dispatch tests exercise the unchanged audit/implement tiers.
+    readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+    // Interim freshness re-check (WL-0MT8KSTOE00871E7): no fresh audit by
+    // default, so existing dispatch tests exercise the unchanged path.
+    hasFreshAudit: vi.fn().mockResolvedValue(false),
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9): empty queue by default
+    // so the gate is inactive and existing tests exercise the unchanged path.
+    getReviewQueueCount: vi.fn().mockResolvedValue(0),
+    // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F3): an available
+    // query reporting NO live panes by default, so the guard is inert and
+    // existing tests escalate critical items unchanged. Tests that exercise
+    // the guard override this with `records` carrying a live working pane.
+    getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+    ...overrides,
+  };
+}
+
+/**
+ * Create a unique temporary directory under the OS temp root, prefixed with
+ * `prefix`. The caller owns cleanup; prefer `createTempDirTracker()` when a
+ * describe block creates several directories.
+ */
+export function makeTempDir(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), prefix));
+}
+
+/** Registry returned by `createTempDirTracker()`. */
+export interface TempDirTracker {
+  /** Create, remember and return a new unique temp directory. */
+  make(prefix: string): string;
+  /** Remove every directory created by this tracker (idempotent). */
+  cleanup(): void;
+}
+
+/**
+ * Per-describe temporary-directory registry: `make()` creates a unique temp
+ * directory and records it, `cleanup()` removes them all (call it from
+ * `afterEach`). Centralises the `mkdtempSync` + `rmSync` boilerplate that was
+ * duplicated across describe blocks.
+ */
+export function createTempDirTracker(): TempDirTracker {
+  const dirs: string[] = [];
+  return {
+    make(prefix: string): string {
+      const dir = mkdtempSync(join(tmpdir(), prefix));
+      dirs.push(dir);
+      return dir;
+    },
+    cleanup(): void {
+      for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/**
+ * ISO timestamp for a moment `ms` milliseconds in the past. Dispatch paths
+ * read the real `Date.now()`, so tests that seed dispatch markers use this
+ * rather than a fake clock.
+ */
+export function ago(ms: number): string {
+  return new Date(Date.now() - ms).toISOString();
+}
+
+/**
+ * Write a raw string to the downtime dispatch log at
+ * `<cwd>/.worklog/<DOWNTIME_LOG_FILE>`, creating the `.worklog` directory
+ * when absent.
+ */
+export function writeRawDowntimeLog(cwd: string, raw: string): void {
+  mkdirSync(join(cwd, '.worklog'), { recursive: true });
+  writeFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), raw, 'utf8');
+}
+
+/**
+ * Write `entries` to the downtime dispatch log as JSONL (one JSON object per
+ * line, trailing newline), creating the `.worklog` directory when absent.
+ */
+export function writeDowntimeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
+  writeRawDowntimeLog(cwd, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+}
