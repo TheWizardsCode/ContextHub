@@ -93,10 +93,15 @@ describe.skipIf(!hasWl())('herdr-refresh-perf benchmark harness', () => {
     expect(Number.isFinite(result.warmMs)).toBe(true);
     expect(Number.isFinite(result.coldMs)).toBe(true);
 
-    // Refresh spawns `wl next` + 2 mandatory subsets + actionable count +
-    // review-queue state + one child fetch per expanded parent (≥ 5 here).
-    expect(result.coldSpawns).toBeGreaterThanOrEqual(5);
-    expect(result.warmSpawns).toBeGreaterThanOrEqual(5);
+    // Consolidated cold refresh (WL-0MV5CBQ6L005SPAG): the default view now
+    // spawns only `wl next` plus the two mandatory-subset queries. The
+    // review-queue state is deduplicated against the mandatory in_review
+    // subset, and the actionable count plus expanded children are read
+    // in-process from SQLite — previously this was ~25 spawns at 20 expanded
+    // parents. Assert the reduction with headroom for the in-process fallback.
+    expect(result.coldSpawns).toBeLessThanOrEqual(6);
+    expect(result.warmSpawns).toBeLessThanOrEqual(6);
+    expect(result.coldSpawns).toBeGreaterThanOrEqual(1);
 
     // The cold phase genuinely did read work (cache was invalidated).
     expect(result.coldReadWorkSpawns).toBeGreaterThan(0);

@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem } from './fetcher.js';
+import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
@@ -5003,14 +5003,18 @@ export async function runWorklistTui(
   let sprintAuditsOutstanding = false;
 
   /**
-   * Refresh the review-queue-depth indicator by counting completed/
-   * in_review ROOT items and recording whether any still has an outstanding
-   * audit (drives the banner copy — AH-0MUDYTQ55002NUSJ). Fail-closed: a
-   * query failure leaves the state unchanged (conservative). Display-only —
-   * NEVER writes/removes the disable marker (WL-0MTTSWC1X005P4VD).
+   * Apply a pre-fetched review-queue-depth state to the banner indicator
+   * (display-only; completed+in_review root count vs browseItemCount, plus
+   * whether any of those items still has an outstanding audit — this drives
+   * the banner copy; AH-0MUDYTQ55002NUSJ). Fail-closed: `undefined` (a query
+   * failure) leaves the state unchanged. Queue depth never writes the disable
+   * marker (WL-0MTTSWC1X005P4VD).
+   *
+   * Split from the fetch so `doRefresh` can run the fetch CONCURRENTLY with
+   * the item fetch and deduplicate it against the identical review query in
+   * `fetchMandatorySubsets` (WL-0MV5CBQ6L005SPAG).
    */
-  const refreshSprintState = async (): Promise<void> => {
-    const state = await fetchReviewQueueState();
+  const applySprintState = (state: ReviewQueueState | undefined): void => {
     if (state === undefined) return; // fail-closed: unknown state → no change
     sprintCompletedCount = state.count;
     sprintAuditsOutstanding = state.auditsOutstanding;
@@ -5289,20 +5293,28 @@ export async function runWorklistTui(
         // children re-fetch fails.
         const expanded = [...state.expandedItems];
         const freshChildren = new Map<string, WorkItem[]>();
-        const fetchExpandedChildren = async (parentId: string): Promise<WorkItem[]> => {
-          try {
-            // Depth derived from the item's hierarchy position so nested
-            // expanded items re-fetch their children at the correct depth
-            // (WL-0MSQ3FH1K000MMJW).
-            const children = await fetchChildrenForItem(parentId, state.getItemDepth(parentId) + 1);
-            freshChildren.set(parentId, children);
-            return children;
-          } catch {
+        // Depth derived from each item's hierarchy position so nested expanded
+        // items re-fetch their children at the correct depth
+        // (WL-0MSQ3FH1K000MMJW). All expanded parents' children are fetched in
+        // ONE batched read (WL-0MV5CBQ6L005SPAG) instead of one `wl` spawn per
+        // parent, which was the dominant cold-refresh cost on wide trees.
+        const depthByParent = new Map(
+          expanded.map((id) => [id, state.getItemDepth(id) + 1]),
+        );
+        // Start the review-queue query concurrently with the item fetch so its
+        // identical `wl list` query inside fetchMandatorySubsets deduplicates
+        // via the in-flight memo into a single spawn (WL-0MV5CBQ6L005SPAG).
+        const reviewStatePromise = fetchReviewQueueState();
+        const childrenPromise = fetchChildrenForItems(expanded, depthByParent)
+          .then((childrenByParent) => {
+            for (const [parentId, children] of childrenByParent) {
+              freshChildren.set(parentId, children);
+            }
+          })
+          .catch(() => {
             // Ignore: refreshItems carries over the previously fetched
             // children when the re-fetch fails.
-            return [];
-          }
-        };
+          });
         const [newItems] = await Promise.all([
           fetchItemsForView(
             state.activeFilter,
@@ -5311,7 +5323,7 @@ export async function runWorklistTui(
             state.activeDispatchFilter,
             opts.cwd,
           ),
-          ...expanded.map(fetchExpandedChildren),
+          childrenPromise,
         ]);
         const oldLen = state.items.length;
 
@@ -5353,7 +5365,7 @@ export async function runWorklistTui(
         // banner copy; AH-0MUDYTQ55002NUSJ). Fail-closed: query failure leaves
         // state unchanged. Queue depth never writes the disable marker
         // (WL-0MTTSWC1X005P4VD).
-        await refreshSprintState();
+        applySprintState(await reviewStatePromise);
         // Merge agent-status state into the refreshed items (top-level +
         // expanded children) so the agent icons reflect the latest tracker
         // state (WL-0MSBQUJQX005RAT9). Fail-open: no herdr CLI → no icons.

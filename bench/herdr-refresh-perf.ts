@@ -5,7 +5,7 @@
  * Seeds a real temp worklog (≥ 1000 root items + ≥ 20 expanded parents with
  * children), then measures the refresh DATA path exactly as `doRefresh` drives
  * it: `wl next` (+ mandatory subsets), the actionable count, the review-queue
- * state, and one `wl list --parent` per expanded parent. It reports:
+ * state, and the expanded children (batched). It reports:
  *
  *   - warm default-view refresh latency (read cache hot),
  *   - cold default-view refresh latency (state counter bumped → cache cold),
@@ -51,7 +51,7 @@ import {
   fetchNextItems,
   fetchActionableCount,
   fetchReviewQueueState,
-  fetchChildrenForItem,
+  fetchChildrenForItems,
 } from '../packages/herdr/src/fetcher.js';
 
 // ── Configuration ────────────────────────────────────────────────────
@@ -254,11 +254,17 @@ export async function runBenchmark(argv: string[] = process.argv): Promise<Herdr
     }) as any);
 
     const refresh = async (): Promise<void> => {
-      await fetchNextItems(options.browse);
+      // Mirror the real default-view data path (worklist.doRefresh): the item
+      // fetch, the batched expanded-children read, the review-queue query and
+      // the actionable count all run CONCURRENTLY, and the children/review/
+      // count reads are consolidated (in-process SQLite reads and in-flight
+      // memo dedupe) so a cold refresh spawns only `wl next` plus the two
+      // mandatory-subset queries (WL-0MV5CBQ6L005SPAG).
       await Promise.all([
-        fetchActionableCount(),
+        fetchNextItems(options.browse),
+        fetchChildrenForItems(expandedParentIds),
         fetchReviewQueueState(),
-        ...expandedParentIds.map((id) => fetchChildrenForItem(id, 1)),
+        fetchActionableCount(),
       ]);
     };
 
