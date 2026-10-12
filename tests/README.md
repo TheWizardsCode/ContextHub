@@ -111,7 +111,6 @@ Tests are spread across two top-level directories:
 
 ### Additional tests (`test/`)
 
-- **`migrations.test.ts`** — Database migration tests
 - **`doctor-dependency-check.test.ts`** / **`doctor-status-stage.test.ts`** — `wl doctor` checks
 - **`comment-update.test.ts`** — Comment update operations
 - **`tui-integration.test.ts`** — TUI integration
