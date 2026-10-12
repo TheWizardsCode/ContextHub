@@ -188,8 +188,8 @@ export default function register(ctx: PluginContext): void {
       };
 
       const sortedAll = items.slice().sort((a, b) => {
-        // In-review lists: use compareInReviewItems for full within-bucket
-        // sorting (bucket → priority → updatedAt → id).  compareInReviewItems
+        // In-review lists: use compareInReviewItems for full within-section
+        // sorting (priority → bucket → updatedAt → id).  compareInReviewItems
         // returns 0 when either item is not in_review, so the caller falls
         // through to the default ordering.
         if (isInReviewList && auditMapForSort) {

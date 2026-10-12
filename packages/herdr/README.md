@@ -1693,8 +1693,8 @@ the file-path-partitioned `Group N` lists alongside
 unknown/custom stages (including the removed `in_progress`/`completed`
 stage values), so legacy rows still render deterministically.
 
-**In Review** items are sorted within the group using a deterministic
-**6-bucket predicate** (WL-0MSLPM5ZB003TADT):
+**In Review** items are sorted within the group by priority first, then by a
+deterministic **6-bucket audit predicate** (WL-0MSLPM5ZB003TADT):
 
 | Bucket | Meaning                            |
 |--------|------------------------------------|
@@ -1707,10 +1707,11 @@ stage values), so legacy rows still render deterministically.
 
 A "fresh" audit satisfies `auditedAt > updatedAt - 60 s` (one-sided, via the
 shared `isAuditFresh` predicate); otherwise it is stale.
-Within the same bucket items are ordered by priority (high → medium → low),
-then by `updatedAt` (older first), then by `id` as a tie-break.  The same
-predicate is shared by the Herdr worklist, `wl next --groups`, and
-`wl list --stage in_review`.
+**Priority is the primary sort key**: all high-priority items are listed
+before medium-priority items, then low. Within each priority band the six
+buckets above order the items, then by `updatedAt` (older first), then by `id`
+as a tie-break (WL-0MUWDW0N6003KF6G).  The same predicate is shared by the
+Herdr worklist, `wl next --groups`, and `wl list --stage in_review`.
 
 ## Markdown viewer
 

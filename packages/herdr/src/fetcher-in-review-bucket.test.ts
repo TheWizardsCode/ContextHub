@@ -10,7 +10,12 @@
  * `wl list` review subset. Without forwarding the fingerprints from the
  * mandatory subset, the default worklist classified the fingerprint-fresh item
  * as passed-stale (bucket 5) and ranked it ahead of a higher-priority
- * passed-fresh item (bucket 6) — the reported "medium before high" symptom.
+ * passed-fresh item (bucket 6) — a "medium before high" inversion.
+ *
+ * Since WL-0MUWDW0N6003KF6G priority is the primary sort key and the bucket
+ * only breaks ties within a priority band; these tests keep verifying that
+ * both fetch paths classify buckets identically (so a high item leads a medium
+ * one), now through the priority-first comparator.
  *
  * Run: npx vitest run packages/herdr/src/fetcher-in-review-bucket.test.ts
  */
@@ -109,5 +114,57 @@ describe('in_review bucket ordering across fetch paths (WL-0MUWDW0N6003KF6G)', (
     const inReviewOrder = items.filter((i) => i.stage === 'in_review').map((i) => i.id);
 
     expect(inReviewOrder).toEqual(['WL-high-time-fresh', 'WL-medium-fp-fresh']);
+  });
+
+  it('fetchItemsByStage(in_review) ranks a high no-audit item before a medium failed-audit item (WL-0MUWDW0N6003KF6G)', async () => {
+    // The producer-reported symptom: the audit bucket was primary, so a medium
+    // failed (stale) audit (bucket 3) led a high no-audit item (bucket 4).
+    // Priority is now the primary key; the bucket breaks ties inside a band.
+    setExecFileAsync((async () => ({
+      stdout: JSON.stringify({
+        success: true,
+        workItems: [
+          {
+            id: 'WL-medium-failed-stale',
+            title: 'Medium failed stale',
+            status: 'completed',
+            stage: 'in_review',
+            priority: 'medium',
+            updatedAt: UPDATED_AT,
+            auditResult: false,
+            auditedAt: STALE_AUDITED_AT,
+          },
+          {
+            id: 'WL-high-no-audit',
+            title: 'High no audit',
+            status: 'completed',
+            stage: 'in_review',
+            priority: 'high',
+            updatedAt: UPDATED_AT,
+            auditResult: null,
+            auditedAt: null,
+          },
+          {
+            id: 'WL-medium-no-audit',
+            title: 'Medium no audit',
+            status: 'completed',
+            stage: 'in_review',
+            priority: 'medium',
+            updatedAt: UPDATED_AT,
+            auditResult: null,
+            auditedAt: null,
+          },
+        ],
+      }),
+      stderr: '',
+    })) as never);
+
+    const items = await fetchItemsByStage('in_review');
+
+    expect(items.map((i) => i.id)).toEqual([
+      'WL-high-no-audit',
+      'WL-medium-failed-stale',
+      'WL-medium-no-audit',
+    ]);
   });
 });

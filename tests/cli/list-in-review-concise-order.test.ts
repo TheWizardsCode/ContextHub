@@ -69,4 +69,40 @@ describe('wl list --stage in_review -F concise ordering (WL-0MUWDW0N6003KF6G)', 
     expect(highPos).toBeLessThan(mediumPos);
     expect(mediumPos).toBeLessThan(lowPos);
   });
+
+  it('ranks a high no-audit item before a medium item with a failed audit (WL-0MUWDW0N6003KF6G)', async () => {
+    // Producer-reported symptom: the audit bucket was the primary sort key,
+    // so a medium-priority item with a failed audit ranked ahead of a
+    // high-priority item with no audit. Priority must dominate.
+    const highId = await createInReview('High no audit', 'high');
+    const mediumFailedId = await createInReview('Medium failed audit', 'medium');
+    const mediumNoAuditId = await createInReview('Medium no audit', 'medium');
+
+    const auditRes = await runInProcess(
+      `tsx ${cliPath} --json --worklog-dir ${wlDir} audit-set ${mediumFailedId} --ready-to-close no --summary "Rejected by test"`,
+    );
+    expect(JSON.parse(auditRes.stdout).success).toBe(true);
+
+    // `audit-set --ready-to-close no` reverts an in_review item to
+    // open/plan_complete (WL-0MSKHYI5U0069FVV); real rejected items such as
+    // WL-0MV1BWETT005GSUJ remain completed/in_review with a stored failed
+    // audit. Re-advance it so the list sees the same state.
+    const reAdvance = await runInProcess(
+      `tsx ${cliPath} --json --worklog-dir ${wlDir} update ${mediumFailedId} --stage in_review --status completed`,
+    );
+    expect(JSON.parse(reAdvance.stdout).success).toBe(true);
+
+    const res = await runInProcess(
+      `tsx ${cliPath} --worklog-dir ${wlDir} list --stage in_review -F concise --no-icons`,
+    );
+
+    const highPos = res.stdout.indexOf(highId);
+    const mediumFailedPos = res.stdout.indexOf(mediumFailedId);
+    const mediumNoAuditPos = res.stdout.indexOf(mediumNoAuditId);
+    expect(highPos).toBeGreaterThanOrEqual(0);
+    expect(mediumFailedPos).toBeGreaterThanOrEqual(0);
+    expect(mediumNoAuditPos).toBeGreaterThanOrEqual(0);
+    expect(highPos).toBeLessThan(mediumFailedPos);
+    expect(mediumFailedPos).toBeLessThan(mediumNoAuditPos);
+  });
 });
