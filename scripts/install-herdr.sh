@@ -22,7 +22,9 @@
 #     `worklog-selection-list.open-worklog-tab` is not already present.
 #   - Legacy `open-worklist` and `open-podcast-editor-tab` prefix+l bindings
 #     are migrated in-place to the new open-worklog-tab action (never
-#     duplicates the key).
+#     duplicates the key). When the new binding is already present, any
+#     leftover legacy block is purged instead, so a stale duplicate prefix+l
+#     key cannot survive (WL-0MSRG4828007ITI4).
 #   - Missing herdr binary or an unwritable config only warn (exit 0), so
 #     `npm run build` never fails in CI/offline environments.
 set -euo pipefail
@@ -122,6 +124,52 @@ fi
 # ── 2. Insert/replace the keybinding (idempotent) ──────────────────────
 if grep -qF "${NEW_BINDING}" "${CONFIG_PATH}" 2>/dev/null; then
   echo "herdr keybinding already present: ${CONFIG_PATH}"
+  # WL-0MSRG4828007ITI4: an earlier installer could add the new binding while
+  # a legacy prefix+l binding (open-worklist / open-podcast-editor-tab) was
+  # still present, because the "already present" fast path exited before the
+  # legacy migration below ran. That left two prefix+l bindings, one pointing
+  # at a now-removed action. Purge any leftover legacy [[keys.command]] block
+  # so exactly one prefix+l binding remains.
+  if grep -qF "${LEGACY_BINDING_OPEN_WORKLIST}" "${CONFIG_PATH}" 2>/dev/null \
+     || grep -qF "${LEGACY_BINDING_OPEN_PODCAST_TAB}" "${CONFIG_PATH}" 2>/dev/null; then
+    if python3 - "${CONFIG_PATH}" "${LEGACY_BINDING_OPEN_WORKLIST}" \
+          "${LEGACY_BINDING_OPEN_PODCAST_TAB}" <<'PY'
+import sys
+
+path, *legacy_bindings = sys.argv[1:]
+with open(path) as f:
+    lines = f.readlines()
+
+out = []
+removed = 0
+i = 0
+while i < len(lines):
+    if lines[i].strip() == "[[keys.command]]":
+        # A TOML table block runs until the next table header or EOF.
+        j = i + 1
+        while j < len(lines) and not lines[j].lstrip().startswith("["):
+            j += 1
+        block = lines[i:j]
+        if any(any(cmd in line for line in block) for cmd in legacy_bindings):
+            removed += 1
+            i = j
+            continue
+        out.extend(block)
+        i = j
+        continue
+    out.append(lines[i])
+    i += 1
+
+if removed:
+    with open(path, "w") as f:
+        f.writelines(out)
+PY
+    then
+      echo "Removed stale legacy herdr keybinding(s) from ${CONFIG_PATH}"
+    else
+      echo "Warning: cannot remove stale legacy herdr keybinding(s) from '${CONFIG_PATH}' — skipping cleanup." >&2
+    fi
+  fi
   # WL-0MSHND11O007FKOU: reload even when the binding is already in the
   # file — an earlier installer may have written it without activating it
   # (the running server keeps startup keybindings in memory). Re-running

@@ -212,6 +212,59 @@ describe('install-herdr script', () => {
     expect(content).toContain('description = "Open the Worklog tab (Worklog work item selection pane)."');
   });
 
+  it('removes a stale legacy open-podcast-editor-tab binding when the new binding is already present', () => {
+    // WL-0MSRG4828007ITI4: an earlier installer could add the new binding
+    // while a legacy prefix+l binding was still present, because the
+    // "already present" fast path exited before the legacy migration ran.
+    // That left two prefix+l bindings, one pointing at the removed
+    // open-podcast-editor-tab action. Re-running the installer must purge
+    // the stale legacy block so exactly one prefix+l binding remains.
+    const tempDir = makeTempDir('worklog-herdr-dedupe-podcast-');
+    const configPath = path.join(tempDir, 'config.toml');
+    const legacyBlock = `[[keys.command]]\nkey = "prefix+l"\ncommand = "${LEGACY_PODCAST_BINDING}"\ndescription = "Open the Worklog tab (Worklog work item selection pane)."\n`;
+    fs.writeFileSync(configPath, KEYBINDING_BLOCK + '\n' + legacyBlock);
+
+    const result = runScript({ HERDR_CONFIG_PATH: configPath });
+    expect(result.status).toBe(0);
+    const content = fs.readFileSync(configPath, 'utf8');
+    expect(countOccurrences(content, LEGACY_PODCAST_BINDING)).toBe(0);
+    expect(countOccurrences(content, COMMAND_MARKER)).toBe(1);
+    expect(countOccurrences(content, '[[keys.command]]')).toBe(1);
+    expect(content).not.toContain('Podcast Editing');
+  });
+
+  it('removes a stale legacy open-worklist binding when the new binding is already present', () => {
+    const tempDir = makeTempDir('worklog-herdr-dedupe-worklist-');
+    const configPath = path.join(tempDir, 'config.toml');
+    const legacyBlock = `[[keys.command]]\nkey = "prefix+l"\ncommand = "${LEGACY_BINDING}"\ndescription = "Open the Worklog work item selection pane in a new tab."\n`;
+    fs.writeFileSync(configPath, KEYBINDING_BLOCK + '\n' + legacyBlock);
+
+    const result = runScript({ HERDR_CONFIG_PATH: configPath });
+    expect(result.status).toBe(0);
+    const content = fs.readFileSync(configPath, 'utf8');
+    expect(countOccurrences(content, LEGACY_BINDING)).toBe(0);
+    expect(countOccurrences(content, COMMAND_MARKER)).toBe(1);
+    expect(countOccurrences(content, '[[keys.command]]')).toBe(1);
+  });
+
+  it('preserves unrelated keybindings when purging a stale legacy binding', () => {
+    const tempDir = makeTempDir('worklog-herdr-dedupe-preserve-');
+    const configPath = path.join(tempDir, 'config.toml');
+    const otherBlock = `[[keys.command]]\nkey = "prefix+n"\ncommand = "herdr plugin action invoke herdr-notes.new-note"\ndescription = "New note."\n`;
+    const legacyBlock = `[[keys.command]]\nkey = "prefix+l"\ncommand = "${LEGACY_PODCAST_BINDING}"\ndescription = "Open the Worklog tab (Worklog work item selection pane)."\n`;
+    fs.writeFileSync(configPath, otherBlock + KEYBINDING_BLOCK + '\n' + legacyBlock);
+
+    const result = runScript({ HERDR_CONFIG_PATH: configPath });
+    expect(result.status).toBe(0);
+    const content = fs.readFileSync(configPath, 'utf8');
+    // The unrelated herdr-notes keybinding must survive the purge untouched.
+    expect(content).toContain('prefix+n');
+    expect(content).toContain('herdr-notes.new-note');
+    expect(content).toContain('New note.');
+    expect(countOccurrences(content, LEGACY_PODCAST_BINDING)).toBe(0);
+    expect(countOccurrences(content, '[[keys.command]]')).toBe(2);
+  });
+
   it('links the plugin from the main checkout when run inside a linked worktree', () => {
     // Reproduce the /skill:implement build: the postbuild hook runs
     // scripts/install-herdr.sh from a linked git worktree. The script must
