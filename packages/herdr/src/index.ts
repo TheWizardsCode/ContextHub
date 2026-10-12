@@ -60,6 +60,8 @@ import {
   isHostAuditActive,
   writeActiveAuditMarker,
   removeActiveAuditMarker,
+  readStoredModelCooldowns,
+  clearStoredModelCooldown,
 } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
 import {
@@ -2118,6 +2120,10 @@ export function createDowntimeDeps(
           fetchItem: fetchAuditItemById,
           readEntries: readDowntimeLogEntries,
           resolveRoot: defaultStalledPaneRootResolver,
+          // Bounded model-cooldown wake (WL-0MV5639GG00085Q7): the machine-wide
+          // signal is read once per scan; a due entry lets the scan offer a
+          // cooldown candidate that bypasses the generic stall threshold.
+          readStoredModelCooldowns: async () => readStoredModelCooldowns(),
         },
         cwd,
         opts,
@@ -2132,6 +2138,7 @@ export function createDowntimeDeps(
           kind: candidate.kind,
           nonTerminalCooldownMs: opts.nonTerminalCooldownMs,
           thresholdMs: opts.thresholdMs,
+          modelCooldown: candidate.modelCooldown,
         },
         {
           promptAgent: defaultStalledResumePromptAgent,
@@ -2142,6 +2149,9 @@ export function createDowntimeDeps(
           },
           markNeedsProducerReview: async (itemId, root) =>
             markNeedsProducerReviewWorkItem(itemId, root),
+          // Consume the marker on a successful resume so the same pane is
+          // not re-woken on the next cycle (WL-0MV5639GG00085Q7).
+          clearCooldown: async (paneId) => clearStoredModelCooldown(paneId),
           maxAttempts: opts.maxAttempts,
         },
       );

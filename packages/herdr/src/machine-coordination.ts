@@ -32,7 +32,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   resolveMachineCoordinationDir,
+  readModelCooldowns,
+  clearModelCooldown,
   DEFAULT_MACHINE_COORDINATION_DIR,
+  type ModelCooldownEntry,
 } from '@worklog/shared/model-cooldown';
 
 // ── Constants ──────────────────────────────────────────────────────────
@@ -64,6 +67,36 @@ export { DEFAULT_MACHINE_COORDINATION_DIR };
  */
 export function getMachineCoordinationDir(): string | null {
   return resolveMachineCoordinationDir();
+}
+
+/**
+ * Read EVERY stored machine-wide model-cooldown entry — active AND
+ * expired/due — for the dispatcher's bounded-wake path
+ * (WL-0MV5639GG00085Q7).
+ *
+ * The cheap-switch gate reads only *active* entries (`readModelCooldowns`
+ * with the current time). The wake path needs the opposite view: a marker
+ * whose `cooldownUntil` has just passed is exactly the pane the dispatcher
+ * must wake. Passing `now = 0` returns every stored entry (all markers have
+ * `cooldownUntil > 0`); the stalled scan then distinguishes active (skip)
+ * from due (wake) against its own injected clock.
+ *
+ * Returns `null` when the coordination directory is unresolvable or the file
+ * is unreadable/corrupt — fail-safe (the scan then has no cooldown
+ * candidates). A missing file is `[]` (nothing recorded). Never throws.
+ */
+export function readStoredModelCooldowns(): ModelCooldownEntry[] | null {
+  return readModelCooldowns(getMachineCoordinationDir(), 0);
+}
+
+/**
+ * Consume a pane's machine-wide model-cooldown marker after a SUCCESSFUL
+ * in-place resume (WL-0MV5639GG00085Q7), so the same pane is not woken
+ * repeatedly. Best-effort: a missing/unreadable marker returns `false`; never
+ * throws.
+ */
+export function clearStoredModelCooldown(paneId: string): boolean {
+  return clearModelCooldown(getMachineCoordinationDir(), paneId);
 }
 
 /**

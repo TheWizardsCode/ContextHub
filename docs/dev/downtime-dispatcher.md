@@ -536,6 +536,7 @@ machine-readable reason:
 | `agent-blocked` | The agent status is `blocked` (never hijacked). |
 | `kind-stale` | The item has already advanced past the pane's dispatched kind. |
 | `cooldown-active` | The non-terminal pane-close cooldown holds the `(item, kind)`. |
+| `model-cooldown-active` | A machine-wide model cooldown is still active (`cooldownUntil` in the future); the pane is never woken early. |
 | `attempt-cap-exhausted` | The per-item/per-kind dispatch-attempt cap is reached. |
 | `last-activity-unknown` | No parseable activity timestamp to measure a stall. |
 | `stall-threshold-not-elapsed` | Not-`working` for less than the threshold. |
@@ -579,6 +580,40 @@ applies to resumes too; the cap is enforced up front and escalates via
 `needsProducerReview` when exhausted. Concurrent resumes of the same
 `(paneId, itemId)` are prevented by an in-process in-flight guard (a second
 attempt is the neutral `concurrent-resume` skip).
+
+#### Model-cooldown wake (WL-0MV5639GG00085Q7; parent WL-0MV54ZP3Y00514Y9)
+
+A pane whose in-pane recovery loop hit provider exhaustion writes a durable
+machine-wide model-cooldown marker (`model-cooldowns.json` in the coordination
+dir; `@worklog/shared/model-cooldown`). The scan reads **every** stored entry
+once per cycle — active *and* expired/due — and matches it to a listed pane by
+`paneId` (the recovery loop writes `HERDR_PANE_ID` when available; a
+session-only entry cannot be mapped to a pane record and is ignored):
+
+- **Active** (`cooldownUntil > now`) — the pane is known to be waiting on a
+  throttled provider: it is **never** woken, and the active cooldown overrides
+  even an elapsed generic stall threshold (reason `model-cooldown-active`).
+  This is the strictness guarantee.
+- **Due** (`cooldownUntil <= now`) — the marker is the WAKE TRIGGER: the pane
+  becomes a candidate **without** waiting for the generic stall threshold (the
+  `last-activity`/`stall-threshold` checks are bypassed). Every other safety
+  gate still applies — the non-terminal pane-close cooldown, the
+  per-item/per-kind attempt cap, the `needsProducerReview` flag and the
+  kind-vs-stage (`kind-stale`) check.
+
+A due cooldown candidate is ordered **before** generic stall candidates and is
+resumed through the **unchanged** stalled-resume path (the literal `continue`
+to a live pane, or a pi `--continue` relaunch in an exited pane) with the same
+attempt accounting. The resume loop still resumes **at most one** candidate per
+cycle, so at most one cooled-down job is woken per dispatcher cycle, and a
+resumed pane makes the cycle short-circuit with `stalled-resume` rather than
+opening a new pane.
+
+A **successful** resume consumes the pane's marker (`clearModelCooldown`) so the
+same pane is not re-woken on the next cycle; a **failed** resume does not clear
+the marker and records no attempt, so it stays bounded by `cooldownUntil` and
+the attempt cap. An unreadable/absent cooldown signal is fail-safe — the scan
+simply has no cooldown candidates and the generic path is unchanged.
 
 #### Neutral outcome vocabulary and fail-safety (parent AC2/AC6)
 

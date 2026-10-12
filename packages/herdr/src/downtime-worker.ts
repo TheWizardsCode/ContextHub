@@ -2149,7 +2149,10 @@ export interface DowntimeWorkerDeps {
    * `herdr pane list` record for a pane hosting a non-terminal item whose
    * agent has stopped working, and return the resumable candidates (each
    * carrying its OWN worklog root). Consulted ONCE per idle cycle,
-   * immediately before new-item selection. OPTIONAL — when absent (or when
+   * immediately before new-item selection. Since WL-0MV5639GG00085Q7 the scan
+   * also reads the machine-wide model-cooldown signal and offers a DUE
+   * cooldown pane as a candidate that bypasses the generic stall threshold
+   * (an active cooldown is never woken). OPTIONAL — when absent (or when
    * `resumeStalledPane` is absent) the scan degrades to "no stalled resume"
    * and normal dispatch proceeds unchanged. Must never throw: an
    * unreadable/unparseable scan resolves an empty array.

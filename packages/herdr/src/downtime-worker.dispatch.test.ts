@@ -18,6 +18,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { dispatchDowntimeWork, buildDowntimePaneArgs } from './downtime-worker.js';
 import { makeDeps } from './downtime-worker.fixtures.js';
+import type { StalledPaneCandidate } from './stalled-work.js';
 
 describe('dispatch selection', () => {
   it('runs /skill:plan on the next intake_complete item', async () => {
@@ -878,5 +879,102 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(true);
     expect(closePane).not.toHaveBeenCalled();
+  });
+});
+
+// ── Bounded model-cooldown wake (WL-0MV5639GG00085Q7) ──────────────────
+
+// These tests exercise the dispatcher seam: a due model cooldown candidate
+// sourced by the scan is resumed through the existing stalled-resume path,
+// at most one per cycle, and it is preferred over opening a new pane.
+describe('bounded model-cooldown wake (WL-0MV5639GG00085Q7)', () => {
+  const ITEM_ID = 'WL-COOL';
+  const NOW = Date.now();
+
+  function cooldownCandidate(paneId: string): StalledPaneCandidate {
+    return {
+      pane: {
+        paneId,
+        label: `Downtime triggered implement Cooled job - ${ITEM_ID}`,
+        agent: 'pi',
+        agentStatus: 'idle',
+      },
+      item: {
+        id: ITEM_ID,
+        status: 'open',
+        stage: 'plan_complete',
+        risk: 'low',
+        effort: 'small',
+        updatedAt: new Date(NOW - 1000).toISOString(),
+      },
+      cwd: '/repo',
+      kind: 'implement',
+      modelCooldown: {
+        paneId,
+        sessionId: null,
+        itemId: ITEM_ID,
+        kind: 'implement',
+        reason: 'all providers exhausted',
+        createdAt: NOW - 60 * 1000,
+        cooldownUntil: NOW - 1,
+      },
+    };
+  }
+
+  it('resumes at most ONE due cooldown job and opens no new pane', async () => {
+    const resumeStalledPane = vi.fn().mockResolvedValue({
+      resumed: true,
+      via: 'prompt',
+      paneId: 'p1',
+      itemId: ITEM_ID,
+      kind: 'implement',
+    });
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([cooldownCandidate('p1'), cooldownCandidate('p2')]),
+      resumeStalledPane,
+      getHerdrListHead: vi.fn().mockResolvedValue({
+        ok: true,
+        items: [{ id: ITEM_ID, title: 'Cooled job', stage: 'plan_complete' }],
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'implement', cwd: '/repo', freeSlots: 5 });
+
+    expect(outcome).toEqual({ dispatched: false, reason: 'stalled-resume' });
+    // At most one resume: the loop short-circuits on the first success.
+    expect(resumeStalledPane).toHaveBeenCalledTimes(1);
+    // Preferred over opening a new pane: no head read, no spawn.
+    expect(deps.getHerdrListHead).not.toHaveBeenCalled();
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(deps.getDueScheduledPrompt).not.toHaveBeenCalled();
+  });
+
+  it('still resumes at most one job when an earlier cooldown candidate fails', async () => {
+    const resumeStalledPane = vi
+      .fn()
+      .mockResolvedValueOnce({
+        resumed: false,
+        reason: 'agent-prompt-stalled',
+        paneId: 'p1',
+        itemId: ITEM_ID,
+        kind: 'implement',
+      })
+      .mockResolvedValueOnce({
+        resumed: true,
+        via: 'prompt',
+        paneId: 'p2',
+        itemId: ITEM_ID,
+        kind: 'implement',
+      });
+    const deps = makeDeps({
+      scanStalledPanes: vi.fn().mockResolvedValue([cooldownCandidate('p1'), cooldownCandidate('p2')]),
+      resumeStalledPane,
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, { model: 'implement', cwd: '/repo', freeSlots: 5 });
+
+    expect(outcome).toEqual({ dispatched: false, reason: 'stalled-resume' });
+    expect(resumeStalledPane).toHaveBeenCalledTimes(2);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
   });
 });

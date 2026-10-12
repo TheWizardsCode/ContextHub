@@ -18,10 +18,18 @@
  * non-terminal pane-close cooldown (`isNonTerminalCooldownActive`,
  * downtime-log) and the per-item/per-kind attempt cap
  * (`isAttemptBudgetExhausted`, downtime-worker) are the canonical predicates.
+ *
+ * Model cooldown (WL-0MV5639GG00085Q7): the scan also reads the machine-wide
+ * model-cooldown signal and matches entries to panes by `paneId`. An ACTIVE
+ * entry (`cooldownUntil` in the future) is never woken — strictness — and a
+ * DUE entry is an additional WAKE TRIGGER that bypasses the generic stall
+ * threshold while keeping every other safety gate. The resume consumes the
+ * marker on success.
  */
 
 import { isActiveBlocker } from './hydrator.js';
 import { isNonTerminalCooldownActive, type DowntimeLogEntry } from './downtime-log.js';
+import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 import {
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   isAttemptBudgetExhausted,
@@ -46,6 +54,15 @@ export interface StalledPaneGuards {
   nonTerminalCooldownMs: number;
   /** Per-item/per-kind dispatch attempt cap. */
   maxAttempts: number;
+  /**
+   * The machine-wide model-cooldown entry matching this pane (by `paneId`),
+   * or `null`/absent when the pane has none (WL-0MV5639GG00085Q7). While
+   * `cooldownUntil` is in the future the pane is known to be waiting on a
+   * throttled provider and must NOT be woken (strictness); once it has
+   * passed, the marker is the WAKE TRIGGER and the generic stall threshold is
+   * bypassed.
+   */
+  modelCooldown?: ModelCooldownEntry | null;
 }
 
 // ── Decision types ────────────────────────────────────────────────────
@@ -63,6 +80,8 @@ export interface StalledPaneGuards {
  *  - `agent-blocked`            — the agent is blocked (never hijacked).
  *  - `kind-stale`               — the item advanced past the pane's kind.
  *  - `cooldown-active`          — the non-terminal pane-close cooldown holds it.
+ *  - `model-cooldown-active`    — a machine-wide model cooldown is still active
+ *                                 (`cooldownUntil` in the future).
  *  - `attempt-cap-exhausted`    — the per-item/per-kind attempt cap is reached.
  *  - `last-activity-unknown`    — no activity timestamp to measure a stall.
  *  - `stall-threshold-not-elapsed` — not-working for less than the threshold.
@@ -77,6 +96,7 @@ export type StalledPaneReason =
   | 'agent-blocked'
   | 'kind-stale'
   | 'cooldown-active'
+  | 'model-cooldown-active'
   | 'attempt-cap-exhausted'
   | 'last-activity-unknown'
   | 'stall-threshold-not-elapsed';
@@ -287,7 +307,22 @@ export function classifyStalledPane(
     return { stalled: false, reason: 'attempt-cap-exhausted' };
   }
 
-  // 8. The not-working state must have persisted at least the threshold.
+  // 8. Machine-wide model cooldown (WL-0MV5639GG00085Q7). While an entry is
+  //    still active (`cooldownUntil > now`) the pane is known to be waiting
+  //    on a throttled provider: never wake it early — an ACTIVE cooldown
+  //    overrides even an elapsed generic stall threshold (strictness). Once
+  //    `cooldownUntil` has passed the marker becomes the WAKE TRIGGER, so the
+  //    pane is resumable WITHOUT waiting for the generic stall threshold
+  //    below. Every safety gate above still applies to a due candidate.
+  const modelCooldown = guards.modelCooldown;
+  if (modelCooldown) {
+    if (modelCooldown.cooldownUntil > now) {
+      return { stalled: false, reason: 'model-cooldown-active' };
+    }
+    return { stalled: true, kind };
+  }
+
+  // 9. The not-working state must have persisted at least the threshold.
   const lastActivityAt = resolveLastActivityAt(itemInfo, guards.entries, itemId, kind);
   if (lastActivityAt === null) {
     return { stalled: false, reason: 'last-activity-unknown' };
@@ -361,6 +396,13 @@ export interface ResumeStalledPaneDeps {
   recordAttempt(cwd: string, entry: DowntimeLogEntry): Promise<void>;
   /** Flag an item whose attempt budget is exhausted for producer review. */
   markNeedsProducerReview(itemId: string, cwd: string): Promise<boolean>;
+  /**
+   * Consume the pane's durable machine-wide model-cooldown marker after a
+   * SUCCESSFUL resume (WL-0MV5639GG00085Q7), so the same pane is not woken
+   * repeatedly. Best-effort: a failure is swallowed (the resume already
+   * happened). OPTIONAL — absent skips the clear.
+   */
+  clearCooldown?(paneId: string): Promise<boolean>;
   /** Per-item/per-kind dispatch attempt cap. */
   maxAttempts: number;
   /** Injectable clock (defaults to `Date.now`). */
@@ -453,6 +495,13 @@ export interface StalledResumeInput {
    * two parses can never silently diverge.
    */
   kind: DowntimeSkillKind;
+  /**
+   * The machine-wide model-cooldown entry matching this pane (from the scan),
+   * or `null` when the pane was selected by the generic stall path
+   * (WL-0MV5639GG00085Q7). A due entry bypasses the stall threshold; an
+   * active entry still blocks the resume (re-checked here against `now`).
+   */
+  modelCooldown?: ModelCooldownEntry | null;
 }
 
 /**
@@ -550,7 +599,12 @@ export async function resumeStalledPane(
     const decision = classifyStalledPane(
       pane,
       item,
-      { entries, nonTerminalCooldownMs, maxAttempts: deps.maxAttempts },
+      {
+        entries,
+        nonTerminalCooldownMs,
+        maxAttempts: deps.maxAttempts,
+        modelCooldown: input.modelCooldown ?? null,
+      },
       (deps.now ?? Date.now)(),
       input.thresholdMs ?? DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
     );
@@ -599,6 +653,18 @@ export async function resumeStalledPane(
       // fail-open: the resume already happened
     }
 
+    // 5. Consume the machine-wide model-cooldown marker (WL-0MV5639GG00085Q7):
+    //    a resumed pane is no longer waiting on the provider, so the same
+    //    pane must not be woken again on the next cycle. Best-effort — a clear
+    //    failure must not turn a successful resume into a failure.
+    if (typeof deps.clearCooldown === 'function') {
+      try {
+        await deps.clearCooldown(pane.paneId);
+      } catch {
+        // fail-open: the resume already happened
+      }
+    }
+
     return { resumed: true, via: mustRelaunch ? 'start' : 'prompt', ...base };
   } catch {
     // Any unexpected throw (an unwired/throwing seam) is a neutral CLI error.
@@ -641,6 +707,13 @@ export interface StalledPaneCandidate {
   /** The item's worklog root (resolved from the pane's cwd / agent_session). */
   cwd: string;
   kind: DowntimeSkillKind;
+  /**
+   * The machine-wide model-cooldown entry whose expiry made this candidate
+   * (WL-0MV5639GG00085Q7), or `null` for a generic stall candidate. Non-null
+   * always means the entry was DUE (`cooldownUntil <= now`); an active entry
+   * is never a candidate (strictness).
+   */
+  modelCooldown: ModelCooldownEntry | null;
 }
 
 /**
@@ -662,6 +735,32 @@ export interface StalledScanDeps {
    * fails closed (skips the pane) rather than resuming against a wrong root.
    */
   resolveRoot(pane: HerdrPaneRecord, fallbackCwd: string): string | null;
+  /**
+   * Read EVERY stored machine-wide model-cooldown entry — active AND
+   * expired/due — for the wake path (WL-0MV5639GG00085Q7). The recovery loop
+   * writes the marker while a pane is in proxy backoff; a marker whose
+   * `cooldownUntil` has passed is exactly the pane the dispatcher must wake.
+   * `null`/a throw is fail-safe: the scan simply has no cooldown candidates.
+   * OPTIONAL — absent leaves the generic stall scan unchanged.
+   */
+  readStoredModelCooldowns?(): Promise<ModelCooldownEntry[] | null>;
+}
+
+/**
+ * The machine-wide cooldown entry matching a pane, keyed by `paneId`
+ * (WL-0MV5639GG00085Q7). The recovery loop writes the pane id
+ * (`HERDR_PANE_ID`) whenever it is available; a session-only entry cannot be
+ * mapped to a pane record, so it is ignored (fail-safe). Returns `null` when
+ * the pane has no entry.
+ */
+export function matchModelCooldownEntry(
+  pane: HerdrPaneRecord,
+  cooldowns: ModelCooldownEntry[],
+): ModelCooldownEntry | null {
+  for (const entry of cooldowns) {
+    if (entry.paneId !== null && entry.paneId === pane.paneId) return entry;
+  }
+  return null;
 }
 
 /**
@@ -690,7 +789,21 @@ export async function scanStalledPanes(
   }
   if (!Array.isArray(panes) || panes.length === 0) return [];
   const now = opts.now ?? Date.now();
+
+  // Machine-wide model-cooldown signal (WL-0MV5639GG00085Q7): read ONCE per
+  // scan. An unreadable/absent signal is fail-safe — no cooldown candidates,
+  // and the generic stall path below is unchanged.
+  let modelCooldowns: ModelCooldownEntry[] = [];
+  if (typeof deps.readStoredModelCooldowns === 'function') {
+    try {
+      modelCooldowns = (await deps.readStoredModelCooldowns()) ?? [];
+    } catch {
+      modelCooldowns = [];
+    }
+  }
+
   const candidates: StalledPaneCandidate[] = [];
+  const cooldownCandidates: StalledPaneCandidate[] = [];
   for (const pane of panes) {
     // Cheap pre-checks before any per-pane I/O (mirrors the classifier).
     if (typeof pane.agent !== 'string' || pane.agent === '') continue;
@@ -716,6 +829,7 @@ export async function scanStalledPanes(
     } catch {
       entries = [];
     }
+    const modelCooldown = matchModelCooldownEntry(pane, modelCooldowns);
     const decision = classifyStalledPane(
       pane,
       fetched.info,
@@ -723,13 +837,26 @@ export async function scanStalledPanes(
         entries,
         nonTerminalCooldownMs: opts.nonTerminalCooldownMs,
         maxAttempts: opts.maxAttempts,
+        modelCooldown,
       },
       now,
       opts.thresholdMs,
     );
     if (decision.stalled) {
-      candidates.push({ pane, item: fetched.info, cwd: root, kind: decision.kind });
+      const candidate: StalledPaneCandidate = {
+        pane,
+        item: fetched.info,
+        cwd: root,
+        kind: decision.kind,
+        modelCooldown,
+      };
+      // A due cooldown candidate is preferred over a generic stalled pane
+      // (WL-0MV5639GG00085Q7): it is a known model-blocked pane whose wake
+      // window has just opened. The resume loop still resumes at most ONE
+      // candidate per cycle.
+      if (modelCooldown !== null) cooldownCandidates.push(candidate);
+      else candidates.push(candidate);
     }
   }
-  return candidates;
+  return [...cooldownCandidates, ...candidates];
 }

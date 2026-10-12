@@ -27,6 +27,7 @@ import {
 } from './stalled-work.js';
 import type { DowntimeItemInfo, HerdrPaneRecord } from './downtime-worker.js';
 import { countAttempts, type DowntimeLogEntry } from './downtime-log.js';
+import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 
 const NOW = Date.parse('2026-10-08T12:00:00.000Z');
 const THRESHOLD = 5 * 60 * 1000;
@@ -61,6 +62,20 @@ function guards(overrides: Partial<StalledPaneGuards> = {}): StalledPaneGuards {
     entries: [],
     nonTerminalCooldownMs: 10 * 60 * 1000,
     maxAttempts: 3,
+    ...overrides,
+  };
+}
+
+/** A machine-wide model-cooldown entry; default DUE (already expired). */
+function cooldown(overrides: Partial<ModelCooldownEntry> = {}): ModelCooldownEntry {
+  return {
+    paneId: 'pane-1',
+    sessionId: null,
+    itemId: ITEM_ID,
+    kind: 'implement',
+    reason: 'all providers exhausted',
+    createdAt: NOW - 30 * 1000,
+    cooldownUntil: NOW - 1,
     ...overrides,
   };
 }
@@ -244,6 +259,49 @@ describe('classifyStalledPane — safety / no-progress exclusions (WL-0MUYMBO9X0
   });
 });
 
+// ── Model cooldown (WL-0MV5639GG00085Q7) ───────────────────────────────
+
+describe('classifyStalledPane — model cooldown (WL-0MV5639GG00085Q7)', () => {
+  it('a DUE (expired) cooldown is the wake trigger and bypasses the stall threshold', () => {
+    // The item has only been quiet for 1 s — the generic 5-min threshold has
+    // NOT elapsed — but the expired cooldown makes it resumable.
+    const info = item({ updatedAt: new Date(NOW - 1000).toISOString() });
+    expect(classify(pane(), info, guards({ modelCooldown: cooldown() }))).toEqual({
+      stalled: true,
+      kind: 'implement',
+    });
+  });
+
+  it('strictness: an ACTIVE (unexpired) cooldown never wakes a pane, even past the threshold', () => {
+    expect(
+      classify(pane(), item(), guards({ modelCooldown: cooldown({ cooldownUntil: NOW + 60 * 1000 }) })),
+    ).toEqual({ stalled: false, reason: 'model-cooldown-active' });
+  });
+
+  it('a due cooldown candidate is still excluded by the needsProducerReview flag', () => {
+    expect(
+      classify(pane(), item({ needsProducerReview: true }), guards({ modelCooldown: cooldown() })),
+    ).toEqual({ stalled: false, reason: 'needs-producer-review' });
+  });
+
+  it('a due cooldown candidate is still excluded by the attempt cap', () => {
+    const entries: DowntimeLogEntry[] = Array.from({ length: 3 }, () => ({
+      itemId: ITEM_ID,
+      kind: 'implement',
+      stage: 'plan_complete',
+      dispatchedAt: new Date(NOW - 20 * 60 * 1000).toISOString(),
+    }));
+    expect(classify(pane(), item(), guards({ entries, maxAttempts: 3, modelCooldown: cooldown() }))).toEqual({
+      stalled: false,
+      reason: 'attempt-cap-exhausted',
+    });
+  });
+
+  it('has no effect when the pane has no matching cooldown entry', () => {
+    expect(classify(pane(), item(), guards())).toEqual({ stalled: true, kind: 'implement' });
+  });
+});
+
 // ── In-place resume orchestrator (WL-0MUYMBPZ5004LBFX) ──────────────────
 
 interface ResumeSpies {
@@ -267,6 +325,7 @@ function resumeController(
   const startCalls: Array<[string, StalledResumeStartOptions]> = [];
   const recorded: DowntimeLogEntry[] = [];
   const flagged: string[] = [];
+  const cleared: string[] = [];
   const deps: ResumeStalledPaneDeps = {
     promptAgent: async (paneId, text) => {
       promptCalls.push([paneId, text]);
@@ -285,14 +344,22 @@ function resumeController(
       flagged.push(itemId);
       return true;
     },
+    clearCooldown: async (paneId) => {
+      cleared.push(paneId);
+      return true;
+    },
     maxAttempts: 3,
     now: () => NOW,
     ...overrides,
   };
-  return { deps, promptCalls, startCalls, recorded, flagged };
+  return { deps, promptCalls, startCalls, recorded, flagged, cleared };
 }
 
-function resumeInput(paneOverrides: Partial<HerdrPaneRecord> = {}, itemOverrides: Partial<DowntimeItemInfo> = {}) {
+function resumeInput(
+  paneOverrides: Partial<HerdrPaneRecord> = {},
+  itemOverrides: Partial<DowntimeItemInfo> = {},
+  modelCooldown: ModelCooldownEntry | null = null,
+) {
   return {
     pane: pane(paneOverrides),
     item: item(itemOverrides),
@@ -300,6 +367,7 @@ function resumeInput(paneOverrides: Partial<HerdrPaneRecord> = {}, itemOverrides
     nonTerminalCooldownMs: 10 * 60 * 1000,
     thresholdMs: THRESHOLD,
     kind: 'implement' as const,
+    modelCooldown,
   };
 }
 
@@ -467,6 +535,52 @@ describe('resumeStalledPane — in-place resume (WL-0MUYMBPZ5004LBFX)', () => {
   });
 });
 
+// ── Model-cooldown wake (WL-0MV5639GG00085Q7) ──────────────────────────
+
+describe('resumeStalledPane — model-cooldown wake (WL-0MV5639GG00085Q7)', () => {
+  beforeEach(() => {
+    _resetStalledResumeInFlight();
+  });
+
+  it('resumes a due cooldown candidate even before the generic stall threshold', async () => {
+    const { deps, promptCalls } = resumeController();
+    const out = await resumeStalledPane(
+      resumeInput({}, { updatedAt: new Date(NOW - 1000).toISOString() }, cooldown()),
+      deps,
+    );
+    expect(out).toMatchObject({ resumed: true, via: 'prompt', paneId: 'pane-1' });
+    expect(promptCalls).toEqual([['pane-1', STALLED_RESUME_PROMPT]]);
+  });
+
+  it('strictness: an active cooldown blocks a resume that would otherwise be stalled', async () => {
+    const { deps, promptCalls } = resumeController();
+    const out = await resumeStalledPane(
+      resumeInput({}, {}, cooldown({ cooldownUntil: NOW + 60 * 1000 })),
+      deps,
+    );
+    expect(out).toMatchObject({ resumed: false, reason: 'model-cooldown-active' });
+    expect(promptCalls).toEqual([]);
+  });
+
+  it('consumes the model-cooldown marker on a successful resume', async () => {
+    const { deps, cleared, recorded } = resumeController();
+    const out = await resumeStalledPane(resumeInput({}, {}, cooldown()), deps);
+    expect(out).toMatchObject({ resumed: true });
+    expect(cleared).toEqual(['pane-1']);
+    expect(recorded).toHaveLength(1);
+  });
+
+  it('a failed resume does not consume the marker and records no attempt', async () => {
+    const { deps, cleared, recorded } = resumeController({
+      promptAgent: async () => ({ ok: false, reason: 'agent-prompt-stalled' }),
+    });
+    const out = await resumeStalledPane(resumeInput({}, {}, cooldown()), deps);
+    expect(out).toMatchObject({ resumed: false, reason: 'agent-prompt-stalled' });
+    expect(cleared).toEqual([]);
+    expect(recorded).toEqual([]);
+  });
+});
+
 // ── Machine-wide scan (WL-0MUYMBSA90092QV2) ───────────────────────────
 
 describe('scanStalledPanes — machine-wide scan (WL-0MUYMBSA90092QV2)', () => {
@@ -614,5 +728,106 @@ describe('scanStalledPanes — machine-wide scan (WL-0MUYMBSA90092QV2)', () => {
     );
     expect(out).toEqual([]);
     expect(fetched).toBe(0);
+  });
+
+  // ── Model-cooldown candidate source (WL-0MV5639GG00085Q7) ──────────
+
+  it('adds a DUE model-cooldown pane as a candidate before the generic stall threshold', async () => {
+    const fresh = new Date(NOW - 1000).toISOString();
+    const out = await scanStalledPanes(
+      scanDeps({
+        listPanes: async () => [pane({ paneId: 'p-cool' })],
+        fetchItem: async (id) => ({ ok: true, info: item({ id, stage: 'plan_complete', updatedAt: fresh }) }),
+        readStoredModelCooldowns: async () => [cooldown({ paneId: 'p-cool' })],
+      }),
+      '/leader',
+      OPTS,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].pane.paneId).toBe('p-cool');
+    expect(out[0].modelCooldown).toMatchObject({ paneId: 'p-cool', cooldownUntil: NOW - 1 });
+  });
+
+  it('strictness: an UNEXPIRED cooldown yields no candidate even past the generic threshold', async () => {
+    const out = await scanStalledPanes(
+      scanDeps({
+        listPanes: async () => [pane({ paneId: 'p-cool' })],
+        readStoredModelCooldowns: async () => [cooldown({ paneId: 'p-cool', cooldownUntil: NOW + 60 * 1000 })],
+      }),
+      '/leader',
+      OPTS,
+    );
+    expect(out).toEqual([]);
+  });
+
+  it('prefers a due cooldown candidate over a generic stall candidate', async () => {
+    const panes: HerdrPaneRecord[] = [
+      pane({ paneId: 'p-stall', label: `Downtime triggered implement A - WL-STALL` }),
+      pane({ paneId: 'p-cool', label: `Downtime triggered implement B - WL-COOL` }),
+    ];
+    const out = await scanStalledPanes(
+      scanDeps({
+        listPanes: async () => panes,
+        readStoredModelCooldowns: async () => [cooldown({ paneId: 'p-cool' })],
+      }),
+      '/leader',
+      OPTS,
+    );
+    expect(out.map((c) => [c.pane.paneId, c.modelCooldown !== null])).toEqual([
+      ['p-cool', true],
+      ['p-stall', false],
+    ]);
+  });
+
+  it('fail-safe: a thrown/absent cooldown reader leaves the generic stall scan unchanged', async () => {
+    const panes: HerdrPaneRecord[] = [
+      pane({ paneId: 'p1', label: `Downtime triggered implement A - WL-A` }),
+    ];
+    const thrown = await scanStalledPanes(
+      scanDeps({
+        listPanes: async () => panes,
+        readStoredModelCooldowns: async () => {
+          throw new Error('cooldown unreadable');
+        },
+      }),
+      '/leader',
+      OPTS,
+    );
+    expect(thrown.map((c) => c.pane.paneId)).toEqual(['p1']);
+    expect(thrown[0].modelCooldown).toBeNull();
+
+    const absent = await scanStalledPanes(scanDeps({ listPanes: async () => panes }), '/leader', OPTS);
+    expect(absent.map((c) => c.pane.paneId)).toEqual(['p1']);
+    expect(absent[0].modelCooldown).toBeNull();
+  });
+
+  it('consumption: a successful resume clears the marker so the next scan does not re-wake it', async () => {
+    const panes: HerdrPaneRecord[] = [pane({ paneId: 'p-cool' })];
+    let cooldowns: ModelCooldownEntry[] = [cooldown({ paneId: 'p-cool' })];
+    const fresh = new Date(NOW - 1000).toISOString();
+    const deps = scanDeps({
+      listPanes: async () => panes,
+      fetchItem: async (id) => ({ ok: true, info: item({ id, stage: 'plan_complete', updatedAt: fresh }) }),
+      readStoredModelCooldowns: async () => cooldowns,
+    });
+
+    const first = await scanStalledPanes(deps, '/leader', OPTS);
+    expect(first.map((c) => c.pane.paneId)).toEqual(['p-cool']);
+
+    // The resume consumes the marker (as the production clear seam does).
+    const { deps: resumeDeps } = resumeController({
+      clearCooldown: async () => {
+        cooldowns = [];
+        return true;
+      },
+    });
+    const outcome = await resumeStalledPane(
+      resumeInput({}, { updatedAt: fresh }, first[0].modelCooldown),
+      resumeDeps,
+    );
+    expect(outcome).toMatchObject({ resumed: true });
+
+    const second = await scanStalledPanes(deps, '/leader', OPTS);
+    expect(second).toEqual([]);
   });
 });
