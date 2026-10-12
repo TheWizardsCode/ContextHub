@@ -86,15 +86,19 @@ const DEFAULT_RATE_LIMIT_PATTERNS: RegExp[] = [
   /too\s*many\s*requests/i,
 ];
 
-const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
-  /5\d{2}/,
-  /server\s*error/i,
-  /internal\s*(server\s*)?error/i,
-  /service\s*unavailable/i,
-  /overloaded/i,
-  /retry\s*delay/i,
-  /bad\s*gateway/i,
-  /server\s*encountered/i,
+/**
+ * Provider-exhaustion pattern set.
+ *
+ * These are the model-unavailable bodies the llm-proxy returns when every
+ * upstream provider is throttled/out of its scheduled window: "all providers
+ * exhausted", "all providers unavailable", "no provider is available during
+ * the current scheduled time window". They are a subset of the SERVER_ERROR
+ * classification (so the recovery loop retries with exponential backoff) and
+ * double as the trigger for the durable model-cooldown marker
+ * (WL-0MV5638J1006URXA): a plain retryable 5xx or timeout must NOT record a
+ * cooldown.
+ */
+export const EXHAUSTION_SERVER_ERROR_PATTERNS: RegExp[] = [
   /all providers exhausted/i,
   // llm-proxy scheduled-window exhaustion body (proxy returns HTTP 503):
   // "All providers unavailable: no provider is available during the current
@@ -111,6 +115,18 @@ const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
   /no provider\s+(is\s+)?available/i,
   /scheduled time window/i,
   /outside its available_times/i,
+];
+
+const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
+  /5\d{2}/,
+  /server\s*error/i,
+  /internal\s*(server\s*)?error/i,
+  /service\s*unavailable/i,
+  /overloaded/i,
+  /retry\s*delay/i,
+  /bad\s*gateway/i,
+  /server\s*encountered/i,
+  ...EXHAUSTION_SERVER_ERROR_PATTERNS,
   // pi-ai mapStopReason() collapses the enriched finish_reason payload to
   // the generic string "Provider finish_reason: error", discarding type/
   // message/suggested_action. Classify as server-error so the recovery loop
@@ -311,6 +327,18 @@ export function isRateLimit(message: unknown): boolean {
 export function isServerError(message: unknown): boolean {
   if (!isAssistantMessage(message)) return false;
   return matchesAny(message.errorMessage, DEFAULT_SERVER_ERROR_PATTERNS);
+}
+
+/**
+ * True when the message is a provider-exhaustion SERVER_ERROR — one of the
+ * model-unavailable bodies (all providers exhausted/unavailable, no provider
+ * available during the scheduled window). This is the narrower trigger for
+ * the durable model-cooldown marker: unlike {@link isServerError}, a plain
+ * retryable 5xx or a timeout returns false (WL-0MV5638J1006URXA).
+ */
+export function isExhaustionServerError(message: unknown): boolean {
+  if (!isAssistantMessage(message)) return false;
+  return matchesAny(message.errorMessage, EXHAUSTION_SERVER_ERROR_PATTERNS);
 }
 
 export function isAuthError(message: unknown): boolean {

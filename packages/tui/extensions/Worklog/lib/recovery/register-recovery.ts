@@ -10,6 +10,9 @@
  * - agent_end COMPACTION_GATE → /compact + auto-retry (proxy hard cap 4xx)
  * - Built-in retry suppression (monkey-patching _prepareRetry)
  * - /retry command registration
+ * - Durable model-cooldown marker: an exhaustion SERVER_ERROR records a
+ *   machine-wide cooldown (best-effort), cleared on the next 2xx provider
+ *   response (WL-0MV5638J1006URXA)
  *
  * Notify/ctx lifecycle:
  *   _notifyFn is captured from ctx.ui.notify in agent_end, turn_end, and
@@ -22,7 +25,7 @@
 
 import type { ExtensionAPI, ExtensionCommandContext, SessionCompactEvent } from '@earendil-works/pi-coding-agent';
 
-import { classifyError, DEFAULT_RECOVERY_CONFIG, ErrorCategory } from './error-patterns.js';
+import { classifyError, DEFAULT_RECOVERY_CONFIG, ErrorCategory, isExhaustionServerError } from './error-patterns.js';
 import {
   executeParseErrorContinue,
   executeCompactAndContinue,
@@ -44,6 +47,9 @@ import {
   formatDuration,
   resolveRetryDelay,
   createRetryHintCapturingFetch,
+  deriveCooldownIdentity,
+  recordExhaustionCooldown,
+  clearModelCooldownSignal,
   DEFAULT_BACKOFF_CONFIG,
 } from './retry-logic.js';
 
@@ -65,6 +71,11 @@ let _lastInvisibleContinueTime = 0;
 // Server-requested retry delay captured from the latest provider response
 // headers (`Retry-After` / `Retry-After-Ms`). Consumed by the retry loop.
 let _lastServerRetryHintMs: number | undefined = undefined;
+
+// Session id of the most recent agent_end/session_start context, used to key
+// (and clear) the durable model-cooldown marker from the fetch wrapper, which
+// has no ExtensionContext of its own (WL-0MV5638J1006URXA).
+let _currentSessionId: string | null = null;
 
 // Guards against installing the fetch hint capture more than once.
 let _fetchHintCaptureInstalled = false;
@@ -90,6 +101,7 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
   // Refresh the notify function on every handler that carries a ctx.
   pi.on('agent_end', async (_event, ctx) => {
     _notifyFn = (message, level) => ctx.ui.notify(message, level);
+    _currentSessionId = safeSessionId(ctx);
   });
   pi.on('turn_end', async (_event, ctx) => {
     if (!_notifyFn) {
@@ -128,9 +140,53 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
         break;
       }
 
-      case ErrorCategory.SERVER_ERROR:
+      case ErrorCategory.SERVER_ERROR: {
+        // Retryable provider error: trigger the retry loop with exponential
+        // backoff. Provider exhaustion additionally records a durable,
+        // machine-wide cooldown marker so the machine's dispatcher and
+        // cheap-switch gate can see that the pane is blocked on a throttled
+        // provider rather than idle (WL-0MV5638J1006URXA). Recording is
+        // best-effort and gated on the exhaustion patterns — a plain
+        // retryable 5xx writes nothing.
+        const errorMsg = lastAssistant.errorMessage || 'Unknown error';
+        const state = retryStates[category as string];
+        if (state && !state.getIsRetrying()) {
+          state.startRetry(errorMsg);
+          // Don't endRetry here — the retry loop owns the state
+          if (isExhaustionServerError(lastAssistant)) {
+            // Resolve the backoff once and expose the expiry so the marker
+            // and the retry loop agree on `cooldownUntil = now + delayMs`.
+            const { cooldownUntil } = resolveRetryDelay(
+              1,
+              errorMsg,
+              DEFAULT_BACKOFF_CONFIG,
+              Math.random,
+              _lastServerRetryHintMs,
+            );
+            const identity = deriveCooldownIdentity(ctx.sessionManager.getEntries());
+            recordExhaustionCooldown({
+              cooldownUntil,
+              errorMessage: errorMsg,
+              sessionId: safeSessionId(ctx),
+              itemId: identity.itemId,
+              kind: identity.kind,
+              reason: 'provider exhaustion',
+            });
+          }
+          ctx.ui.notify(
+            `Retrying after ${category}: ${errorMsg.substring(0, 100)}...`,
+            'info',
+          );
+          // Fire the retry loop (returns immediately; loops in background)
+          void triggerInvisibleContinue();
+        }
+        break;
+      }
+
       case ErrorCategory.TIMEOUT: {
-        // Retryable errors: trigger retry loop with exponential backoff
+        // Retryable timeout: trigger the retry loop with exponential backoff.
+        // A timeout is not provider exhaustion, so no durable cooldown marker
+        // is recorded (WL-0MV5638J1006URXA).
         const errorMsg = lastAssistant.errorMessage || 'Unknown error';
         const state = retryStates[category as string];
         if (state && !state.getIsRetrying()) {
@@ -260,10 +316,11 @@ export function registerRecoveryModule(pi: ExtensionAPI): void {
   });
 
   // ── session_start: reset state for new session ─────────────────
-  pi.on('session_start', async () => {
+  pi.on('session_start', async (_event, ctx) => {
     // Clear the captured notify function so a replaced/reloaded session
     // never retains a stale ExtensionContext reference (WL-0MUIV50EJ007VH9B).
     _notifyFn = null;
+    _currentSessionId = safeSessionId(ctx);
     interruptibleState.sessionGeneration++;
     for (const state of Object.values(retryStates)) {
       state.reset();
@@ -368,6 +425,11 @@ let _sessionGenerationAtStart = 0;
  * remains disabled by default (`retry.provider.maxRetries` unset -> 0), so a
  * transient 5xx is retried by this loop exactly once per attempt — never by
  * two layers stacking.
+ *
+ * Durable cooldown side effect (WL-0MV5638J1006URXA): the agent_end
+ * SERVER_ERROR branch records a machine-wide cooldown marker before this loop
+ * starts, and the fetch wrapper clears it on the next 2xx. This loop itself
+ * performs no cooldown I/O, so the notify/safety contract is unchanged.
  */
 async function triggerInvisibleContinue(): Promise<void> {
   if (!_agent) return;
@@ -640,9 +702,18 @@ function installFetchRetryHintCapture(): void {
   if (typeof originalFetch !== 'function') return;
   _fetchHintCaptureInstalled = true;
   try {
-    globalThis.fetch = createRetryHintCapturingFetch(originalFetch, (hintMs) => {
-      _lastServerRetryHintMs = hintMs;
-    });
+    globalThis.fetch = createRetryHintCapturingFetch(
+      originalFetch,
+      (hintMs) => {
+        _lastServerRetryHintMs = hintMs;
+      },
+      () => {
+        // The next 2xx provider response clears this pane's durable cooldown
+        // marker (WL-0MV5638J1006URXA). Best-effort: never throws, and a
+        // retryable 5xx without a hint does not reach here.
+        clearModelCooldownSignal({ sessionId: _currentSessionId });
+      },
+    );
   } catch {
     // Non-writable fetch in this runtime — fall back to message parsing.
     _fetchHintCaptureInstalled = false;
@@ -684,6 +755,20 @@ function suppressBuiltinRetry(): void {
 }
 
 // ── Helper ───────────────────────────────────────────────────────────
+
+/**
+ * Best-effort read of the current pi session id from an extension context.
+ * Used as the fallback key for the durable cooldown marker; returns `null`
+ * (never throws) when the context is stale or the id is unavailable.
+ */
+function safeSessionId(ctx: { sessionManager?: { getSessionId?: () => string } }): string | null {
+  try {
+    const id = ctx.sessionManager?.getSessionId?.();
+    return typeof id === 'string' && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
 
 function findLastAssistantMessage(entries: unknown[]): { role: string; stopReason?: string; errorMessage?: string } | undefined {
   if (!entries || !Array.isArray(entries)) return undefined;

@@ -8,6 +8,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { readModelCooldowns } from '@worklog/shared/model-cooldown';
 import {
   calculateDelay,
   formatDuration,
@@ -16,6 +20,10 @@ import {
   ContinuationState,
   interruptibleSleep,
   removeErrorFromMessages,
+  resolveRetryDelay,
+  deriveCooldownIdentity,
+  recordExhaustionCooldown,
+  clearModelCooldownSignal,
   DEFAULT_BACKOFF_CONFIG,
   type BackoffConfig,
   type InterruptibleSleepState,
@@ -475,5 +483,246 @@ describe('getLastAssistantMessage (error diagnostics)', () => {
       { type: 'message', message: { role: 'assistant' } },
     ];
     expect(getLastAssistantMessage(entries)?.role).toBe('assistant');
+  });
+});
+
+// ── Durable model cooldown signal (WL-0MV5638J1006URXA) ───────────────
+//
+// The recovery loop records a durable, machine-wide cooldown marker when an
+// exhaustion SERVER_ERROR starts a backoff, and clears it on the next 2xx.
+// These tests pin the pure pieces: the resolved `cooldownUntil`, the
+// best-effort identity derivation, and the never-throwing writer/clearer.
+
+const COOLDOWN_NOW = 1_700_000_000_000;
+
+function makeUserEntry(content: unknown): unknown {
+  return { type: 'message', message: { role: 'user', content } };
+}
+
+describe('resolveRetryDelay cooldownUntil', () => {
+  it('exposes cooldownUntil = now + delayMs without changing delayMs', () => {
+    const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, () => 0, undefined, COOLDOWN_NOW);
+    expect(result.delayMs).toBe(2000);
+    expect(result.serverHintMs).toBeUndefined();
+    expect(result.cooldownUntil).toBe(COOLDOWN_NOW + 2000);
+  });
+
+  it('tracks a server-provided retry hint', () => {
+    const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, () => 0, 11_000, COOLDOWN_NOW);
+    expect(result.delayMs).toBe(11_000);
+    expect(result.serverHintMs).toBe(11_000);
+    expect(result.cooldownUntil).toBe(COOLDOWN_NOW + 11_000);
+  });
+
+  it('defaults now to the current clock', () => {
+    const before = Date.now();
+    const result = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, () => 0);
+    expect(result.cooldownUntil).toBeGreaterThanOrEqual(before + 2000);
+    expect(result.cooldownUntil).toBeLessThanOrEqual(Date.now() + 2000);
+  });
+});
+
+describe('deriveCooldownIdentity', () => {
+  it('derives item id and kind from a dispatch user message', () => {
+    expect(deriveCooldownIdentity([makeUserEntry('/skill:implement WL-0MV5638J1006URXA')])).toEqual({
+      itemId: 'WL-0MV5638J1006URXA',
+      kind: 'implement',
+    });
+  });
+
+  it('derives from array content parts', () => {
+    const entries = [makeUserEntry([{ type: 'text', text: 'please /skill:plan WL-0ABC123456 now' }])];
+    expect(deriveCooldownIdentity(entries)).toEqual({ itemId: 'WL-0ABC123456', kind: 'plan' });
+  });
+
+  it('derives the kind from a triggered-pane dispatch phrasing', () => {
+    expect(deriveCooldownIdentity([makeUserEntry('Downtime triggered audit WL-0ABC123456')]).kind).toBe('audit');
+  });
+
+  it('handles risk-effort', () => {
+    const entries = [makeUserEntry('/skill:risk-effort WL-0ABC123456')];
+    expect(deriveCooldownIdentity(entries).kind).toBe('risk-effort');
+  });
+
+  it('returns nulls when no user message carries identity', () => {
+    const entries = [
+      { type: 'message', message: { role: 'assistant', content: '/skill:implement WL-0MV5638J1006URXA' } },
+      makeUserEntry('hello there'),
+    ];
+    expect(deriveCooldownIdentity(entries)).toEqual({ itemId: null, kind: null });
+  });
+
+  it('leaves kind null when only an item id is present', () => {
+    expect(deriveCooldownIdentity([makeUserEntry('working on WL-0ABC123456')])).toEqual({
+      itemId: 'WL-0ABC123456',
+      kind: null,
+    });
+  });
+
+  it('leaves itemId null when only a kind is present', () => {
+    expect(deriveCooldownIdentity([makeUserEntry('/skill:audit')])).toEqual({ itemId: null, kind: 'audit' });
+  });
+
+  it('returns nulls for empty or malformed entries', () => {
+    expect(deriveCooldownIdentity([])).toEqual({ itemId: null, kind: null });
+    expect(deriveCooldownIdentity(undefined as any)).toEqual({ itemId: null, kind: null });
+  });
+});
+
+describe('recordExhaustionCooldown', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'wl-cooldown-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('writes a durable marker for an exhaustion SERVER_ERROR', () => {
+    const written = recordExhaustionCooldown({
+      cooldownUntil: COOLDOWN_NOW + 30_000,
+      errorMessage: 'All providers exhausted',
+      paneId: 'w1:p1',
+      sessionId: 'sess-1',
+      itemId: 'WL-0ABC123456',
+      kind: 'implement',
+      reason: 'provider exhaustion',
+      dir,
+      now: COOLDOWN_NOW,
+    });
+
+    expect(written).toBe(true);
+    const entries = readModelCooldowns(dir, COOLDOWN_NOW);
+    expect(entries).toHaveLength(1);
+    expect(entries?.[0]).toMatchObject({
+      paneId: 'w1:p1',
+      sessionId: 'sess-1',
+      itemId: 'WL-0ABC123456',
+      kind: 'implement',
+      reason: 'provider exhaustion',
+      cooldownUntil: COOLDOWN_NOW + 30_000,
+    });
+  });
+
+  it('does not write for a plain retryable 5xx', () => {
+    const written = recordExhaustionCooldown({
+      cooldownUntil: COOLDOWN_NOW + 2_000,
+      errorMessage: '500 Internal Server Error',
+      dir,
+      now: COOLDOWN_NOW,
+    });
+    expect(written).toBe(false);
+    expect(readModelCooldowns(dir, COOLDOWN_NOW)).toEqual([]);
+  });
+
+  it('does not write for a timeout', () => {
+    const written = recordExhaustionCooldown({
+      cooldownUntil: COOLDOWN_NOW + 2_000,
+      errorMessage: 'Request timed out',
+      dir,
+      now: COOLDOWN_NOW,
+    });
+    expect(written).toBe(false);
+    expect(readModelCooldowns(dir, COOLDOWN_NOW)).toEqual([]);
+  });
+
+  it('degrades to a session-only key when HERDR_PANE_ID is absent', () => {
+    const original = process.env.HERDR_PANE_ID;
+    delete process.env.HERDR_PANE_ID;
+    try {
+      const written = recordExhaustionCooldown({
+        cooldownUntil: COOLDOWN_NOW + 5_000,
+        errorMessage: 'all providers unavailable',
+        sessionId: 'sess-only',
+        dir,
+        now: COOLDOWN_NOW,
+      });
+      expect(written).toBe(true);
+      const entries = readModelCooldowns(dir, COOLDOWN_NOW);
+      expect(entries?.[0]?.paneId).toBeNull();
+      expect(entries?.[0]?.sessionId).toBe('sess-only');
+    } finally {
+      if (original === undefined) delete process.env.HERDR_PANE_ID;
+      else process.env.HERDR_PANE_ID = original;
+    }
+  });
+
+  it('never throws (returns false) when the marker directory is unwritable', () => {
+    const unwritable = join(dir, 'not-a-dir');
+    writeFileSync(unwritable, 'x');
+
+    expect(() =>
+      recordExhaustionCooldown({
+        cooldownUntil: COOLDOWN_NOW + 5_000,
+        errorMessage: 'all providers exhausted',
+        paneId: 'w1:p1',
+        sessionId: 'sess-1',
+        dir: join(unwritable, 'nested'),
+        now: COOLDOWN_NOW,
+      }),
+    ).not.toThrow();
+
+    expect(
+      recordExhaustionCooldown({
+        cooldownUntil: COOLDOWN_NOW + 5_000,
+        errorMessage: 'all providers exhausted',
+        paneId: 'w1:p1',
+        sessionId: 'sess-1',
+        dir: join(unwritable, 'nested'),
+        now: COOLDOWN_NOW,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('clearModelCooldownSignal', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'wl-cooldown-'));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('clears the entry written for the pane/session key', () => {
+    recordExhaustionCooldown({
+      cooldownUntil: COOLDOWN_NOW + 30_000,
+      errorMessage: 'all providers exhausted',
+      paneId: 'w1:p1',
+      sessionId: 'sess-1',
+      dir,
+      now: COOLDOWN_NOW,
+    });
+    expect(clearModelCooldownSignal({ paneId: 'w1:p1', sessionId: 'sess-1', dir, now: COOLDOWN_NOW })).toBe(true);
+    expect(readModelCooldowns(dir, COOLDOWN_NOW)).toEqual([]);
+  });
+
+  it('clears a session-only entry', () => {
+    recordExhaustionCooldown({
+      cooldownUntil: COOLDOWN_NOW + 30_000,
+      errorMessage: 'all providers exhausted',
+      paneId: null,
+      sessionId: 'sess-only',
+      dir,
+      now: COOLDOWN_NOW,
+    });
+    expect(clearModelCooldownSignal({ paneId: null, sessionId: 'sess-only', dir, now: COOLDOWN_NOW })).toBe(true);
+    expect(readModelCooldowns(dir, COOLDOWN_NOW)).toEqual([]);
+  });
+
+  it('is a no-op when no entry matches', () => {
+    expect(clearModelCooldownSignal({ paneId: 'w1:p9', sessionId: 'sess-x', dir, now: COOLDOWN_NOW })).toBe(false);
+  });
+
+  it('never throws for a corrupt marker file', () => {
+    writeFileSync(join(dir, 'model-cooldowns.json'), '{not json');
+    expect(() =>
+      clearModelCooldownSignal({ paneId: 'w1:p1', sessionId: 'sess-1', dir, now: COOLDOWN_NOW }),
+    ).not.toThrow();
+    expect(clearModelCooldownSignal({ paneId: 'w1:p1', sessionId: 'sess-1', dir, now: COOLDOWN_NOW })).toBe(false);
   });
 });

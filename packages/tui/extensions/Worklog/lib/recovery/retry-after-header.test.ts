@@ -215,6 +215,28 @@ describe('createRetryHintCapturingFetch', () => {
     await capture('http://example.test');
     expect(onHint).not.toHaveBeenCalled();
   });
+
+  it('calls onSuccess only for a 2xx response (WL-0MV5638J1006URXA)', async () => {
+    const onSuccess = vi.fn();
+    const capture = createRetryHintCapturingFetch(
+      async () => makeResponse(200),
+      () => {},
+      onSuccess,
+    );
+    await capture('http://example.test');
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call onSuccess for a retryable 5xx response', async () => {
+    const onSuccess = vi.fn();
+    const capture = createRetryHintCapturingFetch(
+      async () => makeResponse(502),
+      () => {},
+      onSuccess,
+    );
+    await capture('http://example.test');
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
 });
 
 // ── RCA regression: the real error shape + header hint ────────────────
