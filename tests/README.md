@@ -114,7 +114,6 @@ Tests are spread across two top-level directories:
 - **`migrations.test.ts`** — Database migration tests
 - **`doctor-dependency-check.test.ts`** / **`doctor-status-stage.test.ts`** — `wl doctor` checks
 - **`comment-update.test.ts`** — Comment update operations
-- **`validator.test.ts`** — Additional validation tests
 - **`tui-integration.test.ts`** — TUI integration
 - **`tui-opencode-sse-handler.test.ts`** — OpenCode SSE handler (legacy)
 - **`tui-chords.test.ts`** — Keyboard chord handling
