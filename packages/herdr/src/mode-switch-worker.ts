@@ -48,6 +48,18 @@
  *    (`evaluateIdle(status, 0)` — full global checks). In every case a busy
  *    proxy (server down, model switch, or 0 free slots) **delays** the
  *    switch — it never kills in-flight work.
+ *  - **Model-cooldown gate (WL-0MV5638ZS005I5XQ):** before the cheap
+ *    decision the leader reads the machine-wide cooldown signal
+ *    (`readModelCooldowns`, the same coordination dir as
+ *    `mode-activity.json`). While any entry is active (`cooldownUntil` in
+ *    the future) it holds **fast** — a pane sitting in proxy backoff holds
+ *    no slot, so the proxy looks idle and the switch would add concurrency
+ *    (cheap has more slots than fast) during provider exhaustion. The hold
+ *    is bounded by `cooldownUntil` (no latch) and machine-wide, so a
+ *    cooldown for any worklog root suppresses the shared switch (AC4). An
+ *    unreadable/corrupt signal is fail-closed (hold fast, logged); a
+ *    *missing* signal is `[]` and does not suppress the switch. The
+ *    fast-on-command path is unaffected.
  *  - **No redundant switching / no hammering:** the worker skips a switch when
  *    the persisted mode already matches the target (tracking last-known mode,
  *    refreshed via `GET /admin/mode` on each poll). At most one switch per
@@ -86,6 +98,7 @@ import {
   DOWNTIME_PANE_MIN_FREE_SLOTS,
   type LlamaStatus,
 } from './downtime-worker.js';
+import { readModelCooldowns } from '@worklog/shared/model-cooldown';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -563,6 +576,29 @@ export function createModeSwitchWorker(deps?: ModeSwitchWorkerOptions): ModeSwit
         ? DOWNTIME_PANE_MIN_FREE_SLOTS
         : 0;
       if (proxyStatus === null || !evaluateIdle(proxyStatus, requiredFreeSlots)) return;
+
+      // Model-cooldown gate (WL-0MV5638ZS005I5XQ, parent AC2/AC4): while any
+      // active model-cooldown exists the machine-wide proxy must stay fast.
+      // A pane sitting in proxy backoff holds no slot, so the proxy looks
+      // idle and the cheap switch would add concurrency (cheap has more
+      // slots than fast) during a known provider-exhaustion window. The
+      // signal is machine-wide (the coordination dir, not a worklog root),
+      // so a cooldown recorded for any root suppresses the shared switch
+      // (AC4). The hold is bounded by `cooldownUntil` and carries no latch:
+      // the reader returns only *active* entries, so the first tick at/after
+      // expiry resumes the normal decision. A read failure (`null`) is
+      // fail-closed — hold fast rather than switch on an unreadable signal,
+      // and log it so the hold is not silent.
+      if (coordinationDir !== undefined) {
+        const activeCooldowns = readModelCooldowns(coordinationDir, now());
+        if (activeCooldowns === null) {
+          console.error(
+            '[mode-switch] model-cooldown signal unreadable — holding fast (fail-closed)',
+          );
+          return;
+        }
+        if (activeCooldowns.length > 0) return;
+      }
 
       // Refresh last-known mode via GET /admin/mode before deciding (AC:
       // "track last-known mode; refresh via GET /admin/mode on poll").

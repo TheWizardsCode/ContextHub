@@ -75,6 +75,33 @@ The mode-switch worker reuses the machine-wide downtime leader
 - **Fail-closed:** if the shared file cannot be read or written, the worker
   falls back to its local clock (never a premature cheap switch).
 
+### Model-cooldown gate (WL-0MV5638ZS005I5XQ)
+
+A pane blocked on provider exhaustion (the in-pane recovery loop classifies
+"all providers exhausted" / "all providers unavailable" / "no provider is
+available during the current scheduled time window" 503s as `SERVER_ERROR`)
+sits in proxy backoff holding **no** slot, so the proxy looks idle. Without a
+gate the leader would switch the shared proxy to cheap — which *adds*
+concurrency (cheap has more slots than fast) during a known
+provider-exhaustion window.
+
+- Before the cheap decision, the leader reads the machine-wide cooldown
+  signal (`readModelCooldowns` from `@worklog/shared/model-cooldown`, the same
+  coordination dir as `mode-activity.json`). While **any** entry has
+  `cooldownUntil` in the future the leader holds **fast**: no cheap POST.
+- **Bounded, no latch:** the reader returns only *active* entries, so the hold
+  ends exactly at `cooldownUntil` and the first tick at/after expiry resumes
+  the normal decision. The worker persists no cooldown state of its own.
+- **Machine-wide (AC4):** the signal lives in the coordination directory, not
+  in per-root state, so a cooldown recorded for any worklog root suppresses
+  the shared cheap switch.
+- **Fail-closed:** an unreadable/corrupt signal (`null`) holds fast rather
+  than switching on an unreadable signal, and logs the hold so it is not
+  silent. A *missing* signal (nothing was ever recorded) is `[]` and does not
+  suppress the switch.
+- **Fast path unaffected:** `onOperatorCommand` never reads the cooldown
+  signal, so a cooldown can never suppress the fast-on-command switch.
+
 ## 3. Settings (re-read every tick — apply without plugin restart)
 
 | Setting | Default | Clamp |
@@ -97,11 +124,16 @@ time-based plan.
 ## 5. Key files
 
 - `packages/herdr/src/mode-switch-worker.ts` — worker core (idle clock,
-  leader-gated tick, shared `mode-activity.json` read/write, admin API
-  client, clamps)
+  leader-gated tick, shared `mode-activity.json` read/write, machine-wide
+  model-cooldown gate, admin API client, clamps)
+- `packages/shared/src/model-cooldown.ts` — versioned machine-wide cooldown
+  contract (`readModelCooldowns` tolerant/fail-closed reader) shared with the
+  TUI recovery loop
 - `packages/herdr/src/mode-switch-worker.test.ts` — worker core tests
+  (including the model-cooldown gate matrix)
 - `packages/herdr/src/mode-switch-integration.test.ts` — wiring tests
-  (settings → worker, route classification, scheduler interval constants)
+  (settings → worker, route classification, scheduler interval constants,
+  cross-root cooldown gate)
 - `packages/herdr/src/settings.ts` — settings schema + validation/clamps
 - `packages/herdr/src/index.ts` — agent-route hook wiring
 - `packages/herdr/src/worklist.ts` — scheduler task registration
