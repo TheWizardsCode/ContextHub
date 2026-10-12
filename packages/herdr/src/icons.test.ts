@@ -7,6 +7,11 @@
  * keep the status/stage/review icons and the item-ID column at identical
  * columns.
  *
+ * Layer note: this file owns the shared `@worklog/shared/icons` unit coverage
+ * for `iconsEnabled` and the fixed-width/audit-freshness rendering concerns.
+ * It is not a duplicate of tests/unit/icons.test.ts (CLI `src/theme.ts`
+ * vocabulary) or tests/herdr/icons.test.ts (herdr display integration).
+ *
  * Run: npx vitest run packages/herdr/src/icons.test.ts
  */
 

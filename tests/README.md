@@ -115,6 +115,25 @@ Tests live under the top-level `tests/` directory:
 - **`sync-audit-results.test.ts`** — Audit-results export/import and merge
 - **`cli/throttler-stats.test.ts`** — GitHub throttler stats counters
 
+### Icons test layering
+
+The icon system intentionally has three same-named `icons.test.ts` files at
+different layers — they are not duplicates:
+
+- **`tests/unit/icons.test.ts`** — unit tests for the CLI icon vocabulary in
+  `src/theme.ts` (a distinct module from `@worklog/shared/icons`).
+- **`tests/herdr/icons.test.ts`** — herdr display integration tests for the
+  shared `@worklog/shared/icons` functions (status/stage/priority/audit/epic/
+  risk/effort/needsProducerReview icons, `stageColor`, general
+  `getIconPrefix`).
+- **`packages/herdr/src/icons.test.ts`** — herdr package unit tests for the
+  shared `@worklog/shared/icons` `iconsEnabled` flag, fixed-width agent-slot
+  alignment, and audit-freshness rendering.
+
+The verbatim `iconsEnabled` block that was duplicated between the two herdr
+files was removed from `tests/herdr/icons.test.ts` (kept in
+`packages/herdr/src/icons.test.ts`).
+
 ## Test Coverage
 
 Current test coverage: **894 tests passing, 0 skipped** across 82 test files.

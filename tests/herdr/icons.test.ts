@@ -1,5 +1,16 @@
 /**
- * tests/herdr/icons.test.ts — Tests for Herdr icon system
+ * tests/herdr/icons.test.ts — Herdr display integration tests for the icon
+ * system.
+ *
+ * Layer note: exercises the shared `@worklog/shared/icons` functions as used
+ * by the herdr display layer (status/stage/priority/audit/epic/risk/effort/
+ * needsProducerReview icons, `stageColor`, and general `getIconPrefix`
+ * behaviour). It is not a duplicate of:
+ *   - tests/unit/icons.test.ts — the CLI `src/theme.ts` icon vocabulary; or
+ *   - packages/herdr/src/icons.test.ts — fixed-width agent-slot alignment and
+ *     audit-freshness rendering.
+ * `iconsEnabled` shared-function unit coverage lives in
+ * packages/herdr/src/icons.test.ts; the CLI variant is in tests/unit.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -14,7 +25,6 @@ import {
   effortIcon,
   needsProducerReviewIcon,
   auditStaleIcon,
-  iconsEnabled,
   getIconPrefix,
   stageColor,
   stringDisplayWidth,
@@ -23,20 +33,6 @@ import {
 import type { WorkItem } from '../../packages/herdr/src/fetcher.js';
 
 // ── Tests ─────────────────────────────────────────────────────────────
-
-describe('iconsEnabled', () => {
-  it('returns true by default', () => {
-    expect(iconsEnabled()).toBe(true);
-  });
-
-  it('returns false when noIcons is true', () => {
-    expect(iconsEnabled({ noIcons: true })).toBe(false);
-  });
-
-  it('returns true when noIcons is false', () => {
-    expect(iconsEnabled({ noIcons: false })).toBe(true);
-  });
-});
 
 describe('statusIcon', () => {
   it('returns open icon for open status', () => {
