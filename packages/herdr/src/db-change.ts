@@ -14,7 +14,11 @@
  * promptly instead of waiting for the 30 s auto-refresh tick. The watch is
  * debounced (one trailing callback per burst), fails open (an unusable watch
  * is reported as inactive so the caller keeps polling), and is disposable
- * (`dispose()` closes every `fs.watch` handle and clears pending timers).
+ * (`dispose()`/`close()` closes every `fs.watch` handle and clears pending
+ * timers). Hardened against watch failures that surface *after* creation
+ * (an asynchronous `fs.FSWatcher` `'error'` event, e.g. inotify limits or a
+ * network filesystem dropping the watch) and against throwing callbacks so
+ * nothing ever escapes into the TUI loop.
  *
  * @module db-change
  */
@@ -139,9 +143,15 @@ export class DbChangeTracker {
 /** Default debounce window for coalescing a burst of watch events. */
 export const DEFAULT_WATCH_DEBOUNCE_MS = 150;
 
-/** Minimal shape of an `fs.watch` handle (closeable). */
+/** Minimal shape of an `fs.watch` handle (closeable, optionally error-emitting). */
 export interface WatchHandle {
   close(): void;
+  /**
+   * Optional error subscription (a real `fs.FSWatcher` supports it). Used to
+   * fail open when a watch fails *after* creation — otherwise the emitted
+   * `'error'` event is unhandled and crashes the process.
+   */
+  on?(event: 'error', listener: (error: unknown) => void): unknown;
 }
 
 /** A filesystem watch listener, matching the `fs.watch` callback signature. */
@@ -177,6 +187,8 @@ export interface DbChangeWatch {
   readonly active: boolean;
   /** Stop watching and clear any pending debounce timer. Idempotent. */
   dispose(): void;
+  /** Alias for {@link DbChangeWatch.dispose} (scope names both). */
+  close(): void;
 }
 
 interface WatchTarget {
@@ -223,9 +235,24 @@ export function watchDbChanges(
   let timer: ReturnType<typeof setTimeout> | null = null;
   let disposed = false;
 
+  // A throwing callback must never take down the watch (or the pane): report
+  // it through the error seam and carry on (fail open).
+  const reportError = (error: unknown): void => {
+    try {
+      opts.onError?.(error);
+    } catch {
+      // Ignore a throwing error handler — the watch keeps working.
+    }
+  };
+
   const fire = (): void => {
     timer = null;
-    if (!disposed) onChange();
+    if (disposed) return;
+    try {
+      onChange();
+    } catch (error) {
+      reportError(error);
+    }
   };
 
   const schedule = (): void => {
@@ -234,9 +261,27 @@ export function watchDbChanges(
     timer = setT(fire, debounceMs);
   };
 
+  const dispose = (): void => {
+    if (disposed) return;
+    disposed = true;
+    if (timer !== null) {
+      clearT(timer);
+      timer = null;
+    }
+    for (const handle of handles) {
+      try {
+        handle.close();
+      } catch {
+        // A close failure must never break teardown.
+      }
+    }
+    handles.length = 0;
+  };
+
   for (const target of targets) {
+    let handle: WatchHandle;
     try {
-      const handle = watchFn(target.dir, (_eventType, filename) => {
+      handle = watchFn(target.dir, (_eventType, filename) => {
         if (disposed) return;
         const name = typeof filename === 'string'
           ? filename
@@ -247,33 +292,43 @@ export function watchDbChanges(
         // possible match (fail-open toward reacting) rather than ignoring it.
         if (name === '' || target.matches(name)) schedule();
       });
-      handles.push(handle);
     } catch (error) {
       // Fail-open: a target that cannot be watched is skipped. The caller
       // still has the polling fallback (and any other target).
-      opts.onError?.(error);
+      reportError(error);
+      continue;
     }
+
+    // Harden against a watch that fails AFTER creation: a real `fs.FSWatcher`
+    // emits `'error'` (e.g. inotify watch-limit exhaustion, or a network FS
+    // dropping the watch). Left unhandled, that event would crash the process,
+    // so subscribe and retire the failed target (fail open — `active` then
+    // reflects only the handles still alive).
+    const liveHandle = handle;
+    if (typeof liveHandle.on === 'function') {
+      try {
+        liveHandle.on('error', (error: unknown) => {
+          const index = handles.indexOf(liveHandle);
+          if (index !== -1) handles.splice(index, 1);
+          reportError(error);
+          try {
+            liveHandle.close();
+          } catch {
+            // A close failure must never break teardown.
+          }
+        });
+      } catch (error) {
+        reportError(error);
+      }
+    }
+    handles.push(liveHandle);
   }
 
   return {
     get active(): boolean {
       return handles.length > 0;
     },
-    dispose(): void {
-      if (disposed) return;
-      disposed = true;
-      if (timer !== null) {
-        clearT(timer);
-        timer = null;
-      }
-      for (const handle of handles) {
-        try {
-          handle.close();
-        } catch {
-          // A close failure must never break teardown.
-        }
-      }
-      handles.length = 0;
-    },
+    dispose,
+    close: dispose,
   };
 }

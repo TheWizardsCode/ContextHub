@@ -45,6 +45,7 @@ import {
   DbChangeTracker,
   stateCounterFilePath,
   watchDbChanges,
+  type DbChangeWatch,
 } from './db-change.js';
 
 // Re-import fs for real mkdtempSync
@@ -351,6 +352,38 @@ function fakeDebounceTimers(): {
   };
 }
 
+/**
+ * A controllable fake `fs.watch` whose handles expose an async `'error'`
+ * emitter, mirroring `fs.FSWatcher` (which can fail after creation).
+ */
+function fakeErrorWatch(): {
+  watch: any;
+  handles: Array<{
+    close: ReturnType<typeof vi.fn>;
+    on: ReturnType<typeof vi.fn>;
+    emitError: (error: unknown) => void;
+  }>;
+} {
+  const handles: Array<{
+    close: ReturnType<typeof vi.fn>;
+    on: ReturnType<typeof vi.fn>;
+    emitError: (error: unknown) => void;
+  }> = [];
+  const watch = vi.fn((_dir: string, _listener: any) => {
+    let errorListener: ((error: unknown) => void) | null = null;
+    const handle = {
+      close: vi.fn(),
+      on: vi.fn((event: string, listener: (error: unknown) => void) => {
+        if (event === 'error') errorListener = listener;
+      }),
+      emitError: (error: unknown) => errorListener?.(error),
+    };
+    handles.push(handle);
+    return handle;
+  });
+  return { watch, handles };
+}
+
 describe('watchDbChanges', () => {
   it('watches both the state-counter dir and the worklog dir', () => {
     const { watch, dirs } = fakeWatch();
@@ -492,6 +525,102 @@ describe('watchDbChanges', () => {
     // Idempotent.
     w.dispose();
     expect(closes[0]).toHaveBeenCalledTimes(1);
+  });
+
+  it('close() is an alias for dispose() (idempotent, closes every handle)', () => {
+    const { watch, closes } = fakeWatch();
+    const w = watchDbChanges('/cache', '/worklog', vi.fn(), { watch });
+    w.close();
+    expect(closes[0]).toHaveBeenCalledTimes(1);
+    expect(closes[1]).toHaveBeenCalledTimes(1);
+    expect(w.active).toBe(false);
+
+    // Idempotent: dispose after close is a no-op.
+    w.dispose();
+    expect(closes[0]).toHaveBeenCalledTimes(1);
+    expect(closes[1]).toHaveBeenCalledTimes(1);
+  });
+
+  it('fail-open: an async fs.watch error retires that target and is reported', () => {
+    const { watch, handles } = fakeErrorWatch();
+    const onError = vi.fn();
+    const w = watchDbChanges('/cache', '/worklog', vi.fn(), { watch, onError });
+
+    expect(handles).toHaveLength(2);
+    expect(w.active).toBe(true);
+
+    // A post-creation failure (e.g. EPERM on a network FS) must be reported
+    // and that target retired, without crashing or deactivating the watch
+    // while another target is still alive.
+    handles[0].emitError(new Error('EPERM: operation not permitted'));
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError.mock.calls[0][0]).toBeInstanceOf(Error);
+    expect(handles[0].close).toHaveBeenCalledTimes(1);
+    expect(w.active).toBe(true);
+
+    // When the LAST target errors asynchronously the watch reports inactive,
+    // so the caller falls back to the 30 s polling tick.
+    handles[1].emitError(new Error('ENOSPC: inotify watch limit reached'));
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(w.active).toBe(false);
+  });
+
+  it('fail-open: repeated async errors on the same handle are safe', () => {
+    const { watch, handles } = fakeErrorWatch();
+    const onError = vi.fn();
+    const w = watchDbChanges('/cache', '/worklog', vi.fn(), { watch, onError });
+
+    handles[0].emitError(new Error('first'));
+    handles[0].emitError(new Error('second'));
+    expect(onError).toHaveBeenCalledTimes(2);
+    expect(w.active).toBe(true); // the other target is still alive
+    w.dispose();
+  });
+
+  it('fail-open: a throwing onError handler never breaks watch setup', () => {
+    const watch = vi.fn((dir: string, _listener: any) => {
+      if (dir.endsWith('/state')) throw new Error('ENOENT: no state dir');
+      return { close: vi.fn() };
+    });
+    const onError = vi.fn(() => {
+      throw new Error('handler exploded');
+    });
+
+    let w: DbChangeWatch | undefined;
+    expect(() => {
+      w = watchDbChanges('/cache', '/worklog', vi.fn(), { watch, onError });
+    }).not.toThrow();
+    expect(onError).toHaveBeenCalledTimes(1);
+    // The second target still started, so the watch remains active.
+    expect(w!.active).toBe(true);
+    w!.dispose();
+  });
+
+  it('fail-open: a throwing onChange callback is contained (never crashes the loop)', () => {
+    const { watch, listeners } = fakeWatch();
+    const onError = vi.fn();
+    const boom = vi.fn(() => {
+      throw new Error('pane callback exploded');
+    });
+    const timers = fakeDebounceTimers();
+    const w = watchDbChanges('/cache', '/worklog', boom, {
+      watch,
+      setTimeoutFn: timers.setTimeoutFn,
+      clearTimeoutFn: timers.clearTimeoutFn,
+      onError,
+    });
+
+    const counterName = path.basename(stateCounterFile('/cache', '/worklog'));
+    listeners[0]('change', counterName);
+    expect(() => timers.run()).not.toThrow();
+    expect(boom).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledTimes(1);
+
+    // The watch stays armed and observes the next write.
+    listeners[0]('change', counterName);
+    timers.run();
+    expect(boom).toHaveBeenCalledTimes(2);
+    w.dispose();
   });
 
   it('really fires onChange when the state-counter file is written (real fs.watch)', async () => {
