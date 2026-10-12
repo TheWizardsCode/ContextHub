@@ -504,6 +504,10 @@ export function regroupWorkItems<T extends {
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
+  /** Stored content fingerprint from the audit result (WL-0MUBVH5S0008NQ9K). */
+  fingerprint?: string | null;
+  /** Current content fingerprint for the item, when the caller can compute it. */
+  currentFingerprint?: string | null;
 }>(
   items: T[],
   maxFilePathGroups: number = 3,
@@ -518,6 +522,8 @@ export function regroupWorkItems<T extends {
     auditResult: item.auditResult,
     auditedAt: item.auditedAt,
     updatedAt: item.updatedAt,
+    fingerprint: item.fingerprint,
+    currentFingerprint: item.currentFingerprint,
   }));
   const groupMap = assignItemGroups(groupable, maxFilePathGroups);
 
@@ -531,12 +537,16 @@ export function regroupWorkItems<T extends {
         auditResult: a.auditResult,
         auditedAt: a.auditedAt,
         updatedAt: a.updatedAt,
+        fingerprint: a.fingerprint,
+        currentFingerprint: a.currentFingerprint,
       },
       { id: b.id, stage: b.stage, status: b.status, priority: b.priority, filePaths: [],
         needsProducerReview: b.needsProducerReview,
         auditResult: b.auditResult,
         auditedAt: b.auditedAt,
         updatedAt: b.updatedAt,
+        fingerprint: b.fingerprint,
+        currentFingerprint: b.currentFingerprint,
       },
     );
   });

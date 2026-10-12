@@ -604,8 +604,31 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // Smart selection: merge the mandatory subsets with the regular wl next
   // results (deduplicated by ID), then always show the mandatory set and
   // limit only the "other" items to fill the remaining count slots.
+  //
+  // Audit-metadata merge (WL-0MUWDW0N6003KF6G): `wl next` does not emit the
+  // audit content fingerprints (`fingerprint`/`currentFingerprint`) that
+  // `wl list` does. Deduplication below keeps the FIRST occurrence, so without
+  // this enrichment the default worklist would silently drop the fingerprint
+  // metadata for any item also present in a mandatory `wl list` subset — the
+  // in_review 6-bucket sort then degrades to the timestamp gate only, which
+  // can rank a fingerprint-fresh (but time-stale) item into the wrong bucket
+  // and reorder it ahead of a higher-priority item. Prefer the richer
+  // `wl list` representation for audit fields so the default worklist and the
+  // stage-filtered view (`fetchItemsByStage`) classify buckets identically.
   const mandatory = await fetchMandatorySubsets();
-  const merged = mergeUniqueById(items, mandatory);
+  const mandatoryById = new Map(mandatory.map((item) => [item.id, item]));
+  const enrichedItems = items.map((item) => {
+    const rich = mandatoryById.get(item.id);
+    if (!rich) return item;
+    return {
+      ...item,
+      auditResult: rich.auditResult,
+      auditedAt: rich.auditedAt,
+      fingerprint: rich.fingerprint,
+      currentFingerprint: rich.currentFingerprint,
+    };
+  });
+  const merged = mergeUniqueById(enrichedItems, mandatory);
   const selected = selectWorkItems(merged, count);
   // Regroup the final selected set so every displayed item (mandatory wl
   // list items included) receives a correct group assignment and no

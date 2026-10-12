@@ -287,7 +287,13 @@ export default function register(ctx: PluginContext): void {
           // The human formatter's concise mode now includes the additional fields
           // (Status, Priority, Risk, Effort, Assignee, Tags) so this preserves
           // the richer information previously shown by the legacy tree printer.
-          displayItemTreeWithFormat(displayItems, db, format);
+          //
+          // `preserveOrder` for in_review lists (WL-0MUWDW0N6003KF6G): the
+          // 6-bucket predicate already ordered `sortedAll`; without this the
+          // renderer's position-based re-sort would silently discard that
+          // order and show position (sortIndex) order instead — the exact
+          // "medium before high" symptom the work item reports.
+          displayItemTreeWithFormat(displayItems, db, format, isInReviewList);
           console.log('');
           return;
         }
