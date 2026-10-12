@@ -48,10 +48,9 @@ Related work:
 
 ## Test Organization
 
-Tests are spread across two top-level directories:
+Tests live under the top-level `tests/` directory:
 
-- **`tests/`** — the main test directory (this folder)
-- **`test/`** — additional tests (migrations, TUI integration, doctor checks, etc.)
+- **`tests/`** — the test directory (this folder)
 
 ### Core unit tests (`tests/`)
 
@@ -109,14 +108,12 @@ Tests are spread across two top-level directories:
 - **`next-dialog-wrap.test.ts`** — Next dialog wrapping
 - **`toggle-do-not-delegate.test.ts`** — Do-not-delegate toggle in TUI
 
-### Additional tests (`test/`)
+### Additional tests (migrated from the former `test/`)
 
-- **`doctor-dependency-check.test.ts`** / **`doctor-status-stage.test.ts`** — `wl doctor` checks
+- **`doctor-dependency-check.test.ts`** / **`doctor-status-stage.test.ts`** / **`doctor-podcast-scripts.test.ts`** — `wl doctor` checks
 - **`comment-update.test.ts`** — Comment update operations
-- **`tui-integration.test.ts`** — TUI integration
-- **`tui-opencode-sse-handler.test.ts`** — OpenCode SSE handler (legacy)
-- **`tui-chords.test.ts`** — Keyboard chord handling
-- **`tui-style.test.ts`** — TUI styling
+- **`sync-audit-results.test.ts`** — Audit-results export/import and merge
+- **`cli/throttler-stats.test.ts`** — GitHub throttler stats counters
 
 ## Test Coverage
 
@@ -209,9 +206,6 @@ Running subsets of tests
 
 - Run unit tests only (tests under `tests/`):
   - `npx vitest run tests`
-
-- Run integration tests only (tests under `test/`):
-  - `npx vitest run test`
 
 ## E2E Tests
 
