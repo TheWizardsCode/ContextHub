@@ -60,7 +60,6 @@ Tests are spread across two top-level directories:
 - **`sync.test.ts`** — Work item merging, field-level conflict resolution, tag/comment merging
 - **`sync-worktree.test.ts`** — Git worktree sync scenarios
 - **`config.test.ts`** — Configuration loading, defaults, validation, prefix management
-- **`validator.test.ts`** — Work item field validation rules
 - **`fts-search.test.ts`** — Full-text search across titles, descriptions, comments, tags
 - **`sort-operations.test.ts`** — Sort index operations and rebalancing
 - **`grouping.test.ts`** — Work item grouping logic
