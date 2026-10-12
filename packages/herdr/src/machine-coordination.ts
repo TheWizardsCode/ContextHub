@@ -19,17 +19,26 @@
  * this module instead of hard-coding paths, so the machine dir is a single
  * source of truth.
  *
+ * The resolver itself now lives in the shared package
+ * (`@worklog/shared/model-cooldown`, WL-0MV563825002R9Y1) so the TUI recovery
+ * loop (which writes the model-cooldown marker) and herdr (which reads it)
+ * cannot drift. This module re-exports the shared constant and delegates
+ * `getMachineCoordinationDir()` to `resolveMachineCoordinationDir()`.
+ *
  * Single-machine v1 only; multi-machine (flock/NFS) is out of scope.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
+import {
+  resolveMachineCoordinationDir,
+  DEFAULT_MACHINE_COORDINATION_DIR,
+} from '@worklog/shared/model-cooldown';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
 /** Machine-wide coordination dir default: `~/.herdr/downtime`. */
-export const DEFAULT_MACHINE_COORDINATION_DIR = '.herdr/downtime';
+export { DEFAULT_MACHINE_COORDINATION_DIR };
 
 // ── Public API ─────────────────────────────────────────────────────────
 
@@ -54,34 +63,7 @@ export const DEFAULT_MACHINE_COORDINATION_DIR = '.herdr/downtime';
  * @returns The resolved absolute path, or `null` when unresolvable.
  */
 export function getMachineCoordinationDir(): string | null {
-  // 1. Environment override (highest priority)
-  const envDir = process.env.HERDR_COORDINATION_DIR;
-  if (envDir && envDir.length > 0) {
-    // Expand ~ to homedir()
-    if (envDir.startsWith('~')) {
-      const home = os.homedir();
-      if (home) {
-        return path.join(home, envDir.slice(1));
-      }
-      // homedir() failed — env var is unusable, fall through to default
-    } else {
-      // Absolute path — use as-is
-      return envDir;
-    }
-  }
-
-  // 2. Default (~/.herdr/downtime) — resolved lazily at call time so
-  //    tests that mutate process.env.HOME can affect the result.
-  try {
-    const home = os.homedir();
-    if (!home) return null; // homedir() returned empty string — fail-safe
-    return path.join(home, DEFAULT_MACHINE_COORDINATION_DIR);
-  } catch {
-    // homedir() threw — fail-safe
-  }
-
-  // 3. Both env and default failed — return null (fail-safe)
-  return null;
+  return resolveMachineCoordinationDir();
 }
 
 /**
