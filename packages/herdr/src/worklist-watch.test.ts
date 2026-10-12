@@ -136,6 +136,14 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
   }
 }
 
+/** Nearest-rank percentile of a numeric sample (same helper as the hydrator suite). */
+function percentile(samples: number[], p: number): number {
+  if (samples.length === 0) return 0;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.floor(p * sorted.length));
+  return sorted[index];
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -468,5 +476,62 @@ describe('worklist gated watch refresh (WL-0MV5CBPI400508MK F3)', () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
 
     await quit(p);
+  });
+
+  it('keeps event-loop delay under 100 ms p95 across watch-triggered refreshes (F5)', async () => {
+    // Real timers: sample event-loop delay while the REAL pane wiring runs a
+    // yielding refresh. The refresh fetcher models the cold default-view
+    // refresh — several awaited CLI-shaped steps that each yield — so a
+    // synchronous (loop-blocking) refresh would starve the sampler and push
+    // the p95 past the 100 ms budget. See parent WL-0MV02VA29009WBEN F5.
+    const watch = controllableWatch();
+    let fetches = 0;
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => {
+      fetches += 1;
+      for (let i = 0; i < 4; i++) await new Promise((r) => setTimeout(r, 4));
+      return [];
+    });
+
+    setExecFileAsync(makeGateExecMock(true) as any);
+    const cacheDir = tempDir('wl-watch-cache-');
+    const worklogDir = tempDir('wl-watch-log-');
+    process.env.WL_CACHE_DIR = cacheDir;
+    setWorklogDir(worklogDir);
+    const counterFile = stateCounterFilePath(cacheDir, worklogDir);
+    fsReal.mkdirSync(path.dirname(counterFile), { recursive: true });
+    fsReal.writeFileSync(counterFile, JSON.stringify({ state: 1 }), 'utf-8');
+
+    const p = runWorklistTui(fetcher as any, [], undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+      dbWatch: watch.dbWatch as any,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const intervalMs = 5;
+    const delays: number[] = [];
+    let last = Date.now();
+    const sampler = setInterval(() => {
+      const tick = Date.now();
+      delays.push(Math.max(0, tick - last - intervalMs));
+      last = tick;
+    }, intervalMs);
+
+    try {
+      // Drive several watch-triggered refreshes, each after the previous
+      // settles, so the responsiveness guard is exercised repeatedly.
+      for (let i = 0; i < 8; i++) {
+        watch.fire();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    } finally {
+      clearInterval(sampler);
+      await quit(p);
+    }
+
+    expect(fetches).toBeGreaterThanOrEqual(8);
+    expect(percentile(delays, 0.95)).toBeLessThan(100);
   });
 });
