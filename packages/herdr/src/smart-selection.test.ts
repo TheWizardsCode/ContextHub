@@ -1,16 +1,18 @@
 /**
  * Unit tests for selectWorkItems — the smart selection algorithm that
- * guarantees all critical and completed/in_review items are always shown
- * in the Herdr worklist regardless of the browseItemCount setting.
+ * guarantees all critical, in_review and actively-worked in-progress items
+ * are always shown in the Herdr worklist regardless of the browseItemCount
+ * setting.
  *
  * The selection function is intentionally duplicated per TUI (decision Q2c
- * in WL-0MS8W5LTW006YZ4B); this suite mirrors the Pi TUI extension suite.
+ * in WL-0MS8W5LTW006YZ4B); the Pi TUI extension copy was removed by
+ * WL-0MSGI7PV9004UD0N, so this is the only remaining suite.
  *
  * Run: npx vitest run packages/herdr/src/smart-selection.test.ts
  */
 
 import { describe, it, expect } from 'vitest';
-import { selectWorkItems } from './smart-selection.js';
+import { selectWorkItems, isMandatoryItem } from './smart-selection.js';
 import type { WorkItem } from './fetcher.js';
 
 /**
@@ -36,6 +38,8 @@ const inProgressInReview = (id: string): WorkItem => makeItem(id, { status: 'in-
 const criticalInReview = (id: string): WorkItem => makeItem(id, { priority: 'critical', status: 'completed', stage: 'in_review' });
 /** Item that is BOTH critical and in-progress/in_review (overlap case). */
 const criticalInProgressInReview = (id: string): WorkItem => makeItem(id, { priority: 'critical', status: 'in-progress', stage: 'in_review' });
+/** Actively-worked item (status = in-progress) at a non-in_review stage. */
+const active = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => makeItem(id, { status: 'in-progress', stage: 'plan_complete', ...overrides });
 const other = (id: string): WorkItem => makeItem(id, { priority: 'medium', status: 'open', stage: 'idea' });
 /** Item whose stage is 'done' (fully closed — must never appear in the default list). */
 const done = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => makeItem(id, { stage: 'done', status: 'completed', ...overrides });
@@ -148,6 +152,104 @@ describe('selectWorkItems — smart selection algorithm', () => {
       const result = selectWorkItems(items, 2);
 
       expect(result.map(i => i.id)).toEqual(['R1', 'RP1']);
+    });
+  });
+
+  describe('actively-worked in-progress items — mandatory set (WL-0MV6KV22S004NYIU)', () => {
+    it('keeps an actively-worked item visible when the review queue saturates browseItemCount', () => {
+      // Exactly the reported symptom: 22 root in_review items vs
+      // browseItemCount=20 leaves zero slots for "others" — the in-progress
+      // item must still be shown.
+      const items = [
+        ...Array.from({ length: 22 }, (_, i) => inReview(`R${i + 1}`)),
+        active('A1'),
+        other('O1'),
+      ];
+
+      const result = selectWorkItems(items, 20);
+
+      expect(result.map(i => i.id)).toContain('A1');
+      // 22 reviews + 1 active = 23 mandatory; the "other" is cut.
+      expect(result).toHaveLength(23);
+      expect(result.map(i => i.id)).not.toContain('O1');
+    });
+
+    it('treats in-progress at any non-done stage as mandatory', () => {
+      const items = [
+        active('A-idea', { stage: 'idea' }),
+        active('A-intake', { stage: 'intake_complete' }),
+        active('A-plan', { stage: 'plan_complete' }),
+        other('O1'),
+      ];
+
+      // browseItemCount=1: all three active items are mandatory, zero others.
+      const result = selectWorkItems(items, 1);
+
+      expect(result.map(i => i.id)).toEqual(['A-idea', 'A-intake', 'A-plan']);
+    });
+
+    it('overlap in-progress ∩ in_review → item counts once (active, not double-counted)', () => {
+      const items = [inProgressInReview('RP1'), other('O1'), other('O2')];
+
+      const result = selectWorkItems(items, 3);
+
+      expect(result.map(i => i.id)).toEqual(['RP1', 'O1', 'O2']);
+      expect(result.filter(i => i.id === 'RP1')).toHaveLength(1);
+    });
+
+    it('overlap critical ∩ in-progress → item counts once (critical, not double-counted)', () => {
+      const items = [
+        makeItem('BOTH1', { priority: 'critical', status: 'in-progress', stage: 'plan_complete' }),
+        other('O1'),
+        other('O2'),
+      ];
+
+      const result = selectWorkItems(items, 3);
+
+      expect(result.map(i => i.id)).toEqual(['BOTH1', 'O1', 'O2']);
+      expect(result.filter(i => i.id === 'BOTH1')).toHaveLength(1);
+    });
+
+    it('orders criticals, then reviews, then actively-worked, then others', () => {
+      const items = [other('O1'), active('A1'), inReview('R1'), critical('C1'), other('O2')];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map(i => i.id)).toEqual(['C1', 'R1', 'A1', 'O1', 'O2']);
+    });
+
+    it('hides a non-critical child in-progress item (root-only rule still applies)', () => {
+      const items = [
+        active('A1'),
+        makeItem('ChildActive', { status: 'in-progress', stage: 'plan_complete', parentId: 'A1' }),
+        other('O1'),
+      ];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map(i => i.id)).toEqual(['A1', 'O1']);
+    });
+
+    it('excludes an in-progress item whose stage is done (done gate applies first)', () => {
+      const items = [makeItem('D-IP', { status: 'in-progress', stage: 'done' }), other('O1')];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map(i => i.id)).toEqual(['O1']);
+    });
+  });
+
+  describe('isMandatoryItem — mandatory-set predicate', () => {
+    it('is true for critical, completed/in_review, and in-progress at any stage', () => {
+      expect(isMandatoryItem(makeItem('C', { priority: 'critical', stage: 'idea' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('R', { status: 'completed', stage: 'in_review' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('A', { status: 'in-progress', stage: 'plan_complete' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('AI', { status: 'in-progress', stage: 'idea' }))).toBe(true);
+    });
+
+    it('is false for an untouched open item', () => {
+      expect(isMandatoryItem(makeItem('O', { status: 'open', stage: 'idea' }))).toBe(false);
+      expect(isMandatoryItem(makeItem('O2', { status: 'open', stage: 'plan_complete' }))).toBe(false);
     });
   });
 

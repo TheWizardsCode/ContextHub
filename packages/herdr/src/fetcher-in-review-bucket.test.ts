@@ -210,6 +210,70 @@ describe('in_review bucket ordering across fetch paths (WL-0MUWDW0N6003KF6G)', (
     expect(ids).not.toContain('WL-in-window');
   });
 
+  it('fetchNextItems keeps an actively-worked in-progress item when the review queue saturates the window (WL-0MV6KV22S004NYIU)', async () => {
+    // The reported symptom: 22 root in_review items saturate browseItemCount
+    // (20), leaving zero "others" slots — an in-progress/plan_complete item
+    // returned first by `wl next` was cut. Actively-worked items must be
+    // mandatory regardless of review-queue depth.
+    const activeItem = {
+      id: 'WL-active-plan',
+      title: 'Actively worked plan item',
+      status: 'in-progress',
+      stage: 'plan_complete',
+      priority: 'medium',
+      updatedAt: UPDATED_AT,
+    };
+    const reviewItems = Array.from({ length: 22 }, (_, i) => ({
+      id: `WL-review-${i + 1}`,
+      title: `Review ${i + 1}`,
+      status: 'completed',
+      stage: 'in_review',
+      priority: 'medium',
+      updatedAt: UPDATED_AT,
+    }));
+    const windowItem = { id: 'WL-other', title: 'Other', status: 'open', stage: 'idea', priority: 'medium' };
+
+    setExecFileAsync((async (_bin: string, args: string[]) => {
+      if (args.includes('next')) {
+        // The active item leads the wl next window, and the "other" item is
+        // also in the feed — but the 20-item selection window cuts both once
+        // the 22 reviews are mandatory.
+        return {
+          stdout: JSON.stringify({
+            success: true,
+            results: [
+              { workItem: activeItem },
+              ...reviewItems.slice(0, 18).map((w) => ({ workItem: w })),
+              { workItem: windowItem },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      if (args.includes('--priority')) {
+        return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
+      }
+      if (args.includes('--stage')) {
+        // Mandatory review subset: all 22 reviews (completed/in-progress).
+        return { stdout: JSON.stringify({ success: true, workItems: reviewItems }), stderr: '' };
+      }
+      // Mandatory actively-worked in-progress subset.
+      return { stdout: JSON.stringify({ success: true, workItems: [activeItem] }), stderr: '' };
+    }) as never);
+
+    // browseItemCount=20 with 22 reviews: the merged mandatory subsets plus
+    // selection must guarantee the active item and every review survive, and
+    // cut the non-mandatory other.
+    const items = await fetchNextItems(20);
+    const ids = items.map((i) => i.id);
+
+    expect(ids).toContain('WL-active-plan');
+    // All 22 mandatory reviews survive the cap too.
+    expect(reviewItems.every((r) => ids.includes(r.id))).toBe(true);
+    // The non-mandatory other item is cut.
+    expect(ids).not.toContain('WL-other');
+  });
+
   it('reviews arguments pass --status completed,in-progress for the mandatory review subset (WL-0MV6JGVPH009YDXB)', async () => {
     let reviewQuery: string[] | null = null;
     setExecFileAsync((async (_bin: string, args: string[]) => {
@@ -219,7 +283,12 @@ describe('in_review bucket ordering across fetch paths (WL-0MUWDW0N6003KF6G)', (
       if (args.includes('--priority')) {
         return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
       }
-      reviewQuery = args;
+      // The mandatory review subset is the ONLY query carrying --stage; the
+      // actively-worked in-progress subset (WL-0MV6KV22S004NYIU) is
+      // stage-agnostic, so exclude it from the capture.
+      if (args.includes('--stage')) {
+        reviewQuery = args;
+      }
       return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
     }) as never);
 
@@ -231,5 +300,40 @@ describe('in_review bucket ordering across fetch paths (WL-0MUWDW0N6003KF6G)', (
     const statusValue = reviewQuery![statusIdx + 1];
     expect(statusValue).toContain('in-progress');
     expect(statusValue).toContain('completed');
+  });
+
+  it('fetches actively-worked in-progress root items as a mandatory subset (WL-0MV6KV22S004NYIU)', async () => {
+    const calls: string[][] = [];
+    const activeItem = {
+      id: 'WL-active',
+      title: 'Active',
+      status: 'in-progress',
+      stage: 'plan_complete',
+      priority: 'low',
+      updatedAt: UPDATED_AT,
+    };
+
+    setExecFileAsync((async (_bin: string, args: string[]) => {
+      calls.push(args);
+      if (args.includes('next')) {
+        // The active item is NOT in the wl next window (low priority).
+        return { stdout: JSON.stringify({ success: true, results: [] }), stderr: '' };
+      }
+      if (args.includes('--priority')) {
+        return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
+      }
+      if (args.includes('--stage')) {
+        return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
+      }
+      // The stage-agnostic in-progress subset.
+      return { stdout: JSON.stringify({ success: true, workItems: [activeItem] }), stderr: '' };
+    }) as never);
+
+    const items = await fetchNextItems(20);
+
+    expect(items.map((i) => i.id)).toContain('WL-active');
+    const activeQuery = calls.find((a) => a.includes('--status') && a.includes('in-progress') && !a.includes('--stage'));
+    expect(activeQuery).toBeDefined();
+    expect(activeQuery).toContain('--root-only');
   });
 });

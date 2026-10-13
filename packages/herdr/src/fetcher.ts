@@ -683,14 +683,15 @@ function reviewQueueArgs(): string[] {
 
 /**
  * Fetch the mandatory subsets that must ALWAYS be shown in the default
- * worklist: all critical items and all in_review items (the producer-review
+ * worklist: all critical items, all in_review items (the producer-review
  * queue — status completed awaiting review or in-progress being re-worked
- * after review feedback, WL-0MV6JGVPH009YDXB).
+ * after review feedback, WL-0MV6JGVPH009YDXB) and all actively-worked
+ * in-progress root items (WL-0MV6KV22S004NYIU).
  *
  * These are fetched explicitly via `wl list` because `wl next -n N` hard-caps
  * at 32 items — even `-n 500` returns only 32, so a large superset cannot
- * capture all critical/in_review items. Runs the two queries in parallel to
- * mitigate refresh latency.
+ * capture all critical/in_review/in-progress items. Runs the three queries in
+ * parallel to mitigate refresh latency.
  */
 async function fetchMandatorySubsets(): Promise<WorkItem[]> {
   // Critical items: fetch ALL critical items across all statuses (open,
@@ -708,20 +709,32 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
   // the parent's review lifecycle. The query spans status completed AND
   // in-progress (re-worked items stay in_review, WL-0MV6JGVPH009YDXB) so
   // re-worked reviews are never dropped from the mandatory set.
-  const [criticalOutput, reviewOutput] = await Promise.all([
+  //
+  // Actively-worked items: root-only, status in-progress at ANY stage. These
+  // can otherwise fall outside the `wl next` top-N window (the base feed is
+  // capped at 32, and a low-priority in-progress item is outranked by
+  // in-review (+600) and audit-not-ready (+3500) boosts), hiding the
+  // producer's real-time "what am I working on" signal
+  // (WL-0MV6KV22S004NYIU). The query is NOT merged into reviewQueueArgs()
+  // because it is a distinct concern with a different stage scope — adding it
+  // there would break the review-queue single-spawn dedup invariant.
+  const [criticalOutput, reviewOutput, activeOutput] = await Promise.all([
     runWl(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed']),
     runWl(reviewQueueArgs()),
+    runWl(['list', '--status', 'in-progress', '--root-only']),
   ]);
   const criticalItems = extractItems(extractJson(criticalOutput));
   const reviewItems = extractItems(extractJson(reviewOutput));
-  return mergeUniqueById(criticalItems, reviewItems);
+  const activeItems = extractItems(extractJson(activeOutput));
+  return mergeUniqueById(criticalItems, reviewItems, activeItems);
 }
 
 /**
  * Fetch the next available work items (via `wl next`).
  *
- * When a count is given, smart selection is applied: all critical and
- * completed/in_review items are always included (regardless of count) and
+ * When a count is given, smart selection is applied: all critical items, all
+ * in_review review-queue items and all actively-worked in-progress items are
+ * always included (regardless of count, WL-0MV6KV22S004NYIU) and
  * the count limits only the remaining "other" items. The mandatory subsets
  * are merged from explicit `wl list` queries (see fetchMandatorySubsets).
  */

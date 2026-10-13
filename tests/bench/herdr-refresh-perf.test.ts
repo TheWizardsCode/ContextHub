@@ -94,7 +94,9 @@ describe.skipIf(!hasWl())('herdr-refresh-perf benchmark harness', () => {
     expect(Number.isFinite(result.coldMs)).toBe(true);
 
     // Consolidated cold refresh (WL-0MV5CBQ6L005SPAG): the default view now
-    // spawns only `wl next` plus the two mandatory-subset queries. The
+    // spawns only `wl next` plus the three mandatory-subset queries (critical,
+    // in_review review queue, actively-worked in-progress —
+    // WL-0MV6KV22S004NYIU). The
     // review-queue state is deduplicated against the mandatory in_review
     // subset, and the actionable count plus expanded children are read
     // in-process from SQLite — previously this was ~25 spawns at 20 expanded

@@ -2271,8 +2271,9 @@ async function main(): Promise<void> {
 
   // Create a fetcher that loads items using the current browseItemCount setting
   // Each call reads from settings so changes take effect on next auto-refresh
-  // Smart selection (see fetchNextItems) guarantees all critical and
-  // completed/in_review items are always shown, regardless of the count.
+  // Smart selection (see fetchNextItems) guarantees all critical,
+  // in_review and actively-worked in-progress items are always shown,
+  // regardless of the count (WL-0MV6KV22S004NYIU).
   const fetcher = async () => {
     // When no valid .worklog/ exists in the tab directory, do NOT fetch from
     // the plugin's own CWD (which would show an unrelated project's items).

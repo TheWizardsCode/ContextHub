@@ -258,8 +258,9 @@ export async function runBenchmark(argv: string[] = process.argv): Promise<Herdr
       // fetch, the batched expanded-children read, the review-queue query and
       // the actionable count all run CONCURRENTLY, and the children/review/
       // count reads are consolidated (in-process SQLite reads and in-flight
-      // memo dedupe) so a cold refresh spawns only `wl next` plus the two
-      // mandatory-subset queries (WL-0MV5CBQ6L005SPAG).
+      // memo dedupe) so a cold refresh spawns only `wl next` plus the three
+      // mandatory-subset queries (WL-0MV5CBQ6L005SPAG; the actively-worked
+      // in-progress subset was added by WL-0MV6KV22S004NYIU).
       await Promise.all([
         fetchNextItems(options.browse),
         fetchChildrenForItems(expandedParentIds),
