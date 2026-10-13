@@ -5,6 +5,7 @@
 import type { PluginContext } from '../plugin-types.js';
 import { getRepoFromGitRemote, normalizeGithubLabelPrefix, SecondaryRateLimitError, setVerboseLogger } from '../github.js';
 import { getLockPathForJsonl, withFileLock } from '../file-lock.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import path from 'node:path';
 import { ProgressReporter, ProgressMode } from '../progress.js';
@@ -657,7 +658,7 @@ export default function register(ctx: PluginContext): void {
 
         if (mergedItems.length > 0) {
           renderProgress({ phase: 'saving', current: 1, total: 2 });
-          db.upsertItems(mergedItems);
+          withStoreMutationLock(ctx.dataPath, () => db.upsertItems(mergedItems));
         }
 
         // Persist imported GitHub comments
@@ -674,14 +675,14 @@ export default function register(ctx: PluginContext): void {
             c => c.githubCommentId === undefined || !existingGhIds.has(c.githubCommentId)
           );
           if (newComments.length > 0) {
-            db.importComments([...existingComments, ...newComments]);
+            withStoreMutationLock(ctx.dataPath, () => db.importComments([...existingComments, ...newComments]));
           }
         }
 
         if (createNew && createdItems.length > 0) {
           const { updatedItems: markedItems } = await upsertIssuesFromWorkItems(mergedItems, db.getAllComments(), githubConfig, renderProgress);
           if (markedItems.length > 0) {
-            db.upsertItems(markedItems);
+            withStoreMutationLock(ctx.dataPath, () => db.upsertItems(markedItems));
           }
         }
 

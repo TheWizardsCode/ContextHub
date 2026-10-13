@@ -75,6 +75,73 @@ The mode-switch worker reuses the machine-wide downtime leader
 - **Fail-closed:** if the shared file cannot be read or written, the worker
   falls back to its local clock (never a premature cheap switch).
 
+### Model-cooldown gate (WL-0MV5638ZS005I5XQ)
+
+A pane blocked on provider exhaustion (the in-pane recovery loop classifies
+"all providers exhausted" / "all providers unavailable" / "no provider is
+available during the current scheduled time window" 503s as `SERVER_ERROR`)
+sits in proxy backoff holding **no** slot, so the proxy looks idle. Without a
+gate the leader would switch the shared proxy to cheap — which *adds*
+concurrency (cheap has more slots than fast) during a known
+provider-exhaustion window.
+
+- Before the cheap decision, the leader reads the machine-wide cooldown
+  signal (`readModelCooldowns` from `@worklog/shared/model-cooldown`, the same
+  coordination dir as `mode-activity.json`). While **any** entry has
+  `cooldownUntil` in the future the leader holds **fast**: no cheap POST.
+- **Bounded, no latch:** the reader returns only *active* entries, so the hold
+  ends exactly at `cooldownUntil` and the first tick at/after expiry resumes
+  the normal decision. The worker persists no cooldown state of its own.
+- **Machine-wide (AC4):** the signal lives in the coordination directory, not
+  in per-root state, so a cooldown recorded for any worklog root suppresses
+  the shared cheap switch.
+- **Fail-closed:** an unreadable/corrupt signal (`null`) holds fast rather
+  than switching on an unreadable signal, and logs the hold so it is not
+  silent. A *missing* signal (nothing was ever recorded) is `[]` and does not
+  suppress the switch.
+- **Fast path unaffected:** `onOperatorCommand` never reads the cooldown
+  signal, so a cooldown can never suppress the fast-on-command switch.
+- **Contract of record.** The on-disk format — the file
+  (`model-cooldowns.json`), `schemaVersion: 1`, the entry fields (`paneId` /
+  `sessionId` key, best-effort `itemId` / `kind`, `reason`, `createdAt`,
+  `cooldownUntil`) and the tolerant/fail-closed read rules — is documented
+  once, in the header of `packages/shared/src/model-cooldown.ts`. This
+  document, `packages/herdr/README.md` and the TUI recovery-loop code comments
+  cross-reference that header instead of restating the field list.
+- **Bounded default (WL-0MV5639X70029BOI).** An absent or malformed
+  `Retry-After` hint yields a *bounded* default cooldown
+  (`DEFAULT_RECOVERY_CONFIG.cooldown`, clamped into `[floorMs, ceilingMs]` —
+  `1000 ms`–`6 h`, default `10 min`) rather than a zero or unbounded hold, so
+  the gate can neither open prematurely nor pin the proxy in fast mode.
+- **Fail-closed direction (explicit).** Unreadable ⇒ hold fast; absent ⇒ normal
+  decision. The two never collapse: `readModelCooldowns` returns `null` for
+  unreadable/corrupt and `[]` for absent/empty.
+
+### Withdrawn client drain — must not regress (WL-0MUWIHUL2000JEFR)
+
+The earlier "drain before switching to cheap" design (WL-0MUL0KO7Q003O7YJ) was
+withdrawn. It introduced a **client-side** drain whose cheap-switch completion
+gate (`freeSlots >= 2`) was unsatisfiable with the live pool sizes (fast = 1
+slot, cheap = 3 slots — `WL-0MUWF763Q003MGUM`), and whose drain was unbounded,
+so it latched and paused the dispatcher. The proxy's own **server-side bounded
+drain** is unchanged and stays authoritative.
+
+A future change **must not** reintroduce any part of the withdrawn client
+drain:
+
+- **No client-side slot-count completion gate** — the mode-switch worker must
+  not gate the cheap switch on a free-slot count (`MODE_SWITCH_DRAIN_FREE_SLOTS`
+  / `DOWNTIME_AUDIT_MIN_FREE_SLOTS`); the only cheap path is "operator idle +
+  proxy idle + no active model cooldown".
+- **No dispatch pause** — the downtime dispatcher must not carry a
+  `drainPaused` config field or refuse new dispatch while a drain is in
+  progress.
+- **No unbounded latch** — the cheap-switch hold is bounded solely by
+  `cooldownUntil`; there is no persistent "draining" state that can get stuck.
+
+The model-cooldown gate exists to *avoid adding concurrency* during known
+provider exhaustion; it is not a resumption of the withdrawn drain.
+
 ## 3. Settings (re-read every tick — apply without plugin restart)
 
 | Setting | Default | Clamp |
@@ -97,11 +164,16 @@ time-based plan.
 ## 5. Key files
 
 - `packages/herdr/src/mode-switch-worker.ts` — worker core (idle clock,
-  leader-gated tick, shared `mode-activity.json` read/write, admin API
-  client, clamps)
+  leader-gated tick, shared `mode-activity.json` read/write, machine-wide
+  model-cooldown gate, admin API client, clamps)
+- `packages/shared/src/model-cooldown.ts` — versioned machine-wide cooldown
+  contract (`readModelCooldowns` tolerant/fail-closed reader) shared with the
+  TUI recovery loop
 - `packages/herdr/src/mode-switch-worker.test.ts` — worker core tests
+  (including the model-cooldown gate matrix)
 - `packages/herdr/src/mode-switch-integration.test.ts` — wiring tests
-  (settings → worker, route classification, scheduler interval constants)
+  (settings → worker, route classification, scheduler interval constants,
+  cross-root cooldown gate)
 - `packages/herdr/src/settings.ts` — settings schema + validation/clamps
 - `packages/herdr/src/index.ts` — agent-route hook wiring
 - `packages/herdr/src/worklist.ts` — scheduler task registration

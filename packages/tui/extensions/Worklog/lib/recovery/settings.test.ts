@@ -8,24 +8,40 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { DEFAULT_RECOVERY_CONFIG, type RecoveryConfig, type RecoveryCategoryConfig } from './error-patterns.js';
+import {
+  DEFAULT_RECOVERY_CONFIG,
+  type RecoveryConfig,
+  type RecoveryCategoryConfig,
+  type RecoveryCooldownConfig,
+} from './error-patterns.js';
+
+// The 9 error-category keys. `cooldown` is a separate bounded-default policy
+// (it carries no `patterns`/`baseDelayMs`), so category loops must skip it.
+const CATEGORY_KEYS = [
+  'authError',
+  'compactionGate',
+  'contextLength',
+  'parseError',
+  'quotaExhausted',
+  'rateLimit',
+  'serverError',
+  'terminated',
+  'timeout',
+] as const;
+
+function categoryEntries(): [string, RecoveryCategoryConfig][] {
+  return CATEGORY_KEYS.map((key) => [key, DEFAULT_RECOVERY_CONFIG[key]] as [string, RecoveryCategoryConfig]);
+}
 
 // ── RecoveryConfig defaults ───────────────────────────────────────────
 
 describe('DEFAULT_RECOVERY_CONFIG', () => {
   it('has all 9 error categories', () => {
     const keys = Object.keys(DEFAULT_RECOVERY_CONFIG);
-    expect(keys.sort()).toEqual([
-      'authError',
-      'compactionGate',
-      'contextLength',
-      'parseError',
-      'quotaExhausted',
-      'rateLimit',
-      'serverError',
-      'terminated',
-      'timeout',
-    ]);
+    expect(keys.sort()).toEqual([...CATEGORY_KEYS, 'cooldown'].sort());
+    for (const key of CATEGORY_KEYS) {
+      expect(keys).toContain(key);
+    }
   });
 
   it('rate limit defaults to NOT retried', () => {
@@ -37,7 +53,7 @@ describe('DEFAULT_RECOVERY_CONFIG', () => {
   it('server error defaults to retried with backoff', () => {
     expect(DEFAULT_RECOVERY_CONFIG.serverError.enabled).toBe(true);
     expect(DEFAULT_RECOVERY_CONFIG.serverError.baseDelayMs).toBe(2000);
-    expect(DEFAULT_RECOVERY_CONFIG.serverError.maxDelayMs).toBe(60000);
+    expect(DEFAULT_RECOVERY_CONFIG.serverError.maxDelayMs).toBe(600000); // 10-minute ceiling (WL-0MUY9GDPG0062NWF)
   });
 
   it('auth error defaults to NOT retried', () => {
@@ -56,7 +72,7 @@ describe('DEFAULT_RECOVERY_CONFIG', () => {
   it('timeout defaults to retried with backoff', () => {
     expect(DEFAULT_RECOVERY_CONFIG.timeout.enabled).toBe(true);
     expect(DEFAULT_RECOVERY_CONFIG.timeout.baseDelayMs).toBe(2000);
-    expect(DEFAULT_RECOVERY_CONFIG.timeout.maxDelayMs).toBe(60000);
+    expect(DEFAULT_RECOVERY_CONFIG.timeout.maxDelayMs).toBe(600000); // 10-minute ceiling (WL-0MUY9GDPG0062NWF)
   });
 
   it('terminated defaults to NOT retried', () => {
@@ -73,26 +89,58 @@ describe('DEFAULT_RECOVERY_CONFIG', () => {
   });
 
   it('each category has patterns array', () => {
-    for (const [key, cat] of Object.entries(DEFAULT_RECOVERY_CONFIG)) {
-      expect(Array.isArray((cat as RecoveryCategoryConfig).patterns)).toBe(true);
-      expect((cat as RecoveryCategoryConfig).patterns.length).toBeGreaterThan(0);
+    for (const [key, cat] of categoryEntries()) {
+      expect(Array.isArray(cat.patterns), key).toBe(true);
+      expect(cat.patterns.length, key).toBeGreaterThan(0);
     }
   });
 
   it('each category has valid baseDelayMs and maxDelayMs', () => {
-    for (const cat of Object.values(DEFAULT_RECOVERY_CONFIG)) {
-      expect(cat.baseDelayMs).toBeGreaterThanOrEqual(0);
-      expect(cat.maxDelayMs).toBeGreaterThanOrEqual(cat.baseDelayMs);
+    for (const [key, cat] of categoryEntries()) {
+      expect(cat.baseDelayMs, key).toBeGreaterThanOrEqual(0);
+      expect(cat.maxDelayMs, key).toBeGreaterThanOrEqual(cat.baseDelayMs);
     }
   });
 
   it('backoff-based categories have a positive base delay', () => {
-    for (const cat of Object.values(DEFAULT_RECOVERY_CONFIG)) {
+    for (const [key, cat] of categoryEntries()) {
       // Single-shot categories (e.g. parseError) legitimately use 0ms
       // delays because they never back off.
       if (cat.baseDelayMs === 0) continue;
-      expect(cat.baseDelayMs).toBeGreaterThanOrEqual(100);
+      expect(cat.baseDelayMs, key).toBeGreaterThanOrEqual(100);
     }
+  });
+});
+
+// ── Bounded default cooldown (WL-0MV5639X70029BOI) ────────────────────
+
+describe('bounded default cooldown', () => {
+  it('exists in DEFAULT_RECOVERY_CONFIG with default/floor/ceiling', () => {
+    const cooldown: RecoveryCooldownConfig = DEFAULT_RECOVERY_CONFIG.cooldown;
+    expect(cooldown).toBeDefined();
+    expect(typeof cooldown.defaultMs).toBe('number');
+    expect(typeof cooldown.floorMs).toBe('number');
+    expect(typeof cooldown.ceilingMs).toBe('number');
+  });
+
+  it('has a documented, non-zero floor at or below the default', () => {
+    const { defaultMs, floorMs, ceilingMs } = DEFAULT_RECOVERY_CONFIG.cooldown;
+    // Never a zero hold.
+    expect(floorMs).toBeGreaterThan(0);
+    expect(defaultMs).toBeGreaterThanOrEqual(floorMs);
+    expect(ceilingMs).toBeGreaterThanOrEqual(defaultMs);
+  });
+
+  it('pins the default to the retry-loop exponential ceiling (10 min)', () => {
+    expect(DEFAULT_RECOVERY_CONFIG.cooldown.defaultMs).toBe(600000);
+  });
+
+  it('pins the ceiling to the 6-hour server-hint bound', () => {
+    expect(DEFAULT_RECOVERY_CONFIG.cooldown.ceilingMs).toBe(6 * 60 * 60 * 1000);
+  });
+
+  it('pins a 1-second floor so an absent/invalid hint never yields a zero hold', () => {
+    expect(DEFAULT_RECOVERY_CONFIG.cooldown.floorMs).toBe(1000);
   });
 });
 

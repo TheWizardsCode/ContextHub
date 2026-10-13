@@ -50,6 +50,7 @@ import {
   stripAgentPromptPrefix,
 } from './pane-title.js';
 import { showToast } from './notify.js';
+import { applyActiveTabMarkers, createProductionHydratorDeps } from './hydrator.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -59,6 +60,8 @@ import {
   isHostAuditActive,
   writeActiveAuditMarker,
   removeActiveAuditMarker,
+  readStoredModelCooldowns,
+  clearStoredModelCooldown,
 } from './machine-coordination.js';
 import { loadSettings, getDefaultSettingsPath, clampBrowseItemCount, defaultSettings } from './settings.js';
 import {
@@ -2117,6 +2120,10 @@ export function createDowntimeDeps(
           fetchItem: fetchAuditItemById,
           readEntries: readDowntimeLogEntries,
           resolveRoot: defaultStalledPaneRootResolver,
+          // Bounded model-cooldown wake (WL-0MV5639GG00085Q7): the machine-wide
+          // signal is read once per scan; a due entry lets the scan offer a
+          // cooldown candidate that bypasses the generic stall threshold.
+          readStoredModelCooldowns: async () => readStoredModelCooldowns(),
         },
         cwd,
         opts,
@@ -2131,6 +2138,7 @@ export function createDowntimeDeps(
           kind: candidate.kind,
           nonTerminalCooldownMs: opts.nonTerminalCooldownMs,
           thresholdMs: opts.thresholdMs,
+          modelCooldown: candidate.modelCooldown,
         },
         {
           promptAgent: defaultStalledResumePromptAgent,
@@ -2141,6 +2149,9 @@ export function createDowntimeDeps(
           },
           markNeedsProducerReview: async (itemId, root) =>
             markNeedsProducerReviewWorkItem(itemId, root),
+          // Consume the marker on a successful resume so the same pane is
+          // not re-woken on the next cycle (WL-0MV5639GG00085Q7).
+          clearCooldown: async (paneId) => clearStoredModelCooldown(paneId),
           maxAttempts: opts.maxAttempts,
         },
       );
@@ -2233,6 +2244,13 @@ async function main(): Promise<void> {
     stateFile: wlRoot ? join(wlRoot, '.worklog', AGENT_PANES_FILE) : undefined,
   });
 
+  // Production deps for the selection list's tab-based active marker
+  // (WL-0MV1BWETT005GSUJ): an item with an exact-match tab in this workspace
+  // is rendered as in-progress even when its worklog status is still `open`.
+  // Uses the same `herdr tab list --workspace <id>` lookup as the hydrator.
+  const hydratorDeps = createProductionHydratorDeps();
+  const hydratorWorkspaceId = process.env.HERDR_WORKSPACE_ID ?? undefined;
+
   // Event subscriber (WL-0MSHB7DHO004RHBJ): subscribes to herdr window
   // events (pane focus/visibility + agent status) over the herdr socket so
   // the worklist reacts immediately instead of polling. Fail-open: an
@@ -2253,8 +2271,9 @@ async function main(): Promise<void> {
 
   // Create a fetcher that loads items using the current browseItemCount setting
   // Each call reads from settings so changes take effect on next auto-refresh
-  // Smart selection (see fetchNextItems) guarantees all critical and
-  // completed/in_review items are always shown, regardless of the count.
+  // Smart selection (see fetchNextItems) guarantees all critical,
+  // in_review and actively-worked in-progress items are always shown,
+  // regardless of the count (WL-0MV6KV22S004NYIU).
   const fetcher = async () => {
     // When no valid .worklog/ exists in the tab directory, do NOT fetch from
     // the plugin's own CWD (which would show an unrelated project's items).
@@ -2428,6 +2447,11 @@ async function main(): Promise<void> {
       // expanded children) on every refresh cycle (WL-0MSBQUJQX005RAT9).
       // Fail-open: herdr errors yield no icons; the list keeps working.
       mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
+      // Tab-based active marker (WL-0MV1BWETT005GSUJ): stamp `in-progress` on
+      // items whose exact-ID tab is open in the current workspace so the
+      // selection list's marker reflects tab existence. Fail-open.
+      applyActiveTabMarkers: (items) =>
+        applyActiveTabMarkers(items, hydratorDeps.listTabs, hydratorWorkspaceId),
       subscriber: eventSubscriber,
       agentTracker,
       modeSwitchWorker,

@@ -3,6 +3,7 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 
 const TRUTHY = ['true', 'yes', '1'];
 const FALSY = ['false', 'no', '0'];
@@ -14,7 +15,8 @@ export default function register(ctx: PluginContext): void {
     .command('reviewed <id> [value]')
     .description('Toggle or set needsProducerReview flag (true|false|yes|no). If value omitted, toggles current state')
     .option('--prefix <prefix>', 'Override the default prefix')
-    .action((id: string, value: string | undefined, options: { prefix?: string } = {}) => {
+    .action((id: string, value: string | undefined, options: { prefix?: string } = {}) =>
+      withStoreMutationLock(ctx.dataPath, () => {
       const normalized = (value && typeof value === 'object') ? (value as { prefix?: string }) : options;
       const valueArg = (value && typeof value === 'object') ? undefined : value;
       utils.requireInitialized();
@@ -51,5 +53,6 @@ export default function register(ctx: PluginContext): void {
         const state = nextValue ? 'true' : 'false';
         console.log(`needsProducerReview set to ${state} for ${item.id}`);
       }
-    });
+      }),
+    );
 }

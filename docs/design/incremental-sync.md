@@ -293,12 +293,22 @@ the records changed since the last full snapshot — not unbounded history.
 
 The incremental path runs entirely inside the existing sync flow, so it
 inherits unchanged:
-- the file lock (`withFileLock`, `getLockPathForJsonl`) — also acquired by the
-  mutating commands `wl update` / `wl comment add` / `wl audit-set` around
-  their read-modify-write, so a sync can never overwrite a mutation that
-  landed after its local read (no lost update; see
-  [DATA_SYNCING.md § Concurrent Writes](../DATA_SYNCING.md#concurrent-writes-sync-vs-mutating-commands) and
-  `tests/cli/sync-vs-mutation.test.ts`),
+- the file lock (`withFileLock`, `getLockPathForJsonl`) — held by `wl sync`
+  for its whole fetch → merge → write-back → push, and acquired by **every**
+  DB-writing command around its read-modify-write via
+  `withStoreMutationLock` (`src/mutation-lock.ts`). The locked commands are:
+  `wl update`; `wl comment add`, `wl comment update`, `wl comment delete`;
+  `wl audit-set`; `wl close`; `wl delete` (including its reentrant
+  auto-sync); `wl dep add` and `wl dep rm`; `wl create`; `wl reviewed`;
+  `wl interview` (per persisted answer/flag update); `wl audit-waive` and
+  `wl audit-unwaive`; `wl re-sort`; the writing `wl doctor` subcommands
+  (`stage-sync`, `prune`, `foreign-items --apply`, `dangling-parents`,
+  `priority`, `file-paths`, `migrate`, the main `--fix` path, and `upgrade`
+  migrations); `wl github import`; and the whole-store commands `wl import`,
+  `wl github push`, `wl init` and `wl migrate`. Because a mutation and a sync
+  contend on the same lock, a sync can never overwrite a mutation that
+  landed after its local read (no lost update); see
+  `tests/cli/sync-vs-mutation.test.ts`.
 - the single-flight guard and `--if-idle` skip semantics (WL-0MSAB7ZUC004SK7E),
 - the ephemeral JSONL pattern (SQLite → JSONL → push → delete).
 

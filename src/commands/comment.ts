@@ -201,7 +201,7 @@ export default function register(ctx: PluginContext): void {
       });
       
       const normalizedCommentId = utils.normalizeCliId(commentId, options.prefix) || commentId;
-      const comment = db.updateComment(normalizedCommentId, updates);
+      const comment = withStoreMutationLock(ctx.dataPath, () => db.updateComment(normalizedCommentId, updates));
       if (!comment) {
         output.error(`Comment not found: ${normalizedCommentId}`, { success: false, error: `Comment not found: ${normalizedCommentId}` });
         process.exit(1);
@@ -224,7 +224,7 @@ export default function register(ctx: PluginContext): void {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       const normalizedCommentId = utils.normalizeCliId(commentId, options.prefix) || commentId;
-      const deleted = db.deleteComment(normalizedCommentId);
+      const deleted = withStoreMutationLock(ctx.dataPath, () => db.deleteComment(normalizedCommentId));
       if (!deleted) {
         output.error(`Comment not found: ${normalizedCommentId}`, { success: false, error: `Comment not found: ${normalizedCommentId}` });
         process.exit(1);

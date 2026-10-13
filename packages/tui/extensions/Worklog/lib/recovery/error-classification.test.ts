@@ -12,6 +12,7 @@ import {
   classifyError,
   isRateLimit,
   isServerError,
+  isExhaustionServerError,
   isAuthError,
   isContextLengthExceeded,
   isQuotaExhausted,
@@ -133,6 +134,38 @@ describe('isServerError', () => {
 
   it('returns false for non-error messages', () => {
     expect(isServerError(makeErrorMsg('', 'stop'))).toBe(false);
+  });
+});
+
+// ── Provider-exhaustion SERVER_ERROR sub-classification ─────────────
+//
+// The durable model-cooldown writer (WL-0MV5638J1006URXA) only fires for
+// provider-exhaustion SERVER_ERRORs — a plain retryable 5xx or a timeout
+// must stay ephemeral. These tests pin the narrower sub-classification.
+
+describe('isExhaustionServerError', () => {
+  it('detects the llm-proxy exhaustion bodies', () => {
+    expect(isExhaustionServerError(makeErrorMsg('All providers exhausted'))).toBe(true);
+    expect(isExhaustionServerError(makeErrorMsg('all providers unavailable'))).toBe(true);
+    expect(
+      isExhaustionServerError(
+        makeErrorMsg(
+          'All providers unavailable: no provider is available during the current scheduled time window',
+        ),
+      ),
+    ).toBe(true);
+    expect(isExhaustionServerError(makeErrorMsg('provider is outside its available_times'))).toBe(true);
+  });
+
+  it('does not treat a plain retryable 5xx as exhaustion', () => {
+    expect(isExhaustionServerError(makeErrorMsg('HTTP 500: Internal Server Error'))).toBe(false);
+    expect(isExhaustionServerError(makeErrorMsg('503 Service Unavailable'))).toBe(false);
+    expect(isExhaustionServerError(makeErrorMsg('502 Bad Gateway'))).toBe(false);
+  });
+
+  it('does not treat a timeout or a normal message as exhaustion', () => {
+    expect(isExhaustionServerError(makeErrorMsg('Request timed out'))).toBe(false);
+    expect(isExhaustionServerError(makeErrorMsg('', 'stop'))).toBe(false);
   });
 });
 

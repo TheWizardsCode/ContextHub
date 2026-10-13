@@ -10,9 +10,21 @@
  * - RetryState and ContinuationState managers
  * - Interruptible sleep for abort/session-switch detection
  * - Helper to find last assistant message in session entries
+ *
+ * The retry-loop backoff ceiling is 10 minutes (600 000 ms): for outages
+ * lasting longer than a few minutes the loop keeps retrying automatically
+ * but with a backoff that settles at up to one attempt per 10 minutes
+ * (WL-0MUY9GDPG0062NWF).
  */
 
 import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import {
+  resolveMachineCoordinationDir,
+  writeModelCooldown,
+  clearModelCooldown,
+  type ModelCooldownKind,
+} from '@worklog/shared/model-cooldown';
+import { isExhaustionServerError, DEFAULT_RECOVERY_CONFIG, type RecoveryCooldownConfig } from './error-patterns.js';
 
 // ── Backoff configuration ─────────────────────────────────────────────
 
@@ -65,11 +77,49 @@ export const DEFAULT_SERVER_HINT_MAX_DELAY_MS = 6 * 60 * 60 * 1000;
 
 export const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
   baseDelayMs: 2000,
-  maxDelayMs: 60000,
+  maxDelayMs: 600000, // 10-minute ceiling for the retry-loop exponential backoff (WL-0MUY9GDPG0062NWF)
   multiplier: 2,
   serverHintJitterRatio: DEFAULT_SERVER_HINT_JITTER_RATIO,
   serverHintMaxDelayMs: DEFAULT_SERVER_HINT_MAX_DELAY_MS,
 };
+
+/**
+ * Clamp a durable model-cooldown duration into the bounded-default window
+ * (WL-0MV5639X70029BOI).
+ *
+ * This is distinct from {@link calculateDelay}, which bounds the *retry-sleep*
+ * backoff. The durable cooldown marker written for a provider-exhaustion
+ * `SERVER_ERROR` must be best-effort but never unbounded and never zero:
+ *
+ * - an absent/malformed/unusable candidate (including a negative or
+ *   non-finite value) falls back to `config.defaultMs`;
+ * - the result is floored at `config.floorMs` so a `Retry-After: 0` (or a
+ *   default of zero) can never open a zero-length cheap-switch window;
+ * - the result is capped at `config.ceilingMs` so a malformed or absurd hint
+ *   cannot pin the cooldown open.
+ *
+ * A usable (finite, non-negative) candidate is authoritative within the
+ * clamp — a truthful short hint is honoured rather than widened to the default.
+ *
+ * @param candidateMs - Server-requested delay in ms, or undefined/null when
+ *   absent or malformed.
+ * @param config - Bounded default cooldown policy (defaults to
+ *   {@link DEFAULT_RECOVERY_CONFIG.cooldown}).
+ * @returns A finite, non-negative cooldown duration in ms.
+ */
+export function clampCooldownMs(
+  candidateMs: number | undefined | null,
+  config: RecoveryCooldownConfig = DEFAULT_RECOVERY_CONFIG.cooldown,
+): number {
+  const usable =
+    typeof candidateMs === 'number' && Number.isFinite(candidateMs) && candidateMs >= 0
+      ? candidateMs
+      : config.defaultMs;
+  const floor = Number.isFinite(config.floorMs) && config.floorMs > 0 ? config.floorMs : 0;
+  const ceiling =
+    Number.isFinite(config.ceilingMs) && config.ceilingMs >= floor ? config.ceilingMs : floor;
+  return Math.min(Math.max(Math.round(usable), floor), ceiling);
+}
 
 /**
  * Parse a server-requested retry delay from an error message.
@@ -209,11 +259,15 @@ export function parseRetryAfterHeaders(
  *
  * @param originalFetch - The fetch implementation to delegate to
  * @param onHint - Called with the parsed delay in ms (or undefined to clear)
+ * @param onSuccess - Optional: called after a 2xx response is observed. Used
+ *   to clear the durable model-cooldown marker on the next successful
+ *   provider response (WL-0MV5638J1006URXA). Never called for non-2xx.
  * @returns A drop-in fetch wrapper
  */
 export function createRetryHintCapturingFetch(
   originalFetch: typeof fetch,
   onHint: (hintMs: number | undefined) => void,
+  onSuccess?: () => void,
 ): typeof fetch {
   const capturingFetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const response = await originalFetch(input, init);
@@ -222,6 +276,9 @@ export function createRetryHintCapturingFetch(
         onHint(parseRetryAfterHeaders(response.headers));
       } else if (response.status >= 200 && response.status < 300) {
         onHint(undefined);
+        // A 2xx is the success signal that clears the durable cooldown
+        // (WL-0MV5638J1006URXA). A retryable 5xx without a hint must NOT.
+        onSuccess?.();
       }
     }
     return response;
@@ -246,7 +303,7 @@ export function createRetryHintCapturingFetch(
  * @remarks
  * The server hint is authoritative when present. An earlier revision used
  * `max(exponential, serverHintMs)`, which let the local exponential override
- * the hint once it outgrew it (e.g. `Retry-After: 7` -> retry at 32s/60s).
+ * the hint once it outgrew it (e.g. `Retry-After: 7` -> retry at 32s/10min).
  * That is the behaviour the producer rejected as "the local retry mechanism
  * overriding the recommended wait duration".
  *
@@ -307,8 +364,13 @@ export function calculateDelay(
  * @param headerHintMs - Retry delay parsed from the response `Retry-After`
  *   header (see {@link parseRetryAfterHeaders}); takes precedence over the
  *   error-message hint
- * @returns The delay in milliseconds, the parsed server hint (if any), and
- *   which source produced it
+ * @param now - Epoch-ms "now" used to derive `cooldownUntil` (defaults to
+ *   `Date.now()`); injectable for deterministic tests
+ * @returns The delay in milliseconds, the parsed server hint (if any), which
+ *   source produced it, and the epoch-ms instant the durable cooldown expires.
+ *   The cooldown expiry is **not** `now + delayMs`: the retry sleep uses the
+ *   exponential/hint delay while the durable marker uses the bounded default
+ *   clamp (see {@link clampCooldownMs}, WL-0MV5639X70029BOI).
  */
 export function resolveRetryDelay(
   attempt: number,
@@ -316,7 +378,8 @@ export function resolveRetryDelay(
   config: BackoffConfig = DEFAULT_BACKOFF_CONFIG,
   random: () => number = Math.random,
   headerHintMs?: number,
-): { delayMs: number; serverHintMs?: number; hintSource?: 'header' | 'message' } {
+  now: number = Date.now(),
+): { delayMs: number; serverHintMs?: number; hintSource?: 'header' | 'message'; cooldownUntil: number } {
   const headerHint =
     typeof headerHintMs === 'number' && Number.isFinite(headerHintMs) && headerHintMs >= 0
       ? headerHintMs
@@ -326,7 +389,18 @@ export function resolveRetryDelay(
   const hintSource = headerHint !== undefined ? 'header' : messageHint !== undefined ? 'message' : undefined;
   const delayMs = calculateDelay(attempt, config, serverHintMs, random);
 
-  const result: { delayMs: number; serverHintMs?: number; hintSource?: 'header' | 'message' } = { delayMs };
+  // The durable cooldown is a separate policy from the retry sleep: it uses
+  // the bounded default when there is no usable server hint and is always
+  // clamped into [floorMs, ceilingMs] (WL-0MV5639X70029BOI). The `delayMs`
+  // above is unchanged.
+  const cooldownUntil = now + clampCooldownMs(serverHintMs);
+
+  const result: {
+    delayMs: number;
+    serverHintMs?: number;
+    hintSource?: 'header' | 'message';
+    cooldownUntil: number;
+  } = { delayMs, cooldownUntil };
   if (serverHintMs !== undefined) result.serverHintMs = serverHintMs;
   if (hintSource !== undefined) result.hintSource = hintSource;
   return result;
@@ -351,6 +425,190 @@ export function computeRetryDelay(
   random: () => number = Math.random,
 ): number {
   return resolveRetryDelay(attempt, errorMessage, config, random).delayMs;
+}
+
+// ── Durable model-cooldown signal (WL-0MV5638J1006URXA) ──────────────
+
+/**
+ * Dispatch kinds the recovery loop can derive from session entries. Mirrors
+ * the `ModelCooldownKind` union of the shared cooldown contract.
+ */
+const DISPATCH_COOLDOWN_KINDS: readonly ModelCooldownKind[] = [
+  'plan',
+  'intake',
+  'implement',
+  'audit',
+  'risk-effort',
+];
+
+/**
+ * Work-item id matcher: an uppercase project prefix, a dash, then the base36
+ * id (e.g. `WL-0MV5638J1006URXA`). Mirrors the herdr `WORK_ITEM_ID_REGEX`
+ * shape but without the global flag so it is safe to reuse.
+ */
+const COOLDOWN_WORK_ITEM_ID_PATTERN = /[A-Z][A-Z0-9]*-[0-9A-Z]{6,}/;
+
+/**
+ * Dispatch-kind token: a `/skill:<kind>` invocation or the herdr
+ * `<Downtime|Manually> triggered <kind>` pane-launch phrasing.
+ */
+const COOLDOWN_DISPATCH_KIND_PATTERN = /(?:skill:|triggered\s+)(plan|intake|implement|audit|risk[-_]?effort)/i;
+
+/**
+ * Extract the plain text of a user session entry, or `null` when the entry is
+ * not a user message or carries no readable text. Handles both string content
+ * and the array-of-parts content shape used by the pi session format.
+ */
+function cooldownTextFromEntry(entry: unknown): string | null {
+  if (!entry || typeof entry !== 'object') return null;
+  const e = entry as { type?: unknown; message?: unknown };
+  if (e.type !== 'message' || !e.message || typeof e.message !== 'object') return null;
+  const message = e.message as { role?: unknown; content?: unknown };
+  if (message.role !== 'user') return null;
+
+  const content = message.content;
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const part of content) {
+      if (part && typeof part === 'object' && typeof (part as { text?: unknown }).text === 'string') {
+        parts.push((part as { text: string }).text);
+      }
+    }
+    return parts.length > 0 ? parts.join('\n') : null;
+  }
+  return null;
+}
+
+/**
+ * Best-effort derivation of the work-item id and dispatch kind for a cooldown
+ * record from the session entries (parent assumption A1: the TUI recovery loop
+ * has no herdr import and no pane-label access, so it derives identity from
+ * the session journal and lets the dispatcher resolve the rest from the pane
+ * label).
+ *
+ * Scans user messages in order for a work-item id token and a dispatch-kind
+ * token; each is returned independently and left `null` when not derivable.
+ * Pure and total — never throws.
+ */
+export function deriveCooldownIdentity(entries: unknown[]): {
+  itemId: string | null;
+  kind: ModelCooldownKind | null;
+} {
+  if (!Array.isArray(entries)) return { itemId: null, kind: null };
+
+  let itemId: string | null = null;
+  let kind: ModelCooldownKind | null = null;
+
+  for (const entry of entries) {
+    const text = cooldownTextFromEntry(entry);
+    if (text === null) continue;
+
+    if (itemId === null) {
+      const idMatch = COOLDOWN_WORK_ITEM_ID_PATTERN.exec(text);
+      if (idMatch) itemId = idMatch[0];
+    }
+    if (kind === null) {
+      const kindMatch = COOLDOWN_DISPATCH_KIND_PATTERN.exec(text);
+      if (kindMatch) {
+        const token = kindMatch[1].toLowerCase().replace('_', '-');
+        if ((DISPATCH_COOLDOWN_KINDS as readonly string[]).includes(token)) {
+          kind = token as ModelCooldownKind;
+        }
+      }
+    }
+
+    if (itemId !== null && kind !== null) break;
+  }
+
+  return { itemId, kind };
+}
+
+/** Input for {@link recordExhaustionCooldown}. */
+export interface ModelCooldownRecordInput {
+  /** Epoch-ms instant the backoff expires (from {@link resolveRetryDelay}). */
+  cooldownUntil: number;
+  /** The classified error message; the exhaustion gate reads this. */
+  errorMessage?: string | null;
+  /** herdr pane id; defaults to `process.env.HERDR_PANE_ID` when omitted. */
+  paneId?: string | null;
+  /** pi session id (the fallback key when no pane id). */
+  sessionId?: string | null;
+  /** Best-effort work-item id. */
+  itemId?: string | null;
+  /** Best-effort dispatch kind. */
+  kind?: ModelCooldownKind | null;
+  /** Human-readable reason recorded in the marker. */
+  reason?: string;
+  /** Coordination directory; defaults to the shared resolver. */
+  dir?: string | null;
+  /** Epoch-ms "now" used for pruning; defaults to `Date.now()`. */
+  now?: number;
+}
+
+/**
+ * Write a durable, machine-wide cooldown marker for an exhaustion SERVER_ERROR
+ * backoff (WL-0MV5638J1006URXA).
+ *
+ * Only an exhaustion SERVER_ERROR (`isExhaustionServerError`) records a marker
+ * — a plain retryable 5xx or timeout returns `false` and writes nothing. The
+ * marker key is the pane id (`HERDR_PANE_ID`) plus the session id; when the
+ * pane id is absent the key degrades to the session id alone.
+ *
+ * Strictly best-effort: an unwritable/unresolvable coordination directory, a
+ * malformed entry, or any I/O failure returns `false` and never throws — the
+ * retry loop's notify/safety contract must stay intact.
+ */
+export function recordExhaustionCooldown(input: ModelCooldownRecordInput): boolean {
+  if (!isExhaustionServerError({ role: 'assistant', errorMessage: input.errorMessage ?? undefined })) {
+    return false;
+  }
+  try {
+    const dir = input.dir !== undefined ? input.dir : resolveMachineCoordinationDir();
+    const now = input.now ?? Date.now();
+    const paneId = input.paneId !== undefined ? input.paneId : (process.env.HERDR_PANE_ID ?? null);
+    return writeModelCooldown(
+      dir,
+      {
+        paneId,
+        sessionId: input.sessionId ?? null,
+        itemId: input.itemId ?? null,
+        kind: input.kind ?? null,
+        reason: input.reason ?? 'provider exhaustion',
+        cooldownUntil: input.cooldownUntil,
+      },
+      now,
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Clear the pane's durable cooldown marker on the next successful provider
+ * response (WL-0MV5638J1006URXA). Matches by pane id first, then by session
+ * id, so both the full and the session-only key shapes are removed.
+ *
+ * Strictly best-effort: a missing marker, a corrupt document, or any I/O
+ * failure returns `false` and never throws.
+ */
+export function clearModelCooldownSignal(input: {
+  paneId?: string | null;
+  sessionId?: string | null;
+  dir?: string | null;
+  now?: number;
+}): boolean {
+  try {
+    const dir = input.dir !== undefined ? input.dir : resolveMachineCoordinationDir();
+    const now = input.now ?? Date.now();
+    const paneId = input.paneId !== undefined ? input.paneId : (process.env.HERDR_PANE_ID ?? null);
+    let cleared = false;
+    if (paneId) cleared = clearModelCooldown(dir, paneId, now) || cleared;
+    if (input.sessionId) cleared = clearModelCooldown(dir, input.sessionId, now) || cleared;
+    return cleared;
+  } catch {
+    return false;
+  }
 }
 
 /**

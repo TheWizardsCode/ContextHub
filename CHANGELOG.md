@@ -1,5 +1,41 @@
 # Changelog
 
+## v1.0.21 (2026-10-13)
+> **Release focus:** This release focuses on making the worklist more reliable and complete, ensuring blocked, in-progress, and reworked items always appear and that data refreshes instantly. It also fixes several crashes and data-loss issues that could occur when saving changes during conflicts or busy periods, and improves recovery behaviour when AI providers or long outages interrupt queued jobs.
+### Features
+- The README now clearly explains this is a Herdr extension for managing teams of AI agents, with Worklog as shared project memory. (WL-0MV16PXJ6003FEYT)
+- In-progress tasks now always appear in your work list, even when many items await review. (WL-0MV6KV22S004NYIU)
+- The work items list now updates within seconds when an agent makes changes. (WL-0MV02VA29009WBEN)
+- Release notes can now include a custom call-to-action message. (WL-0MUWEPN6X0044R43)
+- Long outages now retry less often, so recovery is smoother and less disruptive. (WL-0MUY9GDPG0062NWF)
+- Queued jobs now resume automatically when AI providers recover, instead of piling on more requests. (WL-0MV54ZP3Y00514Y9)
+- Blocked tasks now appear in the worklist so you can see what's holding up your backlog. (WL-0MV6TFX0600145M2)
+- Stale in-progress tasks now automatically return to the right queue. (WL-0MTF5WO2Q008B8US)
+- Worklist data now refreshes instantly when you return to the tab, so you always see up-to-date info. (WL-0MTF5WO1N0088P5P)
+- Finished items no longer stay marked critical, so urgent lists show only work that still needs attention. (WL-0MSJM4EIV001A0V9)
+### Bug Fixes
+- Your item updates now stay safe even when another session syncs at the same time. (WL-0MUVSQ4EO00092E7)
+- Fixed a crash that could strand your committed work when saving while others changed the same files. (WL-0MV533YSW004D1E1)
+- Fixed a crash that could lose your progress when saving changes during busy periods. (WL-0MV5FAZCQ006EHWE)
+- Fixed a crash that could lose your work when saving changes during a conflict. (WL-0MV569DDI003CCF1)
+- Prevents a crash when your changes are pushed after someone else updates the same branch. (WL-0MV5FDJE30088GGY)
+- Blocked items now always appear in your default worklist, so release-blocking tasks can't be hidden. (WL-0MV71WBHB007D8ZE)
+- Blocked items now appear in the review queue so nothing release-blocking goes unseen. (WL-0MV70XY6D008013C)
+- Rejecting an item for rework no longer changes its priority. (WL-0MUUAEDAU001GT1L)
+- Test runs no longer send fake release notifications to Discord. (WL-0MUYA98Z8003HU8X)
+- Your completed work is no longer lost when another change lands at the same time. (WL-0MUYTCF4L000FX3M)
+- High-priority items now appear first in the In Review list, so you can triage the most important work first. (WL-0MUWDW0N6003KF6G)
+- Tests now finish reliably instead of hanging when output is piped. (WL-0MUYTCF4D000WVKR)
+- Finishing work no longer fails when your branch is behind, so your progress stays safe. (WL-0MV5LY0J8005FKTZ)
+- Items in review that are being reworked now always appear in your list. (WL-0MV6JGVPH009YDXB)
+### Other
+- Removed duplicate tests to keep the game running smoothly and reliably. (WL-0MV28X3BT0079JM3)
+- Audits now run faster in off-peak hours by using spare capacity. (WL-0MUFD33FT0080OD5)
+- Tests are now more reliable, so bugs get caught faster and fixes ship sooner. (WL-0MV28X3SL005R5KX)
+- Improves game stability and performance through ongoing code cleanup. (WL-0MSS3380K0002ZVO)
+- Removed a leftover plugin that caused warnings, so your plugin list is now clean. (WL-0MSRG4828007ITI4)
+- Clearer docs help operators keep worklists accurate and stable. (WL-0MTF5WNZV003JKMJ)
+
 ## v1.0.20 (2026-10-09)
 > **Release focus:** This release focuses on reliability and resilience across agent sessions, fixing issues that could cause stalled work, shared slots, and interrupted sessions while adding automatic retries for connection errors and unavailable AI providers. It also improves day-to-day usability with multi-item deletion, a dedicated work item tab, an interview "Thinking…" indicator, and clearer guidance from the review queue and doctor.
 ### Features

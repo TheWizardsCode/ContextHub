@@ -56,6 +56,45 @@ export interface RecoveryCategoryConfig {
 }
 
 /**
+ * Bounded default cooldown policy for the durable model-cooldown marker
+ * (WL-0MV5639X70029BOI).
+ *
+ * When the recovery loop classifies a provider-exhaustion `SERVER_ERROR` it
+ * records a machine-wide cooldown marker so the cheap-switch worker holds the
+ * shared proxy in fast mode instead of adding concurrency during a known
+ * provider-exhaustion window. The marker's `cooldownUntil` tracks the
+ * server-requested `Retry-After` when one is available; when the hint is
+ * absent or malformed the loop falls back to {@link RecoveryCooldownConfig.defaultMs}.
+ *
+ * Every value is clamped into `[floorMs, ceilingMs]` so the marker can never
+ * be a **zero hold** (which would let the cheap switch fire while the pane is
+ * still backing off) and can never be an **unbounded hold** (which would pin
+ * the shared proxy in fast mode forever). This is documented alongside the
+ * per-category `baseDelayMs`/`maxDelayMs` values: those bound the retry-sleep
+ * backoff, whereas these bound the durable cooldown signal.
+ */
+export interface RecoveryCooldownConfig {
+  /**
+   * Default cooldown (ms) used when the recovery loop has no usable server
+   * hint. Aligned with the retry-loop exponential ceiling so the marker
+   * covers the longest inter-attempt wait the loop can take.
+   */
+  defaultMs: number;
+  /**
+   * Clamp floor (ms): the default is never shorter than this, so a
+   * zero/degenerate cooldown can never open a premature cheap-switch window.
+   * Must be greater than zero.
+   */
+  floorMs: number;
+  /**
+   * Clamp ceiling (ms): the default (and any server hint) is never longer
+   * than this, so a malformed or absurd value cannot pin the cooldown open.
+   * Aligned with `DEFAULT_SERVER_HINT_MAX_DELAY_MS` (6 h).
+   */
+  ceilingMs: number;
+}
+
+/**
  * Complete recovery configuration covering all error categories.
  */
 export interface RecoveryConfig {
@@ -68,6 +107,12 @@ export interface RecoveryConfig {
   terminated: RecoveryCategoryConfig;
   parseError: RecoveryCategoryConfig;
   compactionGate: RecoveryCategoryConfig;
+  /**
+   * Bounded default cooldown policy for the durable model-cooldown marker
+   * (WL-0MV5639X70029BOI). Not an error category: it carries no `patterns`
+   * and bounds the marker, not the retry-sleep backoff.
+   */
+  cooldown: RecoveryCooldownConfig;
 }
 
 // ── Type guard ─────────────────────────────────────────────────────────
@@ -86,15 +131,19 @@ const DEFAULT_RATE_LIMIT_PATTERNS: RegExp[] = [
   /too\s*many\s*requests/i,
 ];
 
-const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
-  /5\d{2}/,
-  /server\s*error/i,
-  /internal\s*(server\s*)?error/i,
-  /service\s*unavailable/i,
-  /overloaded/i,
-  /retry\s*delay/i,
-  /bad\s*gateway/i,
-  /server\s*encountered/i,
+/**
+ * Provider-exhaustion pattern set.
+ *
+ * These are the model-unavailable bodies the llm-proxy returns when every
+ * upstream provider is throttled/out of its scheduled window: "all providers
+ * exhausted", "all providers unavailable", "no provider is available during
+ * the current scheduled time window". They are a subset of the SERVER_ERROR
+ * classification (so the recovery loop retries with exponential backoff) and
+ * double as the trigger for the durable model-cooldown marker
+ * (WL-0MV5638J1006URXA): a plain retryable 5xx or timeout must NOT record a
+ * cooldown.
+ */
+export const EXHAUSTION_SERVER_ERROR_PATTERNS: RegExp[] = [
   /all providers exhausted/i,
   // llm-proxy scheduled-window exhaustion body (proxy returns HTTP 503):
   // "All providers unavailable: no provider is available during the current
@@ -111,6 +160,18 @@ const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
   /no provider\s+(is\s+)?available/i,
   /scheduled time window/i,
   /outside its available_times/i,
+];
+
+const DEFAULT_SERVER_ERROR_PATTERNS: RegExp[] = [
+  /5\d{2}/,
+  /server\s*error/i,
+  /internal\s*(server\s*)?error/i,
+  /service\s*unavailable/i,
+  /overloaded/i,
+  /retry\s*delay/i,
+  /bad\s*gateway/i,
+  /server\s*encountered/i,
+  ...EXHAUSTION_SERVER_ERROR_PATTERNS,
   // pi-ai mapStopReason() collapses the enriched finish_reason payload to
   // the generic string "Provider finish_reason: error", discarding type/
   // message/suggested_action. Classify as server-error so the recovery loop
@@ -232,7 +293,7 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
     enabled: true,
     patterns: DEFAULT_SERVER_ERROR_PATTERNS,
     baseDelayMs: 2000,
-    maxDelayMs: 60000,
+    maxDelayMs: 600000, // 10-minute ceiling, aligned with DEFAULT_BACKOFF_CONFIG (WL-0MUY9GDPG0062NWF)
   },
   authError: {
     enabled: false,
@@ -257,7 +318,7 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
     enabled: true,
     patterns: DEFAULT_TIMEOUT_PATTERNS,
     baseDelayMs: 2000,
-    maxDelayMs: 60000,
+    maxDelayMs: 600000, // 10-minute ceiling, aligned with DEFAULT_BACKOFF_CONFIG (WL-0MUY9GDPG0062NWF)
   },
   terminated: {
     enabled: false,
@@ -278,6 +339,16 @@ export const DEFAULT_RECOVERY_CONFIG: RecoveryConfig = {
     baseDelayMs: 1000,
     maxDelayMs: 10000,
     continuationPrompt: 'Please continue from where you left off.',
+  },
+  // Bounded default cooldown for the durable model-cooldown marker
+  // (WL-0MV5639X70029BOI). The default matches the retry-loop exponential
+  // ceiling (WL-0MUY9GDPG0062NWF); the floor prevents a zero hold; the
+  // ceiling reuses the 6-hour server-hint bound (WL-0MUR5EGH7003VOHM) so a
+  // malformed or absurd hint can never pin the cooldown open.
+  cooldown: {
+    defaultMs: 600000, // 10 min — aligns with serverError/timeout maxDelayMs
+    floorMs: 1000, // 1 s — never a zero hold
+    ceilingMs: 6 * 60 * 60 * 1000, // 6 h — aligns with DEFAULT_SERVER_HINT_MAX_DELAY_MS
   },
 };
 
@@ -311,6 +382,18 @@ export function isRateLimit(message: unknown): boolean {
 export function isServerError(message: unknown): boolean {
   if (!isAssistantMessage(message)) return false;
   return matchesAny(message.errorMessage, DEFAULT_SERVER_ERROR_PATTERNS);
+}
+
+/**
+ * True when the message is a provider-exhaustion SERVER_ERROR — one of the
+ * model-unavailable bodies (all providers exhausted/unavailable, no provider
+ * available during the scheduled window). This is the narrower trigger for
+ * the durable model-cooldown marker: unlike {@link isServerError}, a plain
+ * retryable 5xx or a timeout returns false (WL-0MV5638J1006URXA).
+ */
+export function isExhaustionServerError(message: unknown): boolean {
+  if (!isAssistantMessage(message)) return false;
+  return matchesAny(message.errorMessage, EXHAUSTION_SERVER_ERROR_PATTERNS);
 }
 
 export function isAuthError(message: unknown): boolean {

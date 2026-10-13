@@ -580,7 +580,7 @@ describe('shellQuote', () => {
 
 describe('substituteIdentifiers — shell-route escaping', () => {
   const AR_TEMPLATE =
-    "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete --priority medium && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'";
+    "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'";
 
   it('escapes only the apostrophe inside the existing single-quoted summary', () => {
     const out = substituteIdentifiers(AR_TEMPLATE, { reason: "don't" });

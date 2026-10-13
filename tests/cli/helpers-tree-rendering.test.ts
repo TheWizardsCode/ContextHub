@@ -106,6 +106,44 @@ describe('tree rendering helpers', () => {
     expect(childBIndex).toBeLessThan(childAIndex);
   });
 
+  it('preserves the caller order when preserveOrder is true, overriding the position re-sort (WL-0MUWDW0N6003KF6G)', () => {
+    // Deliberately pass a display order (medium, high) that the default
+    // position-based re-sort would invert (sortIndex puts the high first).
+    // The in_review 6-bucket sort relies on preserveOrder to stop the renderer
+    // discarding the already-computed order.
+    const medium = db.create({ title: 'Medium First', priority: 'medium', sortIndex: 200 });
+    const high = db.create({ title: 'High Second', priority: 'high', sortIndex: 100 });
+    const items = [medium, high];
+
+    const { lines, spy } = captureConsole();
+    displayItemTreeWithFormat(items, db, 'concise', true);
+    spy.mockRestore();
+
+    const normalized = lines.map(stripAnsi);
+    const mediumIndex = normalized.findIndex(line => line.includes('Medium First'));
+    const highIndex = normalized.findIndex(line => line.includes('High Second'));
+    expect(mediumIndex).toBeGreaterThanOrEqual(0);
+    expect(highIndex).toBeGreaterThanOrEqual(0);
+    expect(mediumIndex).toBeLessThan(highIndex);
+  });
+
+  it('defaults to the position re-sort when preserveOrder is omitted', () => {
+    const medium = db.create({ title: 'Medium First', priority: 'medium', sortIndex: 200 });
+    const high = db.create({ title: 'High Second', priority: 'high', sortIndex: 100 });
+    const items = [medium, high];
+
+    const { lines, spy } = captureConsole();
+    displayItemTreeWithFormat(items, db, 'concise');
+    spy.mockRestore();
+
+    const normalized = lines.map(stripAnsi);
+    const mediumIndex = normalized.findIndex(line => line.includes('Medium First'));
+    const highIndex = normalized.findIndex(line => line.includes('High Second'));
+    expect(highIndex).toBeGreaterThanOrEqual(0);
+    expect(mediumIndex).toBeGreaterThanOrEqual(0);
+    expect(highIndex).toBeLessThan(mediumIndex);
+  });
+
   it('shows Risk and Effort placeholders when fields are empty', () => {
     const item = baseWorkItem({ id: 'TEST-RISK-1', title: 'Risk Test', risk: '', effort: '' });
 

@@ -115,11 +115,11 @@ describe('resolveRetryDelay with a header hint', () => {
   });
 
   it('honours a header hint above the exponential cap up to the server-hint ceiling', () => {
-    // 90s exceeds the 60s exponential cap but is below the 6h server-hint
+    // 30min exceeds the 10-minute exponential cap but is below the 6h server-hint
     // ceiling, so the header hint is honoured in full rather than clamped
     // back to `maxDelayMs` (AC1).
-    const honoured = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, noJitter, 90_000);
-    expect(honoured.delayMs).toBe(90_000);
+    const honoured = resolveRetryDelay(1, undefined, DEFAULT_BACKOFF_CONFIG, noJitter, 30 * 60 * 1000);
+    expect(honoured.delayMs).toBe(30 * 60 * 1000);
     expect(honoured.delayMs).toBeGreaterThan(DEFAULT_BACKOFF_CONFIG.maxDelayMs);
 
     // A hint beyond the ceiling (default 6h) is still bounded.
@@ -134,7 +134,7 @@ describe('resolveRetryDelay with a header hint', () => {
   });
 
   it('does not let a grown local backoff override the header hint', () => {
-    // attempt 6 local exponential is capped at 60000ms, but the header hint is
+    // attempt 6 local exponential is capped at 600000ms, but the header hint is
     // authoritative — the local backoff must not override the server's wait.
     const result = resolveRetryDelay(6, REAL_RAMP_503, DEFAULT_BACKOFF_CONFIG, noJitter, 8000);
     expect(result.hintSource).toBe('header');
@@ -147,7 +147,7 @@ describe('resolveRetryDelay with a header hint', () => {
   });
 
   it('applies upward-only jitter to a header-derived delay', () => {
-    const config: BackoffConfig = { baseDelayMs: 2000, maxDelayMs: 60000, multiplier: 2, serverHintJitterRatio: 0.25 };
+    const config: BackoffConfig = { baseDelayMs: 2000, maxDelayMs: 600000, multiplier: 2, serverHintJitterRatio: 0.25 };
     expect(calculateDelay(1, config, 8000, () => 0.5)).toBe(9000);
     expect(calculateDelay(1, config, 8000, () => 0.5)).toBeGreaterThanOrEqual(8000);
   });
@@ -215,6 +215,28 @@ describe('createRetryHintCapturingFetch', () => {
     await capture('http://example.test');
     expect(onHint).not.toHaveBeenCalled();
   });
+
+  it('calls onSuccess only for a 2xx response (WL-0MV5638J1006URXA)', async () => {
+    const onSuccess = vi.fn();
+    const capture = createRetryHintCapturingFetch(
+      async () => makeResponse(200),
+      () => {},
+      onSuccess,
+    );
+    await capture('http://example.test');
+    expect(onSuccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call onSuccess for a retryable 5xx response', async () => {
+    const onSuccess = vi.fn();
+    const capture = createRetryHintCapturingFetch(
+      async () => makeResponse(502),
+      () => {},
+      onSuccess,
+    );
+    await capture('http://example.test');
+    expect(onSuccess).not.toHaveBeenCalled();
+  });
 });
 
 // ── RCA regression: the real error shape + header hint ────────────────
@@ -233,7 +255,7 @@ describe('startup_ramp RCA regression', () => {
   });
 
   it('does not retry sooner than the hint across a full startup ramp', () => {
-    const config: BackoffConfig = { baseDelayMs: 2000, maxDelayMs: 60000, multiplier: 2, serverHintJitterRatio: 0.25 };
+    const config: BackoffConfig = { baseDelayMs: 2000, maxDelayMs: 600000, multiplier: 2, serverHintJitterRatio: 0.25 };
     let elapsed = 0;
     let attempt = 0;
     while (elapsed < 180_000 && attempt < 100) {

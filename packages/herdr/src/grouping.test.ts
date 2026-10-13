@@ -384,5 +384,116 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
     });
     expect(inReviewBucket(item)).toBe(5);
   });
+
+  it('regroupWorkItems honours fingerprint freshness so a fingerprint-fresh item is not ranked behind a lower-priority one (WL-0MUWDW0N6003KF6G)', () => {
+    // Regression: regroupWorkItems used to drop `fingerprint`/`currentFingerprint`
+    // when building its sort comparator. The medium item below is fresh by the
+    // primary content gate (fingerprints match) but stale by the 60s time gate;
+    // without the fingerprint fields it was classified bucket 5 (passed-stale)
+    // while the high item was bucket 6 (passed-fresh), so the medium appeared
+    // BEFORE the high. With the fingerprint fields forwarded, both land in
+    // bucket 6 and priority decides (high first).
+    const fingerprint = 'sha256-match';
+    const merged: WorkItem[] = [
+      makeItem('WL-medium-fp-fresh', {
+        stage: 'in_review',
+        priority: 'medium',
+        auditResult: true,
+        auditedAt: staleAuditedAt,
+        updatedAt,
+        fingerprint,
+        currentFingerprint: fingerprint,
+      }),
+      makeItem('WL-high-time-fresh', {
+        stage: 'in_review',
+        priority: 'high',
+        auditResult: true,
+        auditedAt: updatedAt,
+        updatedAt,
+      }),
+    ];
+
+    const inReviewOrder = regroupWorkItems(merged, 3)
+      .filter((i) => i.stage === 'in_review')
+      .map((i) => i.id);
+
+    expect(inReviewOrder).toEqual(['WL-high-time-fresh', 'WL-medium-fp-fresh']);
+  });
+
+  it('regroupWorkItems keeps a fingerprint-mismatch item in bucket 5 but priority still dominates a passed-fresh item (WL-0MUWDW0N6003KF6G)', () => {
+    // A medium item whose stored/current fingerprints disagree is stale even
+    // though its timestamps look fresh (bucket 5). Priority is the primary
+    // sort key (WL-0MUWDW0N6003KF6G): the high passed-fresh item (bucket 6)
+    // must still rank first; the bucket only orders items within the same
+    // priority band.
+    const merged: WorkItem[] = [
+      makeItem('WL-high-time-fresh', {
+        stage: 'in_review',
+        priority: 'high',
+        auditResult: true,
+        auditedAt: freshAuditedAt,
+        updatedAt,
+      }),
+      makeItem('WL-medium-fp-stale', {
+        stage: 'in_review',
+        priority: 'medium',
+        auditResult: true,
+        auditedAt: freshAuditedAt,
+        updatedAt,
+        fingerprint: 'sha256-old',
+        currentFingerprint: 'sha256-new',
+      }),
+    ];
+
+    // Sanity: the mismatch is still classified as bucket 5.
+    expect(inReviewBucket(merged[1])).toBe(5);
+
+    const inReviewOrder = regroupWorkItems(merged, 3)
+      .filter((i) => i.stage === 'in_review')
+      .map((i) => i.id);
+
+    expect(inReviewOrder).toEqual(['WL-high-time-fresh', 'WL-medium-fp-stale']);
+  });
+
+  it('ranks a high no-audit item ahead of a medium failed-audit item (WL-0MUWDW0N6003KF6G)', () => {
+    // Regression for the producer-reported symptom: a medium-priority item
+    // with a failed (stale) audit was ranking ahead of a high-priority item
+    // with no audit because the audit bucket was the primary sort key. With
+    // priority primary the high item must lead, and the two medium items are
+    // then ordered by their bucket (failed-stale 3 before no-audit 4).
+    const merged: WorkItem[] = [
+      makeItem('WL-medium-no-audit', {
+        stage: 'in_review',
+        priority: 'medium',
+        auditResult: null,
+        auditedAt: null as unknown as string,
+        updatedAt,
+      }),
+      makeItem('WL-medium-failed-stale', {
+        stage: 'in_review',
+        priority: 'medium',
+        auditResult: false,
+        auditedAt: staleAuditedAt,
+        updatedAt,
+      }),
+      makeItem('WL-high-no-audit', {
+        stage: 'in_review',
+        priority: 'high',
+        auditResult: null,
+        auditedAt: null as unknown as string,
+        updatedAt,
+      }),
+    ];
+
+    const inReviewOrder = regroupWorkItems(merged, 3)
+      .filter((i) => i.stage === 'in_review')
+      .map((i) => i.id);
+
+    expect(inReviewOrder).toEqual([
+      'WL-high-no-audit',
+      'WL-medium-failed-stale',
+      'WL-medium-no-audit',
+    ]);
+  });
 });
 

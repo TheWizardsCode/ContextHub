@@ -48,10 +48,9 @@ Related work:
 
 ## Test Organization
 
-Tests are spread across two top-level directories:
+Tests live under the top-level `tests/` directory:
 
-- **`tests/`** — the main test directory (this folder)
-- **`test/`** — additional tests (migrations, TUI integration, doctor checks, etc.)
+- **`tests/`** — the test directory (this folder)
 
 ### Core unit tests (`tests/`)
 
@@ -60,7 +59,6 @@ Tests are spread across two top-level directories:
 - **`sync.test.ts`** — Work item merging, field-level conflict resolution, tag/comment merging
 - **`sync-worktree.test.ts`** — Git worktree sync scenarios
 - **`config.test.ts`** — Configuration loading, defaults, validation, prefix management
-- **`validator.test.ts`** — Work item field validation rules
 - **`fts-search.test.ts`** — Full-text search across titles, descriptions, comments, tags
 - **`sort-operations.test.ts`** — Sort index operations and rebalancing
 - **`grouping.test.ts`** — Work item grouping logic
@@ -110,16 +108,31 @@ Tests are spread across two top-level directories:
 - **`next-dialog-wrap.test.ts`** — Next dialog wrapping
 - **`toggle-do-not-delegate.test.ts`** — Do-not-delegate toggle in TUI
 
-### Additional tests (`test/`)
+### Additional tests (migrated from the former `test/`)
 
-- **`migrations.test.ts`** — Database migration tests
-- **`doctor-dependency-check.test.ts`** / **`doctor-status-stage.test.ts`** — `wl doctor` checks
+- **`doctor-dependency-check.test.ts`** / **`doctor-status-stage.test.ts`** / **`doctor-podcast-scripts.test.ts`** — `wl doctor` checks
 - **`comment-update.test.ts`** — Comment update operations
-- **`validator.test.ts`** — Additional validation tests
-- **`tui-integration.test.ts`** — TUI integration
-- **`tui-opencode-sse-handler.test.ts`** — OpenCode SSE handler (legacy)
-- **`tui-chords.test.ts`** — Keyboard chord handling
-- **`tui-style.test.ts`** — TUI styling
+- **`sync-audit-results.test.ts`** — Audit-results export/import and merge
+- **`cli/throttler-stats.test.ts`** — GitHub throttler stats counters
+
+### Icons test layering
+
+The icon system intentionally has three same-named `icons.test.ts` files at
+different layers — they are not duplicates:
+
+- **`tests/unit/icons.test.ts`** — unit tests for the CLI icon vocabulary in
+  `src/theme.ts` (a distinct module from `@worklog/shared/icons`).
+- **`tests/herdr/icons.test.ts`** — herdr display integration tests for the
+  shared `@worklog/shared/icons` functions (status/stage/priority/audit/epic/
+  risk/effort/needsProducerReview icons, `stageColor`, general
+  `getIconPrefix`).
+- **`packages/herdr/src/icons.test.ts`** — herdr package unit tests for the
+  shared `@worklog/shared/icons` `iconsEnabled` flag, fixed-width agent-slot
+  alignment, and audit-freshness rendering.
+
+The verbatim `iconsEnabled` block that was duplicated between the two herdr
+files was removed from `tests/herdr/icons.test.ts` (kept in
+`packages/herdr/src/icons.test.ts`).
 
 ## Test Coverage
 
@@ -212,9 +225,6 @@ Running subsets of tests
 
 - Run unit tests only (tests under `tests/`):
   - `npx vitest run tests`
-
-- Run integration tests only (tests under `test/`):
-  - `npx vitest run test`
 
 ## E2E Tests
 

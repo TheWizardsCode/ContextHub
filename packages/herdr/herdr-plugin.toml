@@ -37,10 +37,10 @@ command = ["bash", "scripts/open.sh"]
 
 # Action: open the worklog tab (worklist pane renamed to "Worklog")
 [[actions]]
-id = "open-podcast-editor-tab"
+id = "open-worklog-tab"
 title = "Open Worklog tab"
 description = "Open the Worklog work item selection pane in a new tab renamed to 'Worklog'."
-command = ["bash", "scripts/open-podcast-editor-tab.sh"]
+command = ["bash", "scripts/open-worklog-tab.sh"]
 
 # Action: open pi agent pane
 [[actions]]

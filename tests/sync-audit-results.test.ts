@@ -3,28 +3,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorklogDatabase } from '../src/database.js';
 import { importFromJsonlContent } from '../src/jsonl.js';
+import { createTempDir, cleanupTempDir } from './test-utils.js';
 
-const testDir = path.join(__dirname, 'tmp_sync_audits');
-const dbPath = path.join(testDir, 'worklog.db');
-const jsonlPath = path.join(testDir, 'worklog-data.jsonl');
-
-function ensureTestDir() {
-  if (!fs.existsSync(testDir)) {
-    fs.mkdirSync(testDir, { recursive: true });
-  }
-}
-
-function cleanup() {
-  for (const f of fs.readdirSync(testDir)) {
-    const p = path.join(testDir, f);
-    if (fs.lstatSync(p).isDirectory()) {
-      for (const bf of fs.readdirSync(p)) fs.unlinkSync(path.join(p, bf));
-      fs.rmdirSync(p);
-    } else {
-      fs.unlinkSync(p);
-    }
-  }
-}
+let testDir: string;
+let dbPath: string;
+let jsonlPath: string;
 
 function makeItem(id: string, title: string) {
   return {
@@ -53,12 +36,13 @@ function makeItem(id: string, title: string) {
 
 describe('sync audit results preservation', () => {
   beforeEach(() => {
-    ensureTestDir();
-    cleanup();
+    testDir = createTempDir();
+    dbPath = path.join(testDir, 'worklog.db');
+    jsonlPath = path.join(testDir, 'worklog-data.jsonl');
   });
 
   afterEach(() => {
-    cleanup();
+    cleanupTempDir(testDir);
   });
 
   it('preserves audit results across a full export->import round-trip', async () => {
