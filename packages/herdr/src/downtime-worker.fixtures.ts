@@ -25,6 +25,7 @@ import type { DowntimeWorkerDeps, LlamaStatus } from './downtime-worker.js';
 
 // ── Status payloads ───────────────────────────────────────────────────
 
+/** Every slot idle → the worker may dispatch freely (all-free availability signal). */
 export const idleAllSlotsFree: LlamaStatus = {
   llama_server_running: true,
   local_active_query: false,
@@ -47,9 +48,13 @@ export const idleAllSlotsFree: LlamaStatus = {
   local_owner_session_ids: [],
 };
 
+/** A live query is queued on the proxy → slots effectively busy. */
 export const busyActiveQuery: LlamaStatus = { ...idleAllSlotsFree, local_active_query: true };
+/** A model switch is in progress → slots effectively busy. */
 export const busyModelSwitch: LlamaStatus = { ...idleAllSlotsFree, model_switch_in_progress: true };
+/** An in-flight local lease is held → slots effectively busy. */
 export const busyLocalLease: LlamaStatus = { ...idleAllSlotsFree, local_lease_active: true };
+/** The llama server is not running → nothing can be dispatched. */
 export const busyServerNotRunning: LlamaStatus = { ...idleAllSlotsFree, llama_server_running: false };
 
 /** available_slots < total_slots → busy with the default N=0 (all slots). */
@@ -254,6 +259,7 @@ export const ambiguousMissingFieldsRaw: Record<string, unknown> = {
   current_model: 'qwen3-8b',
 };
 
+/** Shape of the fixture used to stub the parsed proxy status in worker tests. */
 export interface LlamaStatusFixture {
   name: string;
   status: LlamaStatus;
@@ -321,6 +327,7 @@ export interface LlamaStatusHttpResponse {
   json(): Promise<unknown>;
 }
 
+/** Build a minimal fetch-style `Response` double returning the given body. */
 export function jsonResponseFixture(body: unknown, status = 200): LlamaStatusHttpResponse {
   return {
     ok: status >= 200 && status < 300,
@@ -329,6 +336,7 @@ export function jsonResponseFixture(body: unknown, status = 200): LlamaStatusHtt
   };
 }
 
+/** A non-2xx `Response` double for error-path tests. */
 export const httpErrorResponseFixture: LlamaStatusHttpResponse = jsonResponseFixture(
   { error: 'boom' },
   500,
