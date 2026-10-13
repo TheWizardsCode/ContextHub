@@ -4290,10 +4290,12 @@ export function createProductionShipGuardQuery(
  * `browseItemCount`-capped `wl next` subset — so stage-filtered views give
  * a complete picture of the stage (WL-0MSDT8X1V003206G). Most stages show
  * `open`-status items only; the in_review stage additionally includes
- * `completed` and `in-progress` items, because per the project workflow
+ * `completed`, `in-progress` and `blocked` items: per the project workflow
  * advancing an item to in_review sets its status to `completed` (or leaves
  * it `in-progress` while being re-worked after review feedback)
- * (WL-0MSKCRX730052IIW). Items with status `blocked` are excluded; child
+ * (WL-0MSKCRX730052IIW), and `blocked` is included (WL-0MV70XY6D008013C) so
+ * the review filter matches the release gate's unfiltered `wl list --stage
+ * in_review` (a status=blocked in_review item is release-blocking). Child
  * items stay hidden and remain reachable via expand exactly as in the
  * unfiltered view. Results follow the standard list order (sortIndex).
  *

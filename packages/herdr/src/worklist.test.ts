@@ -1989,14 +1989,17 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
     expect(callArgs).toContain('--root-only');
   });
 
-  it('fetches completed/in-progress items for the in_review stage', async () => {
+  it('fetches completed/in-progress/blocked items for the in_review stage', async () => {
     // in_review items carry status completed (submitted for review) or
     // in-progress (being re-worked after review feedback) per the project
     // workflow — restricting to status=open would empty the review queue
-    // (WL-0MSKCRX730052IIW).
+    // (WL-0MSKCRX730052IIW). A status=blocked in_review item is also shown
+    // (WL-0MV70XY6D008013C): the release gate queries `wl list --stage
+    // in_review` with no status filter and treats it as release-blocking.
     const stageItems = [
       { ...makeItem('A', 'in_review'), status: 'completed' },
       { ...makeItem('B', 'in_review'), status: 'in-progress' },
+      { ...makeItem('D', 'in_review'), status: 'blocked' },
     ];
     const mockFn = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({ workItems: stageItems }),
@@ -2007,13 +2010,14 @@ describe('fetchItemsForView — stage-filtered fetch', () => {
 
     const items = await fetchItemsForView('in_review', null, defaultFetcher);
 
-    expect(items.map((i) => i.id)).toEqual(['A', 'B']);
+    expect(items.map((i) => i.id)).toEqual(['A', 'B', 'D']);
     expect(defaultFetcher).not.toHaveBeenCalled();
     const callArgs = mockFn.mock.calls[0][1] as string[];
     expect(callArgs).toContain('list');
     const statusArg = callArgs[callArgs.indexOf('--status') + 1];
     expect(statusArg).toContain('completed');
     expect(statusArg).toContain('in-progress');
+    expect(statusArg).toContain('blocked');
     expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('in_review');
     expect(callArgs).toContain('--root-only');
   });

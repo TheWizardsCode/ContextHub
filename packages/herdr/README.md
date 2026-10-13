@@ -1626,11 +1626,16 @@ status rule (WL-0MSDT8X1V003206G, WL-0MSKCRX730052IIW):
   `blocked`, `in-progress`, or `completed` are excluded even when their
   stage matches.
 - The **in_review** stage (press `f` + `s` + `r`, or `/wl review`) is the
-  exception: it shows items with status `completed`, `in-progress`, or
-  `open`. Per the project workflow, advancing an item to `in_review` sets
-  its status to `completed` (or leaves it `in-progress` while being
+  exception: it shows items with status `completed`, `in-progress`, `open`,
+  or `blocked`. Per the project workflow, advancing an item to `in_review`
+  sets its status to `completed` (or leaves it `in-progress` while being
   re-worked after review feedback) — restricting the filter to
-  `status=open` would empty the review queue (WL-0MSKCRX730052IIW).
+  `status=open` would empty the review queue (WL-0MSKCRX730052IIW). A
+  `status=blocked` in_review item is included (WL-0MV70XY6D008013C) because
+  the ship release gate queries `wl list --stage in_review` with **no**
+  status filter and treats such an item as release-blocking: the review
+  filter must show it, or the selection list and the release gate disagree
+  about what is in the review queue.
 - Children stay hidden in the top-level list and remain reachable via
   expand (Tab), exactly as in the unfiltered view.
 - Results follow the standard list order (sortIndex), matching the

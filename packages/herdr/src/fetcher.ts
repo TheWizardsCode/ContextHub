@@ -819,6 +819,11 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
  * `in-progress` while it is being re-worked after review feedback), so
  * restricting to `status=open` would hide the entire review queue. `open`
  * is included for robustness (no in_review item carries it today).
+ * `blocked` is also included (WL-0MV70XY6D008013C): the release gate
+ * queries `wl list --stage in_review` with NO status filter, so a
+ * status=blocked item in the in_review stage blocks the release; the
+ * review filter must show it or the selection list and the release gate
+ * disagree about what is in the review queue.
  *
  * plan_complete and intake_complete are also exceptions (WL-0MUIB7D30009KG00):
  * after WL-0MTOHS5B4001Y9FX removed the in_progress stage, actively-worked
@@ -828,7 +833,7 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
  * stage-filtered worklists.
  */
 const STAGE_STATUS: Record<string, string> = {
-  in_review: 'completed,in-progress,open',
+  in_review: 'completed,in-progress,open,blocked',
   plan_complete: 'open,in-progress',
   intake_complete: 'open,in-progress',
 };
@@ -843,9 +848,12 @@ const STAGE_STATUS: Record<string, string> = {
  * and `completed`.
  *
  * Status per valid stage:
- * - `in_review` (WL-0MSKCRX730052IIW): `completed`, `in-progress`, `open`
- *   — in_review items carry `completed`/`in-progress` status per the project
- *   workflow.
+ * - `in_review` (WL-0MSKCRX730052IIW): `completed`, `in-progress`, `open`,
+ *   `blocked` — in_review items carry `completed`/`in-progress` status per
+ *   the project workflow; `blocked` is included (WL-0MV70XY6D008013C) so the
+ *   review filter matches the release gate's unfiltered `wl list --stage
+ *   in_review`, which treats a status=blocked in_review item as
+ *   release-blocking.
  * - `plan_complete` / `intake_complete` (WL-0MUIB7D30009KG00): `open`,
  *   `in-progress` — actively-worked items retain their pipeline stage and
  *   flip `status` to `in-progress` (WL-0MTOHS5B4001Y9FX removed the
