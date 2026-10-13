@@ -732,6 +732,12 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
 /**
  * Fetch the next available work items (via `wl next`).
  *
+ * Dependency-blocked items are SHOWN in the selection list: the query passes
+ * `--include-blocked` so `wl next`'s default exclusions do not hide blocked
+ * backlog work (WL-0MV6TFX0600145M2). Blocked items still rank low (the
+ * shared scorer applies a heavy blocked penalty), so they surface at the
+ * bottom of the list rather than displacing actionable work.
+ *
  * When a count is given, smart selection is applied: all critical items, all
  * in_review review-queue items and all actively-worked in-progress items are
  * always included (regardless of count, WL-0MV6KV22S004NYIU) and
@@ -744,6 +750,14 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
     args.push('-n', String(count));
   }
   args.push('--include-in-progress');
+  // Show dependency-blocked items in the Herdr selection list. `wl next`
+  // excludes them by default (shared filterCandidates, unless includeBlocked);
+  // without this flag blocked backlog work silently disappears from the
+  // worklist (WL-0MV6TFX0600145M2). Blocked items still rank low (the
+  // -10000 score penalty), so they surface at the bottom of the list rather
+  // than displacing actionable work. The implement-tier candidate lookup
+  // (getNextImplementCandidate) deliberately keeps the default exclusion.
+  args.push('--include-blocked');
 
   // Run the base `wl next` selection and the mandatory subsets CONCURRENTLY:
   // they are independent reads, and overlapping them removes one full `wl`

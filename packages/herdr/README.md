@@ -1595,6 +1595,13 @@ regardless of the `browseItemCount` setting:
 
 - Items with `priority=critical` are always included.
 - Items with `status=completed` **and** `stage=in_review` are always included.
+- Dependency-blocked items are **not filtered out** of the default list
+  (WL-0MV6TFX0600145M2): `fetchNextItems` passes `--include-blocked` to
+  `wl next`, so blocked backlog work stays visible (rendered with the ⛔
+  status icon). They still rank low in the selection order (the shared scorer
+  applies a heavy blocked penalty), so they surface at the bottom of the list
+  rather than displacing actionable work. The implement-tier downtime
+  dispatch lookup deliberately keeps `wl next`'s default exclusion.
 - The `browseItemCount` limit applies only to the remaining "other" items.
   The number of "other" slots is `browseItemCount − (critical count) −
   (completed/in_review count)`, floored at zero.
