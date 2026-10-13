@@ -30,8 +30,12 @@ function makeItem(id: string, overrides: Partial<WorkItem> = {}): WorkItem {
 /** Convenience builders for the mandatory-set criteria. */
 const critical = (id: string): WorkItem => makeItem(id, { priority: 'critical' });
 const inReview = (id: string): WorkItem => makeItem(id, { status: 'completed', stage: 'in_review' });
+/** in_review item being re-worked after review feedback (status = in-progress). */
+const inProgressInReview = (id: string): WorkItem => makeItem(id, { status: 'in-progress', stage: 'in_review' });
 /** Item that is BOTH critical and completed/in_review (overlap case). */
 const criticalInReview = (id: string): WorkItem => makeItem(id, { priority: 'critical', status: 'completed', stage: 'in_review' });
+/** Item that is BOTH critical and in-progress/in_review (overlap case). */
+const criticalInProgressInReview = (id: string): WorkItem => makeItem(id, { priority: 'critical', status: 'in-progress', stage: 'in_review' });
 const other = (id: string): WorkItem => makeItem(id, { priority: 'medium', status: 'open', stage: 'idea' });
 /** Item whose stage is 'done' (fully closed — must never appear in the default list). */
 const done = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => makeItem(id, { stage: 'done', status: 'completed', ...overrides });
@@ -70,6 +74,80 @@ describe('selectWorkItems — smart selection algorithm', () => {
         'C1', 'C2', 'R1', 'R2', 'R3', 'O1', 'O2', 'O3', 'O4', 'O5',
         'O6', 'O7', 'O8', 'O9', 'O10',
       ]);
+    });
+  });
+
+  describe('in-progress/in_review items — mandatory review set (WL-0MV6JGVPH009YDXB)', () => {
+    it('keeps an in-progress/in_review item in the guaranteed set even when it exceeds browseItemCount', () => {
+      const items = [
+        inReview('R1'),
+        inProgressInReview('RP1'),
+        ...Array.from({ length: 25 }, (_, i) => other(`O${i + 1}`)),
+      ];
+
+      // browseItemCount=3: 2 mandatory reviews (completed + in-progress) + 1 other.
+      const result = selectWorkItems(items, 3);
+
+      expect(result).toHaveLength(3);
+      expect(result.map(i => i.id)).toEqual(['R1', 'RP1', 'O1']);
+    });
+
+    it('in-progress/in_review items are never demoted to the capped others bucket', () => {
+      const items = [
+        inProgressInReview('RP1'),
+        ...Array.from({ length: 20 }, (_, i) => other(`O${i + 1}`)),
+      ];
+
+      // browseItemCount=1: the in-progress/in_review item is mandatory and
+      // must still show, consuming the slot before any other.
+      const result = selectWorkItems(items, 1);
+
+      expect(result.map(i => i.id)).toEqual(['RP1']);
+    });
+
+    it('an in-progress/in_review item alone exceeds browseItemCount without a cap', () => {
+      const items = Array.from({ length: 10 }, (_, i) => inProgressInReview(`RP${i + 1}`));
+
+      const result = selectWorkItems(items, 3);
+
+      expect(result).toHaveLength(10);
+      expect(result.every(i => i.status === 'in-progress' && i.stage === 'in_review')).toBe(true);
+    });
+
+    it('overlap critical ∩ in-progress/in_review → item counts once (deduplicated)', () => {
+      const items = [
+        criticalInProgressInReview('BOTH1'),
+        other('O1'),
+        other('O2'),
+        other('O3'),
+        other('O4'),
+        other('O5'),
+      ];
+
+      // browseItemCount=5: mandatory set = 1 (BOTH1 counts once), so 4 others shown.
+      const result = selectWorkItems(items, 5);
+
+      expect(result).toHaveLength(5);
+      const mandatory = result.filter(i =>
+        i.priority === 'critical' ||
+        (i.stage === 'in_review' && (i.status === 'completed' || i.status === 'in-progress')),
+      );
+      expect(mandatory).toHaveLength(1);
+      expect(result.map(i => i.id)).toEqual(['BOTH1', 'O1', 'O2', 'O3', 'O4']);
+    });
+
+    it('mixed completed + in-progress in_review items share one guaranteed review set', () => {
+      const items = [
+        inReview('R1'),
+        inProgressInReview('RP1'),
+        other('O1'),
+        other('O2'),
+      ];
+
+      // browseItemCount=2: both review items are mandatory, zero others shown.
+      const result = selectWorkItems(items, 2);
+
+      expect(result.map(i => i.id)).toEqual(['R1', 'RP1']);
     });
   });
 

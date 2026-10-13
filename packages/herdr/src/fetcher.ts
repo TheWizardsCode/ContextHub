@@ -665,21 +665,27 @@ function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
 }
 
 /**
- * The exact `wl list` invocation backing the root-only completed/in_review
- * review queue. Shared so {@link fetchMandatorySubsets} and
+ * The exact `wl list` invocation backing the root-only in_review review
+ * queue. Shared so {@link fetchMandatorySubsets} and
  * {@link fetchReviewQueueState} build an IDENTICAL argument vector — the
  * in-flight fetch memo then deduplicates the two concurrent calls into a
  * single `wl` spawn per refresh (WL-0MV5CBQ6L005SPAG). Changing one query
  * without the other silently reintroduces the duplicate spawn.
+ *
+ * The status filter spans BOTH `completed` (awaiting producer review) and
+ * `in-progress` (being re-worked after review feedback, WL-0MV6JGVPH009YDXB)
+ * — the mandatory review set must show both, matching the smart-selection
+ * predicate in selectWorkItems.
  */
 function reviewQueueArgs(): string[] {
-  return ['list', '--status', 'completed', '--stage', 'in_review', '--root-only'];
+  return ['list', '--status', 'completed,in-progress', '--stage', 'in_review', '--root-only'];
 }
 
 /**
  * Fetch the mandatory subsets that must ALWAYS be shown in the default
- * worklist: all critical items and all completed/in_review items (the
- * producer-review queue).
+ * worklist: all critical items and all in_review items (the producer-review
+ * queue — status completed awaiting review or in-progress being re-worked
+ * after review feedback, WL-0MV6JGVPH009YDXB).
  *
  * These are fetched explicitly via `wl list` because `wl next -n N` hard-caps
  * at 32 items — even `-n 500` returns only 32, so a large superset cannot
@@ -699,7 +705,9 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
   //
   // Review items: root-only is appropriate because the in_review queue
   // is about producer review of parent items; child items are handled by
-  // the parent's review lifecycle.
+  // the parent's review lifecycle. The query spans status completed AND
+  // in-progress (re-worked items stay in_review, WL-0MV6JGVPH009YDXB) so
+  // re-worked reviews are never dropped from the mandatory set.
   const [criticalOutput, reviewOutput] = await Promise.all([
     runWl(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed']),
     runWl(reviewQueueArgs()),
@@ -915,22 +923,32 @@ export async function runWlSync(): Promise<{ success: boolean; error?: string }>
  * that is not current per `isAuditFresh`).
  */
 export interface ReviewQueueState {
-  /** Number of root-level completed/in_review items. */
+  /** Number of root-level in_review items with status completed. */
   count: number;
   /** True when any of those items lacks a current (fresh) audit. */
   auditsOutstanding: boolean;
 }
 
 /**
- * Fetch the review-queue state (root-only completed/in_review items) for
- * the sprint-complete / queue-depth banner (parent WL-0MTHSHN5V008R5L0;
- * banner copy selection AH-0MUDYTQ55002NUSJ). Returns the count and whether
- * an outstanding audit remains, or undefined on failure — callers treat
- * undefined as "unknown" and leave state unchanged (fail-closed, AC1).
+ * Fetch the review-queue state (root-only in_review items with status
+ * `completed`) for the sprint-complete / queue-depth banner (parent
+ * WL-0MTHSHN5V008R5L0; banner copy selection AH-0MUDYTQ55002NUSJ). Returns
+ * the count and whether an outstanding audit remains, or undefined on
+ * failure — callers treat undefined as "unknown" and leave state unchanged
+ * (fail-closed, AC1).
  *
- * Uses `wl list --status completed --stage in_review --root-only --json`
- * (the same query as the former `fetchCompletedItemCount`). "Outstanding
- * audit" reuses the shared `isAuditFresh` predicate: a missing `auditedAt`
+ * Uses `wl list --status completed,in-progress --stage in_review
+ * --root-only --json` — the SAME query as the mandatory review subset (see
+ * {@link reviewQueueArgs}), so the in-flight memo deduplicates the two into
+ * ONE spawn — and then keeps only the `completed` items in-process. This
+ * preserves the banner's historical "completed/in_review" semantics while
+ * the mandatory worklist subset consumes the full (completed + in-progress)
+ * set (WL-0MV6JGVPH009YDXB). In-progress/in_review items are excluded here
+ * because they are being re-worked after review feedback: they are not
+ * dispatchable to the audit tier (which selects completed/in_review only),
+ * so counting them in "focus on audits" would be misleading.
+ *
+ * "Outstanding audit" reuses the shared `isAuditFresh` predicate: a missing `auditedAt`
  * or a stored audit that is not current counts as outstanding; a fresh
  * audit (passed or failed) does not. `wl list --json` exposes
  * `currentFingerprint` for items that carry a stored fingerprint, so the
@@ -951,7 +969,7 @@ export async function fetchReviewQueueState(): Promise<ReviewQueueState | undefi
     // schedules both concurrently (WL-0MV5CBQ6L005SPAG).
     const output = await runWl(reviewQueueArgs());
     const payload = extractJson(output);
-    const items = extractItems(payload);
+    const items = extractItems(payload).filter((item) => item.status === 'completed');
     const auditsOutstanding = items.some((item) =>
       !isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint),
     );

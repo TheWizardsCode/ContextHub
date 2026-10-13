@@ -167,4 +167,69 @@ describe('in_review bucket ordering across fetch paths (WL-0MUWDW0N6003KF6G)', (
       'WL-medium-no-audit',
     ]);
   });
+
+  it('fetchNextItems rescues an in-progress/in_review item that only exists in the mandatory wl list subset (WL-0MV6JGVPH009YDXB)', async () => {
+    // An item being re-worked after review feedback keeps stage=in_review but
+    // flips status to in-progress. It may fall OUTSIDE the wl next top-N
+    // window — the mandatory `wl list` review subset (now `--status
+    // completed,in-progress`) must still surface it regardless of count.
+    const reworkedReview = {
+      id: 'WL-reworked-review',
+      title: 'Reworked review item',
+      status: 'in-progress',
+      stage: 'in_review',
+      priority: 'medium',
+      updatedAt: UPDATED_AT,
+    };
+    const windowItem = { id: 'WL-in-window', title: 'In window', status: 'open', stage: 'idea', priority: 'medium' };
+
+    setExecFileAsync((async (_bin: string, args: string[]) => {
+      if (args.includes('next')) {
+        // The reworked item is NOT in the wl next top-N window — only the
+        // window item is.
+        return {
+          stdout: JSON.stringify({ success: true, results: [{ workItem: windowItem }] }),
+          stderr: '',
+        };
+      }
+      if (args.includes('--priority')) {
+        return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
+      }
+      // Mandatory review subset — now fetched with --status completed,in-progress.
+      return {
+        stdout: JSON.stringify({ success: true, workItems: [reworkedReview] }),
+        stderr: '',
+      };
+    }) as never);
+
+    // count=1: the mandatory in-progress/in_review item must be included, so
+    // the window item is pushed out (mandatory items are never capped).
+    const items = await fetchNextItems(1);
+    const ids = items.map((i) => i.id);
+    expect(ids).toContain('WL-reworked-review');
+    expect(ids).not.toContain('WL-in-window');
+  });
+
+  it('reviews arguments pass --status completed,in-progress for the mandatory review subset (WL-0MV6JGVPH009YDXB)', async () => {
+    let reviewQuery: string[] | null = null;
+    setExecFileAsync((async (_bin: string, args: string[]) => {
+      if (args.includes('next')) {
+        return { stdout: JSON.stringify({ success: true, results: [] }), stderr: '' };
+      }
+      if (args.includes('--priority')) {
+        return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
+      }
+      reviewQuery = args;
+      return { stdout: JSON.stringify({ success: true, workItems: [] }), stderr: '' };
+    }) as never);
+
+    await fetchNextItems(10);
+
+    expect(reviewQuery).not.toBeNull();
+    const statusIdx = reviewQuery!.indexOf('--status');
+    expect(statusIdx).toBeGreaterThan(-1);
+    const statusValue = reviewQuery![statusIdx + 1];
+    expect(statusValue).toContain('in-progress');
+    expect(statusValue).toContain('completed');
+  });
 });
