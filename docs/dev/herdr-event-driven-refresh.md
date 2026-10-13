@@ -19,8 +19,19 @@ update — precisely when the operator is watching an agent work.
 cross-process signal** the existing `DbChangeTracker` reads:
 
 - the per-worklog state counter `<cacheDir>/state/<sha256(worklogDir)>.json`
-  (bumped by every `wl` write and by post-sync cache invalidation), and
-- the SQLite `worklog.db` / `worklog.db-wal` / `worklog.db-shm` files.
+  (bumped by every `wl` write and by post-sync cache invalidation —
+  write-only from `wl`'s perspective).
+
+The SQLite `worklog.db` / `worklog.db-wal` / `worklog.db-shm` files are
+**deliberately NOT watched**. An early design watched them too, which created
+a self-sustaining refresh loop: the pane's own refresh path
+(`fetchActionableCount` / `fetchChildrenForItems`) opens a fresh
+`WorklogDatabase` connection for in-process reads, and that open/close
+checkpoints the WAL and touches `-shm` — i.e. it modifies exactly the files
+being watched, re-firing the watch → another refresh → more file churn. The
+pane never writes the state counter (it only reads it), so the counter is the
+loop-free authoritative signal (producer-rejection fix for
+`WL-0MV02VA29009WBEN`).
 
 A burst of events is coalesced into **at most one trailing** `onChange()` after
 `debounceMs` (default 150 ms). The watch is **fail-open**: a target whose
@@ -42,10 +53,14 @@ which:
 2. consumes the `DbChangeTracker` baseline (`tracker.dbChanged()`) so the next
    30 s tick sees the change as already handled and stays a no-op
    (`WL-0MSJ1OLTL009N4IQ`, idle zero-spawn preserved);
-3. calls the existing gated `doRefresh`, preserving its **single-flight +
-   trailing-coalescing** semantics (`WL-0MSBVYBMD004007C`,
-   `WL-0MTIB7JAN004MQ8N`) — the watch never bypasses those guards, so a burst
-   cannot cause a refresh storm.
+3. calls the existing gated `doRefresh` (awaited), preserving its
+   **single-flight + trailing-coalescing** semantics
+   (`WL-0MSBVYBMD004007C`, `WL-0MTIB7JAN004MQ8N`) — the watch never bypasses
+   those guards, so a burst cannot cause a refresh storm. Because the state
+   counter is bumped *before* a `wl` write commits (pre-action cache
+   invalidation), the counter is re-checked after the refresh and, if it
+   moved again (the write settled mid-refresh), one final trailing refresh
+   runs so the pane never shows a pre-commit snapshot.
 
 ### 3. Cold-refresh cost (`fetcher.ts`)
 
@@ -72,8 +87,10 @@ cold default-view refresh dropped from **25 → 3** `wl` spawns (~88 %).
 ### Automated
 
 - `packages/herdr/src/db-change.test.ts` — `watchDbChanges` contract: trigger,
-  debounce/coalescing, per-file filtering, fail-open, teardown, async error,
-  throwing callback, real-`fs.watch` write.
+  debounce/coalescing, per-file filtering (state counter only — SQLite
+  `-wal`/`-shm`/db churn never fires), fail-open, teardown, async error,
+  throwing callback, real-`fs.watch` write, and a real-`fs.watch` regression
+  that SQLite-file churn alone never fires the watch.
 - `packages/herdr/src/worklist-watch.test.ts` — integration: a state-counter
   write (the same signal a `wl` write bumps) triggers a refresh within 2 s,
   before the 30 s tick; unrelated writes do not; fail-open + idle no-spawn; the

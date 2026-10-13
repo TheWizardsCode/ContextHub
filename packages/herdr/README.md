@@ -1428,8 +1428,12 @@ auto-refresh tick (parent `WL-0MV02VA29009WBEN`).
 
 - **Watch target** — `db-change.ts` `watchDbChanges()` watches the same
   cross-process signal the `DbChangeTracker` reads: the per-worklog state
-  counter (`<cacheDir>/state/<sha256(worklogDir)>.json`) and the SQLite
-  `worklog.db` / `worklog.db-wal` / `worklog.db-shm` files.
+  counter (`<cacheDir>/state/<sha256(worklogDir)>.json`), which `wl` bumps on
+  every write and after sync (write-only from `wl`'s perspective). The
+  SQLite `worklog.db` / `-wal` / `-shm` files are deliberately NOT watched:
+  the pane's own in-process SQLite reads touch those files, so watching them
+  created a self-sustaining refresh loop (producer-rejection fix for
+  `WL-0MV02VA29009WBEN`).
 - **Debounced, single-flight** — a burst of write events is coalesced into at
   most one trailing callback, which feeds the existing gated `doRefresh`
   (typing + visibility gates, then `doRefresh`'s own single-flight + trailing

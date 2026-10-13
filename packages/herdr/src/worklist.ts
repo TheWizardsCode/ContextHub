@@ -6554,7 +6554,17 @@ export async function runWorklistTui(
     // skipped the work: an unconsumed change is what lets the fallback tick
     // (or the resume-poll) refresh once the overlay closes / the tab returns.
     tracker?.dbChanged();
-    void doRefresh(false);
+    await doRefresh(false);
+    // The state counter is bumped by `wl` BEFORE the write commits (pre-action
+    // cache invalidation), so a watch event can fire while the DB write is
+    // still landing. Re-check the counter AFTER the refresh: if it moved
+    // again (the write settled mid-refresh), run one final trailing refresh
+    // so the pane never shows a pre-commit snapshot until the next write or
+    // the 30 s tick. Bounded by doRefresh's single-flight + trailing
+    // coalescing — never a storm.
+    if (tracker?.dbChanged()) {
+      void doRefresh(false);
+    }
   };
 
   let dbChangeWatch: DbChangeWatch | null = null;

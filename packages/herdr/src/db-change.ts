@@ -8,17 +8,27 @@
  * Fail-open: any read error returns `changed = true`, so the refresh/sync
  * cycle always runs when the signal is unavailable.
  *
- * `watchDbChanges` is the event-driven companion: it watches the same
- * cross-process signal (the state-counter file and the SQLite
- * `worklog.db`/`-wal`/`-shm` files) so the pane can react to an agent write
- * promptly instead of waiting for the 30 s auto-refresh tick. The watch is
- * debounced (one trailing callback per burst), fails open (an unusable watch
- * is reported as inactive so the caller keeps polling), and is disposable
- * (`dispose()`/`close()` closes every `fs.watch` handle and clears pending
- * timers). Hardened against watch failures that surface *after* creation
- * (an asynchronous `fs.FSWatcher` `'error'` event, e.g. inotify limits or a
- * network filesystem dropping the watch) and against throwing callbacks so
- * nothing ever escapes into the TUI loop.
+ * `watchDbChanges` is the event-driven companion: it watches `wl`'s
+ * cross-process write signal (the state-counter file) so the pane can react
+ * to an agent write promptly instead of waiting for the 30 s auto-refresh
+ * tick. The watch is debounced (one trailing callback per burst), fails open
+ * (an unusable watch is reported as inactive so the caller keeps polling),
+ * and is disposable (`dispose()`/`close()` closes every `fs.watch` handle
+ * and clears pending timers). Hardened against watch failures that surface
+ * *after* creation (an asynchronous `fs.FSWatcher` `'error'` event, e.g.
+ * inotify limits or a network filesystem dropping the watch) and against
+ * throwing callbacks so nothing ever escapes into the TUI loop.
+ *
+ * The watch targets the state-counter FILE ONLY — deliberately NOT the
+ * SQLite `worklog.db`/`-wal`/`-shm` files. Watching those created a
+ * self-sustaining refresh loop: the pane's own refresh path opens a fresh
+ * `WorklogDatabase` for in-process reads, and that open/close checkpoints
+ * the WAL and touches `-shm`, i.e. it modifies exactly the files being
+ * watched → the watch re-fired → another refresh → more file churn. The
+ * pane NEVER writes the state counter (it only reads it), so the counter is
+ * the loop-free authoritative signal: every `wl` write bumps it and every
+ * pane-side read leaves it untouched (WL-0MV02VA29009WBEN
+ * producer-rejection fix).
  *
  * @module db-change
  */
@@ -199,12 +209,24 @@ interface WatchTarget {
 /**
  * Watch the cross-process DB-change signal for a worklog dir.
  *
- * Watches two directories (when they exist): the state-counter directory
- * (`<cacheDir>/state/`, filtered to this worklog's counter file) and the
- * worklog directory itself (filtered to the SQLite `worklog.db`, `-wal` and
- * `-shm` files). Either target alone is enough to observe a `wl` write; a
- * burst of events is coalesced into at most ONE trailing `onChange()` call
- * after `debounceMs` of quiet.
+ * Watches the state-counter directory (`<cacheDir>/state/`), filtered to
+ * this worklog's counter file — the SAME monotonic write counter
+ * `DbChangeTracker` reads and the one `wl`'s write path bumps (pre-action
+ * cache invalidation and post-sync invalidation; write-only from `wl`'s
+ * perspective). A burst of events is coalesced into at most ONE trailing
+ * `onChange()` call after `debounceMs` of quiet.
+ *
+ * Why NOT the SQLite files: an early design also watched the worklog dir
+ * (`worklog.db`, `-wal`, `-shm`), which created a SELF-SUSTAINING refresh
+ * loop — the pane's own refresh path opens a fresh `WorklogDatabase`
+ * connection for in-process reads, and that open/close checkpoints the WAL
+ * and touches `-shm`, i.e. it modifies exactly the files being watched,
+ * re-firing the watch → another refresh → more file churn. The pane never
+ * writes the state counter (it only reads it), so the counter is the
+ * loop-free authoritative signal: every real `wl` write bumps it, every
+ * pane-side read leaves it untouched (WL-0MV02VA29009WBEN
+ * producer-rejection fix). The 30 s polling tick stays the fail-open
+ * fallback.
  *
  * Fail-open: a target whose `fs.watch` throws is skipped; when no target
  * could be watched the returned watch reports `active === false` and the
@@ -224,11 +246,14 @@ export function watchDbChanges(
 
   const counterFile = stateCounterFilePath(cacheDir, worklogDir);
   const counterName = path.basename(counterFile);
-  const dbFilenames = new Set(['worklog.db', 'worklog.db-wal', 'worklog.db-shm']);
 
+  // The state-counter directory is watched (not the bare file): the CLI
+  // writes the counter via an atomic tmp + rename, which a direct file watch
+  // would silently stop following after the inode is replaced. The directory
+  // watch sees the rename and the per-worklog filename filter keeps events
+  // from other worklogs (the dir holds one counter file per worklog dir) out.
   const targets: WatchTarget[] = [
     { dir: path.dirname(counterFile), matches: (name) => name === counterName },
-    { dir: worklogDir, matches: (name) => dbFilenames.has(name) },
   ];
 
   const handles: WatchHandle[] = [];

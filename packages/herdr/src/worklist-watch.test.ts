@@ -241,6 +241,60 @@ describe('worklist event-driven DB-change watch (WL-0MV5CBO820024S5A F1)', () =>
     await quit(p);
   });
 
+  it('REGRESSION: SQLite -wal/-shm/db churn (the pane\'s own reads) does not trigger a refresh', async () => {
+    // The pane's own refresh path opens a fresh WorklogDatabase for
+    // in-process reads, which checkpoints the WAL and touches -shm — exactly
+    // the files a SQLite-file watch would react to, creating a self-
+    // sustaining refresh loop that saturated the event loop and made
+    // keyboard input unresponsive (WL-0MV02VA29009WBEN producer-rejection
+    // fix). Only a state-counter write may wake the pane.
+    setExecFileAsync(makeExecMock() as any);
+
+    const cacheDir = tempDir('wl-watch-cache-');
+    const worklogDir = tempDir('wl-watch-log-');
+    process.env.WL_CACHE_DIR = cacheDir;
+    setWorklogDir(worklogDir);
+
+    const counterFile = stateCounterFilePath(cacheDir, worklogDir);
+    fsReal.mkdirSync(path.dirname(counterFile), { recursive: true });
+    fsReal.writeFileSync(counterFile, JSON.stringify({ state: 0 }), 'utf-8');
+
+    const fetcher = vi.fn(async () => []);
+    let armedResolve!: () => void;
+    const armed = new Promise<void>((resolve) => {
+      armedResolve = resolve;
+    });
+    const dbWatch = vi.fn((c: string, w: string, onChange: () => void, opts: any): DbChangeWatch => {
+      const watcher = watchDbChanges(c, w, onChange, { debounceMs: 30, ...opts });
+      armedResolve();
+      return watcher;
+    });
+
+    const p = runWorklistTui(fetcher, [], undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+      dbWatch,
+    });
+    await armed;
+
+    // Emulate the pane's own in-process SQLite reads landing on the DB files
+    // (the old watch target): nothing may wake the pane.
+    fsReal.writeFileSync(path.join(worklogDir, 'worklog.db'), 'db-churn', 'utf-8');
+    fsReal.writeFileSync(path.join(worklogDir, 'worklog.db-wal'), 'wal-churn', 'utf-8');
+    fsReal.writeFileSync(path.join(worklogDir, 'worklog.db-shm'), 'shm-churn', 'utf-8');
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(fetcher).not.toHaveBeenCalled();
+
+    // Sanity: the watch is alive — the counter write still wakes the pane.
+    fsReal.writeFileSync(counterFile, JSON.stringify({ state: 1 }), 'utf-8');
+    await waitFor(() => fetcher.mock.calls.length >= 1, 2000);
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    await quit(p);
+  });
+
   it('fail-open: a throwing watch factory does not crash the pane; the 30 s tick still refreshes (idle no-spawn preserved)', async () => {
     vi.useFakeTimers();
     setExecFileAsync(makeExecMock() as any);
