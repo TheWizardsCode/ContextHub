@@ -9,7 +9,7 @@ import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
 import { getGitRepoRoot } from '@worklog/shared/worklog-paths';
 import { computeContentFingerprint, createGitRunner } from '../audit-fingerprint.js';
 import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, humanFormatProjected, resolveFormat, sortByPriorityAndDate } from './helpers.js';
-import { compareGroupableItems } from './grouping.js';
+import { compareInReviewItems } from './grouping.js';
 
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
@@ -188,11 +188,14 @@ export default function register(ctx: PluginContext): void {
       };
 
       const sortedAll = items.slice().sort((a, b) => {
-        // In-review lists: bucket sort first
+        // In-review lists: use compareInReviewItems for full within-section
+        // sorting (priority → bucket → updatedAt → id).  compareInReviewItems
+        // returns 0 when either item is not in_review, so the caller falls
+        // through to the default ordering.
         if (isInReviewList && auditMapForSort) {
           const arA = auditMapForSort.get(a.id);
           const arB = auditMapForSort.get(b.id);
-          const bucketCmp = compareGroupableItems(
+          const reviewCmp = compareInReviewItems(
             { id: a.id, stage: a.stage, priority: a.priority, filePaths: [],
               needsProducerReview: a.needsProducerReview,
               auditResult: arA ? arA.readyToClose : null,
@@ -210,9 +213,7 @@ export default function register(ctx: PluginContext): void {
               updatedAt: b.updatedAt,
             },
           );
-          // Only return immediately if bucket predicate is non-zero.
-          // If equal bucket, fall through to the default ordering.
-          if (bucketCmp !== 0) return bucketCmp;
+          if (reviewCmp !== 0) return reviewCmp;
         }
 
         const aPos = positions.get(a.id);
@@ -286,7 +287,13 @@ export default function register(ctx: PluginContext): void {
           // The human formatter's concise mode now includes the additional fields
           // (Status, Priority, Risk, Effort, Assignee, Tags) so this preserves
           // the richer information previously shown by the legacy tree printer.
-          displayItemTreeWithFormat(displayItems, db, format);
+          //
+          // `preserveOrder` for in_review lists (WL-0MUWDW0N6003KF6G): the
+          // 6-bucket predicate already ordered `sortedAll`; without this the
+          // renderer's position-based re-sort would silently discard that
+          // order and show position (sortIndex) order instead — the exact
+          // "medium before high" symptom the work item reports.
+          displayItemTreeWithFormat(displayItems, db, format, isInReviewList);
           console.log('');
           return;
         }

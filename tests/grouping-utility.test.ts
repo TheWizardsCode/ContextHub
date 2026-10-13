@@ -682,4 +682,40 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
     const b = { id: 'WL-b', stage: 'intake_complete', filePaths: [], priority: 'medium' } as any;
     expect(compareInReviewItems(a, b)).toBe(0);
   });
+
+  it('priority is the primary key, so a high no-audit item leads a medium failed-audit item (WL-0MUWDW0N6003KF6G)', () => {
+    // Producer-reported symptom: the audit bucket used to be the primary key,
+    // so a medium item with a failed (stale) audit (bucket 3) ranked ahead of
+    // a high item with no audit (bucket 4). Priority must dominate; the bucket
+    // then orders items within the same priority band.
+    const items = [
+      inReviewItem({ id: 'WL-medium-no-audit', priority: 'medium', auditResult: null, auditedAt: null, updatedAt }),
+      inReviewItem({ id: 'WL-medium-failed', priority: 'medium', auditResult: false, auditedAt: staleAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-high-no-audit', priority: 'high', auditResult: null, auditedAt: null, updatedAt }),
+      inReviewItem({ id: 'WL-low-no-audit', priority: 'low', auditResult: null, auditedAt: null, updatedAt }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual([
+      'WL-high-no-audit',
+      'WL-medium-failed',
+      'WL-medium-no-audit',
+      'WL-low-no-audit',
+    ]);
+  });
+
+  it('applies the 6-bucket order within each priority band (WL-0MUWDW0N6003KF6G)', () => {
+    const items = [
+      inReviewItem({ id: 'WL-high-passed', priority: 'high', auditResult: true, auditedAt: freshAuditedAt, updatedAt }),
+      inReviewItem({ id: 'WL-high-no-audit', priority: 'high', auditResult: null, auditedAt: null, updatedAt }),
+      inReviewItem({ id: 'WL-medium-no-audit', priority: 'medium', auditResult: null, auditedAt: null, updatedAt }),
+      inReviewItem({ id: 'WL-medium-failed', priority: 'medium', auditResult: false, auditedAt: staleAuditedAt, updatedAt }),
+    ];
+    const sorted = items.slice().sort(compareGroupableItems);
+    expect(sorted.map(i => (i as { id: string }).id)).toEqual([
+      'WL-high-no-audit',
+      'WL-high-passed',
+      'WL-medium-failed',
+      'WL-medium-no-audit',
+    ]);
+  });
 });

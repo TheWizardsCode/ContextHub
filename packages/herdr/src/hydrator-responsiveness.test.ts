@@ -7,7 +7,7 @@
  * spawns with no per-step bound and no per-tick cap, so a slow or hung CLI
  * could leave the run in flight for the whole 20 s scheduler watchdog while
  * the HERDR pane felt unresponsive to keyboard input. This suite drives a
- * worst-case hydrate (60 panes, 25 in-progress items) with deliberately slow
+ * worst-case hydrate (60 tabs, 25 in-progress items) with deliberately slow
  * fake seams and samples event-loop delay — the deterministic proxy for
  * command-input lag — while the run is in flight.
  *
@@ -17,13 +17,21 @@
  * all 25 items. Both assertions therefore fail on revert.
  */
 import { describe, expect, it } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import {
   runHydrationOnce,
   type HydratorDeps,
   type HydratorItem,
-  type HydratorPane,
+  type HydratorTab,
 } from './hydrator.js';
-import { makeWorstCaseItems, makeWorstCasePanes } from './hydrator.fixtures.js';
+import { makeWorstCaseItems, makeWorstCaseTabs } from './hydrator.fixtures.js';
+import {
+  stateCounterFilePath,
+  watchDbChanges,
+  type DbChangeWatch,
+} from './db-change.js';
 
 /** Resolve after `ms` on the real event loop. */
 function delay(ms: number): Promise<void> {
@@ -40,7 +48,7 @@ function percentile(samples: number[], p: number): number {
 
 describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
   it('keeps event-loop delay under 100 ms p95 during a worst-case hydrate', async () => {
-    const panes = makeWorstCasePanes(60);
+    const tabs = makeWorstCaseTabs(60);
     const items = makeWorstCaseItems(25);
     const deps: HydratorDeps = {
       // Deliberately slow seams: each CLI-shaped lookup yields the event
@@ -49,9 +57,9 @@ describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
         await delay(4);
         return items;
       },
-      listActivePanes: async () => {
+      listTabs: async () => {
         await delay(4);
-        return panes;
+        return tabs;
       },
       listOutboundDeps: async () => {
         await delay(4);
@@ -93,7 +101,7 @@ describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
     // wall-clock bound well under the 20 s scheduler watchdog.
     const deps: HydratorDeps = {
       listInProgressItems: () => new Promise<HydratorItem[]>(() => {}),
-      listActivePanes: async () => [],
+      listTabs: async () => [],
       listOutboundDeps: async () => [],
       applyDemotion: async () => true,
       stepTimeoutMs: 50,
@@ -116,7 +124,7 @@ describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
     const touched: string[] = [];
     const deps: HydratorDeps = {
       listInProgressItems: async () => items,
-      listActivePanes: async () => [] as HydratorPane[],
+      listTabs: async () => [] as HydratorTab[],
       listOutboundDeps: async (id: string) => {
         touched.push(id);
         return [];
@@ -130,5 +138,90 @@ describe('hydrate UI responsiveness (WL-0MUY1CZES0099A04)', () => {
 
     expect(result.demoted).toBe(10);
     expect(touched).toHaveLength(10);
+  });
+});
+
+/**
+ * F5 (WL-0MV5CBQTS008ZWHR) — the event-driven watch must never block the
+ * pane's event loop.
+ *
+ * In `worklist.ts` the watch callback dispatches the refresh asynchronously
+ * (`void requestWatchRefresh()`), so a burst of agent writes is coalesced and
+ * applied without starving keyboard input. This suite exercises the real
+ * {@link watchDbChanges} primitive (real `fs.watch`, real timers) with a
+ * refresh workload shaped like the cold default-view refresh — awaited steps
+ * that each yield to the event loop (the real `doRefresh` awaits bounded `wl`
+ * spawns). It samples event-loop delay, the same deterministic proxy for
+ * command-input lag used above; a synchronous (loop-blocking) refresh would
+ * push the p95 well past the 100 ms budget and fail the test.
+ *
+ * The pane wiring (watch → gates → single-flight/trailing-coalescing
+ * `doRefresh`) is pinned by `worklist-watch.test.ts` (F1/F3); this test pins
+ * the non-blocking responsiveness guarantee on top of it.
+ */
+describe('event-driven watch UI responsiveness (WL-0MV5CBQTS008ZWHR)', () => {
+  it('keeps event-loop delay under 100 ms p95 during and after a watch-triggered refresh', async () => {
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-watch-resp-cache-'));
+    const worklogDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-watch-resp-log-'));
+    const counterFile = stateCounterFilePath(cacheDir, worklogDir);
+    fs.mkdirSync(path.dirname(counterFile), { recursive: true });
+    fs.writeFileSync(counterFile, JSON.stringify({ state: 0 }), 'utf-8');
+
+    // A non-blocking refresh: several awaited steps, each yielding to the
+    // event loop, mirroring the real `doRefresh` spawn path. Counted so the
+    // burst-coalescing and post-dispose idle contracts are asserted too.
+    let refreshes = 0;
+    const refresh = async (): Promise<void> => {
+      refreshes += 1;
+      for (let i = 0; i < 5; i++) await delay(6);
+    };
+
+    const watch: DbChangeWatch = watchDbChanges(
+      cacheDir,
+      worklogDir,
+      () => {
+        void refresh();
+      },
+      { debounceMs: 20 },
+    );
+
+    // Sample event-loop delay (command-input lag proxy) throughout.
+    const intervalMs = 5;
+    const delays: number[] = [];
+    let last = Date.now();
+    const sampler = setInterval(() => {
+      const tick = Date.now();
+      delays.push(Math.max(0, tick - last - intervalMs));
+      last = tick;
+    }, intervalMs);
+
+    try {
+      expect(watch.active).toBe(true);
+
+      // A burst of agent writes lands; the watch coalesces it into one
+      // trailing refresh without blocking the loop.
+      for (let i = 1; i <= 8; i++) {
+        fs.writeFileSync(counterFile, JSON.stringify({ state: i }), 'utf-8');
+        await delay(3);
+      }
+      // Let the debounce fire and the refresh run to completion.
+      await delay(150);
+    } finally {
+      clearInterval(sampler);
+      watch.dispose();
+    }
+
+    expect(refreshes).toBeGreaterThanOrEqual(1);
+    // Command-input lag proxy: the loop was never starved for long, during
+    // or after the watch-triggered refresh.
+    expect(percentile(delays, 0.95)).toBeLessThan(100);
+
+    // After dispose the watch schedules nothing further (idle no-op).
+    const settled = refreshes;
+    await delay(60);
+    expect(refreshes).toBe(settled);
+
+    fs.rmSync(cacheDir, { recursive: true, force: true });
+    fs.rmSync(worklogDir, { recursive: true, force: true });
   });
 });

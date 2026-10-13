@@ -10,6 +10,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
+import { existsSync } from 'node:fs';
 import { selectWorkItems } from './smart-selection.js';
 import { regroupWorkItems } from './grouping.js';
 import { STAGES } from './worklist.js';
@@ -423,6 +424,123 @@ export function _fetchMemoSize(): number {
   return inflightFetchMemo.size;
 }
 
+// ── In-process SQLite reads (WL-0MV5CBQ6L005SPAG) ─────────────────────
+
+/**
+ * Minimal structural type for the `@worklog/shared` WorklogDatabase surface
+ * the default-view auxiliary fetchers use for in-process reads. Kept
+ * structural so the heavy native `better-sqlite3` dependency is loaded
+ * LAZILY (only when an in-process read is actually attempted) and a load
+ * failure degrades to the `wl` spawn path instead of breaking the plugin at
+ * import time.
+ */
+interface InProcessDb {
+  list(query?: {
+    status?: string[];
+    priority?: string;
+    parentId?: string | null;
+    rootOnly?: boolean;
+    stage?: string;
+  }): any[];
+  getAllAuditResults(): {
+    workItemId: string;
+    readyToClose: boolean;
+    auditedAt: string;
+    fingerprint?: string | null;
+  }[];
+  getChildCounts(items?: any[]): Map<string, number>;
+  close(): void;
+}
+
+type InProcessDbCtor = new (
+  prefix: string,
+  dbPath: string,
+  jsonlPath: string,
+  silent: boolean,
+  autoSync: boolean,
+) => InProcessDb;
+
+let _dbCtorPromise: Promise<InProcessDbCtor | null> | null = null;
+
+/**
+ * Lazily resolve the `@worklog/shared` WorklogDatabase constructor. The
+ * dynamic import keeps the native `better-sqlite3` dependency out of the
+ * plugin's import graph until a refresh actually reads in-process. Any load
+ * failure (native module unavailable, incompatible runtime) resolves `null`
+ * and the caller falls back to spawning `wl` (fail-open).
+ */
+function loadInProcessDbCtor(): Promise<InProcessDbCtor | null> {
+  if (_dbCtorPromise === null) {
+    _dbCtorPromise = import('@worklog/shared')
+      .then((mod) => ((mod as { WorklogDatabase?: InProcessDbCtor }).WorklogDatabase) ?? null)
+      .catch(() => null);
+  }
+  return _dbCtorPromise;
+}
+
+/**
+ * Run `fn` against a FRESH in-process WorklogDatabase for the current worklog
+ * dir, or resolve `undefined` when no in-process read is possible (no dir
+ * resolved, no SQLite file on disk, `@worklog/shared` unavailable, or the
+ * read throws).
+ *
+ * The handle is opened per call and closed in `finally`, so a read always
+ * reflects the latest committed state: the store's in-memory query cache can
+ * never serve data across a refresh boundary. This is the "no stale cache
+ * served or left behind" invariant for the default-view fast path
+ * (WL-0MV5CBQ6L005SPAG). Callers MUST fall back to the `wl` spawn path on
+ * `undefined`.
+ */
+async function withInProcessDb<T>(fn: (db: InProcessDb) => T): Promise<T | undefined> {
+  const dir = _worklogDir;
+  if (!dir) return undefined;
+  const dbPath = join(dir, 'worklog.db');
+  if (!existsSync(dbPath)) return undefined;
+
+  const Ctor = await loadInProcessDbCtor();
+  if (!Ctor) return undefined;
+
+  let db: InProcessDb | null = null;
+  try {
+    db = new Ctor('WI', dbPath, join(dir, 'worklog-data.jsonl'), true, false);
+    return fn(db);
+  } catch {
+    // Fail-open: any open/read failure degrades to the wl spawn path.
+    return undefined;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // ignore: closing a broken handle must not mask the result.
+    }
+  }
+}
+
+/**
+ * Apply the audit enrichment `wl list --json` adds (auditResult, auditedAt and
+ * the stored fingerprint) to in-process items. `currentFingerprint` is
+ * deliberately NOT set: deriving it requires the canonical git-based
+ * fingerprint computation that only the `wl` CLI performs, and the shared
+ * `isAuditFresh` predicate fails safe to the time gate when it is absent.
+ * Callers therefore only use this enrichment for items WITHOUT a stored
+ * fingerprint (an audited item falls back to spawning `wl` so its exact
+ * fingerprint freshness is preserved).
+ */
+function enrichInProcessItems(db: InProcessDb, items: any[]): WorkItem[] {
+  const auditMap = new Map(db.getAllAuditResults().map((audit) => [audit.workItemId, audit]));
+  return items.map((raw) => {
+    const item = normalizeItem(raw);
+    const audit = auditMap.get(item.id);
+    if (!audit) return item;
+    return {
+      ...item,
+      auditResult: audit.readyToClose,
+      auditedAt: audit.auditedAt ?? null,
+      fingerprint: audit.fingerprint ?? null,
+    };
+  });
+}
+
 async function runWlInner(
   args: string[],
   includeJson: boolean,
@@ -547,14 +665,34 @@ function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
 }
 
 /**
+ * The exact `wl list` invocation backing the root-only in_review review
+ * queue. Shared so {@link fetchMandatorySubsets} and
+ * {@link fetchReviewQueueState} build an IDENTICAL argument vector — the
+ * in-flight fetch memo then deduplicates the two concurrent calls into a
+ * single `wl` spawn per refresh (WL-0MV5CBQ6L005SPAG). Changing one query
+ * without the other silently reintroduces the duplicate spawn.
+ *
+ * The status filter spans BOTH `completed` (awaiting producer review) and
+ * `in-progress` (being re-worked after review feedback, WL-0MV6JGVPH009YDXB)
+ * — the mandatory review set must show both, matching the smart-selection
+ * predicate in selectWorkItems.
+ */
+function reviewQueueArgs(): string[] {
+  return ['list', '--status', 'completed,in-progress', '--stage', 'in_review', '--root-only'];
+}
+
+/**
  * Fetch the mandatory subsets that must ALWAYS be shown in the default
- * worklist: all critical items and all completed/in_review items (the
- * producer-review queue).
+ * worklist: all critical items, all in_review items (the producer-review
+ * queue — status completed awaiting review or in-progress being re-worked
+ * after review feedback, WL-0MV6JGVPH009YDXB), all actively-worked
+ * in-progress root items (WL-0MV6KV22S004NYIU) and all status=blocked root
+ * items (WL-0MV71WBHB007D8ZE).
  *
  * These are fetched explicitly via `wl list` because `wl next -n N` hard-caps
  * at 32 items — even `-n 500` returns only 32, so a large superset cannot
- * capture all critical/in_review items. Runs the two queries in parallel to
- * mitigate refresh latency.
+ * capture all critical/in_review/in-progress/blocked items. Runs the four
+ * queries in parallel to mitigate refresh latency.
  */
 async function fetchMandatorySubsets(): Promise<WorkItem[]> {
   // Critical items: fetch ALL critical items across all statuses (open,
@@ -569,23 +707,55 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
   //
   // Review items: root-only is appropriate because the in_review queue
   // is about producer review of parent items; child items are handled by
-  // the parent's review lifecycle.
-  const [criticalOutput, reviewOutput] = await Promise.all([
+  // the parent's review lifecycle. The query spans status completed AND
+  // in-progress (re-worked items stay in_review, WL-0MV6JGVPH009YDXB) so
+  // re-worked reviews are never dropped from the mandatory set.
+  //
+  // Actively-worked items: root-only, status in-progress at ANY stage. These
+  // can otherwise fall outside the `wl next` top-N window (the base feed is
+  // capped at 32, and a low-priority in-progress item is outranked by
+  // in-review (+600) and audit-not-ready (+3500) boosts), hiding the
+  // producer's real-time "what am I working on" signal
+  // (WL-0MV6KV22S004NYIU). The query is NOT merged into reviewQueueArgs()
+  // because it is a distinct concern with a different stage scope — adding it
+  // there would break the review-queue single-spawn dedup invariant.
+  //
+  // Blocked items: root-only, status=blocked at ANY stage (root-only keeps
+  // them at the same top-level visibility as the other mandatory subsets).
+  // `wl next` penalises blocked items by -10000, so a release-blocking
+  // blocked in_review item ranks far below the browseItemCount window and is
+  // never returned by the base feed — the explicit subset fetch guarantees it
+  // is still shown (WL-0MV71WBHB007D8ZE). The query is NOT merged into
+  // reviewQueueArgs() (the review queue is stage-scoped; blocked spans stages).
+  const [criticalOutput, reviewOutput, activeOutput, blockedOutput] = await Promise.all([
     runWl(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed']),
-    runWl(['list', '--status', 'completed', '--stage', 'in_review', '--root-only']),
+    runWl(reviewQueueArgs()),
+    runWl(['list', '--status', 'in-progress', '--root-only']),
+    runWl(['list', '--status', 'blocked', '--root-only']),
   ]);
   const criticalItems = extractItems(extractJson(criticalOutput));
   const reviewItems = extractItems(extractJson(reviewOutput));
-  return mergeUniqueById(criticalItems, reviewItems);
+  const activeItems = extractItems(extractJson(activeOutput));
+  const blockedItems = extractItems(extractJson(blockedOutput));
+  return mergeUniqueById(criticalItems, reviewItems, activeItems, blockedItems);
 }
 
 /**
  * Fetch the next available work items (via `wl next`).
  *
- * When a count is given, smart selection is applied: all critical and
- * completed/in_review items are always included (regardless of count) and
- * the count limits only the remaining "other" items. The mandatory subsets
- * are merged from explicit `wl list` queries (see fetchMandatorySubsets).
+ * Dependency-blocked items are SHOWN in the selection list: the query passes
+ * `--include-blocked` so `wl next`'s default exclusions do not hide blocked
+ * backlog work (WL-0MV6TFX0600145M2). Blocked items still rank low (the
+ * shared scorer applies a heavy blocked penalty), so they surface at the
+ * bottom of the list rather than displacing actionable work.
+ *
+ * When a count is given, smart selection is applied: all critical items, all
+ * in_review review-queue items, all actively-worked in-progress items and all
+ * status=blocked root items are always included (regardless of count,
+ * WL-0MV6KV22S004NYIU / WL-0MV71WBHB007D8ZE) and the count limits only the
+ * remaining "other" items. The mandatory subsets are merged from explicit
+ * `wl list` queries (see fetchMandatorySubsets), so a blocked item that ranks
+ * below the `-n` window is still shown.
  */
 export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   const args = ['next'];
@@ -593,8 +763,26 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
     args.push('-n', String(count));
   }
   args.push('--include-in-progress');
+  // Show dependency-blocked items in the Herdr selection list. `wl next`
+  // excludes them by default (shared filterCandidates, unless includeBlocked);
+  // without this flag blocked backlog work silently disappears from the
+  // worklist (WL-0MV6TFX0600145M2). The base feed includes them within its
+  // `-n` window; the status=blocked mandatory subset (see
+  // fetchMandatorySubsets) additionally guarantees a low-ranked blocked item
+  // is never cut (WL-0MV71WBHB007D8ZE). The implement-tier candidate lookup
+  // (getNextImplementCandidate) deliberately keeps the default exclusion.
+  args.push('--include-blocked');
 
-  const output = await runWl(args);
+  // Run the base `wl next` selection and the mandatory subsets CONCURRENTLY:
+  // they are independent reads, and overlapping them removes one full `wl`
+  // startup from the critical path of a cold refresh (WL-0MV5CBQ6L005SPAG).
+  // The mandatory subsets are only needed when a count window is applied;
+  // the count-less path returns the base selection unchanged.
+  const needMandatory = count !== undefined;
+  const mandatoryPromise: Promise<WorkItem[]> = needMandatory
+    ? fetchMandatorySubsets()
+    : Promise.resolve([] as WorkItem[]);
+  const [output, mandatory] = await Promise.all([runWl(args), mandatoryPromise]);
   const payload = extractJson(output);
   const items = extractItems(payload);
   if (count === undefined) {
@@ -604,8 +792,30 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // Smart selection: merge the mandatory subsets with the regular wl next
   // results (deduplicated by ID), then always show the mandatory set and
   // limit only the "other" items to fill the remaining count slots.
-  const mandatory = await fetchMandatorySubsets();
-  const merged = mergeUniqueById(items, mandatory);
+  //
+  // Audit-metadata merge (WL-0MUWDW0N6003KF6G): `wl next` does not emit the
+  // audit content fingerprints (`fingerprint`/`currentFingerprint`) that
+  // `wl list` does. Deduplication below keeps the FIRST occurrence, so without
+  // this enrichment the default worklist would silently drop the fingerprint
+  // metadata for any item also present in a mandatory `wl list` subset — the
+  // in_review 6-bucket sort then degrades to the timestamp gate only, which
+  // can rank a fingerprint-fresh (but time-stale) item into the wrong bucket
+  // and reorder it ahead of a higher-priority item. Prefer the richer
+  // `wl list` representation for audit fields so the default worklist and the
+  // stage-filtered view (`fetchItemsByStage`) classify buckets identically.
+  const mandatoryById = new Map(mandatory.map((item) => [item.id, item]));
+  const enrichedItems = items.map((item) => {
+    const rich = mandatoryById.get(item.id);
+    if (!rich) return item;
+    return {
+      ...item,
+      auditResult: rich.auditResult,
+      auditedAt: rich.auditedAt,
+      fingerprint: rich.fingerprint,
+      currentFingerprint: rich.currentFingerprint,
+    };
+  });
+  const merged = mergeUniqueById(enrichedItems, mandatory);
   const selected = selectWorkItems(merged, count);
   // Regroup the final selected set so every displayed item (mandatory wl
   // list items included) receives a correct group assignment and no
@@ -623,6 +833,11 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
  * `in-progress` while it is being re-worked after review feedback), so
  * restricting to `status=open` would hide the entire review queue. `open`
  * is included for robustness (no in_review item carries it today).
+ * `blocked` is also included (WL-0MV70XY6D008013C): the release gate
+ * queries `wl list --stage in_review` with NO status filter, so a
+ * status=blocked item in the in_review stage blocks the release; the
+ * review filter must show it or the selection list and the release gate
+ * disagree about what is in the review queue.
  *
  * plan_complete and intake_complete are also exceptions (WL-0MUIB7D30009KG00):
  * after WL-0MTOHS5B4001Y9FX removed the in_progress stage, actively-worked
@@ -632,7 +847,7 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
  * stage-filtered worklists.
  */
 const STAGE_STATUS: Record<string, string> = {
-  in_review: 'completed,in-progress,open',
+  in_review: 'completed,in-progress,open,blocked',
   plan_complete: 'open,in-progress',
   intake_complete: 'open,in-progress',
 };
@@ -647,9 +862,12 @@ const STAGE_STATUS: Record<string, string> = {
  * and `completed`.
  *
  * Status per valid stage:
- * - `in_review` (WL-0MSKCRX730052IIW): `completed`, `in-progress`, `open`
- *   — in_review items carry `completed`/`in-progress` status per the project
- *   workflow.
+ * - `in_review` (WL-0MSKCRX730052IIW): `completed`, `in-progress`, `open`,
+ *   `blocked` — in_review items carry `completed`/`in-progress` status per
+ *   the project workflow; `blocked` is included (WL-0MV70XY6D008013C) so the
+ *   review filter matches the release gate's unfiltered `wl list --stage
+ *   in_review`, which treats a status=blocked in_review item as
+ *   release-blocking.
  * - `plan_complete` / `intake_complete` (WL-0MUIB7D30009KG00): `open`,
  *   `in-progress` — actively-worked items retain their pipeline stage and
  *   flip `status` to `in-progress` (WL-0MTOHS5B4001Y9FX removed the
@@ -709,6 +927,15 @@ export async function fetchItemDetails(id: string): Promise<WorkItem | null> {
  * Fetch the total count of actionable work items.
  */
 export async function fetchActionableCount(): Promise<number | undefined> {
+  // Fast path: count in-process against the SQLite store. This removes a
+  // whole `wl` process spawn from every refresh and is exact: the CLI's
+  // actionable count is the number of non-deleted items in those statuses.
+  const inProcess = await withInProcessDb((db) =>
+    db.list({ status: ['open', 'in-progress', 'blocked'] }).length,
+  );
+  if (inProcess !== undefined) {
+    return inProcess;
+  }
   try {
     const output = await runWl(['list', '--status', 'open,in-progress,blocked']);
     const payload = JSON.parse(output);
@@ -745,22 +972,32 @@ export async function runWlSync(): Promise<{ success: boolean; error?: string }>
  * that is not current per `isAuditFresh`).
  */
 export interface ReviewQueueState {
-  /** Number of root-level completed/in_review items. */
+  /** Number of root-level in_review items with status completed. */
   count: number;
   /** True when any of those items lacks a current (fresh) audit. */
   auditsOutstanding: boolean;
 }
 
 /**
- * Fetch the review-queue state (root-only completed/in_review items) for
- * the sprint-complete / queue-depth banner (parent WL-0MTHSHN5V008R5L0;
- * banner copy selection AH-0MUDYTQ55002NUSJ). Returns the count and whether
- * an outstanding audit remains, or undefined on failure — callers treat
- * undefined as "unknown" and leave state unchanged (fail-closed, AC1).
+ * Fetch the review-queue state (root-only in_review items with status
+ * `completed`) for the sprint-complete / queue-depth banner (parent
+ * WL-0MTHSHN5V008R5L0; banner copy selection AH-0MUDYTQ55002NUSJ). Returns
+ * the count and whether an outstanding audit remains, or undefined on
+ * failure — callers treat undefined as "unknown" and leave state unchanged
+ * (fail-closed, AC1).
  *
- * Uses `wl list --status completed --stage in_review --root-only --json`
- * (the same query as the former `fetchCompletedItemCount`). "Outstanding
- * audit" reuses the shared `isAuditFresh` predicate: a missing `auditedAt`
+ * Uses `wl list --status completed,in-progress --stage in_review
+ * --root-only --json` — the SAME query as the mandatory review subset (see
+ * {@link reviewQueueArgs}), so the in-flight memo deduplicates the two into
+ * ONE spawn — and then keeps only the `completed` items in-process. This
+ * preserves the banner's historical "completed/in_review" semantics while
+ * the mandatory worklist subset consumes the full (completed + in-progress)
+ * set (WL-0MV6JGVPH009YDXB). In-progress/in_review items are excluded here
+ * because they are being re-worked after review feedback: they are not
+ * dispatchable to the audit tier (which selects completed/in_review only),
+ * so counting them in "focus on audits" would be misleading.
+ *
+ * "Outstanding audit" reuses the shared `isAuditFresh` predicate: a missing `auditedAt`
  * or a stored audit that is not current counts as outstanding; a fresh
  * audit (passed or failed) does not. `wl list --json` exposes
  * `currentFingerprint` for items that carry a stored fingerprint, so the
@@ -776,9 +1013,12 @@ export interface ReviewQueueState {
  */
 export async function fetchReviewQueueState(): Promise<ReviewQueueState | undefined> {
   try {
-    const output = await runWl(['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json']);
+    // Identical args to {@link fetchMandatorySubsets}'s review query so the
+    // in-flight memo deduplicates the two into ONE spawn when a refresh
+    // schedules both concurrently (WL-0MV5CBQ6L005SPAG).
+    const output = await runWl(reviewQueueArgs());
     const payload = extractJson(output);
-    const items = extractItems(payload);
+    const items = extractItems(payload).filter((item) => item.status === 'completed');
     const auditsOutstanding = items.some((item) =>
       !isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint),
     );
@@ -824,6 +1064,89 @@ export async function fetchChildrenForItem(parentId: string, depth = 1): Promise
   const payload = extractJson(output);
   const items = extractItems(payload);
   return regroupWorkItems(items.map((item) => ({ ...item, depth })));
+}
+
+/**
+ * Fetch the direct children of MULTIPLE expanded parents in ONE pass
+ * (WL-0MV5CBQ6L005SPAG). The default worklist can have dozens of expanded
+ * parents; spawning `wl list --parent <id>` once per parent made the
+ * expanded-children cost the dominant share of a cold refresh. This reads
+ * the children in-process from the SQLite store (one read for all parents)
+ * and groups them per parent with the SAME ordering and fields as
+ * {@link fetchChildrenForItem}.
+ *
+ * Fail-open / correctness:
+ * - When no in-process read is possible (no resolved worklog dir, no SQLite
+ *   file, `@worklog/shared` unavailable) it falls back to one
+ *   `wl list --parent` spawn per parent, so behaviour is unchanged there.
+ * - When any matched child carries a stored audit fingerprint the CLI's
+ *   `currentFingerprint` enrichment is required for exact freshness, so the
+ *   whole batch falls back to spawning `wl`. Audited children are rare
+ *   because audit dispatch is root-only, so this is the uncommon path.
+ *
+ * `depthByParent` overrides the display depth per parent (default 1); the
+ * worklist passes each expanded item's hierarchy depth + 1 so nested
+ * expansion still renders at the correct depth (WL-0MSQ3FH1K000MMJW).
+ */
+export async function fetchChildrenForItems(
+  parentIds: string[],
+  depthByParent?: Map<string, number>,
+): Promise<Map<string, WorkItem[]>> {
+  const uniqueParents = [...new Set(parentIds)];
+  const result = new Map<string, WorkItem[]>();
+  for (const id of uniqueParents) result.set(id, []);
+  if (uniqueParents.length === 0) return result;
+
+  const wanted = new Set(uniqueParents);
+  const inProcess = await withInProcessDb((db) => {
+    // childCounts is computed over ALL items (deleted included), matching the
+    // CLI's `getChildCounts()` enrichment. Children themselves are non-deleted
+    // only, matching `wl list --parent`'s default filtering.
+    const allRaw = db.list({});
+    const childCounts = db.getChildCounts(allRaw);
+    const matched = allRaw.filter(
+      (item) => item.parentId && wanted.has(String(item.parentId)) && item.status !== 'deleted',
+    );
+    const enriched = enrichInProcessItems(db, matched);
+    // A stored fingerprint needs the CLI's currentFingerprint enrichment, so
+    // the fast path must not serve the batch in that case.
+    const needsCli = enriched.some((item) => Boolean(item.fingerprint));
+    const byParent = new Map<string, WorkItem[]>();
+    for (const item of enriched) {
+      const parentId = item.parentId;
+      if (!parentId || !wanted.has(parentId)) continue;
+      const list = byParent.get(parentId) ?? [];
+      list.push({ ...item, childCount: childCounts.get(item.id) ?? 0 });
+      byParent.set(parentId, list);
+    }
+    return { byParent, needsCli };
+  });
+
+  if (inProcess && !inProcess.needsCli) {
+    for (const id of uniqueParents) {
+      const depth = depthByParent?.get(id) ?? 1;
+      const children = (inProcess.byParent.get(id) ?? []).map((item) => ({ ...item, depth }));
+      result.set(id, regroupWorkItems(children));
+    }
+    return result;
+  }
+
+  // Fallback: preserve the exact per-parent CLI semantics (including
+  // currentFingerprint enrichment for audited children).
+  const fetched = await Promise.all(
+    uniqueParents.map(async (id) => {
+      try {
+        const children = await fetchChildrenForItem(id, depthByParent?.get(id) ?? 1);
+        return [id, children] as const;
+      } catch {
+        // Fail-open: a failed child fetch leaves the previously rendered
+        // children in place (the caller carries them over).
+        return [id, [] as WorkItem[]] as const;
+      }
+    }),
+  );
+  for (const [id, children] of fetched) result.set(id, children);
+  return result;
 }
 
 // ── Work-item claiming ────────────────────────────────────────────────

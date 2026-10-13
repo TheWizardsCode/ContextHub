@@ -148,10 +148,12 @@ export interface DispatcherAnchorDeps {
   readProcEnviron?(shellPid: string): Promise<string | null>;
 }
 
-/** One parsed `herdr tab list` record (id + label). */
+/** One parsed `herdr tab list` record (id + label, plus agent liveness). */
 export interface DispatcherTabInfo {
   tabId: string;
   label: string;
+  /** Raw `agent_status` from the tab record, when herdr reports it. */
+  agentStatus?: string;
 }
 
 /** One parsed workspace-scoped `herdr pane list` record (tab routing). */
@@ -252,11 +254,14 @@ export function createDispatcherAnchorDeps(
 // ── herdr tab/pane CLI helpers (per-prefix tab anchors) ────────────────
 
 /**
- * Parse `herdr tab list` JSON output into `{ tabId, label }` records.
+ * Parse `herdr tab list` JSON output into `{ tabId, label, agentStatus? }`
+ * records (the agent status is carried for liveness-aware consumers such as
+ * the hydrator's running-pane check).
  *
  * Tolerates log lines before the JSON envelope (scan for the first `{`), the
  * `{ result: { tabs: [...] } }` envelope, a bare `{ tabs: [...] }` shape, and
- * the `tab_id` / `tabId` / `id` key variants plus `label` / `title`.
+ * the `tab_id` / `tabId` / `id` key variants plus `label` / `title` and
+ * `agent_status` / `agentStatus`.
  * Returns `null` when no tab array can be found (caller fails closed — never
  * treat an unparseable list as "no tab exists", which would duplicate tabs).
  */
@@ -285,7 +290,9 @@ export function parseTabListOutput(raw: string): DispatcherTabInfo[] | null {
     const tabId = rec.tab_id ?? rec.tabId ?? rec.id;
     const label = rec.label ?? rec.title;
     if (typeof tabId === 'string' && tabId !== '' && typeof label === 'string') {
-      out.push({ tabId, label });
+      const rawAgentStatus = rec.agent_status ?? rec.agentStatus;
+      const agentStatus = typeof rawAgentStatus === 'string' ? rawAgentStatus : undefined;
+      out.push(agentStatus !== undefined ? { tabId, label, agentStatus } : { tabId, label });
     }
   }
   return out;

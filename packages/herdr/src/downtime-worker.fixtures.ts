@@ -7,12 +7,25 @@
  * query / model switch / local lease / server down / not all slots free),
  * ambiguous (`total_slots` 0 or missing fields), and network error /
  * timeout / HTTP-failure responses for the poller tests (F2).
+ *
+ * Also hosts the shared test scaffolding (WL-0MV4V0V8Z003PBQ2): the
+ * `makeDeps` mock factory, temporary-directory helpers, and downtime-log
+ * writers, so every split test file imports one module instead of
+ * re-implementing the same setup.
  */
 
-import type { LlamaStatus } from './downtime-worker.js';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { vi } from 'vitest';
+
+import { DOWNTIME_LOG_FILE } from './downtime-log.js';
+import type { DowntimeWorkerDeps, LlamaStatus } from './downtime-worker.js';
 
 // ── Status payloads ───────────────────────────────────────────────────
 
+/** Every slot idle → the worker may dispatch freely (all-free availability signal). */
 export const idleAllSlotsFree: LlamaStatus = {
   llama_server_running: true,
   local_active_query: false,
@@ -35,9 +48,13 @@ export const idleAllSlotsFree: LlamaStatus = {
   local_owner_session_ids: [],
 };
 
+/** A live query is queued on the proxy → slots effectively busy. */
 export const busyActiveQuery: LlamaStatus = { ...idleAllSlotsFree, local_active_query: true };
+/** A model switch is in progress → slots effectively busy. */
 export const busyModelSwitch: LlamaStatus = { ...idleAllSlotsFree, model_switch_in_progress: true };
+/** An in-flight local lease is held → slots effectively busy. */
 export const busyLocalLease: LlamaStatus = { ...idleAllSlotsFree, local_lease_active: true };
+/** The llama server is not running → nothing can be dispatched. */
 export const busyServerNotRunning: LlamaStatus = { ...idleAllSlotsFree, llama_server_running: false };
 
 /** available_slots < total_slots → busy with the default N=0 (all slots). */
@@ -242,6 +259,7 @@ export const ambiguousMissingFieldsRaw: Record<string, unknown> = {
   current_model: 'qwen3-8b',
 };
 
+/** Shape of the fixture used to stub the parsed proxy status in worker tests. */
 export interface LlamaStatusFixture {
   name: string;
   status: LlamaStatus;
@@ -309,6 +327,7 @@ export interface LlamaStatusHttpResponse {
   json(): Promise<unknown>;
 }
 
+/** Build a minimal fetch-style `Response` double returning the given body. */
 export function jsonResponseFixture(body: unknown, status = 200): LlamaStatusHttpResponse {
   return {
     ok: status >= 200 && status < 300,
@@ -317,6 +336,7 @@ export function jsonResponseFixture(body: unknown, status = 200): LlamaStatusHtt
   };
 }
 
+/** A non-2xx `Response` double for error-path tests. */
 export const httpErrorResponseFixture: LlamaStatusHttpResponse = jsonResponseFixture(
   { error: 'boom' },
   500,
@@ -332,3 +352,146 @@ export const timeoutErrorFixture: Error = Object.assign(
   new Error('The operation was aborted'),
   { name: 'AbortError' },
 );
+
+// ── Shared test scaffolding (WL-0MV4V0V8Z003PBQ2) ─────────────────────
+
+// ── Per-test mock budget (WL-0MV4VSNI00002WFM) ────────────────────────
+//
+// The split downtime-worker suite allows at most **5** `vi.fn()` calls per
+// `it()`/`test()` block. The ~20 mocks `makeDeps()` creates are shared
+// infrastructure and are excluded — the budget bounds the *per-test
+// overrides* a reader must hold in their head, which is where the original
+// 13k-line file's 664 mocks came from.
+//
+// Rationale: analysis of the 718 split tests found an average of ~5.2 mocks
+// per original describe block and a maximum of 6 per test. A cap of 5 keeps
+// every focused test green while forcing genuinely overloaded tests to
+// extract setup (the two original 6-mock tests now share a helper instead).
+//
+// Enforcement: `npm run test:mock-budget` (`scripts/check-mock-budget.ts`,
+// Option B of the intake) parses each `downtime-worker*.test.ts` with the
+// TypeScript compiler API and fails when any test exceeds the cap. The same
+// check runs in the unit suite (`tests/unit/mock-budget.test.ts`), so it is
+// part of the normal test gate. Extract extra setup into this module (or a
+// local helper) rather than raising the cap.
+
+/**
+ * Default mocked `DowntimeWorkerDeps` for dispatch tests, with every dep
+ * answering a neutral "nothing to do" result so a test only overrides the
+ * dep it exercises. Merges `overrides` over the defaults (last write wins).
+ */
+export function makeDeps(overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
+  return {
+    // Herdr list head (WL-0MTK1ILM2009QYB2): empty by default so legacy tests that
+    // stub per-tier lookups keep passing (the head path is inert on empty).
+    getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+    getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Audit tier answers a GENUINELY empty tier by default ({ok:true,
+    // candidate:null}); a wl/parse failure is {ok:false} (WL-0MSLWJ2KP0002SV0).
+    getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Active-audit single-flight (WL-0MT3PHW4I002SNOV): no active audit by
+    // default ({ok:true, active:false}), so the existing tier tests exercise
+    // the unchanged audit tier (backward-compatible default — the audit
+    // tier proceeds). The dispatcher consults this dep only after F2 lands;
+    // existing tests are unaffected either way.
+    getActiveAudit: vi.fn().mockResolvedValue({ ok: true, active: false }),
+    getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+    claimItem: vi.fn().mockResolvedValue({ ok: true }),
+    spawnAgentPane: vi.fn().mockResolvedValue({ ok: true }),
+    recordDispatch: vi.fn().mockResolvedValue(true),
+    recordDispatchFailure: vi.fn().mockResolvedValue(undefined),
+    // Claim rollback (WL-0MT32F908002YFFA): default success so the recovery
+    // paths report 'claim-rolled-back' unless a test forces a failed rollback.
+    rollbackClaim: vi.fn().mockResolvedValue(true),
+    recordError: vi.fn().mockResolvedValue(undefined),
+    // Scheduled-prompts tier (WL-0MSS1Q5ER007QDKX): no due prompt by
+    // default, so existing tier tests exercise the unchanged backlog tiers.
+    getDueScheduledPrompt: vi.fn().mockResolvedValue(null),
+    recordScheduledPromptTrigger: vi.fn().mockResolvedValue(true),
+    // Critical-first tier (WL-0MT3FM8VA005XBHE): no critical candidate by
+    // default, so the existing tier tests exercise the unchanged backlog
+    // tiers (regression guard — after F4 the critical tier must fall
+    // through to implement → plan → intake when the critical tier is
+    // genuinely empty).
+    getNextCriticalCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+    // Code-freeze gate (WL-0MSQ0RPQP00636JY): not frozen by default, so
+    // existing dispatch tests exercise the unchanged audit/implement tiers.
+    readCodeFreezeStatus: vi.fn().mockReturnValue('not-frozen'),
+    // Interim freshness re-check (WL-0MT8KSTOE00871E7): no fresh audit by
+    // default, so existing dispatch tests exercise the unchanged path.
+    hasFreshAudit: vi.fn().mockResolvedValue(false),
+    // Review-queue depth gate (WL-0MT2UQWOR007CYY9): empty queue by default
+    // so the gate is inactive and existing tests exercise the unchanged path.
+    getReviewQueueCount: vi.fn().mockResolvedValue(0),
+    // Item-scoped in-flight guard (WL-0MUBEZ6PE002WLP4 / F3): an available
+    // query reporting NO live panes by default, so the guard is inert and
+    // existing tests escalate critical items unchanged. Tests that exercise
+    // the guard override this with `records` carrying a live working pane.
+    getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0, paneIds: [], records: [] }),
+    ...overrides,
+  };
+}
+
+/**
+ * Create a unique temporary directory under the OS temp root, prefixed with
+ * `prefix`. The caller owns cleanup; prefer `createTempDirTracker()` when a
+ * describe block creates several directories.
+ */
+export function makeTempDir(prefix: string): string {
+  return mkdtempSync(join(tmpdir(), prefix));
+}
+
+/** Registry returned by `createTempDirTracker()`. */
+export interface TempDirTracker {
+  /** Create, remember and return a new unique temp directory. */
+  make(prefix: string): string;
+  /** Remove every directory created by this tracker (idempotent). */
+  cleanup(): void;
+}
+
+/**
+ * Per-describe temporary-directory registry: `make()` creates a unique temp
+ * directory and records it, `cleanup()` removes them all (call it from
+ * `afterEach`). Centralises the `mkdtempSync` + `rmSync` boilerplate that was
+ * duplicated across describe blocks.
+ */
+export function createTempDirTracker(): TempDirTracker {
+  const dirs: string[] = [];
+  return {
+    make(prefix: string): string {
+      const dir = mkdtempSync(join(tmpdir(), prefix));
+      dirs.push(dir);
+      return dir;
+    },
+    cleanup(): void {
+      for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+/**
+ * ISO timestamp for a moment `ms` milliseconds in the past. Dispatch paths
+ * read the real `Date.now()`, so tests that seed dispatch markers use this
+ * rather than a fake clock.
+ */
+export function ago(ms: number): string {
+  return new Date(Date.now() - ms).toISOString();
+}
+
+/**
+ * Write a raw string to the downtime dispatch log at
+ * `<cwd>/.worklog/<DOWNTIME_LOG_FILE>`, creating the `.worklog` directory
+ * when absent.
+ */
+export function writeRawDowntimeLog(cwd: string, raw: string): void {
+  mkdirSync(join(cwd, '.worklog'), { recursive: true });
+  writeFileSync(join(cwd, '.worklog', DOWNTIME_LOG_FILE), raw, 'utf8');
+}
+
+/**
+ * Write `entries` to the downtime dispatch log as JSONL (one JSON object per
+ * line, trailing newline), creating the `.worklog` directory when absent.
+ */
+export function writeDowntimeLog(cwd: string, entries: Array<Record<string, unknown>>): void {
+  writeRawDowntimeLog(cwd, entries.map((e) => JSON.stringify(e)).join('\n') + '\n');
+}

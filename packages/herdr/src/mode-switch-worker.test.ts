@@ -6,8 +6,8 @@
  * Run: npx vitest run packages/herdr/src/mode-switch-worker.test.ts
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -31,6 +31,7 @@ import {
   type ProxyMode,
 } from './mode-switch-worker.js';
 import { DOWNTIME_AUDIT_MIN_FREE_SLOTS, type LlamaStatus } from './downtime-worker.js';
+import { writeModelCooldown, readModelCooldowns, MODEL_COOLDOWN_FILE } from '@worklog/shared/model-cooldown';
 
 // ── Test helpers ──────────────────────────────────────────────────────
 
@@ -1278,5 +1279,219 @@ describe('15-minute default (AC3)', () => {
     expect(clampModeSwitchIdleThresholdMs(-1)).toBe(900_000);
     // The 60s floor is unchanged.
     expect(clampModeSwitchIdleThresholdMs(1_000)).toBe(MODE_SWITCH_IDLE_THRESHOLD_FLOOR_MS);
+  });
+});
+
+// ── Model-cooldown gate (WL-0MV5638ZS005I5XQ, parent AC2/AC4) ─────────
+//
+// While any active model-cooldown exists, the leader must hold **fast** —
+// a pane sitting in proxy backoff holds no slot, so the proxy looks idle and
+// the cheap switch would otherwise add concurrency during a known
+// provider-exhaustion window. The hold is bounded by `cooldownUntil` (no
+// latch) and the fast-on-command path is untouched.
+
+describe('model-cooldown gate', () => {
+  let cooldownDir: string;
+
+  beforeEach(() => {
+    clock = 1_000_000;
+    cooldownDir = mkdtempSync(join(tmpdir(), 'wl-mode-cooldown-'));
+  });
+
+  afterEach(() => {
+    rmSync(cooldownDir, { recursive: true, force: true });
+  });
+
+  function makeWorker(api: MockAdminApi) {
+    return createModeSwitchWorker({
+      fetcher: api.fetcher,
+      now,
+      isLeader: () => true,
+      coordinationDir: cooldownDir,
+    });
+  }
+
+  /** Record an active exhaustion cooldown keyed to a (different) pane. */
+  function recordCooldown(cooldownUntil: number): boolean {
+    return writeModelCooldown(
+      cooldownDir,
+      {
+        paneId: 'pane-exhausted',
+        sessionId: 'session-exhausted',
+        itemId: 'WL-0MV5638ZS005I5XQ',
+        kind: 'implement',
+        reason: 'all providers exhausted',
+        cooldownUntil,
+      },
+      clock,
+    );
+  }
+
+  it('AC2: an active cooldown holds fast — no cheap POST while cooldownUntil is in the future', async () => {
+    const api = mockAdminApi();
+    const worker = makeWorker(api);
+    advance(900_000); // idle window met
+    recordCooldown(clock + 60_000); // cooldown active well past the tick
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(0);
+  });
+
+  it('AC2: no cooldown recorded (missing signal) the normal cheap decision runs', async () => {
+    const api = mockAdminApi();
+    const worker = makeWorker(api);
+    advance(900_000);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'cheap' }));
+  });
+
+  it('AC2: an already-expired cooldown does not suppress the cheap switch', async () => {
+    const api = mockAdminApi();
+    const worker = makeWorker(api);
+    advance(900_000);
+    recordCooldown(clock - 1); // expiry strictly in the past
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'cheap' }));
+  });
+
+  it('AC2/fail-closed: an unreadable/corrupt cooldown signal produces no cheap POST', async () => {
+    const api = mockAdminApi();
+    const worker = makeWorker(api);
+    advance(900_000);
+    writeFileSync(join(cooldownDir, MODEL_COOLDOWN_FILE), '{ not valid json', 'utf8');
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(0);
+  });
+
+  it('fail-closed: an unreadable/corrupt signal is logged (not silent)', async () => {
+    const api = mockAdminApi();
+    const worker = makeWorker(api);
+    advance(900_000);
+    writeFileSync(join(cooldownDir, MODEL_COOLDOWN_FILE), '{ not valid json', 'utf8');
+
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await worker.tick({
+        enabled: true,
+        idleThresholdMs: 900_000,
+        proxyUrl: 'http://proxy',
+        proxyStatus: idleStatus(),
+      });
+      await flushAsync();
+      expect(errorSpy).toHaveBeenCalledTimes(1);
+      expect(String(errorSpy.mock.calls[0][0])).toMatch(/unreadable\/corrupt/i);
+      expect(String(errorSpy.mock.calls[0][0])).toMatch(/fail-closed/i);
+    } finally {
+      errorSpy.mockRestore();
+    }
+    // The hold is the safe direction: no cheap POST.
+    expect(setModePosts(api)).toHaveLength(0);
+  });
+
+  it('absent vs unreadable: an empty cooldown document permits the normal cheap decision', async () => {
+    const api = mockAdminApi();
+    const worker = makeWorker(api);
+    advance(900_000);
+    // A present-but-empty signal (`cooldowns: []`) is not fail-closed: it
+    // means "nothing recorded", so the cheap decision runs (WL-0MV5639X70029BOI).
+    writeFileSync(
+      join(cooldownDir, MODEL_COOLDOWN_FILE),
+      JSON.stringify({ schemaVersion: 1, cooldowns: [] }),
+      'utf8',
+    );
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'cheap' }));
+  });
+
+  it('staleness: a crashed pane marker expires by cooldownUntil and is pruned on the next write', async () => {
+    // A marker left by a crashed pane whose cooldownUntil is in the past is
+    // inactive, so the cheap decision runs and the entry is pruned when the
+    // next marker is written (WL-0MV5639X70029BOI).
+    recordCooldown(clock - 1);
+    let stored = readModelCooldowns(cooldownDir, clock);
+    expect(stored).toEqual([]);
+
+    // A subsequent write prunes the expired entry.
+    recordCooldown(clock + 60_000);
+    stored = readModelCooldowns(cooldownDir, clock);
+    expect(stored).toHaveLength(1);
+    expect(stored?.[0].cooldownUntil).toBe(clock + 60_000);
+
+    const raw = JSON.parse(readFileSync(join(cooldownDir, MODEL_COOLDOWN_FILE), 'utf8'));
+    expect(raw.cooldowns).toHaveLength(1);
+  });
+
+  it('AC2/no-latch: the first tick at/after cooldownUntil performs the normal cheap decision', async () => {
+    const api = mockAdminApi();
+    const worker = makeWorker(api);
+    advance(900_000);
+    const cooldownUntil = clock + 60_000;
+    recordCooldown(cooldownUntil);
+
+    // Held while the cooldown is active.
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(0);
+
+    // The first tick at `cooldownUntil` treats the entry as expired (active
+    // is `cooldownUntil > now`) and resumes the normal cheap decision.
+    advance(cooldownUntil - clock);
+    await worker.tick({
+      enabled: true,
+      idleThresholdMs: 900_000,
+      proxyUrl: 'http://proxy',
+      proxyStatus: idleStatus(),
+    });
+    await flushAsync();
+    expect(setModePosts(api)).toHaveLength(1);
+    expect(setModePosts(api)[0].body).toBe(JSON.stringify({ mode: 'cheap' }));
+  });
+
+  it('fast path: onOperatorCommand still POSTs fast while a cooldown is active', async () => {
+    const api = mockAdminApi();
+    const worker = makeWorker(api);
+    recordCooldown(clock + 3_600_000); // long active cooldown
+    worker.onOperatorCommand('http://proxy');
+    await flushAsync();
+    const posts = setModePosts(api);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].body).toBe(JSON.stringify({ mode: 'fast' }));
   });
 });

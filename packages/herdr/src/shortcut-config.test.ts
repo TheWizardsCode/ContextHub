@@ -283,15 +283,18 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     );
   });
 
-  it('a-r (audit reject) resets status/stage/priority on reject (WL-0MSM72QXN008GUP2)', () => {
+  it('a-r (audit reject) resets status/stage but preserves priority (WL-0MUUAEDAU001GT1L)', () => {
     const registry = loadShortcutConfig();
     const entry = registry.lookupChordEntry(['a', 'r'], 'list', undefined, false);
     expect(entry).toBeDefined();
     expect(entry?.command).toContain('wl reviewed <id> false');
-    expect(entry?.command).toContain('wl update <id> --status open --stage plan_complete --priority medium');
+    expect(entry?.command).toContain('wl update <id> --status open --stage plan_complete');
+    // Rejection must not downgrade the producer's priority signal.
+    expect(entry?.command).not.toContain('--priority');
     expect(entry?.command).toContain("wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'");
     expect(entry?.label).toBe('audit reject');
     expect(entry?.stages).toEqual(['in_review']);
+    expect(entry?.description).toBe('Reject the in_review item and reset it to open/plan_complete for rework.');
   });
 
   it('a-y (audit approve) and a-r (audit reject) differ only in the audit-set flag (WL-0MSM72QXN008GUP2)', () => {
@@ -304,7 +307,8 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     // Approve sets ready-to-close yes; reject sets it no plus the reset.
     expect(approve?.command).toContain('--ready-to-close yes');
     expect(reject?.command).toContain('--ready-to-close no');
-    expect(reject?.command).toContain('--status open --stage plan_complete --priority medium');
+    expect(reject?.command).toContain('--status open --stage plan_complete');
+    expect(reject?.command).not.toContain('--priority');
   });
 
 // ── c chord split: c-n (create intake) and c-q (create quick) (WL-0MTCLB50D0026YA7) ──

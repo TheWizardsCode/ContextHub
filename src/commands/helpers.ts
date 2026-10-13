@@ -121,13 +121,21 @@ export function displayItemTree(items: WorkItem[]): void {
   });
 }
 
-// Display work items using the human formatter but preserve tree hierarchy
-export function displayItemTreeWithFormat(items: WorkItem[], db: WorklogDatabase | null, format: string): void {
+// Display work items using the human formatter but preserve tree hierarchy.
+//
+// `preserveOrder` (WL-0MUWDW0N6003KF6G): when true, the caller has already
+// applied a deliberate display order (e.g. the in_review 6-bucket predicate in
+// `list.ts`) and the default position-based re-sort must NOT discard it. The
+// passed array order is preserved for both root items and children.
+export function displayItemTreeWithFormat(items: WorkItem[], db: WorklogDatabase | null, format: string, preserveOrder: boolean = false): void {
   const itemIds = new Set(items.map(i => i.id));
   const orderedItems = db
     ? db.getAllOrderedByHierarchySortIndex().filter(item => itemIds.has(item.id))
     : null;
   const sortChildren = (list: WorkItem[]): WorkItem[] => {
+    if (preserveOrder) {
+      return list.slice();
+    }
     if (!orderedItems) {
       return list.slice().sort(sortByPriorityAndDate);
     }
@@ -177,13 +185,16 @@ export function displayItemTreeWithFormat(items: WorkItem[], db: WorklogDatabase
  * a single string instead of printing directly. This is useful when callers
  * wish to pipe the output through a pager or otherwise capture it.
  */
-export function displayItemTreeWithFormatToString(items: WorkItem[], db: WorklogDatabase | null, format: string): string {
+export function displayItemTreeWithFormatToString(items: WorkItem[], db: WorklogDatabase | null, format: string, preserveOrder: boolean = false): string {
   const outLines: string[] = [];
   const itemIds = new Set(items.map(i => i.id));
   const orderedItems = db
     ? db.getAllOrderedByHierarchySortIndex().filter(item => itemIds.has(item.id))
     : null;
   const sortChildren = (list: WorkItem[]): WorkItem[] => {
+    if (preserveOrder) {
+      return list.slice();
+    }
     if (!orderedItems) {
       return list.slice().sort(sortByPriorityAndDate);
     }

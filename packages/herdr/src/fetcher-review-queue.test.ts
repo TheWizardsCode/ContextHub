@@ -6,7 +6,11 @@
  * count and correctly flags an outstanding audit: a missing `auditedAt`, a
  * stale audit (updatedAt after auditedAt beyond the freshness tolerance), or
  * a mismatched fingerprint counts as outstanding; a fresh audit does not.
- * `fetchCompletedItemCount` remains a count-only wrapper.
+ * The underlying query now spans `--status completed,in-progress` (the shared
+ * mandatory-review-subset query, WL-0MV6JGVPH009YDXB) but the banner state
+ * keeps only the `completed` items — in-progress/in_review items being
+ * re-worked are not audit candidates. `fetchCompletedItemCount` remains a
+ * count-only wrapper.
  *
  * Run: npx vitest run packages/herdr/src/fetcher-review-queue.test.ts
  */
@@ -78,6 +82,17 @@ describe('fetchReviewQueueState', () => {
   it('returns an empty, fully-audited state for an empty queue', async () => {
     mockWl([]);
     expect(await fetchReviewQueueState()).toEqual({ count: 0, auditsOutstanding: false });
+  });
+
+  it('excludes in-progress/in_review items from the banner count (WL-0MV6JGVPH009YDXB)', async () => {
+    // The shared query returns both statuses, but re-worked in-progress items
+    // are not audit candidates, so the banner count stays completed-only.
+    mockWl([
+      inReview('WL-1', FRESH),
+      { id: 'WL-2', title: 'Reworked review', status: 'in-progress', stage: 'in_review', auditedAt: null, updatedAt: '2026-09-27T10:00:00.000Z', auditResult: null },
+      { id: 'WL-3', title: 'Reworked review 2', status: 'in-progress', stage: 'in_review', auditedAt: null, updatedAt: '2026-09-27T10:00:00.000Z', auditResult: null },
+    ]);
+    expect(await fetchReviewQueueState()).toEqual({ count: 1, auditsOutstanding: false });
   });
 
   it('resolves to undefined on a wl CLI error (fail-closed)', async () => {

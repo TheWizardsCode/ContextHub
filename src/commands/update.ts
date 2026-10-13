@@ -14,6 +14,7 @@ import { normalizeActionArgs } from './cli-utils.js';
 import { buildAuditEntry, extractAuditFingerprint, formatInvalidAuditFirstLineMessage, inspectAuditFirstLine, redactAuditText } from '../audit.js';
 import { loadStatusStageRules, normalizeStatusValue } from '../status-stage-rules.js';
 import { normalizePriority, CANONICAL_PRIORITIES } from '../validators/priority.js';
+import { downgradeCriticalIfTerminal, isTerminalState } from '../terminal-priority.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
 
 export default function register(ctx: PluginContext): void {
@@ -459,8 +460,10 @@ export default function register(ctx: PluginContext): void {
         }
 
         // Capture the previous priority before the update so we can detect a
-        // downgrade away from `critical` and cascade it to children.
-        const oldPriority = (db.get(normalizedId)?.priority) as WorkItemPriority | undefined;
+        // downgrade away from `critical` and cascade it to children. Also
+        // capture the full previous state for the terminal-transition check.
+        const itemBeforeUpdate = db.get(normalizedId);
+        const oldPriority = (itemBeforeUpdate?.priority) as WorkItemPriority | undefined;
         // CAS claim path (RCA WL-0MSRBFFLN005W3VT design point 1): when
         // --if-status/--if-stage are provided the update applies ONLY if the
         // item still matches — the check and the write run in one immediate
@@ -505,6 +508,21 @@ export default function register(ctx: PluginContext): void {
 
         if (updates.status || updates.stage) {
           db.reconcileDependentStatus(normalizedId);
+        }
+
+        // Auto-downgrade on a terminal transition (WL-0MSJM4EIV001A0V9): an
+        // item that just became `completed` or entered `in_review` must not
+        // stay at `critical`, which signals urgent *open* work. Only an
+        // actual *transition* triggers this — an item already terminal before
+        // the update is left untouched, so editing finished work does not
+        // silently rewrite its priority.
+        let downgradedItem: WorkItem | null = null;
+        if (!itemBeforeUpdate || !isTerminalState(itemBeforeUpdate)) {
+          const downgraded = downgradeCriticalIfTerminal(db, normalizedId);
+          if (downgraded) {
+            downgradedItem = downgraded;
+            item = downgraded;
+          }
         }
 
         // Cascade a priority downgrade: when the item's priority moves away
@@ -555,6 +573,7 @@ export default function register(ctx: PluginContext): void {
           success: true,
           workItem: item,
           ...(downgradedChildren.length > 0 ? { downgradedChildren } : {}),
+          ...(downgradedItem ? { downgradedItem } : {}),
           ...(demotedParent ? { demotedParent } : {}),
           ...(reverted ? { reverted } : {}),
         });
@@ -572,6 +591,9 @@ export default function register(ctx: PluginContext): void {
             const jsonOut: any = { success: true, workItem: r.workItem };
             if (r.downgradedChildren?.length) {
               jsonOut.downgradedChildren = r.downgradedChildren;
+            }
+            if (r.downgradedItem) {
+              jsonOut.downgradedItem = r.downgradedItem;
             }
             if (r.demotedParent) {
               jsonOut.demotedParent = r.demotedParent;
@@ -596,6 +618,9 @@ export default function register(ctx: PluginContext): void {
             console.log(humanFormatWorkItem(r.workItem, db, format));
             if (r.downgradedChildren?.length) {
               console.log(`[Downgraded ${r.downgradedChildren.length} child(ren) from critical to high]`);
+            }
+            if (r.downgradedItem) {
+              console.log(`[Downgraded priority of ${r.downgradedItem.id} from critical to high]`);
             }
             if (r.demotedParent) {
               console.log(`[Parent ${r.demotedParent.parent.id} demoted from ${r.demotedParent.from.status}/${r.demotedParent.from.stage} to ${r.demotedParent.to.status}/${r.demotedParent.to.stage}]`);

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { TokenBucketThrottler } from '../src/github-throttler.js';
+import { TokenBucketThrottler } from '../../src/github-throttler.js';
 
 class FakeClock {
   private t = 0;

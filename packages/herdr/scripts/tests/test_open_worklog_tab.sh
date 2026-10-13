@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test_open_podcast_editor_tab.sh — tests for open-podcast-editor-tab.sh
+# test_open_worklog_tab.sh — tests for open-worklog-tab.sh
 #
 # Covers the parse-and-rename wiring with a mock herdr CLI:
 #   - happy path: pane opened, tab_id parsed from the pane-open JSON,
@@ -9,12 +9,12 @@
 #   - `plugin pane open` failure → clear error, non-zero exit
 #
 # Run from the repo root (or anywhere):
-#   bash packages/herdr/scripts/tests/test_open_podcast_editor_tab.sh
+#   bash packages/herdr/scripts/tests/test_open_worklog_tab.sh
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-OPEN_PODCAST_EDITOR="$SCRIPT_DIR/open-podcast-editor-tab.sh"
+OPEN_WORKLOG_TAB="$SCRIPT_DIR/open-worklog-tab.sh"
 PASS=0
 FAIL=0
 
@@ -119,12 +119,12 @@ chmod +x "$MOCK_HERDR_OPEN_FAILS"
 
 run_script() {
   rm -f "$HERDR_LOG"
-  HERDR_BIN_PATH="$1" bash "$OPEN_PODCAST_EDITOR" 2>&1
+  HERDR_BIN_PATH="$1" bash "$OPEN_WORKLOG_TAB" 2>&1
 }
 
 echo "=== Test: script exists and is executable ==="
-[ -f "$OPEN_PODCAST_EDITOR" ] && pass "open-podcast-editor-tab.sh exists" || fail "open-podcast-editor-tab.sh missing"
-[ -x "$OPEN_PODCAST_EDITOR" ] && pass "open-podcast-editor-tab.sh executable" || fail "open-podcast-editor-tab.sh not executable"
+[ -f "$OPEN_WORKLOG_TAB" ] && pass "open-worklog-tab.sh exists" || fail "open-worklog-tab.sh missing"
+[ -x "$OPEN_WORKLOG_TAB" ] && pass "open-worklog-tab.sh executable" || fail "open-worklog-tab.sh not executable"
 
 echo ""
 echo "=== Test: happy path — opens pane, parses tab_id, renames tab ==="
@@ -178,7 +178,7 @@ fi
 echo ""
 echo "=== Test: unparseable tab_id → clear error, non-zero exit, no rename ==="
 rm -f "$HERDR_LOG"
-out="$(HERDR_BIN_PATH="$MOCK_HERDR_BAD_JSON" bash "$OPEN_PODCAST_EDITOR" 2>&1)"
+out="$(HERDR_BIN_PATH="$MOCK_HERDR_BAD_JSON" bash "$OPEN_WORKLOG_TAB" 2>&1)"
 RC=$?
 
 if [ "$RC" -ne 0 ]; then

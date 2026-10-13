@@ -1,16 +1,18 @@
 /**
  * Unit tests for selectWorkItems — the smart selection algorithm that
- * guarantees all critical and completed/in_review items are always shown
- * in the Herdr worklist regardless of the browseItemCount setting.
+ * guarantees all critical, in_review and actively-worked in-progress items
+ * are always shown in the Herdr worklist regardless of the browseItemCount
+ * setting.
  *
  * The selection function is intentionally duplicated per TUI (decision Q2c
- * in WL-0MS8W5LTW006YZ4B); this suite mirrors the Pi TUI extension suite.
+ * in WL-0MS8W5LTW006YZ4B); the Pi TUI extension copy was removed by
+ * WL-0MSGI7PV9004UD0N, so this is the only remaining suite.
  *
  * Run: npx vitest run packages/herdr/src/smart-selection.test.ts
  */
 
 import { describe, it, expect } from 'vitest';
-import { selectWorkItems } from './smart-selection.js';
+import { selectWorkItems, isMandatoryItem } from './smart-selection.js';
 import type { WorkItem } from './fetcher.js';
 
 /**
@@ -30,8 +32,16 @@ function makeItem(id: string, overrides: Partial<WorkItem> = {}): WorkItem {
 /** Convenience builders for the mandatory-set criteria. */
 const critical = (id: string): WorkItem => makeItem(id, { priority: 'critical' });
 const inReview = (id: string): WorkItem => makeItem(id, { status: 'completed', stage: 'in_review' });
+/** in_review item being re-worked after review feedback (status = in-progress). */
+const inProgressInReview = (id: string): WorkItem => makeItem(id, { status: 'in-progress', stage: 'in_review' });
 /** Item that is BOTH critical and completed/in_review (overlap case). */
 const criticalInReview = (id: string): WorkItem => makeItem(id, { priority: 'critical', status: 'completed', stage: 'in_review' });
+/** Item that is BOTH critical and in-progress/in_review (overlap case). */
+const criticalInProgressInReview = (id: string): WorkItem => makeItem(id, { priority: 'critical', status: 'in-progress', stage: 'in_review' });
+/** Actively-worked item (status = in-progress) at a non-in_review stage. */
+const active = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => makeItem(id, { status: 'in-progress', stage: 'plan_complete', ...overrides });
+/** Blocked item (status = blocked) at a non-done stage — always shown (WL-0MV71WBHB007D8ZE). */
+const blocked = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => makeItem(id, { status: 'blocked', stage: 'plan_complete', ...overrides });
 const other = (id: string): WorkItem => makeItem(id, { priority: 'medium', status: 'open', stage: 'idea' });
 /** Item whose stage is 'done' (fully closed — must never appear in the default list). */
 const done = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => makeItem(id, { stage: 'done', status: 'completed', ...overrides });
@@ -70,6 +80,247 @@ describe('selectWorkItems — smart selection algorithm', () => {
         'C1', 'C2', 'R1', 'R2', 'R3', 'O1', 'O2', 'O3', 'O4', 'O5',
         'O6', 'O7', 'O8', 'O9', 'O10',
       ]);
+    });
+  });
+
+  describe('in-progress/in_review items — mandatory review set (WL-0MV6JGVPH009YDXB)', () => {
+    it('keeps an in-progress/in_review item in the guaranteed set even when it exceeds browseItemCount', () => {
+      const items = [
+        inReview('R1'),
+        inProgressInReview('RP1'),
+        ...Array.from({ length: 25 }, (_, i) => other(`O${i + 1}`)),
+      ];
+
+      // browseItemCount=3: 2 mandatory reviews (completed + in-progress) + 1 other.
+      const result = selectWorkItems(items, 3);
+
+      expect(result).toHaveLength(3);
+      expect(result.map(i => i.id)).toEqual(['R1', 'RP1', 'O1']);
+    });
+
+    it('in-progress/in_review items are never demoted to the capped others bucket', () => {
+      const items = [
+        inProgressInReview('RP1'),
+        ...Array.from({ length: 20 }, (_, i) => other(`O${i + 1}`)),
+      ];
+
+      // browseItemCount=1: the in-progress/in_review item is mandatory and
+      // must still show, consuming the slot before any other.
+      const result = selectWorkItems(items, 1);
+
+      expect(result.map(i => i.id)).toEqual(['RP1']);
+    });
+
+    it('an in-progress/in_review item alone exceeds browseItemCount without a cap', () => {
+      const items = Array.from({ length: 10 }, (_, i) => inProgressInReview(`RP${i + 1}`));
+
+      const result = selectWorkItems(items, 3);
+
+      expect(result).toHaveLength(10);
+      expect(result.every(i => i.status === 'in-progress' && i.stage === 'in_review')).toBe(true);
+    });
+
+    it('overlap critical ∩ in-progress/in_review → item counts once (deduplicated)', () => {
+      const items = [
+        criticalInProgressInReview('BOTH1'),
+        other('O1'),
+        other('O2'),
+        other('O3'),
+        other('O4'),
+        other('O5'),
+      ];
+
+      // browseItemCount=5: mandatory set = 1 (BOTH1 counts once), so 4 others shown.
+      const result = selectWorkItems(items, 5);
+
+      expect(result).toHaveLength(5);
+      const mandatory = result.filter(i =>
+        i.priority === 'critical' ||
+        (i.stage === 'in_review' && (i.status === 'completed' || i.status === 'in-progress')),
+      );
+      expect(mandatory).toHaveLength(1);
+      expect(result.map(i => i.id)).toEqual(['BOTH1', 'O1', 'O2', 'O3', 'O4']);
+    });
+
+    it('mixed completed + in-progress in_review items share one guaranteed review set', () => {
+      const items = [
+        inReview('R1'),
+        inProgressInReview('RP1'),
+        other('O1'),
+        other('O2'),
+      ];
+
+      // browseItemCount=2: both review items are mandatory, zero others shown.
+      const result = selectWorkItems(items, 2);
+
+      expect(result.map(i => i.id)).toEqual(['R1', 'RP1']);
+    });
+  });
+
+  describe('actively-worked in-progress items — mandatory set (WL-0MV6KV22S004NYIU)', () => {
+    it('keeps an actively-worked item visible when the review queue saturates browseItemCount', () => {
+      // Exactly the reported symptom: 22 root in_review items vs
+      // browseItemCount=20 leaves zero slots for "others" — the in-progress
+      // item must still be shown.
+      const items = [
+        ...Array.from({ length: 22 }, (_, i) => inReview(`R${i + 1}`)),
+        active('A1'),
+        other('O1'),
+      ];
+
+      const result = selectWorkItems(items, 20);
+
+      expect(result.map(i => i.id)).toContain('A1');
+      // 22 reviews + 1 active = 23 mandatory; the "other" is cut.
+      expect(result).toHaveLength(23);
+      expect(result.map(i => i.id)).not.toContain('O1');
+    });
+
+    it('treats in-progress at any non-done stage as mandatory', () => {
+      const items = [
+        active('A-idea', { stage: 'idea' }),
+        active('A-intake', { stage: 'intake_complete' }),
+        active('A-plan', { stage: 'plan_complete' }),
+        other('O1'),
+      ];
+
+      // browseItemCount=1: all three active items are mandatory, zero others.
+      const result = selectWorkItems(items, 1);
+
+      expect(result.map(i => i.id)).toEqual(['A-idea', 'A-intake', 'A-plan']);
+    });
+
+    it('overlap in-progress ∩ in_review → item counts once (active, not double-counted)', () => {
+      const items = [inProgressInReview('RP1'), other('O1'), other('O2')];
+
+      const result = selectWorkItems(items, 3);
+
+      expect(result.map(i => i.id)).toEqual(['RP1', 'O1', 'O2']);
+      expect(result.filter(i => i.id === 'RP1')).toHaveLength(1);
+    });
+
+    it('overlap critical ∩ in-progress → item counts once (critical, not double-counted)', () => {
+      const items = [
+        makeItem('BOTH1', { priority: 'critical', status: 'in-progress', stage: 'plan_complete' }),
+        other('O1'),
+        other('O2'),
+      ];
+
+      const result = selectWorkItems(items, 3);
+
+      expect(result.map(i => i.id)).toEqual(['BOTH1', 'O1', 'O2']);
+      expect(result.filter(i => i.id === 'BOTH1')).toHaveLength(1);
+    });
+
+    it('orders criticals, then reviews, then actively-worked, then others', () => {
+      const items = [other('O1'), active('A1'), inReview('R1'), critical('C1'), other('O2')];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map(i => i.id)).toEqual(['C1', 'R1', 'A1', 'O1', 'O2']);
+    });
+
+    it('hides a non-critical child in-progress item (root-only rule still applies)', () => {
+      const items = [
+        active('A1'),
+        makeItem('ChildActive', { status: 'in-progress', stage: 'plan_complete', parentId: 'A1' }),
+        other('O1'),
+      ];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map(i => i.id)).toEqual(['A1', 'O1']);
+    });
+
+    it('excludes an in-progress item whose stage is done (done gate applies first)', () => {
+      const items = [makeItem('D-IP', { status: 'in-progress', stage: 'done' }), other('O1')];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map(i => i.id)).toEqual(['O1']);
+    });
+  });
+
+  describe('isMandatoryItem — mandatory-set predicate', () => {
+    it('is true for critical, completed/in_review, in-progress, and blocked at any stage', () => {
+      expect(isMandatoryItem(makeItem('C', { priority: 'critical', stage: 'idea' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('R', { status: 'completed', stage: 'in_review' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('A', { status: 'in-progress', stage: 'plan_complete' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('AI', { status: 'in-progress', stage: 'idea' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('B', { status: 'blocked', stage: 'in_review' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('B2', { status: 'blocked', stage: 'intake_complete' }))).toBe(true);
+    });
+
+    it('is false for an untouched open item', () => {
+      expect(isMandatoryItem(makeItem('O', { status: 'open', stage: 'idea' }))).toBe(false);
+      expect(isMandatoryItem(makeItem('O2', { status: 'open', stage: 'plan_complete' }))).toBe(false);
+    });
+  });
+
+  describe('blocked items — mandatory set (WL-0MV71WBHB007D8ZE)', () => {
+    it('keeps a blocked in_review item visible when it ranks below browseItemCount', () => {
+      // The operator-visible symptom: WL-0MTF5WO1N0088P5P (status=blocked,
+      // stage=in_review) ranked ~35 of 52, so `wl next -n 20` never returned
+      // it and the default list hid a release-blocking item entirely.
+      const items = [
+        ...Array.from({ length: 25 }, (_, i) => other(`O${i + 1}`)),
+        blocked('BLK1', { stage: 'in_review' }),
+      ];
+
+      const result = selectWorkItems(items, 20);
+
+      expect(result.map((i) => i.id)).toContain('BLK1');
+      // The blocked item consumes a mandatory slot — it must not be cut even
+      // though it appears after 25 other items in the input.
+      expect(result.filter((i) => i.id === 'BLK1')).toHaveLength(1);
+    });
+
+    it('blocked item survives a tiny browseItemCount when others saturate the window', () => {
+      const items = [...Array.from({ length: 5 }, (_, i) => other(`O${i + 1}`)), blocked('BLK1')];
+
+      // browseItemCount=1: the blocked item is mandatory and must show
+      // instead of being demoted to the capped others bucket.
+      const result = selectWorkItems(items, 1);
+
+      expect(result.map((i) => i.id)).toEqual(['BLK1']);
+    });
+
+    it('orders criticals, then reviews, then blocked, then actively-worked, then others', () => {
+      const items = [other('O1'), active('A1'), blocked('B1'), inReview('R1'), critical('C1'), other('O2')];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map((i) => i.id)).toEqual(['C1', 'R1', 'B1', 'A1', 'O1', 'O2']);
+    });
+
+    it('a blocked child item stays hidden (root-only rule for non-critical children)', () => {
+      const items = [
+        blocked('B1'),
+        makeItem('ChildBlocked', { status: 'blocked', stage: 'idea', parentId: 'B1' }),
+        other('O1'),
+      ];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map((i) => i.id)).toEqual(['B1', 'O1']);
+    });
+
+    it('excludes a blocked item whose stage is done (done gate applies first)', () => {
+      const items = [blocked('B1', { stage: 'done' }), other('O1')];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map((i) => i.id)).toEqual(['O1']);
+    });
+
+    it('a blocked item does not consume an others slot when the window is full', () => {
+      // browseItemCount=2: mandatory = 1 blocked, so 1 other shown — the
+      // blocked item is NOT charged to the others budget.
+      const items = [other('O1'), other('O2'), other('O3'), blocked('B1')];
+
+      const result = selectWorkItems(items, 2);
+
+      expect(result.map((i) => i.id)).toEqual(['B1', 'O1']);
     });
   });
 

@@ -19,17 +19,29 @@
  * this module instead of hard-coding paths, so the machine dir is a single
  * source of truth.
  *
+ * The resolver itself now lives in the shared package
+ * (`@worklog/shared/model-cooldown`, WL-0MV563825002R9Y1) so the TUI recovery
+ * loop (which writes the model-cooldown marker) and herdr (which reads it)
+ * cannot drift. This module re-exports the shared constant and delegates
+ * `getMachineCoordinationDir()` to `resolveMachineCoordinationDir()`.
+ *
  * Single-machine v1 only; multi-machine (flock/NFS) is out of scope.
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as os from 'node:os';
+import {
+  resolveMachineCoordinationDir,
+  readModelCooldowns,
+  clearModelCooldown,
+  DEFAULT_MACHINE_COORDINATION_DIR,
+  type ModelCooldownEntry,
+} from '@worklog/shared/model-cooldown';
 
 // ── Constants ──────────────────────────────────────────────────────────
 
 /** Machine-wide coordination dir default: `~/.herdr/downtime`. */
-export const DEFAULT_MACHINE_COORDINATION_DIR = '.herdr/downtime';
+export { DEFAULT_MACHINE_COORDINATION_DIR };
 
 // ── Public API ─────────────────────────────────────────────────────────
 
@@ -54,34 +66,37 @@ export const DEFAULT_MACHINE_COORDINATION_DIR = '.herdr/downtime';
  * @returns The resolved absolute path, or `null` when unresolvable.
  */
 export function getMachineCoordinationDir(): string | null {
-  // 1. Environment override (highest priority)
-  const envDir = process.env.HERDR_COORDINATION_DIR;
-  if (envDir && envDir.length > 0) {
-    // Expand ~ to homedir()
-    if (envDir.startsWith('~')) {
-      const home = os.homedir();
-      if (home) {
-        return path.join(home, envDir.slice(1));
-      }
-      // homedir() failed — env var is unusable, fall through to default
-    } else {
-      // Absolute path — use as-is
-      return envDir;
-    }
-  }
+  return resolveMachineCoordinationDir();
+}
 
-  // 2. Default (~/.herdr/downtime) — resolved lazily at call time so
-  //    tests that mutate process.env.HOME can affect the result.
-  try {
-    const home = os.homedir();
-    if (!home) return null; // homedir() returned empty string — fail-safe
-    return path.join(home, DEFAULT_MACHINE_COORDINATION_DIR);
-  } catch {
-    // homedir() threw — fail-safe
-  }
+/**
+ * Read EVERY stored machine-wide model-cooldown entry — active AND
+ * expired/due — for the dispatcher's bounded-wake path
+ * (WL-0MV5639GG00085Q7).
+ *
+ * The cheap-switch gate reads only *active* entries (`readModelCooldowns`
+ * with the current time). The wake path needs the opposite view: a marker
+ * whose `cooldownUntil` has just passed is exactly the pane the dispatcher
+ * must wake. Passing `now = 0` returns every stored entry (all markers have
+ * `cooldownUntil > 0`); the stalled scan then distinguishes active (skip)
+ * from due (wake) against its own injected clock.
+ *
+ * Returns `null` when the coordination directory is unresolvable or the file
+ * is unreadable/corrupt — fail-safe (the scan then has no cooldown
+ * candidates). A missing file is `[]` (nothing recorded). Never throws.
+ */
+export function readStoredModelCooldowns(): ModelCooldownEntry[] | null {
+  return readModelCooldowns(getMachineCoordinationDir(), 0);
+}
 
-  // 3. Both env and default failed — return null (fail-safe)
-  return null;
+/**
+ * Consume a pane's machine-wide model-cooldown marker after a SUCCESSFUL
+ * in-place resume (WL-0MV5639GG00085Q7), so the same pane is not woken
+ * repeatedly. Best-effort: a missing/unreadable marker returns `false`; never
+ * throws.
+ */
+export function clearStoredModelCooldown(paneId: string): boolean {
+  return clearModelCooldown(getMachineCoordinationDir(), paneId);
 }
 
 /**

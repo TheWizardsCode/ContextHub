@@ -13,6 +13,9 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { defaultSettings } from './settings.js';
 import { routeCommand } from './index.js';
 import {
@@ -24,7 +27,10 @@ import {
   MODE_SWITCH_IDLE_THRESHOLD_FLOOR_MS,
   MODE_SWITCH_RUN_TIMEOUT_MS,
   ADMIN_API_TIMEOUT_MS,
+  type AdminApiFetcher,
 } from './mode-switch-worker.js';
+import { type LlamaStatus } from './downtime-worker.js';
+import { writeModelCooldown, clearModelCooldown } from '@worklog/shared/model-cooldown';
 
 // ── Settings integration ──────────────────────────────────────────────
 
@@ -142,5 +148,100 @@ describe('worker interface integration', () => {
     expect(typeof worker.onOperatorCommand).toBe('function');
     // tick — called by the scheduler task in worklist.ts
     expect(typeof worker.tick).toBe('function');
+  });
+});
+
+// ── Cross-root model-cooldown gate (WL-0MV5638ZS005I5XQ, AC4) ────────
+//
+// The cheap switch is machine-wide (the shared proxy), so the cooldown
+// signal must be machine-wide too: a cooldown recorded while working in one
+// worklog root must suppress the switch for every other root on the machine.
+// This is an integration test spanning two roots that share one machine-wide
+// coordination directory.
+
+describe('cross-root model-cooldown gate (AC4)', () => {
+  function idleStatus(): LlamaStatus {
+    return {
+      llama_server_running: true,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 3,
+      total_slots: 3,
+      slots: [
+        { slot_id: 'slot-1', is_processing: false },
+        { slot_id: 'slot-2', is_processing: false },
+        { slot_id: 'slot-3', is_processing: false },
+      ],
+    };
+  }
+
+  it('a cooldown recorded for one root suppresses the shared cheap switch for another root', async () => {
+    // One machine-wide coordination dir, two worklog roots. The signal
+    // carries no root field, which is exactly why root B sees root A's
+    // cooldown.
+    const machineDir = mkdtempSync(join(tmpdir(), 'wl-cross-root-cooldown-'));
+    try {
+      let clock = 1_000_000;
+      const now = () => clock;
+
+      // Root A's recovery loop records an exhaustion cooldown in the
+      // machine-wide store (keyed by pane/session, not by worklog root).
+      expect(
+        writeModelCooldown(
+          machineDir,
+          {
+            paneId: 'pane-root-a',
+            sessionId: 'session-root-a',
+            itemId: 'WL-ROOT-A',
+            kind: 'implement',
+            reason: 'all providers exhausted',
+            cooldownUntil: clock + 3_600_000,
+          },
+          clock,
+        ),
+      ).toBe(true);
+
+      const posts: string[] = [];
+      const fetcher: AdminApiFetcher = async (_url, init) => {
+        if (init?.method === 'POST') {
+          posts.push(init.body ?? '');
+          return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ mode: 'fast' }) };
+      };
+
+      // Root B's leader worker — configured with the same machine dir.
+      const worker = createModeSwitchWorker({
+        fetcher,
+        now,
+        isLeader: () => true,
+        coordinationDir: machineDir,
+      });
+
+      clock += 900_000; // root B has been idle long enough to switch
+      await worker.tick({
+        enabled: true,
+        idleThresholdMs: 900_000,
+        proxyUrl: 'http://proxy',
+        proxyStatus: idleStatus(),
+      });
+      // Root A's active cooldown holds root B's shared proxy in fast mode.
+      expect(posts).toHaveLength(0);
+
+      // Root A's pane recovers and clears the machine-wide cooldown; root B's
+      // worker then resumes the normal cheap decision.
+      expect(clearModelCooldown(machineDir, 'pane-root-a', clock)).toBe(true);
+      await worker.tick({
+        enabled: true,
+        idleThresholdMs: 900_000,
+        proxyUrl: 'http://proxy',
+        proxyStatus: idleStatus(),
+      });
+      expect(posts).toHaveLength(1);
+      expect(posts[0]).toBe(JSON.stringify({ mode: 'cheap' }));
+    } finally {
+      rmSync(machineDir, { recursive: true, force: true });
+    }
   });
 });

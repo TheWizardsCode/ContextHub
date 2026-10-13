@@ -180,6 +180,12 @@ Priority downgrade cascade:
 - When an item's priority is downgraded away from `critical` (to `high`, `medium`, or `low`), any direct children still at `critical` priority are automatically downgraded to `high` so that a non-critical parent has no critical subtasks. Children already at `high` or below are left untouched.
 - In JSON mode, the downgraded children are reported in a `downgradedChildren` array. In human-readable mode, a summary line like `[Downgraded 2 child(ren) from critical to high]` is printed.
 
+Terminal priority auto-downgrade (WL-0MSJM4EIV001A0V9):
+
+- When an item with `critical` priority transitions to a terminal state — `status` `completed` or `stage` `in_review` — its priority is automatically downgraded to `high`, so finished work stops competing with genuinely urgent open items. Closing via `wl close` is also a terminal transition and downgrades `critical` to `high`.
+- Only an actual transition triggers the downgrade: editing an item that is already terminal does not rewrite its priority. Non-critical priorities (`high`, `medium`, `low`) are never modified, and non-terminal transitions (e.g. `--stage plan_complete`) leave `critical` intact.
+- In JSON mode the downgraded item is reported in a `downgradedItem` field. In human-readable mode a summary line like `[Downgraded priority of WL-ABC123 from critical to high]` is printed.
+
 Example:
 
 ```sh
@@ -436,6 +442,13 @@ This is an audit gate leak; re-audit it or record a deliberate exception with
 
 `wl close --force` bypasses the warning and records a durable waiver on an uncovered
 `in_review` root, so the bypass is auditable.
+
+**Terminal priority auto-downgrade (WL-0MSJM4EIV001A0V9):** Closing is a terminal
+transition, so a `critical` item is automatically downgraded to `high`. When a subtree is
+closed recursively or with `--force`, every closed descendant that was `critical` is
+downgraded too; non-critical priorities are left untouched. The JSON result object
+reports the downgraded items in a `downgradedItems` array, and human-readable mode prints
+a summary line like `[Downgraded 1 item from critical to high]`.
 
 **Output format (recursive close):** When the audit-gated recursive close path is triggered:
 

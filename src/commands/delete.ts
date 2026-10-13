@@ -30,6 +30,7 @@ import type { DeleteOptions } from '../cli-types.js';
 import type { WorkItem } from '../types.js';
 import { performSync, getSyncDefaults } from './sync.js';
 import { getConfiguredUserEmail } from '../sync.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 
 /** Per-id result for a batch delete invocation. */
 interface DeleteResult {
@@ -64,7 +65,8 @@ export default function register(ctx: PluginContext): void {
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-recursive', 'Delete only the specified items, leaving children orphaned')
     .option('--no-sync', 'Skip auto-sync after deletion')
-    .action(async (ids: string[], options: DeleteOptions & { sync?: boolean }) => {
+    .action(async (ids: string[], options: DeleteOptions & { sync?: boolean }) =>
+      withStoreMutationLock(dataPath, async () => {
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
       const isJsonMode = utils.isJsonMode();
@@ -236,5 +238,6 @@ export default function register(ctx: PluginContext): void {
       }
 
       if (anyFailures) process.exit(1);
-    });
+      }),
+    );
 }

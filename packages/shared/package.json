@@ -22,6 +22,10 @@
       "types": "./dist/lease-release.d.ts",
       "import": "./dist/lease-release.js"
     },
+    "./model-cooldown": {
+      "types": "./dist/model-cooldown.d.ts",
+      "import": "./dist/model-cooldown.js"
+    },
     "./icons": {
       "types": "./dist/icons.d.ts",
       "import": "./dist/icons.js"

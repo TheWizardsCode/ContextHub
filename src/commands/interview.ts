@@ -52,6 +52,7 @@
  */
 
 import type { PluginContext } from '../plugin-types.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 import type { InterviewOptions } from '../cli-types.js';
 import type { WorkItem, Comment } from '../types.js';
 import { OpenAIChatClient, type ChatClient } from '../lib/llm.js';
@@ -1528,10 +1529,16 @@ export default function register(
       // ── Step 2: Interactive walkthrough ──────────────────────────────
       const prompts = promptLoopFactory();
       let outcome: InterviewOutcome;
+      // Serialise each persisted answer/flag update against a concurrent
+      // `wl sync` without holding the store lock across interactive prompts.
+      const lockedStore: InterviewStore = {
+        update: (itemId, updates) =>
+          withStoreMutationLock(ctx.dataPath, () => db.update(itemId, updates)),
+      };
       try {
         outcome = await runInterview(
           item,
-          db,
+          lockedStore,
           { prompt: (message: string) => prompts.next(message) },
           {
             llmFallback: llmFallbackEnabled,
@@ -1562,7 +1569,7 @@ export default function register(
         console.log('');
         const shouldClear = await clearPrompt('Clear the needsProducerReview flag? (y/N)');
         if (shouldClear) {
-          db.update(item.id, { needsProducerReview: false });
+          withStoreMutationLock(ctx.dataPath, () => db.update(item.id, { needsProducerReview: false }));
           console.log('   needsProducerReview cleared.');
         } else {
           console.log('   needsProducerReview remains flagged.');

@@ -4,6 +4,7 @@
 
 import type { PluginContext } from '../plugin-types.js';
 import type { ResortOptions } from '../cli-types.js';
+import { withStoreMutationLock } from '../mutation-lock.js';
 
 const DEFAULT_SORT_GAP = 100;
 const DEFAULT_RECENCY_POLICY = 'avoid';
@@ -53,7 +54,7 @@ export default function register(ctx: PluginContext): void {
         return;
       }
 
-      const result = db.reSort(recency as 'prefer' | 'avoid' | 'ignore', gap);
+      const result = withStoreMutationLock(ctx.dataPath, () => db.reSort(recency as 'prefer' | 'avoid' | 'ignore', gap));
       if (utils.isJsonMode()) {
         output.json({ success: true, updated: result.updated, gap, recency });
         return;

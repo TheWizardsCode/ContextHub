@@ -296,12 +296,17 @@ export function inReviewBucket(item: {
 }
 
 /**
- * Compare two in_review items using the 6-bucket predicate.
+ * Compare two in_review items.
  *
- * Primary sort: bucket number (ascending — lower bucket = higher priority).
- * Secondary: priority (high → medium → low).
+ * Primary sort: priority (high → medium → low).  The review queue must
+ * surface the most important work first: a medium-priority failed-audit item
+ * must never rank ahead of a high-priority item (WL-0MUWDW0N6003KF6G).
+ * Secondary: audit bucket number (ascending — lower bucket = higher priority).
  * Tertiary: updatedAt (older items first).
  * Quaternary: id (deterministic tie-break).
+ *
+ * The 6-bucket predicate is applied consistently *within* each priority band
+ * rather than as the global primary key.
  *
  * Returns 0 when either item lacks stage === 'in_review', letting the
  * caller fall back to the standard comparator.
@@ -316,15 +321,16 @@ export function compareInReviewItems(a: GroupableItem & {
 }, b: typeof a): number {
   if (a.stage !== 'in_review' || b.stage !== 'in_review') return 0;
 
-  const bucketDiff = inReviewBucket(a) - inReviewBucket(b);
-  if (bucketDiff !== 0) return bucketDiff;
-
-  // Within bucket: priority (high → medium → low)
+  // Primary: priority (high → medium → low).
   const prioA = WITHIN_GROUP_PRIORITY_ORDER[a.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
   const prioB = WITHIN_GROUP_PRIORITY_ORDER[b.priority ?? ''] ?? DEFAULT_PRIORITY_ORDER;
   if (prioA !== prioB) return prioA - prioB;
 
-  // Within bucket: updatedAt (older items first)
+  // Secondary: audit bucket (within the same priority band).
+  const bucketDiff = inReviewBucket(a) - inReviewBucket(b);
+  if (bucketDiff !== 0) return bucketDiff;
+
+  // Tertiary: updatedAt (older items first)
   const tsA = a.updatedAt ? new Date(a.updatedAt).getTime() : 0;
   const tsB = b.updatedAt ? new Date(b.updatedAt).getTime() : 0;
   if (tsA !== tsB) return tsA - tsB;
@@ -339,17 +345,18 @@ export function compareInReviewItems(a: GroupableItem & {
  * stages), then priority (high → medium → low), then id as a deterministic
  * tie-break.
  *
- * When BOTH items have stage === 'in_review', the 6-bucket predicate
- * (see `compareInReviewItems`) takes priority over the default stage
- * sub-sort.  All in_review items map to the same stage-sub-order value
- * (REMAINING_STAGE_ORDER) anyway, but the bucket predicate provides the
- * deterministic ordering specified in WL-0MSLPM5ZB003TADT.
+ * When BOTH items have stage === 'in_review', `compareInReviewItems`
+ * orders them by priority (high → medium → low) and then by the 6-bucket
+ * audit predicate (WL-0MSLPM5ZB003TADT, refined by WL-0MUWDW0N6003KF6G so a
+ * medium-priority item can never rank ahead of a high-priority one).  This
+ * takes precedence over the default stage sub-sort: all in_review items map
+ * to the same stage-sub-order value (REMAINING_STAGE_ORDER) anyway.
  *
- * If the bucket comparator returns 0 (items in the same bucket, same
- * priority, same timestamp), falls through to stage/priority/id tie-break.
+ * If the in_review comparator returns 0 (same priority, same bucket, same
+ * timestamp, same id), falls through to stage/priority/id tie-break.
  */
 export function compareGroupableItems(a: GroupableItem, b: GroupableItem): number {
-  // Fast-path: if both are in_review, use bucket ordering
+  // Fast-path: if both are in_review, use the in_review ordering
   if (a.stage === 'in_review' && b.stage === 'in_review') {
     const bucketCmp = compareInReviewItems(a, b);
     if (bucketCmp !== 0) return bucketCmp;

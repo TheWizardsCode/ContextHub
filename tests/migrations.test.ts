@@ -44,6 +44,24 @@ function createLegacyDbWithoutAudit(dbPath: string): void {
   }
 }
 
+function createLegacyDbWithoutNeedsProducerReview(dbPath: string): void {
+  const db = new Database(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS metadata (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS workitems (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL
+      );
+    `);
+  } finally {
+    db.close();
+  }
+}
+
 describe('migrations: add audit field', () => {
   it('lists audit migration as pending for legacy db', () => {
     const tempDir = createTempDir();
@@ -88,6 +106,47 @@ describe('migrations: add audit field', () => {
 
       const secondRun = runMigrations({ confirm: true }, dbPath);
       expect(secondRun.applied).toHaveLength(0);
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+});
+
+describe('migrations: add needsProducerReview column', () => {
+  it('lists the needsProducerReview migration as pending when the column is missing', () => {
+    const tempDir = createTempDir();
+    try {
+      const dbPath = path.join(tempDir, 'worklog.db');
+      createLegacyDbWithoutNeedsProducerReview(dbPath);
+
+      const pending = listPendingMigrations(dbPath);
+      expect(pending.map(p => p.id)).toContain('20260210-add-needsProducerReview');
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+
+  it('applies the needsProducerReview migration and creates a backup', () => {
+    const tempDir = createTempDir();
+    try {
+      const dbPath = path.join(tempDir, 'worklog.db');
+      createLegacyDbWithoutNeedsProducerReview(dbPath);
+
+      const dryRun = runMigrations({ dryRun: true }, dbPath);
+      expect(dryRun.applied.map(a => a.id)).toContain('20260210-add-needsProducerReview');
+
+      const applied = runMigrations({ confirm: true }, dbPath);
+      expect(applied.applied.map(a => a.id)).toContain('20260210-add-needsProducerReview');
+      // The migration framework creates a backup before applying.
+      expect(applied.backups.length).toBeGreaterThanOrEqual(1);
+
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
+        expect(cols.map(c => c.name)).toContain('needsProducerReview');
+      } finally {
+        db.close();
+      }
     } finally {
       cleanupTempDir(tempDir);
     }

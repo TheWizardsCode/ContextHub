@@ -1,3 +1,15 @@
+/**
+ * tests/unit/icons.test.ts — Unit tests for the CLI icon vocabulary exported
+ * by `src/theme.ts` (a distinct module from `@worklog/shared/icons`).
+ *
+ * Layer note: this is the canonical unit coverage for the CLI icon helpers,
+ * labels and text fallbacks, including `iconsEnabled`'s `noIcons` option and
+ * `WL_NO_ICONS` env handling. The herdr rendering layers are covered by
+ * `tests/herdr/icons.test.ts` (display integration) and
+ * `packages/herdr/src/icons.test.ts` (fixed-width agent-slot alignment and
+ * audit freshness), both of which exercise the shared
+ * `@worklog/shared/icons` functions.
+ */
 import { describe, it, expect, beforeEach, afterAll, vi } from 'vitest';
 import { readFileSync, readdirSync, statSync, lstatSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
