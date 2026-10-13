@@ -290,6 +290,17 @@ The hydrator detects those claims and releases them:
   the **current workspace** whose label **exactly equals** the work-item ID; a
   label that merely contains the ID does not count. No matching tab → the
   claim is stale.
+- **Pane-title ID survival (F0)** — matching is keyed on the work-item ID, so
+  the ID must survive wherever it appears. Every pane spawned for an item
+  gets a title ending in ` - WL-<id>` (manual, shell, and downtime builders in
+  `pane-title.ts`), and the 60-char truncation always preserves that trailing
+  suffix (`truncatePaneTitlePreservingSuffix` — the pane-title amendment
+  WL-0MTF5WNRB009RHRU), so the ID stays visible and attributable in every
+  pane title. The hydrator itself matches on **exact tab labels** — item-ID
+  tabs are labelled with the exact ID (never truncated) by the shared
+  dispatcher-anchor builders — so a long pane title can never break the
+  match; the suffix-preservation rule is what keeps the ID as the
+  association key an operator scans for.
 - **Release semantics** — `in_review` items → `completed`; items with an
   active outbound dependency blocker → `blocked`; otherwise → `open` at the
   claimed stage (folded-in no-activity/claim-age timeout, WL-0MTTSWE0G008M1VA;
