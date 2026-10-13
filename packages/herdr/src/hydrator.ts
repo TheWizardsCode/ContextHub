@@ -9,22 +9,32 @@
  *
  * Demotion decision (signal-based, mirroring `dispatch` eligibility):
  *  - item is not `in-progress`            → untouched (not in scope)
- *  - a tab is labelled exactly the ID     → untouched (genuinely being worked)
+ *  - a RUNNING pane's tab label EXACTLY   → untouched (genuinely being worked)
+ *    matches the ID (agent not `done`/`exited`)
  *  - stage `in_review`                    → `status=completed`, stage `in_review`
  *  - an active outbound dependency blocker→ `status=blocked` (stage made compatible)
- *  - otherwise                            → `status=open`  (stage preserved)
+ *  - otherwise                            → `status=open`, stage `intake_complete`
+ *
+ * Running-pane liveness (F1/WL-0MTF5WO2Q008B8US, AC2): a tab whose agent has
+ * finished (`agent_status` `done`/`exited`) is NOT an active match, so its
+ * item is released instead of lingering in `in-progress` while a stale pane
+ * remains listed. Absent/unknown `agent_status` fails open toward active —
+ * never demote on untrustworthy evidence (AC5).
  *
  * Folded-in no-activity/claim-age timeout (WL-0MTTSWE0G008M1VA, 2026-09-13):
  * the tab-absent signal is the primary "stuck" signal. A claim with no
- * matching tab is stale regardless of activity age, so it is released (reset
- * to `open` at the claimed stage) — the 2 h dispatch stale window
+ * matching running tab is stale regardless of activity age, so it is released
+ * (reset to `open`/`intake_complete`) — the 2 h dispatch stale window
  * (`DOWNTIME_AUDIT_STALE_WINDOW_MS`) is the activity bound an operator can
  * use to reason about abandoned claims. Every release is logged (who/why/age
  * is carried by the work-item audit trail from the `wl` mutation itself).
  *
  * Fail-open by design: an unavailable/unparseable `wl list` or `herdr tab
  * list` aborts the cycle WITHOUT demoting — a transient CLI error must never
- * trigger a false demotion. Matching tabs are created by the shared
+ * trigger a false demotion. A production log sink
+ * (`createHydratorFileLog` → `<worklog root>/.worklog/logs/hydrator.log`) is
+ * wired by default (F2/AC5) so such a cycle is operator-observable rather
+ * than failing silently. Matching tabs are created by the shared
  * dispatcher-anchor builders (`getItemTabAnchor`), which label the tab with
  * the exact work-item ID (`findTabByLabel` matches exact labels only).
  *
@@ -58,7 +68,15 @@
  */
 
 import type { ExecFileOptionsWithStringEncoding } from 'node:child_process';
-import { getExecFileAsync, buildWlArgs, extractJson } from './fetcher.js';
+import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import {
+  getExecFileAsync,
+  buildWlArgs,
+  extractJson,
+  getWorklogDir,
+} from './fetcher.js';
 import { parseTabListOutput } from './dispatcher-anchor.js';
 
 // ── Constants ─────────────────────────────────────────────────────────
@@ -129,6 +147,19 @@ const TERMINAL_DEP_STATUSES = new Set(['completed', 'deleted']);
 /** Stages considered terminal for an outbound dependency target. */
 const TERMINAL_DEP_STAGES = new Set(['in_review', 'done']);
 
+/**
+ * `agent_status` values that mean the pane's agent has finished and left
+ * (mirrors `countRunningDowntimePanes` in `downtime-worker.ts` and the
+ * agent-liveness gate in `pane-close-herdr.ts`). A tab reporting a terminal
+ * status is NOT a running pane, so its item is eligible for demotion.
+ */
+const TERMINAL_AGENT_STATUSES = new Set(['done', 'exited']);
+
+/** File name of the hydrator diagnostic log inside `.worklog/logs/`. */
+export const HYDRATOR_LOG_FILE = 'hydrator.log';
+/** Rolling bound: keep at most this many lines in the hydrator log. */
+export const HYDRATOR_LOG_MAX_LINES = 200;
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 /** The subset of a work item the hydrator needs. */
@@ -150,6 +181,13 @@ export interface HydratorTab {
    * contract on an unscoped payload.
    */
   workspace_id?: string;
+  /**
+   * Raw `agent_status` reported for the tab, when herdr provides it. Only a
+   * terminal value (`done`/`exited`) makes the tab NOT a running pane
+   * (F1/WL-0MTF5WO2Q008B8US); absent/unknown status is fail-open toward
+   * active (never demote on untrustworthy evidence, AC5).
+   */
+  agent_status?: string;
 }
 
 /** An outbound dependency target (`wl dep list` → `outbound`). */
@@ -267,6 +305,62 @@ export function hasItemTab(
   workspaceId?: string,
 ): boolean {
   return collectTabWorkItemIds(tabs, workspaceId).has(itemId);
+}
+
+/**
+ * True when a tab is a RUNNING pane: its agent has not reported a finished
+ * status (`done`/`exited`). Absent or unknown `agent_status` is fail-open
+ * toward active — the hydrator must never demote on untrustworthy evidence
+ * (AC5), and only a provably-finished agent makes a pane stale (F1).
+ */
+export function isRunningTab(tab: HydratorTab): boolean {
+  const status = (tab.agent_status ?? '').trim().toLowerCase();
+  return !TERMINAL_AGENT_STATUSES.has(status);
+}
+
+/**
+ * AC2: true iff the item ID appears in a RUNNING pane's label in any tab of
+ * the current workspace (exact-label matching per WL-0MV24RM9I0051GEF). A
+ * tab whose agent has finished (`agent_status` `done`/`exited`) is not a
+ * running pane, so its item IS eligible for demotion (F1). Absent/unknown
+ * `agent_status` fails open toward active (no demotion on untrustworthy
+ * evidence).
+ */
+export function isActivePaneMatch(
+  itemId: string,
+  tabs: readonly HydratorTab[],
+  workspaceId?: string,
+): boolean {
+  for (const tab of tabs) {
+    if (!isRunningTab(tab)) continue;
+    if (typeof tab.label !== 'string') continue;
+    if (tab.label !== itemId) continue;
+    if (
+      workspaceId &&
+      typeof tab.workspace_id === 'string' &&
+      tab.workspace_id.length > 0 &&
+      tab.workspace_id !== workspaceId
+    ) {
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * AC1: extract every work-item ID (`WL-[0-9A-Z]+` …) appearing in the labels
+ * of the given panes. Returns a fresh array; deduplicates across panes.
+ */
+export function extractWorkItemIdsFromPaneTitles(
+  panes: readonly HydratorTab[],
+): string[] {
+  const ids = new Set<string>();
+  for (const pane of panes) {
+    if (typeof pane.label !== 'string') continue;
+    for (const id of extractWorkItemIdsFromText(pane.label)) ids.add(id);
+  }
+  return [...ids];
 }
 
 /**
@@ -396,10 +490,10 @@ export function compatibleStage(stage: string, status: string): string {
 
 /**
  * Pure demotion decision. Returns `null` when the item must be left alone
- * (not `in-progress`, or a matching tab exists).
+ * (not `in-progress`, or a matching RUNNING pane exists — F1).
  *
  * The `hasActivePane` context key is retained for source compatibility; its
- * value now comes from exact tab membership (see `hasItemTab`).
+ * value now comes from the running-pane check `isActivePaneMatch`.
  */
 export function decideDemotion(
   item: HydratorItem,
@@ -416,7 +510,10 @@ export function decideDemotion(
   if (ctx.blocked) {
     return { status: 'blocked', stage: compatibleStage(stage, 'blocked') };
   }
-  return { status: 'open', stage: compatibleStage(stage, 'open') };
+  // AC3 else-branch as written: release to `open` at `intake_complete`
+  // (per WL-0MTF5WO2Q008B8US AC3; the stage is valid for `open` in
+  // ALLOWED_STAGES_BY_STATUS / config.defaults.yaml).
+  return { status: 'open', stage: 'intake_complete' };
 }
 
 // ── Orchestration ─────────────────────────────────────────────────────
@@ -569,7 +666,6 @@ export async function runHydrationOnce(
     };
   }
   const tabs = tabStep.value;
-  const activeIds = collectTabWorkItemIds(tabs, workspaceId);
 
   let demoted = 0;
   let skipped = 0;
@@ -579,7 +675,10 @@ export async function runHydrationOnce(
     if (!item || typeof item.id !== 'string' || item.id.length === 0) continue;
     processed += 1;
 
-    const hasActiveTab = activeIds.has(item.id);
+    // AC2 (F1): only a RUNNING pane blocks demotion — a tab whose agent has
+    // finished (`agent_status` done/exited) is not an active match, so the
+    // item is released instead of lingering in `in-progress` forever.
+    const hasActiveTab = isActivePaneMatch(item.id, tabs, workspaceId);
     let blocked = false;
     if (!hasActiveTab) {
       const depStep = await runStep(
@@ -689,11 +788,82 @@ function hydratorExecOptions(
 }
 
 /**
+ * Build a fail-open diagnostic sink for the hydrator (F2/WL-0MTF5WO2Q008B8US,
+ * AC5): appends one timestamped line per call to
+ * `<cwd>/.worklog/logs/hydrator.log`, rolling to the most recent `maxLines`
+ * entries (mirrors the bounded rolling pattern of `downtime-log.ts`). Never
+ * throws — a log failure must never break the hydration loop.
+ *
+ * @param opts.cwd     Project root used for `<cwd>/.worklog/logs` placement
+ *                     (defaults to `process.cwd()`).
+ * @param opts.maxLines Rolling bound; defaults to `HYDRATOR_LOG_MAX_LINES`.
+ */
+export function createHydratorFileLog(
+  opts: { cwd?: string; maxLines?: number } = {},
+): (message: string) => void {
+  const cwd = opts.cwd ?? process.cwd();
+  const maxLines = opts.maxLines ?? HYDRATOR_LOG_MAX_LINES;
+  return (message: string) => {
+    try {
+      const dir = join(cwd, '.worklog', 'logs');
+      const filePath = join(dir, HYDRATOR_LOG_FILE);
+      mkdirSync(dir, { recursive: true });
+
+      let lines: string[] = [];
+      try {
+        const existing = readFileSync(filePath, 'utf8');
+        lines = existing.split('\n').filter((ln) => ln.trim() !== '');
+      } catch {
+        lines = []; // first entry or unreadable file → start fresh
+      }
+      lines.push(`${new Date().toISOString()} ${message}`);
+      if (lines.length > maxLines) {
+        lines = lines.slice(lines.length - maxLines);
+      }
+
+      // Temp name carries pid + a random suffix so two concurrent writers
+      // never collide on the same temp path. Same directory → same filesystem
+      // → the rename is atomic.
+      const tmpPath = join(
+        dir,
+        `.${HYDRATOR_LOG_FILE}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`,
+      );
+      try {
+        writeFileSync(tmpPath, lines.join('\n') + '\n', 'utf8');
+        renameSync(tmpPath, filePath);
+      } catch (err) {
+        // Clean up the temp file (best-effort) and leave the target untouched.
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          /* best-effort */
+        }
+        throw err;
+      }
+    } catch {
+      // Fail-open: a broken log sink never breaks the hydrator.
+    }
+  };
+}
+
+/**
  * Production `HydratorDeps` backed by the real `wl` and `herdr` CLIs.
  * Uses the injectable exec seam from `fetcher.ts` (tests never hit this).
+ *
+ * Returns a real `log` sink by default (F2): diagnostics land in
+ * `<worklog root>/.worklog/logs/hydrator.log` so a silently-failing
+ * hydrator is operator-observable (AC5).
  */
-export function createProductionHydratorDeps(): HydratorDeps {
+export function createProductionHydratorDeps(
+  opts: { log?: HydratorDeps['log'] } = {},
+): HydratorDeps {
   const herdrBin = (): string => process.env.HERDR_BIN_PATH ?? 'herdr';
+
+  // Resolve the project root from the worklog-dir override when set, else
+  // fall back to the process cwd (both work in the plugin pane).
+  const worklogDir = getWorklogDir();
+  const logRoot = worklogDir ? dirname(worklogDir) : process.cwd();
+  const log = opts.log ?? createHydratorFileLog({ cwd: logRoot });
 
   return {
     listInProgressItems: async () => {
@@ -722,10 +892,18 @@ export function createProductionHydratorDeps(): HydratorDeps {
         args,
         hydratorExecOptions(8 * 1024 * 1024),
       );
-      // Reuse the shared dispatcher-anchor parser (no second parser).
+      // Reuse the shared dispatcher-anchor parser (no second parser). The
+      // parser now carries `agentStatus` through so the running-pane check
+      // (F1) can distinguish a live agent pane from a finished one.
       const parsed = parseTabListOutput(stdout);
       if (parsed === null) return null;
-      return parsed.map((tab) => ({ tab_id: tab.tabId, label: tab.label }));
+      return parsed.map((tab) => ({
+        tab_id: tab.tabId,
+        label: tab.label,
+        ...(tab.agentStatus !== undefined
+          ? { agent_status: tab.agentStatus }
+          : {}),
+      }));
     },
 
     listOutboundDeps: async (itemId: string) => {
@@ -736,7 +914,43 @@ export function createProductionHydratorDeps(): HydratorDeps {
       );
       const payload = extractJson(stdout) as { outbound?: unknown } | null;
       const outbound = payload?.outbound;
-      return Array.isArray(outbound) ? (outbound as HydratorDepTarget[]) : null;
+      if (!Array.isArray(outbound)) return null;
+      const targets = outbound as HydratorDepTarget[];
+      // AC3: `wl dep list` carries only `status` — fetch the stage via
+      // `wl show` for each edge not already completed/deleted so the
+      // blocked-vs-open decision matches `isDependencyActive` (a target at
+      // stage `in_review`/`done` is NOT an active blocker). Fail-open: an
+      // unparseable/unfetchable `wl show` leaves the edge's stage undefined
+      // (treated as an active blocker — the conservative, pre-existing
+      // classification).
+      const enriched: HydratorDepTarget[] = [];
+      for (const target of targets) {
+        const status = (target.status ?? '').toLowerCase().trim();
+        if (status === 'completed' || status === 'deleted') {
+          enriched.push(target);
+          continue;
+        }
+        try {
+          const { stdout: showOut } = await getExecFileAsync()(
+            'wl',
+            buildWlArgs(['show', target.id, '--json']),
+            hydratorExecOptions(4 * 1024 * 1024),
+          );
+          const showPayload = extractJson(showOut) as {
+            workItem?: { stage?: unknown };
+          } | null;
+          const stage = showPayload?.workItem?.stage;
+          enriched.push(
+            typeof stage === 'string'
+              ? { ...target, stage }
+              : target,
+          );
+        } catch {
+          // Failed stage lookup — keep the edge as-is (status only).
+          enriched.push(target);
+        }
+      }
+      return enriched;
     },
 
     applyDemotion: async (itemId: string, status: string, stage: string) => {
@@ -748,5 +962,7 @@ export function createProductionHydratorDeps(): HydratorDeps {
       const payload = extractJson(stdout) as { success?: boolean } | null;
       return payload?.success === true;
     },
+
+    log,
   };
 }

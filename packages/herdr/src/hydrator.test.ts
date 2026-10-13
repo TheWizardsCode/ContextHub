@@ -19,11 +19,14 @@ import {
   applyActiveTabMarkers,
   collectTabWorkItemIds,
   compatibleStage,
+  createHydratorFileLog,
   createHydratorRunner,
   createProductionHydratorDeps,
   decideDemotion,
+  extractWorkItemIdsFromPaneTitles,
   extractWorkItemIdsFromText,
   isActiveBlocker,
+  isActivePaneMatch,
   hasItemTab,
   markItemsActiveByTab,
   runHydrationOnce,
@@ -33,6 +36,9 @@ import {
   type HydratorItem,
   type HydratorTab,
 } from './hydrator.js';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // ── Test helpers ──────────────────────────────────────────────────────
 
@@ -316,11 +322,69 @@ describe('decideDemotion', () => {
     });
   });
 
-  it('releases an otherwise-stuck item to open at its claimed stage', () => {
+  it('releases an otherwise-stuck item to open at intake_complete (AC3 else-branch)', () => {
     expect(decideDemotion(inProgress('plan_complete'), { hasActivePane: false, blocked: false })).toEqual({
       status: 'open',
-      stage: 'plan_complete',
+      stage: 'intake_complete',
     });
+  });
+});
+
+// ── Running-pane liveness (AC2 / F1) ──────────────────────────────────
+
+describe('running-pane liveness (AC2)', () => {
+  const tab = (label: string, agent_status?: string, workspace_id?: string): HydratorTab => ({
+    tab_id: `t-${label}-${agent_status ?? 'none'}`,
+    label,
+    ...(workspace_id !== undefined ? { workspace_id } : {}),
+    ...(agent_status !== undefined ? { agent_status } : {}),
+  });
+
+  it('isActivePaneMatch: matches an exact-label tab hosting a working agent', () => {
+    const panes = [tab('Work Items'), tab(WL, 'working')];
+    expect(isActivePaneMatch(WL, panes)).toBe(true);
+  });
+
+  it('isActivePaneMatch: does NOT match a done (finished) pane (F1 repro)', () => {
+    const panes = [tab(WL, 'done')];
+    expect(isActivePaneMatch(WL, panes)).toBe(false);
+  });
+
+  it('isActivePaneMatch: does NOT match an exited pane', () => {
+    const panes = [tab(WL, 'exited')];
+    expect(isActivePaneMatch(WL, panes)).toBe(false);
+  });
+
+  it('isActivePaneMatch: fail-open — an un-reported agent_status still counts as active', () => {
+    const panes = [tab(WL)];
+    expect(isActivePaneMatch(WL, panes)).toBe(true);
+  });
+
+  it('isActivePaneMatch: exact label only (a containing label is not a match)', () => {
+    const panes = [tab(`implement ${WL}`, 'working')];
+    expect(isActivePaneMatch(WL, panes)).toBe(false);
+  });
+
+  it('isActivePaneMatch: scopes to the current workspace', () => {
+    expect(isActivePaneMatch(WL, [tab(WL, 'working', 'wOther')], 'wCurrent')).toBe(false);
+    expect(isActivePaneMatch(WL, [tab(WL, 'working', 'wCurrent')], 'wCurrent')).toBe(true);
+  });
+});
+
+// ── AC1: pane-title ID extraction ─────────────────────────────────────
+
+describe('extractWorkItemIdsFromPaneTitles (AC1)', () => {
+  it('extracts every work-item ID found in pane labels', () => {
+    const panes = [
+      { tab_id: 't1', label: `implement ${WL} --focused` },
+      { tab_id: 't2', label: 'Work Items' },
+    ];
+    expect(extractWorkItemIdsFromPaneTitles(panes)).toEqual([WL]);
+  });
+
+  it('returns an empty array when no pane label carries an ID', () => {
+    expect(extractWorkItemIdsFromPaneTitles([{ tab_id: 't1', label: 'Nothing here' }])).toEqual([]);
+    expect(extractWorkItemIdsFromPaneTitles([])).toEqual([]);
   });
 });
 
@@ -337,13 +401,37 @@ describe('runHydrationOnce', () => {
     expect(applied).toEqual([{ id: WL, status: 'completed', stage: 'in_review' }]);
   });
 
-  it('demotes a tab-less plain item to open at its claimed stage', async () => {
+  it('demotes a tab-less plain item to open at intake_complete (AC3 else-branch)', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
       listTabs: async () => [],
     });
     await runHydrationOnce(deps);
-    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
+  });
+
+  it('demotes an item whose only matching tab hosts a done agent (F1)', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listTabs: async () => [
+        { tab_id: 't1', label: WL, agent_status: 'done', workspace_id: 'wCurrent' },
+      ],
+    });
+    const result = await runHydrationOnce(deps, 'wCurrent');
+    expect(result.demoted).toBe(1);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
+  });
+
+  it('keeps an item whose matching tab hosts a working agent', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
+      listTabs: async () => [
+        { tab_id: 't1', label: WL, agent_status: 'working', workspace_id: 'wCurrent' },
+      ],
+    });
+    const result = await runHydrationOnce(deps, 'wCurrent');
+    expect(result.demoted).toBe(0);
+    expect(applied).toEqual([]);
   });
 
   it('demotes to blocked when an outbound dependency is active', async () => {
@@ -424,7 +512,7 @@ describe('runHydrationOnce', () => {
     });
     const result = await runHydrationOnce(deps);
     expect(result.demoted).toBe(1);
-    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
   });
 
   it('demotes multiple stuck items independently', async () => {
@@ -440,7 +528,7 @@ describe('runHydrationOnce', () => {
     expect(result.demoted).toBe(2);
     expect(applied).toEqual([
       { id: WL, status: 'completed', stage: 'in_review' },
-      { id: other, status: 'open', stage: 'plan_complete' },
+      { id: other, status: 'open', stage: 'intake_complete' },
     ]);
   });
 });
@@ -466,7 +554,7 @@ describe('createHydratorRunner', () => {
     const run = createHydratorRunner(deps, { isVisible: async () => true });
     const result = await run();
     expect(result).toMatchObject({ ok: true, demoted: 1 });
-    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
   });
 
   it('runs immediately on the hidden→visible focus-resume (no interval wait)', async () => {
@@ -488,7 +576,7 @@ describe('createHydratorRunner', () => {
     visible = true;
     const result = await run();
     expect(result).toMatchObject({ ok: true, demoted: 1 });
-    expect(applied).toHaveLength(1);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
   });
 });
 
@@ -546,7 +634,7 @@ describe('pane-title-only ID no longer counts (verification)', () => {
     expect(result.ok).toBe(true);
     expect(result.demoted).toBe(1);
     // The item is demoted because its ID is not an *exact* tab label match.
-    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
   });
 });
 
@@ -564,7 +652,7 @@ describe('workspace scoping at orchestration level', () => {
     await runHydrationOnce(deps, 'wCurrent');
 
     // Tab exists but in the wrong workspace → item demoted.
-    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
   });
 
   it('keeps an item when a matching tab is in the current workspace', async () => {
@@ -663,7 +751,116 @@ describe('closed tab clears the in-progress marker (cadence re-evaluation)', () 
     const result2 = await run();
     expect(result2?.ok).toBe(true);
     expect(result2?.demoted).toBe(1);
-    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'plan_complete' }]);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
+  });
+});
+
+// ── Production log sink (AC5 / F2) ────────────────────────────────────
+
+describe('production log sink (AC5)', () => {
+  it('createProductionHydratorDeps exposes a log sink by default', () => {
+    const deps = createProductionHydratorDeps();
+    expect(typeof deps.log).toBe('function');
+  });
+
+  it('listOutboundDeps enriches non-terminal edges with their stage via wl show (AC3)', async () => {
+    // A dep edge whose target is at stage in_review must NOT be treated as an
+    // active blocker (per isDependencyActive in database.ts), even though
+    // `wl dep list` carries only status. The production seam therefore fetches
+    // the stage via `wl show` for every non-completed/deleted edge.
+    let showCalls = 0;
+    const exec = async (bin: string, args: string[]) => {
+      if (args[0] === 'dep') {
+        return {
+          stdout: JSON.stringify({
+            outbound: [
+              { id: 'WL-EDGE-INREVIEW', status: 'open', direction: 'depends-on' },
+              { id: 'WL-EDGE-DONE', status: 'completed', direction: 'depends-on' },
+              { id: 'WL-EDGE-PLAN', status: 'in-progress', direction: 'depends-on' },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      if (args[0] === 'show') {
+        showCalls += 1;
+        const stage =
+          args[1] === 'WL-EDGE-INREVIEW'
+            ? 'in_review'
+            : args[1] === 'WL-EDGE-PLAN'
+              ? 'plan_complete'
+              : 'idea';
+        return {
+          stdout: JSON.stringify({ workItem: { id: args[1], stage } }),
+          stderr: '',
+        };
+      }
+      return { stdout: '{}', stderr: '' };
+    };
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps({ log: () => {} });
+
+    const targets = await deps.listOutboundDeps(WL);
+
+    expect(showCalls).toBe(2); // only the two non-terminal edges are fetched
+    expect(targets).toEqual([
+      { id: 'WL-EDGE-INREVIEW', status: 'open', direction: 'depends-on', stage: 'in_review' },
+      { id: 'WL-EDGE-DONE', status: 'completed', direction: 'depends-on' },
+      { id: 'WL-EDGE-PLAN', status: 'in-progress', direction: 'depends-on', stage: 'plan_complete' },
+    ]);
+  });
+
+  it('listOutboundDeps fails open when wl show is unavailable (edge keeps status only)', async () => {
+    const exec = async (bin: string, args: string[]) => {
+      if (args[0] === 'dep') {
+        return {
+          stdout: JSON.stringify({
+            outbound: [{ id: 'WL-EDGE', status: 'open', direction: 'depends-on' }],
+          }),
+          stderr: '',
+        };
+      }
+      throw new Error('wl show unavailable');
+    };
+    setExecFileAsync(exec as never);
+    const deps = createProductionHydratorDeps({ log: () => {} });
+
+    const targets = await deps.listOutboundDeps(WL);
+
+    // Stage unknown → edge retained as-is; isActiveBlocker conservatively
+    // treats the unknown-stage edge as an active blocker.
+    expect(targets).toEqual([{ id: 'WL-EDGE', status: 'open', direction: 'depends-on' }]);
+  });
+
+  it('logs a diagnostic through the injected sink when a cycle fails open', async () => {
+    const logs: string[] = [];
+    const { deps } = makeDeps({
+      log: (m) => logs.push(m),
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      listTabs: async () => {
+        throw new Error('herdr missing');
+      },
+    });
+    const result = await runHydrationOnce(deps);
+    expect(result.ok).toBe(false);
+    expect(logs.length).toBeGreaterThan(0);
+    expect(logs.some((l) => l.includes('tab-list'))).toBe(true);
+  });
+
+  it('createHydratorFileLog appends bounded lines to <cwd>/.worklog/logs/hydrator.log', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'hydrator-log-'));
+    const log = createHydratorFileLog({ cwd: tmp, maxLines: 3 });
+    log('one');
+    log('two');
+    log('three');
+    log('four');
+    const text = readFileSync(join(tmp, '.worklog', 'logs', 'hydrator.log'), 'utf8');
+    const lines = text.split('\n').filter((l) => l.trim() !== '');
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('two');
+    expect(lines[2]).toContain('four');
   });
 });
 
