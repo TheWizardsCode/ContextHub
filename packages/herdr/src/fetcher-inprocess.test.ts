@@ -192,19 +192,22 @@ describe('in-process default-view reads (WL-0MV5CBQ6L005SPAG)', () => {
     expect(review).toEqual({ count: 0, auditsOutstanding: false });
     expect(actionable).toBe(seeded.actionable);
 
-    // Only `wl next` + the three mandatory-subset `wl list` queries spawn
-    // (critical, in_review review queue, actively-worked in-progress —
-    // WL-0MV6KV22S004NYIU); the review query is shared with the banner and
-    // the count/children reads are in-process. Exactly one query carries
-    // `--stage` (the review subset; the critical and active subsets are
-    // stage-agnostic).
-    expect(spawns).toHaveLength(4);
+    // Only `wl next` + the four mandatory-subset `wl list` queries spawn
+    // (critical, in_review review queue, actively-worked in-progress, and
+    // status=blocked root items — WL-0MV6KV22S004NYIU / WL-0MV71WBHB007D8ZE);
+    // the review query is shared with the banner and the count/children reads
+    // are in-process. Exactly one query carries `--stage` (the review subset;
+    // the critical, active and blocked subsets are stage-agnostic).
+    expect(spawns).toHaveLength(5);
     expect(spawns.some((s) => s.includes('next'))).toBe(true);
     expect(spawns.some((s) => s.includes('--priority') && s.includes('critical'))).toBe(true);
     expect(spawns.filter((s) => s.includes('--stage')).length).toBe(1);
     expect(spawns.some((s) => s.includes('--parent'))).toBe(false);
     // The actively-worked in-progress subset is fetched explicitly.
     expect(spawns.some((s) => s.includes('--status') && s.includes('in-progress'))).toBe(true);
+    // The blocked subset is fetched explicitly so a low-ranked blocked item
+    // is never cut by the -n window (WL-0MV71WBHB007D8ZE).
+    expect(spawns.some((s) => s.includes('--status') && s.includes('blocked'))).toBe(true);
   });
 
   it('falls back to spawning wl when no worklog dir is resolved', async () => {

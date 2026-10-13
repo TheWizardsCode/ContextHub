@@ -685,13 +685,14 @@ function reviewQueueArgs(): string[] {
  * Fetch the mandatory subsets that must ALWAYS be shown in the default
  * worklist: all critical items, all in_review items (the producer-review
  * queue — status completed awaiting review or in-progress being re-worked
- * after review feedback, WL-0MV6JGVPH009YDXB) and all actively-worked
- * in-progress root items (WL-0MV6KV22S004NYIU).
+ * after review feedback, WL-0MV6JGVPH009YDXB), all actively-worked
+ * in-progress root items (WL-0MV6KV22S004NYIU) and all status=blocked root
+ * items (WL-0MV71WBHB007D8ZE).
  *
  * These are fetched explicitly via `wl list` because `wl next -n N` hard-caps
  * at 32 items — even `-n 500` returns only 32, so a large superset cannot
- * capture all critical/in_review/in-progress items. Runs the three queries in
- * parallel to mitigate refresh latency.
+ * capture all critical/in_review/in-progress/blocked items. Runs the four
+ * queries in parallel to mitigate refresh latency.
  */
 async function fetchMandatorySubsets(): Promise<WorkItem[]> {
   // Critical items: fetch ALL critical items across all statuses (open,
@@ -718,15 +719,25 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
   // (WL-0MV6KV22S004NYIU). The query is NOT merged into reviewQueueArgs()
   // because it is a distinct concern with a different stage scope — adding it
   // there would break the review-queue single-spawn dedup invariant.
-  const [criticalOutput, reviewOutput, activeOutput] = await Promise.all([
+  //
+  // Blocked items: root-only, status=blocked at ANY stage (root-only keeps
+  // them at the same top-level visibility as the other mandatory subsets).
+  // `wl next` penalises blocked items by -10000, so a release-blocking
+  // blocked in_review item ranks far below the browseItemCount window and is
+  // never returned by the base feed — the explicit subset fetch guarantees it
+  // is still shown (WL-0MV71WBHB007D8ZE). The query is NOT merged into
+  // reviewQueueArgs() (the review queue is stage-scoped; blocked spans stages).
+  const [criticalOutput, reviewOutput, activeOutput, blockedOutput] = await Promise.all([
     runWl(['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed']),
     runWl(reviewQueueArgs()),
     runWl(['list', '--status', 'in-progress', '--root-only']),
+    runWl(['list', '--status', 'blocked', '--root-only']),
   ]);
   const criticalItems = extractItems(extractJson(criticalOutput));
   const reviewItems = extractItems(extractJson(reviewOutput));
   const activeItems = extractItems(extractJson(activeOutput));
-  return mergeUniqueById(criticalItems, reviewItems, activeItems);
+  const blockedItems = extractItems(extractJson(blockedOutput));
+  return mergeUniqueById(criticalItems, reviewItems, activeItems, blockedItems);
 }
 
 /**
@@ -739,10 +750,12 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
  * bottom of the list rather than displacing actionable work.
  *
  * When a count is given, smart selection is applied: all critical items, all
- * in_review review-queue items and all actively-worked in-progress items are
- * always included (regardless of count, WL-0MV6KV22S004NYIU) and
- * the count limits only the remaining "other" items. The mandatory subsets
- * are merged from explicit `wl list` queries (see fetchMandatorySubsets).
+ * in_review review-queue items, all actively-worked in-progress items and all
+ * status=blocked root items are always included (regardless of count,
+ * WL-0MV6KV22S004NYIU / WL-0MV71WBHB007D8ZE) and the count limits only the
+ * remaining "other" items. The mandatory subsets are merged from explicit
+ * `wl list` queries (see fetchMandatorySubsets), so a blocked item that ranks
+ * below the `-n` window is still shown.
  */
 export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   const args = ['next'];
@@ -753,9 +766,10 @@ export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
   // Show dependency-blocked items in the Herdr selection list. `wl next`
   // excludes them by default (shared filterCandidates, unless includeBlocked);
   // without this flag blocked backlog work silently disappears from the
-  // worklist (WL-0MV6TFX0600145M2). Blocked items still rank low (the
-  // -10000 score penalty), so they surface at the bottom of the list rather
-  // than displacing actionable work. The implement-tier candidate lookup
+  // worklist (WL-0MV6TFX0600145M2). The base feed includes them within its
+  // `-n` window; the status=blocked mandatory subset (see
+  // fetchMandatorySubsets) additionally guarantees a low-ranked blocked item
+  // is never cut (WL-0MV71WBHB007D8ZE). The implement-tier candidate lookup
   // (getNextImplementCandidate) deliberately keeps the default exclusion.
   args.push('--include-blocked');
 

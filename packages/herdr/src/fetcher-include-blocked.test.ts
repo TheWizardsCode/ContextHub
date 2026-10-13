@@ -54,6 +54,52 @@ function installExecMock(): void {
         stderr: '',
       };
     }
+    // Mandatory critical / review / actively-worked / blocked subsets — all empty.
+    return { stdout: JSON.stringify({ success: true, count: 0, workItems: [] }), stderr: '' };
+  }) as never);
+}
+
+/**
+ * Install a recording exec mock for the low-ranked-blocked regression
+ * (WL-0MV71WBHB007D8ZE): the base `wl next -n` feed does NOT include the
+ * blocked item (it ranks below the window, like WL-0MTF5WO1N0088P5P at ~35
+ * of 52), but the mandatory blocked subset query returns it — so the item
+ * can only appear via the explicit `--status blocked` subset fetch.
+ */
+function installLowRankedBlockedMock(): void {
+  spawns = [];
+  setExecFileAsync((async (_bin: string, args: string[]) => {
+    spawns.push(args.join(' '));
+    if (args.includes('next')) {
+      return {
+        stdout: JSON.stringify({
+          success: true,
+          count: 2,
+          results: [
+            { workItem: { id: 'WL-OPEN', title: 'Open item', status: 'open', stage: 'idea' } },
+            { workItem: { id: 'WL-OTHER', title: 'Other item', status: 'open', stage: 'idea' } },
+          ],
+        }),
+        stderr: '',
+      };
+    }
+    if (args.includes('--status') && args.includes('blocked')) {
+      return {
+        stdout: JSON.stringify({
+          success: true,
+          count: 1,
+          workItems: [
+            {
+              id: 'WL-LOWRANK-BLOCKED',
+              title: 'Low-ranked blocked review item',
+              status: 'blocked',
+              stage: 'in_review',
+            },
+          ],
+        }),
+        stderr: '',
+      };
+    }
     // Mandatory critical / review / actively-worked subsets — all empty.
     return { stdout: JSON.stringify({ success: true, count: 0, workItems: [] }), stderr: '' };
   }) as never);
@@ -98,5 +144,31 @@ describe('fetchNextItems includes dependency-blocked items (WL-0MV6TFX0600145M2)
     for (const spawn of listSpawns) {
       expect(spawn).not.toContain('--include-blocked');
     }
+  });
+});
+
+describe('fetchNextItems shows a low-ranked blocked item via the mandatory subset (WL-0MV71WBHB007D8ZE)', () => {
+  it('fetches status=blocked root items as a mandatory subset', async () => {
+    installLowRankedBlockedMock();
+
+    await fetchNextItems(20);
+
+    const blockedSpawn = spawns.find((s) => s.includes('--status blocked'));
+    expect(blockedSpawn).toBeDefined();
+    expect(blockedSpawn).toContain('--root-only');
+  });
+
+  it('keeps a blocked item that the base wl-next window never returned', async () => {
+    installLowRankedBlockedMock();
+
+    const items = await fetchNextItems(20);
+
+    // The base feed only carried WL-OPEN/WL-OTHER; the blocked item arrives
+    // solely through the mandatory `--status blocked` subset and must be
+    // shown (it is release-blocking and must not be hidden by the -n window).
+    expect(items.map((i) => i.id)).toContain('WL-LOWRANK-BLOCKED');
+    const blocked = items.find((i) => i.id === 'WL-LOWRANK-BLOCKED');
+    expect(blocked?.status).toBe('blocked');
+    expect(blocked?.stage).toBe('in_review');
   });
 });

@@ -1595,16 +1595,19 @@ regardless of the `browseItemCount` setting:
 
 - Items with `priority=critical` are always included.
 - Items with `status=completed` **and** `stage=in_review` are always included.
+- Items with `status=blocked` at any non-done stage are always included
+  (WL-0MV71WBHB007D8ZE): a blocked in_review item is release-blocking (the
+  ship release gate queries `wl list --stage in_review` with no status filter)
+  and is fetched as a mandatory subset (`wl list --status blocked --root-only`)
+  so it is never cut by the `browseItemCount` window or a low `-n` ranking.
 - Dependency-blocked items are **not filtered out** of the default list
   (WL-0MV6TFX0600145M2): `fetchNextItems` passes `--include-blocked` to
   `wl next`, so blocked backlog work stays visible (rendered with the ⛔
-  status icon). They still rank low in the selection order (the shared scorer
-  applies a heavy blocked penalty), so they surface at the bottom of the list
-  rather than displacing actionable work. The implement-tier downtime
-  dispatch lookup deliberately keeps `wl next`'s default exclusion.
+  status icon). The implement-tier downtime dispatch lookup deliberately keeps
+  `wl next`'s default exclusion.
 - The `browseItemCount` limit applies only to the remaining "other" items.
   The number of "other" slots is `browseItemCount − (critical count) −
-  (completed/in_review count)`, floored at zero.
+  (completed/in_review count) − (blocked count)`, floored at zero.
 - When critical + completed/in_review items alone meet or exceed
   `browseItemCount`, all of them are shown anyway (no hard cap on the
   mandatory set) — the total may exceed the configured count.

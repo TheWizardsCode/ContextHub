@@ -40,6 +40,8 @@ const criticalInReview = (id: string): WorkItem => makeItem(id, { priority: 'cri
 const criticalInProgressInReview = (id: string): WorkItem => makeItem(id, { priority: 'critical', status: 'in-progress', stage: 'in_review' });
 /** Actively-worked item (status = in-progress) at a non-in_review stage. */
 const active = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => makeItem(id, { status: 'in-progress', stage: 'plan_complete', ...overrides });
+/** Blocked item (status = blocked) at a non-done stage — always shown (WL-0MV71WBHB007D8ZE). */
+const blocked = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => makeItem(id, { status: 'blocked', stage: 'plan_complete', ...overrides });
 const other = (id: string): WorkItem => makeItem(id, { priority: 'medium', status: 'open', stage: 'idea' });
 /** Item whose stage is 'done' (fully closed — must never appear in the default list). */
 const done = (id: string, overrides: Partial<WorkItem> = {}): WorkItem => makeItem(id, { stage: 'done', status: 'completed', ...overrides });
@@ -240,16 +242,85 @@ describe('selectWorkItems — smart selection algorithm', () => {
   });
 
   describe('isMandatoryItem — mandatory-set predicate', () => {
-    it('is true for critical, completed/in_review, and in-progress at any stage', () => {
+    it('is true for critical, completed/in_review, in-progress, and blocked at any stage', () => {
       expect(isMandatoryItem(makeItem('C', { priority: 'critical', stage: 'idea' }))).toBe(true);
       expect(isMandatoryItem(makeItem('R', { status: 'completed', stage: 'in_review' }))).toBe(true);
       expect(isMandatoryItem(makeItem('A', { status: 'in-progress', stage: 'plan_complete' }))).toBe(true);
       expect(isMandatoryItem(makeItem('AI', { status: 'in-progress', stage: 'idea' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('B', { status: 'blocked', stage: 'in_review' }))).toBe(true);
+      expect(isMandatoryItem(makeItem('B2', { status: 'blocked', stage: 'intake_complete' }))).toBe(true);
     });
 
     it('is false for an untouched open item', () => {
       expect(isMandatoryItem(makeItem('O', { status: 'open', stage: 'idea' }))).toBe(false);
       expect(isMandatoryItem(makeItem('O2', { status: 'open', stage: 'plan_complete' }))).toBe(false);
+    });
+  });
+
+  describe('blocked items — mandatory set (WL-0MV71WBHB007D8ZE)', () => {
+    it('keeps a blocked in_review item visible when it ranks below browseItemCount', () => {
+      // The operator-visible symptom: WL-0MTF5WO1N0088P5P (status=blocked,
+      // stage=in_review) ranked ~35 of 52, so `wl next -n 20` never returned
+      // it and the default list hid a release-blocking item entirely.
+      const items = [
+        ...Array.from({ length: 25 }, (_, i) => other(`O${i + 1}`)),
+        blocked('BLK1', { stage: 'in_review' }),
+      ];
+
+      const result = selectWorkItems(items, 20);
+
+      expect(result.map((i) => i.id)).toContain('BLK1');
+      // The blocked item consumes a mandatory slot — it must not be cut even
+      // though it appears after 25 other items in the input.
+      expect(result.filter((i) => i.id === 'BLK1')).toHaveLength(1);
+    });
+
+    it('blocked item survives a tiny browseItemCount when others saturate the window', () => {
+      const items = [...Array.from({ length: 5 }, (_, i) => other(`O${i + 1}`)), blocked('BLK1')];
+
+      // browseItemCount=1: the blocked item is mandatory and must show
+      // instead of being demoted to the capped others bucket.
+      const result = selectWorkItems(items, 1);
+
+      expect(result.map((i) => i.id)).toEqual(['BLK1']);
+    });
+
+    it('orders criticals, then reviews, then blocked, then actively-worked, then others', () => {
+      const items = [other('O1'), active('A1'), blocked('B1'), inReview('R1'), critical('C1'), other('O2')];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map((i) => i.id)).toEqual(['C1', 'R1', 'B1', 'A1', 'O1', 'O2']);
+    });
+
+    it('a blocked child item stays hidden (root-only rule for non-critical children)', () => {
+      const items = [
+        blocked('B1'),
+        makeItem('ChildBlocked', { status: 'blocked', stage: 'idea', parentId: 'B1' }),
+        other('O1'),
+      ];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map((i) => i.id)).toEqual(['B1', 'O1']);
+    });
+
+    it('excludes a blocked item whose stage is done (done gate applies first)', () => {
+      const items = [blocked('B1', { stage: 'done' }), other('O1')];
+
+      const result = selectWorkItems(items, 10);
+
+      expect(result.map((i) => i.id)).toEqual(['O1']);
+    });
+
+    it('a blocked item does not consume an others slot when the window is full', () => {
+      // browseItemCount=2: mandatory = 1 blocked, so 1 other shown — the
+      // blocked item is NOT charged to the others budget.
+      const items = [other('O1'), other('O2'), other('O3'), blocked('B1')];
+
+      const result = selectWorkItems(items, 2);
+
+      expect(result.map((i) => i.id)).toEqual(['B1', 'O1']);
     });
   });
 
