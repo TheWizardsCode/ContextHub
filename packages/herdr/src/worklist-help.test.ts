@@ -4,11 +4,9 @@
  * child WL-0MV85R0JD004CHAE; implementation child WL-0MV85R14Y003RII9).
  *
  * The help screen does not exist yet, so every body here asserts the
- * POST-IMPLEMENTATION behaviour and is committed with `it.fails` — the suite
- * stays GREEN while the assertions are RED (the repo's documented TDD
- * pattern; see packages/herdr/src/downtime-worker.assignee-claim.test.ts and
- * packages/herdr/src/coordination-dispatch.test.ts). The implementation child
- * WL-0MV85R14Y003RII9 flips each `it.fails` to `it` once the overlay lands.
+ * The overlay landed in the implementation child WL-0MV85R14Y003RII9, so
+ * every body here asserts the IMPLEMENTED behaviour with a plain `it` (the
+ * red-witness `it.fails` form was flipped on landing).
  *
  * Everything is pinned through the REAL `runWorklistTui` render loop over a
  * fake TTY (the same technique as the composed-footer tests in
@@ -221,7 +219,7 @@ const isListMode = (f: string): boolean => f.includes('Work Items') && !f.includ
 // ── AC1: `?` opens help; `?`/Esc/`q` each return to list ───────────────
 
 describe('help screen overlay — open/dismiss (WL-0MV85R0JD004CHAE)', () => {
-  it.fails('opens on ? and dismisses with ?, Esc and q back to list mode', async () => {
+  it('opens on ? and dismisses with ?, Esc and q back to list mode', async () => {
     const items = [makeItem('A'), makeItem('B'), makeItem('C')];
     await runWithTui(items, async (h) => {
       // ? opens the overlay.
@@ -250,12 +248,12 @@ describe('help screen overlay — open/dismiss (WL-0MV85R0JD004CHAE)', () => {
 
   // ── AC2: dismissing help mutates no list state ─────────────────────
 
-  it.fails('leaves the selection unchanged after help is dismissed', async () => {
+  it('leaves the selection unchanged after help is dismissed', async () => {
     const items = [makeItem('A'), makeItem('B'), makeItem('C')];
     await runWithTui(items, async (h) => {
       // Move the cursor onto item B, then capture the exact list frame.
       h.press('j');
-      await h.waitForFrame((f) => f.includes('▸ Item B'), 'selection on Item B');
+      await h.waitForFrame((f) => /▸[^\n]*B Item B/.test(f), 'selection on Item B');
       const listFrameBefore = h.rawFrame();
 
       // Open then dismiss help.
@@ -267,11 +265,11 @@ describe('help screen overlay — open/dismiss (WL-0MV85R0JD004CHAE)', () => {
       // The whole frame is byte-identical — selection, scroll, filters and
       // navigation stack are untouched (a full-pane overlay is display-only).
       expect(h.rawFrame()).toBe(listFrameBefore);
-      expect(h.frame()).toContain('▸ Item B');
+      expect(h.frame()).toMatch(/▸[^\n]*B Item B/);
     });
   });
 
-  it.fails('is display-only — keys pressed while help is open dispatch nothing', async () => {
+  it('is display-only — keys pressed while help is open dispatch nothing', async () => {
     const items = [makeItem('A')];
     const onCommand = vi.fn();
     const onDowntimeToggle = vi.fn();
@@ -300,7 +298,7 @@ describe('help screen overlay — open/dismiss (WL-0MV85R0JD004CHAE)', () => {
 // ── AC3: command enumeration from the live registry ─────────────────────
 
 describe('help screen overlay — command enumeration (WL-0MV85R0JD004CHAE)', () => {
-  it.fails('enumerates every visible registry shortcut, grouped by chord leader', async () => {
+  it('enumerates every visible registry shortcut, grouped by chord leader', async () => {
     const items = [makeItem('A')];
     await runWithTui(
       items,
@@ -332,7 +330,7 @@ describe('help screen overlay — command enumeration (WL-0MV85R0JD004CHAE)', ()
     );
   });
 
-  it.fails('derives the command list from the live ShortcutRegistry', async () => {
+  it('derives the command list from the live ShortcutRegistry', async () => {
     const items = [makeItem('A')];
     const sentinel: ShortcutEntry = {
       command: '/skill:audit <id>',
@@ -361,7 +359,7 @@ describe('help screen overlay — command enumeration (WL-0MV85R0JD004CHAE)', ()
 // ── AC4: pane-height budget + discoverable dismiss keys ─────────────────
 
 describe('help screen overlay — small-pane behaviour (WL-0MV85R0JD004CHAE)', () => {
-  it.fails('stays within the rows - 1 budget on a short pane and keeps dismiss keys discoverable', async () => {
+  it('stays within the rows - 1 budget on a short pane and keeps dismiss keys discoverable', async () => {
     const rows = 12;
     const items = [makeItem('A'), makeItem('B'), makeItem('C')];
     await runWithTui(
@@ -385,7 +383,7 @@ describe('help screen overlay — small-pane behaviour (WL-0MV85R0JD004CHAE)', (
 // ── AC5: showHelpText gate ──────────────────────────────────────────────
 
 describe('help screen overlay — showHelpText gate (WL-0MV85R0JD004CHAE)', () => {
-  it.fails('honours showHelpText: false while offering help when enabled', async () => {
+  it('honours showHelpText: false while offering help when enabled', async () => {
     const items = [makeItem('A')];
 
     // Enabled: `?` opens the help overlay.

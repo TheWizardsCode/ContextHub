@@ -444,7 +444,7 @@ export class NavigationStack {
 
 // ── State ─────────────────────────────────────────────────────────────
 
-export type ViewMode = 'list' | 'detail' | 'filter' | 'form';
+export type ViewMode = 'list' | 'detail' | 'filter' | 'form' | 'help';
 
 /**
  * A group heading row in the display-rows model (WL-0MSL5MPSZ003TG94).
@@ -2868,6 +2868,116 @@ export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
   // dropped above but its key binding is untouched.
   parts.unshift(HELP_FOOTER_HINT);
   return parts.join('  ');
+}
+
+/**
+ * Truncate a string to at most `max` terminal cells, appending an ellipsis
+ * when content is dropped. Keeps the leading text (chord + label) intact so
+ * a long description can never hide an entry's identity.
+ */
+function truncateToWidth(s: string, max: number): string {
+  if (max <= 0) return '';
+  if (s.length <= max) return s;
+  if (max <= 1) return s.slice(0, max);
+  return `${s.slice(0, max - 1)}\u2026`;
+}
+
+/** A single row in the help screen's icon legend. */
+export interface HelpIconRow {
+  /** The glyph (or noIcons text fallback) as rendered in the list. */
+  glyph: string;
+  /** Short human-readable meaning of the glyph. */
+  meaning: string;
+}
+
+/**
+ * Render the full-pane `?` help overlay (WL-0MV85R14Y003RII9).
+ *
+ * Two sections are produced: **Commands** — every supplied shortcut entry,
+ * grouped by chord leader so a family (`c n`, `c q`) is shown together, each
+ * with its chord, label and a short description — and **Icons** — the
+glyph legend (supplied by the caller from the shared icon source of truth).
+ *
+ * The output is CLIPPED to the `rows - 1` render budget (matching the list
+ * viewport contract, WL-0MTV979LK005YB1B): a title line is always shown and
+ * the dismiss footer (`? / Esc / q`) is always the final line, even when the
+ * command list is longer than the pane. Entries are laid out in as many
+ * columns as the pane width comfortably allows.
+ *
+ * Display-only: it takes no state and mutates nothing.
+ *
+ * @param entries   - Shortcut entries filtered by stage/view/issue type.
+ * @param cols      - Pane width in terminal cells.
+ * @param rows      - Pane height in terminal cells.
+ * @param iconRows  - Icon legend rows (empty when no legend is supplied).
+ */
+export function formatHelpScreen(
+  entries: ShortcutEntry[],
+  cols: number,
+  rows: number,
+  iconRows: ReadonlyArray<HelpIconRow> = [],
+): string {
+  const budget = Math.max(2, rows - 1);
+  const title = 'Help \u2014 Commands';
+  const footer = '? / Esc / q  close';
+  // Title + footer are always reserved; the remainder is scrollable content.
+  const contentBudget = Math.max(0, budget - 2);
+
+  // Group entries by chord leader (stable), so a family is contiguous.
+  const grouped = new Map<string, ShortcutEntry[]>();
+  for (const e of entries) {
+    const leader = (e.chord && e.chord.length > 0) ? e.chord[0] : '';
+    const list = grouped.get(leader) ?? [];
+    list.push(e);
+    grouped.set(leader, list);
+  }
+  const ordered: Array<{ chord: string; label: string; description: string }> = [];
+  for (const [, group] of grouped) {
+    for (const e of group) {
+      const chord = (e.chord ?? []).join('');
+      const label = e.label ?? e.command;
+      ordered.push({ chord, label, description: e.description ?? '' });
+    }
+  }
+
+  // Pick a column count that comfortably fits entries in the pane width.
+  const desiredWidth = 44;
+  const minColumnWidth = 34;
+  let columns = Math.max(1, Math.floor(cols / desiredWidth));
+  let columnWidth = Math.floor(cols / columns) - 2;
+  while (columns > 1 && columnWidth < minColumnWidth) {
+    columns -= 1;
+    columnWidth = Math.floor(cols / columns) - 2;
+  }
+  if (columnWidth < 10) columnWidth = Math.max(4, cols - 2);
+
+  const cellFor = (it: { chord: string; label: string; description: string }): string => {
+    const head = `${it.chord} ${it.label}`.trim();
+    const text = it.description ? `${head} \u2014 ${it.description}` : head;
+    return truncateToWidth(text, columnWidth);
+  };
+
+  const contentLines: string[] = [];
+  for (let i = 0; i < ordered.length; i += columns) {
+    const cells = ordered.slice(i, i + columns).map(cellFor);
+    contentLines.push(cells.map(c => c.padEnd(columnWidth)).join('  ').trimEnd());
+  }
+
+  // Icon legend section (WL-0MV85R2G6000G7BU). Only present when supplied;
+  // combined with the command list inside the same scrollable budget.
+  const allContent: string[] = [...contentLines];
+  if (iconRows.length > 0) {
+    allContent.push('');
+    allContent.push('Icons');
+    for (const row of iconRows) {
+      allContent.push(`  ${row.glyph}  ${row.meaning}`);
+    }
+  }
+
+  const out = [title, ...allContent.slice(0, contentBudget)];
+  while (out.length < budget - 1) out.push('');
+  out.push(footer);
+  return out.slice(0, budget).join('\n');
 }
 
 /**
@@ -5329,6 +5439,12 @@ export async function runWorklistTui(
   /** Saved mode before entering form overlay (to restore on cancel) */
   let preFormMode: ViewMode = 'list';
   /**
+   * The mode the help overlay returns to when dismissed (WL-0MV85R14Y003RII9).
+   * Mirrors the `preFormMode` pattern: opening help records the mode, and
+   * `?`/Esc/`q` restore it without mutating list state.
+   */
+  let preHelpMode: ViewMode = 'list';
+  /**
    * Ship It confirmation dialog (WL-0MSGG5N5Z0074TLY). Non-null while the
    * dialog is open; its buffer holds the typed confirmation input. The
    * dialog is bottom-anchored — the selection list stays visible above it.
@@ -5996,9 +6112,10 @@ export async function runWorklistTui(
     }
 
     // Try mouse event dispatch first — only runs when the pane is not in a
-    // modal state (code-freeze notice, form, ship-it dialog), matching the
-    // keyboard path. Mouse input is ignored during those modal states.
-    if (!codeFreezeNotice && blockedNotice === null && formState === null && shipItDialog === null) {
+    // modal state (code-freeze notice, form, ship-it dialog, help overlay),
+    // matching the keyboard path. Mouse input is ignored during those modal
+    // states.
+    if (!codeFreezeNotice && blockedNotice === null && formState === null && shipItDialog === null && state.mode !== 'help') {
       if (dispatchMouse(key)) {
         render();
         return;
@@ -6095,7 +6212,35 @@ export async function runWorklistTui(
     // Quit on a bare `q` — but NOT while a chord is pending, because `q`
     // may be the chord's next key (e.g. the `c q` create-quick chord,
     // WL-0MTCLB50D0026YA7). Chord-mode handling below consumes the key
-    // when `chordState.pendingKeys` is non-empty.
+    // when `chordState.pendingKeys` is non-empty. Help mode is handled
+    // first (below) so `q` dismisses the overlay instead of quitting.
+
+    // ── Help overlay mode (WL-0MV85R14Y003RII9) ─────────────────
+    // Full-pane, display-only overlay. `?`, Esc and `q` dismiss it back to
+    // the recorded pre-help mode; every other key is consumed so no command
+    // is dispatched and no list state is mutated.
+    if (state.mode === 'help') {
+      if (key === '?' || key === '\x1b' || key === 'q') {
+        state.mode = preHelpMode;
+      }
+      render();
+      return;
+    }
+    // Open the help overlay from the list view. Reserved key `?` (no
+    // registry chord, no navigation action) — only offered while help text
+    // is enabled, matching the footer hint gate (WL-0MV85QZXN002T51A AC3).
+    if (
+      state.mode === 'list'
+      && key === '?'
+      && chordState.pendingKeys.length === 0
+      && opts.getShowHelpText()
+    ) {
+      preHelpMode = state.mode;
+      state.mode = 'help';
+      render();
+      return;
+    }
+
     if (key === 'q' && state.mode !== 'filter' && chordState.pendingKeys.length === 0) {
       cleanup();
       resolve(undefined);
@@ -6653,6 +6798,36 @@ export async function runWorklistTui(
     }
   };
 
+  /**
+   * Build the command list shown in the `?` help overlay (WL-0MV85R14Y003RII9).
+   *
+   * Derived live from the ShortcutRegistry for the selected item's stage and
+   * issue type, so a future shortcut appears automatically. Mirrors the
+   * footer's list-view filter (`view === 'list' | 'both'`); unlike the footer
+   * it never collapses a chord family — the overlay enumerates every entry.
+   */
+  const buildHelpEntries = (): ShortcutEntry[] => {
+    if (!shortcutRegistry) return [];
+    const reg = shortcutRegistry as ShortcutRegistry;
+    const displayItems = state.getDisplayRows();
+    const selIdx = state.selectedIndex;
+    const selItem = displayItems.length > 0 && selIdx < displayItems.length
+      ? displayItems[selIdx]
+      : undefined;
+    const selStage = selItem !== undefined && !isHeadingRow(selItem) ? selItem.stage : undefined;
+    const selIssueType = selItem !== undefined && !isHeadingRow(selItem) ? selItem.issueType : undefined;
+    return reg
+      .getEntriesForStage(selStage, codeFreezeActive, selIssueType)
+      .filter(e => e.view === 'list' || e.view === 'both');
+  };
+
+  /**
+   * Build the icon legend shown in the `?` help overlay. Implemented by the
+   * dedicated legend work item (WL-0MV85R2G6000G7BU); until then the overlay
+   * renders the command section only.
+   */
+  const buildHelpIconLegend = (): HelpIconRow[] => [];
+
   const render = (): void => {
     termSize = getTermSize();
     state.termSize = termSize;
@@ -6687,6 +6862,25 @@ export async function runWorklistTui(
       process.stdout.write(ANSI.clear);
       process.stdout.write(ANSI.cursorHome);
       process.stdout.write(dialogOutput);
+      return;
+    }
+
+    // ── Help overlay rendering (WL-0MV85R14Y003RII9) ──────────
+    // Full-pane, read-only `?` help screen: every list-view shortcut
+    // (grouped by chord leader) plus the icon legend, clipped to the
+    // `rows - 1` budget with the dismiss footer always visible. Nothing is
+    // dispatched and no list state is read or mutated beyond the registry.
+    if (state.mode === 'help') {
+      const helpEntries = buildHelpEntries();
+      const helpOutput = formatHelpScreen(
+        helpEntries,
+        termSize.cols,
+        termSize.rows,
+        buildHelpIconLegend(),
+      );
+      process.stdout.write(ANSI.clear);
+      process.stdout.write(ANSI.cursorHome);
+      process.stdout.write(helpOutput);
       return;
     }
 
