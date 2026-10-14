@@ -257,19 +257,7 @@ describe('updateIfMatches() CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1)',
 /**
  * Extension of `updateIfMatches`' expected-match surface with `assignee`
  * (the `wl update --if-assignee` guard, C2 WL-0MV85WBDB003J35W).
- *
- * Test-first: the red cases (mismatch / empty-guard semantics) are pinned
- * under vitest's `it.fails(...)` (expected-failure) so the committed suite
- * stays green while the assignee guard is unimplemented; C2 turns them
- * into normal `it(...)` when the primitive's `expected` type gains
- * `assignee`. Until then the extra field is passed through a cast so the
- * shared package's `tsc` build keeps compiling.
  */
-type AssigneeCasExpected = { status?: string; stage?: string; assignee?: string };
-function assigneeCasExpected(expected: AssigneeCasExpected): { status?: string; stage?: string } {
-  return expected as { status?: string; stage?: string };
-}
-
 describe('updateIfMatches() assignee CAS guard (WL-0MV85WARS000THEC)', () => {
   function seed(assignee: string, status: string = 'open', stage: string = 'idea'): WorkItem {
     const item = makeItem({
@@ -287,18 +275,18 @@ describe('updateIfMatches() assignee CAS guard (WL-0MV85WARS000THEC)', () => {
     const result = db.updateIfMatches(
       seeded.id,
       { assignee: 'Map' },
-      assigneeCasExpected({ assignee: '' }),
+      { assignee: '' },
     );
     expect(result.ok).toBe(true);
     expect(result.item?.assignee).toBe('Map');
   });
 
-  it.fails('fails stale (no write) when expected.assignee does not match', () => {
+  it('fails stale (no write) when expected.assignee does not match', () => {
     const seeded = seed('Other');
     const result = db.updateIfMatches(
       seeded.id,
       { assignee: 'Map', priority: 'high' },
-      assigneeCasExpected({ assignee: '' }),
+      { assignee: '' },
     );
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('stale');
@@ -312,18 +300,18 @@ describe('updateIfMatches() assignee CAS guard (WL-0MV85WARS000THEC)', () => {
     const result = db.updateIfMatches(
       seeded.id,
       { assignee: 'Map' },
-      assigneeCasExpected({ assignee: '' }),
+      { assignee: '' },
     );
     expect(result.ok).toBe(true);
     expect(result.item?.assignee).toBe('Map');
   });
 
-  it.fails('assignee "" expected value fails stale when the stored assignee is non-empty', () => {
+  it('assignee "" expected value fails stale when the stored assignee is non-empty', () => {
     const seeded = seed('Map');
     const result = db.updateIfMatches(
       seeded.id,
       { assignee: 'Other' },
-      assigneeCasExpected({ assignee: '' }),
+      { assignee: '' },
     );
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('stale');
@@ -335,7 +323,7 @@ describe('updateIfMatches() assignee CAS guard (WL-0MV85WARS000THEC)', () => {
     const result = db.updateIfMatches(
       seeded.id,
       { assignee: 'audit-tier' },
-      assigneeCasExpected({ status: 'completed', stage: 'in_review', assignee: '' }),
+      { status: 'completed', stage: 'in_review', assignee: '' },
     );
     expect(result.ok).toBe(true);
     const after = db.get(seeded.id);
@@ -345,12 +333,12 @@ describe('updateIfMatches() assignee CAS guard (WL-0MV85WARS000THEC)', () => {
     expect(after?.stage).toBe('in_review');
   });
 
-  it.fails('combined guard fails stale (no write) when only the assignee mismatches', () => {
+  it('combined guard fails stale (no write) when only the assignee mismatches', () => {
     const seeded = seed('Other', 'completed', 'in_review');
     const result = db.updateIfMatches(
       seeded.id,
       { assignee: 'audit-tier' },
-      assigneeCasExpected({ status: 'completed', stage: 'in_review', assignee: '' }),
+      { status: 'completed', stage: 'in_review', assignee: '' },
     );
     expect(result.ok).toBe(false);
     expect(result.reason).toBe('stale');

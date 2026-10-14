@@ -16,13 +16,10 @@
  * two concurrent `--if-assignee ""` claims wins (RCA WL-0MSRBFFLN005W3VT
  * RC-1 single-claim guarantee, preserved by the BEGIN IMMEDIATE CAS).
  *
- * Test-first discipline: before "C2" lands, `--if-assignee` is an UNKNOWN
- * option, so every spec below FAILS against current `dev` — that is the
- * red phase. They are committed under vitest's `it.fails(...)`
- * (expected-failure) so the project-configured suite stays green while the
- * red contract is pinned in the tree. C2 flips `it.fails(` → `it(` as it
- * implements the flag; the specs then go genuinely green and validate the
- * real semantics.
+ * Test-first discipline: this contract was authored against an unimplemented
+ * `--if-assignee` (every spec failed: the flag was an UNKNOWN option) and is
+ * now implemented by C2. The specs are normal `it(...)` assertions that
+ * genuinely pass against the landed flag, pinning the real semantics.
  *
  * Covers AC2 (unit semantics at the CLI), AC3 (atomicity) and AC4
  * (status-neutral claim never creates an in-progress/in_review hybrid) of
@@ -117,7 +114,7 @@ describe('wl update --if-assignee (assignee CAS guard, WL-0MV85WARS000THEC)', ()
 
   // ── AC2: exact-match success ────────────────────────────────────────
 
-  it.fails('applies the update when --if-assignee matches the current assignee', async () => {
+  it('applies the update when --if-assignee matches the current assignee', async () => {
     const id = await createItem(); // assignee '' by default
     const { stdout } = await execAsync(
       `tsx ${cliPath} --json update ${id} --assignee AgentA --if-assignee ""`,
@@ -127,7 +124,7 @@ describe('wl update --if-assignee (assignee CAS guard, WL-0MV85WARS000THEC)', ()
     expect((await readBack(id)).assignee).toBe('AgentA');
   });
 
-  it.fails('succeeds with a non-empty expected value on an exact match', async () => {
+  it('succeeds with a non-empty expected value on an exact match', async () => {
     const id = await createItem();
     await execAsync(`tsx ${cliPath} --json update ${id} --assignee Alice`);
     const { stdout } = await execAsync(
@@ -139,7 +136,7 @@ describe('wl update --if-assignee (assignee CAS guard, WL-0MV85WARS000THEC)', ()
 
   // ── AC2: mismatch is a stale no-op with NO partial write ────────────
 
-  it.fails('fails stale with no write when the current assignee no longer matches', async () => {
+  it('fails stale with no write when the current assignee no longer matches', async () => {
     const id = await createItem();
     // Another pane won the claim first.
     await execAsync(`tsx ${cliPath} --json update ${id} --assignee Other`);
@@ -158,7 +155,7 @@ describe('wl update --if-assignee (assignee CAS guard, WL-0MV85WARS000THEC)', ()
 
   // ── AC2: the empty-string guard ─────────────────────────────────────
 
-  it.fails('--if-assignee "" succeeds when the current assignee is empty', async () => {
+  it('--if-assignee "" succeeds when the current assignee is empty', async () => {
     const id = await createItem();
     const { stdout } = await execAsync(
       `tsx ${cliPath} --json update ${id} --assignee AgentA --if-assignee ""`,
@@ -167,7 +164,7 @@ describe('wl update --if-assignee (assignee CAS guard, WL-0MV85WARS000THEC)', ()
     expect((await readBack(id)).assignee).toBe('AgentA');
   });
 
-  it.fails('--if-assignee "" fails stale when the assignee is non-empty', async () => {
+  it('--if-assignee "" fails stale when the assignee is non-empty', async () => {
     const id = await createItem();
     await execAsync(`tsx ${cliPath} --json update ${id} --assignee Map`);
 
@@ -183,7 +180,7 @@ describe('wl update --if-assignee (assignee CAS guard, WL-0MV85WARS000THEC)', ()
   // ── AC4: status-neutral audit-tier claim ────────────────────────────
   // The item stays completed/in_review throughout — never a hybrid.
 
-  it.fails('audit-tier claim keeps a completed/in_review item at completed/in_review', async () => {
+  it('audit-tier claim keeps a completed/in_review item at completed/in_review', async () => {
     const id = await createItem('Audit me');
     await seedCompletedInReview(id);
 
@@ -199,7 +196,7 @@ describe('wl update --if-assignee (assignee CAS guard, WL-0MV85WARS000THEC)', ()
     expect(back.assignee).toBe('audit-tier');
   });
 
-  it.fails('a claimed-and-cleared item reads back completed/in_review with an empty assignee (no hybrid, no residue)', async () => {
+  it('a claimed-and-cleared item reads back completed/in_review with an empty assignee (no hybrid, no residue)', async () => {
     const id = await createItem('Audit me');
     await seedCompletedInReview(id);
 
@@ -222,7 +219,7 @@ describe('wl update --if-assignee (assignee CAS guard, WL-0MV85WARS000THEC)', ()
 
   // ── AC3: atomicity — two concurrent claims, exactly one winner ──────
 
-  it.fails('two concurrent --if-assignee "" claims yield exactly one winner', async () => {
+  it('two concurrent --if-assignee "" claims yield exactly one winner', async () => {
     const id = await createItem('Race me');
     await seedCompletedInReview(id);
 

@@ -161,7 +161,7 @@ Automatic re-sort:
 
 ### `update` [options] <id...>
 
-Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
 
 > **Auto-revert:** when `--audit-text`/`--audit-file` carries a `Ready to close: No` verdict for an item in `in_review` (status `completed`), the item is automatically reverted to `open`/`plan_complete` (priority preserved) and the output reports the transition (`reverted` field in JSON, `[ID reverted from completed/in_review to open/plan_complete]` in human mode). See docs/AUDIT_STATUS.md.
 
@@ -200,6 +200,19 @@ New: toggle the do-not-delegate tag (prevents automation from auto-assigning the
 wl update WL-ABC123 --do-not-delegate true   # add tag
 wl update WL-ABC123 --do-not-delegate false  # remove tag
 ```
+
+Conditional updates (compare-and-swap guards):
+
+- `--if-status <status>`, `--if-stage <stage>` and `--if-assignee <assignee>` make the update conditional on the item's current value for that field. When any guard is supplied, the check and the write run inside a single `BEGIN IMMEDIATE` SQLite transaction, so exactly one of several concurrent claimers wins; every loser receives a per-id `stale` result (`success: false`, `error: "stale"`) and **no field is written** (no partial write).
+- The guards compose: supplying more than one requires **all** of them to match. This is how the herdr audit tier claims a `completed`/`in_review` item **status-neutrally** — it changes only the assignee, leaving status and stage untouched:
+
+  ```sh
+  wl update WL-ABC123 --assignee audit-tier \
+    --if-status completed --if-stage in_review --if-assignee ""
+  ```
+
+- `--if-assignee ""` is a meaningful expected value: it matches an item that is currently **unassigned** (empty assignee). It is distinguishable from omitting the flag (which applies no assignee guard), so an empty-string guard is a valid exclusive-claim token.
+- The guarded status values are normalized (e.g. `in_progress` matches a stored `in-progress`). `--if-assignee` matches the stored assignee exactly.
 
 ### `reviewed` <id> [value]
 

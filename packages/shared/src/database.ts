@@ -1340,13 +1340,18 @@ export class WorklogDatabase {
 
   /**
    * Conditional update (compare-and-swap, RCA WL-0MSRBFFLN005W3VT design
-   * point 1): apply `input` ONLY if the item's current status/stage match the
-   * expected guard. Runs the check and the write inside a single `BEGIN
-   * IMMEDIATE` transaction (see `PersistentStore.transactionImmediate`), so
-   * two concurrent `wl update --if-status/--if-stage` processes serialize on
-   * the SQLite write lock: exactly one observes the expected state and wins;
-   * the loser observes the winner's committed transition and fails `stale`
-   * without writing.
+   * point 1): apply `input` ONLY if the item's current status/stage/assignee
+   * match the expected guard. Runs the check and the write inside a single
+   * `BEGIN IMMEDIATE` transaction (see `PersistentStore.transactionImmediate`),
+   * so two concurrent `wl update --if-status/--if-stage/--if-assignee`
+   * processes serialize on the SQLite write lock: exactly one observes the
+   * expected state and wins; the loser observes the winner's committed
+   * transition and fails `stale` without writing.
+   *
+   * `expected.assignee` distinguishes an explicit empty-string guard (match
+   * an unassigned item — the status-neutral audit-tier claim) from an omitted
+   * guard (`undefined`): the empty string is a meaningful expected value, not
+   * a "no guard" sentinel.
    *
    * @returns `{ok:true, item}` on success; `{ok:false, reason:'not-found'}`
    * when the id is absent; `{ok:false, reason:'stale'}` when the guard
@@ -1355,7 +1360,7 @@ export class WorklogDatabase {
   updateIfMatches(
     id: string,
     input: UpdateWorkItemInput,
-    expected: { status?: string; stage?: string } = {},
+    expected: { status?: string; stage?: string; assignee?: string } = {},
   ): UpdateIfMatchesResult {
     return this.store.transactionImmediate(() => {
       const current = this.store.getWorkItem(id);
@@ -1370,6 +1375,9 @@ export class WorklogDatabase {
         }
       }
       if (expected.stage !== undefined && current.stage !== expected.stage) {
+        return { ok: false, reason: 'stale' };
+      }
+      if (expected.assignee !== undefined && (current.assignee ?? '') !== expected.assignee) {
         return { ok: false, reason: 'stale' };
       }
       const updated = this.update(id, input);
