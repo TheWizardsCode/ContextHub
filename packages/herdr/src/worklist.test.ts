@@ -6527,18 +6527,10 @@ describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', (
 
 // ── Footer help-line: advertise `?: Help`, drop downtime + mouse hints ──
 // Test-first pins for parent help screen work (WL-0MTV97GV20088CS7 AC1, AC2,
-// AC7a). The footer currently advertises the low-value `d:downtime toggle`
-// single-key entry and appends an `alt+m mouse on/off` suffix at render time.
-// The desired footer instead advertises `?: Help` and drops both.
-//
-// RED WITNESS. The footer behaviour does not exist yet, so every body asserts
-// the POST-IMPLEMENTATION behaviour and is committed with `it.fails` — the
-// suite stays GREEN while the assertions are RED (the repo's documented TDD
-// pattern; see packages/herdr/src/downtime-worker.assignee-claim.test.ts and
-// packages/herdr/src/coordination-dispatch.test.ts). The implementation child
-// WL-0MV85QZXN002T51A flips each `it.fails` to `it` once the footer lands. The
-// key bindings themselves (AC4) are asserted with plain `it` — they must stay
-// green throughout; only the advertisement changes.
+// AC7a). The footer advertises `?: Help` instead of the low-value
+// `d:downtime toggle` single-key entry and the `alt+m mouse on/off` suffix.
+// The key bindings (AC4) are asserted with plain `it` — they stay green; only
+// the advertisement changes.
 describe('footer help-line advertises ?: Help and drops downtime/mouse hints (WL-0MV85QZCC002U28M)', () => {
   // The live list entries the render path feeds to formatFooterShortcutHints().
   const listEntries = (): ShortcutEntry[] =>
@@ -6547,12 +6539,12 @@ describe('footer help-line advertises ?: Help and drops downtime/mouse hints (WL
       .filter(e => e.view === 'list' || e.view === 'both');
 
   // AC1: the composed footer advertises the help screen.
-  it.fails('advertises the literal ?: Help in the footer hint line', () => {
+  it('advertises the literal ?: Help in the footer hint line', () => {
     expect(formatFooterShortcutHints(listEntries())).toContain('?: Help');
   });
 
   // AC2: the low-value downtime toggle is no longer advertised.
-  it.fails('no longer advertises the d:downtime toggle single-key entry', () => {
+  it('no longer advertises the d:downtime toggle single-key entry', () => {
     expect(formatFooterShortcutHints(listEntries())).not.toContain('d:downtime toggle');
   });
 
@@ -6564,10 +6556,7 @@ describe('footer help-line advertises ?: Help and drops downtime/mouse hints (WL
   });
 
   // AC5: the existing showHelpText gate still hides the new `?: Help` hint.
-  // Body is RED now only because the enabled case lacks `?: Help`; the
-  // disabled case is asserted after it so the `it.fails` witness trips on the
-  // missing advertisement.
-  it.fails('showHelpText: false hides the ?: Help hint while it is shown when enabled', () => {
+  it('showHelpText: false hides the ?: Help hint while it is shown when enabled', () => {
     const renderer = createListRenderer();
     const hints = formatFooterShortcutHints(listEntries());
     const items: WorkItem[] = [makeItem('A')];
@@ -6654,7 +6643,7 @@ describe('footer help-line advertises ?: Help and drops downtime/mouse hints (WL
 
     // AC1 + AC2 + AC3: the composed footer advertises help and no longer
     // carries the downtime or mouse-tracking advertisements.
-    it.fails('composed TUI footer advertises ?: Help without downtime/mouse hints', async () => {
+    it('composed TUI footer advertises ?: Help without downtime/mouse hints', async () => {
       const footer = await renderFooter();
       expect(footer).toContain('?: Help');
       expect(footer).not.toContain('d:downtime toggle');

@@ -2746,6 +2746,16 @@ export function formatChordHintsForHelp(
  * @param entries - Shortcut entries already filtered by stage/view/issue type.
  * @returns Space-joined hint string (empty when no entry yields a hint).
  */
+/**
+ * Literal footer advertisement for the help screen (WL-0MV85QZXN002T51A).
+ *
+ * `?` is a reserved key handled by the key loop, not a registry chord, so it
+ * has no `shortcuts.json` entry to format. The hint is prepended to the
+ * dynamic shortcut hints so it stays visible even when the footer is
+ * truncated in a narrow pane.
+ */
+export const HELP_FOOTER_HINT = '?: Help';
+
 export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
   const labelOf = (e: ShortcutEntry): string => e.label ?? e.command
     .replace(/<[^>]+>/g, '')
@@ -2757,6 +2767,11 @@ export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
   const grouped = new Map<string, ShortcutEntry[]>();
   const parts: string[] = [];
   for (const e of entries) {
+    // Skip the d single-key downtime-toggle entry — only its advertisement
+    // changes; the key binding remains in shortcuts.json (WL-0MV85QZXN002T51A).
+    if (e.chord?.length === 1 && e.chord[0] === 'd') {
+      continue;
+    }
     if (e.chord && e.chord.length >= 2) {
       const leader = e.chord[0];
       const group = grouped.get(leader) ?? [];
@@ -2781,6 +2796,10 @@ export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
       parts.push(`${leader}:${labelOf(group[0]).split(/\s+/)[0]}...`);
     }
   }
+  // Advertise the help screen ahead of the dynamic hints (parent
+  // WL-0MTV97GV20088CS7 AC1). The `d:downtime toggle` advertisement is
+  // dropped above but its key binding is untouched.
+  parts.unshift(HELP_FOOTER_HINT);
   return parts.join('  ');
 }
 
@@ -4166,7 +4185,12 @@ export function createListRenderer(getShowIcons?: () => boolean): (
         const navHint = (navStackDepth && navStackDepth > 0)
           ? ` ${ANSI.dim}[esc] back${navStackDepth > 1 ? ` (${navStackDepth} levels)` : ''}${ANSI.reset}`
           : '';
-        const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
+        // Gate the dynamic hint line behind showHelpText so `false` hides
+        // the `?: Help` advertisement too, not only the chord-in-progress
+        // footer (WL-0MV85QZXN002T51A AC3).
+        const chordHelpSuffix = (helpEnabled && chordHelpHints)
+          ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}`
+          : '';
         const footerLine = navHint + chordHelpSuffix || ' ';
         // ── Footer wrap guard (WL-0MTV979LK005YB1B) ──────────────
         // In narrow panes the dynamic help line can exceed `cols`,
@@ -6577,17 +6601,6 @@ export async function runWorklistTui(
       if (relevantEntries.length > 0) {
         dynamicHints = formatFooterShortcutHints(relevantEntries);
       }
-    }
-
-    // Mouse-tracking toggle hint (WL-0MT0AP2LR000JFWN): appends the Alt+m
-    // toggle to the footer shortcut hints so the user knows how to switch
-    // between mouse interaction and native text-selection (drag-select).
-    // Shown whenever help text is enabled.
-    if (opts.getShowHelpText()) {
-      const mouseHint = mouseTrackingEnabled
-        ? `alt+m mouse on`
-        : `alt+m mouse off`;
-      dynamicHints = dynamicHints ? `${dynamicHints}  ${mouseHint}` : ` ${mouseHint}`;
     }
 
     // Look up the selected item's last recorded command for the metadata

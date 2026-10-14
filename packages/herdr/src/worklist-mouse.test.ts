@@ -1091,7 +1091,7 @@ describe('runWorklistTui — Alt+m mouse-tracking toggle (WL-0MT0AP2LR000JFWN)',
     }
   });
 
-  it('footer shows the current mouse-tracking state (on/off)', async () => {
+  it('footer no longer advertises mouse-tracking state while Alt+m still toggles', async () => {
     const { dataListeners, writes, restore } = setupFakeTty();
     try {
       const tui = runWorklistTui(
@@ -1101,22 +1101,28 @@ describe('runWorklistTui — Alt+m mouse-tracking toggle (WL-0MT0AP2LR000JFWN)',
         { autoRefresh: false, autoSync: false },
       );
 
-      // Initial render: hint says mouse on.
+      // The footer advertisement was removed (WL-0MV85QZXN002T51A AC3).
       await vi.waitFor(() => {
-        expect(writes.join('')).toContain('alt+m mouse on');
+        expect(writes.join('')).toContain(ANSI.mouseEnable);
       });
+      expect(writes.join('')).not.toContain('alt+m mouse on');
+      expect(writes.join('')).not.toContain('alt+m mouse off');
 
-      // Alt+m → hint flips to mouse off.
+      // Alt+m still toggles mouse tracking OFF (disable sequences emitted).
       dataListeners.forEach((cb) => cb(Buffer.from('\x1bm')));
       await vi.waitFor(() => {
-        expect(writes.join('')).toContain('alt+m mouse off');
+        expect(writes.join('')).toContain(ANSI.mouseDisable);
       });
 
-      // Alt+m again → hint flips back to mouse on.
+      // Alt+m again still toggles it back ON (a second enable sequence).
       dataListeners.forEach((cb) => cb(Buffer.from('\x1bm')));
       await vi.waitFor(() => {
-        expect(writes.join('')).toContain('alt+m mouse on');
+        const enableCount = writes.join('').split(ANSI.mouseEnable).length - 1;
+        expect(enableCount).toBe(2);
       });
+      // Still no footer advertisement after toggling.
+      expect(writes.join('')).not.toContain('alt+m mouse on');
+      expect(writes.join('')).not.toContain('alt+m mouse off');
 
       dataListeners.forEach((cb) => cb(Buffer.from('q')));
       await tui;
