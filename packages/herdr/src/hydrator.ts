@@ -9,21 +9,20 @@
  *
  * Demotion decision (signal-based, mirroring `dispatch` eligibility):
  *  - item is not `in-progress`            → untouched (not in scope)
- *  - a RUNNING pane's tab label EXACTLY   → untouched (genuinely being worked)
- *    matches the ID (agent not `done`/`exited`)
+ *  - a tab whose label EXACTLY matches    → untouched (genuinely being worked)
+ *    the item ID                           (simple tab-existence rule)
  *  - stage `in_review`                    → `status=completed`, stage `in_review`
  *  - an active outbound dependency blocker→ `status=blocked` (stage made compatible)
  *  - otherwise                            → `status=open`, stage `intake_complete`
  *
- * Running-pane liveness (F1/WL-0MTF5WO2Q008B8US, AC2): a tab whose agent has
- * finished (`agent_status` `done`/`exited`) is NOT an active match, so its
- * item is released instead of lingering in `in-progress` while a stale pane
- * remains listed. Absent/unknown `agent_status` fails open toward active —
- * never demote on untrustworthy evidence (AC5).
+ * Active detection (WL-0MV1BWETT005GSUJ): a single simple rule — if there
+ * is a tab whose label exactly equals the work-item ID the item is actively
+ * being worked on; if there is no such tab, the item is not. No agent liveness
+ * or pane-title checks: tab existence is the sole signal.
  *
  * Folded-in no-activity/claim-age timeout (WL-0MTTSWE0G008M1VA, 2026-09-13):
  * the tab-absent signal is the primary "stuck" signal. A claim with no
- * matching running tab is stale regardless of activity age, so it is released
+ * matching tab is stale regardless of activity age, so it is released
  * (reset to `open`/`intake_complete`) — the 2 h dispatch stale window
  * (`DOWNTIME_AUDIT_STALE_WINDOW_MS`) is the activity bound an operator can
  * use to reason about abandoned claims. Every release is logged (who/why/age
@@ -147,14 +146,6 @@ const TERMINAL_DEP_STATUSES = new Set(['completed', 'deleted']);
 /** Stages considered terminal for an outbound dependency target. */
 const TERMINAL_DEP_STAGES = new Set(['in_review', 'done']);
 
-/**
- * `agent_status` values that mean the pane's agent has finished and left
- * (mirrors `countRunningDowntimePanes` in `downtime-worker.ts` and the
- * agent-liveness gate in `pane-close-herdr.ts`). A tab reporting a terminal
- * status is NOT a running pane, so its item is eligible for demotion.
- */
-const TERMINAL_AGENT_STATUSES = new Set(['done', 'exited']);
-
 /** File name of the hydrator diagnostic log inside `.worklog/logs/`. */
 export const HYDRATOR_LOG_FILE = 'hydrator.log';
 /** Rolling bound: keep at most this many lines in the hydrator log. */
@@ -182,10 +173,9 @@ export interface HydratorTab {
    */
   workspace_id?: string;
   /**
-   * Raw `agent_status` reported for the tab, when herdr provides it. Only a
-   * terminal value (`done`/`exited`) makes the tab NOT a running pane
-   * (F1/WL-0MTF5WO2Q008B8US); absent/unknown status is fail-open toward
-   * active (never demote on untrustworthy evidence, AC5).
+   * Raw `agent_status` reported for the tab, when herdr provides it.
+   * Retained in the shape for forward compatibility but no longer used
+   * by the hydrator's active detection (tab existence alone is the signal).
    */
   agent_status?: string;
 }
@@ -308,44 +298,17 @@ export function hasItemTab(
 }
 
 /**
- * True when a tab is a RUNNING pane: its agent has not reported a finished
- * status (`done`/`exited`). Absent or unknown `agent_status` is fail-open
- * toward active — the hydrator must never demote on untrustworthy evidence
- * (AC5), and only a provably-finished agent makes a pane stale (F1).
- */
-export function isRunningTab(tab: HydratorTab): boolean {
-  const status = (tab.agent_status ?? '').trim().toLowerCase();
-  return !TERMINAL_AGENT_STATUSES.has(status);
-}
-
-/**
- * AC2: true iff the item ID appears in a RUNNING pane's label in any tab of
- * the current workspace (exact-label matching per WL-0MV24RM9I0051GEF). A
- * tab whose agent has finished (`agent_status` `done`/`exited`) is not a
- * running pane, so its item IS eligible for demotion (F1). Absent/unknown
- * `agent_status` fails open toward active (no demotion on untrustworthy
- * evidence).
+ * True when a tab in the workspace is labelled exactly the item's ID
+ * (exact equality — never substring/prefix). A simple rule: if there is
+ * a tab with the same ID the item is actively being worked on; if there
+ * is not, it is not (WL-0MV1BWETT005GSUJ).
  */
 export function isActivePaneMatch(
   itemId: string,
   tabs: readonly HydratorTab[],
   workspaceId?: string,
 ): boolean {
-  for (const tab of tabs) {
-    if (!isRunningTab(tab)) continue;
-    if (typeof tab.label !== 'string') continue;
-    if (tab.label !== itemId) continue;
-    if (
-      workspaceId &&
-      typeof tab.workspace_id === 'string' &&
-      tab.workspace_id.length > 0 &&
-      tab.workspace_id !== workspaceId
-    ) {
-      continue;
-    }
-    return true;
-  }
-  return false;
+  return hasItemTab(itemId, tabs, workspaceId);
 }
 
 /**
@@ -675,9 +638,9 @@ export async function runHydrationOnce(
     if (!item || typeof item.id !== 'string' || item.id.length === 0) continue;
     processed += 1;
 
-    // AC2 (F1): only a RUNNING pane blocks demotion — a tab whose agent has
-    // finished (`agent_status` done/exited) is not an active match, so the
-    // item is released instead of lingering in `in-progress` forever.
+    // Tab existence is the active signal: a tab whose label exactly equals
+    // the item ID means the item is being worked on; otherwise it is
+    // released (AC2, WL-0MV1BWETT005GSUJ).
     const hasActiveTab = isActivePaneMatch(item.id, tabs, workspaceId);
     let blocked = false;
     if (!hasActiveTab) {
@@ -892,9 +855,9 @@ export function createProductionHydratorDeps(
         args,
         hydratorExecOptions(8 * 1024 * 1024),
       );
-      // Reuse the shared dispatcher-anchor parser (no second parser). The
-      // parser now carries `agentStatus` through so the running-pane check
-      // (F1) can distinguish a live agent pane from a finished one.
+      // Reuse the shared dispatcher-anchor parser (no second parser).
+      // The parser carries `agentStatus` through for completeness; the
+      // hydrator uses tab existence alone as the active signal.
       const parsed = parseTabListOutput(stdout);
       if (parsed === null) return null;
       return parsed.map((tab) => ({

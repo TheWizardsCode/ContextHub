@@ -330,9 +330,11 @@ describe('decideDemotion', () => {
   });
 });
 
-// ── Running-pane liveness (AC2 / F1) ──────────────────────────────────
+// ── Tab-existence active detection (AC2 / WL-0MV1BWETT005GSUJ) ───────
+// A tab whose label exactly equals the item ID → active; otherwise not.
+// No agent-liveness or pane-title checks: tab existence is the sole signal.
 
-describe('running-pane liveness (AC2)', () => {
+describe('tab-existence active detection (AC2)', () => {
   const tab = (label: string, agent_status?: string, workspace_id?: string): HydratorTab => ({
     tab_id: `t-${label}-${agent_status ?? 'none'}`,
     label,
@@ -340,34 +342,25 @@ describe('running-pane liveness (AC2)', () => {
     ...(agent_status !== undefined ? { agent_status } : {}),
   });
 
-  it('isActivePaneMatch: matches an exact-label tab hosting a working agent', () => {
-    const panes = [tab('Work Items'), tab(WL, 'working')];
-    expect(isActivePaneMatch(WL, panes)).toBe(true);
-  });
-
-  it('isActivePaneMatch: does NOT match a done (finished) pane (F1 repro)', () => {
-    const panes = [tab(WL, 'done')];
-    expect(isActivePaneMatch(WL, panes)).toBe(false);
-  });
-
-  it('isActivePaneMatch: does NOT match an exited pane', () => {
-    const panes = [tab(WL, 'exited')];
-    expect(isActivePaneMatch(WL, panes)).toBe(false);
-  });
-
-  it('isActivePaneMatch: fail-open — an un-reported agent_status still counts as active', () => {
-    const panes = [tab(WL)];
-    expect(isActivePaneMatch(WL, panes)).toBe(true);
+  it('isActivePaneMatch: matches an exact-label tab regardless of agent_status', () => {
+    // Tab existence is the signal — agent_status is irrelevant.
+    expect(isActivePaneMatch(WL, [tab(WL, 'working')])).toBe(true);
+    expect(isActivePaneMatch(WL, [tab(WL, 'done')])).toBe(true);
+    expect(isActivePaneMatch(WL, [tab(WL, 'exited')])).toBe(true);
+    expect(isActivePaneMatch(WL, [tab(WL)])).toBe(true); // absent status also counts
   });
 
   it('isActivePaneMatch: exact label only (a containing label is not a match)', () => {
-    const panes = [tab(`implement ${WL}`, 'working')];
-    expect(isActivePaneMatch(WL, panes)).toBe(false);
+    expect(isActivePaneMatch(WL, [tab(`implement ${WL}`)])).toBe(false);
   });
 
   it('isActivePaneMatch: scopes to the current workspace', () => {
     expect(isActivePaneMatch(WL, [tab(WL, 'working', 'wOther')], 'wCurrent')).toBe(false);
     expect(isActivePaneMatch(WL, [tab(WL, 'working', 'wCurrent')], 'wCurrent')).toBe(true);
+  });
+
+  it('isActivePaneMatch: no match when tab label is not a work-item ID', () => {
+    expect(isActivePaneMatch(WL, [tab('Work Items')])).toBe(false);
   });
 });
 
@@ -410,23 +403,12 @@ describe('runHydrationOnce', () => {
     expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
   });
 
-  it('demotes an item whose only matching tab hosts a done agent (F1)', async () => {
+  it('keeps an item whose tab label matches the item ID (agent_status irrelevant)', async () => {
+    // Tab existence is the sole signal — agent_status (done/working/absent) is irrelevant.
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
       listTabs: async () => [
         { tab_id: 't1', label: WL, agent_status: 'done', workspace_id: 'wCurrent' },
-      ],
-    });
-    const result = await runHydrationOnce(deps, 'wCurrent');
-    expect(result.demoted).toBe(1);
-    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
-  });
-
-  it('keeps an item whose matching tab hosts a working agent', async () => {
-    const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listTabs: async () => [
-        { tab_id: 't1', label: WL, agent_status: 'working', workspace_id: 'wCurrent' },
       ],
     });
     const result = await runHydrationOnce(deps, 'wCurrent');
