@@ -6677,3 +6677,16 @@ describe('footer help-line advertises ?: Help and drops downtime/mouse hints (WL
     });
   });
 });
+
+// ── `?` help-screen key reservation (WL-0MV85R0JD004CHAE) ──
+// The help overlay is opened by `?` in the key loop, so `?` must not be a
+// registered chord or a navigation action — otherwise the key would conflict
+// (parent AC: `?` must not collide with any registered chord or navigation
+// key). GREEN before and after the implementation (test-first guard only).
+describe('? help-screen key reservation (WL-0MV85R0JD004CHAE)', () => {
+  it('reserves ? — no registry chord and no navigation action claims it', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['?'], 'list')).toBeUndefined();
+    expect(keyToAction('?')).toBeNull();
+  });
+});
