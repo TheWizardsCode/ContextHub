@@ -40,6 +40,7 @@ import {
   formatChordHintsForHelp,
   formatFooterShortcutHints,
   resolvePodcastTarget,
+  formatPodcastNotice,
   clearDescriptionPreviewCache,
   isHeadingRow,
   formatItemLine,
@@ -6780,5 +6781,189 @@ describe('? help-screen key reservation (WL-0MV85R0JD004CHAE)', () => {
     const registry = loadShortcutConfig();
     expect(registry.lookupChordEntry(['?'], 'list')).toBeUndefined();
     expect(keyToAction('?')).toBeNull();
+  });
+});
+
+// ── Podcast w-chord dispatch notice (OSL-0MUQ59IRF009ICIF) ──────────────
+//
+// Producer decision (2026-10-14): the w-r/w-s/w-b chords keep their
+// stage/guard semantics (producer choice (a) — `w-s` still errors on a
+// script-bearing item with no open editor notes), and their failure/
+// confirmation feedback must be a PERSISTENT, dismissable in-pane notice
+// rather than a transient fire-and-forget toast. This kills the reported
+// "nothing happens" symptom: a refused dispatch can no longer be mistaken
+// for a silently dropped keypress.
+describe('podcast w-chord dispatch notice (OSL-0MUQ59IRF009ICIF)', () => {
+  // Local shortcuts.json fixture matching the project-local override.
+  const wChordEntries = [
+    { chord: ['w', 'r'], command: '/skill:wiki-podcast-script --review <podcast-review>', view: 'both', label: 'write review', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 's'], command: '/skill:wiki-podcast-script <podcast-target>', view: 'both', label: 'write script', stages: ['intake_complete', 'plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 'b'], command: '/skill:wiki-podcast-script --review-rewrite <podcast-both>', view: 'both', label: 'write both', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+  ];
+
+  it('formatPodcastNotice renders a titled, dismiss-hinted box for both outcomes', () => {
+    const dispatched = stripAnsiLocal(formatPodcastNotice(100, 30, {
+      kind: 'dispatched',
+      body: '/skill:wiki-podcast-script --review Ep10/Ep10.podcast.md',
+    }));
+    expect(dispatched).toContain('WRITE CHORD DISPATCHED');
+    expect(dispatched).toContain('--review Ep10/Ep10.podcast.md');
+    expect(dispatched).toContain('dismiss');
+
+    const refused = stripAnsiLocal(formatPodcastNotice(100, 30, {
+      kind: 'error',
+      body: 'podcast script already present, review and edit that rather than author a new one',
+    }));
+    expect(refused).toContain('WRITE CHORD — NOT DISPATCHED');
+    expect(refused).toContain('already present');
+    expect(refused).toContain('dismiss');
+  });
+
+  // ── TUI-path harness (mirrors notify-dispatch.test.ts) ────────────
+  let dataHandler: ((chunk: Buffer) => void) | undefined;
+  let writes: string[] = [];
+  let tempRoot: string | undefined;
+
+  function stripAnsiLocal(s: string): string {
+    return s.replace(/\x1b\[[0-9;]*m/g, '');
+  }
+
+  beforeEach(() => {
+    dataHandler = undefined;
+    writes = [];
+    for (const prop of ['on', 'removeListener', 'pause', 'resume', 'setRawMode'] as const) {
+      if (!(prop in process.stdin)) {
+        Object.defineProperty(process.stdin, prop, { value: vi.fn(), configurable: true, writable: true });
+      }
+    }
+    (process.stdin as any).on = vi.fn((event: string, cb: (chunk: Buffer) => void) => {
+      if (event === 'data') dataHandler = cb;
+      return process.stdin;
+    });
+    (process.stdin as any).removeListener = vi.fn(() => process.stdin);
+    (process.stdin as any).pause = vi.fn(() => process.stdin);
+    (process.stdin as any).resume = vi.fn(() => process.stdin);
+    (process.stdin as any).setRawMode = vi.fn(() => process.stdin);
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    vi.spyOn(process.stdout, 'write').mockImplementation(((s: any) => {
+      writes.push(String(s));
+      return true;
+    }) as any);
+    vi.spyOn(process.stdout, 'on').mockImplementation((() => process.stdout as any) as any);
+    vi.spyOn(process.stdout, 'removeListener').mockImplementation((() => process.stdout as any) as any);
+  });
+
+  afterEach(() => {
+    if (tempRoot) {
+      try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+      tempRoot = undefined;
+    }
+    vi.restoreAllMocks();
+  });
+
+  function registryWithLocalWChords(): ShortcutRegistry {
+    tempRoot = mkdtempSync(join(tmpdir(), 'herdr-podcast-notice-'));
+    writeFileSync(join(tempRoot, 'shortcuts.json'), JSON.stringify(wChordEntries));
+    return loadShortcutConfig(tempRoot);
+  }
+
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 5));
+  const lastRender = (): string => writes[writes.length - 1] ?? '';
+
+  const scriptItem: WorkItem = {
+    id: 'OSL-EP-1',
+    title: 'Episode with script',
+    status: 'open',
+    stage: 'plan_complete',
+    issueType: 'podcast',
+    description: '## Key Files:\n- Ep10/Ep10.podcast.md\n',
+  };
+
+  const scriptlessItem: WorkItem = {
+    ...scriptItem,
+    id: 'OSL-EP-2',
+    title: 'Episode with no script',
+    description: '# Episode 10 — spec only\n\nSee docs/video-series-outline.md for the outline.\n',
+  };
+
+  async function press(keys: string): Promise<void> {
+    for (const ch of keys) dataHandler?.(Buffer.from(ch));
+    await tick();
+    await tick();
+  }
+
+  it('surfaces a refused w-r dispatch as a persistent notice (and never dispatches)', async () => {
+    const onCommand = vi.fn();
+    const registry = registryWithLocalWChords();
+    const p = runWorklistTui(async () => [scriptlessItem], [scriptlessItem], registry, {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+      onCommand,
+    });
+    await tick();
+    await tick();
+
+    await press('wr');
+
+    const rendered = stripAnsiLocal(lastRender());
+    expect(rendered).toContain('WRITE CHORD — NOT DISPATCHED');
+    expect(rendered).toContain('No podcast script found');
+    expect(onCommand).not.toHaveBeenCalled();
+
+    // The notice is modal: dismiss it before the quit key will be processed.
+    await press('\x1b');
+    dataHandler?.(Buffer.from('q'));
+    await p;
+  });
+
+  it('shows the dispatched notice AND dispatches the resolved command', async () => {
+    const onCommand = vi.fn();
+    const registry = registryWithLocalWChords();
+    const p = runWorklistTui(async () => [scriptItem], [scriptItem], registry, {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+      onCommand,
+    });
+    await tick();
+    await tick();
+
+    await press('wr');
+
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand.mock.calls[0][0]).toBe('/skill:wiki-podcast-script --review Ep10/Ep10.podcast.md');
+    const rendered = stripAnsiLocal(lastRender());
+    expect(rendered).toContain('WRITE CHORD DISPATCHED');
+    expect(rendered).toContain('--review Ep10/Ep10.podcast.md');
+
+    await press('\x1b');
+    dataHandler?.(Buffer.from('q'));
+    await p;
+  });
+
+  it('the notice is modal until dismissed — other keys are consumed, Esc returns to the list', async () => {
+    const registry = registryWithLocalWChords();
+    const p = runWorklistTui(async () => [scriptlessItem], [scriptlessItem], registry, {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await tick();
+    await tick();
+
+    await press('wr');
+    expect(stripAnsiLocal(lastRender())).toContain('WRITE CHORD — NOT DISPATCHED');
+
+    // A non-dismiss key keeps the notice up (modal — never scrolls away).
+    await press('j');
+    expect(stripAnsiLocal(lastRender())).toContain('WRITE CHORD — NOT DISPATCHED');
+
+    // Esc dismisses; the list renders again (no notice title).
+    await press('\x1b');
+    expect(stripAnsiLocal(lastRender())).not.toContain('WRITE CHORD — NOT DISPATCHED');
+
+    dataHandler?.(Buffer.from('q'));
+    await p;
   });
 });

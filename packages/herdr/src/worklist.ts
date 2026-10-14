@@ -4651,13 +4651,26 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
 }
 
 /**
- * Full-pane "Ship mode blocked" notice (WL-0MUD6DDZC007ZSIW). Renders the
- * guard's plain-text blocked notice inside the same box style as the Code
- * Freeze dialog, so the blocked state reuses the established in-pane modal
- * pattern (esc/enter/q dismiss). Shown INSTEAD of the Ship It dialog when
- * live agent panes are working on project items — the dialog never opens.
+ * Render a full-pane, dismissable modal notice: a centred box with a bold
+ * accent-coloured title, a body, and a dim dismiss-key footer.
+ *
+ * Extracted from {@link formatBlockedShipDialog} so the Ship-mode blocked
+ * notice and the podcast w-chord dispatch notice (OSL-0MUQ59IRF009ICIF)
+ * share one implementation and render identically apart from title/accent.
+ *
+ * @param maxCols - Terminal width.
+ * @param maxRows - Terminal height (the box is padded to fill it).
+ * @param title - Bold title line (rendered in the accent colour).
+ * @param body - Body text; `\n` is honoured and each line is padded.
+ * @param accent - ANSI 256-colour code for the title.
  */
-export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: string): string {
+export function formatNoticeDialog(
+  maxCols: number,
+  maxRows: number,
+  title: string,
+  body: string,
+  accent: number,
+): string {
   const lines: string[] = [];
   const dialogWidth = Math.min(maxCols - 4, 76);
   const effectiveWidth = Math.max(52, dialogWidth);
@@ -4674,7 +4687,7 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
 
   lines.push('');
   lines.push(borderLine('┌', '┐'));
-  lines.push(padLine(`${ANSI.bold}${ANSI.fg(196)}⛔ SHIP MODE BLOCKED${ANSI.reset}`));
+  lines.push(padLine(`${ANSI.bold}${ANSI.fg(accent)}${title}${ANSI.reset}`));
   lines.push(padLine(''));
   for (const raw of body.split('\n')) {
     lines.push(padLine(raw));
@@ -4690,6 +4703,52 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
     lines.push('');
   }
   return lines.join('\n');
+}
+
+/**
+ * Outcome of a podcast w-chord dispatch attempt, surfaced to the operator.
+ *
+ * - `dispatched` — the command resolved and was sent to a Pi agent pane.
+ * - `error` — `resolvePodcastTarget` refused to resolve the command (e.g. no
+ *   script in `Key Files:`, or the belt-and-braces "never author a duplicate"
+ *   guard). Nothing was dispatched.
+ */
+export interface PodcastNotice {
+  kind: 'dispatched' | 'error';
+  body: string;
+}
+
+/**
+ * Render the persistent, dismissable notice for a podcast w-chord dispatch
+ * attempt (OSL-0MUQ59IRF009ICIF).
+ *
+ * The w-chords' failure and confirmation feedback used to be transient
+ * fire-and-forget `herdr notification` toasts that were easy to miss — the
+ * reported symptom was "nothing happens". This notice stays on screen until
+ * the operator dismisses it, so a refused dispatch can never be mistaken for
+ * a silently dropped keypress.
+ */
+export function formatPodcastNotice(
+  maxCols: number,
+  maxRows: number,
+  notice: PodcastNotice,
+): string {
+  const title = notice.kind === 'dispatched'
+    ? '✅ WRITE CHORD DISPATCHED'
+    : '⚠ WRITE CHORD — NOT DISPATCHED';
+  const accent = notice.kind === 'dispatched' ? 82 : 196;
+  return formatNoticeDialog(maxCols, maxRows, title, notice.body, accent);
+}
+
+/**
+ * Full-pane "Ship mode blocked" notice (WL-0MUD6DDZC007ZSIW). Renders the
+ * guard's plain-text blocked notice inside the same box style as the Code
+ * Freeze dialog, so the blocked state reuses the established in-pane modal
+ * pattern (esc/enter/q dismiss). Shown INSTEAD of the Ship It dialog when
+ * live agent panes are working on project items — the dialog never opens.
+ */
+export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: string): string {
+  return formatNoticeDialog(maxCols, maxRows, '⛔ SHIP MODE BLOCKED', body, 196);
 }
 
 /**
@@ -5474,6 +5533,12 @@ export async function runWorklistTui(
    */
   let blockedNotice: string | null = null;
 
+  // Persistent, dismissable notice for a podcast w-chord dispatch attempt
+  // (OSL-0MUQ59IRF009ICIF). Replaces the transient toast for the w-r/w-s/w-b
+  // (and t) markers so a refused dispatch — e.g. the belt-and-braces
+  // "already present" guard — can never look like a silently dropped key.
+  let podcastNotice: PodcastNotice | null = null;
+
   /**
    * Single source of truth for "the user is typing" (WL-0MTV67MZU003H7SH):
    * true while any text-input overlay (`formState`, `shipItDialog`, or the
@@ -5483,7 +5548,7 @@ export async function runWorklistTui(
    * command-completion hook). See {@link isInputActive}.
    */
   const inputActive = (): boolean =>
-    isInputActive(formState, shipItDialog, blockedNotice !== null);
+    isInputActive(formState, shipItDialog, blockedNotice !== null || podcastNotice !== null);
 
   /**
    * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
@@ -6115,7 +6180,7 @@ export async function runWorklistTui(
     // modal state (code-freeze notice, form, ship-it dialog, help overlay),
     // matching the keyboard path. Mouse input is ignored during those modal
     // states.
-    if (!codeFreezeNotice && blockedNotice === null && formState === null && shipItDialog === null && state.mode !== 'help') {
+    if (!codeFreezeNotice && blockedNotice === null && podcastNotice === null && formState === null && shipItDialog === null && state.mode !== 'help') {
       if (dispatchMouse(key)) {
         render();
         return;
@@ -6142,6 +6207,19 @@ export async function runWorklistTui(
     if (blockedNotice !== null) {
       if (key === '\x1b' || key === '\r' || key === '\n' || key === 'q') {
         blockedNotice = null;
+      }
+      render();
+      return;
+    }
+
+    // ── Podcast w-chord dispatch notice handling (OSL-0MUQ59IRF009ICIF) ──
+    // Persistent modal surfacing the outcome of a w-r/w-s/w-b dispatch: a
+    // refused resolution ("nothing happens") or a successful dispatch. Esc,
+    // Enter or q dismisses it and returns to the list; all other keys are
+    // consumed so the notice cannot be scrolled away unnoticed.
+    if (podcastNotice !== null) {
+      if (key === '\x1b' || key === '\r' || key === '\n' || key === 'q') {
+        podcastNotice = null;
       }
       render();
       return;
@@ -6274,6 +6352,10 @@ export async function runWorklistTui(
         chordState.resolvedModel = null;
         chordState.resolvedOpenPane = undefined;
         chordState.resolvedFocus = undefined;
+        // True when the resolved command carried a podcast-progression marker
+        // (OSL-0MUQ59IRF009ICIF): its outcome is surfaced as the persistent
+        // podcastNotice instead of the transient 'Sent' toast.
+        let podcastMarkerCommand = false;
         if (command) {
           // Podcast-progression markers (<podcast-target>/<podcast-script>/
           // <podcast-review>/<podcast-both>) are resolved from the selected
@@ -6284,11 +6366,12 @@ export async function runWorklistTui(
               || command.includes('<podcast-review>') || command.includes('<podcast-both>')) {
             const podcast = await resolvePodcastTarget(command, state.getSelectedItem());
             if (podcast.error) {
-              showToast('Error', { body: podcast.error });
+              podcastNotice = { kind: 'error', body: podcast.error };
               render();
               return;
             }
             command = podcast.command ?? command;
+            podcastMarkerCommand = true;
           }
           // Ship It confirmation (WL-0MSGG5N5Z0074TLY): the dev→main
           // release command, however it reaches this path, requires a typed
@@ -6481,6 +6564,10 @@ export async function runWorklistTui(
               // Code Freeze — show the notice dialog; the command was NOT
               // routed, no pane spawned, no work item claimed.
               codeFreezeNotice = true;
+            } else if (podcastMarkerCommand) {
+              // Persistent in-pane confirmation (OSL-0MUQ59IRF009ICIF): the
+              // resolved podcast command replaces the transient 'Sent' toast.
+              podcastNotice = { kind: 'dispatched', body: command };
             } else if (result === 'noop') {
               showToast('Skipped', { body: `${command.length > 60 ? command.substring(0, 57) + '...' : command} (no item)` });
             } else {
@@ -6561,6 +6648,9 @@ export async function runWorklistTui(
         // openPane: undefined (default) = open a pane; false = background,
         // no pane (WL-0MSJLD1I70045ZUL).
         const singleOpenPane = singleEntry.openPane ?? undefined;
+        // True when the command carried a podcast-progression marker: its
+        // outcome uses the persistent podcastNotice (OSL-0MUQ59IRF009ICIF).
+        let singlePodcastMarker = false;
         // Podcast-progression markers (<podcast-target>/<podcast-script>/
         // <podcast-review>/<podcast-both>) are resolved from the selected
         // item's context BEFORE the generic modal-form check so they never
@@ -6570,11 +6660,12 @@ export async function runWorklistTui(
             || singleCmd.includes('<podcast-review>') || singleCmd.includes('<podcast-both>')) {
           const podcast = await resolvePodcastTarget(singleCmd, state.getSelectedItem());
           if (podcast.error) {
-            showToast('Error', { body: podcast.error });
+            podcastNotice = { kind: 'error', body: podcast.error };
             render();
             return;
           }
           singleCmd = podcast.command ?? singleCmd;
+          singlePodcastMarker = true;
         }
         // Ship It (S) — typed-confirmation dialog (WL-0MSGG5N5Z0074TLY):
         // the dev→main release shortcut does NOT dispatch immediately. It
@@ -6641,6 +6732,9 @@ export async function runWorklistTui(
           if (result === 'blocked') {
             // Code Freeze — show the notice dialog; no pane spawned.
             codeFreezeNotice = true;
+          } else if (singlePodcastMarker) {
+            // Persistent in-pane confirmation (OSL-0MUQ59IRF009ICIF).
+            podcastNotice = { kind: 'dispatched', body: singleCmd };
           } else {
             // Surface a brief toast, then continue
             showToast('Sent', { body: singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd });
@@ -6859,6 +6953,18 @@ export async function runWorklistTui(
     // dialog is never rendered while this notice is showing.
     if (blockedNotice !== null) {
       const dialogOutput = formatBlockedShipDialog(termSize.cols, termSize.rows, blockedNotice);
+      process.stdout.write(ANSI.clear);
+      process.stdout.write(ANSI.cursorHome);
+      process.stdout.write(dialogOutput);
+      return;
+    }
+
+    // ── Podcast w-chord dispatch notice overlay rendering ──────
+    // Persistent modal for a w-r/w-s/w-b dispatch outcome
+    // (OSL-0MUQ59IRF009ICIF). Rendered above the list so a refused dispatch
+    // is impossible to miss; the operator dismisses it with Esc/Enter/q.
+    if (podcastNotice !== null) {
+      const dialogOutput = formatPodcastNotice(termSize.cols, termSize.rows, podcastNotice);
       process.stdout.write(ANSI.clear);
       process.stdout.write(ANSI.cursorHome);
       process.stdout.write(dialogOutput);
