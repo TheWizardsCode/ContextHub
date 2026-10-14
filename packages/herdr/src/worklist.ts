@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState } from './fetcher.js';
+import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, fetchBlockersForItem, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState, type BlockerRef } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
@@ -614,6 +614,13 @@ export class WorkItemListState {
    */
   metaScrollOffset = 0;
 
+  /**
+   * Active blockers of the current selection, supplied by the render loop so
+   * the metadata-panel scroll clamp counts the same `Blocked By` rows the
+   * renderer shows (WL-0MV8EZRDJ001TDA8). Null while unresolved or absent.
+   */
+  metaBlockedBy: BlockerRef[] | null = null;
+
   /** Set of expanded item IDs (for hierarchical display). */
   expandedItems: Set<string> = new Set();
 
@@ -1037,8 +1044,8 @@ export class WorkItemListState {
     }
     const selected = this.getSelectedItem();
     if (!selected) return;
-    const allLines = formatMetadataPanel(selected, this.termSize.cols, ph, 0);
-    const maxScroll = Math.max(0, allLines.length - ph);
+    const contentHeight = metadataPanelContentHeight(selected, this.termSize.cols, ph, undefined, false, this.metaBlockedBy);
+    const maxScroll = Math.max(0, contentHeight - ph);
     this.metaScrollOffset = Math.min(maxScroll, this.metaScrollOffset + amount);
   }
 
@@ -1990,39 +1997,22 @@ function buildDescriptionPreview(
 }
 
 /**
- * Format the metadata panel shown below the selection list.
+ * Build the FULL, unpadded metadata-panel content lines for an item.
  *
- * Renders the selected item's fields (via {@link buildMetaRows}) plus a
- * description preview (up to 3 lines) and a last command line when the item's
- * status is `in-progress`. The panel scrolls independently with its own offset:
- * when the content is taller than the panel,
- * `metaScrollOffset` selects the visible window and a `[m/M scroll]`
- * indicator is appended to the last line.
- *
- * @param item - Selected work item (or null for an empty panel).
- * @param maxCols - Terminal width (lines are truncated to fit).
- * @param panelRows - Number of rows available for the panel.
- * @param metaScrollOffset - Vertical scroll offset into the panel content.
- * @param lastCommand - Most recent command for the item (shown only when the
- *                      item status is `in-progress`).
- * @returns Exactly `panelRows` lines ready for the renderer.
+ * Shared by {@link formatMetadataPanel} (which truncates, slices and pads
+ * them to the panel viewport) and {@link metadataPanelContentHeight} (the
+ * `m`/`M` scroll clamp), so the rendered window and the scroll clamp can
+ * never diverge (WL-0MV8EZRDJ001TDA8).
  */
-export function formatMetadataPanel(
-  item: WorkItem | null,
+function buildMetadataPanelLines(
+  item: WorkItem,
   maxCols: number,
   panelRows: number,
-  metaScrollOffset = 0,
   lastCommand?: string | null,
   noIcons = false,
+  blockedBy?: BlockerRef[] | null,
 ): string[] {
   const lines: string[] = [];
-  if (!item) {
-    // Blank panel — pad to the full height
-    while (lines.length < panelRows) {
-      lines.push('');
-    }
-    return lines;
-  }
 
   // Header separator identifying the selected item
   lines.push(` ${ANSI.dim}── ${item.id} ──${ANSI.reset}`);
@@ -2031,6 +2021,16 @@ export function formatMetadataPanel(
   // Audit+AuditedAt onto single rows for a more compact display (WL-0MSNIX4V60012266).
   // Drop the ID row since the panel header already shows the ID (WL-0MSHIJR7T007Q9R7).
   const metaRows = pairMetaRows(buildMetaRows(item, noIcons)).filter(([label]) => label !== 'ID');
+  // Blocked By rows (WL-0MV8EZRDJ001TDA8) — one row per ACTIVE blocker, at
+  // the END of the metadata section (after every field row, before the
+  // description preview). ``${id} — ${title}`` keeps both readable; a
+  // title-less blocker falls back to the bare ID rather than a dangling
+  // separator. Omitted entirely when there are no active blockers.
+  for (const blocker of blockedBy ?? []) {
+    if (!blocker || !blocker.id) continue;
+    const value = blocker.title ? `${blocker.id} — ${blocker.title}` : blocker.id;
+    metaRows.push(['Blocked By', value]);
+  }
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
     for (const [label, value] of metaRows) {
@@ -2059,21 +2059,88 @@ export function formatMetadataPanel(
     }
   }
 
+  return lines;
+}
+
+/**
+ * Height (in lines) of the metadata panel's full content for `item` at
+ * `panelRows` — the value the `m`/`M` scroll clamp subtracts the panel
+ * height from (WL-0MV8EZRDJ001TDA8). Unlike {@link formatMetadataPanel}'s
+ * return value (always exactly `panelRows` lines after padding), this is the
+ * UNPADDED content length, so the scroll offset can reach the true bottom of
+ * the panel.
+ */
+export function metadataPanelContentHeight(
+  item: WorkItem | null,
+  maxCols: number,
+  panelRows: number,
+  lastCommand?: string | null,
+  noIcons = false,
+  blockedBy?: BlockerRef[] | null,
+): number {
+  if (!item) return 0;
+  return buildMetadataPanelLines(item, maxCols, panelRows, lastCommand, noIcons, blockedBy).length;
+}
+
+/**
+ * Format the metadata panel shown below the selection list.
+ *
+ * Renders the selected item's fields (via {@link buildMetaRows}) plus a
+ * description preview (up to 3 lines) and a last command line when the item's
+ * status is `in-progress`. The panel scrolls independently with its own offset:
+ * when the content is taller than the panel,
+ * `metaScrollOffset` selects the visible window and a `[m/M scroll]`
+ * indicator is appended to the last line.
+ *
+ * @param item - Selected work item (or null for an empty panel).
+ * @param maxCols - Terminal width (lines are truncated to fit).
+ * @param panelRows - Number of rows available for the panel.
+ * @param metaScrollOffset - Vertical scroll offset into the panel content.
+ * @param lastCommand - Most recent command for the item (shown only when the
+ *                      item status is `in-progress`).
+ * @param noIcons - Icons gated off for this frame.
+ * @param blockedBy - Active dependency blockers of the selected item
+ *                    (WL-0MV8EZRDJ001TDA8). One `Blocked By` row is appended
+ *                    per blocker, after the metadata rows and before the
+ *                    description preview. Omitted entirely when empty, so an
+ *                    unblocked item's panel is byte-for-byte unchanged.
+ * @returns Exactly `panelRows` lines ready for the renderer.
+ */
+export function formatMetadataPanel(
+  item: WorkItem | null,
+  maxCols: number,
+  panelRows: number,
+  metaScrollOffset = 0,
+  lastCommand?: string | null,
+  noIcons = false,
+  blockedBy?: BlockerRef[] | null,
+): string[] {
+  const lines: string[] = [];
+  if (!item) {
+    // Blank panel — pad to the full height
+    while (lines.length < panelRows) {
+      lines.push('');
+    }
+    return lines;
+  }
+
+  const content = buildMetadataPanelLines(item, maxCols, panelRows, lastCommand, noIcons, blockedBy);
+
   // Truncate to fit the terminal width
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].length > 0) {
-      lines[i] = truncateLine(lines[i], maxCols);
+  for (let i = 0; i < content.length; i++) {
+    if (content[i].length > 0) {
+      content[i] = truncateLine(content[i], maxCols);
     }
   }
 
   // Apply independent scrolling
-  const maxScroll = Math.max(0, lines.length - panelRows);
+  const maxScroll = Math.max(0, content.length - panelRows);
   const safeOffset = Math.min(metaScrollOffset, maxScroll);
-  const visible = lines.slice(safeOffset, safeOffset + panelRows);
+  const visible = content.slice(safeOffset, safeOffset + panelRows);
 
   // Scroll indicator when content overflows
-  if (lines.length > panelRows) {
-    const percent = Math.round(((safeOffset + panelRows) / lines.length) * 100);
+  if (content.length > panelRows) {
+    const percent = Math.round(((safeOffset + panelRows) / content.length) * 100);
     const indicator = ` ${ANSI.dim}[m/M scroll ${Math.min(percent, 100)}%]${ANSI.reset}`;
     visible[visible.length - 1] = truncateLine(visible[visible.length - 1] + indicator, maxCols);
   }
@@ -3908,6 +3975,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
    * (AH-0MUDYTQ55002NUSJ)
    */
   sprintAuditsOutstanding?: boolean,
+  /** Active dependency blockers of the selected item, rendered as `Blocked By` rows (WL-0MV8EZRDJ001TDA8). */
+  metaBlockedBy?: BlockerRef[] | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -3948,6 +4017,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     sprintCompletedCount?: number,
     browseItemCount?: number,
     sprintAuditsOutstanding?: boolean,
+    metaBlockedBy?: BlockerRef[] | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -4226,6 +4296,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
           metaScrollOffset ?? 0,
           metaLastCommand,
           noIcons,
+          metaBlockedBy,
         );
     for (const line of panelLines) {
       output.push(line);
@@ -5216,6 +5287,48 @@ export async function runWorklistTui(
   // showIcons setting change applies without a plugin restart — same pattern
   // as getShowHelpText). The renderer is created per-TUI-run with the getter.
   const renderer = createListRenderer(opts.getShowIcons);
+
+  // ── Metadata-panel dependency blockers (WL-0MV8EZRDJ001TDA8) ────────
+  // Resolved for the SELECTED item only (never every list row), cached by
+  // item ID, and invalidated on every list refresh. The render path never
+  // blocks: an unresolved item renders without `Blocked By` rows and a
+  // follow-up render shows them once the async lookup lands. Fail-open — a
+  // lookup error caches an empty list so a broken `wl dep list` can never
+  // break rendering or navigation (mirrors resolveMetaLastCommand).
+  const blockerCache = new Map<string, BlockerRef[]>();
+  const blockerInFlight = new Set<string>();
+  const resolveMetaBlockers = (item: WorkItem | null): BlockerRef[] | undefined => {
+    if (!item) return undefined;
+    // Synthetic log-derived rows have no live `wl` counterpart; blockers are
+    // only meaningful for live rows, so skip the lookup (WL-0MUL2IY8L009S3PQ).
+    if (item.isLogDerived || item.isLogOnly) return undefined;
+    const cached = blockerCache.get(item.id);
+    if (cached !== undefined) return cached;
+    if (!blockerInFlight.has(item.id)) {
+      blockerInFlight.add(item.id);
+      // Fail-open even against an unexpectedly unavailable helper (tests may
+      // replace the fetcher module): never let the lookup break a render.
+      try {
+        void fetchBlockersForItem(item.id)
+          .then((blockers) => {
+            blockerCache.set(item.id, blockers);
+          })
+          .catch(() => {
+            // Fail-open: never surface a blocker lookup failure.
+            blockerCache.set(item.id, []);
+          })
+          .finally(() => {
+            blockerInFlight.delete(item.id);
+            render();
+          });
+      } catch {
+        blockerInFlight.delete(item.id);
+        blockerCache.set(item.id, []);
+      }
+    }
+    // Unresolved — render no rows this frame; the follow-up render shows them.
+    return undefined;
+  };
   const chordState: ChordState = createChordState();
   let formState: FormState | null = null;
   /** Saved mode before entering form overlay (to restore on cancel) */
@@ -5645,6 +5758,10 @@ export async function runWorklistTui(
         // before the tab was (re)opened). Fail-open.
         await applyTabMarkers(newItems);
         state.refreshItems(newItems);
+        // Blocked-by rows are refreshed with the list (WL-0MV8EZRDJ001TDA8):
+        // drop the cached blockers so a newly resolved/added dependency edge
+        // is reflected without a plugin restart.
+        blockerCache.clear();
         // Re-read the Code Freeze marker so a freeze that started (or ended)
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
@@ -6611,6 +6728,15 @@ export async function runWorklistTui(
       ? resolveMetaLastCommand(state.getSelectedItem())
       : undefined;
 
+    // Active dependency blockers for the metadata panel's `Blocked By` rows
+    // (WL-0MV8EZRDJ001TDA8). Cached/async; the render path never blocks.
+    const metaBlockers = state.mode === 'list'
+      ? resolveMetaBlockers(state.getSelectedItem())
+      : undefined;
+    // Keep the state's `m`/`M` scroll clamp in sync with the rows the
+    // renderer will actually show.
+    state.metaBlockedBy = metaBlockers ?? null;
+
     // ── Hover tooltip (WL-0MT9XRZDK006GMUH) ────────────────────────
     // Build the tooltip lines for the currently hovered row when it is a
     // work item with an associated agent-pane and the tooltip has not been
@@ -6677,6 +6803,7 @@ export async function runWorklistTui(
       loadSettings().browseItemCount ?? opts.browseItemCount,
       // Outstanding-audit flag driving the banner copy (AH-0MUDYTQ55002NUSJ).
       sprintAuditsOutstanding,
+      metaBlockers,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

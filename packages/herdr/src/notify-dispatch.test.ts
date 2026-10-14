@@ -17,6 +17,7 @@ import type { Mock } from 'vitest';
 vi.mock('./fetcher.js', () => ({
   fetchActionableCount: vi.fn().mockResolvedValue(5),
   fetchChildrenForItem: vi.fn().mockResolvedValue([]),
+  fetchBlockersForItem: vi.fn().mockResolvedValue([]),
   getWorklogDir: vi.fn().mockReturnValue(undefined),
 }));
 

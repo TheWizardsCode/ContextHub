@@ -31,6 +31,7 @@ vi.mock('./fetcher.js', async (importOriginal) => {
     ...actual,
     fetchActionableCount: vi.fn().mockResolvedValue(0),
     fetchChildrenForItem: vi.fn().mockResolvedValue([]),
+    fetchBlockersForItem: vi.fn().mockResolvedValue([]),
   };
 });
 

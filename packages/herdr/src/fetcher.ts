@@ -16,6 +16,8 @@ import { regroupWorkItems } from './grouping.js';
 import { STAGES } from './worklist.js';
 import type { Stage } from './worklist.js';
 import type { AgentState } from './agent-tracker.js';
+import { isActiveBlocker } from './hydrator.js';
+import { parseDepListBlockersOutput } from './downtime-worker.js';
 import { isAuditFresh, type ParentAuditState } from '@worklog/shared/icons';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -927,6 +929,56 @@ export async function fetchItemDetails(id: string): Promise<WorkItem | null> {
     return items.length > 0 ? items[0] : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * A dependency blocker of a work item, as shown in the metadata panel
+ * (WL-0MV8EZRDJ001TDA8). Display-only: the id and title are all the
+ * `Blocked By` rows need.
+ */
+export interface BlockerRef {
+  id: string;
+  title: string;
+}
+
+/**
+ * Fetch the ACTIVE dependency blockers of a work item — the outbound
+ * `depends-on` edges that still block it (WL-0MV8EZRDJ001TDA8).
+ *
+ * `wl dep list <id> --json` edges carry only id/title/status/priority, so
+ * each edge that is not already terminal by status is enriched with its
+ * target's `stage` via `wl show` (mirroring the hydrator's
+ * `listOutboundDeps`) before the shared {@link isActiveBlocker} predicate
+ * decides whether it still blocks: `completed`/`deleted` targets and
+ * targets at stage `in_review`/`done` are NOT blockers. A failed stage
+ * lookup leaves the edge's stage undefined and it is classified by status
+ * alone.
+ *
+ * Fail-open (AC): a failed/unparseable `wl dep list` (or any unexpected
+ * error) yields an empty array rather than throwing — the panel then
+ * simply omits its `Blocked By` rows.
+ */
+export async function fetchBlockersForItem(id: string): Promise<BlockerRef[]> {
+  try {
+    const output = await runWl(['dep', 'list', id]);
+    const edges = parseDepListBlockersOutput(output);
+    if (edges === null) return [];
+
+    const blockers: BlockerRef[] = [];
+    for (const edge of edges) {
+      const status = (edge.status ?? '').toLowerCase().trim();
+      const stage =
+        status === 'completed' || status === 'deleted'
+          ? undefined
+          : (await fetchItemDetails(edge.id))?.stage;
+      if (!isActiveBlocker({ id: edge.id, status: edge.status, stage })) continue;
+      blockers.push({ id: edge.id, title: edge.title });
+    }
+    return blockers;
+  } catch {
+    // Fail-open: no blocker rows on any lookup failure.
+    return [];
   }
 }
 

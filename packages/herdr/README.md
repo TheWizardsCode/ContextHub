@@ -23,7 +23,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Worklog tab** — The `open-worklog-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Worklog`** so it is instantly recognisable in the tab row among other open tabs. See [Worklog tab](#worklog-tab).
 - **Quit** — Press `q` to exit
-- **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, tags, audit info, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
+- **Metadata panel** — The selected item's metadata (ID, title, status, stage, priority, type, risk, effort, tags, audit info, its **active dependency blockers**, and more, plus a **description preview** — first up-to-3 lines of the item's description) is shown in a panel below the list. The list takes as much vertical space as its content needs, up to the full pane height; the metadata panel fills whatever space remains — expanding when the list is short, and sitting at the bottom (minimum 3 rows) when the list is long. The panel scrolls independently with `m`/`M` (down/up) so long metadata never affects list navigation. See [Metadata panel](#metadata-panel).
 - **Command log** — Every plugin-dispatched command that targets a work item (via `<id>` substitution or an explicit item ID) is recorded to a local JSON log. For `in_progress` items the panel shows the **last command** at the bottom, so you can see exactly what was last dispatched against the item. See [Command log](#command-log).
 - **Stage grouping** — Work items are grouped by their Worklog stage (standard lifecycle stages only: `idea`, `intake_complete`, `plan_complete`, `in_review`, `done` — no custom stage values). Actively-worked items are identified by `status = in-progress`, not by a stage. Podcast episode items group exactly as their frontmatter stages map 1:1 (PRD §7.2). See [Stage grouping](#stage-grouping).
 - **Generic md viewer** — When a work item's description carries a `Key Files:` path to a markdown document (e.g. a podcast episode `.podcast.md`), the detail view renders the file with a generic markdown viewer (frontmatter skipped, full GFM rendering: headings, lists, tables, blockquotes, code, links) as a preview. The description section is rendered with the same markdown renderer. A persistent **Related Docs** table of contents at the top of the detail view lists every `.md` Key File (`↑↓/j:k` to navigate, `Enter` to open in the viewer), and the metadata panel shows a display-only `Related Docs` row. See [Markdown viewer](#markdown-viewer).
@@ -1768,6 +1768,18 @@ first rows), so a long list never scrolls off the top.
   the row is omitted entirely when there are no `.md` Key Files. The row is
   **display-only** — opening a document happens from the detail view's
   Related Docs table of contents (see [Markdown viewer](#markdown-viewer)).
+- When the item has at least one **active dependency blocker** (an outbound
+  `depends-on` edge whose target is neither `completed`/`deleted` nor at
+  stage `in_review`/`done`), the panel appends one **`Blocked By`** row per
+  blocker — `Blocked By  WL-xxxxxxxx — <title>` — at the end of the metadata
+  section (before the description preview). The rows appear for ANY selected
+  item with active blockers, regardless of its stored `status` (a
+  dependency-blocked `open` item is covered), and are omitted entirely when
+  there are none, so unblocked items render byte-for-byte as before. The
+  lookup runs only for the **selected** item (`wl dep list`, with a `wl
+  show` stage enrichment per still-possible blocker), is cached per item ID,
+  and is refreshed with the list; the render path never blocks on it — a
+  failed or unparseable lookup simply yields no rows (fail-open).
 - For actively-worked items (`status = in-progress`), the panel
   additionally shows **`Last command:`** — the most recent command the
   plugin dispatched against that item (`none yet` until the first
@@ -2077,7 +2089,7 @@ packages/herdr/
   - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
   - Local entries are validated with the same rules as bundled entries: an invalid entry is **logged and skipped**, and a missing/malformed local file (bad JSON, non-array) falls back to bundled-only with an error logged — a broken local file never crashes the plugin.
   - When no worklog root is resolved (uninitialized project) or no local file exists, the registry is exactly the bundled defaults and all dispatch behaviour is unchanged.
-- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X).
+- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Blocked By` rows (WL-0MV8EZRDJ001TDA8):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and invalidated on each list refresh; `formatMetadataPanel` appends one `Blocked By  <id> — <title>` row per blocker at the end of the metadata rows. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
 - **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
 ## Code Freeze

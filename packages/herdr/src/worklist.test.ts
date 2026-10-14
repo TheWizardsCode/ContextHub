@@ -26,6 +26,7 @@ import {
   computeMetadataPanelHeight,
   computeDynamicLayout,
   formatMetadataPanel,
+  metadataPanelContentHeight,
   resolveMetaLastCommand,
   formatTimestamp,
   buildMetaRows,
@@ -3236,6 +3237,63 @@ describe('formatMetadataPanel — field rendering and scrolling', () => {
   });
 });
 
+describe('formatMetadataPanel — Blocked By rows (WL-0MV8EZRDJ001TDA8)', () => {
+  // Strip ANSI SGR codes so tests assert on visible text.
+  const visibleOf = (lines: string[]): string => lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+  it('renders one Blocked By row per active blocker with ID and title', () => {
+    const blockers = [
+      { id: 'WL-B1', title: 'First blocker' },
+      { id: 'WL-B2', title: 'Second blocker' },
+    ];
+    const lines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, 'cmd', false, blockers));
+    expect(lines).toMatch(/Blocked By\s+WL-B1 — First blocker/);
+    expect(lines).toMatch(/Blocked By\s+WL-B2 — Second blocker/);
+  });
+
+  it('renders Blocked By rows for a dependency-blocked open item', () => {
+    const item = { ...makeRichItem(), status: 'open', description: undefined };
+    const lines = visibleOf(formatMetadataPanel(item, 80, 20, 0, undefined, false, [
+      { id: 'WL-B1', title: 'Still blocking' },
+    ]));
+    expect(lines).toMatch(/Blocked By\s+WL-B1 — Still blocking/);
+  });
+
+  it('omits the Blocked By rows entirely when there are no active blockers', () => {
+    for (const blockedBy of [undefined, null, []]) {
+      const lines = visibleOf(
+        formatMetadataPanel(makeRichItem(), 80, 20, 0, 'cmd', false, blockedBy as never),
+      );
+      expect(lines).not.toContain('Blocked By');
+    }
+  });
+
+  it('falls back to the ID alone when a blocker has no title', () => {
+    const lines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, false, [
+      { id: 'WL-NOTITLE', title: '' },
+    ]));
+    expect(lines).toMatch(/Blocked By\s+WL-NOTITLE\s*$/m);
+    expect(lines).not.toContain('WL-NOTITLE —');
+  });
+
+  it('renders the Blocked By rows after the metadata rows and before the description preview', () => {
+    const item = { ...makeRichItem(), description: 'Some description here.' };
+    const raw = formatMetadataPanel(item, 80, 30, 0, undefined, false, [
+      { id: 'WL-B1', title: 'First blocker' },
+    ]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    const blockerIdx = raw.findIndex((l) => l.includes('WL-B1'));
+    expect(blockerIdx).toBeGreaterThan(-1);
+    // A metadata row (e.g. Status+Stage) precedes it; the Description
+    // preview follows it.
+    const metaIdx = raw.findIndex((l) => l.includes('Status'));
+    const descIdx = raw.findIndex((l) => l.includes('Description'));
+    expect(metaIdx).toBeGreaterThan(-1);
+    expect(descIdx).toBeGreaterThan(-1);
+    expect(metaIdx).toBeLessThan(blockerIdx);
+    expect(blockerIdx).toBeLessThan(descIdx);
+  });
+});
+
 describe('formatMetadataPanel — description preview (WL-0MT9ZJF28004UJ28)', () => {
   // Strip ANSI SGR codes so tests assert on visible text.
   const visibleOf = (lines: string[]): string => lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
@@ -3476,10 +3534,44 @@ describe('WorkItemListState — metadata scroll state', () => {
       /* bannerCount = */ 0,
       TERM_80x24,
     );
-    const content = formatMetadataPanel(state.getSelectedItem()!, TERM_80x24.cols, panelHeight, 0);
-    const maxScroll = Math.max(0, content.length - panelHeight);
+    // The clamp uses the UNPADDED content height (metadataPanelContentHeight),
+    // not formatMetadataPanel's padded return (always exactly panelHeight).
+    const contentHeight = metadataPanelContentHeight(
+      state.getSelectedItem()!,
+      TERM_80x24.cols,
+      panelHeight,
+    );
+    const maxScroll = Math.max(0, contentHeight - panelHeight);
     state.metaScrollDown(100, panelHeight);
     expect(state.metaScrollOffset).toBe(maxScroll);
+    // For a rich item the content genuinely overflows a small panel.
+    state.metaScrollDown(100, 4);
+    expect(state.metaScrollOffset).toBeGreaterThan(0);
+  });
+
+  it('clamps metaScrollDown to include Blocked By rows (WL-0MV8EZRDJ001TDA8)', () => {
+    const state = new WorkItemListState([makeRichItem()], TERM_80x24);
+    // A deliberately small panel height forces overflow in both cases.
+    const panelHeight = 4;
+    const blockers = Array.from({ length: 6 }, (_, i) => ({
+      id: `WL-B${i}`,
+      title: `Blocker ${i}`,
+    }));
+
+    // Without blockers.
+    state.metaScrollDown(1000, panelHeight);
+    const plainMax = state.metaScrollOffset;
+
+    // The render loop keeps state.metaBlockedBy in sync with the rows it
+    // shows; metaScrollDown must clamp against THOSE rows so `m` reaches the
+    // true bottom of the panel.
+    state.metaScrollOffset = 0;
+    state.metaBlockedBy = blockers;
+    state.metaScrollDown(1000, panelHeight);
+    const blockedMax = state.metaScrollOffset;
+
+    expect(plainMax).toBeGreaterThan(0);
+    expect(blockedMax).toBeGreaterThan(plainMax);
   });
 
   it('metaScrollUp clamps at zero', () => {
