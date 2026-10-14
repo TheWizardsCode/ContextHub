@@ -1353,6 +1353,27 @@ dispatch call — no per-worklog duplication (F5 WL-0MTII48OV008P2QU;
 WL-0MT50LKAK001EF5Q single cap source). v1 scope is single-machine; a
 multi-machine (real flock/NFS) extension is future work.
 
+#### Cross-root `assignee` merge rule (WL-0MV85WBZ2004VDUQ)
+
+`assignee` is a scheduling hold, not a protected data field: assigning an item
+holds it from auto-dispatch and clearing the assignee releases it. Cross-root
+sync therefore treats a cleared `assignee` (`''`) as **meaningful intent**
+rather than an absent/default value:
+
+- `assignee` is **not** a regression-guarded merge field (it is absent from
+  `mergeParticipatingFields` in `src/sync.ts`). A newer remote `''` clears a
+  local non-empty assignee and propagates **without** `--accept-regressions`.
+- Empty-vs-non-empty assignee merges resolve **last-writer-wins** by
+  `updatedAt` (deterministic lexicographic tie-break at equal timestamps) via
+  `isEmptyMeaningfulField()` — so a stale local claim can never resurrect a
+  released hold, and a newer local hold is not cleared by a stale remote `''`.
+- `status`, `stage` and `priority` remain regression-guarded unchanged: a
+  newer remote default is still refused and the local value kept.
+
+Rationale and the accepted answer to the epic's Q1 live in the parent epic
+appendix (Option A — status-neutral assignee CAS claim). Cross-root coverage:
+`tests/cli/sync-assignee-clear.test.ts` (two worklog roots, real `wl sync`).
+
 ### Owner lease, pane liveness & contention feedback (WL-0MTYZXSLN008HZOW;
     pane-count cap removed by WL-0MU2EP6JL006A1U3)
 
