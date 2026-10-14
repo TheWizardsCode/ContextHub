@@ -1246,6 +1246,12 @@ export interface DowntimeHerdrItem {
    * the check-in offer computation.
    */
   needsProducerReview?: boolean;
+  /**
+   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
+   * scheduling hold: the item is held by a human/agent and must not be
+   * dispatched at any tier (WL-0MV85WCJJ0087VMP).
+   */
+  assignee?: string;
 }
 
 /**
@@ -1264,6 +1270,24 @@ export function isSoftDeleted(
   if (item === null || item === undefined) return false;
   const deletedBy = item.deletedBy;
   return typeof deletedBy === 'string' && deletedBy.trim() !== '';
+}
+
+/**
+ * Whether a candidate/work item is held by a non-empty assignee.
+ *
+ * An assignee (human or agent) means the item is already being worked, so it
+ * must never be auto-dispatched at any tier (WL-0MV85WCJJ0087VMP). The
+ * audit-tier claim additionally CASes on the empty assignee
+ * (`--if-assignee ""`), so a held item would fail stale there anyway; this
+ * helper excludes it up front at every selection path. Blank/absent values
+ * mean the item is free to claim.
+ */
+export function isAssigneeHeld(
+  item: { assignee?: string | null } | null | undefined,
+): boolean {
+  if (item === null || item === undefined) return false;
+  const assignee = item.assignee;
+  return typeof assignee === 'string' && assignee.trim() !== '';
 }
 export type DowntimeHerdrListResult =
   | { ok: true; items: DowntimeHerdrItem[] }
@@ -1309,6 +1333,12 @@ export interface DowntimeCandidate {
    * Filtered in every `select*` function (AC1).
    */
   needsProducerReview?: boolean;
+  /**
+   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
+   * scheduling hold — the item is held by a human/agent and is excluded from
+   * every `select*` filter (WL-0MV85WCJJ0087VMP).
+   */
+  assignee?: string;
 }
 
 /**
@@ -1330,6 +1360,8 @@ export interface ImplementCandidate {
   priority?: string;
   /** Soft-delete attribution (SA-0MUJBLZC60085DI9): non-empty ⇒ excluded from selection. */
   deletedBy?: string;
+  /** Assignee hold (WL-0MV85WCJJ0087VMP): non-empty ⇒ excluded from selection. */
+  assignee?: string;
   /**
    * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
    * exclude from implement-tier selection (AC1).
@@ -1370,6 +1402,13 @@ export interface AuditCandidate {
    * any child that would otherwise slip through (WL-0MUBVH8QG0020H9L AC2).
    */
   parentId?: string | null;
+  /**
+   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
+   * scheduling hold — the audit tier excludes it so a producer-held item is
+   * never claimed (the claim's `--if-assignee ""` CAS would fail stale)
+   * (WL-0MV85WCJJ0087VMP).
+   */
+  assignee?: string;
 }
 
 /**
@@ -1405,6 +1444,12 @@ export interface DowntimeItemInfo {
   risk?: string;
   /** Effort level (XS/S/M/L/XL). */
   effort?: string;
+  /**
+   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
+   * scheduling hold: the item is held by a human/agent and must not be
+   * dispatched at any tier (WL-0MV85WCJJ0087VMP).
+   */
+  assignee?: string;
   /** Latest audit timestamp (enriched; absent on show-only items). */
   auditedAt?: string | null;
   /** Item update timestamp (audit-tier recency window). */
@@ -2810,6 +2855,9 @@ async function dispatchFromHerdrList(
       sortIndex: item.sortIndex,
       parentId: item.parentId,
       deletedBy: item.deletedBy,
+      // Assignee hold (WL-0MV85WCJJ0087VMP): carried into the classification
+      // info so a held item is excluded by `classifyItemForDispatch` here too.
+      assignee: item.assignee,
       needsProducerReview: item.needsProducerReview,
     };
     const k = classifyItemForDispatch(info, now);
@@ -3517,6 +3565,11 @@ export function classifyItemForDispatch(
   // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
   // Items flagged for producer review must NOT be auto-dispatched at any tier.
   if (info.needsProducerReview === true) return null;
+  // Assignee hold (WL-0MV85WCJJ0087VMP): an item held by a non-empty
+  // assignee is never auto-dispatched at any tier. Assigning an item to a
+  // human/agent (e.g. the producer) makes it non-dispatchable, and the
+  // audit-tier claim's `--if-assignee ""` CAS would fail stale anyway.
+  if (isAssigneeHeld(info)) return null;
   const status = typeof info.status === 'string' ? info.status : '';
   const stage = typeof info.stage === 'string' ? info.stage : '';
   if (status === 'completed') {
@@ -6802,6 +6855,7 @@ export function parseNextCandidatesOutput(
           : undefined,
       priority: typeof nested.priority === 'string' ? nested.priority : undefined,
       deletedBy: typeof nested.deletedBy === 'string' ? nested.deletedBy : undefined,
+      assignee: typeof nested.assignee === 'string' ? nested.assignee : undefined,
       needsProducerReview:
         nested.needsProducerReview !== undefined ? Boolean(nested.needsProducerReview) : undefined,
     });
@@ -6948,6 +7002,7 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       deletedBy: typeof o.deletedBy === 'string' ? o.deletedBy : undefined,
       needsProducerReview:
         o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
+      assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
     });
   }
   return candidates;
@@ -7039,6 +7094,10 @@ export function selectAuditCandidate(
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
     .filter((c) => c.needsProducerReview !== true)
+    // Assignee hold (WL-0MV85WCJJ0087VMP): a non-empty assignee means the
+    // item is already held (e.g. by the producer), so it is not an audit
+    // candidate — the claim's `--if-assignee ""` CAS would fail stale.
+    .filter((c) => !isAssigneeHeld(c))
     .filter((c) => {
       if (!c.updatedAt) return true; // missing → include
       const updated = new Date(c.updatedAt).getTime();
@@ -7167,6 +7226,7 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
       deletedBy: typeof o.deletedBy === 'string' ? o.deletedBy : undefined,
+      assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
       needsProducerReview:
         o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
@@ -7195,6 +7255,8 @@ export function selectImplementCandidate(
 ): ImplementCandidate | null {
   const filtered = candidates
     .filter((c) => !isSoftDeleted(c))
+    // Assignee hold (WL-0MV85WCJJ0087VMP): a held item is never dispatched.
+    .filter((c) => !isAssigneeHeld(c))
     .filter((c) => c.status === 'open')
     .filter((c) => {
       const risk = riskOrdinal(c.risk);
@@ -7247,6 +7309,8 @@ export function selectNextCandidate(
 ): DowntimeCandidate | null {
   const filtered = candidates
     .filter((c) => !isSoftDeleted(c))
+    // Assignee hold (WL-0MV85WCJJ0087VMP): a held item is never dispatched.
+    .filter((c) => !isAssigneeHeld(c))
     .filter((c) => c.status === 'open')
     // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
     .filter((c) => c.needsProducerReview !== true)
@@ -7293,6 +7357,8 @@ export interface CriticalCandidate {
   priority?: string;
   /** Soft-delete attribution (SA-0MUJBLZC60085DI9): non-empty ⇒ excluded from selection. */
   deletedBy?: string;
+  /** Assignee hold (WL-0MV85WCJJ0087VMP): non-empty ⇒ excluded from selection. */
+  assignee?: string;
   /**
    * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
    * exclude from critical-tier selection and from dependency-frontier
@@ -7353,6 +7419,7 @@ export function parseCriticalCandidatesOutput(stdout: string): CriticalCandidate
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
       deletedBy: typeof o.deletedBy === 'string' ? o.deletedBy : undefined,
+      assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
       needsProducerReview:
         o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
@@ -7382,6 +7449,8 @@ export function selectCriticalCandidate(
 ): CriticalCandidate | null {
   const filtered = candidates
     .filter((c) => !isSoftDeleted(c))
+    // Assignee hold (WL-0MV85WCJJ0087VMP): a held item is never dispatched.
+    .filter((c) => !isAssigneeHeld(c))
     .filter((c) => c.status === 'open')
     // Dispatchable stages only (idea / intake_complete / plan_complete).
     .filter((c) => criticalSkillKind(c.stage) !== null)
@@ -7522,6 +7591,7 @@ export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
     priority: typeof raw.priority === 'string' ? raw.priority : undefined,
     risk: typeof raw.risk === 'string' ? raw.risk : undefined,
     effort: typeof raw.effort === 'string' ? raw.effort : undefined,
+    assignee: typeof raw.assignee === 'string' ? raw.assignee : undefined,
     auditedAt:
       typeof raw.auditedAt === 'string'
         ? raw.auditedAt

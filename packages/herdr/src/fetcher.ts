@@ -178,6 +178,12 @@ export interface WorkItem {
    * (SA-0MUJBLZC60085DI9).
    */
   deletedBy?: string;
+  /**
+   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
+   * scheduling hold (WL-0MV85WCJJ0087VMP): the item is held by a
+   * human/agent and is excluded from downtime dispatch at every tier.
+   */
+  assignee?: string;
   auditResult?: boolean | null;
   auditedAt?: string | null;
   /** Stored content fingerprint from the audit result (WL-0MUBVH5S0008NQ9K). */
@@ -307,6 +313,7 @@ function normalizeItem(raw: any): WorkItem {
     groupLabel: raw?.groupLabel ? String(raw.groupLabel) : undefined,
     needsProducerReview: raw?.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
     deletedBy: raw?.deletedBy ? String(raw.deletedBy) : undefined,
+    assignee: raw?.assignee ? String(raw.assignee) : undefined,
     auditResult: raw?.auditResult !== undefined ? raw.auditResult : null,
     auditedAt: raw?.auditedAt == null ? (raw?.auditedAt as null | undefined) : String(raw.auditedAt),
     fingerprint: raw?.fingerprint == null ? (raw?.fingerprint as null | undefined) : String(raw.fingerprint),
@@ -1231,18 +1238,25 @@ export interface ClaimResult {
 const CLAIM_TIMEOUT_MS = 3000;
 
 /**
- * Claim a work item before dispatching an agent command: set its status
- * to `in_progress` with the given assignee, matching the claim pattern
- * documented in AGENTS.md. Targets the configured worklog database via
+ * Claim a work item before dispatching an agent command. For every tier
+ * except audit the claim sets its status to `in_progress` with the given
+ * assignee, matching the claim pattern documented in AGENTS.md. For the
+ * audit tier (`expected` = `completed`/`in_review`) the claim is
+ * STATUS-NEUTRAL: it writes only the assignee, guarded by
+ * `--if-status completed --if-stage in_review --if-assignee ""`, so an
+ * audited item never enters the `in_progress`/`in_review` hybrid
+ * (WL-0MV85WCJJ0087VMP). Targets the configured worklog database via
  * `--worklog-dir` when set.
  *
  * With `expected` (status/stage), the claim is a compare-and-swap (RCA
  * WL-0MSRBFFLN005W3VT design point 1): `--if-status`/`--if-stage` are
  * passed to `wl update`, so the transition only applies while the item is
- * still in the state the tier selected it in. Exactly one concurrent pane
- * wins; a loser gets `{success:false, stale:true}` and the caller aborts
- * the dispatch. A stale result is detected from the wl CLI's `"error":
- * "stale"` JSON payload on stderr.
+ * still in the state the tier selected it in. The audit tier additionally
+ * CASes on the empty assignee (`--if-assignee ""`), so assigning an item
+ * makes the claim fail stale. Exactly one concurrent pane wins; a loser
+ * gets `{success:false, stale:true}` and the caller aborts the dispatch. A
+ * stale result is detected from the wl CLI's `"error": "stale"` JSON
+ * payload on stderr.
  *
  * `worklogRoot` (optional, WL-0MTQ14W7L003II5A) targets the update at a
  * specific worklog root's database via per-call `--worklog-dir` — the
@@ -1261,23 +1275,48 @@ export async function claimWorkItem(
   migrateStage?: string,
 ): Promise<ClaimResult> {
   try {
-    const args = ['update', id, '--status', 'in_progress', '--assignee', assignee];
-    if (expected?.status) {
-      args.push('--if-status', expected.status);
-    }
-    if (expected?.stage) {
-      args.push('--if-stage', expected.stage);
-    }
-    // Retired-stage recovery (WL-0MTYL7DX9000MZOH): an item stuck on a stage
-    // that is no longer valid (e.g. the removed `in_progress` stage) cannot
-    // satisfy the tier's normalised stage CAS. In that case the caller passes
-    // the tier's target stage as an atomic MIGRATION — the CAS guard still
-    // matches the item's ACTUAL (retired) stage for race safety, while
-    // `--stage` advances the stored value to a valid stage in the same write.
-    // Without this, the claim is rejected by the status/stage validator and
-    // counted as a hard wl-error strike.
-    if (migrateStage !== undefined) {
-      args.push('--stage', migrateStage);
+    // Status-neutral audit-tier claim (WL-0MV85WCJJ0087VMP): an audited
+    // `completed`/`in_review` item must never enter the `in_progress`/
+    // `in_review` hybrid the stranding autocracies were built on. The claim
+    // therefore writes ONLY the assignee — no `--status`/`--stage` — guarded
+    // by the tier's status/stage expectation AND the empty-assignee CAS. A
+    // failed audit restores by clearing the assignee, so the item never
+    // leaves the review queue. Every other tier keeps the status-flip claim.
+    const isAuditTier = expected?.status === 'completed' && expected?.stage === 'in_review';
+    const args = isAuditTier
+      ? [
+          'update',
+          id,
+          '--assignee',
+          assignee,
+          '--if-status',
+          expected.status as string,
+          '--if-stage',
+          expected.stage as string,
+          // `""` is a meaningful expected value: only an UNASSIGNED item may
+          // be claimed, so a concurrent/human assignee makes the claim stale.
+          '--if-assignee',
+          '',
+        ]
+      : ['update', id, '--status', 'in_progress', '--assignee', assignee];
+    if (!isAuditTier) {
+      if (expected?.status) {
+        args.push('--if-status', expected.status);
+      }
+      if (expected?.stage) {
+        args.push('--if-stage', expected.stage);
+      }
+      // Retired-stage recovery (WL-0MTYL7DX9000MZOH): an item stuck on a stage
+      // that is no longer valid (e.g. the removed `in_progress` stage) cannot
+      // satisfy the tier's normalised stage CAS. In that case the caller passes
+      // the tier's target stage as an atomic MIGRATION — the CAS guard still
+      // matches the item's ACTUAL (retired) stage for race safety, while
+      // `--stage` advances the stored value to a valid stage in the same write.
+      // Without this, the claim is rejected by the status/stage validator and
+      // counted as a hard wl-error strike.
+      if (migrateStage !== undefined) {
+        args.push('--stage', migrateStage);
+      }
     }
     // Per-call --worklog-dir targeting (WL-0MTQ14W7L003II5A): the downtime
     // leader claims coordination offers in the OFFER's own worklog root,
@@ -1317,32 +1356,41 @@ export async function claimWorkItem(
  *
  * `original.status` defaults to `open` (the plan/intake/implement/risk-effort
  * tiers); the audit tier passes `completed` so a failed audit dispatch
- * returns to the audit queue rather than the open backlog. `worklogRoot`
- * targets that root's database via per-call `--worklog-dir` (the same
- * cross-root convention as `claimWorkItem`).
+ * returns to the audit queue rather than the open backlog. When
+ * `original.assignee` is a non-empty string (the audit tier,
+ * WL-0MV85WCJJ0087VMP) the rollback is STATUS-NEUTRAL: it clears only the
+ * claiming agent's assignee, guarded by `--if-assignee <agent>`, and never
+ * rewrites status/stage. `worklogRoot` targets that root's database via
+ * per-call `--worklog-dir` (the same cross-root convention as
+ * `claimWorkItem`).
  *
  * Never throws — a failure resolves `false` so the caller can fall back to
  * the fail-closed abort outcome.
  */
 export async function rollbackClaimWorkItem(
   id: string,
-  original?: { status?: string; stage?: string },
+  original?: { status?: string; stage?: string; assignee?: string },
   worklogRoot?: string,
 ): Promise<boolean> {
   try {
-    const args = [
-      'update',
-      id,
-      '--status',
-      original?.status ?? 'open',
-      '--if-status',
-      'in_progress',
-    ];
+    // Assignee-guarded status-neutral rollback (WL-0MV85WCJJ0087VMP): when
+    // the caller identifies the claiming agent, clear ONLY that claim's
+    // assignee (CAS on the agent) and never rewrite status/stage — the
+    // audit-tier item stays `completed`/`in_review` throughout, so a failed
+    // audit can never strand it off the review queue. `--if-assignee <agent>`
+    // makes the clear a no-clobber: a concurrent assignee change makes the
+    // rollback stale and leaves their state untouched.
+    const claimedAgent = original?.assignee;
+    const isAssigneeGuarded = typeof claimedAgent === 'string' && claimedAgent.length > 0;
+    const args = isAssigneeGuarded
+      ? ['update', id, '--assignee', '', '--if-assignee', claimedAgent]
+      : ['update', id, '--status', original?.status ?? 'open', '--if-status', 'in_progress'];
     // Restore the stage the tier claimed at. The claim itself does not change
     // the stage (except the retired-stage migration, which advances it to the
     // tier's target); passing the tier's expectation is therefore a no-op in
-    // the migration path and the correct restore everywhere else.
-    if (original?.stage) {
+    // the migration path and the correct restore everywhere else. The
+    // status-neutral audit-tier rollback writes no stage at all.
+    if (!isAssigneeGuarded && original?.stage) {
       args.push('--if-stage', original.stage);
       args.push('--stage', original.stage);
     }

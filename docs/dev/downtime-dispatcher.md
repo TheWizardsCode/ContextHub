@@ -311,12 +311,16 @@ are now recovered automatically:
 
 - **`marker-write-failed`** (the marker write failed AFTER the successful
   claim): `dispatchClaimedTier` calls `rollbackClaim` (→
-  `rollbackClaimWorkItem`) to reverse the CAS transition —
+  `rollbackClaimWorkItem`) to reverse the CAS transition. The plan/intake/
+  implement/risk-effort tiers keep the legacy status restore —
   `--status <pre-claim status> --if-status in_progress [--if-stage
-  <pre-claim stage> --stage <pre-claim stage>]`. Plan/intake/implement/
-  risk-effort roll back to `open` at the original stage; the audit tier
-  rolls back to `completed`/`in_review` so the item stays in the audit
-  queue. A successful rollback reports the neutral outcome
+  <pre-claim stage> --stage <pre-claim stage>]`, rolling back to `open` at
+  the original stage. The AUDIT tier claim is STATUS-NEUTRAL
+  (WL-0MV85WCJJ0087VMP): it never flips status/stage, so its rollback
+  clears only the claiming agent's assignee, guarded by
+  `--assignee "" --if-assignee <agent>` — the item stays at
+  `completed`/`in_review` (never a hybrid write) and only THIS claim's
+  state is reverted. A successful rollback reports the neutral outcome
   `claim-rolled-back`; a stale/failed rollback (a concurrent human/agent
   already moved the item) reports `marker-write-failed` and leaves the item
   untouched (fail-closed).
@@ -331,6 +335,37 @@ are now recovered automatically:
   panes).
 
 A STANDING success marker (no `outcome`) excludes the item for its tier **for a bounded lifetime**, so a dispatched item is never double-dispatched while its pane may still be running — and never stranded forever if it is not (see below).
+
+### Status-neutral audit-tier claim (WL-0MV85WCJJ0087VMP)
+
+The AUDIT tier claim is deliberately STATUS-NEUTRAL: an audited
+`completed`/`in_review` item must never enter the `in_progress`/`in_review`
+hybrid that stranding autocracies were built on. `claimItem` (→
+`claimWorkItem`) writes ONLY the assignee for the audit tier:
+
+```
+wl update <id> --assignee <agent> --if-status completed --if-stage in_review --if-assignee ""
+```
+
+- No `--status`/`--stage` — the item reads back `completed`/`in_review`
+  throughout the claim (AC: no hybrid state).
+- `--if-assignee ""` is the exclusive claim token: only an UNASSIGNED item
+  may be claimed, so assigning an item (e.g. to the producer) makes the
+  claim fail stale at every re-claim.
+- A failed audit Phase 2 restores via the status-neutral rollback
+  (`--assignee "" --if-assignee <agent>`), so the item can never be stranded
+  off the review queue.
+- Assignee-based scheduling hold: `classifyItemForDispatch` and every tier's
+  `select*` helper exclude items with a non-empty assignee, and the parse
+  helpers (`parseShowItemOutput`, `parseAuditCandidatesOutput`,
+  `parseNextCandidatesOutput`, `parseImplementCandidatesOutput`,
+  `parseCriticalCandidatesOutput`) carry the field so the exclusion holds at
+  every selection path.
+
+Every OTHER tier keeps the legacy status-flip claim
+(`--status in_progress` + the tier's status/stage CAS), and its rollback
+keeps the legacy status restore guarded by `--if-status in_progress`.
+
 
 ### Success-marker lifetime (WL-0MU6UL0RJ008IHGT)
 

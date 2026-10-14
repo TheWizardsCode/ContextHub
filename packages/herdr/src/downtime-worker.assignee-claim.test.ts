@@ -27,10 +27,9 @@
  * (a harness that maps emitted CLI args onto `updateIfMatches`; the CAS
  * primitive itself is the production code under test).
  *
- * Test-first discipline: specs that pin the TARGET (unimplemented) behaviour
- * are committed under vitest `it.fails(...)` (expected-failure) so the
- * suite stays green while the contract is red; C4 flips `it.fails(` → `it(`
- * as it lands.
+ * Test-first discipline: specs that pinned the TARGET were committed under
+ * vitest `it.fails(...)` (expected-failure) so the suite stayed green while
+ * the contract was red; C4 flipped `it.fails(` → `it(` as it landed.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -126,7 +125,7 @@ describe('status-neutral audit-tier claim (WL-0MV85WARS000THEC)', () => {
 
   // ── C4 AC: claimWorkItem command shape ────────────────────────────
 
-  it.fails('claimWorkItem for the audit tier is status-neutral: assignee CAS only, no --status/--stage', async () => {
+  it('claimWorkItem for the audit tier is status-neutral: assignee CAS only, no --status/--stage', async () => {
     const recorded: string[][] = [];
     setExecFileAsync((async (_b: string, args: string[]) => {
       recorded.push(args);
@@ -165,7 +164,7 @@ describe('status-neutral audit-tier claim (WL-0MV85WARS000THEC)', () => {
 
   // ── C4 AC: rollbackClaimWorkItem command shape ────────────────────
 
-  it.fails('rollbackClaimWorkItem for the audit tier clears the assignee guarded by --if-assignee <agent>', async () => {
+  it('rollbackClaimWorkItem for the audit tier clears the assignee guarded by --if-assignee <agent>', async () => {
     const recorded: string[][] = [];
     setExecFileAsync((async (_b: string, args: string[]) => {
       recorded.push(args);
@@ -195,7 +194,7 @@ describe('status-neutral audit-tier claim (WL-0MV85WARS000THEC)', () => {
   // The item must read back completed/in_review (never a hybrid) and be
   // RE-SELECTABLE by the audit tier without any needsProducerReview column.
 
-  it.fails('dispatch claim → simulated audit Phase-2 failure → completed/in_review again, re-selectable', async () => {
+  it('dispatch claim → simulated audit Phase-2 failure → completed/in_review again, re-selectable', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'wl-herdr-assignee-'));
     const db = new WorklogDatabase('TEST', join(tempDir, 'worklog.db'), join(tempDir, 'data.jsonl'), true);
     try {
@@ -247,7 +246,7 @@ describe('status-neutral audit-tier claim (WL-0MV85WARS000THEC)', () => {
 
   // ── C4 AC: scheduling hold — assigned items are not audit-selected ──
 
-  it.fails('selectAuditCandidate excludes audit candidates with a non-empty assignee', () => {
+  it('selectAuditCandidate excludes audit candidates with a non-empty assignee', () => {
     const now = Date.now();
     const due: AuditCandidate = {
       id: 'WL-FREE',

@@ -2094,7 +2094,19 @@ export function createDowntimeDeps(
       // a CAS claim whose dispatch never completed — restore the item to its
       // pre-claim status+stage so a future idle period can re-select it.
       // Race-safe (--if-status in_progress) and fail-closed (never throws).
-      return rollbackClaimWorkItem(itemId, original, cwd);
+      //
+      // Status-neutral audit-tier rollback (WL-0MV85WCJJ0087VMP): the audit
+      // claim never flips status/stage, so the rollback must not rewrite
+      // them either — it clears only the claiming agent's assignee, guarded
+      // by `--if-assignee <agent>`. The claiming agent rides on the original
+      // expectation here (this deps' configured assignee); every other tier
+      // keeps the legacy status/stage restore.
+      const isAuditTier = original?.status === 'completed' && original?.stage === 'in_review';
+      return rollbackClaimWorkItem(
+        itemId,
+        isAuditTier ? { ...original, assignee } : original,
+        cwd,
+      );
     },
     // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
     // `needsProducerReview = true` when an item exhausts its automatic
