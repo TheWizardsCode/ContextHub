@@ -244,6 +244,41 @@ export default function register(ctx: PluginContext): void {
         if (deletedByCandidate !== undefined) updates.deletedBy = deletedByCandidate;
         if (deleteReasonCandidate !== undefined) updates.deleteReason = deleteReasonCandidate;
         if (needsProducerReviewCandidate !== undefined) updates.needsProducerReview = needsProducerReviewCandidate;
+
+        // Soft-delete guard (SA-0MUJBLZC60085DI9 AC1): a soft-deleted work
+        // item (non-empty `deletedBy`) must never be resurrected by an
+        // update. `wl delete` sets `deletedBy` and may leave the status
+        // untouched, so without this guard `wl update <id> --status open`
+        // rewrites the status and the downtime dispatcher re-selects the
+        // deleted item. Reject any mutation other than an explicit change to
+        // the delete-attribution fields themselves (`--deleted-by` /
+        // `--delete-reason`) — the administrative override. The guard runs
+        // before any write so a rejected id is never partially mutated.
+        const existingForSoftDeleteGuard = db.get(normalizedId);
+        if (
+          existingForSoftDeleteGuard &&
+          String(existingForSoftDeleteGuard.deletedBy ?? '').trim() !== ''
+        ) {
+          // Note: `updates.status`/`updates.stage` are only populated later,
+          // per-id, by the status/stage validation block — so the candidate
+          // flags above must be checked directly here.
+          const mutatesNonDeleteField =
+            statusCandidate !== undefined ||
+            stageCandidate !== undefined ||
+            Object.keys(updates).some(
+              (key) => key !== 'deletedBy' && key !== 'deleteReason',
+            ) ||
+            auditCandidate !== undefined;
+          if (mutatesNonDeleteField) {
+            const message =
+              `Work item ${normalizedId} is soft-deleted ` +
+              `(deletedBy: ${existingForSoftDeleteGuard.deletedBy}) and cannot be updated. ` +
+              `Create a new work item instead.`;
+            results.push({ id: normalizedId, success: false, error: 'deleted-item', message });
+            continue;
+          }
+        }
+
         if (auditCandidate !== undefined) {
           const current = db.get(normalizedId);
           if (!current) {

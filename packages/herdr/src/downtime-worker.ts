@@ -1233,6 +1233,12 @@ export interface DowntimeHerdrItem {
   sortIndex?: number;
   parentId?: string | null;
   /**
+   * Soft-delete attribution (`wl delete` sets it; SA-0MUJBLZC60085DI9): a
+   * non-empty value excludes the item from every dispatch path. Carried by
+   * the fetcher's `WorkItem`.
+   */
+  deletedBy?: string;
+  /**
    * Needs-producer-review flag (WL-0MTIAL65N004T22F): carried by the
    * fetcher's `WorkItem`; when `true` the item is not dispatchable — the
    * producer-review gate is a sequential filter on the Herdr sequence
@@ -1240,6 +1246,24 @@ export interface DowntimeHerdrItem {
    * the check-in offer computation.
    */
   needsProducerReview?: boolean;
+}
+
+/**
+ * Whether a candidate/work item carries a soft-delete marker.
+ *
+ * `wl delete` sets `deletedBy` (and `deleteReason`) and may leave the
+ * status untouched, so a status-based filter alone can re-select a deleted
+ * item and dispatch it a second time (SA-0MUJBLZC60085DI9). A non-empty
+ * (non-whitespace) `deletedBy` is the authoritative deletion marker and
+ * excludes the item from every dispatch path. Blank/absent values mean the
+ * item is live.
+ */
+export function isSoftDeleted(
+  item: { deletedBy?: string | null } | null | undefined,
+): boolean {
+  if (item === null || item === undefined) return false;
+  const deletedBy = item.deletedBy;
+  return typeof deletedBy === 'string' && deletedBy.trim() !== '';
 }
 export type DowntimeHerdrListResult =
   | { ok: true; items: DowntimeHerdrItem[] }
@@ -1274,6 +1298,11 @@ export interface DowntimeCandidate {
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
   /**
+   * Soft-delete attribution (SA-0MUJBLZC60085DI9): a non-empty `deletedBy`
+   * marks the item as deleted and excludes it from every `select*` filter.
+   */
+  deletedBy?: string;
+  /**
    * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
    * the item must NOT be auto-dispatched by the downtime worker — a human
    * producer must review it first. Absent/false/undefined → dispatchable.
@@ -1299,6 +1328,8 @@ export interface ImplementCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
+  /** Soft-delete attribution (SA-0MUJBLZC60085DI9): non-empty ⇒ excluded from selection. */
+  deletedBy?: string;
   /**
    * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
    * exclude from implement-tier selection (AC1).
@@ -1325,6 +1356,8 @@ export interface AuditCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
   priority?: string;
+  /** Soft-delete attribution (SA-0MUJBLZC60085DI9): non-empty ⇒ excluded from selection. */
+  deletedBy?: string;
   /**
    * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
    * exclude from audit-tier selection (AC1).
@@ -1382,6 +1415,12 @@ export interface DowntimeItemInfo {
   currentFingerprint?: string | null;
   /** wl priority order preserved for deterministic ordering. */
   sortIndex?: number;
+  /**
+   * Soft-delete attribution such as parsed from `wl show --json`
+   * (SA-0MUJBLZC60085DI9): a non-empty `deletedBy` makes the item
+   * non-dispatchable (`classifyItemForDispatch` returns null).
+   */
+  deletedBy?: string;
   /**
    * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
    * exclude from classification (the item is not dispatchable) and the
@@ -2770,6 +2809,7 @@ async function dispatchFromHerdrList(
       updatedAt: item.updatedAt,
       sortIndex: item.sortIndex,
       parentId: item.parentId,
+      deletedBy: item.deletedBy,
       needsProducerReview: item.needsProducerReview,
     };
     const k = classifyItemForDispatch(info, now);
@@ -3470,6 +3510,10 @@ export function classifyItemForDispatch(
   info: DowntimeItemInfo,
   now: number = Date.now(),
 ): DowntimeSkillKind | null {
+  // Exclude soft-deleted items (SA-0MUJBLZC60085DI9 AC3): a non-empty
+  // `deletedBy` is the authoritative deletion marker — the item must never
+  // be dispatched, even if its status/stage would otherwise qualify.
+  if (isSoftDeleted(info)) return null;
   // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
   // Items flagged for producer review must NOT be auto-dispatched at any tier.
   if (info.needsProducerReview === true) return null;
@@ -6757,6 +6801,7 @@ export function parseNextCandidatesOutput(
           ? nested.sortIndex
           : undefined,
       priority: typeof nested.priority === 'string' ? nested.priority : undefined,
+      deletedBy: typeof nested.deletedBy === 'string' ? nested.deletedBy : undefined,
       needsProducerReview:
         nested.needsProducerReview !== undefined ? Boolean(nested.needsProducerReview) : undefined,
     });
@@ -6900,6 +6945,7 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
       parentId: o.parentId == null ? (o.parentId as null | undefined) : String(o.parentId),
+      deletedBy: typeof o.deletedBy === 'string' ? o.deletedBy : undefined,
       needsProducerReview:
         o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
@@ -6983,6 +7029,7 @@ export function selectAuditCandidate(
 ): AuditCandidate | null {
   const recencyCutoff = now - DOWNTIME_AUDIT_RECENCY_WINDOW_MS;
   const filtered = candidates
+    .filter((c) => !isSoftDeleted(c))
     .filter((c) => !isAuditFresh(c.auditedAt, c.updatedAt, c.fingerprint, c.currentFingerprint))
     // Belt-and-suspenders child exclusion (WL-0MUBVH8QG0020H9L AC2): the
     // audit-tier query is root-only, so children are already excluded
@@ -7119,6 +7166,7 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
       effort: typeof o.effort === 'string' ? o.effort : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      deletedBy: typeof o.deletedBy === 'string' ? o.deletedBy : undefined,
       needsProducerReview:
         o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
@@ -7146,6 +7194,7 @@ export function selectImplementCandidate(
   registry?: RoundRobinRegistry,
 ): ImplementCandidate | null {
   const filtered = candidates
+    .filter((c) => !isSoftDeleted(c))
     .filter((c) => c.status === 'open')
     .filter((c) => {
       const risk = riskOrdinal(c.risk);
@@ -7197,6 +7246,7 @@ export function selectNextCandidate(
   registry?: RoundRobinRegistry,
 ): DowntimeCandidate | null {
   const filtered = candidates
+    .filter((c) => !isSoftDeleted(c))
     .filter((c) => c.status === 'open')
     // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
     .filter((c) => c.needsProducerReview !== true)
@@ -7241,6 +7291,8 @@ export interface CriticalCandidate {
   sortIndex?: number;
   /** Worklog priority level (critical) — round-robin grouping key. */
   priority?: string;
+  /** Soft-delete attribution (SA-0MUJBLZC60085DI9): non-empty ⇒ excluded from selection. */
+  deletedBy?: string;
   /**
    * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
    * exclude from critical-tier selection and from dependency-frontier
@@ -7300,6 +7352,7 @@ export function parseCriticalCandidatesOutput(stdout: string): CriticalCandidate
       effort: typeof o.effort === 'string' ? o.effort : undefined,
       sortIndex: typeof o.sortIndex === 'number' && Number.isFinite(o.sortIndex) ? o.sortIndex : undefined,
       priority: typeof o.priority === 'string' ? o.priority : undefined,
+      deletedBy: typeof o.deletedBy === 'string' ? o.deletedBy : undefined,
       needsProducerReview:
         o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
@@ -7328,6 +7381,7 @@ export function selectCriticalCandidate(
   registry?: RoundRobinRegistry,
 ): CriticalCandidate | null {
   const filtered = candidates
+    .filter((c) => !isSoftDeleted(c))
     .filter((c) => c.status === 'open')
     // Dispatchable stages only (idea / intake_complete / plan_complete).
     .filter((c) => criticalSkillKind(c.stage) !== null)
@@ -7476,6 +7530,7 @@ export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
           : undefined,
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : undefined,
     sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
+    deletedBy: typeof raw.deletedBy === 'string' ? raw.deletedBy : undefined,
     needsProducerReview:
       raw.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
   };

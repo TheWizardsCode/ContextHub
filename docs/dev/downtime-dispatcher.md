@@ -1045,6 +1045,22 @@ falls through/deferred; a per-worklog active audit still reports
 `audit-in-flight`; the observability line carries the concurrent-audit count
 and slot state).
 
+### Soft-delete exclusion (SA-0MUJBLZC60085DI9)
+
+Every dispatch path excludes soft-deleted items — those with a non-empty
+`deletedBy` (set by `wl delete`, which may leave the item's `status`
+untouched). `isSoftDeleted()` (trim-aware) is applied in
+`classifyItemForDispatch` (the Herdr-head and coordination paths) and in every
+`select*` helper (audit, implement, plan/intake, critical). The parse helpers
+(`parseNextCandidatesOutput`, `parseImplementCandidatesOutput`,
+`parseCriticalCandidatesOutput`, `parseAuditCandidatesOutput`,
+`parseShowItemOutput`) carry `deletedBy` to those filters, and the fetcher's
+`normalizeItem` preserves it so the live Herdr head carries the field. Before
+this guard a deleted item whose status was not `deleted` could be re-selected
+and worked a second time. The guard is a neutral sequential filter (never a
+strike, never `no-candidate` metadata) and is a single-field check, so it has
+negligible cost.
+
 ### Producer-review gate (WL-0MTIAL65N004T22F)
 
 Every dispatch tier — audit, critical (including its dependency-frontier walk), implement,

@@ -170,6 +170,12 @@ export interface WorkItem {
   group?: number;
   groupLabel?: string;
   needsProducerReview?: boolean;
+  /**
+   * Soft-delete attribution (`wl delete`): a non-empty value marks the item
+   * as deleted and excludes it from the downtime dispatcher
+   * (SA-0MUJBLZC60085DI9).
+   */
+  deletedBy?: string;
   auditResult?: boolean | null;
   auditedAt?: string | null;
   /** Stored content fingerprint from the audit result (WL-0MUBVH5S0008NQ9K). */
@@ -298,6 +304,7 @@ function normalizeItem(raw: any): WorkItem {
     group: raw?.group !== undefined ? Number(raw.group) : undefined,
     groupLabel: raw?.groupLabel ? String(raw.groupLabel) : undefined,
     needsProducerReview: raw?.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
+    deletedBy: raw?.deletedBy ? String(raw.deletedBy) : undefined,
     auditResult: raw?.auditResult !== undefined ? raw.auditResult : null,
     auditedAt: raw?.auditedAt == null ? (raw?.auditedAt as null | undefined) : String(raw.auditedAt),
     fingerprint: raw?.fingerprint == null ? (raw?.fingerprint as null | undefined) : String(raw.fingerprint),
