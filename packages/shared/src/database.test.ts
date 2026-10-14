@@ -252,6 +252,112 @@ describe('updateIfMatches() CAS claim (RCA WL-0MSRBFFLN005W3VT design point 1)',
   });
 });
 
+// ── WL-0MV85WARS000THEC: assignee CAS guard on updateIfMatches ──────
+
+/**
+ * Extension of `updateIfMatches`' expected-match surface with `assignee`
+ * (the `wl update --if-assignee` guard, C2 WL-0MV85WBDB003J35W).
+ *
+ * Test-first: the red cases (mismatch / empty-guard semantics) are pinned
+ * under vitest's `it.fails(...)` (expected-failure) so the committed suite
+ * stays green while the assignee guard is unimplemented; C2 turns them
+ * into normal `it(...)` when the primitive's `expected` type gains
+ * `assignee`. Until then the extra field is passed through a cast so the
+ * shared package's `tsc` build keeps compiling.
+ */
+type AssigneeCasExpected = { status?: string; stage?: string; assignee?: string };
+function assigneeCasExpected(expected: AssigneeCasExpected): { status?: string; stage?: string } {
+  return expected as { status?: string; stage?: string };
+}
+
+describe('updateIfMatches() assignee CAS guard (WL-0MV85WARS000THEC)', () => {
+  function seed(assignee: string, status: string = 'open', stage: string = 'idea'): WorkItem {
+    const item = makeItem({
+      id: 'WI-CAS-ASG',
+      status: status as WorkItem['status'],
+      stage,
+      assignee,
+    });
+    db.import([item]);
+    return item;
+  }
+
+  it('applies the update when expected.assignee matches the stored assignee', () => {
+    const seeded = seed('');
+    const result = db.updateIfMatches(
+      seeded.id,
+      { assignee: 'Map' },
+      assigneeCasExpected({ assignee: '' }),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.item?.assignee).toBe('Map');
+  });
+
+  it.fails('fails stale (no write) when expected.assignee does not match', () => {
+    const seeded = seed('Other');
+    const result = db.updateIfMatches(
+      seeded.id,
+      { assignee: 'Map', priority: 'high' },
+      assigneeCasExpected({ assignee: '' }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('stale');
+    // No partial write: neither the guarded assignee nor a sibling field.
+    expect(db.get(seeded.id)?.assignee).toBe('Other');
+    expect(db.get(seeded.id)?.priority).toBe('medium');
+  });
+
+  it('assignee "" expected value matches an empty stored assignee', () => {
+    const seeded = seed('');
+    const result = db.updateIfMatches(
+      seeded.id,
+      { assignee: 'Map' },
+      assigneeCasExpected({ assignee: '' }),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.item?.assignee).toBe('Map');
+  });
+
+  it.fails('assignee "" expected value fails stale when the stored assignee is non-empty', () => {
+    const seeded = seed('Map');
+    const result = db.updateIfMatches(
+      seeded.id,
+      { assignee: 'Other' },
+      assigneeCasExpected({ assignee: '' }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('stale');
+    expect(db.get(seeded.id)?.assignee).toBe('Map');
+  });
+
+  it('composes with the status/stage guards in one atomic guard (audit-tier claim shape)', () => {
+    const seeded = seed('', 'completed', 'in_review');
+    const result = db.updateIfMatches(
+      seeded.id,
+      { assignee: 'audit-tier' },
+      assigneeCasExpected({ status: 'completed', stage: 'in_review', assignee: '' }),
+    );
+    expect(result.ok).toBe(true);
+    const after = db.get(seeded.id);
+    expect(after?.assignee).toBe('audit-tier');
+    // Status-neutral: the claim never rewrote status/stage.
+    expect(after?.status).toBe('completed');
+    expect(after?.stage).toBe('in_review');
+  });
+
+  it.fails('combined guard fails stale (no write) when only the assignee mismatches', () => {
+    const seeded = seed('Other', 'completed', 'in_review');
+    const result = db.updateIfMatches(
+      seeded.id,
+      { assignee: 'audit-tier' },
+      assigneeCasExpected({ status: 'completed', stage: 'in_review', assignee: '' }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('stale');
+    expect(db.get(seeded.id)?.assignee).toBe('Other');
+  });
+});
+
 describe('upsertItems() no-op guard (WL-0MSORD6HC005QVZX)', () => {
   it('preserves updatedAt when only description differs by a trailing newline', () => {
     const original = makeItem();
