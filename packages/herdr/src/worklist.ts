@@ -4354,6 +4354,60 @@ function logCommandForItem(command: string, itemId?: string): void {
 }
 
 /**
+ * Invoke the resolved-command callback, forwarding the optional routing
+ * flags with the strict "append only when explicitly set" arity rules shared
+ * by every dispatch path:
+ *
+ *  - `openPane` is appended only when explicitly set (`false`); an undefined
+ *    value keeps the 2-arg call byte-compatible so shortcuts without
+ *    `open_pane` open a pane exactly as before (WL-0MSJLD1I70045ZUL).
+ *  - `onRefresh` occupies the 4th slot and is forwarded when present so a
+ *    background (no-pane) dispatch can refresh the list on child exit
+ *    (WL-0MT1KB70U0012X6T).
+ *  - `paneTitle` occupies the 5th slot; only pane-opening routes with a
+ *    selected item carry one (WL-0MSJ4E8UA005KG9Y).
+ *  - `focus` is appended as the 6th arg only when `true`, so callers
+ *    without a focus flag see today's arity (WL-0MT70LC6B009TL3Q).
+ *
+ * Extracted so the placeholder form dialog honours `open_pane` /
+ * `onRefresh` / `focus` exactly like the placeholder-free paths
+ * (WL-0MV6J4HQ0009OJPQ).
+ */
+function invokeOnCommand(
+  onCommand: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => void,
+  command: string,
+  model: string | undefined,
+  openPane: boolean | undefined,
+  onRefresh: (() => Promise<void>) | undefined,
+  paneTitle: string | undefined,
+  focus: boolean | undefined,
+): void {
+  if (openPane === undefined) {
+    if (paneTitle !== undefined) {
+      if (focus === true) onCommand(command, model, undefined, undefined, paneTitle, true);
+      else onCommand(command, model, undefined, undefined, paneTitle);
+    } else {
+      if (focus === true) onCommand(command, model, undefined, undefined, undefined, true);
+      else onCommand(command, model);
+    }
+  } else if (onRefresh) {
+    if (paneTitle !== undefined) {
+      if (focus === true) onCommand(command, model, openPane, onRefresh, paneTitle, true);
+      else onCommand(command, model, openPane, onRefresh, paneTitle);
+    } else {
+      if (focus === true) onCommand(command, model, openPane, onRefresh, undefined, true);
+      else onCommand(command, model, openPane, onRefresh);
+    }
+  } else if (paneTitle !== undefined) {
+    if (focus === true) onCommand(command, model, openPane, undefined, paneTitle, true);
+    else onCommand(command, model, openPane, undefined, paneTitle);
+  } else {
+    if (focus === true) onCommand(command, model, openPane, undefined, undefined, true);
+    else onCommand(command, model, openPane);
+  }
+}
+
+/**
  * Resolve `<id>` placeholders in a command and route it through the
  * output mechanism. Used by {@link dispatchChordCommand} for agent
  * workflow and audit command families.
@@ -4401,46 +4455,11 @@ function resolveAndRouteCommand(
       selected && (isAgentCommand(resolvedCommand) || resolvedCommand.startsWith('!'))
         ? selected.title
         : undefined;
-    // The openPane flag is passed only when explicitly set (false): an
-    // undefined third arg keeps the 2-arg call identical to today's
-    // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL). Focus (WL-0MT70LC6B009TL3Q) follows the same
-    // "append when explicitly true" rule: omitted/false keeps the current
-    // no-focus default. The onRefresh hook is appended only for
-    // background (no-pane) dispatches (openPane === false) so they can
-    // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
-    // pane-opening paths keep their existing arity. The focuses arg slots
-    // after paneTitle so callers that pass a title keep their position;
-    // callers that don't pass a focus flag see no extra arg (backward
-    // compatible). Pane titles are appended only when the command opens a
-    // pane and a title exists.
-    // Focus handling (WL-0MT70LC6B009TL3Q): when focus is true, the new pane
-    // is zoomed. The value is appended as a 6th arg only when true so
-    // omitting/undefined stays backward compatible — callers without a focus
-    // flag see today's arity (no trailing undefined).
-    if (openPane === undefined) {
-      if (paneTitle !== undefined) {
-        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, paneTitle, true);
-        else onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
-      } else {
-        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, undefined, true);
-        else onCommand(resolvedCommand, model);
-      }
-    } else if (onRefresh) {
-      if (paneTitle !== undefined) {
-        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle, true);
-        else onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
-      } else {
-        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, undefined, true);
-        else onCommand(resolvedCommand, model, openPane, onRefresh);
-      }
-    } else if (paneTitle !== undefined) {
-      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, paneTitle, true);
-      else onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
-    } else {
-      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, undefined, true);
-      else onCommand(resolvedCommand, model, openPane);
-    }
+    // Forward openPane/onRefresh/paneTitle/focus with the shared arity rules
+    // (invokeOnCommand) so shortcuts without an explicit open_pane stay
+    // byte-compatible (WL-0MSJLD1I70045ZUL, WL-0MT1KB70U0012X6T,
+    // WL-0MT70LC6B009TL3Q).
+    invokeOnCommand(onCommand, resolvedCommand, model, openPane, onRefresh, paneTitle, focus);
   }
   return true;
 }
@@ -5147,35 +5166,11 @@ export function executeResolvedCommand(
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL). Focus (WL-0MT70LC6B009TL3Q) follows the same
-    // append-when-explicitly-true rule — omitted/false keeps today's arity.
-    // The onRefresh hook is appended only for background (no-pane)
-    // dispatches (openPane === false) so they can trigger a refresh when
-    // the child exits (WL-0MT1KB70U0012X6T); pane-opening paths keep their
-    // existing arity.
-    if (openPane === undefined) {
-      if (paneTitle !== undefined) {
-        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, paneTitle, true);
-        else onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
-      } else {
-        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, undefined, true);
-        else onCommand(resolvedCommand, model);
-      }
-    } else if (onRefresh) {
-      if (paneTitle !== undefined) {
-        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle, true);
-        else onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
-      } else {
-        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, undefined, true);
-        else onCommand(resolvedCommand, model, openPane, onRefresh);
-      }
-    } else if (paneTitle !== undefined) {
-      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, paneTitle, true);
-      else onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
-    } else {
-      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, undefined, true);
-      else onCommand(resolvedCommand, model, openPane);
-    }
+    // (WL-0MSJLD1I70045ZUL). `focus`/`onRefresh`/`paneTitle` follow the rules
+    // documented on invokeOnCommand. Centralised so the placeholder form
+    // dialog (WL-0MV6J4HQ0009OJPQ) and the placeholder-free paths can never
+    // drift apart.
+    invokeOnCommand(onCommand, resolvedCommand, model, openPane, onRefresh, paneTitle, focus);
   }
   return 'callback';
 }
@@ -6307,7 +6302,15 @@ export async function runWorklistTui(
                   return;
                 }
                 if (opts.onCommand) {
-                  opts.onCommand(finalCmd, model ?? undefined);
+                  // Forward openPane/onRefresh/focus with the same arity rules
+                  // as the placeholder-free paths (invokeOnCommand): a form-
+                  // triggered shortcut carrying `open_pane: false` must run in
+                  // the background exactly like a placeholder-free one
+                  // (WL-0MV6J4HQ0009OJPQ). paneTitle is intentionally not
+                  // computed here — the form path has never supplied one, so
+                  // pane-opening form dispatches stay byte-compatible with
+                  // today's 2-arg call.
+                  invokeOnCommand(opts.onCommand, finalCmd, model ?? undefined, openPane, opts.onRefresh, undefined, focus);
                 }
               },
               // onCancel
