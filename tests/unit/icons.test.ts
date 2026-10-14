@@ -56,7 +56,7 @@ describe('priorityIcon', () => {
   });
 
   it('returns emoji for medium priority', () => {
-    expect(priorityIcon('medium')).toBe('\u{1F4CB}'); // 📋
+    expect(priorityIcon('medium')).toBe('\u{1F7E8}'); // 🟨
   });
 
   it('returns emoji for low priority', () => {
@@ -76,7 +76,7 @@ describe('priorityIcon', () => {
   it('is case-insensitive', () => {
     expect(priorityIcon('CRITICAL')).toBe('\u{1F6A8}');
     expect(priorityIcon('High')).toBe('\u{2B50}');
-    expect(priorityIcon('MEDIUM')).toBe('\u{1F4CB}');
+    expect(priorityIcon('MEDIUM')).toBe('\u{1F7E8}');
   });
 
   describe('with noIcons option', () => {

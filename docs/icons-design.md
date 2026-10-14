@@ -36,13 +36,13 @@ across the CLI (chalk) and TUI rendering paths. It covers:
 |-----------|--------|---------------|-------------------------|---------------------|
 | critical  | `🚨`   | `[CRIT]`      | "Critical priority"     | Rotating light - urgent/danger |
 | high      | `⭐`   | `[HIGH]`      | "High priority"         | Star - important     |
-| medium    | `📋`   | `[MED]`       | "Medium priority"       | Clipboard - standard task |
+| medium    | `🟨`   | `[MED]`       | "Medium priority"       | Yellow square - standard task |
 | low       | `🐢`   | `[LOW]`       | "Low priority"          | Turtle - slow/low priority |
 
 **Colour association:** The emoji colours are enhanced with chalk color tags to match the existing colour scheme in the theme (`theme.priority` colours) so scanning by colour remains consistent.
 - critical: red (🚨)
 - high: orange (⭐)
-- medium: yellow (📋)
+- medium: yellow (🟨)
 - low: white (🐢)
 
 > The underlying title/id text colour scheme is priority-based: critical → red, high → orange, medium → yellow, low → white (revised 2026-09-08, WL-0MSJ2JFMO007PGQ6). See [COLOUR-MAPPING.md](COLOUR-MAPPING.md).
@@ -356,7 +356,7 @@ column aligns across rows, and the columns are (left to right):
 
 | Column | Content | Notes |
 |--------|---------|-------|
-| 0 | Priority icon | `🚨` critical, `⭐` high, `📋` medium, `🐢` low (added WL-0MTQYTA20009YXBT) |
+| 0 | Priority icon | `🚨` critical, `⭐` high, `🟨` medium, `🐢` low (added WL-0MTQYTA20009YXBT) |
 | 1 | Agent status | Fixed-width reserved slot (`AGENT_SLOT_WIDTH`) |
 | 2 | Status icon | `statusIcon` |
 | 3 | Stage / audit icon | `stageDisplayIcon` (audit-aware for `in_review`) |
@@ -472,5 +472,5 @@ Description: A test item for audit formatting
 **TUI list:**
 ```
 ▸ 🚨 ⭐ Set up CI pipeline (TEST-1)
-  ├── 📋 🔄 Write tests (TEST-2)
+  ├── 🟨 🔄 Write tests (TEST-2)
 ```

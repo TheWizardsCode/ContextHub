@@ -51,7 +51,7 @@ export interface IconOptions {
 const PRIORITY_ICON: Record<string, string> = {
   critical: '\u{1F6A8}',   // 🚨 Rotating light - urgent/danger
   high:     '\u{2B50}',    // ⭐ Star - important
-  medium:   '\u{1F4CB}',   // 📋 Clipboard - standard task
+  medium:   '\u{1F7E8}',   // 🟨 Yellow square - standard task
   low:      '\u{1F422}',   // 🐢 Turtle - slow/low priority
 };
 

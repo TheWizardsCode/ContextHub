@@ -326,7 +326,7 @@ describe('getIconPrefix', () => {
     const expected: Record<string, string> = {
       critical: '\u{1F6A8}', // 🚨
       high: '\u{2B50}',      // ⭐
-      medium: '\u{1F4CB}',   // 📋
+      medium: '\u{1F7E8}',   // 🟨
       low: '\u{1F422}',      // 🐢
     };
     for (const [priority, glyph] of Object.entries(expected)) {
@@ -351,7 +351,7 @@ describe('getIconPrefix', () => {
 
     // No stray priority glyph or fallback text appears, and both cases align
     // identically (the fixed-width padding absorbs the empty cell).
-    expect(undefinedPrefix).not.toMatch(/\u{1F6A8}|\u{2B50}|\u{1F4CB}|\u{1F422}/u);
+    expect(undefinedPrefix).not.toMatch(/\u{1F6A8}|\u{2B50}|\u{1F7E8}|\u{1F422}/u);
     expect(nullPrefix).toBe(undefinedPrefix);
   });
 
@@ -389,8 +389,8 @@ describe('getIconPrefix', () => {
     const withIcons = getIconPrefix(item, { noIcons: false });
     const withoutIcons = getIconPrefix(item, { noIcons: true });
 
-    expect(withIcons).toContain('\u{1F4CB}');
-    expect(withoutIcons).not.toContain('\u{1F4CB}');
+    expect(withIcons).toContain('\u{1F7E8}');
+    expect(withoutIcons).not.toContain('\u{1F7E8}');
     // The priority fallback is prepended (before the agent fallback).
     expect(withoutIcons).toContain('[MED ]');
     expect(withoutIcons.indexOf('[MED ]')).toBeLessThan(withoutIcons.indexOf('[IDLE]'));

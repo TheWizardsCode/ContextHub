@@ -75,7 +75,7 @@ const STAGE_FALLBACK: Record<string, string> = {
 const PRIORITY_ICONS: Record<string, string> = {
   critical: '\u{1F6A8}',  // 🚨
   high:     '\u{2B50}',   // ⭐
-  medium:   '\u{1F4CB}',  // 📋
+  medium:   '\u{1F7E8}',  // 🟨
   low:      '\u{1F422}',  // 🐢
 };
 
