@@ -5,9 +5,12 @@
  * Contract under test:
  *  - Tooltip state machine (show / Esc-dismiss / re-show on re-entry):
  *    `state.hoveredRowIndex` + `state.tooltipDismissed`.
- *  - Motion-to-row mapping: motion events (button & 32) map to
- *    `hover-row` (over an item row) or `hover-none` (over chrome/blank
- *    rows) in list mode, and never navigate (AC5/AC6).
+ *  - Motion-to-row mapping: BUTTON-LESS motion events (button 3 | 32 = 35)
+ *    map to `hover-row` (over an item row) or `hover-none` (over
+ *    chrome/blank rows) in list mode, and never navigate (AC5/AC6).
+ *    Left-button-held motion (button 32) is a drag candidate owned by
+ *    handleMouseInput — it never drives the tooltip (WL-0MSI72S0Y0060BRK
+ *    hover/drag split, Q5c).
  *  - Metadata formatting: `formatTooltipLines` renders all 8 fields
  *    (ID, Title, Command, Priority, Type, Risk, Effort, Start Time).
  *  - Backward-compatible `agent-panes.json` parsing: entries lacking the
@@ -77,7 +80,7 @@ describe('tooltip state machine (WL-0MT9XRZDK006GMUH AC2/AC7)', () => {
     const state = makeListState(30);
     const click: MouseClickState = { lastClick: null, now: 0 };
     // Motion over row 5 → display-row index 3.
-    expect(handleMouseInput(state, '\x1b[<32;5;5M', TERM_80x24, click)).toBe(true);
+    expect(handleMouseInput(state, '\x1b[<35;5;5M', TERM_80x24, click)).toBe(true);
     expect(state.hoveredRowIndex).toBe(3);
     expect(state.tooltipDismissed).toBe(false);
   });
@@ -85,7 +88,7 @@ describe('tooltip state machine (WL-0MT9XRZDK006GMUH AC2/AC7)', () => {
   it('esc dismisses the tooltip: clears hover and sets dismissed', () => {
     const state = makeListState(30);
     const click: MouseClickState = { lastClick: null, now: 0 };
-    handleMouseInput(state, '\x1b[<32;5;5M', TERM_80x24, click);
+    handleMouseInput(state, '\x1b[<35;5;5M', TERM_80x24, click);
     expect(state.hoveredRowIndex).toBe(3);
 
     const action = handleKeypress(state, '\x1b', TERM_80x24);
@@ -97,12 +100,12 @@ describe('tooltip state machine (WL-0MT9XRZDK006GMUH AC2/AC7)', () => {
   it('while dismissed, motion over a row does NOT re-show the tooltip (stays dismissed)', () => {
     const state = makeListState(30);
     const click: MouseClickState = { lastClick: null, now: 0 };
-    handleMouseInput(state, '\x1b[<32;5;5M', TERM_80x24, click);
+    handleMouseInput(state, '\x1b[<35;5;5M', TERM_80x24, click);
     handleKeypress(state, '\x1b', TERM_80x24);
     expect(state.tooltipDismissed).toBe(true);
 
     // Motion over a DIFFERENT row while the pointer is still in the rows area.
-    handleMouseInput(state, '\x1b[<32;5;8M', TERM_80x24, click);
+    handleMouseInput(state, '\x1b[<35;5;8M', TERM_80x24, click);
     expect(state.hoveredRowIndex).toBe(6);
     expect(state.tooltipDismissed).toBe(true); // still dismissed — no re-show
   });
@@ -110,17 +113,17 @@ describe('tooltip state machine (WL-0MT9XRZDK006GMUH AC2/AC7)', () => {
   it('motion over chrome rows (hover-none) clears dismissal — re-entry re-shows', () => {
     const state = makeListState(30);
     const click: MouseClickState = { lastClick: null, now: 0 };
-    handleMouseInput(state, '\x1b[<32;5;5M', TERM_80x24, click);
+    handleMouseInput(state, '\x1b[<35;5;5M', TERM_80x24, click);
     handleKeypress(state, '\x1b', TERM_80x24);
     expect(state.tooltipDismissed).toBe(true);
 
     // Pointer leaves the rows area (header row 1) → hover-none clears.
-    handleMouseInput(state, '\x1b[<32;5;1M', TERM_80x24, click);
+    handleMouseInput(state, '\x1b[<35;5;1M', TERM_80x24, click);
     expect(state.hoveredRowIndex).toBeNull();
     expect(state.tooltipDismissed).toBe(false);
 
     // Re-entry over a row re-shows the tooltip candidate.
-    handleMouseInput(state, '\x1b[<32;5;5M', TERM_80x24, click);
+    handleMouseInput(state, '\x1b[<35;5;5M', TERM_80x24, click);
     expect(state.hoveredRowIndex).toBe(3);
     expect(state.tooltipDismissed).toBe(false);
   });
@@ -134,7 +137,7 @@ describe('tooltip state machine (WL-0MT9XRZDK006GMUH AC2/AC7)', () => {
   it('motion events never select or navigate (AC5/AC6)', () => {
     const state = makeListState(30);
     const click: MouseClickState = { lastClick: null, now: 0 };
-    handleMouseInput(state, '\x1b[<32;5;5M', TERM_80x24, click);
+    handleMouseInput(state, '\x1b[<35;5;5M', TERM_80x24, click);
     expect(state.selectedIndex).toBe(0); // unchanged
     expect(state.mode).toBe('list'); // unchanged
   });
@@ -142,8 +145,8 @@ describe('tooltip state machine (WL-0MT9XRZDK006GMUH AC2/AC7)', () => {
   it('releases do not disturb tooltip state', () => {
     const state = makeListState(30);
     const click: MouseClickState = { lastClick: null, now: 0 };
-    handleMouseInput(state, '\x1b[<32;5;5M', TERM_80x24, click); // motion press
-    handleMouseInput(state, '\x1b[<32;5;5m', TERM_80x24, click); // motion release
+    handleMouseInput(state, '\x1b[<35;5;5M', TERM_80x24, click); // motion press
+    handleMouseInput(state, '\x1b[<35;5;5m', TERM_80x24, click); // motion release
     expect(state.hoveredRowIndex).toBe(3);
   });
 });
@@ -154,23 +157,23 @@ describe('mapMouseToAction — motion-to-row mapping (AC4/AC7)', () => {
   it('maps motion over a visible item row to the display-row index', () => {
     const state = makeListState(30);
     // Row 2 → index 0; row 5 → index 3; row 14 → index 12 (fixture rows 2..14).
-    expect(mapMouseToAction(state, motion(0, 5, 2), TERM_80x24)).toEqual({ type: 'hover-row', index: 0 });
-    expect(mapMouseToAction(state, motion(0, 5, 5), TERM_80x24)).toEqual({ type: 'hover-row', index: 3 });
-    expect(mapMouseToAction(state, motion(0, 5, 14), TERM_80x24)).toEqual({ type: 'hover-row', index: 12 });
+    expect(mapMouseToAction(state, motion(3, 5, 2), TERM_80x24)).toEqual({ type: 'hover-row', index: 0 });
+    expect(mapMouseToAction(state, motion(3, 5, 5), TERM_80x24)).toEqual({ type: 'hover-row', index: 3 });
+    expect(mapMouseToAction(state, motion(3, 5, 14), TERM_80x24)).toEqual({ type: 'hover-row', index: 12 });
   });
 
   it('maps motion over chrome/blank rows to hover-none', () => {
     const state = makeListState(30);
-    expect(mapMouseToAction(state, motion(0, 5, 1), TERM_80x24)).toEqual({ type: 'hover-none' }); // header
-    expect(mapMouseToAction(state, motion(0, 5, 20), TERM_80x24)).toEqual({ type: 'hover-none' }); // footer
-    expect(mapMouseToAction(state, motion(0, 5, 21), TERM_80x24)).toEqual({ type: 'hover-none' }); // metadata panel
+    expect(mapMouseToAction(state, motion(3, 5, 1), TERM_80x24)).toEqual({ type: 'hover-none' }); // header
+    expect(mapMouseToAction(state, motion(3, 5, 20), TERM_80x24)).toEqual({ type: 'hover-none' }); // footer
+    expect(mapMouseToAction(state, motion(3, 5, 21), TERM_80x24)).toEqual({ type: 'hover-none' }); // metadata panel
   });
 
   it('accounts for the top fold indicator when scrolled', () => {
     const state = makeListState(30);
     state.scrollOffset = 20;
-    expect(mapMouseToAction(state, motion(0, 5, 2), TERM_80x24)).toEqual({ type: 'hover-none' }); // '▲ more'
-    expect(mapMouseToAction(state, motion(0, 5, 3), TERM_80x24)).toEqual({ type: 'hover-row', index: 20 });
+    expect(mapMouseToAction(state, motion(3, 5, 2), TERM_80x24)).toEqual({ type: 'hover-none' }); // '▲ more'
+    expect(mapMouseToAction(state, motion(3, 5, 3), TERM_80x24)).toEqual({ type: 'hover-row', index: 20 });
   });
 });
 

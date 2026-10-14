@@ -985,6 +985,18 @@ export class WorkItemListState {
     this.detailScrollOffset = Math.min(maxScroll, this.detailScrollOffset + amount);
   }
 
+  // ── Selection-preserving list scroll (drag-to-scroll) ───────────
+  /**
+   * Scroll the list by a given number of rows **without** changing the
+   * selected index.  Clamps `scrollOffset` to `[0, maxOffset]` using the
+   * same `_listHeight()` / `flatCount` maths as `_adjustScroll`.  (WL-0MSI72S0Y0060BRK)
+   */
+  scrollBy(rows: number): void {
+    const listHeight = this._listHeight();
+    const maxOffset = Math.max(0, this.flatCount - listHeight);
+    this.scrollOffset = Math.max(0, Math.min(maxOffset, this.scrollOffset + rows));
+  }
+
   // ── Metadata panel scroll ───────────────────────────────────────
 
   /**
@@ -3149,6 +3161,49 @@ export interface ParsedMouseEvent {
  * inclusive (<=). */
 export const DOUBLE_CLICK_WINDOW_MS = 400;
 
+/** Minimum pointer displacement (in terminal cells / rows) before a
+ * held-button motion event is treated as a drag-to-scroll gesture rather
+ * than click jitter.  SGR coordinates are 1-based cell positions so a
+ * threshold of 1 row distinguishes deliberate scrolling from incidental
+ * movement.  (WL-0MSI72S0Y0060BRK) */
+export const DRAG_THRESHOLD_CELLS = 1;
+
+/** State tracker for an active drag-to-scroll gesture.  Tracks the press
+ * origin, a fractional accumulator for proportional scrolling, and the
+ * pre-press selection/scroll so the drag can restore them when it
+ * activates — ensuring a drag never leaves the selection moved by the
+ * initial press.  (WL-0MSI72S0Y0060BRK) */
+export interface MouseDragState {
+  /** Origin of the press (x, y) or null when no drag is active. */
+  origin: { x: number; y: number } | null;
+  /** Fractional row/line accumulator — integer parts are dispatched as
+   * discrete scroll deltas. */
+  accumulator: number;
+  /** True when the drag has crossed the threshold and is actively
+   * scrolling. */
+  active: boolean;
+  /** Snapshot of selectedIndex and scrollOffset taken at press time, used
+   * to restore state when the drag activates so the drag never leaves the
+   * selection moved by the initial press. */
+  prePressSelection: { selectedIndex: number; scrollOffset: number } | null;
+  /** True once the pre-press selection has been restored for this drag
+   * gesture — the restore happens exactly once, on the first threshold-
+   * crossing motion; subsequent drag events accumulate scroll on top of
+   * the restored state. */
+  restored: boolean;
+}
+
+/** Create a fresh drag state (helper for tests). */
+export function createDragState(): MouseDragState {
+  return {
+    origin: null,
+    accumulator: 0,
+    active: false,
+    prePressSelection: null,
+    restored: false,
+  };
+}
+
 /** Prior left-press coordinates plus an injectable clock for deterministic
  * double-click tests. */
 export interface MouseClickState {
@@ -3158,7 +3213,18 @@ export interface MouseClickState {
   now: number;
 }
 
-/** Dispatchable mouse action — mirrors the list/detail/filter key paths. */
+/** Internal drag bookkeeping action — emitted on the first press and
+ * never dispatched to the state switch (it triggers state capture only).
+ * (WL-0MSI72S0Y0060BRK) */
+type DragAction =
+  | { type: 'drag-start' }
+  | { type: 'drag-list'; rows: number }
+  | { type: 'drag-detail'; lines: number };
+
+/** Dispatchable mouse action — mirrors the list/detail/filter key paths.
+ * Drag actions are emitted by `mapMouseDrag` and dispatched by
+ * `handleMouseInput`; the drag consumer never emits `select-row` /
+ * `open-detail`, so a drag-release can never click.  (WL-0MSI72S0Y0060BRK) */
 export type MouseAction =
   | { type: 'select-row'; index: number } // list: click/tap an item row
   | { type: 'open-detail' } // list: double-click (Enter-equivalent)
@@ -3170,6 +3236,7 @@ export type MouseAction =
   | { type: 'filter-stage'; index: number } // filter: tap a stage option
   | { type: 'hover-row'; index: number } // list: motion over an item row (tooltip)
   | { type: 'hover-none' } // list: motion over chrome rows (pointer left the rows)
+  | DragAction // internal drag actions (drag-start, drag-list, drag-detail)
   | null; // inert: chrome rows, motion, releases, unknown buttons
 
 /**
@@ -3322,10 +3389,13 @@ function filterStageIndexForColumn(x: number): number | null {
 
 /**
  * Map a parsed SGR mouse event to a dispatchable action for the current
- * state. Gate rules (WL-0MSGHM5BQ0096BNJ AC2–AC6): release events and
- * motion (button & 32) are inert; wheel 64/65 navigate (list) or scroll the
- * detail (detail) and are ignored in filter mode; only the left button
- * selects; two left presses on the same row within
+ * state. Gate rules (WL-0MSGHM5BQ0096BNJ AC2–AC6, WL-0MSI72S0Y0060BRK):
+ * release events are inert; button-less motion (button & 32 and & 3 = 3)
+ * drives the hover tooltip in list mode (left-button-held motion is a drag
+ * candidate handled by {@link handleMouseInput} via {@link mapMouseDrag} —
+ * it never returns a navigation/select action); wheel 64/65 navigate (list)
+ * or scroll the detail (detail) and are ignored in filter mode; only the
+ * left button selects; two left presses on the same row within
  * {@link DOUBLE_CLICK_WINDOW_MS} open the detail view (list mode) or go
  * back (detail mode); filter-mode taps on the stage-options row select a
  * stage.
@@ -3338,15 +3408,13 @@ export function mapMouseToAction(
 ): MouseAction {
   // Release events are consumed but inert — presses drive selection (AC6).
   if (ev.release) return null;
-  // Motion events (button & 32): never navigate, but trigger hover tooltip
-  // in list mode (WL-0MT9XRZDK006GMUH). They remain inert in detail/filter.
-  if ((ev.button & 32) !== 0) {
+  // Motion events (button & 32): button-less motion triggers the hover
+  // tooltip in list mode; left-button-held motion is handled separately
+  // in handleMouseInput via mapMouseDrag (AC4).
+  if ((ev.button & 32) !== 0 && (ev.button & 3) === 3) {
+    // Button-less motion → hover tooltip (WL-0MT9XRZDK006GMUH).
     if (state.mode === 'list') {
       const index = mapListRowToIndex(state, ev.y, termSize);
-      // Motion over a visible list row → hover-row (tooltip candidate).
-      // Motion over chrome/blank rows (header, fold indicators, footer,
-      // panel) → hover-none: the pointer has left the rows area, allowing
-      // a dismissed tooltip to re-show on the next re-entry (AC2).
       return index !== null ? { type: 'hover-row', index } : { type: 'hover-none' };
     }
     return null; // detail/filter: motion is inert
@@ -3393,13 +3461,114 @@ export function mapMouseToAction(
   return index !== null ? { type: 'select-row', index } : null;
 }
 
+/** Pure function that maps a drag candidate SGR mouse event to a drag
+ * action, driven by the supplied `dragState` tracker.
+ *
+ * Behaviour (WL-0MSI72S0Y0060BRK):
+ *
+ *   - Left-button press: record origin + pre-press selection → `drag-start`
+ *   - Left-button motion past `DRAG_THRESHOLD_CELLS`: return `drag-list`
+ *     (list mode, whole-row deltas) or `drag-detail` (detail mode, lines)
+ *   - Sub-threshold motion / release / filter mode / detail single-click: null
+ *
+ * Drag actions never emit `select-row` / `open-detail`; releases are inert.
+ */
+export function mapMouseDrag(
+  state: WorkItemListState,
+  ev: ParsedMouseEvent,
+  dragState: MouseDragState,
+  termSize: TermSize,
+): MouseAction {
+  // Filter mode and detail single-clicks: drag is out of scope (constraints).
+  if (state.mode === 'filter') return null;
+
+  // ── Left-button press: capture state and emit drag-start ─────────
+  if (!ev.release && ev.button === 0) {
+    dragState.origin = { x: ev.x, y: ev.y };
+    dragState.accumulator = 0;
+    dragState.active = false;
+    dragState.restored = false;
+    dragState.prePressSelection = {
+      selectedIndex: state.selectedIndex,
+      scrollOffset: state.scrollOffset,
+    };
+    return { type: 'drag-start' };
+  }
+
+  // ── Release: end the drag; return null (inert) ──────────────────
+  if (ev.release) {
+    dragState.origin = null;
+    dragState.accumulator = 0;
+    dragState.active = false;
+    dragState.restored = false;
+    dragState.prePressSelection = null;
+    return null;
+  }
+
+  // ── Motion (left button held): compute deltas ───────────────────
+  // Only process motion for the left button (button bits 0, with motion bit 32).
+  // Other button+motion combos (e.g. middle+motion) are inert — fall through.
+  if ((ev.button & 3) !== 0 || (ev.button & 32) === 0) {
+    return null;
+  }
+
+  if (!dragState.origin) return null;
+
+  const deltaY = ev.y - dragState.origin.y;
+
+  if (state.mode === 'list') {
+    // List mode: scroll proportional to vertical movement, snapped to whole
+    // rows. A fractional accumulator converts continuous movement into
+    // discrete row steps.
+    dragState.accumulator += deltaY;
+    let rows = 0;
+    while (dragState.accumulator >= DRAG_THRESHOLD_CELLS) {
+      dragState.accumulator -= DRAG_THRESHOLD_CELLS;
+      rows++;
+    }
+    while (dragState.accumulator <= -DRAG_THRESHOLD_CELLS) {
+      dragState.accumulator += DRAG_THRESHOLD_CELLS;
+      rows--;
+    }
+    // Reset accumulator for next delta
+    if (rows !== 0) {
+      dragState.origin = { x: ev.x, y: ev.y };
+      dragState.active = true;
+    }
+    return rows !== 0 ? { type: 'drag-list', rows } : null;
+  }
+
+  if (state.mode === 'detail') {
+    // Detail mode: scroll proportional to vertical movement, 1 row ≈ 1 line.
+    dragState.accumulator += deltaY;
+    let lines = 0;
+    while (dragState.accumulator >= DRAG_THRESHOLD_CELLS) {
+      dragState.accumulator -= DRAG_THRESHOLD_CELLS;
+      lines++;
+    }
+    while (dragState.accumulator <= -DRAG_THRESHOLD_CELLS) {
+      dragState.accumulator += DRAG_THRESHOLD_CELLS;
+      lines--;
+    }
+    if (lines !== 0) {
+      dragState.origin = { x: ev.x, y: ev.y };
+      dragState.active = true;
+    }
+    return lines !== 0 ? { type: 'drag-detail', lines } : null;
+  }
+
+  // Other modes (e.g. filter): drag is out of scope.
+  return null;
+}
+
 /**
  * Wire a raw stdin chunk into the mouse path — the onData entry point
- * (WL-0MSGHM5BQ0096BNJ AC2–AC6, fix WL-0MSZBWT500034E74). Parses SGR mouse
- * events via {@link consumeMouseChunk}, maps them to an action via
- * {@link mapMouseToAction}, dispatches it against `state` (mirroring the
- * handleKeypress action handling), and tracks the double-click window in
- * `clickState`.
+ * (WL-0MSGHM5BQ0096BNJ AC2–AC6, fix WL-0MSZBWT500034E74, WL-0MSI72S0Y0060BRK).
+ * Parses SGR mouse events via {@link consumeMouseChunk}, maps them to an
+ * action via {@link mapMouseToAction}, dispatches it against `state`
+ * (mirroring the handleKeypress action handling), tracks the double-click
+ * window in `clickState`, and drives drag-to-scroll via {@link mapMouseDrag}
+ * with the accumulated `dragState`.
  *
  * Returns true when the chunk was mouse-shaped (fully consumed — it must
  * NOT reach the keyboard path); false for plain keys and foreign escape
@@ -3419,6 +3588,7 @@ export function handleMouseInput(
   key: string,
   termSize: TermSize,
   clickState: MouseClickState,
+  dragState?: MouseDragState,
 ): boolean {
   const bufferBefore = mouseChunkBuffer;
   const mouseEvent = consumeMouseChunk(key);
@@ -3433,19 +3603,69 @@ export function handleMouseInput(
     return mouseChunkBuffer !== bufferBefore;
   }
 
+  // Drag-state tracker — callers that only exercise click/wheel behaviour
+  // may omit it; drag tracking then uses a fresh per-event tracker (no
+  // cross-event state, so no drag can activate).
+  const ds: MouseDragState = dragState ?? createDragState();
+
   // Current clock for the double-click window (Date.now; deterministic
   // tests inject clickState directly into mapMouseToAction instead).
   const now = Date.now();
   clickState.now = now;
   const action = mapMouseToAction(state, mouseEvent, termSize, clickState);
 
-  // Advance the tracker AFTER the double-click check — the next event's
-  // window compares against THIS press (fix WL-0MSZBWT500034E74).
+  // Advance the double-click tracker AFTER the double-click check — the next
+  // event's window compares against THIS press (fix WL-0MSZBWT500034E74).
   if (!mouseEvent.release && mouseEvent.button === 0) {
     clickState.lastClick = { x: mouseEvent.x, y: mouseEvent.y, at: now };
   }
 
-  if (action === null) return true; // consumed but inert (motion, release, chrome)
+  // Update the drag-state tracker on every mouse event (press / motion /
+  // release).  mapMouseDrag captures the pre-press selection and returns
+  // the appropriate drag action (drag-start / drag-list / drag-detail) or
+  // null for inert events.
+  const dragAction = mapMouseDrag(state, mouseEvent, ds, termSize);
+
+  if (action === null && dragAction === null) return true; // consumed but inert
+
+  // Dispatch drag actions — they override regular mouse actions when the
+  // drag mapper returns something (left-held motion in list/detail mode).
+  if (dragAction !== null) {
+    switch (dragAction.type) {
+      case 'drag-start':
+        // Bookkeeping only — mapMouseDrag already captured the pre-press
+        // selection.  Fall through to the regular dispatch so the press
+        // still selects (click behaviour preserved); a later threshold-
+        // crossing motion restores the pre-press selection.
+        break;
+      case 'drag-list':
+        // Restore the pre-press selection/scroll exactly once, on the first
+        // threshold-crossing motion — a drag never leaves the selection
+        // moved by the initial press (AC3).  Subsequent drag events
+        // accumulate scroll on top of the restored state.
+        if (!ds.restored && ds.prePressSelection) {
+          state.selectedIndex = ds.prePressSelection.selectedIndex;
+          state.scrollOffset = ds.prePressSelection.scrollOffset;
+          ds.restored = true;
+        }
+        state.scrollBy(dragAction.rows);
+        return true;
+      case 'drag-detail':
+        if (!ds.restored && ds.prePressSelection) {
+          state.selectedIndex = ds.prePressSelection.selectedIndex;
+          state.scrollOffset = ds.prePressSelection.scrollOffset;
+          ds.restored = true;
+        }
+        if (state.detailItem) {
+          dragAction.lines > 0
+            ? state.detailScrollDown(dragAction.lines)
+            : state.detailScrollUp(-dragAction.lines);
+        }
+        return true;
+    }
+  }
+
+  if (action === null) return true; // consumed but inert
 
   // Dispatch mouse actions (mirrors the handleKeypress action handling).
   switch (action.type) {
@@ -5592,15 +5812,21 @@ export async function runWorklistTui(
   // double-clicks within {@link DOUBLE_CLICK_WINDOW_MS}. (WL-0MSGHM5BQ0096BNJ AC3)
   let clickState: MouseClickState = { lastClick: null, now: 0 };
 
+  // Drag-to-scroll state tracker (WL-0MSI72S0Y0060BRK): persists across
+  // onData calls so the drag mapper can accumulate fractional movement
+  // and restore the pre-press selection when the drag activates.
+  let dragState: MouseDragState = createDragState();
+
   // ── Mouse event dispatch (WL-0MSGHM5BQ0096BNJ AC2–AC6) ─────────
   // handleMouseInput parses SGR mouse events from the raw chunk BEFORE the
   // keypress path and dispatches them (click select, double-click open,
-  // wheel/scroll, filter tap). Mouse-shaped sequences are fully consumed;
-  // plain keys and foreign escapes fall through to the keyboard handler
-  // untouched (AC6). See the fix note in handleMouseInput for the
-  // single-click-select vs double-click-open ordering (WL-0MSZBWT500034E74).
+  // wheel/scroll, filter tap, drag-to-scroll). Mouse-shaped sequences are
+  // fully consumed; plain keys and foreign escapes fall through to the
+  // keyboard handler untouched (AC6). See the fix note in handleMouseInput
+  // for the single-click-select vs double-click-open ordering
+  // (WL-0MSZBWT500034E74).
   const dispatchMouse = (key: string): boolean =>
-    handleMouseInput(state, key, termSize, clickState);
+    handleMouseInput(state, key, termSize, clickState, dragState);
 
   const handleKeyInput = async (key: string): Promise<void> => {
 

@@ -71,8 +71,20 @@ Two pollers were fixed:
   chunk. Non-mouse chunks clear the buffer.
 - Mouse actions dispatched: left-click selects a row, double-click (same row,
   ≤400 ms) opens detail; wheel/touch-scroll navigates list or scrolls detail
-  (j/k-equivalent); filter-prompt taps apply a stage filter. Drag-motion and
-  release events are inert. Middle/right buttons are ignored.
+  (j/k-equivalent); filter-prompt taps apply a stage filter. Middle/right
+  buttons are ignored; release events are inert.
+- **Drag-to-scroll (WL-0MSI72S0Y0060BRK):** motion events are split by the
+  SGR button field. Button-less motion (`(button & 3) === 3`) drives the
+  hover tooltip (hover-row/hover-none); left-button-held motion
+  (`(button & 32) !== 0`, `(button & 3) === 0` — e.g. touch drag / click-drag)
+  drives drag-to-scroll via the pure `mapMouseDrag` mapper plus an
+  accumulated `MouseDragState`. Movement past `DRAG_THRESHOLD_CELLS` (1 row)
+  activates the drag: the list scrolls by whole rows (`scrollBy`, clamped to
+  `[0, maxOffset]`) and the detail view by whole lines (reusing the existing
+  detail clamp); the pre-press selection is restored on activation so a drag
+  never selects, and a drag-release never clicks. Drag is inert in filter
+  mode and the metadata panel. Drag-motion is therefore **no longer inert** —
+  this supersedes the earlier "motion events are inert" note above.
 - **Fail-soft:** terminals that do not support SGR mouse reporting (1006)
   never send mouse events — the worklist remains fully keyboard-usable.
 - Mouse input is ignored during modal states (code-freeze notice, form input,
