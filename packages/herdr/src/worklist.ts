@@ -2868,6 +2868,14 @@ export function keyToAction(key: string): KeyAction {
       return 'toggle-expand';
     case '\x1b':
       return 'back';
+    // Ctrl+r (\x12) — immediate manual refresh of the selection list
+    // (WL-0MV85T0LT008UT9H). The legacy bare-`r` refresh stays removed:
+    // `r` is the Producer Review / Interview chord leader (WL-0MS4LDWHW0062FTA)
+    // and is resolved via the ShortcutRegistry, not here. \x12 is not a chord
+    // leader and not a single-key shortcut, so the existing
+    // `action === 'refresh'` branch fires `doRefresh(true)`.
+    case '\x12':
+      return 'refresh';
     // '/' filter prompt removed — use f-* chords instead
     // 'r' is a single-key Producer Review shortcut — resolved via ShortcutRegistry
     // 'S' is the Ship It shortcut — resolved via ShortcutRegistry (opens the
@@ -3847,6 +3855,11 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   totalCount?: number,
   chordState?: ChordState | null,
   detailScrollOffset?: number,
+  /**
+   * Retained for positional call-site compatibility only — the
+   * `[auto-refresh on]` header indicator it drove was removed in
+   * WL-0MV85T0LT008UT9H. Callers/tests pass it positionally; do not remove.
+   */
   autoRefresh?: boolean,
   expandedItems?: Set<string>,
   chordHelpHints?: string,
@@ -3891,6 +3904,11 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     totalCount?: number,
     chordState?: ChordState | null,
     detailScrollOffset?: number,
+    /**
+     * Retained for positional call-site compatibility only — the
+     * `[auto-refresh on]` header indicator it drove was removed in
+     * WL-0MV85T0LT008UT9H. Callers/tests pass it positionally; do not remove.
+     */
     autoRefresh?: boolean,
     expandedItems?: Set<string>,
     chordHelpHints?: string,
@@ -3954,17 +3972,19 @@ export function createListRenderer(getShowIcons?: () => boolean): (
 
     // ── Render list mode ──────────────────────────────────────────
 
-    // Header with total count and auto-refresh indicator. `totalItems` is
+    // Header with total count. `totalItems` is
     // the count of WorkItem rows only (heading rows are excluded so the
     // header reconciles with per-group heading counts).
+    // `autoRefresh` is intentionally unused since WL-0MV85T0LT008UT9H removed
+    // the `[auto-refresh on]` header indicator; it is retained for
+    // positional call-site compatibility (the production call site and many
+    // tests pass it positionally). The setting still controls the scheduler
+    // tick — the shortcut is independent of it.
     const totalItems = displayRows.filter((row) => !isHeadingRow(row)).length;
     const filterLabel = activeFilter ? ` (filtered: ${activeFilter})` : '';
     let header = ` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`;
     if (totalCount !== undefined && totalCount > totalItems) {
       header += ` (top ${totalItems} of ${totalCount})`;
-    }
-    if (autoRefresh) {
-      header += ` ${ANSI.dim}[auto-refresh on]${ANSI.reset}`;
     }
     if (panePaused) {
       header += ` ${ANSI.fg(220)}[paused — hidden]${ANSI.reset}`;

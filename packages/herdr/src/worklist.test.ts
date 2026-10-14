@@ -47,6 +47,7 @@ import {
   createGatedTick,
   reviewQueueBannerText,
   runWorklistTui,
+  keyToAction,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
@@ -3573,6 +3574,38 @@ describe('handleKeypress — metadata scroll keys', () => {
 // the ShortcutRegistry (Ship It dialog) like every other shortcut, and stays
 // distinct from lowercase `s` (Search).
 
+// ── Ctrl+r manual refresh (WL-0MV85T0LT008UT9H) ────────────────────────
+// The legacy bare-`r` refresh was removed (it collides with the `r` chord
+// leader); Ctrl+r (\x12) is the re-instated, unambiguous manual-refresh key
+// in list mode. The `refresh` action it returns drives the existing
+// `doRefresh(true)` path, which preserves the selection across the refetch.
+
+describe('Ctrl+r manual refresh (WL-0MV85T0LT008UT9H)', () => {
+  it('maps Ctrl+r (\x12) to the refresh action', () => {
+    expect(keyToAction('\x12')).toBe('refresh');
+  });
+
+  it('handleKeypress returns refresh for Ctrl+r in list mode', () => {
+    const state = new WorkItemListState([makeItem('A'), makeItem('B')], TERM_80x24);
+    expect(handleKeypress(state, '\x12', TERM_80x24)).toBe('refresh');
+    // Navigation state is untouched — the caller performs the refetch.
+    expect(state.mode).toBe('list');
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('does not bind Ctrl+r in detail mode (list-mode-only scope)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.selectItem();
+    expect(state.mode).toBe('detail');
+    expect(handleKeypress(state, '\x12', TERM_80x24)).toBeNull();
+  });
+
+  it('keeps bare r keyboard-neutral (r remains the chord leader)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    expect(handleKeypress(state, 'r', TERM_80x24)).toBeNull();
+  });
+});
+
 describe('keyToAction — manual sync binding removed', () => {
   it('does not map S to the sync action anymore', () => {
     const state = new WorkItemListState([makeItem('A')], TERM_80x24);
@@ -5913,7 +5946,9 @@ describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () =>
     expect(visible.length).toBeLessThanOrEqual(cols);
     // At 120 cols the header may be truncated at the very tail, but the
     // core segments should all be present up to the truncation point.
-    expect(visible).toContain('[auto-refresh on]');
+    // The `[auto-refresh on]` segment was removed entirely — it must never
+    // render, even when `autoRefresh` is passed as true (WL-0MV85T0LT008UT9H).
+    expect(visible).not.toContain('[auto-refresh on]');
     expect(visible).toContain('[paused — hidden]');
     // The downtime segment may be cut at the truncation boundary.
     expect(visible).toContain('[downtime');

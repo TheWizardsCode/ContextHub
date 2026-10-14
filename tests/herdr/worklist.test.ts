@@ -547,6 +547,16 @@ describe('handleKeypress', () => {
     expect(result).toBeNull();
   });
 
+  it('handles Ctrl+r (\x12) as an immediate refresh in list mode (WL-0MV85T0LT008UT9H)', () => {
+    const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
+    // Ctrl+r is not a chord leader or single-key shortcut — it maps straight
+    // to the refresh action, which drives doRefresh(true) in the onData flow.
+    const result = handleKeypress(state, '\x12', DEFAULT_TERM_SIZE);
+    expect(result).toBe('refresh');
+    expect(state.mode).toBe('list');
+    expect(state.selectedIndex).toBe(0);
+  });
+
   it('handles r as keyboard neutral in detail mode (resolved via ShortcutRegistry)', () => {
     const state = new WorkItemListState(sampleItems, DEFAULT_TERM_SIZE);
     state.selectItem();

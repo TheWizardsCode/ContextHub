@@ -35,7 +35,7 @@ Two pollers were fixed:
   resumes the normal cadence.
 - The idle threshold is a named module constant (`IDLE_PAUSE_MS`, default
   30_000ms) — no settings toggle, always on.
-- Manual actions (navigation, shortcuts, `r`/`S`-style refreshes) are never
+- Manual actions (navigation, shortcuts, `Ctrl+r`/`S`-style refreshes) are never
   gated; the detail-view widget (no interval) is unaffected.
 
 ### Herdr worklist pane (tab-focus gating)
