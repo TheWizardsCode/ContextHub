@@ -46,6 +46,7 @@ import {
   formatBlockedShipDialog,
   createGatedTick,
   reviewQueueBannerText,
+  runWorklistTui,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
@@ -6486,5 +6487,169 @@ describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', (
     const line = formatItemLine({ id: 'WL-999', title: 'No Stage', status: 'open', priority: 'high' } as WorkItem, 200, false, false);
     // id with no stage should render as plain (no stage escape) or default grey
     expect(line).toContain('WL-999');
+  });
+});
+
+// ── Footer help-line: advertise `?: Help`, drop downtime + mouse hints ──
+// Test-first pins for parent help screen work (WL-0MTV97GV20088CS7 AC1, AC2,
+// AC7a). The footer currently advertises the low-value `d:downtime toggle`
+// single-key entry and appends an `alt+m mouse on/off` suffix at render time.
+// The desired footer instead advertises `?: Help` and drops both.
+//
+// RED WITNESS. The footer behaviour does not exist yet, so every body asserts
+// the POST-IMPLEMENTATION behaviour and is committed with `it.fails` — the
+// suite stays GREEN while the assertions are RED (the repo's documented TDD
+// pattern; see packages/herdr/src/downtime-worker.assignee-claim.test.ts and
+// packages/herdr/src/coordination-dispatch.test.ts). The implementation child
+// WL-0MV85QZXN002T51A flips each `it.fails` to `it` once the footer lands. The
+// key bindings themselves (AC4) are asserted with plain `it` — they must stay
+// green throughout; only the advertisement changes.
+describe('footer help-line advertises ?: Help and drops downtime/mouse hints (WL-0MV85QZCC002U28M)', () => {
+  // The live list entries the render path feeds to formatFooterShortcutHints().
+  const listEntries = (): ShortcutEntry[] =>
+    loadShortcutConfig()
+      .getEntriesForStage('plan_complete', false, 'task')
+      .filter(e => e.view === 'list' || e.view === 'both');
+
+  // AC1: the composed footer advertises the help screen.
+  it.fails('advertises the literal ?: Help in the footer hint line', () => {
+    expect(formatFooterShortcutHints(listEntries())).toContain('?: Help');
+  });
+
+  // AC2: the low-value downtime toggle is no longer advertised.
+  it.fails('no longer advertises the d:downtime toggle single-key entry', () => {
+    expect(formatFooterShortcutHints(listEntries())).not.toContain('d:downtime toggle');
+  });
+
+  // AC4: the d binding itself is untouched — only its advertisement changes.
+  // This regression guard is GREEN before and after the implementation.
+  it('keeps the d single-key downtime-toggle binding intact in the registry', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['d'], 'list')?.command).toBe('/downtime toggle');
+  });
+
+  // AC5: the existing showHelpText gate still hides the new `?: Help` hint.
+  // Body is RED now only because the enabled case lacks `?: Help`; the
+  // disabled case is asserted after it so the `it.fails` witness trips on the
+  // missing advertisement.
+  it.fails('showHelpText: false hides the ?: Help hint while it is shown when enabled', () => {
+    const renderer = createListRenderer();
+    const hints = formatFooterShortcutHints(listEntries());
+    const items: WorkItem[] = [makeItem('A')];
+    const renderWith = (showHelpText: boolean): string =>
+      renderer(
+        items, 0, 0, TERM_80x24, null, 'list', null,
+        undefined, null, 0, false, undefined, hints,
+        0, false, false, 0, undefined, undefined, undefined,
+        0, false, undefined, showHelpText,
+      );
+    expect(renderWith(true)).toContain('?: Help');
+    expect(renderWith(false)).not.toContain('?: Help');
+  });
+
+  // ── Composed-footer integration: the real TUI render loop ─────────────
+  // The alt+m suffix is appended to the dynamic hints inside render(), not in
+  // formatFooterShortcutHints(), so its removal can only be pinned end-to-end.
+  describe('runWorklistTui composed footer', () => {
+    type StdinListener = (chunk: Buffer) => void;
+
+    // Shared fake-TTY harness (mirrors worklist-mouse.test.ts): swaps
+    // process.stdin for a fake TTY that records data listeners and captures
+    // process.stdout writes.
+    function setupFakeTty(): {
+      dataListeners: StdinListener[];
+      writes: string[];
+      restore: () => void;
+    } {
+      const dataListeners: StdinListener[] = [];
+      const fakeStdin = {
+        isTTY: true,
+        setRawMode: vi.fn(),
+        resume: vi.fn(),
+        pause: vi.fn(),
+        on: (ev: string, cb: StdinListener) => {
+          if (ev === 'data') dataListeners.push(cb);
+        },
+        removeListener: (ev: string, cb: StdinListener) => {
+          if (ev === 'data') {
+            const i = dataListeners.indexOf(cb);
+            if (i >= 0) dataListeners.splice(i, 1);
+          }
+        },
+      };
+      const writes: string[] = [];
+      const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: any) => {
+        writes.push(String(chunk));
+        return true;
+      }) as any);
+      const origStdin = (process as any).stdin;
+      Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true, writable: true });
+      setExecFileAsync((async () => ({ stdout: '{"count": 0}' })) as any);
+      return {
+        dataListeners,
+        writes,
+        restore: () => {
+          Object.defineProperty(process, 'stdin', { value: origStdin, configurable: true, writable: true });
+          writeSpy.mockRestore();
+          resetExecFileAsync();
+        },
+      };
+    }
+
+    // Drives the real render loop, then dismisses the TUI. Always dismisses and
+    // drains the TUI promise so a failing assertion never leaks the loop.
+    async function renderFooter(dismissKey = 'q'): Promise<string> {
+      const { dataListeners, writes, restore } = setupFakeTty();
+      let tui: Promise<WorkItem | undefined> | undefined;
+      try {
+        tui = runWorklistTui(async () => [], [], loadShortcutConfig(), {
+          autoRefresh: false,
+          autoSync: false,
+        });
+        await vi.waitFor(() => {
+          expect(writes.length).toBeGreaterThan(0);
+        });
+        return stripAnsi(writes.join(''));
+      } finally {
+        dataListeners.forEach(cb => cb(Buffer.from(dismissKey)));
+        if (tui) await tui.catch(() => undefined);
+        restore();
+      }
+    }
+
+    // AC1 + AC2 + AC3: the composed footer advertises help and no longer
+    // carries the downtime or mouse-tracking advertisements.
+    it.fails('composed TUI footer advertises ?: Help without downtime/mouse hints', async () => {
+      const footer = await renderFooter();
+      expect(footer).toContain('?: Help');
+      expect(footer).not.toContain('d:downtime toggle');
+      expect(footer).not.toContain('alt+m mouse on');
+      expect(footer).not.toContain('alt+m mouse off');
+    });
+
+    // AC4: the Alt+m toggle itself remains functional — its footer hint is
+    // gone but the key binding still toggles mouse tracking. GREEN before and
+    // after the implementation.
+    it('Alt+m still toggles mouse tracking (binding intact)', async () => {
+      const { dataListeners, writes, restore } = setupFakeTty();
+      let tui: Promise<WorkItem | undefined> | undefined;
+      try {
+        tui = runWorklistTui(async () => [], [], loadShortcutConfig(), {
+          autoRefresh: false,
+          autoSync: false,
+        });
+        await vi.waitFor(() => {
+          expect(writes.join('')).toContain(ANSI.mouseEnable);
+        });
+        dataListeners.forEach(cb => cb(Buffer.from('\x1bm')));
+        await vi.waitFor(() => {
+          expect(writes.join('')).toContain(ANSI.mouseDisable);
+        });
+      } finally {
+        dataListeners.forEach(cb => cb(Buffer.from('q')));
+        if (tui) await tui.catch(() => undefined);
+        restore();
+      }
+    });
   });
 });
