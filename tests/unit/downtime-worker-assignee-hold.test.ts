@@ -17,6 +17,8 @@ import {
   classifyItemForDispatch,
   dispatchDowntimeWork,
   isAssigneeHeld,
+  isProducerHold,
+  PRODUCER_HOLD_ASSIGNEE,
   parseAuditCandidatesOutput,
   parseCriticalCandidatesOutput,
   parseImplementCandidatesOutput,
@@ -237,5 +239,95 @@ describe('Herdr-head dispatch never dispatches an assignee-held item (WL-0MV85WC
 
     expect(outcome.dispatched).toBe(false);
     expect(deps.claimItem).not.toHaveBeenCalled();
+  });
+});
+
+describe('producer-hold sentinel (WL-0MV85WDOM007BKF8)', () => {
+  it('reserves the producer wl identity as the sentinel', () => {
+    // The sentinel is the producer's wl identity, so the hold is
+    // self-describing and the release gate can key on it.
+    expect(PRODUCER_HOLD_ASSIGNEE).toBe('Map');
+    expect(isProducerHold(PRODUCER_HOLD_ASSIGNEE)).toBe(true);
+    expect(isProducerHold('  Map  ')).toBe(true);
+  });
+
+  it('never collides with an automated agent identity or a blank assignee', () => {
+    expect(isProducerHold('@github-copilot')).toBe(false);
+    expect(isProducerHold('pi')).toBe(false);
+    expect(isProducerHold('implement')).toBe(false);
+    // Exact reserved identity — not a case variant.
+    expect(isProducerHold('map')).toBe(false);
+    expect(isProducerHold('Map ')).toBe(true);
+    expect(isProducerHold('')).toBe(false);
+    expect(isProducerHold('   ')).toBe(false);
+    expect(isProducerHold(undefined)).toBe(false);
+    expect(isProducerHold(null)).toBe(false);
+  });
+
+  it('agrees with the general assignee hold for the producer sentinel', () => {
+    expect(isAssigneeHeld({ assignee: PRODUCER_HOLD_ASSIGNEE })).toBe(true);
+    // The producer hold is a subset of "any non-empty assignee".
+    expect(isProducerHold('some-agent')).toBe(false);
+    expect(isAssigneeHeld({ assignee: 'some-agent' })).toBe(true);
+  });
+});
+
+describe('clearing the assignee releases the hold (WL-0MV85WDOM007BKF8)', () => {
+  const implement = (overrides: Partial<ImplementCandidate> = {}): ImplementCandidate => ({
+    id: 'IMP-1',
+    title: 'Implement',
+    status: 'open',
+    risk: 'low',
+    effort: 'small',
+    sortIndex: 1,
+    ...overrides,
+  });
+  const audit = (overrides: Partial<AuditCandidate> = {}): AuditCandidate => ({
+    id: 'AUD-1',
+    title: 'Audit',
+    updatedAt: new Date(Date.now() - 1000).toISOString(),
+    ...overrides,
+  });
+
+  it('makes an implement candidate dispatchable again once the claim is cleared', () => {
+    const held = implement({ id: 'IMP-1', assignee: 'herdr-123', sortIndex: 1 });
+    expect(selectImplementCandidate([held])).toBeNull();
+
+    const released: ImplementCandidate = { ...held, assignee: '' };
+    expect(isAssigneeHeld(released)).toBe(false);
+    expect(selectImplementCandidate([released])?.id).toBe('IMP-1');
+  });
+
+  it('makes an audit candidate dispatchable again once the claim is cleared', () => {
+    const held = audit({ id: 'AUD-1', assignee: 'herdr-123', sortIndex: 1 });
+    expect(selectAuditCandidate([held])).toBeNull();
+
+    const released: AuditCandidate = { ...held, assignee: '' };
+    expect(selectAuditCandidate([released])?.id).toBe('AUD-1');
+  });
+
+  it('makes a classifyItemForDispatch item dispatchable again once the producer hold is cleared', () => {
+    const held: Parameters<typeof classifyItemForDispatch>[0] = {
+      id: 'PROD-1',
+      status: 'open',
+      stage: 'idea',
+      assignee: PRODUCER_HOLD_ASSIGNEE,
+    };
+    expect(classifyItemForDispatch(held)).toBeNull();
+    // Clearing the producer hold releases the item for its intake tier.
+    expect(classifyItemForDispatch({ ...held, assignee: '' })).toBe('intake');
+  });
+
+  it('releases a producer-held next candidate for auto-dispatch', () => {
+    const producerHeld: DowntimeCandidate = {
+      id: 'NEXT-1',
+      title: 'Producer-held',
+      stage: 'intake_complete',
+      status: 'open',
+      sortIndex: 1,
+      assignee: PRODUCER_HOLD_ASSIGNEE,
+    };
+    expect(selectNextCandidate([producerHeld])).toBeNull();
+    expect(selectNextCandidate([{ ...producerHeld, assignee: '' }])?.id).toBe('NEXT-1');
   });
 });

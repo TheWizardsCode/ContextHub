@@ -366,6 +366,36 @@ Every OTHER tier keeps the legacy status-flip claim
 (`--status in_progress` + the tier's status/stage CAS), and its rollback
 keeps the legacy status restore guarded by `--if-status in_progress`.
 
+### Producer-hold sentinel (WL-0MV85WDOM007BKF8)
+
+The **scheduling-hold convention**: a non-empty `assignee` means the item is
+intentionally held from auto-dispatch — `classifyItemForDispatch` and every
+tier's `select*` helper exclude it, and the audit claim's `--if-assignee ""`
+CAS fails stale on it. Assigning an item therefore *pauses its automatic
+scheduling*, with no magic DB flag involved.
+
+The per-item **producer pause switch** is assigning the item to the
+producer's wl identity. The reserved sentinel is
+`PRODUCER_HOLD_ASSIGNEE` (`'Map'`, the producer's wl identity), recognised
+by `isProducerHold()`. Because the value is self-describing, the ship
+release gate can key on it: an item assigned to the producer means "the
+producer owns it" and is not shippable until it has a passing audit
+(epic WL-0MV82CHGQ000HAZZ Q2; re-homed ship gate — SA-tracked).
+
+Rules:
+
+- Assigning to the producer (`wl update <id> --assignee Map`) holds the item
+  at every tier — claims fail stale and selectors skip it.
+- Clearing the assignee (`wl update <id> --assignee ""`) **releases** the
+  hold and makes the item dispatchable again.
+- The sentinel never collides with an automated agent identity
+  (`pi`, `implement`, `@github-copilot`, …); comparison is exact
+  (whitespace-tolerant), not case-insensitive.
+- **Clearing discipline:** every assignee writer clears the assignee on
+  session end so a finished/aborted claim never silently suppresses future
+  auto-dispatch. `status_lifecycle`'s failure-exit already clears; the
+  dispatch claim/rollback paths clear it on every terminal outcome
+  (WL-0MV85WD400091OZ6).
 
 ### Success-marker lifetime (WL-0MU6UL0RJ008IHGT)
 
