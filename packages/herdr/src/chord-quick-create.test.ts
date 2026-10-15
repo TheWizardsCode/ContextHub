@@ -13,6 +13,11 @@
  *   - `c` then `q` opens the quick-create form (it does NOT quit), and
  *   - the form dispatches the expected `wl create` command on submit.
  *
+ * Since WL-0MV6J5JXL002D8C4 the `c q` entry carries `open_pane: false`, so
+ * the form dispatches the command for background (no-pane) execution: the
+ * resolved `openPane === false` flag and the completion-refresh hook are
+ * forwarded to `onCommand`.
+ *
  * Run: npx vitest run packages/herdr/src/chord-quick-create.test.ts
  */
 
@@ -119,7 +124,9 @@ function quickCreateFormShowing(): boolean {
   return out.includes('Command Input') && out.includes('title') && out.includes('description');
 }
 
-function startTui(onCommand?: (c: string, model?: string) => void): Promise<unknown> {
+function startTui(
+  onCommand?: (c: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>) => void,
+): Promise<unknown> {
   return runWorklistTui(async () => [], [], loadShortcutConfig(), {
     autoRefresh: false,
     autoSync: false,
@@ -151,7 +158,7 @@ describe('c q (create quick) chord (WL-0MTCLB50D0026YA7)', () => {
     await p;
   });
 
-  it('dispatches wl create with the form values on submit', async () => {
+  it('dispatches wl create in the background (no pane) with the form values on submit', async () => {
     const onCommand = vi.fn();
     const p = startTui(onCommand);
     await tick();
@@ -179,10 +186,16 @@ describe('c q (create quick) chord (WL-0MTCLB50D0026YA7)', () => {
     await tick();
 
     expect(onCommand).toHaveBeenCalledTimes(1);
-    // Shell-route values are POSIX single-quoted (form-dialog.ts).
+    // Quick create opts into background dispatch (`open_pane: false` in
+    // shortcuts.json, WL-0MV6J5JXL002D8C4): the form dialog forwards the
+    // inherited flag (3rd arg `false`) plus the completion-refresh hook
+    // (4th arg) so no pane opens and the list refreshes when `wl create`
+    // exits. Shell-route values are POSIX single-quoted (form-dialog.ts).
     expect(onCommand).toHaveBeenCalledWith(
       "!!wl create -t 'My title' -d 'My desc' -p 'medium'",
       undefined,
+      false,
+      expect.any(Function),
     );
 
     dataHandler?.(Buffer.from('q'));

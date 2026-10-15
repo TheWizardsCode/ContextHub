@@ -28,7 +28,8 @@
     "command": "!!wl create -t <title> -d <description> -p <priority default='medium'>",
     "view": "both",
     "label": "create quick",
-    "description": "Quickly create a new work item with title, description, and priority — no issue-type gating (c q)."
+    "description": "Quickly create a new work item with title, description, and priority — no issue-type gating (c q).",
+    "open_pane": false
   },
   {
     "chord": [
