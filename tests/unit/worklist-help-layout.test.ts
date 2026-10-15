@@ -83,6 +83,10 @@ describe('help screen layout — grouped icon legend (WL-0MTV97GV20088CS7)', () 
   const lines = frame.split('\n');
 
   it('groups icons by category under headings', () => {
+    // `Producer Review` was deliberately absent from this list: the
+    // needsProducerReview removal (WL-0MV85WFYU0071YQ9) deleted the
+    // producer-review icon category from ICON_LEGEND, so no such heading is
+    // rendered anymore.
     for (const heading of [
       'Status',
       'Stage',
@@ -91,7 +95,6 @@ describe('help screen layout — grouped icon legend (WL-0MTV97GV20088CS7)', () 
       'Risk',
       'Effort',
       'Audit',
-      'Producer Review',
       'Agent',
       'Coverage',
     ]) {
