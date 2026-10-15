@@ -410,3 +410,39 @@ describe('help screen overlay — showHelpText gate (WL-0MV85R0JD004CHAE)', () =
     );
   });
 });
+
+// ── AC5 (parent): the overlay explains every row glyph ─────────────────
+// Icon-legend tests (test-first child WL-0MV85R1V6000IL4E; implementation
+// child WL-0MV85R2G6000G7BU). Committed with `it.fails` until the legend
+// lands; the implementation child flips them to `it`.
+describe('help screen overlay — icon legend (WL-0MV85R1V6000IL4E)', () => {
+  it.fails('renders an icon legend that identifies the row glyphs', async () => {
+    const items = [makeItem('A')];
+    await runWithTui(
+      items,
+      async (h) => {
+        h.press('?');
+        await h.waitForFrame(isHelpOpen, 'help open');
+        const frame = h.frame();
+        // A dedicated legend section exists.
+        expect(frame).toContain('Icons');
+        // Every required category is explained in prose the user can read.
+        const lower = frame.toLowerCase();
+        for (const word of [
+          'priority',
+          'status',
+          'stage',
+          'risk',
+          'effort',
+          'epic',
+          'audit',
+          'review',
+          'agent',
+        ]) {
+          expect(lower, `legend should explain the '${word}' icon`).toContain(word);
+        }
+      },
+      { rows: 120, cols: 200 },
+    );
+  });
+});
