@@ -232,6 +232,29 @@ describe('rollbackClaimWorkItem (fetcher, WL-0MT32F908002YFFA)', () => {
     expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('in_review');
   });
 
+  it('non-audit rollback clears the claim assignee guarded by --if-assignee <agent> (WL-0MV85WD400091OZ6)', async () => {
+    const mockFn = vi.fn().mockResolvedValue({
+      stdout: '{"success":true}',
+      stderr: '',
+    });
+    setExecFileAsync(mockFn as any);
+
+    const ok = await rollbackClaimWorkItem('WL-IMP', {
+      status: 'open',
+      stage: 'plan_complete',
+      assignee: 'herdr-1',
+    });
+
+    expect(ok).toBe(true);
+    const callArgs = mockFn.mock.calls[0][1] as string[];
+    expect(callArgs[callArgs.indexOf('--status') + 1]).toBe('open');
+    expect(callArgs[callArgs.indexOf('--if-status') + 1]).toBe('in_progress');
+    expect(callArgs[callArgs.indexOf('--stage') + 1]).toBe('plan_complete');
+    // The failed dispatch must release the scheduling hold (empty assignee).
+    expect(callArgs[callArgs.indexOf('--assignee') + 1]).toBe('');
+    expect(callArgs[callArgs.indexOf('--if-assignee') + 1]).toBe('herdr-1');
+  });
+
   it('defaults to status open and omits the stage guard when no original state is given', async () => {
     const mockFn = vi.fn().mockResolvedValue({
       stdout: '{"success":true}',

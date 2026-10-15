@@ -2098,13 +2098,13 @@ export function createDowntimeDeps(
       // Status-neutral audit-tier rollback (WL-0MV85WCJJ0087VMP): the audit
       // claim never flips status/stage, so the rollback must not rewrite
       // them either — it clears only the claiming agent's assignee, guarded
-      // by `--if-assignee <agent>`. The claiming agent rides on the original
-      // expectation here (this deps' configured assignee); every other tier
-      // keeps the legacy status/stage restore.
-      const isAuditTier = original?.status === 'completed' && original?.stage === 'in_review';
+      // by `--if-assignee <agent>`. Every other tier keeps the legacy
+      // status/stage restore and ALSO clears this claim's assignee
+      // (WL-0MV85WD400091OZ6), so a failed dispatch never leaves a non-empty
+      // assignee (a scheduling hold) behind.
       return rollbackClaimWorkItem(
         itemId,
-        isAuditTier ? { ...original, assignee } : original,
+        { ...original, assignee },
         cwd,
       );
     },

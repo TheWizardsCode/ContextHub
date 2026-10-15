@@ -1558,6 +1558,14 @@ export type MostImportantItemResult =
 export interface DowntimeClaimExpected {
   status?: string;
   stage?: string;
+  /**
+   * The claiming agent's assignee (WL-0MV85WD400091OZ6). Carried from the
+   * claim to the failure rollback so the recovery can clear ONLY this claim's
+   * assignee (guarded by `--if-assignee <agent>`) — a failed dispatch must
+   * never leave a non-empty assignee (a non-empty assignee acts as a
+   * scheduling hold and would make the item permanently undispatchable).
+   */
+  assignee?: string;
 }
 
 /**

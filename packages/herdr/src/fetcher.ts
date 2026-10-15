@@ -1373,26 +1373,42 @@ export async function rollbackClaimWorkItem(
   worklogRoot?: string,
 ): Promise<boolean> {
   try {
-    // Assignee-guarded status-neutral rollback (WL-0MV85WCJJ0087VMP): when
-    // the caller identifies the claiming agent, clear ONLY that claim's
-    // assignee (CAS on the agent) and never rewrite status/stage — the
-    // audit-tier item stays `completed`/`in_review` throughout, so a failed
-    // audit can never strand it off the review queue. `--if-assignee <agent>`
-    // makes the clear a no-clobber: a concurrent assignee change makes the
-    // rollback stale and leaves their state untouched.
+    // The audit tier's claim is STATUS-NEUTRAL (WL-0MV85WCJJ0087VMP): it
+    // writes only the assignee and never flips status/stage, so its rollback
+    // must likewise not rewrite them — it clears only the claiming agent's
+    // assignee, guarded by `--if-assignee <agent>` so a concurrent assignee
+    // change makes the rollback stale (no clobber). Every OTHER tier keeps
+    // the legacy status/stage restore but ALSO clears THIS claim's assignee
+    // (guarded by `--if-assignee <agent>`) so a failed dispatch never leaves a
+    // non-empty assignee behind. A non-empty assignee is a scheduling hold
+    // (WL-0MV85WDOM007BKF8): residue would make the item permanently
+    // undispatchable after a marker-write/spawn failure
+    // (WL-0MV85WD400091OZ6). When the claiming agent is unknown the legacy
+    // restore is applied as before (fail-safe: no stricter claim than the
+    // original).
+    const isAuditTier =
+      original?.status === 'completed' && original?.stage === 'in_review';
     const claimedAgent = original?.assignee;
-    const isAssigneeGuarded = typeof claimedAgent === 'string' && claimedAgent.length > 0;
-    const args = isAssigneeGuarded
-      ? ['update', id, '--assignee', '', '--if-assignee', claimedAgent]
-      : ['update', id, '--status', original?.status ?? 'open', '--if-status', 'in_progress'];
-    // Restore the stage the tier claimed at. The claim itself does not change
-    // the stage (except the retired-stage migration, which advances it to the
-    // tier's target); passing the tier's expectation is therefore a no-op in
-    // the migration path and the correct restore everywhere else. The
-    // status-neutral audit-tier rollback writes no stage at all.
-    if (!isAssigneeGuarded && original?.stage) {
-      args.push('--if-stage', original.stage);
-      args.push('--stage', original.stage);
+    const hasClaimedAgent = typeof claimedAgent === 'string' && claimedAgent.length > 0;
+    let args: string[];
+    if (isAuditTier && hasClaimedAgent) {
+      // Status-neutral, assignee-guarded clear (Option A).
+      args = ['update', id, '--assignee', '', '--if-assignee', claimedAgent as string];
+    } else if (isAuditTier) {
+      // No claimed agent known: best-effort restore of the review-queue state
+      // (never the plan_complete coercion that stranded items).
+      args = ['update', id, '--status', 'completed', '--stage', original?.stage ?? 'in_review'];
+    } else {
+      // Legacy status/stage restore + clear THIS claim's assignee (hold).
+      args = ['update', id, '--status', original?.status ?? 'open', '--if-status', 'in_progress'];
+      if (original?.stage) {
+        args.push('--if-stage', original.stage);
+        args.push('--stage', original.stage);
+      }
+      if (hasClaimedAgent) {
+        args.push('--assignee', '');
+        args.push('--if-assignee', claimedAgent as string);
+      }
     }
     const dirOverride = worklogRoot !== undefined ? join(worklogRoot, '.worklog') : undefined;
     await runWl(args, true, CLAIM_TIMEOUT_MS, dirOverride);
