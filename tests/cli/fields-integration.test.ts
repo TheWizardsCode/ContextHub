@@ -47,7 +47,7 @@ describe('--fields end-to-end integration', () => {
     expect(listErr![1]).toBe(searchErr![1]);
     // The vocabulary lists all fields EXCEPT id (id is always included,
     // so it is not mentioned in the error message).
-    const expectedFields = ['title', 'description', 'status', 'stage', 'priority', 'issueType', 'assignee', 'tags', 'createdAt', 'updatedAt', 'parentId', 'needsProducerReview', 'sortIndex'];
+    const expectedFields = ['title', 'description', 'status', 'stage', 'priority', 'issueType', 'assignee', 'tags', 'createdAt', 'updatedAt', 'parentId', 'sortIndex'];
     for (const f of expectedFields) {
       expect(listErr![1]).toContain(f);
     }

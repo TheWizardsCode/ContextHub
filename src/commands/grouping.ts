@@ -247,23 +247,21 @@ const WITHIN_GROUP_PRIORITY_ORDER: Record<string, number> = {
 const DEFAULT_PRIORITY_ORDER = WITHIN_GROUP_PRIORITY_ORDER.medium;
 
 /**
- * The 6-bucket predicate for in_review items.  Lower number = higher
+ * The 5-bucket predicate for in_review items.  Lower number = higher
  * display priority (displayed first).
  *
  * | Bucket | Meaning                                        |
  * |--------|------------------------------------------------ |
- * | 1      | needsProducerReview                             |
- * | 2      | failed audit, fresh                             |
- * | 3      | failed audit, stale                             |
- * | 4      | no audit                                        |
- * | 5      | passed audit, stale                             |
- * | 6      | passed audit, fresh                             |
+ * | 1      | failed audit, fresh                             |
+ * | 2      | failed audit, stale                             |
+ * | 3      | no audit                                        |
+ * | 4      | passed audit, stale                             |
+ * | 5      | passed audit, fresh                             |
  *
  * This mirrors the predicate in packages/herdr/src/grouping.ts (ACL2).
  */
 export function inReviewBucket(item: {
   stage?: string;
-  needsProducerReview?: boolean;
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
@@ -275,12 +273,9 @@ export function inReviewBucket(item: {
   // Sentinel — only valid when stage === 'in_review'
   if (item.stage !== 'in_review') return 0;
 
-  // Bucket 1: producer review pending
-  if (item.needsProducerReview) return 1;
-
-  // Bucket 4: no audit yet (null/undefined auditResult or missing auditedAt)
+  // Bucket 3: no audit yet (null/undefined auditResult or missing auditedAt)
   // Per AC4 stale buckets require auditedAt present; absence is the no-audit bucket.
-  if (item.auditResult === null || item.auditResult === undefined || !item.auditedAt) return 4;
+  if (item.auditResult === null || item.auditResult === undefined || !item.auditedAt) return 3;
 
   // Determine freshness via the shared predicate (isAuditFresh/AUDIT_FRESHNESS_AT_NEAR_TOLERANCE_MS)
   const fresh = Boolean(
@@ -289,10 +284,10 @@ export function inReviewBucket(item: {
 
   if (item.auditResult === false) {
     // Failed audit — fresh items are more urgent (need attention)
-    return fresh ? 2 : 3;
+    return fresh ? 1 : 2;
   }
   // Passed audit — fresh items are least urgent (already cleared)
-  return fresh ? 6 : 5;
+  return fresh ? 5 : 4;
 }
 
 /**
@@ -305,14 +300,13 @@ export function inReviewBucket(item: {
  * Tertiary: updatedAt (older items first).
  * Quaternary: id (deterministic tie-break).
  *
- * The 6-bucket predicate is applied consistently *within* each priority band
+ * The 5-bucket predicate is applied consistently *within* each priority band
  * rather than as the global primary key.
  *
  * Returns 0 when either item lacks stage === 'in_review', letting the
  * caller fall back to the standard comparator.
  */
 export function compareInReviewItems(a: GroupableItem & {
-  needsProducerReview?: boolean;
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
@@ -346,7 +340,7 @@ export function compareInReviewItems(a: GroupableItem & {
  * tie-break.
  *
  * When BOTH items have stage === 'in_review', `compareInReviewItems`
- * orders them by priority (high → medium → low) and then by the 6-bucket
+ * orders them by priority (high → medium → low) and then by the 5-bucket
  * audit predicate (WL-0MSLPM5ZB003TADT, refined by WL-0MUWDW0N6003KF6G so a
  * medium-priority item can never rank ahead of a high-priority one).  This
  * takes precedence over the default stage sub-sort: all in_review items map

@@ -112,38 +112,35 @@ describe('migrations: add audit field', () => {
   });
 });
 
-describe('migrations: add needsProducerReview column', () => {
-  it('lists the needsProducerReview migration as pending when the column is missing', () => {
+describe('migrations: needsProducerReview column', () => {
+  it('lists the drop migration as pending when the column is present', () => {
     const tempDir = createTempDir();
     try {
       const dbPath = path.join(tempDir, 'worklog.db');
-      createLegacyDbWithoutNeedsProducerReview(dbPath);
+      createLegacyDbWithoutAudit(dbPath);
 
       const pending = listPendingMigrations(dbPath);
-      expect(pending.map(p => p.id)).toContain('20260210-add-needsProducerReview');
+      expect(pending.map(p => p.id)).toContain('20261015-drop-needsProducerReview');
     } finally {
       cleanupTempDir(tempDir);
     }
   });
 
-  it('applies the needsProducerReview migration and creates a backup', () => {
+  it('drops the needsProducerReview column and preserves the historical add-migration', () => {
     const tempDir = createTempDir();
     try {
       const dbPath = path.join(tempDir, 'worklog.db');
-      createLegacyDbWithoutNeedsProducerReview(dbPath);
-
-      const dryRun = runMigrations({ dryRun: true }, dbPath);
-      expect(dryRun.applied.map(a => a.id)).toContain('20260210-add-needsProducerReview');
+      createLegacyDbWithoutAudit(dbPath);
 
       const applied = runMigrations({ confirm: true }, dbPath);
-      expect(applied.applied.map(a => a.id)).toContain('20260210-add-needsProducerReview');
+      expect(applied.applied.map(a => a.id)).toContain('20261015-drop-needsProducerReview');
       // The migration framework creates a backup before applying.
       expect(applied.backups.length).toBeGreaterThanOrEqual(1);
 
       const db = new Database(dbPath, { readonly: true });
       try {
         const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
-        expect(cols.map(c => c.name)).toContain('needsProducerReview');
+        expect(cols.map(c => c.name)).not.toContain('needsProducerReview');
       } finally {
         db.close();
       }

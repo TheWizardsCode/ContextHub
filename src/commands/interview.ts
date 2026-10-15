@@ -1,12 +1,7 @@
 /**
  * Interview command - Interactive walkthrough of outstanding interview
- * questions on a work item, capturing responses and clearing the
- * producer review flag.
- *
- * The command walks the "Clarifying questions" appendix of a work item
- * description (written by the intake/plan skills), extracts outstanding
- * questions, prompts the producer for each answer, writes the answers back
- * into the description and clears `needsProducerReview`.
+ * questions on a work item, capturing responses and writing them back into
+ * the description.
  *
  * Question detection is deliberately tolerant of the formats observed in
  * practice:
@@ -23,26 +18,17 @@
  * Answers are written back in place so surrounding markup (Source lines,
  * attribution, quotes) is preserved losslessly.
  *
- * When the item is flagged for producer review but there is nothing to
- * interview (no section, or no parseable questions), the command explains
- * **why** it is flagged — drawing on the persisted audit result, the review
- * comments and the description — and then offers to clear the flag. The
- * explanation is produced by the local LLM when available and silently falls
- * back to the structured evidence otherwise; it is advisory and never mutates
- * the item (WL-0MUUAMP7M008Z4GK).
- *
  * Multi-second LLM requests are made visible: the command prints a static
  * `Thinking…` status (plus a TTY-only spinner) before each request and clears
  * it before any subsequent output or prompt, suppressing all feedback in
- * `--json` mode. When a request is unavailable, times out or errors and the
- * command falls back to structured evidence, it prints a brief
- * `LLM unavailable — using structured evidence.` notice
+ * `--json` mode. When the LLM is unavailable, a request times out or errors,
+ * a brief `LLM unavailable — using structured evidence.` notice is printed
  * (WL-0MUX2W8IN005RW66).
  *
- * When the item is **not** flagged (or before explaining) and the operator
- * opts in with `--llm` or `interview.intelligent: true`, the command falls
- * back to the local LLM to extract questions from natural prose when the
- * deterministic parser finds none. Extracted questions are confirmed one by
+ * When the operator opts in with `--llm` or `interview.intelligent: true`,
+ * the command falls back to the local LLM to extract questions from natural
+ * prose when the deterministic parser finds none. Extracted questions are
+ * confirmed one by
  * one through the same prompt loop and only confirmed answers are written
  * back through the deterministic re-serialiser; an unavailable/failing LLM
  * degrades to the deterministic-only behaviour (after the same brief
@@ -562,126 +548,6 @@ export function rebuildDescription(
   return [...before, newContent, ...after].join('\n').trim();
 }
 
-// ── Producer-review explanation ─────────────────────────────────────────
-
-/**
- * Instruction sent to the LLM when explaining the `needsProducerReview`
- * flag. The model must first state **why** the item is flagged (citing the
- * triggering evidence) and only then what the producer must do to clear it
- * (WL-0MUUAMP7M008Z4GK AC1).
- */
-export const PRODUCER_REVIEW_INSTRUCTION =
-  'Explain why the needsProducerReview flag is set, citing the triggering ' +
-  'evidence (the latest audit verdict and summary, review or audit comments, ' +
-  'or the item description), and then explain what the producer needs to do ' +
-  'in order to remove the needsProducerReview flag';
-
-/** Maximum size (bytes) of the item context embedded in the prompt. */
-export const MAX_PROMPT_CONTEXT_BYTES = 8192;
-
-/** Maximum bytes of the audit summary embedded in the explanation prompt. */
-export const MAX_AUDIT_SUMMARY_BYTES = 2048;
-
-/** Maximum bytes of the audit raw-output excerpt embedded in the prompt. */
-export const MAX_AUDIT_RAW_OUTPUT_BYTES = 2048;
-
-/** Maximum length (characters) of the rendered explanation. */
-export const MAX_EXPLANATION_LENGTH = 8192;
-
-/**
- * Maximum number of lines in the rendered explanation. The render keeps
- * intentional line breaks (AC3) but caps how many are surfaced so a runaway
- * LLM response cannot flood the console.
- */
-export const MAX_EXPLANATION_LINES = 512;
-
-/** Default timeout (ms) for the explanation LLM call. */
-export const EXPLANATION_TIMEOUT_MS = 15000;
-
-/**
- * The subset of a persisted audit result consumed by the explanation. This is
- * structurally compatible with `PersistentStore#getAuditResult`, so callers
- * pass the row returned by the store directly (WL-0MUUAMP7M008Z4GK AC2/AC4).
- */
-export interface ProducerReviewAuditContext {
-  /** Whether the latest audit judged the item ready to close. */
-  readyToClose: boolean;
-  /** ISO 8601 timestamp of the audit, when known. */
-  auditedAt?: string | null;
-  /** Human-readable audit summary, when present. */
-  summary?: string | null;
-  /** Machine-readable audit output, when present. */
-  rawOutput?: string | null;
-  /** Audit author/provenance, when known. */
-  author?: string | null;
-}
-
-/**
- * Dependencies for {@link buildProducerReviewExplanation}. The chat client is
- * injected so callers (and tests) never make network calls implicitly.
- */
-export interface ProducerReviewExplanationDeps {
-  /** Newest-first comments for the item (`getCommentsForWorkItem` order). */
-  comments: Comment[];
-  /**
-   * Latest persisted audit result, when one exists. Included as first-class
-   * prompt context and as the primary structured fallback signal.
-   */
-  auditResult?: ProducerReviewAuditContext | null;
-  /** Chat client to use; `null`/`undefined` disables the LLM path. */
-  chatClient?: ChatClient | null;
-  /** When true, skip the LLM entirely and use the structured fallback. */
-  noLlm?: boolean;
-  /** Per-call timeout override in milliseconds. */
-  timeoutMs?: number;
-}
-
-/**
- * Render an explanation readably for the console: keep intentional line
- * breaks and short Markdown structure, but collapse runs of spaces/tabs and
- * repeated blank lines, then bound the result by a documented character
- * length and line count (WL-0MUUAMP7M008Z4GK AC3). Truncation is marked with
- * a trailing ellipsis line.
- */
-export function renderExplanation(
-  text: string,
-  maxLength: number = MAX_EXPLANATION_LENGTH,
-  maxLines: number = MAX_EXPLANATION_LINES,
-): string {
-  const source = (text ?? '').replace(/\r\n?/g, '\n');
-  const collapsed: string[] = [];
-  for (const raw of source.split('\n')) {
-    const line = raw.replace(/[ \t]+/g, ' ').replace(/\s+$/, '');
-    // Collapse runs of blank lines to a single blank line.
-    if (line === '' && collapsed[collapsed.length - 1] === '') continue;
-    collapsed.push(line);
-  }
-  while (collapsed.length > 0 && collapsed[0] === '') collapsed.shift();
-  while (collapsed.length > 0 && collapsed[collapsed.length - 1] === '') collapsed.pop();
-
-  const joined = collapsed.join('\n');
-  const overLines = collapsed.length > maxLines;
-  const overLength = joined.length > maxLength;
-  const truncated = overLines || overLength;
-
-  const kept = overLines
-    ? collapsed.slice(0, Math.max(1, maxLines - 1))
-    : collapsed;
-  let result = kept.join('\n');
-  // Reserve two characters for the newline + ellipsis appended below.
-  const budget = truncated ? Math.max(1, maxLength - 2) : maxLength;
-  if (result.length > budget) result = result.slice(0, budget);
-  result = result.replace(/\s+$/, '');
-
-  if (!truncated) return result;
-  return result.length > 0 ? `${result}\n…` : '…';
-}
-
-/** First non-empty line of a comment body, trimmed. */
-function firstLine(text: string): string {
-  return text.split('\n').map(line => line.trim()).find(line => line.length > 0) ?? '';
-}
-
 /** Truncate `text` to at most `maxBytes` UTF-8 bytes without splitting a char. */
 function truncateBytes(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
@@ -690,185 +556,6 @@ function truncateBytes(text: string, maxBytes: number): string {
     result = result.slice(0, -1);
   }
   return result;
-}
-
-/**
- * Format an audit result for the explanation prompt: verdict, provenance,
- * summary and a bounded raw-output excerpt. The summary/raw output are
- * individually bounded so a single large audit cannot dominate the prompt.
- */
-function formatAuditPromptContext(audit: ProducerReviewAuditContext): string {
-  const lines = [
-    `Verdict: ${audit.readyToClose ? 'ready to close' : 'not ready to close'}`,
-    `Audited at: ${audit.auditedAt ?? 'unknown'}`,
-    `Audit author: ${audit.author ?? 'unknown'}`,
-  ];
-  const summary = audit.summary?.trim();
-  if (summary) {
-    lines.push('Summary:', truncateBytes(summary, MAX_AUDIT_SUMMARY_BYTES));
-  }
-  const raw = audit.rawOutput?.trim();
-  if (raw) {
-    lines.push(
-      'Raw output (excerpt):',
-      truncateBytes(raw, MAX_AUDIT_RAW_OUTPUT_BYTES),
-    );
-  }
-  return lines.join('\n');
-}
-
-/**
- * Build the LLM prompt: the fixed instruction plus item context — the latest
- * audit result, the description and the two most recent comments — bounded to
- * {@link MAX_PROMPT_CONTEXT_BYTES}.
- *
- * The audit block is placed before the description so it survives the overall
- * byte-bounded truncation even when the description is very large: the audit
- * verdict/summary is the single most informative signal for flagging
- * (WL-0MUUAMP7M008Z4GK AC2).
- */
-export function buildExplanationPrompt(
-  item: WorkItem,
-  comments: Comment[],
-  auditResult?: ProducerReviewAuditContext | null,
-): string {
-  const recent = comments
-    .slice(0, 2)
-    .map(c => `${c.author}: ${firstLine(c.comment)}`)
-    .join('\n');
-  const sections: string[] = [`Work item: ${item.id} — ${item.title}`];
-  if (auditResult) {
-    sections.push('', 'Latest audit result:', formatAuditPromptContext(auditResult));
-  }
-  sections.push(
-    '',
-    'Description:',
-    item.description,
-    '',
-    'Most recent comments:',
-    recent || '(none)',
-  );
-  const context = sections.join('\n');
-  return `${PRODUCER_REVIEW_INSTRUCTION}.\n\n${truncateBytes(context, MAX_PROMPT_CONTEXT_BYTES)}`;
-}
-
-/** The generic, last-resort actionable line. */
-function genericFallback(item: WorkItem): string {
-  return (
-    `No structured evidence found in the description, comments or audit result; ` +
-    `review the item and clear the flag with \`wl reviewed ${item.id} false\` ` +
-    `once the blocker is resolved.`
-  );
-}
-
-/**
- * Structured fallback used when the LLM is unavailable/disabled.
- *
- * Reports the flag reason from structured signals first — the latest audit
- * verdict and summary, then a durable audit-gap waiver, then the two most
- * recent comments — and only falls back to the generic actionable line as a
- * last resort (WL-0MUUAMP7M008Z4GK AC4). Line breaks are preserved so the
- * caller can render multiple signals readably.
- */
-export function buildFallbackExplanation(
-  item: WorkItem,
-  comments: Comment[],
-  auditResult?: ProducerReviewAuditContext | null,
-): string {
-  if (auditResult) {
-    const verdict = auditResult.readyToClose
-      ? 'ready to close'
-      : 'not ready to close';
-    const attribution = auditResult.author ? ` (audited by ${auditResult.author})` : '';
-    const lines = [`Latest audit verdict: ${verdict}${attribution}.`];
-    if (auditResult.auditedAt) lines.push(`Audited at: ${auditResult.auditedAt}`);
-    const summary = auditResult.summary?.trim();
-    if (summary) lines.push(summary);
-    return lines.join('\n');
-  }
-
-  const waiver = item.auditWaiver;
-  const waiverReason = waiver?.reason?.trim();
-  if (waiver && waiverReason) {
-    const author = waiver.author ? ` by ${waiver.author}` : '';
-    return `Audit gap waived${author}: ${waiverReason}`;
-  }
-
-  const recent = comments
-    .slice(0, 2)
-    .map(c => `${c.author}: ${firstLine(c.comment)}`)
-    .filter(entry => entry.replace(/^[^:]*:\s*/, '').length > 0);
-  if (recent.length > 0) return recent.join('\n');
-
-  return genericFallback(item);
-}
-
-/**
- * Result of {@link buildProducerReviewExplanationResult}. `usedLlm` reports
- * whether the text came from the LLM (true) or the structured fallback
- * (false), so the caller can surface a brief fallback notice
- * (WL-0MUX2W8IN005RW66).
- */
-export interface ProducerReviewExplanationResult {
-  text: string;
-  usedLlm: boolean;
-}
-
-/**
- * Produce the producer-review explanation **plus** a signal of whether the
- * LLM path was actually used.
- *
- * Behaves exactly like {@link buildProducerReviewExplanation} but returns
- * `{ text, usedLlm }` instead of a bare string: `usedLlm` is `false` when the
- * item is not flagged (result `null`), the LLM is disabled/unavailable, or
- * the request fails, times out or returns an empty response. The public
- * {@link buildProducerReviewExplanation} keeps its string contract and
- * delegates here, so existing callers are unaffected
- * (WL-0MUX2W8IN005RW66).
- */
-export async function buildProducerReviewExplanationResult(
-  item: WorkItem,
-  deps: ProducerReviewExplanationDeps,
-): Promise<ProducerReviewExplanationResult | null> {
-  if (!item.needsProducerReview) return null;
-
-  if (!deps.noLlm && deps.chatClient?.available) {
-    try {
-      const response = await deps.chatClient.complete(
-        buildExplanationPrompt(item, deps.comments, deps.auditResult),
-        { timeoutMs: deps.timeoutMs ?? EXPLANATION_TIMEOUT_MS },
-      );
-      const rendered = renderExplanation(response);
-      if (rendered.length > 0) return { text: rendered, usedLlm: true };
-    } catch {
-      // Silent fallback — the explanation is advisory; never surface an error.
-    }
-  }
-
-  return {
-    text: renderExplanation(
-      buildFallbackExplanation(item, deps.comments, deps.auditResult),
-    ),
-    usedLlm: false,
-  };
-}
-
-/**
- * Produce a bounded, readable explanation of **why** the item requires
- * producer review and what clears the flag.
- *
- * Returns `null` when the item is not flagged. Otherwise it calls the injected
- * chat client (unless `noLlm` is set or the client is unavailable) and falls
- * back silently to the structured evidence — audit verdict/summary, waiver,
- * comments — on any failure (network error, non-2xx, timeout or empty
- * response). The explanation is advisory: it never mutates the item.
- */
-export async function buildProducerReviewExplanation(
-  item: WorkItem,
-  deps: ProducerReviewExplanationDeps,
-): Promise<string | null> {
-  const result = await buildProducerReviewExplanationResult(item, deps);
-  return result ? result.text : null;
 }
 
 // ── LLM-assisted question extraction ─────────────────────────────────────
@@ -1133,9 +820,6 @@ async function walkQuestions(
 
   const unanswered = pairs.filter(p => p.unanswered);
   if (unanswered.length === 0) {
-    if (item.needsProducerReview) {
-      store.update(item.id, { needsProducerReview: false });
-    }
     outcome.allAnswered = true;
     return outcome;
   }
@@ -1176,9 +860,6 @@ async function walkQuestions(
   }
 
   const allAnswered = !interrupted && pairs.every(p => !p.unanswered);
-  if (allAnswered) {
-    store.update(item.id, { needsProducerReview: false });
-  }
 
   outcome.recorded = recorded;
   outcome.outstanding = pairs.filter(p => p.unanswered).length;
@@ -1191,8 +872,7 @@ async function walkQuestions(
  * each answer back to the description as it is given.
  *
  * Answers are persisted after each response so an interrupted session can be
- * resumed; the producer review flag is only cleared once every question has
- * a non-empty answer (the `allAnswered` auto-clear path, unchanged).
+ * resumed.
  *
  * When the deterministic parser finds no questions and the caller enables the
  * LLM fallback (`options.llmFallback` + an available `chatClient`),
@@ -1200,11 +880,6 @@ async function walkQuestions(
  * questions; each is then presented through the same prompt loop for
  * confirmation and answer. Extraction failures degrade silently to the
  * deterministic-only outcome (WL-0MUH7ACKJ0024VGF AC1–AC6).
- *
- * The "no questions detected" edge case (noSection / noQuestions) is handled
- * by the command registration below, which explains how the producer clears
- * an outstanding `needsProducerReview` flag and offers to clear it: see
- * {@link buildProducerReviewExplanation} and `.option('--no-llm')`.
  */
 export async function runInterview(
   item: WorkItem,
@@ -1300,8 +975,8 @@ export interface InterviewPromptLoop {
 /** Injectable dependencies for the interview command (used by tests). */
 export interface InterviewCommandDeps {
   /**
-   * Build the chat client used for the producer-review explanation and the
-   * LLM-assisted question extraction. Return `null` to disable the LLM path.
+   * Build the chat client used for LLM-assisted question extraction.
+   * Return `null` to disable the LLM path.
    * Defaults to an `OpenAIChatClient` over the resolved LLM config.
    */
   chatClientFactory?: (options: { model?: string }) => ChatClient | null;
@@ -1311,33 +986,12 @@ export interface InterviewCommandDeps {
    */
   promptLoopFactory?: () => InterviewPromptLoop;
   /**
-   * Confirm whether the `needsProducerReview` flag should be cleared.
-   * Defaults to a `readline` `(y/N)` prompt on stdin/stdout.
-   */
-  clearPrompt?: (message: string) => Promise<boolean>;
-  /**
    * Sink for in-flight LLM progress feedback (defaults to `process.stdout`).
    * Tests inject a capturing stream to assert the status message, spinner and
    * fallback notice without writing to the real terminal
    * (WL-0MUX2W8IN005RW66).
    */
   progressOutStream?: ProgressWriteStream;
-}
-
-/**
- * Ask a yes/no question on the terminal, defaulting to **No** on anything
- * other than an explicit `y`/`yes` (parent AC1/AC3).
- */
-export async function defaultClearPrompt(message: string): Promise<boolean> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  try {
-    const answer = await new Promise<string>(resolve => {
-      rl.question(message, resolve);
-    });
-    return /^y(es)?$/i.test(answer.trim());
-  } finally {
-    rl.close();
-  }
 }
 
 /**
@@ -1380,23 +1034,22 @@ export default function register(
     });
 
   const promptLoopFactory = deps.promptLoopFactory ?? createPromptLoop;
-  const clearPrompt = deps.clearPrompt ?? defaultClearPrompt;
   const progressStream: ProgressWriteStream =
     deps.progressOutStream ?? process.stdout;
 
   program
     .command('interview <id>')
     .description(
-      'Walk through outstanding interview questions on a work item interactively, capturing answers and clearing the producer review flag',
+      'Walk through outstanding interview questions on a work item interactively and capture answers',
     )
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--json', 'Non-interactive JSON output (no prompts, no mutation)')
-    .option('--no-llm', 'Disable all LLM use (explanation and question extraction)')
+    .option('--no-llm', 'Disable all LLM use (question extraction)')
     .option(
       '--llm',
       'Enable LLM-assisted clarifying-question extraction when the deterministic parser finds none',
     )
-    .option('--model <model>', 'Override the chat model for the explanation')
+    .option('--model <model>', 'Override the chat model')
     .action(async (
       id: string,
       options: InterviewOptions,
@@ -1472,42 +1125,11 @@ export default function register(
         fallbackNoticeEmitted = true;
       };
 
-      /** Explanation for the flagged no-question cases, else null. */
-      const explanationFor = async (): Promise<string | null> => {
-        if (!item.needsProducerReview || !(noSection || noQuestions)) return null;
-        const deps = {
-          comments: db.getCommentsForWorkItem(item.id),
-          auditResult: db.getAuditResult(item.id),
-          chatClient,
-          noLlm,
-        };
-        // `--json` must remain byte-for-byte valid: never emit progress.
-        if (jsonMode) {
-          const result = await buildProducerReviewExplanationResult(item, deps);
-          return result ? result.text : null;
-        }
-        const willAttempt = !noLlm && chatClient?.available === true;
-        if (willAttempt) beginProgress();
-        let result: ProducerReviewExplanationResult | null = null;
-        try {
-          result = await buildProducerReviewExplanationResult(item, deps);
-        } finally {
-          if (willAttempt) endProgress({ usedLlm: result?.usedLlm ?? false });
-        }
-        if (!willAttempt && result && !result.usedLlm && !noLlm) {
-          noticeFallbackWithoutRequest();
-        }
-        return result ? result.text : null;
-      };
-
       // ── Non-interactive JSON mode: no prompts, no mutation ───────────
       if (jsonMode) {
-        const explanation = await explanationFor();
         output.json({
           success: true,
           workItemId: item.id,
-          needsProducerReview: item.needsProducerReview,
-          producerReviewExplanation: explanation,
           noSection,
           noQuestions,
           total: pairs.length,
@@ -1521,10 +1143,7 @@ export default function register(
       console.log(`\n=== Interview: ${item.id} ===`);
       console.log(`Title:     ${item.title}`);
       console.log(`Status:    ${item.status}`);
-      console.log(`Stage:     ${item.stage}`);
-      console.log(
-        `Review:    ${item.needsProducerReview ? 'needs review' : 'not flagged'}\n`,
-      );
+      console.log(`Stage:     ${item.stage}\n`);
 
       // ── Step 2: Interactive walkthrough ──────────────────────────────
       const prompts = promptLoopFactory();
@@ -1552,30 +1171,6 @@ export default function register(
         prompts.close();
       }
 
-      /**
-       * Print the explanation (when the item is flagged and there is nothing
-       * to interview), then offer to clear the flag. Returns true when the
-       * flag was cleared. Never called in `--json` mode.
-       */
-      const explainAndOfferClear = async (): Promise<void> => {
-        const explanation = await explanationFor();
-        if (!explanation) {
-          console.log('Nothing to interview. Exiting.');
-          return;
-        }
-        console.log('');
-        console.log('Why this item needs producer review:');
-        console.log(explanation);
-        console.log('');
-        const shouldClear = await clearPrompt('Clear the needsProducerReview flag? (y/N)');
-        if (shouldClear) {
-          withStoreMutationLock(ctx.dataPath, () => db.update(item.id, { needsProducerReview: false }));
-          console.log('   needsProducerReview cleared.');
-        } else {
-          console.log('   needsProducerReview remains flagged.');
-        }
-      };
-
       // ── Step 3: Report outcome ───────────────────────────────────────
       if (outcome.extracted > 0) {
         console.log('');
@@ -1583,13 +1178,12 @@ export default function register(
           console.log(
             `✅ ${outcome.recorded} of ${outcome.extracted} LLM-extracted question(s) confirmed for ${normalizedId}.`,
           );
-          console.log('   needsProducerReview cleared.');
         } else if (outcome.recorded > 0) {
           console.log(
             `📝 ${outcome.recorded} of ${outcome.extracted} LLM-extracted question(s) confirmed for ${normalizedId}.`,
           );
           console.log(
-            `   ${outcome.outstanding} question(s) skipped — needsProducerReview remains flagged.`,
+            `   ${outcome.outstanding} question(s) skipped — rerun \`interview\` to resume.`,
           );
         } else {
           console.log(
@@ -1600,26 +1194,22 @@ export default function register(
       }
       if (outcome.noSection) {
         console.log('No clarifying-questions section found.');
-        await explainAndOfferClear();
+        console.log('Nothing to interview. Exiting.');
         return;
       }
       if (outcome.noQuestions) {
         console.log('No interview questions found in the clarifying section.');
-        await explainAndOfferClear();
+        console.log('Nothing to interview. Exiting.');
         return;
       }
       if (outcome.recorded === 0 && outcome.allAnswered) {
         console.log('All questions already have answers.');
-        if (item.needsProducerReview) {
-          console.log('   needsProducerReview cleared.');
-        }
         return;
       }
 
       console.log('');
       if (outcome.allAnswered) {
         console.log(`✅ ${outcome.recorded} answer(s) recorded for ${normalizedId}.`);
-        console.log('   needsProducerReview cleared.');
       } else {
         console.log(`📝 ${outcome.recorded} answer(s) recorded for ${normalizedId}.`);
         console.log(

@@ -28,7 +28,6 @@ const REQUIRED_CATEGORIES = [
   'risk',
   'effort',
   'audit',
-  'producer-review',
   'agent',
   'coverage',
 ];

@@ -17,9 +17,7 @@ const ID_ARG_COMMANDS = new Set([
 ]);
 
 // Commands that accept a work-item ID as an optional argument
-const OPTIONAL_ID_COMMANDS = new Set([
-  'reviewed',
-]);
+const OPTIONAL_ID_COMMANDS = new Set<string>([]);
 
 type Shell = 'bash' | 'zsh';
 

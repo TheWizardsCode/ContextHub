@@ -25,14 +25,15 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
     id: '20260210-add-needsProducerReview',
     description: 'Add needsProducerReview INTEGER column to workitems (default 0)',
     safe: true,
-    requiredColumn: 'needsProducerReview',
+    requiredColumn: '__meta:needsProducerReview_added',
     apply: (db: Database.Database) => {
-      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
-      const existingCols = new Set(cols.map(c => String(c.name)));
-      if (!existingCols.has('needsProducerReview')) {
-        // Idempotent add column
-        db.exec(`ALTER TABLE workitems ADD COLUMN needsProducerReview INTEGER NOT NULL DEFAULT 0`);
-      }
+      // Historical migration — preserved for history (WL-0MV85WFYU0071YQ9).
+      // The column has been dropped by 20261015-drop-needsProducerReview;
+      // this entry must never re-add it, so it only records completion via a
+      // metadata sentinel (mirrors the add-audit migration's noop pattern).
+      try {
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('needsProducerReview_added', '1');
+      } catch (_e) { /* best-effort */ }
     }
   },
   {
@@ -199,6 +200,27 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
       if (!cols.some(c => String(c.name) === 'auditWaiver')) {
         db.exec(`ALTER TABLE workitems ADD COLUMN auditWaiver TEXT`);
       }
+    }
+  },
+  {
+    id: '20261015-drop-needsProducerReview',
+    description: 'Drop needsProducerReview column from workitems (assignee hold replaces the flag, WL-0MV85WFYU0071YQ9)',
+    safe: false,
+    requiredColumn: '__meta:needsProducerReview_dropped',
+    apply: (db: Database.Database) => {
+      // SQLite 3.35.0+ supports ALTER TABLE DROP COLUMN. Check whether the
+      // column still exists before dropping (mirrors drop-audit-column).
+      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+      const existingCols = new Set(cols.map(c => String(c.name)));
+      if (existingCols.has('needsProducerReview')) {
+        db.exec(`ALTER TABLE workitems DROP COLUMN needsProducerReview`);
+      }
+      // Mark the migration complete via a metadata sentinel so the runner
+      // treats it as idempotent even though the target column no longer
+      // exists (same pattern as drop-audit-column).
+      try {
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('needsProducerReview_dropped', '1');
+      } catch (_e) { /* best-effort */ }
     }
   }
 ];

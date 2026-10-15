@@ -78,28 +78,6 @@ describe('searchFallback with new filter flags', () => {
     });
   });
 
-  describe('--needs-producer-review filter (fallback)', () => {
-    it('should filter by needsProducerReview true', () => {
-      db.create({ title: 'Fbreview alpha item', needsProducerReview: true });
-      db.create({ title: 'Fbreview alpha item', needsProducerReview: false });
-
-      const results = (db as any).store.searchFallback('fbreview alpha', { needsProducerReview: true });
-      expect(results.length).toBe(1);
-      const item = db.get(results[0].itemId);
-      expect(item?.needsProducerReview).toBe(true);
-    });
-
-    it('should filter by needsProducerReview false', () => {
-      db.create({ title: 'Fbreview beta item', needsProducerReview: true });
-      db.create({ title: 'Fbreview beta item', needsProducerReview: false });
-
-      const results = (db as any).store.searchFallback('fbreview beta', { needsProducerReview: false });
-      expect(results.length).toBe(1);
-      const item = db.get(results[0].itemId);
-      expect(item?.needsProducerReview).toBe(false);
-    });
-  });
-
   describe('--deleted filter (fallback)', () => {
     it('should exclude deleted items by default', () => {
       db.create({ title: 'Fbdeleted alpha item', status: 'open' });
@@ -136,17 +114,15 @@ describe('searchFallback with new filter flags', () => {
       expect(item?.assignee).toBe('alice');
     });
 
-    it('should combine stage, issueType and needsProducerReview', () => {
-      db.create({ title: 'Fbmulti alpha item', stage: 'review', issueType: 'bug', needsProducerReview: true });
-      db.create({ title: 'Fbmulti alpha item', stage: 'review', issueType: 'bug', needsProducerReview: false });
-      db.create({ title: 'Fbmulti alpha item', stage: 'done', issueType: 'bug', needsProducerReview: true });
+    it('should combine stage and issueType', () => {
+      db.create({ title: 'Fbmulti alpha item', stage: 'review', issueType: 'bug' });
+      db.create({ title: 'Fbmulti alpha item', stage: 'done', issueType: 'bug' });
 
-      const results = (db as any).store.searchFallback('fbmulti alpha', { stage: 'review', issueType: 'bug', needsProducerReview: true });
+      const results = (db as any).store.searchFallback('fbmulti alpha', { stage: 'review', issueType: 'bug' });
       expect(results.length).toBe(1);
       const item = db.get(results[0].itemId);
       expect(item?.stage).toBe('review');
       expect(item?.issueType).toBe('bug');
-      expect(item?.needsProducerReview).toBe(true);
     });
   });
 });

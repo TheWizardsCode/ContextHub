@@ -110,6 +110,8 @@ describe('doctor upgrade command', () => {
       const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
       // After all migrations, audit column should be dropped in favor of audit_results table
       expect(cols.map(c => c.name)).not.toContain('audit');
+      // needsProducerReview is dropped in favour of the assignee hold (WL-0MV85WFYU0071YQ9).
+      expect(cols.map(c => c.name)).not.toContain('needsProducerReview');
       // audit_results table should exist
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_results'").all() as any[];
       expect(tables.length).toBe(1);

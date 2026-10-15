@@ -49,7 +49,6 @@ function makeItem(overrides: Partial<WorkItem> = {}): WorkItem {
     deleteReason: '',
     risk: '',
     effort: '',
-    needsProducerReview: false,
     ...overrides,
   };
 }

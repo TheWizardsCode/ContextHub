@@ -108,7 +108,7 @@ async function waitForFile(file: string, timeoutMs = 15000): Promise<void> {
 
 /** Shape of the subset of `wl show --json` this suite asserts on. */
 interface ShowResult {
-  workItem: { id: string; status: string; stage: string; title?: string; description?: string; needsProducerReview?: boolean; auditWaiver?: { reason: string; author?: string } | null; sortIndex?: number };
+  workItem: { id: string; status: string; stage: string; title?: string; description?: string; assignee?: string; auditWaiver?: { reason: string; author?: string } | null; sortIndex?: number };
   comments: Array<{ id?: string; author: string; comment: string }>;
 }
 
@@ -537,8 +537,8 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     expect(after.workItem.title).toBe('IMPORTED TITLE');
   }, 90000);
 
-  it('AC1/AC3: a concurrent wl reviewed survives a sync (needsProducerReview flag intact)', async () => {
-    const id = createItem(s.local, 'Reviewed flag target');
+  it('AC1/AC3: a concurrent wl update (--assignee) survives a sync (assignee intact)', async () => {
+    const id = createItem(s.local, 'Assignee update target');
 
     const seed = runCli(s.local, ['--json', 'sync']);
     expect(seed.status, seed.stderr).toBe(0);
@@ -548,7 +548,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     await waitForFile(s.marker, 20000);
 
     const mutation = (async () => {
-      const rv = spawnCli(s.local, ['--json', 'reviewed', id, 'true'], realGitEnv());
+      const rv = spawnCli(s.local, ['--json', 'update', id, '--assignee', 'producer'], realGitEnv());
       const rvRes = await rv.done;
       expect(rvRes.status, rvRes.stderr).toBe(0);
     })();
@@ -563,9 +563,9 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     expect(syncRes.status, syncRes.stderr).toBe(0);
     await mutation;
 
-    // The flag set during the parked sync must survive it.
+    // The assignee set during the parked sync must survive it.
     const after = showItem(s.local, id);
-    expect(after.workItem.needsProducerReview).toBe(true);
+    expect(after.workItem.assignee).toBe('producer');
   }, 90000);
 
   it('AC1: a concurrent wl audit-waive survives a sync (waiver intact)', async () => {
@@ -785,7 +785,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
       });
 
     const mutations = Promise.all([
-      mutate(['--json', 'reviewed', idA, 'true']),
+      mutate(['--json', 'update', idA, '--assignee', 'producer']),
       mutate(['--json', 'comment', 'add', idB, '-a', 'tester', '-c', 'cross-command comment']),
       mutate(['--json', 'dep', 'add', idC, idD]),
       mutate(['--json', 're-sort']),
@@ -799,7 +799,7 @@ describe('wl sync vs concurrent mutation (lost-update race)', () => {
     await mutations;
 
     // Every command class's mutation must have survived the single sync.
-    expect(showItem(s.local, idA).workItem.needsProducerReview).toBe(true);
+    expect(showItem(s.local, idA).workItem.assignee).toBe('producer');
     expect(
       showItem(s.local, idB).comments.some(c => c.comment.includes('cross-command comment')),
     ).toBe(true);

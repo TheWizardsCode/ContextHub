@@ -117,7 +117,6 @@ Options:
 - `--created-by <createdBy>` — Interoperability: created by (optional).
 - `--deleted-by <deletedBy>` — Interoperability: deleted by (optional).
 - `--delete-reason <deleteReason>` — Interoperability: delete reason (optional).
-- `--needs-producer-review <true|false>` — Set needsProducerReview flag (true|false|yes|no) (optional).
 - `--audit-text <text>` — Set structured audit text when creating an item. The audit result is stored in the `audit_results` table (the sole source of truth for audit state). Prefer `--audit-file` for file-based input to avoid shell-escaping issues (see docs/AUDIT_STATUS.md).
 - `--audit-file <file>` — Read audit text from a file (recommended for large or shell-sensitive content).
 - `--audit-fingerprint <fingerprint>` — Content fingerprint for the freshness gate (WL-0MUBVH5S0008NQ9K); an explicit value wins over an embedded `Audit content fingerprint: <hex>` line.
@@ -161,7 +160,7 @@ Automatic re-sort:
 
 ### `update` [options] <id...>
 
-Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line), `--needs-producer-review <true|false>` (set needsProducerReview flag), and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
+Update fields on one or more existing work items. Accepts multiple IDs. Options mirror `create` for updatable fields, plus `--description-file <file>` (read description from a file), `--if-status <status>`/`--if-stage <stage>`/`--if-assignee <assignee>` (atomic compare-and-swap guards; see *Conditional updates* below), `--audit-text <text>` and `--audit-file <file>` (read audit text from a file; writes to the `audit_results` table), `--audit-fingerprint <fingerprint>` (content fingerprint for the freshness gate; an explicit value wins over an embedded `Audit content fingerprint: <hex>` line) and `--do-not-delegate <true|false>` (set or clear the do-not-delegate tag).
 
 > **Soft-delete guard (SA-0MUJBLZC60085DI9):** a soft-deleted item (non-empty `deletedBy`) cannot be updated — `wl update` rejects it per-id with error `deleted-item` and a message naming the item, and exits non-zero. This prevents a stale status/stage update from resurrecting a deleted item for the dispatcher to re-select. An explicit change to the delete-attribution fields themselves (`--deleted-by` / `--delete-reason`) is still permitted.
 
@@ -215,23 +214,6 @@ Conditional updates (compare-and-swap guards):
 
 - `--if-assignee ""` is a meaningful expected value: it matches an item that is currently **unassigned** (empty assignee). It is distinguishable from omitting the flag (which applies no assignee guard), so an empty-string guard is a valid exclusive-claim token.
 - The guarded status values are normalized (e.g. `in_progress` matches a stored `in-progress`). `--if-assignee` matches the stored assignee exactly.
-
-### `reviewed` <id> [value]
-
-Toggle or set the `needsProducerReview` flag on a work item. If `value` is omitted, it toggles the current value.
-
-Options:
-
-- `--prefix <prefix>` — Operate on a specific prefix (optional).
-
-Examples:
-
-```sh
-wl reviewed WL-ABC123           # toggle flag
-wl reviewed WL-ABC123 true      # set to true
-wl reviewed WL-ABC123 false     # set to false
-wl --json reviewed WL-ABC123    # JSON output with updated work item
-```
 
 ### `audit` [options] <id>
 
@@ -799,7 +781,6 @@ Options:
 `-n, --number <n>` (optional) — Limit the number of items returned
 `--stage <stage>` (optional)
 `--deleted` (optional) — Include items with `deleted` status in the output (hidden by default).
-`--needs-producer-review [value]` (optional; defaults to `true` when omitted; accepts true|false|yes|no)
 `--prefix <prefix>` (optional)
 `--no-icons` (optional) — Disable icon rendering for clean text output. When icons are disabled, priority and status display as plain text (e.g., `[CRIT]`, `[OPEN]`) instead of emoji. This is useful for scripting or copy-paste operations.
 `--json` (optional)
@@ -817,7 +798,6 @@ wl list --root-only -p critical
 wl search "signup"
 wl -F concise list -s in-progress
 wl --json list -s open --tags backlog
-wl list --needs-producer-review
 ```
 
 When `--json` is used, each work item includes the audit enrichment fields
@@ -864,7 +844,6 @@ Options:
 `-a, --assignee <assignee>` (optional) — Filter by assignee
 `--stage <stage>` (optional) — Filter by stage
 `--deleted` (optional) — Include deleted items in results
-`--needs-producer-review [value]` (optional) — Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)
 `--issue-type <type>` (optional) — Filter by issue type
 `-l, --limit <n>` (optional) — Maximum number of results (default: 20)
 `--rebuild-index` (optional) — Rebuild the FTS index from scratch before searching
@@ -885,7 +864,6 @@ wl search "bug" --priority high --assignee alice
 wl search "migration" --stage in_progress
 wl search "authentication" --tags security,auth --limit 5
 wl search "feature" --issue-type epic
-wl search "review" --needs-producer-review
 wl --json search "cli refactor"
 wl search "rebuild" --rebuild-index
 
@@ -1293,7 +1271,7 @@ wl --json status
 ### `interview` [options] <id>
 
 Walk through the outstanding clarifying questions on a work item interactively,
-capturing answers and clearing the `needsProducerReview` flag.
+capturing answers.
 
 The command reads the work item's clarifying-questions appendix (written by the
 `intake` and `plan` skills) and prompts for every question that is still
@@ -1310,7 +1288,7 @@ Both appendix styles are recognised:
 
 Answers are persisted after each response, so an interrupted session can be
 resumed by re-running the command: only the questions that remain outstanding
-are asked. `needsProducerReview` is cleared once every question has an answer.
+are asked.
 
 #### LLM-assisted question extraction
 
@@ -1351,8 +1329,7 @@ the questions did not come from the model.
 
 #### In-flight progress feedback
 
-Both LLM paths (question extraction and the producer-review explanation) can
-block for up to 15 s. To make that visible, the command prints a static
+The LLM question-extraction path can block for up to 15 s. To make that visible, the command prints a static
 `Thinking…` status message immediately before each request.
 
 - When stdout is a TTY, an animated spinner is rendered on the same line and
@@ -1371,72 +1348,19 @@ block for up to 15 s. To make that visible, the command prints a static
 No LLM request is issued — and therefore no feedback is shown — when the
 deterministic parser already found clarifying questions.
 
-#### When there are no questions to answer
-
-If no clarifying-questions section is found (or it contains no parseable
-questions) but the item is still flagged for producer review, the command
-explains **why** the item is flagged — naming the triggering evidence — and
-only then what the producer must do to clear the flag.
-
-The explanation is produced by the local LLM proxy's `compact` model, prompted
-with an instruction to first state the reason (citing the triggering evidence)
-and then the action, plus item context:
-
-- the **latest audit result** (verdict, provenance, summary and a bounded
-  raw-output excerpt) — the strongest signal for review-gated items;
-- the description; and
-- the two most recent comments.
-
-The audit block is placed ahead of the description so it survives the overall
-context bound (`MAX_PROMPT_CONTEXT_BYTES`, 8 KiB) when the description is very
-large. The summary and raw-output excerpt are individually bounded so a single
-large audit cannot dominate the prompt.
-
-When the LLM is disabled (`--no-llm`) or unreachable the command falls back
-to the **structured evidence** (printing the `LLM unavailable — using
-structured evidence.` notice for the unreachable case, but not for an
-explicit `--no-llm` opt-out), in priority order:
-
-1. the latest audit result (verdict and summary);
-2. a durable audit-gap waiver (`auditWaiver`);
-3. the two most recent comments (`<author>: <first line>`);
-4. a generic actionable line (`wl reviewed <id> false`) as a last resort.
-
-The rendered explanation preserves intentional line breaks and short Markdown
-structure — it is no longer collapsed into a single line — but collapses runs
-of spaces and repeated blank lines, and is bounded by a documented maximum
-(`MAX_EXPLANATION_LENGTH`, 8192 characters, and `MAX_EXPLANATION_LINES`, 512
-lines). Truncation is marked with a trailing ellipsis.
-
-The explanation is advisory only — it never mutates the description or clears
-the flag.
-
-After printing the explanation the command asks
-`Clear the needsProducerReview flag? (y/N)` (default **No**); answering `y`
-clears the flag via the store, anything else leaves it flagged. This prompt
-only appears in the `noSection`/`noQuestions` cases; the **`allAnswered`
-path is unchanged** (`WL-0MU55UDBJ008DJ67`) and still clears the flag
-automatically without prompting. No prompt is shown — and the flag is never
-mutated — in `--json` mode or other non-interactive contexts.
-
 Options:
 
 - `--prefix <prefix>` — Operate on a specific prefix (optional).
-- `--json` — Non-interactive mode: prints JSON with
-  `needsProducerReview` (boolean), `producerReviewExplanation` (string or
-  `null`; multi-line explanations are preserved), `noSection`,
+- `--json` — Non-interactive mode: prints JSON with `noSection`,
   `noQuestions`, `total`, `outstanding` and `allAnswered`. Performs no
   prompts, no mutation, no progress/status output and (with `--no-llm`) no
   LLM call.
-- `--no-llm` — Disable all LLM use (the producer-review explanation and the
-  LLM-assisted question extraction) and use the structured fallback instead
-  (default: explanation on, extraction off unless enabled).
+- `--no-llm` — Disable all LLM use (LLM-assisted question extraction).
 - `--llm` — Enable LLM-assisted clarifying-question extraction when the
   deterministic parser finds no questions. Equivalent to
   `interview.intelligent: true`; the flag wins when both are set (default:
   off).
-- `--model <model>` — Override the chat model used for the explanation and
-  extraction.
+- `--model <model>` — Override the chat model used for extraction.
 
 > Without `--json`, the command requires interactive (TTY) input.
 

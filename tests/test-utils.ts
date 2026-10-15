@@ -144,7 +144,6 @@ export function createTuiTestContext(options?: { prefix?: string }) {
       deleteReason: '',
       risk: '',
       effort: '',
-      needsProducerReview: false,
     };
       items.set(id, item);
       return id;
@@ -206,10 +205,6 @@ export function createTuiTestContext(options?: { prefix?: string }) {
           return stages.includes(item.stage);
         });
       }
-      // Apply needsProducerReview filter if present
-      if (query?.needsProducerReview) {
-        allItems = allItems.filter(item => item.needsProducerReview === true);
-      }
       // Apply assignee filter (supports @github-copilot)
       if (query?.assignee) {
         const assignee = String(query.assignee).toLowerCase();
@@ -243,7 +238,6 @@ export function createTuiTestContext(options?: { prefix?: string }) {
         deleteReason: '',
         risk: String(item.risk ?? ''),
         effort: String(item.effort ?? ''),
-        needsProducerReview: Boolean(item.needsProducerReview ?? false),
         doNotDelegate: Boolean(item.doNotDelegate ?? false),
       };
       items.set(id, newItem);

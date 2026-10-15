@@ -34,7 +34,6 @@ const SAMPLE_ITEM: WorkItem = {
   deleteReason: '',
   risk: 'Low',
   effort: 'M',
-  needsProducerReview: false,
 };
 
 describe('pickFields', () => {
@@ -102,14 +101,12 @@ describe('pickFields', () => {
       'createdAt',
       'updatedAt',
       'parentId',
-      'needsProducerReview',
       'sortIndex',
     ]);
     const keys = Object.keys(result);
-    expect(keys.length).toBe(13);
+    expect(keys.length).toBe(12);
     expect(result.id).toBe('WL-000000000000000000');
     expect(result.sortIndex).toBe(100);
-    expect(result.needsProducerReview).toBe(false);
     expect(result.tags).toEqual(['tag1', 'tag2']);
     expect(result.parentId).toBeNull();
   });
@@ -137,14 +134,13 @@ describe('pickFields', () => {
         'createdAt',
         'updatedAt',
         'parentId',
-        'needsProducerReview',
         'sortIndex',
       ])
     );
   });
 
   it('VALID_FIELDS has no unexpected entries', () => {
-    expect(VALID_FIELDS).toHaveLength(14);
+    expect(VALID_FIELDS).toHaveLength(13);
   });
 
   it('error message for unknown fields excludes id from valid fields list', () => {

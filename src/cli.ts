@@ -32,7 +32,6 @@ import migrateCommand from './commands/migrate.js';
 import depCommand from './commands/dep.js';
 import reSortCommand from './commands/re-sort.js';
 import doctorCommand from './commands/doctor.js';
-import reviewedCommand from './commands/reviewed.js';
 import interviewCommand from './commands/interview.js';
 import searchCommand from './commands/search.js';
 import unlockCommand from './commands/unlock.js';
@@ -328,7 +327,6 @@ const builtInCommands = [
   depCommand,
   reSortCommand,
   doctorCommand,
-  reviewedCommand,
   interviewCommand,
   searchCommand,
   unlockCommand,
@@ -362,7 +360,6 @@ const builtInCommandNames = new Set([
   'dep',
   're-sort',
   'doctor',
-  'reviewed',
   'interview',
   'search',
   'unlock',
@@ -423,7 +420,7 @@ const formatHelp = (cmd: any, helper: any) => {
 
   // Build groups and mapping of command name -> group
   const groupsDef: { name: string; names: string[] }[] = [
-    { name: 'Issue Management', names: ['create', 'update', 'comment', 'close', 'delete', 'dep', 'reviewed', 'audit'] },
+    { name: 'Issue Management', names: ['create', 'update', 'comment', 'close', 'delete', 'dep', 'audit'] },
     { name: 'Status', names: ['in-progress', 'next', 'recent', 'list', 'show', 'search'] },
     { name: 'Team', names: ['sync', 'github', 'import', 'export'] },
     { name: 'Maintenance', names: ['migrate', 're-sort', 'doctor', 'unlock'] },
