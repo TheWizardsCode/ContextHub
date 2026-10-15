@@ -1742,13 +1742,20 @@ unchanged.
 
 The overlay has two sections:
 
-- **Commands** — every shortcut registered for the list view, grouped by
-  chord leader (`c n`, `c q`, `u p l`, …) with chord, label and a short
-  description. The list is derived live from the shortcut registry, so future
-  shortcut additions appear automatically.
-- **Icons** — a legend explaining every glyph rendered in a work-item row
-  (status, stage, priority, epic, risk, effort, audit, producer-review, agent
-  state and child coverage), derived from the shared icon source of truth.
+- **Commands** — every shortcut registered for the list view listed in a
+  single column, each row showing the chord key(s), label and the FULL
+  (untruncated, word-wrapped) description. Commands are grouped by chord
+  leader under a heading per family (`d — Downtime`, `c — Create`, `u —
+  Update`, `f — Filter`, …) so the sections read logically. The list is
+  derived live from the shortcut registry, so future shortcut additions
+  appear automatically under their leader heading.
+- **Icons** — a legend explaining every glyph rendered in a work-item row,
+  grouped by category under a heading (`Status`, `Stage`, `Priority`, `Epic`,
+  `Risk`, `Effort`, `Audit`, `Producer review`, `Agent`, `Coverage`) with
+  each group's icons listed on a single line. The category name prefix is
+  removed from each meaning (the heading already names the group), and the
+  legend is derived from the shared icon source of truth so new row glyphs
+  cannot silently miss it.
 
 The footer advertises the screen as `?: Help`. When content exceeds the pane
 height the overlay is clipped (scrolled) but the dismiss hint line (`? / Esc /

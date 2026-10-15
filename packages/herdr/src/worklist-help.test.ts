@@ -326,7 +326,7 @@ describe('help screen overlay — command enumeration (WL-0MV85R0JD004CHAE)', ()
         expect(frame).toContain('Create a new work item');
         expect(frame).toContain('Run the implement workflow');
       },
-      { cols: 200 },
+      { cols: 200, rows: 200 },
     );
   });
 
@@ -441,7 +441,7 @@ describe('help screen overlay — icon legend (WL-0MV85R1V6000IL4E)', () => {
           expect(lower, `legend should explain the '${word}' icon`).toContain(word);
         }
       },
-      { rows: 120, cols: 200 },
+      { rows: 260, cols: 200 },
     );
   });
 });

@@ -2882,20 +2882,10 @@ export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
   return parts.join('  ');
 }
 
-/**
- * Truncate a string to at most `max` terminal cells, appending an ellipsis
- * when content is dropped. Keeps the leading text (chord + label) intact so
- * a long description can never hide an entry's identity.
- */
-function truncateToWidth(s: string, max: number): string {
-  if (max <= 0) return '';
-  if (s.length <= max) return s;
-  if (max <= 1) return s.slice(0, max);
-  return `${s.slice(0, max - 1)}\u2026`;
-}
-
 /** A single row in the help screen's icon legend. */
 export interface HelpIconRow {
+  /** Icon category (the name prefix, e.g. `status`) used to group the legend. */
+  category: string;
   /** The glyph (or noIcons text fallback) as rendered in the list. */
   glyph: string;
   /** Short human-readable meaning of the glyph. */
@@ -2903,18 +2893,118 @@ export interface HelpIconRow {
 }
 
 /**
- * Render the full-pane `?` help overlay (WL-0MV85R14Y003RII9).
+ * Word-wrap a single logical line into lines of at most `cols` display
+ * cells, indenting continuation lines by `indent` columns. Keeps the FULL
+ * text — never truncates — so a long description still reads completely and
+ * the pane's physical row budget stays exact (producer audit on
+ * WL-0MTV97GV20088CS7: "full (not truncated) descriptions").
+ */
+function wrapHelpLine(text: string, cols: number, indent: number): string[] {
+  if (cols <= 1) return [text];
+  const words = text.split(/\s+/).filter(w => w.length > 0);
+  const lines: string[] = [];
+  let current = '';
+  let currentWidth = 0;
+  for (const word of words) {
+    const width = visibleLength(word);
+    if (current === '') {
+      current = word;
+      currentWidth = width;
+      continue;
+    }
+    if (currentWidth + 1 + width <= cols) {
+      current += ` ${word}`;
+      currentWidth += 1 + width;
+    } else {
+      lines.push(current);
+      current = `${' '.repeat(indent)}${word}`;
+      currentWidth = indent + width;
+    }
+  }
+  if (current !== '') lines.push(current);
+  return lines.length > 0 ? lines : [text];
+}
+
+/**
+ * Explicit group headings for chord-leader families whose member labels do
+ * not share a common first word (so the derived heading would be a bare key).
+ * Unknown leaders fall back to the label-derived heading in
+ * {@link helpGroupHeading}, so future chords are still grouped.
+ */
+const HELP_LEADER_LABELS: Record<string, string> = {
+  r: 'Review',
+};
+
+/**
+ * Render a human-readable group heading for a chord-leader command family: the
+ * leader key plus the shared first label word when a strict majority of the
+ * group's labels agree (e.g. `c — create`, `a — audit`), else the bare leader
+ * key (`r`). Derived from live registry data so future chords keep working.
+ */
+function helpGroupHeading(leader: string, group: ShortcutEntry[]): string {
+  const explicit = HELP_LEADER_LABELS[leader];
+  if (explicit) return `${leader} \u2014 ${explicit}`;
+  const counts = new Map<string, number>();
+  for (const e of group) {
+    const word = (e.label ?? e.command).split(/\s+/)[0] ?? '';
+    if (word) counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  let best = '';
+  let bestCount = 0;
+  for (const [word, count] of counts) {
+    if (count > bestCount) {
+      bestCount = count;
+      best = word;
+    }
+  }
+  if (bestCount > group.length / 2) {
+    return `${leader} \u2014 ${best.charAt(0).toUpperCase()}${best.slice(1)}`;
+  }
+  return leader;
+}
+
+/** Human-readable heading for an icon category (e.g. `status` → `Status`). */
+function helpCategoryHeading(category: string): string {
+  return category
+    .split('-')
+    .map(w => (w ? w.charAt(0).toUpperCase() + w.slice(1) : w))
+    .join(' ');
+}
+
+/**
+ * Strip the leading category name from an icon meaning (the producer audit's
+ * "remove the name prefix"): the group heading already names the category, so
+ * `Status: open — not started` renders as `open — not started` under `Status`.
+ * Meanings that do not start with the category label are returned unchanged.
+ */
+function helpMeaningWithoutCategory(category: string, meaning: string): string {
+  const label = helpCategoryHeading(category);
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Strip a leading `<Category>` optionally followed by a separator
+  // (`:`, `—`, `–`, `-`) and/or whitespace. `Audit passed — …` under the
+  // `Audit` heading becomes `passed — …`; unrelated meanings are untouched.
+  const re = new RegExp(`^\\s*${escaped}\\s*[:\\u2014\\u2013-]?\\s*`, 'i');
+  const stripped = meaning.replace(re, '').trim();
+  return stripped.length > 0 ? stripped : meaning;
+}
+
+/**
+ * Render the full-pane `?` help overlay (WL-0MV85R14Y003RII9; layout reworked
+ * per the producer audit of 2026-10-15).
  *
- * Two sections are produced: **Commands** — every supplied shortcut entry,
- * grouped by chord leader so a family (`c n`, `c q`) is shown together, each
- * with its chord, label and a short description — and **Icons** — the
-glyph legend (supplied by the caller from the shared icon source of truth).
+ * Two sections are produced:
+ * - **Commands** — every supplied shortcut entry in a SINGLE column with its
+ *   FULL (never truncated) description, grouped under a heading per chord
+ *   leader family (`c — create`, `a — audit`, …) so groups are separated;
+ * - **Icons** — the glyph legend (supplied by the caller from the shared icon
+ *   source of truth), grouped by category under a heading (`Status`, `Stage`,…)
+ *   with the category name prefix removed from each meaning and every group
+ *   listed on a single line under its heading.
  *
- * The output is CLIPPED to the `rows - 1` render budget (matching the list
+ * The output is clipped to the `rows - 1` render budget (matching the list
  * viewport contract, WL-0MTV979LK005YB1B): a title line is always shown and
  * the dismiss footer (`? / Esc / q`) is always the final line, even when the
- * command list is longer than the pane. Entries are laid out in as many
- * columns as the pane width comfortably allows.
+ * content is longer than the pane.
  *
  * Display-only: it takes no state and mutates nothing.
  *
@@ -2930,12 +3020,13 @@ export function formatHelpScreen(
   iconRows: ReadonlyArray<HelpIconRow> = [],
 ): string {
   const budget = Math.max(2, rows - 1);
-  const title = 'Help \u2014 Commands';
+  const title = 'Help';
   const footer = '? / Esc / q  close';
   // Title + footer are always reserved; the remainder is scrollable content.
   const contentBudget = Math.max(0, budget - 2);
+  const lineWidth = Math.max(20, cols - 2);
 
-  // Group entries by chord leader (stable), so a family is contiguous.
+  // ── Commands: single column, grouped by chord leader with headings ──
   const grouped = new Map<string, ShortcutEntry[]>();
   for (const e of entries) {
     const leader = (e.chord && e.chord.length > 0) ? e.chord[0] : '';
@@ -2943,50 +3034,41 @@ export function formatHelpScreen(
     list.push(e);
     grouped.set(leader, list);
   }
-  const ordered: Array<{ chord: string; label: string; description: string }> = [];
-  for (const [, group] of grouped) {
+
+  const content: string[] = [];
+  content.push('Commands');
+  for (const [leader, group] of grouped) {
+    content.push(helpGroupHeading(leader, group));
     for (const e of group) {
-      const chord = (e.chord ?? []).join('');
+      const chord = (e.chord ?? []).join(' ');
       const label = e.label ?? e.command;
-      ordered.push({ chord, label, description: e.description ?? '' });
+      const text = e.description
+        ? `${chord}  ${label} \u2014 ${e.description}`
+        : `${chord}  ${label}`;
+      content.push(...wrapHelpLine(`  ${text}`, lineWidth, 6));
     }
   }
 
-  // Pick a column count that comfortably fits entries in the pane width.
-  const desiredWidth = 44;
-  const minColumnWidth = 34;
-  let columns = Math.max(1, Math.floor(cols / desiredWidth));
-  let columnWidth = Math.floor(cols / columns) - 2;
-  while (columns > 1 && columnWidth < minColumnWidth) {
-    columns -= 1;
-    columnWidth = Math.floor(cols / columns) - 2;
-  }
-  if (columnWidth < 10) columnWidth = Math.max(4, cols - 2);
-
-  const cellFor = (it: { chord: string; label: string; description: string }): string => {
-    const head = `${it.chord} ${it.label}`.trim();
-    const text = it.description ? `${head} \u2014 ${it.description}` : head;
-    return truncateToWidth(text, columnWidth);
-  };
-
-  const contentLines: string[] = [];
-  for (let i = 0; i < ordered.length; i += columns) {
-    const cells = ordered.slice(i, i + columns).map(cellFor);
-    contentLines.push(cells.map(c => c.padEnd(columnWidth)).join('  ').trimEnd());
-  }
-
-  // Icon legend section (WL-0MV85R2G6000G7BU). Only present when supplied;
-  // combined with the command list inside the same scrollable budget.
-  const allContent: string[] = [...contentLines];
+  // ── Icons: grouped by category with a heading, one line per group ──
   if (iconRows.length > 0) {
-    allContent.push('');
-    allContent.push('Icons');
+    content.push('');
+    content.push('Icons');
+    const byCategory = new Map<string, HelpIconRow[]>();
     for (const row of iconRows) {
-      allContent.push(`  ${row.glyph}  ${row.meaning}`);
+      const list = byCategory.get(row.category) ?? [];
+      list.push(row);
+      byCategory.set(row.category, list);
+    }
+    for (const [category, rows] of byCategory) {
+      content.push(helpCategoryHeading(category));
+      const tokens = rows
+        .map(r => `${r.glyph} ${helpMeaningWithoutCategory(category, r.meaning)}`)
+        .join('   ');
+      content.push(...wrapHelpLine(`  ${tokens}`, lineWidth, 4));
     }
   }
 
-  const out = [title, ...allContent.slice(0, contentBudget)];
+  const out = [title, ...content.slice(0, contentBudget)];
   while (out.length < budget - 1) out.push('');
   out.push(footer);
   return out.slice(0, budget).join('\n');
@@ -6987,7 +7069,11 @@ export async function runWorklistTui(
    * guard in packages/shared/src/icons-legend.test.ts enforces it.
    */
   const buildHelpIconLegend = (): HelpIconRow[] =>
-    ICON_LEGEND.map((entry) => ({ glyph: entry.glyph, meaning: entry.meaning }));
+    ICON_LEGEND.map((entry) => ({
+      category: entry.category,
+      glyph: entry.glyph,
+      meaning: entry.meaning,
+    }));
 
   const render = (): void => {
     termSize = getTermSize();

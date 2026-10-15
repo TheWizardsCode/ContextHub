@@ -19,9 +19,14 @@
 
 > **Help-screen legend (WL-0MTV97GV20088CS7):** the herdr worklist's full-pane
 > help screen (pressing `?`) renders an **Icons** legend explaining every glyph
-> shown in a work-item row. The on-screen legend is generated from
-> `ICON_LEGEND` in `@worklog/shared/icons` (the same single source of truth
-> the row renderer uses); a drift test in
+> shown in a work-item row. The legend is grouped by the icon **category**
+> (`Status`, `Stage`, `Priority`, `Epic`, `Risk`, `Effort`, `Audit`,
+> `Producer review`, `Agent`, `Coverage`) under a heading per group, with each
+> group's icons on a single line. The category name prefix is removed from each
+> meaning because the group heading already names it (e.g. `Status: open — not
+> started` renders as `open — not started` under **Status**). The on-screen
+> legend is generated from `ICON_LEGEND` in `@worklog/shared/icons` (the same
+> single source of truth the row renderer uses); a drift test in
 > `packages/shared/src/icons-legend.test.ts` fails whenever a row glyph has no
 > legend entry. The wording in this specification is the authoritative
 > reference for those meanings — keep `ICON_LEGEND` aligned with the tables
