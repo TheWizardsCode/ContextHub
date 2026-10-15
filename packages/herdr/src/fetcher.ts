@@ -18,6 +18,7 @@ import type { Stage } from './worklist.js';
 import type { AgentState } from './agent-tracker.js';
 import { isActiveBlocker } from './hydrator.js';
 import { parseDepListBlockersOutput } from './downtime-worker.js';
+import { PRODUCER_HOLD_ASSIGNEE } from './producer-hold.js';
 import { isAuditFresh, type ParentAuditState } from '@worklog/shared/icons';
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -171,7 +172,6 @@ export interface WorkItem {
   githubIssueNumber?: string;
   group?: number;
   groupLabel?: string;
-  needsProducerReview?: boolean;
   /**
    * Soft-delete attribution (`wl delete`): a non-empty value marks the item
    * as deleted and excludes it from the downtime dispatcher
@@ -311,7 +311,6 @@ function normalizeItem(raw: any): WorkItem {
     updatedAt: raw?.updatedAt ? String(raw.updatedAt) : undefined,
     group: raw?.group !== undefined ? Number(raw.group) : undefined,
     groupLabel: raw?.groupLabel ? String(raw.groupLabel) : undefined,
-    needsProducerReview: raw?.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
     deletedBy: raw?.deletedBy ? String(raw.deletedBy) : undefined,
     assignee: raw?.assignee ? String(raw.assignee) : undefined,
     auditResult: raw?.auditResult !== undefined ? raw.auditResult : null,
@@ -1421,24 +1420,32 @@ export async function rollbackClaimWorkItem(
 }
 
 /**
- * Flag a work item as needing producer review (`needsProducerReview = true`)
- * via `wl reviewed <id> true` (WL-0MUKYEXMK0033MFK AC3). The downtime
- * dispatcher calls this once an item exhausts its per-item/per-kind attempt
- * budget so it surfaces for human triage instead of looping through idle
- * cycles. `worklogRoot` targets that root's database via per-call
- * `--worklog-dir` (the same cross-root convention as `claimWorkItem`).
+ * Apply the producer scheduling hold to a work item by assigning it to the
+ * reserved producer-hold identity (`wl update <id> --assignee Map`). The
+ * downtime dispatcher calls this once an item exhausts its per-item/per-kind
+ * attempt budget so it surfaces for human triage instead of looping through
+ * idle cycles (WL-0MUKYEXMK0033MFK AC3, re-homed onto the assignee hold in
+ * WL-0MV85WGIT004PHRC). `worklogRoot` targets that root's database via
+ * per-call `--worklog-dir` (the same cross-root convention as
+ * `claimWorkItem`).
  *
- * Idempotent: setting the flag true when it is already true is a no-op.
- * Never throws — a failure resolves `false` (fail-closed: the dispatcher
- * still skips the budget-exhausted item and retries the flag next cycle).
+ * The write is guarded by `--if-assignee ""` so it never clobbers a
+ * concurrent in-flight claim: if another agent owns the item the update fails
+ * stale and resolves `false` (the dispatcher still skips the budget-exhausted
+ * item and retries the hold next cycle). Never throws.
  */
-export async function markNeedsProducerReviewWorkItem(
+export async function markProducerHoldWorkItem(
   id: string,
   worklogRoot?: string,
 ): Promise<boolean> {
   try {
     const dirOverride = worklogRoot !== undefined ? join(worklogRoot, '.worklog') : undefined;
-    await runWl(['reviewed', id, 'true'], true, CLAIM_TIMEOUT_MS, dirOverride);
+    await runWl(
+      ['update', id, '--assignee', PRODUCER_HOLD_ASSIGNEE, '--if-assignee', ''],
+      true,
+      CLAIM_TIMEOUT_MS,
+      dirOverride,
+    );
     return true;
   } catch {
     return false;

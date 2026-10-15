@@ -2,9 +2,8 @@
  * CLI documentation validator integration test.
  *
  * Migrated from the legacy `test/validator.test.ts` (WL-0MV4UUK120029UR5,
- * child of WL-0MV28X3BT0079JM3) alongside the API `needsProducerReview`
- * filter tests, so deleting the legacy file does not drop the CLI-doc
- * validator assertion.
+ * validating the CLI help corpus against the CLI.md reference.
+
  */
 
 import { execaSync } from 'execa';

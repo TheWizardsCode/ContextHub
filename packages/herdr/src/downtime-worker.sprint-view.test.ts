@@ -7,7 +7,7 @@
  * on one concern and under the 2,000-line cap. Covers:
  *   - the critical-first scan on the live Herdr-head dispatch path
  *     (`WL-0MU6UL3XY001M3VT`),
- *   - `needsProducerReview` threading on the Herdr-head dispatch path
+ *   - assignee-hold threading on the Herdr-head dispatch path
  *     (`WL-0MU72WJ8C0005GIE`),
  *   - RCA in-flight critical re-dispatch and one-dispatch-per-in-flight
  *     guarantees (`WL-0MUBEZ6PE002WLP4`, `WL-0MUBVKS5I007LSWB`),
@@ -178,12 +178,12 @@ describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
   });
 
   describe('AC4(b) — safety gates block critical escalation', () => {
-    it('needsProducerReview === true blocks a critical item from critical-first scan', async () => {
+    it('an assignee-held item blocks a critical item from critical-first scan', async () => {
       const deps = makeDeps({
         getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [
           {
             ...criticalPlanned('CR-PR'),
-            needsProducerReview: true,
+            assignee: 'producer',
           },
           nonCriticalImplement('IMP-1'),
         ]}),
@@ -287,18 +287,18 @@ describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
   });
 });
 
-// ── Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE) ──
+// ── Herdr-head dispatch threads the assignee hold (WL-0MU72WJ8C0005GIE) ──
 //
 // The live Herdr-head dispatch path (`dispatchFromHerdrList` → normal scan)
-// builds its `classifyItemForDispatch` input from the Herdr item fields. Before
-// the fix (022f1b24) it OMITTED `needsProducerReview`, so a non-critical item
-// flagged for producer review was dispatched anyway — even though the offer
-// path (`computeMostImportantItem`, which passes the item object directly)
-// already honoured the flag. These tests pin AC1–AC3: the flag blocks a
-// non-critical plan_complete / idea candidate, the direct path agrees with the
-// offer path, and clearing the flag restores dispatchability.
+// builds its `classifyItemForDispatch` input from the Herdr item fields. The
+// producer scheduling hold (a non-empty assignee — the replacement for the
+// removed producer-review flag) is carried through `classifyItemForDispatch`
+// so a held item is never auto-dispatched. These tests pin AC1–AC3: the hold
+// blocks a non-critical plan_complete / idea candidate, the direct path
+// agrees with the offer path, and clearing the assignee restores
+// dispatchability.
 
-describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)', () => {
+describe('Herdr-head dispatch threads the assignee hold (WL-0MU72WJ8C0005GIE)', () => {
   const implementItem = (id: string, overrides: Partial<DowntimeHerdrItem> = {}): DowntimeHerdrItem => ({
     id,
     title: `Non-critical ${id}`,
@@ -328,11 +328,11 @@ describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)'
     recordDispatch: vi.fn().mockResolvedValue(true),
   });
 
-  describe('AC2 — the flag blocks a non-critical candidate on dispatchDowntimeWork', () => {
+  describe('AC2 — the assignee hold blocks a non-critical candidate on dispatchDowntimeWork', () => {
     it('blocks a plan_complete item (implement) and dispatches the next eligible item', async () => {
       const deps = dispatchDeps([
-        implementItem('NPR-GATED', { needsProducerReview: true, sortIndex: 1 }),
-        implementItem('NPR-ALLOWED', { needsProducerReview: false, sortIndex: 2 }),
+        implementItem('NPR-GATED', { assignee: 'producer', sortIndex: 1 }),
+        implementItem('NPR-ALLOWED', { sortIndex: 2 }),
       ]);
 
       const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -346,8 +346,8 @@ describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)'
 
     it('blocks an idea item (intake) and dispatches the next eligible item', async () => {
       const deps = dispatchDeps([
-        intakeItem('NPR-IDEA-GATED', { needsProducerReview: true, sortIndex: 1 }),
-        intakeItem('NPR-IDEA-ALLOWED', { needsProducerReview: false, sortIndex: 2 }),
+        intakeItem('NPR-IDEA-GATED', { assignee: 'producer', sortIndex: 1 }),
+        intakeItem('NPR-IDEA-ALLOWED', { sortIndex: 2 }),
       ]);
 
       const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -358,9 +358,9 @@ describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)'
       expect(deps.claimItem).not.toHaveBeenCalledWith('NPR-IDEA-GATED', expect.any(Object), '/repo');
     });
 
-    it('dispatches nothing when every candidate is review-gated', async () => {
+    it('dispatches nothing when every candidate is assignee-held', async () => {
       const deps = dispatchDeps([
-        implementItem('NPR-ONLY', { needsProducerReview: true }),
+        implementItem('NPR-ONLY', { assignee: 'producer' }),
       ]);
 
       const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
@@ -370,23 +370,23 @@ describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)'
       expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     });
 
-    it('clearing the flag restores dispatchability (same item shape)', async () => {
-      const gated = implementItem('NPR-CLEAR', { needsProducerReview: true });
+    it('clearing the assignee restores dispatchability (same item shape)', async () => {
+      const gated = implementItem('NPR-CLEAR', { assignee: 'producer' });
       const blocked = await dispatchDowntimeWork(dispatchDeps([gated]), { model: 'plan', cwd: '/repo' });
       expect(blocked.dispatched).toBe(false);
 
-      gated.needsProducerReview = false;
+      gated.assignee = '';
       const released = await dispatchDowntimeWork(dispatchDeps([gated]), { model: 'plan', cwd: '/repo' });
       expect(released.dispatched).toBe(true);
       expect(released.candidate?.id).toBe('NPR-CLEAR');
     });
   });
 
-  describe('AC3 — direct and offer paths agree on the producer-review gate', () => {
-    it('both the direct dispatch and the offer skip the gated item and pick the same next item', async () => {
+  describe('AC3 — direct and offer paths agree on the assignee hold', () => {
+    it('both the direct dispatch and the offer skip the held item and pick the same next item', async () => {
       const items = [
-        implementItem('NPR-PARITY-GATED', { needsProducerReview: true, sortIndex: 1 }),
-        implementItem('NPR-PARITY-ALLOWED', { needsProducerReview: false, sortIndex: 2 }),
+        implementItem('NPR-PARITY-GATED', { assignee: 'producer', sortIndex: 1 }),
+        implementItem('NPR-PARITY-ALLOWED', { sortIndex: 2 }),
       ];
 
       const direct = await dispatchDowntimeWork(dispatchDeps(items), { model: 'plan', cwd: '/repo' });
@@ -397,9 +397,9 @@ describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)'
       expect(offer).toMatchObject({ ok: true, candidate: { id: 'NPR-PARITY-ALLOWED' } });
     });
 
-    it('the offer reports no candidate when every candidate is review-gated', async () => {
+    it('the offer reports no candidate when every candidate is assignee-held', async () => {
       const offer = await computeMostImportantItem(
-        dispatchDeps([implementItem('NPR-OFFER-ONLY', { needsProducerReview: true })]),
+        dispatchDeps([implementItem('NPR-OFFER-ONLY', { assignee: 'producer' })]),
         '/repo',
       );
 
@@ -416,7 +416,7 @@ describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)'
 // dispatched-marker exclusion UNCONDITIONALLY, so the only thing preventing a
 // second dispatch is the CAS claim inside `dispatchClaimedTier`. When the
 // item's status has reverted to `open` at its marker's stage (H5 — e.g. an
-// aborted `implement.py start` reset it, or `wl reviewed <id> true` released
+// aborted `implement.py start` reset it, or the producer hold was released
 // it) while the first dispatch's pane is still live, the CAS succeeds and a
 // SECOND pane is spawned for the same in-flight item. H1 (marker bypass)
 // therefore cannot duplicate on its own; H1+H5 is the confirmed pair.
@@ -754,10 +754,9 @@ describe('one dispatch per in-flight critical item (WL-0MUBVKS5I007LSWB / AC5)',
 //
 // Blocking is done by CLASSIFICATION SHAPE (a non-dispatchable stage for
 // open items, out-of-recency for completed/in_review) rather than by the
-// `needsProducerReview` flag: the window-extension tests deliberately isolate
-// the window mechanism from the review gate. (The flag now blocks on this
-// path too — the field is threaded into `classifyItemForDispatch` as of
-// WL-0MU72WJ8C0005GIE / 022f1b24.)
+// assignee hold: the window-extension tests deliberately isolate
+// the window mechanism from the review gate. (A held item also blocks on this
+// path too — the assignee is carried into `classifyItemForDispatch`.)
 
 describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0MU6UL3GQ0015AA5 AC1/AC4)', () => {
   const OLD = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();

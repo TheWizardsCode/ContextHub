@@ -34,7 +34,7 @@ import {
   setWorklogDir,
   claimWorkItem,
   rollbackClaimWorkItem,
-  markNeedsProducerReviewWorkItem,
+  markProducerHoldWorkItem,
   getExecFileAsync,
   buildWlArgs,
   buildWlArgsForRoot,
@@ -122,6 +122,7 @@ import {
   type RunningPanesResult,
   type LlamaStatus,
 } from './downtime-worker.js';
+import { isProducerHold } from './producer-hold.js';
 import {
   createModeSwitchWorker,
   type ModeSwitchWorker,
@@ -1922,7 +1923,7 @@ export function createDowntimeDeps(
           effort: info.effort,
           auditedAt: info.auditedAt,
           auditResult: info.auditResult,
-          needsProducerReview: info.needsProducerReview,
+          assignee: info.assignee,
         };
       } catch {
         return null; // fail-closed: an unreadable item is never acted upon
@@ -2022,9 +2023,10 @@ export function createDowntimeDeps(
           }
         },
         invokingPaneId,
-        // Item lookup (parent AC2/AC6): fetch both the producer-review flag
-        // and the work-item stage so the close-decision snapshot records the
-        // stage. Fail-closed: an unreadable item stays review-blocked.
+        // Item lookup (parent AC2/AC6): fetch both the item's assignee (the
+        // producer hold replaces the retired producer-review flag) and the
+        // work-item stage so the close-decision snapshot records the stage.
+        // Fail-closed: an unreadable item stays review-blocked.
         getItemInfo: async (itemId: string) => {
           const { stdout } = await getExecFileAsync()(
             'wl',
@@ -2032,10 +2034,10 @@ export function createDowntimeDeps(
             { encoding: 'utf8', timeout: DOWNTIME_WL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024, cwd },
           );
           const parsed = extractJson(stdout) as {
-            workItem?: { needsProducerReview?: boolean; stage?: string };
+            workItem?: { assignee?: string; stage?: string };
           };
           return {
-            needsProducerReview: parsed?.workItem?.needsProducerReview === true,
+            producerHold: isProducerHold(parsed?.workItem?.assignee),
             stage: parsed?.workItem?.stage,
           };
         },
@@ -2108,12 +2110,12 @@ export function createDowntimeDeps(
         cwd,
       );
     },
-    // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
-    // `needsProducerReview = true` when an item exhausts its automatic
-    // dispatch-attempt budget so it surfaces for human triage. Cross-root
-    // (`cwd` is the item's worklog root) and fail-closed (never throws).
-    async markNeedsProducerReview(itemId: string, cwd: string): Promise<boolean> {
-      return markNeedsProducerReviewWorkItem(itemId, cwd);
+    // Producer scheduling hold (WL-0MUKYEXMK0033MFK AC3): assign the item to
+    // the producer when it exhausts its automatic dispatch-attempt budget so
+    // it surfaces for human triage. Cross-root (`cwd` is the item's worklog
+    // root) and fail-closed (never throws).
+    async markProducerHold(itemId: string, cwd: string): Promise<boolean> {
+      return markProducerHoldWorkItem(itemId, cwd);
     },
     // Stalled-work scan + in-place resume (WL-0MUYMBSA90092QV2): production
     // wiring reuses the machine-wide `herdr pane list` read, the `wl show`
@@ -2159,8 +2161,8 @@ export function createDowntimeDeps(
           recordAttempt: async (root, entry) => {
             await appendDowntimeLogEntry(root, JSON.stringify(entry));
           },
-          markNeedsProducerReview: async (itemId, root) =>
-            markNeedsProducerReviewWorkItem(itemId, root),
+          markProducerHold: async (itemId, root) =>
+            markProducerHoldWorkItem(itemId, root),
           // Consume the marker on a successful resume so the same pane is
           // not re-woken on the next cycle (WL-0MV5639GG00085Q7).
           clearCooldown: async (paneId) => clearStoredModelCooldown(paneId),

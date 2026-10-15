@@ -116,7 +116,6 @@ for (let i = 0; i < ITEM_COUNT; i++) {
     deleteReason: '',
     risk: '',
     effort: '',
-    needsProducerReview: false,
   });
 }
 // Add some comments

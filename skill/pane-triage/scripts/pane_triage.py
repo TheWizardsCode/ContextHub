@@ -211,7 +211,7 @@ def _is_invoking(pane: Mapping[str, Any], invoking_pane_id: str | None) -> bool:
 def _needs_review(pane: Mapping[str, Any]) -> bool:
     """Whether the pane's work item is review-pending (never close)."""
     snapshot = pane.get("reasonSnapshot") or {}
-    return bool(snapshot.get("needsProducerReview"))
+    return bool(snapshot.get("producerHold"))
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +318,7 @@ def recommend_to_close(
 
     Exclusions (never-close guards, universal — manual + automatic reaper):
       - the invoking pane (by id, and defensively by classifier flag)
-      - panes whose work item has ``needsProducerReview=true``
+      - panes whose work item has ``producerHold=true``
       - panes the classifier did not flag ``close``
     """
     recommendations: list[Mapping[str, Any]] = []

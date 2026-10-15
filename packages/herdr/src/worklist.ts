@@ -5037,7 +5037,6 @@ export async function resolveDispatchDetail(
  * - `/wl <stage>` — stage filter actions (applied internally)
  * - `/skill:implement`, `/skill:audit` — agent skill invocations
  * - `/intake`, `/plan` — agent workflow commands
- * - `!!wl reviewed` — producer review toggle
  * - Compound audit commands containing `&& wl audit-set`
  *
  * @param command - The resolved command string (may contain `<id>` placeholders)
@@ -5140,10 +5139,6 @@ export function dispatchChordCommand(
     return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
 
-  // ── Producer review / audit compound commands ───────────
-  if (command.startsWith('!!wl reviewed')) {
-    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
-  }
   // ── Data-modifying wl commands (close/delete/update/search) ──
   // These mutate the work-item data set or change the list contents, so
   // they are routed here (not the generic callback path) so the caller's
@@ -5336,7 +5331,7 @@ export async function resolvePodcastTarget(
  * Routing priority:
  * 1. {@link dispatchChordCommand} — handles `/wl <stage>` (internal filter),
  *    `/skill:implement`, `/skill:audit`, `/skill:ship`, `/intake`, `/plan`,
- *    `!!wl reviewed`, and compound `&& wl audit-set` commands (resolves
+ *    and compound `&& wl audit-set` commands (resolves
  *    `<id>` and routes to `onCommand`). Returns 'dispatched'.
  * 2. Code Freeze guard — when `codeFreezeActive` is true and the command is
  *    an implement command, the command is NOT routed; returns 'blocked' so
@@ -5381,7 +5376,7 @@ export function executeResolvedCommand(
   }
 
   // Try dispatchChordCommand first — handles /wl, /downtime, /skill:,
-  // /intake, /plan, !!wl reviewed, and compound audit commands. Focus
+  // /intake, /plan, and compound audit commands. Focus
   // (WL-0MT70LC6B009TL3Q) is threaded through so the new pane can be focused
   // when requested (only `P n` today).
   if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane, onRefresh, focus)) {
@@ -6142,12 +6137,12 @@ export async function runWorklistTui(
   // clear-filter `/wl`.
 
   // True when a command modifies the work-item data set (close, delete,
-  // update, reviewed, search), warranting an immediate list refresh so the
+  // update, search), warranting an immediate list refresh so the
   // selection list reflects the change without waiting for the auto-refresh
   // cycle (WL-0MTA217DZ003H5K8).
   const isWlModifyingCommand = (cmd: string): boolean => {
     // Commands like "!!wl close <id>", "!!wl delete <id>", "!!wl update <id> ..."
-    if (/^!!\s*wl\s+(close|delete|update|reviewed|search)\b/i.test(cmd)) return true;
+    if (/^!!\s*wl\s+(close|delete|update|search)\b/i.test(cmd)) return true;
     return false;
   };
 
@@ -6718,7 +6713,7 @@ export async function runWorklistTui(
             // so the filtered view shows every root item in the stage matching
             // the stage's status rule, not just the already-loaded subset
             // (WL-0MSDT8X1V003206G).
-            // Modifying-command dispatch (close, delete, update, reviewed,
+            // Modifying-command dispatch (close, delete, update,
             // search): refetch so the selection list reflects the change
             // immediately instead of waiting for the auto-refresh cycle
             // (WL-0MTA217DZ003H5K8).
@@ -6883,7 +6878,7 @@ export async function runWorklistTui(
           // so the filtered view shows every root item in the stage matching
           // the stage's status rule, not just the already-loaded subset
           // (WL-0MSDT8X1V003206G).
-          // Modifying-command dispatch (close, delete, update, reviewed,
+          // Modifying-command dispatch (close, delete, update,
           // search): refetch so the selection list reflects the change
           // immediately instead of waiting for the auto-refresh cycle
           // (WL-0MTA217DZ003H5K8).

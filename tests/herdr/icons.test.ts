@@ -3,8 +3,8 @@
  * system.
  *
  * Layer note: exercises the shared `@worklog/shared/icons` functions as used
- * by the herdr display layer (status/stage/priority/audit/epic/risk/effort/
- * needsProducerReview icons, `stageColor`, and general `getIconPrefix`
+ * by the herdr display layer (status/stage/priority/audit/epic/risk/effort
+ * icons, `stageColor`, and general `getIconPrefix`
  * behaviour). It is not a duplicate of:
  *   - tests/unit/icons.test.ts — the CLI `src/theme.ts` icon vocabulary; or
  *   - packages/herdr/src/icons.test.ts — fixed-width agent-slot alignment and
@@ -23,7 +23,6 @@ import {
   epicIcon,
   riskIcon,
   effortIcon,
-  needsProducerReviewIcon,
   auditStaleIcon,
   getIconPrefix,
   stageColor,
@@ -166,22 +165,6 @@ describe('effortIcon', () => {
   });
 });
 
-describe('needsProducerReviewIcon', () => {
-  it('returns needs-review icon when true', () => {
-    const result = needsProducerReviewIcon(true);
-    expect(result).toBeTruthy();
-  });
-
-  it('returns done icon when false', () => {
-    const result = needsProducerReviewIcon(false);
-    expect(result).toBeTruthy();
-  });
-
-  it('returns empty when undefined', () => {
-    expect(needsProducerReviewIcon(undefined)).toBe('');
-  });
-});
-
 describe('stageColor', () => {
   it('returns a color for each valid CLI stage', () => {
     const stages = ['idea', 'intake_complete', 'plan_complete', 'in_review', 'done'];
@@ -210,14 +193,8 @@ describe('getIconPrefix', () => {
     expect(prefix.length).toBeGreaterThan(0);
   });
 
-  it('includes audit icon for in_review items', () => {
+  it('includes the audit icon for in_review items', () => {
     const item: WorkItem = { id: 'T1', title: 'Test', status: 'in_progress', stage: 'in_review' };
-    const prefix = getIconPrefix(item);
-    expect(prefix).toBeTruthy();
-  });
-
-  it('includes producer review icon', () => {
-    const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', needsProducerReview: true };
     const prefix = getIconPrefix(item);
     expect(prefix).toBeTruthy();
   });
@@ -267,7 +244,7 @@ describe('getIconPrefix', () => {
     const items: WorkItem[] = [
       { id: 'T1', title: 'T', status: 'open', stage: 'idea', issueType: 'task' as const },
       { id: 'T2', title: 'T', status: 'in-progress', stage: 'in_review', issueType: 'epic' as const, childCount: 3 },
-      { id: 'T3', title: 'T', status: 'completed', stage: 'plan_complete', needsProducerReview: true },
+      { id: 'T3', title: 'T', status: 'completed', stage: 'plan_complete' },
       { id: 'T4', title: 'T', status: 'blocked', stage: 'intake_complete', issueType: 'task' as const },
       { id: 'T5', title: 'T', status: 'open', stage: 'in_progress', issueType: 'epic' as const },
     ];
@@ -282,10 +259,10 @@ describe('getIconPrefix', () => {
   it('prefixes with different icon counts align to the same column width', () => {
     // Item with only status icon
     const minimal: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', childCount: 0 };
-    // Item with status + stage + review + epic icon (child count removed from prefix)
+    // Item with status + stage + agent + epic icon (child count removed from prefix)
     const maximal: WorkItem = {
       id: 'T2', title: 'T', status: 'completed', stage: 'in_review',
-      needsProducerReview: true, issueType: 'epic' as const, childCount: 5,
+      issueType: 'epic' as const, childCount: 5,
     };
 
     const minimalPrefix = getIconPrefix(minimal);
@@ -311,11 +288,11 @@ describe('getIconPrefix', () => {
     expect(freshWidth).toBe(staleWidth);
   });
 
-  it('handles items with and without producer review consistently', () => {
-    const withReview: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', needsProducerReview: true };
+  it('handles items with and without an agent state consistently', () => {
+    const withAgent: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', agentState: 'working' };
     const withoutReview: WorkItem = { id: 'T2', title: 'T', status: 'open', stage: 'idea' };
 
-    const withWidth = stringDisplayWidth(getIconPrefix(withReview));
+    const withWidth = stringDisplayWidth(getIconPrefix(withAgent));
     const withoutWidth = stringDisplayWidth(getIconPrefix(withoutReview));
     expect(withWidth).toBe(withoutWidth);
   });
@@ -376,7 +353,7 @@ describe('getIconPrefix', () => {
     const items: WorkItem[] = [
       { id: 'T1', title: 'T', status: 'open', priority: 'critical' },
       { id: 'T2', title: 'T', status: 'open', priority: 'high', stage: 'in_review' },
-      { id: 'T3', title: 'T', status: 'completed', stage: 'in_review', needsProducerReview: true },
+      { id: 'T3', title: 'T', status: 'completed', stage: 'in_review' },
       { id: 'T4', title: 'T', status: 'blocked', issueType: 'epic' as const, priority: 'low' },
       { id: 'T5', title: 'T', status: 'open' },
     ];

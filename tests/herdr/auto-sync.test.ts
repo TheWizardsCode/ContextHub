@@ -396,6 +396,8 @@ describe('auto-refresh + sync integration', () => {
       undefined, undefined, 0, true, undefined, undefined, 0, true,
     );
     expect(result).toContain('Work Items');
-    expect(result).toContain('auto');
+    // The `[auto-refresh on]` header segment was removed (WL-0MV85T0LT008UT9H)
+    // — an enabled setting never renders an indicator.
+    expect(result).not.toContain('auto');
   });
 });

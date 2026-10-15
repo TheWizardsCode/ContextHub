@@ -28,7 +28,7 @@ describe('ShortcutRegistry', () => {
   beforeEach(() => {
     entries = [
       { chord: ['i'], command: '/skill:implement <id>', view: 'both', label: 'implement', stages: ['intake_complete', 'plan_complete', 'in_progress'] },
-      { chord: ['r'], command: "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'", view: 'both', label: 'Producer Review' },
+      { chord: ['r'], command: "!!wl update <id> --assignee Map && wl comment add <id> --body '<producer_comment>'", view: 'both', label: 'Producer Hold' },
       { chord: ['p'], command: '/plan <id>', view: 'both', label: 'plan', stages: ['intake_complete'] },
       { chord: ['c'], command: '/intake', view: 'both', label: 'create new' },
       { chord: ['n'], command: '/intake <id>', view: 'both', label: 'intake', stages: ['idea'] },
@@ -104,8 +104,8 @@ describe('ShortcutRegistry', () => {
         { chord: ['x', 'c'], command: '!!wl close <id>', view: 'both', label: 'close done' },
         { chord: ['x', 'd'], command: '!!wl delete <id>', view: 'both', label: 'close deleted' },
         { chord: ['a', 'a'], command: '/skill:audit <id>', view: 'both', label: 'audit automatic', stages: ['in_review'] },
-        { chord: ['a', 'y'], command: "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'", view: 'both', label: 'audit approve', stages: ['in_review'] },
-        { chord: ['a', 'r'], command: "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", view: 'both', label: 'audit reject', stages: ['in_review'] },
+        { chord: ['a', 'y'], command: "!!wl update <id> --assignee '' && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'", view: 'both', label: 'audit approve', stages: ['in_review'] },
+        { chord: ['a', 'r'], command: "!!wl update <id> --assignee '' --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", view: 'both', label: 'audit reject', stages: ['in_review'] },
       ];
     });
 
@@ -277,11 +277,11 @@ describe('ShortcutRegistry', () => {
 
     it('leaves resolvedModel null for entries without a model', () => {
       const reg = new ShortcutRegistry([
-        { chord: ['r'], command: '!!wl reviewed <id>', view: 'both' },
+        { chord: ['r'], command: '!!wl update <id> --assignee Map', view: 'both' },
       ]);
       const state = createChordState();
       processChordInput(state, 'r', reg, 'list');
-      expect(state.resolvedCommand).toBe('!!wl reviewed <id>');
+      expect(state.resolvedCommand).toBe('!!wl update <id> --assignee Map');
       expect(state.resolvedModel).toBeNull();
     });
   });
@@ -587,15 +587,15 @@ describe('dispatchChordCommand', () => {
     expect(commands).toEqual(['/plan WL-001']);
   });
 
-  it('recognizes !!wl reviewed prefix and routes to onCommand', () => {
+  it('recognizes !!wl update producer-hold commands and routes to onCommand', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
-    const result = dispatchChordCommand('!!wl reviewed <id> && wl comment add <id> --body "Looks good"', state, callback);
+    const result = dispatchChordCommand('!!wl update <id> --assignee Map && wl comment add <id> --body "Looks good"', state, callback);
     expect(result).toBe(true);
-    expect(commands).toEqual(['!!wl reviewed WL-001 && wl comment add WL-001 --body "Looks good"']);
+    expect(commands).toEqual(['!!wl update WL-001 --assignee Map && wl comment add WL-001 --body "Looks good"']);
   });
 
   it('recognizes compound audit commands with && wl audit-set', () => {
@@ -604,9 +604,9 @@ describe('dispatchChordCommand', () => {
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
-    const result = dispatchChordCommand('!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary "Approved"', state, callback);
+    const result = dispatchChordCommand('!!wl update <id> --assignee "" && wl audit-set <id> --ready-to-close yes --summary "Approved"', state, callback);
     expect(result).toBe(true);
-    expect(commands).toEqual(['!!wl reviewed WL-001 false && wl audit-set WL-001 --ready-to-close yes --summary "Approved"']);
+    expect(commands).toEqual(['!!wl update WL-001 --assignee "" && wl audit-set WL-001 --ready-to-close yes --summary "Approved"']);
   });
 
   it('returns the no-op for /skill:implement when no item selected and command requires <id>', () => {
@@ -711,13 +711,13 @@ describe('dispatchChordCommand', () => {
   it('routes audit approve/reject chord templates with id substitution', () => {
     const items = [makeWorkItem('WL-001')];
     const templates = [
-      ["!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'", "!!wl reviewed WL-001 false && wl audit-set WL-001 --ready-to-close yes --summary 'Approved by manual review'"],
-      ["!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", "!!wl reviewed WL-001 false && wl update WL-001 --status open --stage plan_complete && wl audit-set WL-001 --ready-to-close no --summary 'Rejected by manual review. <reason>'"],
+      ["!!wl update <id> --assignee '' && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'", "!!wl update WL-001 --assignee '' && wl audit-set WL-001 --ready-to-close yes --summary 'Approved by manual review'"],
+      ["!!wl update <id> --assignee '' --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'", "!!wl update WL-001 --assignee '' --status open --stage plan_complete && wl audit-set WL-001 --ready-to-close no --summary 'Rejected by manual review. <reason>'"],
     ] as const;
     for (const [template, expected] of templates) {
       const commands: string[] = [];
       const callback = (cmd: string) => { commands.push(cmd); };
-      // dispatchChordCommand handles !!wl reviewed/audit-set and routes to onCommand
+      // dispatchChordCommand handles !!wl update/audit-set and routes to onCommand
       const result = executeResolvedCommand(template, makeState(items), callback);
       expect(result).toBe('dispatched');
       expect(commands).toEqual([expected]);
@@ -827,15 +827,15 @@ describe('executeResolvedCommand with routing', () => {
     expect(commands).toEqual(['/plan WL-001']);
   });
 
-  it('returns "dispatched" for !!wl reviewed commands', () => {
+  it('returns "dispatched" for !!wl update commands', () => {
     const items = [makeWorkItem('WL-001')];
     const state = makeState(items);
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
-    const result = executeResolvedCommand('!!wl reviewed <id> && wl comment add <id> --body "Looks good"', state, callback);
+    const result = executeResolvedCommand('!!wl update <id> --assignee Map && wl comment add <id> --body "Looks good"', state, callback);
     expect(result).toBe('dispatched');
-    expect(commands).toEqual(['!!wl reviewed WL-001 && wl comment add WL-001 --body "Looks good"']);
+    expect(commands).toEqual(['!!wl update WL-001 --assignee Map && wl comment add WL-001 --body "Looks good"']);
   });
 
   it('returns "dispatched" for compound audit commands', () => {
@@ -844,9 +844,9 @@ describe('executeResolvedCommand with routing', () => {
     const commands: string[] = [];
     const callback = (cmd: string) => { commands.push(cmd); };
 
-    const result = executeResolvedCommand('!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary "Approved"', state, callback);
+    const result = executeResolvedCommand('!!wl update <id> --assignee "" && wl audit-set <id> --ready-to-close yes --summary "Approved"', state, callback);
     expect(result).toBe('dispatched');
-    expect(commands).toEqual(['!!wl reviewed WL-001 false && wl audit-set WL-001 --ready-to-close yes --summary "Approved"']);
+    expect(commands).toEqual(['!!wl update WL-001 --assignee "" && wl audit-set WL-001 --ready-to-close yes --summary "Approved"']);
   });
 
   it('returns "noop" for /skill:implement when no item selected', () => {

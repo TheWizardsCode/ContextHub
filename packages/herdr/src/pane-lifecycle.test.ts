@@ -187,10 +187,10 @@ describe('classifyPaneLifecycle — implement is logged but never closed (AC4/AC
 });
 
 describe('classifyPaneLifecycle — requires-attention (AC3)', () => {
-  it('an item awaiting producer review → requires-attention (close)', () => {
+  it('an item held by the producer (assignee) → requires-attention (close)', () => {
     const d = classifyPaneLifecycle(
       pane({ kind: 'plan' }),
-      item({ stage: 'intake_complete', needsProducerReview: true }),
+      item({ stage: 'intake_complete', assignee: 'Map' }),
       false,
     );
     expect(d).toMatchObject({ outcome: 'requires-attention', reasonCode: 'producer-review', close: true });

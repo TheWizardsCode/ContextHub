@@ -11,7 +11,7 @@
  *   - the transient-downtime-error classifier and the bounded retry helper.
  *
  * The transient-retry describes were originally nested under the
- * `needsProducerReview exclusion` block; they are relocated here because they
+ * `assignee-hold exclusion` block; they are relocated here because they
  * exercise the `isTransientDowntimeError` / `withTransientRetry` utilities
  * (retry gating), not the producer-review gate itself.
  *
@@ -141,7 +141,7 @@ describe('transient retry (WL-0MTOTCETU004YYIU AC3 — bounded backoff)', () => 
       expect(isTransientDowntimeError('show parse error')).toBe(false);
       expect(isTransientDowntimeError('audit list parse error')).toBe(false);
       expect(isTransientDowntimeError('author identity gate')).toBe(false);
-      expect(isTransientDowntimeError('needsProducerReview gate')).toBe(false);
+      expect(isTransientDowntimeError('producer hold gate')).toBe(false);
       expect(isTransientDowntimeError('')).toBe(false);
       expect(isTransientDowntimeError('some random error')).toBe(false);
     });

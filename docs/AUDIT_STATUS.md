@@ -250,7 +250,7 @@ the primary content gate instead of the 60 s time gate
 `audit_runner._compute_content_fingerprint` (skipped when the audit skill is not
 installed).
 
-Flag-only flips of `needsProducerReview` do not bump `updatedAt`
+Applying an assignee hold does not bump `updatedAt`
 (WL-0MSN6ZCTN0027U2R), and neither do comment writes (WL-0MUBVH6JM0093KVM):
 comment create/update/delete bump `activityAt` only. `updatedAt` therefore
 changes only when tracked *content* changes (or an audit is persisted), so a

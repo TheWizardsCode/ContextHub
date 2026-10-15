@@ -141,9 +141,9 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     const producerReview = registry.lookupChordEntry(['r', 'p'], 'list', undefined, false);
     expect(producerReview).toBeDefined();
     expect(producerReview?.command).toBe(
-      "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>' --author <author>",
+      "!!wl update <id> --assignee Map && wl comment add <id> --body '<producer_comment>' --author <author>",
     );
-    expect(producerReview?.label).toBe('Producer Review');
+    expect(producerReview?.label).toBe('Producer Hold');
 
     const interview = registry.lookupChordEntry(['r', 'i'], 'list', undefined, false);
     expect(interview).toBeDefined();
@@ -157,7 +157,7 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     expect(nextChords).toHaveLength(2);
 
     const hints = formatChordHints(nextChords, ['r']);
-    expect(hints).toContain('p:Review');
+    expect(hints).toContain('p:Hold');
     expect(hints).toContain('i:interview');
   });
 
@@ -281,7 +281,7 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     const entry = registry.lookupChordEntry(['a', 'y'], 'list');
     expect(entry?.openPane).toBe(false);
     expect(entry?.command).toBe(
-      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+      '!!wl update <id> --assignee "" && wl audit-set <id> --ready-to-close yes --summary \'Approved by manual review\'',
     );
   });
 
@@ -289,8 +289,8 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const entry = registry.lookupChordEntry(['a', 'r'], 'list', undefined, false);
     expect(entry).toBeDefined();
-    expect(entry?.command).toContain('wl reviewed <id> false');
-    expect(entry?.command).toContain('wl update <id> --status open --stage plan_complete');
+    expect(entry?.command).toContain('wl update <id> --assignee ""');
+    expect(entry?.command).toContain('--status open --stage plan_complete');
     // Rejection must not downgrade the producer's priority signal.
     expect(entry?.command).not.toContain('--priority');
     expect(entry?.command).toContain("wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'");
@@ -303,9 +303,9 @@ describe('loadShortcutConfig — production shortcuts.json', () => {
     const registry = loadShortcutConfig();
     const approve = registry.lookupChordEntry(['a', 'y'], 'list', undefined, false);
     const reject = registry.lookupChordEntry(['a', 'r'], 'list', undefined, false);
-    // Both share the reviewed reset + audit-set chain.
-    expect(approve?.command).toContain('wl reviewed <id> false');
-    expect(reject?.command).toContain('wl reviewed <id> false');
+    // Both share the assignee-clear reset + audit-set chain.
+    expect(approve?.command).toContain('wl update <id> --assignee ""');
+    expect(reject?.command).toContain('wl update <id> --assignee ""');
     // Approve sets ready-to-close yes; reject sets it no plus the reset.
     expect(approve?.command).toContain('--ready-to-close yes');
     expect(reject?.command).toContain('--ready-to-close no');
@@ -418,7 +418,7 @@ describe('parseShortcutEntry — open_pane field (WL-0MSJLD1I70045ZUL)', () => {
   it('parses open_pane: false', () => {
     const entry = parseShortcutEntry({
       chord: ['a', 'y'],
-      command: '!!wl reviewed <id> false',
+      command: '!!wl update <id> --assignee ""',
       view: 'both',
       open_pane: false,
     });
@@ -463,7 +463,7 @@ describe('parseShortcutEntry — open_pane field (WL-0MSJLD1I70045ZUL)', () => {
   it('keeps other fields intact when open_pane is present', () => {
     const entry = parseShortcutEntry({
       chord: ['a', 'y'],
-      command: '!!wl reviewed <id> false',
+      command: '!!wl update <id> --assignee ""',
       view: 'both',
       model: 'plan',
       code_freeze: 'allow',
@@ -471,7 +471,7 @@ describe('parseShortcutEntry — open_pane field (WL-0MSJLD1I70045ZUL)', () => {
     });
     expect(entry).toMatchObject({
       chord: ['a', 'y'],
-      command: '!!wl reviewed <id> false',
+      command: '!!wl update <id> --assignee ""',
       view: 'both',
       model: 'plan',
       codeFreeze: 'allow',

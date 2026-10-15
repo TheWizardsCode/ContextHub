@@ -74,8 +74,8 @@ export interface PaneStatus {
   agentProcessAlive: boolean;
   /** Idle time in milliseconds. */
   idleMs: number;
-  /** Whether the work item needs producer review. */
-  needsProducerReview: boolean;
+  /** Whether the work item is held by the producer (assignee hold). */
+  producerHold: boolean;
   /** Whether this pane is the invoking/launching pane. */
   isInvokingPane: boolean;
   /** Number of child processes spawned by this session. */
@@ -257,7 +257,7 @@ function toSessionSample(ps: PaneStatus): SessionSample {
     agentProcessAlive: ps.agentProcessAlive,
     idleMs: ps.idleMs,
     kind: ps.kind,
-    needsProducerReview: ps.needsProducerReview,
+    producerHold: ps.producerHold,
     isInvokingPane: ps.isInvokingPane,
     childProcessCount: ps.childProcessCount,
     ageSinceDispatchMs: ps.ageSinceDispatchMs,
@@ -426,7 +426,7 @@ export async function runReaperCli(
             close: r.decision.close === true,
             reasonCode: r.decision.reasonCode,
             reasonSnapshot: r.decision.reasonSnapshot,
-            needsProducerReview: r.decision.reasonSnapshot?.needsProducerReview === true,
+            producerHold: r.decision.reasonSnapshot?.producerHold === true,
             sessionTail: Array.isArray(r.sessionTail) ? r.sessionTail : [],
             success: r.success,
             error: r.error,

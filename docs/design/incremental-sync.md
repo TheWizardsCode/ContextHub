@@ -299,8 +299,8 @@ inherits unchanged:
   `withStoreMutationLock` (`src/mutation-lock.ts`). The locked commands are:
   `wl update`; `wl comment add`, `wl comment update`, `wl comment delete`;
   `wl audit-set`; `wl close`; `wl delete` (including its reentrant
-  auto-sync); `wl dep add` and `wl dep rm`; `wl create`; `wl reviewed`;
-  `wl interview` (per persisted answer/flag update); `wl audit-waive` and
+  auto-sync); `wl dep add` and `wl dep rm`; `wl create`;
+  `wl interview` (per persisted answer update); `wl audit-waive` and
   `wl audit-unwaive`; `wl re-sort`; the writing `wl doctor` subcommands
   (`stage-sync`, `prune`, `foreign-items --apply`, `dangling-parents`,
   `priority`, `file-paths`, `migrate`, the main `--fix` path, and `upgrade`

@@ -1175,7 +1175,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', ()
     const closePane = vi.fn().mockResolvedValue(true);
     const deps = monitorDeps({
       getItemLifecycleState: vi.fn().mockResolvedValue({
-        id: 'WL-11', stage: 'intake_complete', needsProducerReview: true,
+        id: 'WL-11', stage: 'intake_complete', assignee: 'Map',
       }),
       closePane,
     });

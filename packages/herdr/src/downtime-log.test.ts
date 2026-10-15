@@ -751,7 +751,7 @@ describe('pane-close lifecycle entries (WL-0MU308WSF0002JWN)', () => {
       agentProcessAlive: false,
       idleMs: 1234,
       itemStage: 'plan_complete',
-      needsProducerReview: false,
+      producerHold: false,
       isInvokingPane: false,
       childProcessCount: 0,
       hasRecentFileModifications: false,

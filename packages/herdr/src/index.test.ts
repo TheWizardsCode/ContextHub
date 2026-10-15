@@ -757,10 +757,10 @@ describe('stripCommandPrefix', () => {
     it('strips !! from multi-command sequences', () => {
       expect(
         stripCommandPrefix(
-          '!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes',
+          '!!wl update <id> --assignee "" && wl audit-set <id> --ready-to-close yes',
         ),
       ).toBe(
-        'wl reviewed <id> false && wl audit-set <id> --ready-to-close yes',
+        'wl update <id> --assignee "" && wl audit-set <id> --ready-to-close yes',
       );
     });
 
@@ -1004,7 +1004,7 @@ describe('routeCommand', () => {
     it('routes !!-prefixed wl commands to the visible pane', () => {
       expect(
         routeCommand(
-          '!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary \'Approved by manual review\'',
+          '!!wl update <id> --assignee "" && wl audit-set <id> --ready-to-close yes --summary \'Approved by manual review\'',
         ),
       ).toBe('pane');
     });
@@ -1024,7 +1024,7 @@ describe('routeCommand', () => {
     it('routes unprefixed commands to stdout (CMD:)', () => {
       expect(
         routeCommand(
-          'wl reviewed <id> && wl comment add <id> --body \'<producer_comment>\'',
+          'wl update <id> --assignee Map && wl comment add <id> --body \'<producer_comment>\'',
         ),
       ).toBe('stdout');
       expect(routeCommand('wl search ')).toBe('stdout');
@@ -3360,14 +3360,14 @@ describe('spawnBackgroundShell', () => {
     const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
     const openSyncFn = vi.fn(() => 7);
     const child = spawnBackgroundShell(
-      'wl reviewed WL-1 false',
+      'wl update WL-1 --assignee ""',
       '/project',
       '/tmp/herdr-background-logs/x.log',
       { spawn: spawnFn as never, openSync: openSyncFn },
     );
     expect(spawnFn).toHaveBeenCalledWith(
       'bash',
-      ['-c', 'wl reviewed WL-1 false'],
+      ['-c', 'wl update WL-1 --assignee ""'],
       expect.objectContaining({
         detached: true,
         stdio: ['ignore', 7, 7],
@@ -3388,7 +3388,7 @@ describe('spawnBackgroundShell', () => {
       }),
     } as never;
     const onExit = vi.fn();
-    spawnBackgroundShell('wl reviewed WL-1 false', '/project', '/tmp/log', {
+    spawnBackgroundShell('wl update WL-1 --assignee ""', '/project', '/tmp/log', {
       spawn: vi.fn(() => child),
       openSync: () => 7,
       onExit,
@@ -3426,7 +3426,7 @@ describe('formatBackgroundFailure (WL-0MUEBQLRD00288VV AC4)', () => {
 
   it('surfaces the command, exit code and log path on failure', () => {
     const failure = formatBackgroundFailure(
-      'wl reviewed WL-1 false && wl audit-set WL-1 --ready-to-close yes',
+      'wl update WL-1 --assignee "" && wl audit-set WL-1 --ready-to-close yes',
       1,
       null,
       '/tmp/herdr-background-logs/x.log',

@@ -129,7 +129,7 @@ The plugin pane will then be available via the Herdr plugin system.
    - Press `S` (Shift+s) — **Ship It**: run the dev→main release. A pre-dialog guard first checks that no other live agent pane is working on a project work item; if one is, a blocked notice lists the offending panes and nothing is dispatched. Otherwise a typed-confirmation dialog anchored to the bottom of the list (the list stays visible above it) asks you to type `ship` (case-insensitive) and press Enter to dispatch `/skill:ship release`; Esc cancels. The release is a global command — no work item id is involved. `S` is distinct from lowercase `s` (Search). See [Ship It confirmation dialog](#ship-it-confirmation-dialog).
 
 5. Review chords (press `r` then a key):
-   - Press `r`, `p` — Toggle 'Needs Producer Review' flag and add a comment to the selected item
+   - Press `r`, `p` — Hold the selected item for the producer (`wl update <id> --assignee Map`) and add a comment
    - Press `r`, `i` — Walk through outstanding interview questions on the selected item (`wl interview`); the new pane is **focused** so you can answer immediately (see **Focused shortcuts via `focus: true`** below)
 
 6. Priority update chords (press `u` then `p` then a priority key):
@@ -187,7 +187,7 @@ Semantics:
 - **Rendered from the live item** — the log decides which items appear and
   their order, but when the item still exists in `wl` the row is rendered from
   that live work item (the same data source the other views use), so every
-  icon — status, stage, audit verdict, producer-review flag and priority — is
+  icon — status, stage, audit verdict and priority — is
   identical to every other view (WL-0MUGLL9SS002E1D2). Only an item that is no
   longer in `wl` (closed/deleted) falls back to log-derived metadata: it
   renders the dispatch marker's stage icon and shows `—` for fields the log
@@ -354,14 +354,14 @@ dispatches; the other herdr instances coordinate instead of polling:
   contract). The leader re-validates each offer **at dispatch time**
   (`fetchItem` → `classifyItemForDispatch`/stage+status as the sole gate;
   no wall-clock prune — WL-0MTMPIQBE001J41P) and applies the sequential
-  safety filters (producer-review gate, code-freeze split-by-skill,
+  safety filters (assignee-hold gate, code-freeze split-by-skill,
   free-slot minimums). The cross-root **tier priority** and the **global
   cross-project round-robin cursor** ordering are **retired**
   (WL-0MTK1ILM2009QYB2 — a second ranking on the dispatch path); dispatch
   is gated by a single machine-wide slot budget (F5 — one snapshot,
   per-tier minimums audit 2 / single-pane 1). A **stale** offer
-  (closed/`in_progress`/`done`, audit-now-fresh, `needsProducerReview ===
-  true`, above-caps, or otherwise not currently dispatchable) is **removed
+  (closed/`in_progress`/`done`, audit-now-fresh, held by a non-empty
+  assignee, above-caps, or otherwise not currently dispatchable) is **removed
   eagerly without pane or dispatched marker**, and dispatch continues to
   the next offer. If no offer is dispatchable, the leader may fall back to
   its **own backlog** — a bounded window extension of the same ranking
@@ -436,7 +436,7 @@ visible (non-focus-stealing) pi agent pane. **Ranking contract (WL-0MTK1ILM2009Q
 “dispatcher == Herdr list head”** — the Herdr selection list
 (`fetchNextItems` → `selectWorkItems` → `regroupWorkItems`) is the sole ranking path;
 the dispatcher derives its candidate from the Herdr list head and applies safety gates as
-sequential filters (scheduled-prompt → code-freeze → producer-review gate → dispatched-marker
+sequential filters (scheduled-prompt → code-freeze → assignee-hold gate → dispatched-marker
 → free-slot minimums → active-audit single-flight → freshness/recency → CAS claim → spawn).
 The filters walk the Herdr sequence in LIST ORDER — a filtered head simply moves the pick
 to the first dispatchable item deeper in the same sequence (never a re-ranking). The same
@@ -495,8 +495,7 @@ timestamps are treated as not-fresh and therefore selected.
 
 Guarantee (WL-0MSN6ZCTN0027U2R): `updatedAt` is bumped only on **content**
 changes (title, description, status, stage, priority, tags, assignee, etc.).
-Flag-only flips of `needsProducerReview` persist the flag but do **not** move
-`updatedAt`, so a previously valid audit stays fresh — the TUI keeps showing
+Applying an assignee hold does **not** move `updatedAt` either, so a previously valid audit stays fresh — the TUI keeps showing
 the passed icon (not the stale hourglass) and the audit tier does not
 re-dispatch a redundant `/skill:audit` for unchanged content.
 
@@ -531,8 +530,9 @@ without per-slot data it fails closed to all-slots-free for `0 < N < total`
   24 h)
 - `downtimeMaxAttempts` — Per-item, per-kind dispatch-attempt cap. Once an
   item has been dispatched this many times for a kind at its current worklog
-  stage (including non-terminal pane closes), it is flagged
-  `needsProducerReview` and excluded from further automatic dispatch of that
+  stage (including non-terminal pane closes), it is held for the producer
+  (assigned to the producer-hold identity) and excluded from further
+  automatic dispatch of that
   kind — a neutral skip (reason `attempt-budget-exhausted`, never a strike,
   never a no-candidate) reset by a stage advancement (default: `3`, clamped
   to 1 – 10)
@@ -641,12 +641,11 @@ exclusion composes with the freshness rule: a *fresh* audit since the
 dispatch still governs (fresh → not a candidate). A missing or unreadable
 log is treated as empty (fail-safe), so audit dispatch keeps working on a
 fresh worklog. Every dispatch tier — audit, critical, implement, plan,
-and intake — additionally excludes items with `needsProducerReview === true`
-(WL-0MTIAL65N004T22F): items flagged for producer review are never
-auto-dispatched (the `r p` chord / `wl update --needs-producer-review true`),
-so the worker never consumes local slots on items awaiting a human decision.
-Absent/false/undefined → dispatchable (`=== true` only). Clearing the flag
-makes the item dispatchable again on the next idle poll.
+and intake — additionally excludes items held by a non-empty assignee
+(WL-0MV85WCJJ0087VMP): assigning the item to the producer is the per-item
+pause switch (`r p` → `wl update <id> --assignee Map`), so the worker never
+consumes local slots on items awaiting a human decision. Clearing the
+assignee makes the item dispatchable again on the next idle poll.
 
 > **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV):** exactly one
 > audit is dispatched at a time during downtime dispatch — strictly
@@ -902,14 +901,14 @@ mechanisms cannot diverge:
 
 - `classifySession(sample, opts?) → { close, reasonCode, reasonSnapshot }`
   — `reasonSnapshot` is a full state snapshot (kind, agent state, idle
-  duration, item stage, `needsProducerReview`, invoking-pane/live-children
+  duration, item stage, `producerHold`, invoking-pane/live-children
   flags, activity signals, grace-period status, idle threshold) captured for
   every outcome so a close can be explained from the log alone.
 - `extractFinalAssistantText(entries) → string` — the `.trimEnd()`-ed final
   assistant text; marker detection requires `</end_session>` at the very end
   (a marker quoted mid-message does not match)
 - `SessionSample` fields: `lastAssistantText`, `agentProcessAlive`, `idleMs`,
-  `kind`, `needsProducerReview`, `isInvokingPane`, `childProcessCount`,
+  `kind`, `producerHold`, `isInvokingPane`, `childProcessCount`,
   `ageSinceDispatchMs` (optional; age since first dispatch),
   `hasRecentFileModifications` / `hasActiveNetworkConnections` (optional;
   active-agent signals)
@@ -917,7 +916,7 @@ mechanisms cannot diverge:
 
 **Decision order (first match wins):**
 
-1. Never-close guards — `implement` pane, `needsProducerReview`, invoking
+1. Never-close guards — `implement` pane, producer-hold, invoking
    pane, live children.
 2. Within the grace window since first dispatch → **no close**
    (`grace-period`); disabled when the grace period is `0` or the pane age is
@@ -1185,8 +1184,9 @@ computation, and leader dispatch of a remote offer.
 **Per-item/per-kind attempt cap (WL-0MUKYEXMK0033MFK)** — the dispatcher
 counts dispatch attempts per `(item, kind)` from the rolling dispatch log
 (`countAttempts`) and, once the count reaches `downtimeMaxAttempts`
-(default 3, clamped to 1 – 10) at the item's current stage, flags the item
-`needsProducerReview` and stops auto-dispatching that kind. Non-terminal
+(default 3, clamped to 1 – 10) at the item's current stage, applies the
+producer scheduling hold (assigns the item to the producer) and stops
+auto-dispatching that kind. Non-terminal
 closes count via their dispatch marker; `spawn-failed` traces and post-spawn
 enrichment entries do not. Stage advancement resets the budget (earlier-stage
 markers no longer count). The skip is neutral — reason
@@ -1264,10 +1264,9 @@ directory.
 
 **Blocked-questions handling** — the dispatched prompt instructs the agent:
 if it cannot proceed because it needs answers, record the questions in a
-comment on the work item (`wl comment add <id> --comment ...`) and mark the
-item as needing producer review (`wl update <id> --needs-producer-review
-true`), repeat the questions in the final summary, then stop — it never
-blocks indefinitely.
+comment on the work item (`wl comment add <id> --comment ...`) and hold it
+for the producer (`wl update <id> --assignee Map`), repeat the questions in
+the final summary, then stop — it never blocks indefinitely.
 
 **No lock file (cross-pane decision Q5)** — concurrent panes are serialized
 by the idle→busy cadence (a dispatch consumes the local slot, so the proxy
@@ -1602,7 +1601,7 @@ deferred until typing finishes.
 ### Selection List Behaviour
 
 The default (unfiltered) worklist always shows **all** critical-priority
-items and **all** completed/in_review items (the producer-review queue),
+items and **all** completed/in_review items (the review queue),
 regardless of the `browseItemCount` setting:
 
 - Items with `priority=critical` are always included.
@@ -1751,7 +1750,7 @@ The overlay has two sections:
   appear automatically under their leader heading.
 - **Icons** — a legend explaining every glyph rendered in a work-item row,
   grouped by category under a heading (`Status`, `Stage`, `Priority`, `Epic`,
-  `Risk`, `Effort`, `Audit`, `Producer review`, `Agent`, `Coverage`) with
+  `Risk`, `Effort`, `Audit`, `Agent`, `Coverage`) with
   each group's icons listed on a single line. The category name prefix is
   removed from each meaning (the heading already names the group), and the
   legend is derived from the shared icon source of truth so new row glyphs
@@ -1869,7 +1868,7 @@ deterministic **6-bucket audit predicate** (WL-0MSLPM5ZB003TADT):
 
 | Bucket | Meaning                            |
 |--------|------------------------------------|
-| 1      | `needsProducerReview = true`       |
+| 1      | held by a non-empty assignee        |
 | 2      | failed audit, fresh                |
 | 3      | failed audit, stale                |
 | 4      | no audit                           |
@@ -2228,8 +2227,8 @@ Semantics:
 - **Bundled restriction:** the code-workflow chords `n` (intake), `p` (plan),
   and `i` (implement) carry `work_item_types: ["bug","docs","feature",
   "task","chore","epic"]`, so they are hidden on non-code and non-docs types
-  (e.g. `podcast`). All other bundled shortcuts (audit `a-*`, producer review
-  `r-p`/`r-i`, housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
+  (e.g. `podcast`). All other bundled shortcuts (audit `a-*`, producer hold
+  `r-p`/interview `r-i`, housekeeping `u-*`/`x-*`/`c`/`s`/`P-*`/`f-*`) remain untyped and are
   available on all types. Consumer projects can add their own type-gated
   chords (e.g. a `w` chord leader → `wiki-podcast-script` for `podcast`
   items) via the project-local `shortcuts.json` mechanism above.

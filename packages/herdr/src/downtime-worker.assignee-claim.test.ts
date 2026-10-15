@@ -11,7 +11,7 @@
  *
  *   AC1/AC5 — herdr dispatch claim → simulated audit Phase-2 failure → item
  *             back at completed/in_review, re-selectable (no
- *             needsProducerReview-column dependency).
+ *             producer-review-column dependency).
  *   C4 AC    — `claimWorkItem` is status-neutral for the audit tier (writes
  *             NO --status/--stage); `rollbackClaimWorkItem` clears the
  *             assignee guarded by `--if-assignee <agent>`.
@@ -109,7 +109,6 @@ function makeItem(overrides: Record<string, unknown> = {}): Record<string, unkno
     deleteReason: '',
     risk: '',
     effort: '',
-    needsProducerReview: false,
     ...overrides,
   };
 }
@@ -192,7 +191,7 @@ describe('status-neutral audit-tier claim (WL-0MV85WARS000THEC)', () => {
 
   // ── AC1/AC5 regression: claim → simulated audit Phase-2 failure ─────
   // The item must read back completed/in_review (never a hybrid) and be
-  // RE-SELECTABLE by the audit tier without any needsProducerReview column.
+  // RE-SELECTABLE by the audit tier without any producer-review column.
 
   it('dispatch claim → simulated audit Phase-2 failure → completed/in_review again, re-selectable', async () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'wl-herdr-assignee-'));
@@ -222,12 +221,11 @@ describe('status-neutral audit-tier claim (WL-0MV85WARS000THEC)', () => {
       expect(rollbackOk).toBe(true);
 
       // The item is back at completed/in_review — and the claim residue is
-      // gone (assignee cleared) — no needsProducerReview involvement.
+      // gone (assignee cleared) — no producer-review flag involvement.
       stored = db.get('WL-AUD');
       expect(stored?.status).toBe('completed');
       expect(stored?.stage).toBe('in_review');
       expect(stored?.assignee).toBe('');
-      expect(stored?.needsProducerReview).toBe(false);
 
       // Re-selectable: the audit tier's own selector picks it again.
       const candidate: AuditCandidate = {

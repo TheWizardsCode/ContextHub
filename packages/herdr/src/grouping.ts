@@ -121,8 +121,14 @@ export interface GroupableItem {
   status?: string;
   filePaths: string[];
   priority?: string;
+  /**
+   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
+   * scheduling hold — the producer-hold convention that replaced the removed
+   * producer-review flag (WL-0MV85WGIT004PHRC). Held in_review items
+   * rank first in the review queue so the pause state stays observable.
+   */
+  assignee?: string;
   // Optional audit fields — used for in_review bucket sort
-  needsProducerReview?: boolean;
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
@@ -367,18 +373,20 @@ const DEFAULT_PRIORITY_ORDER = WITHIN_GROUP_PRIORITY_ORDER.medium;
  *
  * | Bucket | Meaning                                        |
  * |--------|------------------------------------------------ |
- * | 1      | needsProducerReview                             |
+ * | 1      | held by a non-empty assignee (producer hold)    |
  * | 2      | failed audit, fresh                             |
  * | 3      | failed audit, stale                             |
  * | 4      | no audit                                        |
  * | 5      | passed audit, stale                             |
  * | 6      | passed audit, fresh                             |
  *
- * This mirrors the predicate in src/commands/grouping.ts (ACL2).
+ * Bucket 1 is the assignee hold that replaced the removed producer-review
+ * flag (WL-0MV85WGIT004PHRC). The remaining five
+ * buckets mirror `src/commands/grouping.ts` (ACL2).
  */
 export function inReviewBucket(item: {
   stage?: string;
-  needsProducerReview?: boolean;
+  assignee?: string;
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
@@ -390,8 +398,8 @@ export function inReviewBucket(item: {
   // Sentinel — only valid when stage === 'in_review'
   if (item.stage !== 'in_review') return 0;
 
-  // Bucket 1: producer review pending
-  if (item.needsProducerReview) return 1;
+  // Bucket 1: held by a non-empty assignee (producer hold).
+  if (typeof item.assignee === 'string' && item.assignee.trim() !== '') return 1;
 
   // Bucket 4: no audit yet (null/undefined auditResult or missing auditedAt)
   // Per AC4 stale buckets require auditedAt present; absence is the no-audit bucket.
@@ -427,7 +435,7 @@ export function inReviewBucket(item: {
  * caller fall back to the standard comparator.
  */
 export function compareInReviewItems(a: GroupableItem & {
-  needsProducerReview?: boolean;
+  assignee?: string;
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
@@ -507,7 +515,7 @@ export function regroupWorkItems<T extends {
   group?: number;
   groupLabel?: string;
   // Optional audit fields — used for in_review bucket sort
-  needsProducerReview?: boolean;
+  assignee?: string;
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;
@@ -525,7 +533,7 @@ export function regroupWorkItems<T extends {
     status: item.status,
     priority: item.priority,
     filePaths: extractFilePaths(item.description ?? ''),
-    needsProducerReview: item.needsProducerReview,
+    assignee: item.assignee,
     auditResult: item.auditResult,
     auditedAt: item.auditedAt,
     updatedAt: item.updatedAt,
@@ -540,7 +548,7 @@ export function regroupWorkItems<T extends {
     if (ga !== gb) return ga - gb;
     return compareGroupableItems(
       { id: a.id, stage: a.stage, status: a.status, priority: a.priority, filePaths: [],
-        needsProducerReview: a.needsProducerReview,
+        assignee: a.assignee,
         auditResult: a.auditResult,
         auditedAt: a.auditedAt,
         updatedAt: a.updatedAt,
@@ -548,7 +556,7 @@ export function regroupWorkItems<T extends {
         currentFingerprint: a.currentFingerprint,
       },
       { id: b.id, stage: b.stage, status: b.status, priority: b.priority, filePaths: [],
-        needsProducerReview: b.needsProducerReview,
+        assignee: b.assignee,
         auditResult: b.auditResult,
         auditedAt: b.auditedAt,
         updatedAt: b.updatedAt,

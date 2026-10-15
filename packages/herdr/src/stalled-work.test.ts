@@ -163,10 +163,10 @@ describe('classifyStalledPane — stall detection (WL-0MUYMBO9X000WDF6)', () => 
     });
   });
 
-  it('needs-producer-review: excludes an item flagged for producer review', () => {
-    expect(classify(pane(), item({ needsProducerReview: true }))).toEqual({
+  it('producer-hold: excludes an item held by the producer (assignee)', () => {
+    expect(classify(pane(), item({ assignee: 'Map' }))).toEqual({
       stalled: false,
-      reason: 'needs-producer-review',
+      reason: 'producer-hold',
     });
   });
 
@@ -278,10 +278,10 @@ describe('classifyStalledPane — model cooldown (WL-0MV5639GG00085Q7)', () => {
     ).toEqual({ stalled: false, reason: 'model-cooldown-active' });
   });
 
-  it('a due cooldown candidate is still excluded by the needsProducerReview flag', () => {
+  it('a due cooldown candidate is still excluded by the producer hold', () => {
     expect(
-      classify(pane(), item({ needsProducerReview: true }), guards({ modelCooldown: cooldown() })),
-    ).toEqual({ stalled: false, reason: 'needs-producer-review' });
+      classify(pane(), item({ assignee: 'Map' }), guards({ modelCooldown: cooldown() })),
+    ).toEqual({ stalled: false, reason: 'producer-hold' });
   });
 
   it('a due cooldown candidate is still excluded by the attempt cap', () => {
@@ -340,7 +340,7 @@ function resumeController(
     recordAttempt: async (_cwd, entry) => {
       recorded.push(entry);
     },
-    markNeedsProducerReview: async (itemId) => {
+    markProducerHold: async (itemId) => {
       flagged.push(itemId);
       return true;
     },
@@ -465,7 +465,7 @@ describe('resumeStalledPane — in-place resume (WL-0MUYMBPZ5004LBFX)', () => {
     expect(countAttempts(recorded, ITEM_ID, 'implement', 'plan_complete')).toBe(1);
   });
 
-  it('escalates via needsProducerReview when the attempt cap is exhausted, without resuming', async () => {
+  it('escalates via the producer hold when the attempt cap is exhausted, without resuming', async () => {
     const entries: DowntimeLogEntry[] = Array.from({ length: 3 }, () => ({
       itemId: ITEM_ID,
       kind: 'implement',

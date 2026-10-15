@@ -113,19 +113,21 @@ def check_queue():
             return "No items in completed/in_review queue."
 
         if count < 10:
-            # Sparse queue — flag next item for producer review
+            # Sparse queue — hold the next item for the producer (assign to the
+            # producer-hold identity; the assignee hold replaced the removed
+            # producer-review flag).
             next_data = run_wl(['next', '--json'])
             next_item = next_data.get('workItem')
             if next_item:
                 item_id = next_item['id']
                 item_title = next_item.get('title', item_id)
-                run_wl(['update', item_id, '--needs-producer-review', 'true', '--json'])
+                run_wl(['update', item_id, '--assignee', 'Map', '--json'])
                 return (
-                    f"Flagged {item_title} ({item_id}) for producer review.\n"
+                    f"Held {item_title} ({item_id}) for the producer.\n"
                     f"Queue has {count} completed/in_review items (below threshold of 10)."
                 )
             else:
-                return "No next item found to flag for review."
+                return "No next item found to hold for the producer."
         else:
             # Full queue — find first non-ready item by sortIndex
             items_sorted = sorted(items, key=lambda x: x.get('sortIndex', 0) or 0)

@@ -304,10 +304,10 @@ describe('createHerdrReaperDeps', () => {
     const deps = createHerdrReaperDeps({
       listPanesRaw: vi.fn().mockResolvedValue(raw),
       closePane: vi.fn(),
-      getNeedsProducerReview: vi.fn().mockRejectedValue(new Error('wl down')),
+      getProducerHold: vi.fn().mockRejectedValue(new Error('wl down')),
     });
     const panes = await deps.listPanes();
-    expect(panes[0].needsProducerReview).toBe(true);
+    expect(panes[0].producerHold).toBe(true);
   });
 
   it('maps closePane failure to {success:false} instead of throwing', async () => {
@@ -377,7 +377,7 @@ describe('createHerdrReaperDeps', () => {
     expect(network).toHaveBeenCalledWith(expect.objectContaining({ paneId: 'w1:p1' }));
   });
 
-  it('populates itemStage and producer-review from getItemInfo (parent AC6)', async () => {
+  it('populates itemStage and producer hold from getItemInfo (parent AC6)', async () => {
     const raw = JSON.stringify({
       panes: [
         {
@@ -389,7 +389,7 @@ describe('createHerdrReaperDeps', () => {
         },
       ],
     });
-    const getItemInfo = vi.fn().mockResolvedValue({ needsProducerReview: false, stage: 'plan_complete' });
+    const getItemInfo = vi.fn().mockResolvedValue({ producerHold: false, stage: 'plan_complete' });
     const deps = createHerdrReaperDeps({
       listPanesRaw: vi.fn().mockResolvedValue(raw),
       closePane: vi.fn(),
@@ -398,7 +398,7 @@ describe('createHerdrReaperDeps', () => {
     const panes = await deps.listPanes();
     expect(getItemInfo).toHaveBeenCalledWith('WL-0ABC123');
     expect(panes[0].itemStage).toBe('plan_complete');
-    expect(panes[0].needsProducerReview).toBe(false);
+    expect(panes[0].producerHold).toBe(false);
   });
 
   it('treats a failed getItemInfo lookup as review-blocked (fail-closed)', async () => {
@@ -419,7 +419,7 @@ describe('createHerdrReaperDeps', () => {
       getItemInfo: vi.fn().mockRejectedValue(new Error('wl down')),
     });
     const panes = await deps.listPanes();
-    expect(panes[0].needsProducerReview).toBe(true);
+    expect(panes[0].producerHold).toBe(true);
   });
 
   it('maps the raw herdr agent status into PaneStatus (parent AC3/AC6)', async () => {

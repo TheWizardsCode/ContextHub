@@ -623,8 +623,9 @@ describe('fail-closed on unusable per-slot detail (WL-0MUXVPXAZ005RESW)', () => 
 //
 // A repeatedly non-terminal item must stop consuming dispatch slots. Once
 // the rolling dispatch log records `maxAttempts` attempts for an
-// `(item, kind)` at the item's current stage, the item is flagged
-// `needsProducerReview` and excluded from further automatic dispatch of that
+// `(item, kind)` at the item's current stage, the item is held for the
+// producer (assigned to the producer-hold identity) and excluded from
+// further automatic dispatch of that
 // kind, with a neutral `attempt-budget-exhausted` reason (never a strike,
 // never `no-candidate`). A stage advancement resets the budget; a
 // missing/corrupt log is fail-open (count 0).
@@ -678,7 +679,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
   function depsFor(items: DowntimeHerdrItem[], overrides: Partial<DowntimeWorkerDeps> = {}): DowntimeWorkerDeps {
     return makeDeps({
       getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items }),
-      markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+      markProducerHold: vi.fn().mockResolvedValue(true),
       ...overrides,
     });
   }
@@ -698,7 +699,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('implement');
     expect(outcome.candidate?.id).toBe('IMP-1');
-    expect(deps.markNeedsProducerReview).not.toHaveBeenCalled();
+    expect(deps.markProducerHold).not.toHaveBeenCalled();
   });
 
   it('AC7b: at the cap the item is skipped with the neutral attempt-budget-exhausted reason', async () => {
@@ -721,7 +722,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
     expect(deps.recordError).not.toHaveBeenCalled();
   });
 
-  it('AC7c: the producer-review flag is set exactly once when the cap is reached', async () => {
+  it('AC7c: the producer hold is applied exactly once when the cap is reached', async () => {
     const cwd = makeCwd();
     writeLog(cwd, [marker(), marker(), marker()]);
     const deps = depsFor([implementHead('IMP-1')]);
@@ -733,8 +734,8 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
       maxAttempts: 3,
     });
 
-    expect(deps.markNeedsProducerReview).toHaveBeenCalledTimes(1);
-    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
+    expect(deps.markProducerHold).toHaveBeenCalledTimes(1);
+    expect(deps.markProducerHold).toHaveBeenCalledWith('IMP-1', cwd);
   });
 
   it('AC7d: a stage advancement resets the budget (earlier-stage attempts do not count)', async () => {
@@ -757,7 +758,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.candidate?.id).toBe('IMP-1');
-    expect(deps.markNeedsProducerReview).not.toHaveBeenCalled();
+    expect(deps.markProducerHold).not.toHaveBeenCalled();
   });
 
   it('AC7e: a corrupt/missing log is fail-open (never blocks all dispatch)', async () => {
@@ -809,7 +810,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
       expect('noCandidate' in result).toBe(false);
       expect('candidate' in result).toBe(false);
     }
-    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
+    expect(deps.markProducerHold).toHaveBeenCalledWith('IMP-1', cwd);
   });
 
   it('AC6 (offer path): below the cap computeMostImportantItem still offers the item', async () => {
@@ -846,7 +847,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
           sortIndex: 10,
         },
       }),
-      markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+      markProducerHold: vi.fn().mockResolvedValue(true),
     });
     const entries: CoordinationEntry[] = [{
       instanceId: 'inst-1',
@@ -869,7 +870,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
     expect(outcome.reason).toBe('attempt-budget-exhausted');
     expect(deps.claimItem).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
-    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
+    expect(deps.markProducerHold).toHaveBeenCalledWith('IMP-1', cwd);
   });
 
   it('plan kind: the cap is enforced for a plan candidate too', async () => {
@@ -890,7 +891,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('attempt-budget-exhausted');
-    expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('PLN-1', cwd);
+    expect(deps.markProducerHold).toHaveBeenCalledWith('PLN-1', cwd);
   });
 });
 
@@ -1182,7 +1183,7 @@ describe('stalled-work cross-root, idempotence and fail-safe integration (WL-0MU
           startAgent: vi.fn().mockResolvedValue({ ok: true }),
           readEntries: async () => [],
           recordAttempt: async () => undefined,
-          markNeedsProducerReview: async () => true,
+          markProducerHold: async () => true,
           maxAttempts: 3,
           now: () => NOW,
           ...overrides,
@@ -1474,7 +1475,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
           eligibleBacklog('WL-OOV-BUDGET', { sortIndex: 1000 }),
           eligibleBacklog('WL-OOV-FRESH', { sortIndex: 2000 }),
         ]),
-        markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+        markProducerHold: vi.fn().mockResolvedValue(true),
       });
 
       const outcome = await dispatchFallback(deps, coordinationDir, cwd, {
@@ -1486,7 +1487,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
       // The exhausted item is flagged and skipped; the next eligible dispatches.
       expect(outcome.dispatched).toBe(true);
       expect(outcome.candidate?.id).toBe('WL-OOV-FRESH');
-      expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('WL-OOV-BUDGET', cwd);
+      expect(deps.markProducerHold).toHaveBeenCalledWith('WL-OOV-BUDGET', cwd);
       expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-BUDGET', expect.anything(), expect.anything());
     },
   );

@@ -36,10 +36,12 @@
  *    WL-0MSLIY8ZR004QUSY) unless a fresh audit exists since, closing the
  *    re-selection loop where a dispatched run reverts the item to
  *    completed/in_review without recording a fresh audit. Every tier
- *    additionally excludes items with `needsProducerReview === true`
- *    (parent WL-0MTIAL65N004T22F): items flagged for producer review are
- *    never auto-dispatched, preventing the worker from consuming local
- *    slots on items awaiting a human decision.
+ *    additionally excludes items held by a non-empty assignee
+ *    (WL-0MV85WCJJ0087VMP): a held item is never auto-dispatched,
+ *    preventing the worker from consuming local slots on items awaiting a
+ *    human decision (assigning to the producer is the per-item pause
+ *    switch, re-homed from the retired producer-review flag in
+ *    WL-0MV85WGIT004PHRC).
  *    A NON-TERMINAL pane-close cooldown (WL-0MUKYERLZ006ELL5) is applied as
  *    a sequential filter after the dispatched-marker exclusion and before
  *    the code-freeze gate: an item whose previous pane of the SAME kind
@@ -1239,14 +1241,6 @@ export interface DowntimeHerdrItem {
    */
   deletedBy?: string;
   /**
-   * Needs-producer-review flag (WL-0MTIAL65N004T22F): carried by the
-   * fetcher's `WorkItem`; when `true` the item is not dispatchable — the
-   * producer-review gate is a sequential filter on the Herdr sequence
-   * (via `classifyItemForDispatch`) for both the direct dispatcher and
-   * the check-in offer computation.
-   */
-  needsProducerReview?: boolean;
-  /**
    * Current assignee (empty/absent = unassigned). A non-empty assignee is a
    * scheduling hold: the item is held by a human/agent and must not be
    * dispatched at any tier (WL-0MV85WCJJ0087VMP).
@@ -1292,38 +1286,10 @@ export function isAssigneeHeld(
 
 /**
  * Reserved assignee value that marks the producer's per-item scheduling hold.
- *
- * The producer's wl identity is `Map`, so assigning an item to it is an
- * explicit, self-describing "pause auto-dispatch" switch — no magic DB flag
- * is involved (the held `needsProducerReview` flag is retired in favour of
- * this convention). Because the value is the producer's real wl identity, the
- * release gate and the downtime dispatcher can recognise "the producer owns
- * this item" from the assignee alone
- * (WL-0MV85WDOM007BKF8; epic WL-0MV82CHGQ000HAZZ Q2).
- *
- * The sentinel is a reserved identity: it must never collide with an
- * automated agent identity (`pi`, `implement`, `@github-copilot`, …) and it
- * does not. By contrast, {@link isAssigneeHeld} treats ANY non-empty assignee
- * as a hold; this constant identifies the specific producer hold the release
- * gate keys on. Clearing the assignee (empty/whitespace) releases the hold.
+ * Live implementation in `./producer-hold.js` (extracted so pane-close and
+ * fetcher can share it without importing the whole downtime worker).
  */
-export const PRODUCER_HOLD_ASSIGNEE = 'Map';
-
-/**
- * Whether an assignee value is the producer-hold sentinel.
- *
- * Whitespace-only and non-string values are never the sentinel: a blank
- * assignee means "unassigned" (the hold is released). Comparison is exact —
- * the sentinel is a reserved wl identity, not a prefix nor a case variant.
- * A non-sentinel non-empty assignee is still a hold via
- * {@link isAssigneeHeld}; this helper only distinguishes the producer's own
- * hold for the release gate (WL-0MV85WDOM007BKF8).
- */
-export function isProducerHold(assignee?: string | null): boolean {
-  return (
-    typeof assignee === 'string' && assignee.trim() === PRODUCER_HOLD_ASSIGNEE
-  );
-}
+export { PRODUCER_HOLD_ASSIGNEE, isProducerHold } from './producer-hold.js';
 export type DowntimeHerdrListResult =
   | { ok: true; items: DowntimeHerdrItem[] }
   | { ok: false; error?: string };
@@ -1362,13 +1328,6 @@ export interface DowntimeCandidate {
    */
   deletedBy?: string;
   /**
-   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
-   * the item must NOT be auto-dispatched by the downtime worker — a human
-   * producer must review it first. Absent/false/undefined → dispatchable.
-   * Filtered in every `select*` function (AC1).
-   */
-  needsProducerReview?: boolean;
-  /**
    * Current assignee (empty/absent = unassigned). A non-empty assignee is a
    * scheduling hold — the item is held by a human/agent and is excluded from
    * every `select*` filter (WL-0MV85WCJJ0087VMP).
@@ -1397,11 +1356,6 @@ export interface ImplementCandidate {
   deletedBy?: string;
   /** Assignee hold (WL-0MV85WCJJ0087VMP): non-empty ⇒ excluded from selection. */
   assignee?: string;
-  /**
-   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
-   * exclude from implement-tier selection (AC1).
-   */
-  needsProducerReview?: boolean;
 }
 
 /**
@@ -1425,11 +1379,6 @@ export interface AuditCandidate {
   priority?: string;
   /** Soft-delete attribution (SA-0MUJBLZC60085DI9): non-empty ⇒ excluded from selection. */
   deletedBy?: string;
-  /**
-   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
-   * exclude from audit-tier selection (AC1).
-   */
-  needsProducerReview?: boolean;
   /**
    * Parent work item id when present. The audit-tier query is root-only
    * (`--root-only`, WL-0MSTLFW14000KPEC) so children never reach selection;
@@ -1501,12 +1450,6 @@ export interface DowntimeItemInfo {
    * non-dispatchable (`classifyItemForDispatch` returns null).
    */
   deletedBy?: string;
-  /**
-   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
-   * exclude from classification (the item is not dispatchable) and the
-   * coordination leader path skips it (AC3).
-   */
-  needsProducerReview?: boolean;
   /**
    * Recorded audit verdict (`auditResult.readyToClose` from `wl show
    * --json`, WL-0MU308WSF0002JWN): `false` means the audit FAILED; `true`
@@ -2194,7 +2137,7 @@ export interface DowntimeWorkerDeps {
   /**
    * Pane-lifecycle item state lookup (WL-0MU308WSF0002JWN): resolve the
    * current work-item state (stage/status/risk/effort/auditedAt/auditResult/
-   * needsProducerReview) for a dispatched pane's item so the monitor can
+   * assignee) for a dispatched pane's item so the monitor can
    * classify its lifecycle outcome. OPTIONAL — when absent the monitor
    * cannot classify and takes no action (fail-open; production wiring always
    * provides it). Must never throw; resolves null on a wl/CLI failure so a
@@ -2259,18 +2202,19 @@ export interface DowntimeWorkerDeps {
     cwd: string,
   ): Promise<boolean>;
   /**
-   * Flag an item for producer review (`needsProducerReview = true`) after its
-   * automatic dispatch budget is exhausted (WL-0MUKYEXMK0033MFK AC3). Called
-   * once when the per-item/per-kind attempt count reaches `maxAttempts`, so a
-   * repeatedly non-terminal item surfaces for human triage instead of
-   * looping through idle cycles forever. `cwd` is the item's worklog root
-   * (cross-root safe). OPTIONAL — when absent the dispatcher still SKIPS the
-   * budget-exhausted item (the cap is enforced) but cannot persist the flag
-   * (legacy/test callers). Must never throw (fail-closed): a flag write
-   * failure must not crash the worker, and the item stays budget-skipped so
-   * the flag is retried on the next cycle.
+   * Apply the producer scheduling hold (assign to the producer) after its
+   * automatic dispatch budget is exhausted (WL-0MUKYEXMK0033MFK AC3, re-homed
+   * onto the assignee hold in WL-0MV85WGIT004PHRC). Called once when the
+   * per-item/per-kind attempt count reaches `maxAttempts`, so a repeatedly
+   * non-terminal item surfaces for human triage instead of looping through
+   * idle cycles forever. `cwd` is the item's worklog root (cross-root safe).
+   * OPTIONAL — when absent the dispatcher still SKIPS the budget-exhausted
+   * item (the cap is enforced) but cannot persist the hold (legacy/test
+   * callers). Must never throw (fail-closed): a hold write failure must not
+   * crash the worker, and the item stays budget-skipped so the hold is
+   * retried on the next cycle.
    */
-  markNeedsProducerReview?(itemId: string, cwd: string): Promise<boolean>;
+  markProducerHold?(itemId: string, cwd: string): Promise<boolean>;
   /**
    * Machine-wide stalled-work scan (WL-0MUYMBSA90092QV2 AC1/AC4): scan every
    * `herdr pane list` record for a pane hosting a non-terminal item whose
@@ -2656,7 +2600,7 @@ export interface CriticalFirstCandidate {
  * NON-BYPASSABLE safety gates, in deterministic order (lowest `sortIndex`
  * first — the historical critical-tier ordering):
  *
- *  - `needsProducerReview === true` excludes that candidate;
+ *  - a held (non-empty-assignee) candidate is excluded;
  *  - `classifyItemForDispatch` excludes non-dispatchable shapes (retired
  *    stage, missing fields, above-effort-cap `plan_complete`);
  *  - while the code-freeze marker is frozen OR ambiguous, the
@@ -2681,7 +2625,7 @@ export function selectCriticalFirstCandidates(
   frozen: boolean = false,
 ): CriticalFirstCandidate[] {
   const sorted = items
-    .filter((i) => i.priority === 'critical' && (i.status === 'open' || i.status === 'blocked') && i.needsProducerReview !== true)
+    .filter((i) => i.priority === 'critical' && (i.status === 'open' || i.status === 'blocked') && !isAssigneeHeld(i))
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
   const out: CriticalFirstCandidate[] = [];
   for (const item of sorted) {
@@ -2717,21 +2661,21 @@ export function isAttemptBudgetExhausted(
 }
 
 /**
- * Best-effort producer-review flag for a budget-exhausted item
+ * Best-effort producer scheduling hold for a budget-exhausted item
  * (WL-0MUKYEXMK0033MFK AC3). Never throws; a missing dep or a failed write is
  * swallowed — the caller still skips the item via the budget filter, so the
- * flag is retried on the next cycle (fail-closed).
+ * hold is retried on the next cycle (fail-closed).
  */
 async function flagBudgetExhausted(
   deps: DowntimeWorkerDeps,
   itemId: string,
   cwd: string,
 ): Promise<void> {
-  if (typeof deps.markNeedsProducerReview !== 'function') return;
+  if (typeof deps.markProducerHold !== 'function') return;
   try {
-    await deps.markNeedsProducerReview(itemId, cwd);
+    await deps.markProducerHold(itemId, cwd);
   } catch {
-    // fail-closed: a flag write failure must never crash the worker
+    // fail-closed: a hold write failure must never crash the worker
   }
 }
 
@@ -2901,7 +2845,6 @@ async function dispatchFromHerdrList(
       // Assignee hold (WL-0MV85WCJJ0087VMP): carried into the classification
       // info so a held item is excluded by `classifyItemForDispatch` here too.
       assignee: item.assignee,
-      needsProducerReview: item.needsProducerReview,
     };
     const k = classifyItemForDispatch(info, now);
     if (k === null) continue;
@@ -3605,9 +3548,6 @@ export function classifyItemForDispatch(
   // `deletedBy` is the authoritative deletion marker — the item must never
   // be dispatched, even if its status/stage would otherwise qualify.
   if (isSoftDeleted(info)) return null;
-  // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
-  // Items flagged for producer review must NOT be auto-dispatched at any tier.
-  if (info.needsProducerReview === true) return null;
   // Assignee hold (WL-0MV85WCJJ0087VMP): an item held by a non-empty
   // assignee is never auto-dispatched at any tier. Assigning an item to a
   // human/agent (e.g. the producer) makes it non-dispatchable, and the
@@ -3675,7 +3615,6 @@ export function toCoordinationCandidate(info: DowntimeItemInfo): DowntimeCandida
     status: info.status,
     priority: info.priority,
     sortIndex: info.sortIndex,
-    needsProducerReview: info.needsProducerReview,
   };
 }
 
@@ -3825,7 +3764,7 @@ export async function computeMostImportantItem(
   // NON-SAFETY filter (stale dispatched marker, review-queue depth hold) must
   // still be OFFERED — otherwise the check-in floats a lower-priority head
   // item and the leader never dispatches the critical work. Safety gates
-  // (`needsProducerReview`, code-freeze split-by-skill) still apply inside the
+  // (assignee hold, code-freeze split-by-skill) still apply inside the
   // helper; free-slot minimums and active-audit single-flight remain
   // dispatch-time gates and are intentionally not applied to an offer.
   //
@@ -5020,7 +4959,7 @@ export async function dispatchDowntimeWork(
             // No active audit: proceed with the candidate lookup unchanged.
             const audit = await deps.getNextAuditCandidate(opts.cwd);
             if (audit.ok) {
-              if (audit.candidate !== null && audit.candidate.needsProducerReview !== true) {
+              if (audit.candidate !== null && !isAssigneeHeld(audit.candidate)) {
                 // Interim freshness re-check (WL-0MT8KSTOE00871E7): between
                 // candidate selection and dispatch, a valid audit may have
                 // been recorded (e.g. by a human or another process). Re-check
@@ -5090,7 +5029,7 @@ export async function dispatchDowntimeWork(
     if (panesEligible) {
       const critical = await deps.getNextCriticalCandidate(opts.cwd);
       if (critical.ok) {
-        if (critical.candidate !== null && critical.candidate.needsProducerReview !== true) {
+        if (critical.candidate !== null && !isAssigneeHeld(critical.candidate)) {
           const kind = criticalSkillKind(critical.candidate.stage);
           if (kind !== null && !(frozen && kind === 'implement')) {
             return await dispatchClaimedTier(deps, kind, critical.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'critical-tier' });
@@ -5136,7 +5075,7 @@ export async function dispatchDowntimeWork(
       // ineligible (never a strike): the lookup is skipped entirely and
       // dispatch falls through to the plan tier's defensive no-candidate.
       let implementCandidate = await deps.getNextImplementCandidate(opts.cwd);
-      if (implementCandidate !== null && implementCandidate.needsProducerReview !== true) {
+      if (implementCandidate !== null && !isAssigneeHeld(implementCandidate)) {
         // Gate enforcement: only critical candidates bypass the review-queue
         // depth throttle (shared `isImplementHeldByReviewGate` semantics).
         // Non-critical candidates are excluded when the gate is active.
@@ -5155,7 +5094,7 @@ export async function dispatchDowntimeWork(
         let planIntakeEmpty = true;
         if (panesEligible) {
           const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
-          if (intakeComplete.ok && intakeComplete.candidate !== null && intakeComplete.candidate.needsProducerReview !== true) {
+          if (intakeComplete.ok && intakeComplete.candidate !== null && !isAssigneeHeld(intakeComplete.candidate)) {
             planIntakeEmpty = false;
           }
         }
@@ -5176,7 +5115,7 @@ export async function dispatchDowntimeWork(
     if (panesEligible) {
       const intakeComplete = await deps.getNextItem('intake_complete', opts.cwd);
       if (intakeComplete.ok) {
-        if (intakeComplete.candidate !== null && intakeComplete.candidate.needsProducerReview !== true) {
+        if (intakeComplete.candidate !== null && !isAssigneeHeld(intakeComplete.candidate)) {
           return await dispatchClaimedTier(deps, 'plan', intakeComplete.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'non-critical' });
         }
       } else {
@@ -5193,7 +5132,7 @@ export async function dispatchDowntimeWork(
     // no candidate — including when tier 2 errored.
     const idea = await deps.getNextItem('idea', opts.cwd);
     if (idea.ok) {
-      if (idea.candidate !== null && idea.candidate.needsProducerReview !== true) {
+      if (idea.candidate !== null && !isAssigneeHeld(idea.candidate)) {
         return await dispatchClaimedTier(deps, 'intake', idea.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'non-critical' });
       }
       if (tier2Error) {
@@ -6794,16 +6733,15 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
 /**
  * Instruction appended to every dispatched prompt: when the skill run
  * cannot proceed because answers are needed, record the questions in a
- * comment on the work item, mark it as needing producer review, repeat the
- * questions in the final summary, and stop — never block indefinitely (parent
- * AC6).
+ * comment on the work item, apply the producer scheduling hold (assign to
+ * the producer), repeat the questions in the final summary, and stop —
+ * never block indefinitely (parent AC6).
  */
 export const BLOCKED_QUESTIONS_INSTRUCTION =
   'If you cannot proceed because you need answers, record the questions in a ' +
   'comment on the work item (wl comment add <id> --comment "question: ...") and ' +
-  'mark the item as needing producer review (wl update <id> --needs-producer-review ' +
-  'true), repeat the questions in your final summary, then stop — do not block ' +
-  'indefinitely.';
+  'hold the item for the producer (wl update <id> --assignee Map), repeat the ' +
+  'questions in your final summary, then stop — do not block indefinitely.';
 
 /** Build the prompt dispatched to a pi agent pane for the given candidate. */
 export function buildDowntimePrompt(kind: DowntimeSkillKind, candidate: DowntimeCandidate): string {
@@ -6899,8 +6837,6 @@ export function parseNextCandidatesOutput(
       priority: typeof nested.priority === 'string' ? nested.priority : undefined,
       deletedBy: typeof nested.deletedBy === 'string' ? nested.deletedBy : undefined,
       assignee: typeof nested.assignee === 'string' ? nested.assignee : undefined,
-      needsProducerReview:
-        nested.needsProducerReview !== undefined ? Boolean(nested.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -7043,8 +6979,6 @@ export function parseAuditCandidatesOutput(stdout: string): AuditCandidate[] | n
       priority: typeof o.priority === 'string' ? o.priority : undefined,
       parentId: o.parentId == null ? (o.parentId as null | undefined) : String(o.parentId),
       deletedBy: typeof o.deletedBy === 'string' ? o.deletedBy : undefined,
-      needsProducerReview:
-        o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
       assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
     });
   }
@@ -7135,8 +7069,6 @@ export function selectAuditCandidate(
     // audit candidate even if a non-root-only/faulty response leaks one.
     .filter((c) => !c.parentId)
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
-    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
-    .filter((c) => c.needsProducerReview !== true)
     // Assignee hold (WL-0MV85WCJJ0087VMP): a non-empty assignee means the
     // item is already held (e.g. by the producer), so it is not an audit
     // candidate — the claim's `--if-assignee ""` CAS would fail stale.
@@ -7160,7 +7092,6 @@ export function toDowntimeCandidate(candidate: AuditCandidate): DowntimeCandidat
     id: candidate.id,
     title: candidate.title,
     stage: 'audit',
-    needsProducerReview: candidate.needsProducerReview,
   };
 }
 
@@ -7270,8 +7201,6 @@ export function parseImplementCandidatesOutput(stdout: string): ImplementCandida
       priority: typeof o.priority === 'string' ? o.priority : undefined,
       deletedBy: typeof o.deletedBy === 'string' ? o.deletedBy : undefined,
       assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
-      needsProducerReview:
-        o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -7308,8 +7237,6 @@ export function selectImplementCandidate(
       if (effort === null || effort > 3) return false; // effort ≤ Medium (1=XS, 2=S, 3=M)
       return true;
     })
-    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
-    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => !(dispatchedItemIds?.has(c.id) ?? false))
     .sort((a, b) => (a.sortIndex ?? 0) - (b.sortIndex ?? 0));
   return selectWithRotation(filtered, registry);
@@ -7324,7 +7251,6 @@ export function toImplementCandidate(candidate: ImplementCandidate): DowntimeCan
     id: candidate.id,
     title: candidate.title,
     stage: 'implement',
-    needsProducerReview: candidate.needsProducerReview,
   };
 }
 
@@ -7355,8 +7281,6 @@ export function selectNextCandidate(
     // Assignee hold (WL-0MV85WCJJ0087VMP): a held item is never dispatched.
     .filter((c) => !isAssigneeHeld(c))
     .filter((c) => c.status === 'open')
-    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
-    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => {
       const dispatchedAt = dispatchedStages?.get(c.id);
       // Exclude while still at the dispatched-at stage; a missing recorded
@@ -7402,12 +7326,6 @@ export interface CriticalCandidate {
   deletedBy?: string;
   /** Assignee hold (WL-0MV85WCJJ0087VMP): non-empty ⇒ excluded from selection. */
   assignee?: string;
-  /**
-   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
-   * exclude from critical-tier selection and from dependency-frontier
-   * resolution (AC1, AC2).
-   */
-  needsProducerReview?: boolean;
 }
 
 /**
@@ -7463,8 +7381,6 @@ export function parseCriticalCandidatesOutput(stdout: string): CriticalCandidate
       priority: typeof o.priority === 'string' ? o.priority : undefined,
       deletedBy: typeof o.deletedBy === 'string' ? o.deletedBy : undefined,
       assignee: typeof o.assignee === 'string' ? o.assignee : undefined,
-      needsProducerReview:
-        o.needsProducerReview !== undefined ? Boolean(o.needsProducerReview) : undefined,
     });
   }
   return candidates;
@@ -7508,8 +7424,6 @@ export function selectCriticalCandidate(
       if (effort === null || effort > 3) return false; // effort ≤ Medium
       return true;
     })
-    // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
-    .filter((c) => c.needsProducerReview !== true)
     .filter((c) => {
       const dispatchedAt = dispatchedStages?.get(c.id);
       // Change-guard: exclude while still at the dispatched-at stage; a
@@ -7597,8 +7511,7 @@ export function parseShownWorkItem(stdout: string): CriticalCandidate | null {
     effort: typeof raw.effort === 'string' ? raw.effort : undefined,
     sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
     priority: typeof raw.priority === 'string' ? raw.priority : undefined,
-    needsProducerReview:
-      raw.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
+    assignee: typeof raw.assignee === 'string' ? raw.assignee : undefined,
   };
 }
 
@@ -7644,8 +7557,6 @@ export function parseShowItemOutput(stdout: string): DowntimeItemInfo | null {
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : undefined,
     sortIndex: typeof raw.sortIndex === 'number' && Number.isFinite(raw.sortIndex) ? raw.sortIndex : undefined,
     deletedBy: typeof raw.deletedBy === 'string' ? raw.deletedBy : undefined,
-    needsProducerReview:
-      raw.needsProducerReview !== undefined ? Boolean(raw.needsProducerReview) : undefined,
   };
   // Top-level audit result (WL-0MU308WSF0002JWN): `wl show --json` serves
   // `auditResult` as a TOP-LEVEL sibling of `workItem` (not nested inside
@@ -7718,8 +7629,8 @@ export async function resolveDependencyFrontier(
   const dispatchable = (c: CriticalCandidate): boolean =>
     c.status === 'open' &&
     criticalSkillKind(c.stage) !== null &&
-    // Exclude review-gated blockers (parent WL-0MTIAL65N004T22F AC2).
-    c.needsProducerReview !== true &&
+    // Exclude assignee-held blockers (WL-0MV85WCJJ0087VMP).
+    !isAssigneeHeld(c) &&
     (c.stage !== 'plan_complete' ||
       ((riskOrdinal(c.risk) ?? 9) <= 2 && (effortOrdinal(c.effort) ?? 9) <= 3));
 

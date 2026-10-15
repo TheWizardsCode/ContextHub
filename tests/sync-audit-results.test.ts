@@ -30,7 +30,6 @@ function makeItem(id: string, title: string) {
     deleteReason: '',
     risk: '',
     effort: '',
-    needsProducerReview: false,
   };
 }
 

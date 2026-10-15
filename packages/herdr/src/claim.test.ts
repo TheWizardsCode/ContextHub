@@ -13,7 +13,7 @@ import { extractWorkItemId, claimItemForAgentCommand } from './index.js';
 import {
   claimWorkItem,
   rollbackClaimWorkItem,
-  markNeedsProducerReviewWorkItem,
+  markProducerHoldWorkItem,
   setWorklogDir,
   resetWorklogDir,
   setExecFileAsync,
@@ -305,7 +305,7 @@ describe('rollbackClaimWorkItem (fetcher, WL-0MT32F908002YFFA)', () => {
   });
 });
 
-describe('markNeedsProducerReviewWorkItem (fetcher, WL-0MUKYEXMK0033MFK)', () => {
+describe('markProducerHoldWorkItem (fetcher, WL-0MUKYEXMK0033MFK)', () => {
   beforeEach(() => {
     resetExecFileAsync();
     resetWorklogDir();
@@ -316,17 +316,18 @@ describe('markNeedsProducerReviewWorkItem (fetcher, WL-0MUKYEXMK0033MFK)', () =>
     resetWorklogDir();
   });
 
-  it('runs `wl reviewed <id> true --json`', async () => {
+  it('runs `wl update <id> --assignee Map --if-assignee "" --json`', async () => {
     const mockFn = vi.fn().mockResolvedValue({ stdout: '{"success":true}', stderr: '' });
     setExecFileAsync(mockFn as any);
 
-    const ok = await markNeedsProducerReviewWorkItem('WL-ABC');
+    const ok = await markProducerHoldWorkItem('WL-ABC');
 
     expect(ok).toBe(true);
     const callArgs = mockFn.mock.calls[0][1] as string[];
-    expect(callArgs).toContain('reviewed');
+    expect(callArgs).toContain('update');
     expect(callArgs).toContain('WL-ABC');
-    expect(callArgs).toContain('true');
+    expect(callArgs[callArgs.indexOf('--assignee') + 1]).toBe('Map');
+    expect(callArgs[callArgs.indexOf('--if-assignee') + 1]).toBe('');
     expect(callArgs).toContain('--json');
   });
 
@@ -334,18 +335,18 @@ describe('markNeedsProducerReviewWorkItem (fetcher, WL-0MUKYEXMK0033MFK)', () =>
     const mockFn = vi.fn().mockResolvedValue({ stdout: '{"success":true}', stderr: '' });
     setExecFileAsync(mockFn as any);
 
-    await markNeedsProducerReviewWorkItem('AH-ABC', '/foreign/root');
+    await markProducerHoldWorkItem('AH-ABC', '/foreign/root');
 
     const callArgs = mockFn.mock.calls[0][1] as string[];
     expect(callArgs).toContain('--worklog-dir');
     expect(callArgs[callArgs.indexOf('--worklog-dir') + 1]).toBe('/foreign/root/.worklog');
   });
 
-  it('returns false (never throws) when wl reviewed errors', async () => {
+  it('returns false (never throws) when the wl update errors', async () => {
     const mockFn = vi.fn().mockRejectedValue(new Error('worklog: no such item'));
     setExecFileAsync(mockFn as any);
 
-    await expect(markNeedsProducerReviewWorkItem('WL-NOTREAL')).resolves.toBe(false);
+    await expect(markProducerHoldWorkItem('WL-NOTREAL')).resolves.toBe(false);
   });
 });
 

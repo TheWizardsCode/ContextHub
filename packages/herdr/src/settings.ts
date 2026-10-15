@@ -106,10 +106,10 @@ export interface PluginSettings {
   /**
    * Per-item, per-kind dispatch-ATTEMPT cap (WL-0MUKYEXMK0033MFK). Once an
    * item has been dispatched this many times for a kind at its current
-   * worklog stage (including non-terminal pane closes), it is flagged
-   * `needsProducerReview` and excluded from further automatic dispatch of
-   * that kind. A stage advancement resets the budget. Default 3; clamped to
-   * [1, 10].
+   * worklog stage (including non-terminal pane closes), it is held for the
+   * producer (assigned to the producer-hold identity) and excluded from
+   * further automatic dispatch of that kind. A stage advancement resets the
+   * budget. Default 3; clamped to [1, 10].
    */
   downtimeMaxAttempts: number;
   /**

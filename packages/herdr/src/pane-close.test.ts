@@ -14,7 +14,7 @@
  *  5. No marker, agent alive, idle >= 30 min → close, reason `idle-threshold`
  *  6. No marker, agent process gone → **no close**, reason `dead-agent` (AC1)
  *  7. `kind: 'implement'` → never close, reason `implement`
- *  8. `needsProducerReview: true` → never close, reason `producer-review`
+ *  8. `producerHold: true` → never close, reason `producer-review`
  *  9. `isInvokingPane: true` → never close, reason `invoking-pane`
  * 10. `childProcessCount > 0` → never close, reason `live-children`
  * 11. idle threshold ≤ 0 → never close on idle (AC2)
@@ -34,7 +34,7 @@ function sample(overrides: Partial<SessionSample> = {}): SessionSample {
     agentProcessAlive: true,
     idleMs: 0,
     kind: 'unknown',
-    needsProducerReview: false,
+    producerHold: false,
     isInvokingPane: false,
     childProcessCount: 0,
     ...overrides,
@@ -192,9 +192,9 @@ describe('classifySession — never-close guards (AC4, AC3, parent)', () => {
     expect(result).toMatchObject({ close: false, reasonCode: 'implement' });
   });
 
-  it('never closes a pane with needsProducerReview = true', () => {
+  it('never closes a pane held by the producer (producerHold = true)', () => {
     const result = classifySession(sample({
-      needsProducerReview: true,
+      producerHold: true,
       lastAssistantText: '</end_session>',
       agentProcessAlive: false,
     }));
@@ -230,9 +230,9 @@ describe('classifySession — guard precedence (never-close wins)', () => {
     expect(result.reasonCode).toBe('implement');
   });
 
-  it('needsProducerReview guard takes precedence over dead-agent close', () => {
+  it('producerHold guard takes precedence over dead-agent close', () => {
     const result = classifySession(sample({
-      needsProducerReview: true,
+      producerHold: true,
       agentProcessAlive: false,
     }));
     expect(result.close).toBe(false);
@@ -286,7 +286,7 @@ describe('classifySession — producer-review per kind (AC1.1)', () => {
     it(`never closes a ${kind} pane with producer-review, even with marker+dead+idle`, () => {
       const result = classifySession(sample({
         kind,
-        needsProducerReview: true,
+        producerHold: true,
         lastAssistantText: '</end_session>',
         agentProcessAlive: false,
         idleMs: 999999999,
@@ -386,8 +386,8 @@ describe('classifySession — table-driven coverage of every classification path
       expected: { close: false, reasonCode: 'implement' },
     },
     {
-      name: 'needsProducerReview → producer-review',
-      sample: { needsProducerReview: true, lastAssistantText: '</end_session>', agentProcessAlive: false },
+      name: 'producerHold → producer-review',
+      sample: { producerHold: true, lastAssistantText: '</end_session>', agentProcessAlive: false },
       expected: { close: false, reasonCode: 'producer-review' },
     },
     {
@@ -613,9 +613,9 @@ describe('classifySession — never-close guards beat activity signals (parent A
     expect(result).toMatchObject({ close: false, reasonCode: 'implement' });
   });
 
-  it('producer-review guard beats activity signals', () => {
+  it('producer-hold guard beats activity signals', () => {
     const result = classifySession(sample({
-      needsProducerReview: true,
+      producerHold: true,
       idleMs: THRESHOLD_MS + 1,
       hasRecentFileModifications: true,
       hasActiveNetworkConnections: true,
@@ -653,7 +653,7 @@ describe('classifySession — reasonSnapshot (parent AC6 / AC4.1)', () => {
         agentProcessAlive: false,
         idleMs: 1234,
         itemStage: 'plan_complete',
-        needsProducerReview: false,
+        producerHold: false,
         isInvokingPane: false,
         childProcessCount: 0,
       }),
@@ -664,7 +664,7 @@ describe('classifySession — reasonSnapshot (parent AC6 / AC4.1)', () => {
       agentProcessAlive: false,
       idleMs: 1234,
       itemStage: 'plan_complete',
-      needsProducerReview: false,
+      producerHold: false,
       isInvokingPane: false,
       childProcessCount: 0,
       hasRecentFileModifications: false,
@@ -712,10 +712,10 @@ describe('classifySession — reasonSnapshot (parent AC6 / AC4.1)', () => {
       expected: { kind: 'implement', childProcessCount: 2 },
     },
     {
-      name: 'producer-review guard',
-      sample: { needsProducerReview: true },
+      name: 'producer-hold guard',
+      sample: { producerHold: true },
       reasonCode: 'producer-review',
-      expected: { needsProducerReview: true },
+      expected: { producerHold: true },
     },
     {
       name: 'invoking-pane guard',

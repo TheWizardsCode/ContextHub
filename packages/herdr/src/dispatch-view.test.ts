@@ -197,7 +197,6 @@ describe('mergeDispatchRow — surviving items render exactly like live rows', (
     priority: 'high',
     risk: 'Medium',
     effort: 'Small',
-    needsProducerReview: false,
     auditResult: true,
     auditedAt: '2026-01-03T00:00:00.000Z',
     updatedAt: '2026-01-03T00:00:00.000Z',
@@ -211,7 +210,6 @@ describe('mergeDispatchRow — surviving items render exactly like live rows', (
     expect(merged.priority).toBe('high');
     expect(merged.risk).toBe('Medium');
     expect(merged.effort).toBe('Small');
-    expect(merged.needsProducerReview).toBe(false);
     expect(merged.auditResult).toBe(true);
   });
 

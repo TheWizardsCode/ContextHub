@@ -56,7 +56,7 @@ The `bin` entry `worklog-pane-close` is registered in `packages/herdr/package.js
       "kind": "implement",
       "close": false,
       "reasonCode": "implement",
-      "reasonSnapshot": { "needsProducerReview": false, "isInvokingPane": false },
+      "reasonSnapshot": { "producerHold": false, "isInvokingPane": false },
       "sessionTail": ["...last 20 session lines..."],
       "success": true
     }
@@ -91,7 +91,7 @@ out to the compiled bridge with `--json --dry-run`.
 Applies to **both** the manual skill and the automatic reaper:
 
 - `implement` panes,
-- items with `needsProducerReview=true`,
+- items with `producerHold=true`,
 - the invoking pane (`HERDR_PANE_ID`),
 - panes with live child processes.
 
