@@ -1631,6 +1631,13 @@ export function formatTooltipLines(
   cols: number,
   noIcons = false,
 ): string[] {
+  // NOTE — `Blocked By` parity decision (WL-0MV8Q5X8U004KKAP AC-5): the
+  // hover tooltip deliberately omits the blocker rows. Blockers are the
+  // metadata panel's job (the SELECTED item's `Blocked By` rows in
+  // `formatMetadataPanel`); the tooltip is a compact pane-status summary and
+  // rendering its own async blocker lookup would duplicate the uncoordinated
+  // async preview path whose flicker WL-0MV8Q5X8U004KKAP fixes. Kept
+  // documented-out-of-scope rather than silently divergent.
   const parts: string[] = [];
 
   // ID + Title line.
@@ -2272,6 +2279,17 @@ export function formatDetailToC(
  * {@link buildMetaRows} (WL-0MSGIXHHI009KFW9). ID and Title are shown in
  * the header (from the shared {@link buildMetaRows} set they are omitted
  * from the table to avoid duplication).
+ *
+ * NOTE — `Blocked By` parity decision (WL-0MV8Q5X8U004KKAP AC-5): this
+ * detail view deliberately does NOT render the `Blocked By` rows that the
+ * selection-list metadata panel shows. The rows need an async per-item
+ * lookup (`fetchBlockersForItem`) that the list mode resolves in the
+ * render loop (single-flight + cache, so it never blanks on refresh); a
+ * detail-view copy would add a second, uncoordinated async render path
+ * (plus a matching update to its scroll-bounds calculation) and re-open
+ * exactly the flicker class WL-0MV8Q5X8U004KKAP fixes. Divergence is
+ * documented out of scope; the selection-list metadata panel remains the
+ * canonical place to see what a selected item is blocked on.
  *
  * When the item has ≥1 `.md` Key File, a pinned `Related Docs` ToC is
  * rendered at the top (see {@link formatDetailToC}); the md viewer section
@@ -5447,45 +5465,94 @@ export async function runWorklistTui(
   const renderer = createListRenderer(opts.getShowIcons);
 
   // ── Metadata-panel dependency blockers (WL-0MV8EZRDJ001TDA8) ────────
-  // Resolved for the SELECTED item only (never every list row), cached by
-  // item ID, and invalidated on every list refresh. The render path never
-  // blocks: an unresolved item renders without `Blocked By` rows and a
-  // follow-up render shows them once the async lookup lands. Fail-open — a
-  // lookup error caches an empty list so a broken `wl dep list` can never
-  // break rendering or navigation (mirrors resolveMetaLastCommand).
-  const blockerCache = new Map<string, BlockerRef[]>();
-  const blockerInFlight = new Set<string>();
+  // Resolved for the SELECTED item only (never every list row) and cached by
+  // item ID. The cache SURVIVES list refreshes (WL-0MV8Q5X8U004KKAP): the
+  // previous implementation cleared it on EVERY refresh, which re-entered the
+  // unresolved frame and made the `Blocked By` line flicker on/off endlessly
+  // under the frequent refresh traffic of a live workspace (DB-change watch
+  // + auto-sync + `wl next` re-sorts all bump the read-cache counter).
+  //
+  // Invalidation: a cached entry is reused while the item's payload signature
+  // (status/stage/updatedAt) is unchanged. A signature change — a dependency
+  // add/remove reconciles the from-item's status (`blocked` ↔ `open`) and
+  // bumps `updatedAt` — invalidates just that entry. While a re-resolve is in
+  // flight the last known value is still served (stale-while-revalidate), so
+  // a refresh never blanks the line and a stable selection shows exactly one
+  // unresolved→resolved transition. The render path never blocks: an item
+  // with no cached value renders without `Blocked By` rows and a follow-up
+  // render shows them once the async lookup lands.
+  //
+  // Single-flight: the in-flight lookup is memoised per item, so repeated
+  // renders/refreshes while it is pending share one spawn (no race/duplicate)
+  // and the resolved value is re-rendered from cache thereafter.
+  //
+  // Fail-open — a lookup error caches an empty list so a broken `wl dep list`
+  // can never break rendering or navigation (mirrors resolveMetaLastCommand).
+  const blockerCache = new Map<string, { blockers: BlockerRef[]; signature: string }>();
+  const blockerInFlight = new Map<string, Promise<BlockerRef[]>>();
+
+  /**
+   * Payload signature of an item whose change can invalidate its cached
+   * blockers. A dependency edge add/remove reconciles the from-item's status
+   * and bumps `updatedAt` (packages/shared/src/database.ts
+   * `reconcileDependentStatus`), so a signature change is the refresh-time
+   * signal that the item's edges may have changed. Fields absent from a
+   * payload collapse to empty strings, keeping the comparison stable.
+   *
+   * Known residual: an edge change that leaves the from-item's payload
+   * untouched (e.g. adding a second blocker to an already-`blocked` item, or
+   * a blocker target completing while other blockers keep the item `blocked`)
+   * does not change the signature and the cache serves the last resolved rows
+   * until the item itself changes or it is re-selected. This is the accepted
+   * trade-off of the AC-2 invalidation rule (reuse until the item changes)
+   * — the alternative (re-resolve on every refresh) is the flicker this item
+   * fixes.
+   */
+  const blockerSignature = (item: WorkItem): string =>
+    `${item.id}|${item.status ?? ''}|${item.stage ?? ''}|${item.updatedAt ?? ''}`;
+
   const resolveMetaBlockers = (item: WorkItem | null): BlockerRef[] | undefined => {
     if (!item) return undefined;
     // Synthetic log-derived rows have no live `wl` counterpart; blockers are
     // only meaningful for live rows, so skip the lookup (WL-0MUL2IY8L009S3PQ).
     if (item.isLogDerived || item.isLogOnly) return undefined;
+    const signature = blockerSignature(item);
     const cached = blockerCache.get(item.id);
-    if (cached !== undefined) return cached;
+    // Cached value whose signature still matches the payload — reuse it,
+    // never re-entering the unresolved frame or re-spawning the lookup.
+    if (cached !== undefined && cached.signature === signature) return cached.blockers;
     if (!blockerInFlight.has(item.id)) {
-      blockerInFlight.add(item.id);
       // Fail-open even against an unexpectedly unavailable helper (tests may
       // replace the fetcher module): never let the lookup break a render.
+      let lookup: Promise<BlockerRef[]>;
       try {
-        void fetchBlockersForItem(item.id)
-          .then((blockers) => {
-            blockerCache.set(item.id, blockers);
-          })
-          .catch(() => {
-            // Fail-open: never surface a blocker lookup failure.
-            blockerCache.set(item.id, []);
-          })
-          .finally(() => {
-            blockerInFlight.delete(item.id);
-            render();
-          });
+        lookup = fetchBlockersForItem(item.id);
       } catch {
-        blockerInFlight.delete(item.id);
-        blockerCache.set(item.id, []);
+        // Synchronous throw: cache the fail-open empty list and stop.
+        blockerCache.set(item.id, { blockers: [], signature });
+        return [];
       }
+      const inFlight = lookup
+        .then((blockers) => {
+          blockerCache.set(item.id, { blockers, signature });
+          return blockers;
+        })
+        .catch(() => {
+          // Fail-open: never surface a blocker lookup failure.
+          blockerCache.set(item.id, { blockers: [], signature });
+          return [] as BlockerRef[];
+        })
+        .finally(() => {
+          blockerInFlight.delete(item.id);
+          render();
+        });
+      blockerInFlight.set(item.id, inFlight);
     }
-    // Unresolved — render no rows this frame; the follow-up render shows them.
-    return undefined;
+    // A re-resolve is in flight: serve the last known value so a refresh
+    // never drops the line (stale-while-revalidate). On a first resolve
+    // there is none yet, so render no rows this frame and let the follow-up
+    // render show them — the one unresolved→resolved transition per selection.
+    return cached?.blockers;
   };
   const chordState: ChordState = createChordState();
   let formState: FormState | null = null;
@@ -5928,10 +5995,14 @@ export async function runWorklistTui(
         // before the tab was (re)opened). Fail-open.
         await applyTabMarkers(newItems);
         state.refreshItems(newItems);
-        // Blocked-by rows are refreshed with the list (WL-0MV8EZRDJ001TDA8):
-        // drop the cached blockers so a newly resolved/added dependency edge
-        // is reflected without a plugin restart.
-        blockerCache.clear();
+        // Blocked-by rows survive refreshes (WL-0MV8Q5X8U004KKAP): the
+        // blocker cache is keyed by item ID and invalidated per item only
+        // when its payload signature changes (status/stage/updatedAt — see
+        // blockerSignature above), so an unrelated refresh reuses the last
+        // resolved rows instead of re-running the async lookup and dropping
+        // the `Blocked By` line for a frame (the endless flicker fix). A
+        // dependency edge change reconciles the from-item's status and
+        // bumps updatedAt, so the very next refresh invalidates that item.
         // Re-read the Code Freeze marker so a freeze that started (or ended)
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
