@@ -17,6 +17,16 @@
 > of those intentionally differ from the CLI's `src/theme.ts` choices (see
 > §13.1).
 
+> **Help-screen legend (WL-0MTV97GV20088CS7):** the herdr worklist's full-pane
+> help screen (pressing `?`) renders an **Icons** legend explaining every glyph
+> shown in a work-item row. The on-screen legend is generated from
+> `ICON_LEGEND` in `@worklog/shared/icons` (the same single source of truth
+> the row renderer uses); a drift test in
+> `packages/shared/src/icons-legend.test.ts` fails whenever a row glyph has no
+> legend entry. The wording in this specification is the authoritative
+> reference for those meanings — keep `ICON_LEGEND` aligned with the tables
+> below.
+
 ## Overview
 
 This document defines the icon set for work item **priority** and **status** used

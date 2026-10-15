@@ -12,7 +12,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Command output** — When a chord resolves to a non-`/wl` command (e.g., `!!wl update <id> --priority high`), the resolved command is executed **visibly in a new herdr pane** (see `scripts/run-in-pane.sh`) so the user sees the command line and its output; the wrapper keeps the pane's process alive so the pane stays open for inspection — dismiss it with Enter or close it with `prefix+x`. Panes spawned from the selection list open **without stealing focus**: the list keeps the keyboard focus while the command-output pane opens in the background (see [Design decisions](#design-decisions)). When the command carries a work-item ID, the pane is placed in that item's work-item-ID tab in the current workspace (see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs)).
 - **Command input form** — When a chord command contains unknown `<identifier>` placeholders (e.g. `!!wl update <id> --status <status> --stage <stage>`), the plugin shows a modal input form so you can fill in the values before the command runs. Known identifiers like `<id>` are still auto-substituted with the selected item's ID. The form is a full-pane page (no border/centering) that wraps text at the pane width and grows downward as content is entered. See [Command input form](#command-input-form).
 - **Keyboard navigation** — Arrow keys or j/k to navigate (wraps at list boundaries), Page Up/Down, g/G for first/last, Enter to select, Escape to go back, **Ctrl+r to refresh the list immediately** (re-fetches items from the worklog DB and re-renders, preserving the current selection when the item still exists — WL-0MV85T0LT008UT9H; works regardless of the auto-refresh setting).
-- **Mouse and touch** — Click/tap a row to select; double-click to open detail; mouse wheel or touch-scroll to navigate (list mode) or scroll detail; tap stage options in the filter prompt. Requires SGR mouse reporting (enabled on raw-mode entry, disabled on exit). Terminals without it fall back to keyboard-only. **Alt+m toggles mouse tracking** on/off (WL-0MT0AP2LR000JFWN): while tracking is off, the terminal's native drag-select-to-copy works; press Alt+m again to resume mouse interaction. The current state is shown in the footer (`alt+m mouse on/off`). **Hover tooltip** (WL-0MT9XRZDK006GMUH): hovering the mouse over a row that has an associated agent-pane shows a metadata tooltip in the footer area (ID, Title, Command, Priority, Type, Risk, Effort, Start Time); `Esc` dismisses it until the mouse leaves and re-enters the list. **Drag-to-scroll** (WL-0MSI72S0Y0060BRK): with the left button (or touch contact) held, drag vertically to grab and scroll the content — the worklist scrolls by whole rows and the detail view by whole lines, both clamped to their bounds; the selection never moves from a drag. Motion is split by button state: button-less motion drives the hover tooltip, while left-button-held motion drives drag-to-scroll, so plain clicks and double-clicks are unaffected.
+- **Mouse and touch** — Click/tap a row to select; double-click to open detail; mouse wheel or touch-scroll to navigate (list mode) or scroll detail; tap stage options in the filter prompt. Requires SGR mouse reporting (enabled on raw-mode entry, disabled on exit). Terminals without it fall back to keyboard-only. **Alt+m toggles mouse tracking** on/off (WL-0MT0AP2LR000JFWN): while tracking is off, the terminal's native drag-select-to-copy works; press Alt+m again to resume mouse interaction. The footer no longer advertises the toggle (the binding is documented here and in the help screen). **Hover tooltip** (WL-0MT9XRZDK006GMUH): hovering the mouse over a row that has an associated agent-pane shows a metadata tooltip in the footer area (ID, Title, Command, Priority, Type, Risk, Effort, Start Time); `Esc` dismisses it until the mouse leaves and re-enters the list. **Drag-to-scroll** (WL-0MSI72S0Y0060BRK): with the left button (or touch contact) held, drag vertically to grab and scroll the content — the worklist scrolls by whole rows and the detail view by whole lines, both clamped to their bounds; the selection never moves from a drag. Motion is split by button state: button-less motion drives the hover tooltip, while left-button-held motion drives drag-to-scroll, so plain clicks and double-clicks are unaffected.
 - **Fold indicators** — When the worklist has more items than fit the visible list area, the list shows dim `▼ more` / `▲ more` markers so you always know when items are hidden below the fold or above the current scroll position (WL-0MSG8YXYJ008PWJJ). See [Selection List Behaviour](#selection-list-behaviour).
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)). When the command carries a work-item ID, the pane is placed in that item's work-item-ID tab in the current workspace (reused if it already exists) — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
@@ -120,7 +120,8 @@ The plugin pane will then be available via the Herdr plugin system.
 
 4. Workflow shortcuts (single-key):
    - Press `c` — Create a new work item
-   - Press `d` — **Toggle downtime dispatch for the current pane** (per-pane only — sibling panes and other worklog roots are unaffected; the header shows `[Downtime Off]` while off and the live status when on. The disable persists across plugin restarts via a `.herdr-downtime-disabled` marker in the worklog root; press `d` again to return to following the global setting. See [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
+   - Press `d` — **Toggle downtime dispatch for the current pane** (per-pane only — sibling panes and other worklog roots are unaffected; the header shows `[Downtime Off]` while off and the live status when on. The disable persists across plugin restarts via a `.herdr-downtime-disabled` marker in the worklog root; press `d` again to return to following the global setting. The binding remains fully functional — only its inline footer advertisement was replaced (see Help screen below). See [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
+   - Press `?` — **Open the help screen**: a full-pane overlay listing every list-view shortcut (grouped by chord leader) plus an icon legend explaining every glyph rendered in a work-item row. `?`, `Esc` or `q` dismiss it back to the list with no state change. The help screen is display-only — it never dispatches commands, spawns panes, or mutates the worklog. The footer advertises it as `?: Help`. When `showHelpText` is `false` the footer hint and the `?` overlay are both hidden. See [Help screen](#help-screen).
    - Press `i` — Run the implement workflow on the selected item (intake_complete, plan_complete)
    - Press `n` — Run the intake workflow on the selected item (idea stage)
    - Press `p` — Run the plan workflow on the selected item (intake_complete stage)
@@ -1730,6 +1731,33 @@ scrolls off the top) holds with indicators active. Edge case: when the
 bottom indicator row reservation trims the window so the list fully fits,
 the `▼ more` marker is omitted — the list then shows every remaining item
 without an indicator.
+
+### Help screen
+
+Pressing `?` in the selection list opens a full-pane **help screen**
+(WL-0MTV97GV20088CS7). It is display-only — it never dispatches commands,
+spawns panes, or mutates the worklog — and is dismissed with `?`, `Esc` or
+`q`, returning to the list with the selection, filters and navigation stack
+unchanged.
+
+The overlay has two sections:
+
+- **Commands** — every shortcut registered for the list view, grouped by
+  chord leader (`c n`, `c q`, `u p l`, …) with chord, label and a short
+  description. The list is derived live from the shortcut registry, so future
+  shortcut additions appear automatically.
+- **Icons** — a legend explaining every glyph rendered in a work-item row
+  (status, stage, priority, epic, risk, effort, audit, producer-review, agent
+  state and child coverage), derived from the shared icon source of truth.
+
+The footer advertises the screen as `?: Help`. When content exceeds the pane
+height the overlay is clipped (scrolled) but the dismiss hint line (`? / Esc /
+q`) stays visible. The `d` downtime toggle and `Alt+m` mouse-tracking bindings
+remain fully functional; only their inline footer advertisements were removed
+in favour of the help screen.
+
+The help screen honours the `showHelpText` setting: when help text is
+disabled, the `?: Help` footer hint and the `?` overlay are not offered.
 
 ## Metadata panel
 

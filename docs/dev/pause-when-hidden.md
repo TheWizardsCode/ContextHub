@@ -93,8 +93,9 @@ Two pollers were fixed:
   default on raw-mode entry. Pressing `Alt+m` (`\x1bm`) toggles it off so the
   terminal's native text-selection (drag-select to copy content from the
   terminal) works again, and toggles it back on to resume mouse interaction.
-  The toggle always works (handled before modal-state guards) and is reflected
-  in the footer hint (`alt+m mouse on` / `alt+m mouse off`).
+  The toggle always works (handled before modal-state guards). Its inline
+  footer advertisement was removed in WL-0MTV97GV20088CS7 in favour of the
+  `?` help screen; the binding itself is unchanged.
 - When the TUI is paused (hidden tab), mouse input is irrelevant because the
   `onData` handler is never called — stdin is only read while the pane is
   visible (the input loop runs inside the scheduler-visible cadence).

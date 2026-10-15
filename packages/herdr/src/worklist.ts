@@ -2796,34 +2796,27 @@ export function formatChordHintsForHelp(
 }
 
 /**
- * Build the dynamic footer hint string for the visible shortcut entries.
- *
- * Most chord leaders collapse to a single `<leader>:<firstWord>...` hint
- * (e.g. `u:update...`), which keeps the footer compact for homogeneous
- * variant families. The podcast-progression family (`w-r`/`w-s`/`w-b`) is
- * the exception: its sub-chords are distinct, stage-gated steps whose labels
- * differ after the shared leading word, so collapsing them hid the
- * sub-options from the producer (OSL-0MUQ59IRF009ICIF AC5).
- *
- * A leader is expanded (every sub-chord hinted) only when its entries carry
- * an explicit work-item-type allowlist — the marker that the entries were
- * authored as type-specific progression steps rather than generic variants.
- * Ungated families (`u`, `f`, `a`, `x`, `P`, `r`, `n`) keep the collapsed
- * form, preserving existing behaviour.
- *
- * @param entries - Shortcut entries already filtered by stage/view/issue type.
- * @returns Space-joined hint string (empty when no entry yields a hint).
- */
-/**
  * Literal footer advertisement for the help screen (WL-0MV85QZXN002T51A).
  *
  * `?` is a reserved key handled by the key loop, not a registry chord, so it
  * has no `shortcuts.json` entry to format. The hint is prepended to the
  * dynamic shortcut hints so it stays visible even when the footer is
- * truncated in a narrow pane.
+ * truncated in a narrow pane. It replaces the retired `d:downtime toggle`
+ * single-key advertisement and the `alt+m mouse on/off` suffix (parent
+ * WL-0MTV97GV20088CS7): both bindings still work, only their inline
+ * advertising moved to the help screen.
  */
 export const HELP_FOOTER_HINT = '?: Help';
 
+/**
+ * Build the dynamic footer hint string for the visible shortcut entries.
+ *
+ * The `?: Help` advertisement is always prepended; the `d` single-key
+ * downtime-toggle entry is no longer advertised (its binding is unchanged).
+ *
+ * @param entries - Shortcut entries already filtered by stage/view/issue type.
+ * @returns Space-joined hint string (empty when no entry yields a hint).
+ */
 export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
   const labelOf = (e: ShortcutEntry): string => e.label ?? e.command
     .replace(/<[^>]+>/g, '')
