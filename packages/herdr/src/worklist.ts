@@ -37,6 +37,7 @@ import {
   stageColor,
   applyPriorityColour,
   priorityColor,
+  ICON_LEGEND,
   type IconOptions,
 } from '@worklog/shared/icons';
 import {
@@ -6916,11 +6917,13 @@ export async function runWorklistTui(
   };
 
   /**
-   * Build the icon legend shown in the `?` help overlay. Implemented by the
-   * dedicated legend work item (WL-0MV85R2G6000G7BU); until then the overlay
-   * renders the command section only.
+   * Build the icon legend shown in the `?` help overlay (WL-0MV85R2G6000G7BU).
+   * Rows come from the shared `ICON_LEGEND` (the single icon source of truth)
+   * so a newly added row glyph cannot silently miss the legend — the drift
+   * guard in packages/shared/src/icons-legend.test.ts enforces it.
    */
-  const buildHelpIconLegend = (): HelpIconRow[] => [];
+  const buildHelpIconLegend = (): HelpIconRow[] =>
+    ICON_LEGEND.map((entry) => ({ glyph: entry.glyph, meaning: entry.meaning }));
 
   const render = (): void => {
     termSize = getTermSize();

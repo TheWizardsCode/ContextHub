@@ -269,6 +269,100 @@ export function needsProducerReviewIcon(
   return needsReview ? NEEDS_REVIEW_ICON : REVIEW_DONE_ICON;
 }
 
+// ── Icon legend (help screen) ───────────────────────────────────────────
+
+/**
+ * A single row of the help screen's icon legend (WL-0MV85R2G6000G7BU).
+ *
+ * `category` groups the row in the overlay (status/stage/priority/epic/risk/
+ * effort/audit/producer-review/agent/coverage); `glyph` is the exact glyph
+ * rendered in work-item rows; `meaning` is a short human-readable label.
+ */
+export interface IconLegendEntry {
+  category: string;
+  glyph: string;
+  meaning: string;
+}
+
+/**
+ * The complete icon legend for the help overlay.
+ *
+ * Every row glyph (see {@link iconLegendGlyphs}, the catalog the row renderer
+ * emits) must have a legend row – the drift guard in
+ * `packages/shared/src/icons-legend.test.ts` fails on any unmapped glyph.
+ * Entries are deliberately authored here so a newly added row glyph is
+ * flagged until the legend explains it (parent WL-0MTV97GV20088CS7 AC5; the
+ * recorded mitigation for full automatic derivation).
+ */
+export const ICON_LEGEND: readonly IconLegendEntry[] = [
+  { category: 'status', glyph: '\u{1F513}', meaning: 'Status: open — not started' },
+  { category: 'status', glyph: '\u{1F504}', meaning: 'Status: in progress' },
+  { category: 'status', glyph: '\u{2714}\u{FE0F}', meaning: 'Status: completed' },
+  { category: 'status', glyph: '\u{26D4}', meaning: 'Status: blocked' },
+  { category: 'status', glyph: '\u{1F5D1}\u{FE0F}', meaning: 'Status: deleted' },
+  { category: 'status', glyph: '\u{1F4AC}', meaning: 'Status: input needed' },
+  { category: 'stage', glyph: '\u{1F4A1}', meaning: 'Stage: idea' },
+  { category: 'stage', glyph: '\u{1F4E5}', meaning: 'Stage: intake complete' },
+  { category: 'stage', glyph: '\u{1F4CB}', meaning: 'Stage: plan complete' },
+  { category: 'stage', glyph: '\u{1F6E0}\u{FE0F}', meaning: 'Stage: in progress (legacy)' },
+  { category: 'stage', glyph: '\u{1F50D}', meaning: 'Stage: in review' },
+  { category: 'stage', glyph: '\u{2714}\u{FE0F}', meaning: 'Stage: completed (legacy)' },
+  { category: 'stage', glyph: '\u{2714}\u{FE0F}', meaning: 'Stage: done' },
+  { category: 'priority', glyph: '\u{1F6A8}', meaning: 'Priority: critical' },
+  { category: 'priority', glyph: '\u{2B50}', meaning: 'Priority: high' },
+  { category: 'priority', glyph: '\u{1F7E8}', meaning: 'Priority: medium' },
+  { category: 'priority', glyph: '\u{1F422}', meaning: 'Priority: low' },
+  { category: 'epic', glyph: '\u{2299}', meaning: 'Epic — parent work item' },
+  { category: 'risk', glyph: '\u{1F7E2}', meaning: 'Risk: low' },
+  { category: 'risk', glyph: '\u{1F7E1}', meaning: 'Risk: medium' },
+  { category: 'risk', glyph: '\u{1F534}', meaning: 'Risk: high' },
+  { category: 'risk', glyph: '\u{1F4A5}', meaning: 'Risk: critical' },
+  { category: 'effort', glyph: '\u{1F539}', meaning: 'Effort: small' },
+  { category: 'effort', glyph: '\u{1F537}', meaning: 'Effort: medium' },
+  { category: 'effort', glyph: '\u{1F536}', meaning: 'Effort: large' },
+  { category: 'effort', glyph: '\u{1F4A0}', meaning: 'Effort: extra large' },
+  { category: 'audit', glyph: '\u{2705}', meaning: 'Audit passed — ready to close' },
+  { category: 'audit', glyph: '\u{274C}', meaning: 'Audit failed — not ready' },
+  { category: 'audit', glyph: '\u{2753}', meaning: 'No audit recorded yet' },
+  { category: 'audit', glyph: '\u{23F3}', meaning: 'Stale audit (passed)' },
+  { category: 'audit', glyph: '\u{26A0}', meaning: 'Stale audit (failed)' },
+  { category: 'producer-review', glyph: '\u{274C}', meaning: 'Needs producer review' },
+  { category: 'producer-review', glyph: '\u{2705}', meaning: 'Producer review done' },
+  { category: 'agent', glyph: '\u{26AA}', meaning: 'Agent idle' },
+  { category: 'agent', glyph: '\u{1F7E2}', meaning: 'Agent working' },
+  { category: 'agent', glyph: '\u{26D4}', meaning: 'Agent blocked' },
+  { category: 'coverage', glyph: '[COVERED]', meaning: 'Child covered by parent audit' },
+];
+
+/**
+ * The catalog of glyphs the work-item row renderer can emit — the single
+ * source of truth (the icon maps and constants). The help-overlay drift guard
+ * compares this catalog against {@link ICON_LEGEND}: adding a row glyph here
+ * without a legend row fails the test.
+ */
+export function iconLegendGlyphs(): string[] {
+  const glyphs = new Set<string>();
+  const collect = (map: Record<string, string>): void => {
+    for (const value of Object.values(map)) glyphs.add(value);
+  };
+  collect(STATUS_ICONS);
+  collect(STAGE_ICONS);
+  collect(PRIORITY_ICONS);
+  glyphs.add(EPIC_ICON);
+  collect(RISK_ICONS);
+  collect(EFFORT_ICONS);
+  glyphs.add(AUDIT_READY);
+  glyphs.add(AUDIT_NOT_READY);
+  glyphs.add(AUDIT_UNKNOWN);
+  glyphs.add(AUDIT_STALE_PASSED);
+  glyphs.add(AUDIT_STALE_FAILED);
+  glyphs.add(NEEDS_REVIEW_ICON);
+  glyphs.add(REVIEW_DONE_ICON);
+  collect(AGENT_STATE_ICONS);
+  glyphs.add(AUDIT_COVERED_FALLBACK);
+  return [...glyphs];
+}
+
 // ── Audit freshness ───────────────────────────────────────────────────
 
 /**

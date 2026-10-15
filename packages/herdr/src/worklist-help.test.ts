@@ -413,10 +413,9 @@ describe('help screen overlay — showHelpText gate (WL-0MV85R0JD004CHAE)', () =
 
 // ── AC5 (parent): the overlay explains every row glyph ─────────────────
 // Icon-legend tests (test-first child WL-0MV85R1V6000IL4E; implementation
-// child WL-0MV85R2G6000G7BU). Committed with `it.fails` until the legend
-// lands; the implementation child flips them to `it`.
+// child WL-0MV85R2G6000G7BU landed the legend).
 describe('help screen overlay — icon legend (WL-0MV85R1V6000IL4E)', () => {
-  it.fails('renders an icon legend that identifies the row glyphs', async () => {
+  it('renders an icon legend that identifies the row glyphs', async () => {
     const items = [makeItem('A')];
     await runWithTui(
       items,
