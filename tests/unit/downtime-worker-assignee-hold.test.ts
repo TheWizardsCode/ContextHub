@@ -17,8 +17,6 @@ import {
   classifyItemForDispatch,
   dispatchDowntimeWork,
   isAssigneeHeld,
-  isProducerHold,
-  PRODUCER_HOLD_ASSIGNEE,
   parseAuditCandidatesOutput,
   parseCriticalCandidatesOutput,
   parseImplementCandidatesOutput,
@@ -242,37 +240,7 @@ describe('Herdr-head dispatch never dispatches an assignee-held item (WL-0MV85WC
   });
 });
 
-describe('producer-hold sentinel (WL-0MV85WDOM007BKF8)', () => {
-  it('reserves the producer wl identity as the sentinel', () => {
-    // The sentinel is the producer's wl identity, so the hold is
-    // self-describing and the release gate can key on it.
-    expect(PRODUCER_HOLD_ASSIGNEE).toBe('Map');
-    expect(isProducerHold(PRODUCER_HOLD_ASSIGNEE)).toBe(true);
-    expect(isProducerHold('  Map  ')).toBe(true);
-  });
-
-  it('never collides with an automated agent identity or a blank assignee', () => {
-    expect(isProducerHold('@github-copilot')).toBe(false);
-    expect(isProducerHold('pi')).toBe(false);
-    expect(isProducerHold('implement')).toBe(false);
-    // Exact reserved identity — not a case variant.
-    expect(isProducerHold('map')).toBe(false);
-    expect(isProducerHold('Map ')).toBe(true);
-    expect(isProducerHold('')).toBe(false);
-    expect(isProducerHold('   ')).toBe(false);
-    expect(isProducerHold(undefined)).toBe(false);
-    expect(isProducerHold(null)).toBe(false);
-  });
-
-  it('agrees with the general assignee hold for the producer sentinel', () => {
-    expect(isAssigneeHeld({ assignee: PRODUCER_HOLD_ASSIGNEE })).toBe(true);
-    // The producer hold is a subset of "any non-empty assignee".
-    expect(isProducerHold('some-agent')).toBe(false);
-    expect(isAssigneeHeld({ assignee: 'some-agent' })).toBe(true);
-  });
-});
-
-describe('clearing the assignee releases the hold (WL-0MV85WDOM007BKF8)', () => {
+describe('clearing the assignee releases the hold (WL-0MV85WCJJ0087VMP)', () => {
   const implement = (overrides: Partial<ImplementCandidate> = {}): ImplementCandidate => ({
     id: 'IMP-1',
     title: 'Implement',
@@ -311,10 +279,10 @@ describe('clearing the assignee releases the hold (WL-0MV85WDOM007BKF8)', () => 
       id: 'PROD-1',
       status: 'open',
       stage: 'idea',
-      assignee: PRODUCER_HOLD_ASSIGNEE,
+      assignee: 'herdr-123',
     };
     expect(classifyItemForDispatch(held)).toBeNull();
-    // Clearing the producer hold releases the item for its intake tier.
+    // Clearing the claim releases the item for its intake tier.
     expect(classifyItemForDispatch({ ...held, assignee: '' })).toBe('intake');
   });
 
@@ -325,7 +293,7 @@ describe('clearing the assignee releases the hold (WL-0MV85WDOM007BKF8)', () => 
       stage: 'intake_complete',
       status: 'open',
       sortIndex: 1,
-      assignee: PRODUCER_HOLD_ASSIGNEE,
+      assignee: 'herdr-123',
     };
     expect(selectNextCandidate([producerHeld])).toBeNull();
     expect(selectNextCandidate([{ ...producerHeld, assignee: '' }])?.id).toBe('NEXT-1');

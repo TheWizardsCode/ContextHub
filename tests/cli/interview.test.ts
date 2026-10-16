@@ -1516,9 +1516,9 @@ describe('interview LLM progress feedback', () => {
 // ── Restored producer-review flag flow (WL-0MVAMS4RO000H3B0 F1) ─────────
 // RED-pinned contract: the flag explain/clear flow was removed with
 // `needsProducerReview` (WL-0MV85WFYU0071YQ9). These specs pin the restored
-// interface. They are wrapped in `it.fails(...)` so the gated suite stays
+// interface. They are wrapped in `it(...)` so the gated suite stays
 // green while the contract is failing; F5 (theme/interview/shortcuts restore)
-// flips `it.fails(` → `it(`.
+// flips `it(` → `it(`.
 //
 // Documented interface (function names/signatures, per the item's AC):
 //   buildProducerReviewExplanation(item, opts) → Promise<string|null>
@@ -1551,7 +1551,7 @@ describe('buildProducerReviewExplanation (RED-contract, restored)', () => {
     comment('alice', 'First comment'),
   ];
 
-  it.fails('returns null when the item is not flagged for producer review', async () => {
+  it('returns null when the item is not flagged for producer review', async () => {
     const m = await loadInterview();
     const result = await m.buildProducerReviewExplanation(flaggedItem('desc', false), {
       comments,
@@ -1560,7 +1560,7 @@ describe('buildProducerReviewExplanation (RED-contract, restored)', () => {
     expect(result).toBeNull();
   });
 
-  it.fails('preserves intentional line breaks in the LLM explanation', async () => {
+  it('preserves intentional line breaks in the LLM explanation', async () => {
     const m = await loadInterview();
     const client = fakeChatClient('Reason: AC3 unmet\nAction: fix rendering');
     const result = await m.buildProducerReviewExplanation(flaggedItem('desc'), {
@@ -1572,7 +1572,7 @@ describe('buildProducerReviewExplanation (RED-contract, restored)', () => {
     expect(client.complete).toHaveBeenCalledTimes(1);
   });
 
-  it.fails('skips the LLM and uses the two most recent comments when --no-llm', async () => {
+  it('skips the LLM and uses the two most recent comments when --no-llm', async () => {
     const m = await loadInterview();
     const client = fakeChatClient('unused');
     const result = await m.buildProducerReviewExplanation(flaggedItem('desc'), {
@@ -1585,7 +1585,7 @@ describe('buildProducerReviewExplanation (RED-contract, restored)', () => {
     expect(result).toContain('alice: First comment');
   });
 
-  it.fails('falls back silently when the LLM call fails', async () => {
+  it('falls back silently when the LLM call fails', async () => {
     const m = await loadInterview();
     const client = fakeChatClient(new Error('network unavailable'));
     const result = await m.buildProducerReviewExplanation(flaggedItem('desc'), {
@@ -1596,7 +1596,7 @@ describe('buildProducerReviewExplanation (RED-contract, restored)', () => {
     expect(result).toContain('bob: Second comment');
   });
 
-  it.fails('uses a generic actionable fallback when there are no comments', async () => {
+  it('uses a generic actionable fallback when there are no comments', async () => {
     const m = await loadInterview();
     const result = await m.buildProducerReviewExplanation(flaggedItem('desc'), {
       comments: [],
@@ -1605,7 +1605,7 @@ describe('buildProducerReviewExplanation (RED-contract, restored)', () => {
     expect(result).toContain('WL-TEST-1');
   });
 
-  it.fails('builds the prompt from the instruction and the two most recent comments', async () => {
+  it('builds the prompt from the instruction and the two most recent comments', async () => {
     const m = await loadInterview();
     const client = fakeChatClient('ok');
     const older = comment('old', 'Ancient history');
@@ -1622,7 +1622,7 @@ describe('buildProducerReviewExplanation (RED-contract, restored)', () => {
 });
 
 describe('buildProducerReviewExplanationResult (RED-contract, restored)', () => {
-  it.fails('reports usedLlm true when the LLM returns an explanation', async () => {
+  it('reports usedLlm true when the LLM returns an explanation', async () => {
     const m = await loadInterview();
     const result = await m.buildProducerReviewExplanationResult(flaggedItem('desc'), {
       comments: [comment('alice', 'First comment')],
@@ -1631,7 +1631,7 @@ describe('buildProducerReviewExplanationResult (RED-contract, restored)', () => 
     expect(result).toEqual({ text: 'LLM reason', usedLlm: true });
   });
 
-  it.fails('reports usedLlm false when the LLM throws (timeout/error)', async () => {
+  it('reports usedLlm false when the LLM throws (timeout/error)', async () => {
     const m = await loadInterview();
     const result = await m.buildProducerReviewExplanationResult(flaggedItem('desc'), {
       comments: [comment('alice', 'First comment')],
@@ -1641,7 +1641,7 @@ describe('buildProducerReviewExplanationResult (RED-contract, restored)', () => 
     expect(result?.text).toBeTruthy();
   });
 
-  it.fails('returns null for an unflagged item', async () => {
+  it('returns null for an unflagged item', async () => {
     const m = await loadInterview();
     const result = await m.buildProducerReviewExplanationResult(flaggedItem('desc', false), {
       comments: [comment('alice', 'First comment')],
@@ -1652,20 +1652,20 @@ describe('buildProducerReviewExplanationResult (RED-contract, restored)', () => 
 });
 
 describe('renderExplanation + buildFallbackExplanation + buildExplanationPrompt (RED-contract, restored)', () => {
-  it.fails('renderExplanation preserves line breaks but collapses runs of spaces', async () => {
+  it('renderExplanation preserves line breaks but collapses runs of spaces', async () => {
     const m = await loadInterview();
     const rendered = m.renderExplanation('Line one\n\nLine two   with   spaces');
     expect(rendered).toBe('Line one\n\nLine two with spaces');
     expect(rendered.split('\n').length).toBeGreaterThan(1);
   });
 
-  it.fails('renderExplanation bounds the explanation by length', async () => {
+  it('renderExplanation bounds the explanation by length', async () => {
     const m = await loadInterview();
     const bounded = m.renderExplanation('x'.repeat(5000), 100, 50);
     expect(bounded.length).toBeLessThanOrEqual(100);
   });
 
-  it.fails('buildFallbackExplanation reports the audit verdict and summary when an audit result exists', async () => {
+  it('buildFallbackExplanation reports the audit verdict and summary when an audit result exists', async () => {
     const m = await loadInterview();
     const auditResult = {
       readyToClose: false,
@@ -1679,7 +1679,7 @@ describe('renderExplanation + buildFallbackExplanation + buildExplanationPrompt 
     expect(fallback).toContain(auditResult.summary);
   });
 
-  it.fails('buildExplanationPrompt includes the audit summary as first-class prompt context', async () => {
+  it('buildExplanationPrompt includes the audit summary as first-class prompt context', async () => {
     const m = await loadInterview();
     const auditResult = {
       readyToClose: false,
