@@ -386,26 +386,26 @@ async function loadSharedIcons(): Promise<Record<string, any>> {
 }
 
 describe('needsProducerReviewIcon (RED-contract, restored)', () => {
-  it.fails('RED (F4 flips it.fails→it): returns needs-review icon when true', async () => {
+  it('returns needs-review icon when true (F2 shared icon)', async () => {
     const icons = await loadSharedIcons();
     const result = icons.needsProducerReviewIcon(true);
     expect(result).toBeTruthy();
   });
 
-  it.fails('RED (F4 flips it.fails→it): returns done icon when false', async () => {
+  it('returns done icon when false (F2 shared icon)', async () => {
     const icons = await loadSharedIcons();
     const result = icons.needsProducerReviewIcon(false);
     expect(result).toBeTruthy();
   });
 
-  it.fails('RED (F4 flips it.fails→it): returns empty when undefined', async () => {
+  it('returns empty when undefined (F2 shared icon)', async () => {
     const icons = await loadSharedIcons();
     expect(icons.needsProducerReviewIcon(undefined)).toBe('');
   });
 });
 
 describe('getIconPrefix producer column (RED-contract, restored)', () => {
-  it.fails('RED (F4 flips it.fails→it): includes producer review icon', async () => {
+  it('includes producer review icon (F2 shared icon + prefix column)', async () => {
     const icons = await loadSharedIcons();
     const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', needsProducerReview: true };
     const prefix = icons.getIconPrefix(item);
@@ -413,7 +413,7 @@ describe('getIconPrefix producer column (RED-contract, restored)', () => {
     expect(prefix).toContain('\u{274C}'); // ❌
   });
 
-  it.fails('RED (F4 flips it.fails→it): renders the [REVIEW]/[OK] text fallback in noIcons mode', async () => {
+  it('renders the [REVIEW]/[OK] text fallback in noIcons mode (F2 shared icon)', async () => {
     const icons = await loadSharedIcons();
     const flagged = icons.getIconPrefix(
       { id: 'T1', title: 'Test', status: 'open', needsProducerReview: true } as WorkItem,
@@ -428,7 +428,7 @@ describe('getIconPrefix producer column (RED-contract, restored)', () => {
     expect(clear).toContain('[OK]');
   });
 
-  it.fails('RED (F4 flips it.fails→it): getIconPrefixParts exposes the producer column for the coverage dimmer', async () => {
+  it('getIconPrefixParts exposes the producer column for the coverage dimmer (F2 shared icon)', async () => {
     const icons = await loadSharedIcons();
     const parts = icons.getIconPrefixParts(
       { status: 'open', needsProducerReview: true } as any,

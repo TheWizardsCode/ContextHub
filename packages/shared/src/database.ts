@@ -872,6 +872,7 @@ export class WorklogDatabase {
       assignee?: string;
       stage?: string;
       deleted?: boolean;
+      needsProducerReview?: boolean;
       issueType?: string;
     }
   ): { results: FtsSearchResult[]; ftsUsed: boolean; warning?: string } {
@@ -1278,6 +1279,8 @@ export class WorklogDatabase {
       githubIssueNumber: undefined,
       githubIssueId: undefined,
       githubIssueUpdatedAt: undefined,
+      // default for the new flag
+      needsProducerReview: input.needsProducerReview ?? false,
     };
 
     this.store.saveWorkItem(item);
@@ -1414,10 +1417,14 @@ export class WorklogDatabase {
     // this comparison because the update method above explicitly preserves
     // the existing values for these fields (prevents manual update from
     // overwriting GitHub metadata). Only hasWorkItemChanged() checks them.
-    const fieldsToCompare: (keyof WorkItem)[] = [
+    const contentFieldsToCompare: (keyof WorkItem)[] = [
       'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
       'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
       'deletedBy', 'deleteReason'
+    ];
+    const fieldsToCompare: (keyof WorkItem)[] = [
+      ...contentFieldsToCompare,
+      'needsProducerReview'
     ];
     // Shared comparator: whitespace-only diffs in title/description are not
     // semantic changes (WL-0MSORD6HC005QVZX). Same normalization as
@@ -1431,8 +1438,19 @@ export class WorklogDatabase {
       return updated;
     }
 
-    // At least one tracked field changed — bump the timestamp.
-    updated.updatedAt = new Date().toISOString();
+    // At least one tracked field changed.  Check whether a content field
+    // actually changed — only then bump the timestamp.  This prevents
+    // needsProducerReview-only flips from invalidating audits
+    // (WL-0MSN6ZCTN0027U2R).  A metadata-only change still persists the
+    // flag but preserves the timestamp so that existing audits remain fresh.
+    const contentChanged = this.compareTrackedFields(item, updated, contentFieldsToCompare);
+    if (contentChanged) {
+      updated.updatedAt = new Date().toISOString();
+    } else {
+      // Metadata-only change (e.g. needsProducerReview): preserve the
+      // original updatedAt so existing audits remain fresh.
+      updated.updatedAt = item.updatedAt;
+    }
 
     if (process.env.WL_DEBUG_SQL_BINDINGS) {
       try {
@@ -1590,6 +1608,9 @@ export class WorklogDatabase {
       }
       if (query.deleteReason) {
         items = items.filter(item => item.deleteReason === query.deleteReason);
+      }
+      if (query.needsProducerReview !== undefined) {
+        items = items.filter(item => Boolean(item.needsProducerReview) === Boolean(query.needsProducerReview));
       }
     }
 
@@ -3080,7 +3101,7 @@ export class WorklogDatabase {
     const fieldsToCompare: (keyof WorkItem)[] = [
       'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
       'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
-      'githubIssueNumber', 'githubIssueId',
+      'needsProducerReview', 'githubIssueNumber', 'githubIssueId',
       'githubIssueUpdatedAt'
     ];
     return this.compareTrackedFields(oldItem, newItem, fieldsToCompare);
@@ -3109,7 +3130,7 @@ export class WorklogDatabase {
    * **No-op guard**: Before clearing, this method snapshots existing items.
    * For each incoming item that already exists and has identical tracked fields
    * (title, description, status, priority, sortIndex, parentId, tags, assignee,
-   * stage, issueType, risk, effort), the original
+   * stage, issueType, risk, effort, needsProducerReview), the original
    * `updatedAt` is preserved so that sync operations do not silently
    * re-timestamp unchanged items. Changed items get a new `updatedAt`;
    * entirely new items use the incoming value as-is.

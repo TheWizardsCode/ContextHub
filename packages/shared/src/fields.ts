@@ -8,7 +8,7 @@
  * Valid field names:
  *   id, title, description, status, stage, priority, issueType,
  *   assignee, tags, createdAt, updatedAt, parentId,
- *   sortIndex
+ *   needsProducerReview, sortIndex
  *
  * Usage:
  *   const compact = pickFields(fullItem, ['id', 'title', 'status']);
@@ -39,6 +39,7 @@ export const VALID_FIELDS = [
   'createdAt',
   'updatedAt',
   'parentId',
+  'needsProducerReview',
   'sortIndex',
 ] as const;
 

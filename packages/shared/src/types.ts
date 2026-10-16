@@ -96,6 +96,8 @@ export interface WorkItem {
   githubIssueNumber?: number;
   githubIssueId?: number;
   githubIssueUpdatedAt?: string;
+  // Indicates whether the item needs a Producer to review/sign-off. Default: false
+  needsProducerReview?: boolean;
   /**
    * Explicit audit-gap waiver (WL-0MUBVH9FV0027COG). Null/absent means
    * "not waived"; a waiver exempts the item from the no-audit closure guard
@@ -125,6 +127,8 @@ export interface CreateWorkItemInput {
 
   risk?: WorkItemRiskLevel | '';
   effort?: WorkItemEffortLevel | '';
+  /** When present, sets the needsProducerReview flag on the created item */
+  needsProducerReview?: boolean;
 }
 
 /**
@@ -148,6 +152,8 @@ export interface UpdateWorkItemInput {
 
   risk?: WorkItemRiskLevel | '';
   effort?: WorkItemEffortLevel | '';
+  /** When present, sets the needsProducerReview flag */
+  needsProducerReview?: boolean;
   /**
    * Explicit audit-gap waiver (WL-0MUBVH9FV0027COG). Set to an
    * `AuditWaiver` to waive, or `null` to clear. Prefer the dedicated
@@ -191,6 +197,9 @@ export interface WorkItemQuery {
   createdBy?: string;
   deletedBy?: string;
   deleteReason?: string;
+  // Filter for items that need a Producer review. When present, filters results to items
+  // where the `needsProducerReview` flag matches the provided boolean value.
+  needsProducerReview?: boolean;
 }
 
 /**

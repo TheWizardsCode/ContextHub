@@ -117,6 +117,9 @@ const AUDIT_STALE_FAILED = '\u{26A0}';   // ⚠️
  */
 const AUDIT_COVERED_FALLBACK = '[COVERED]';
 
+const NEEDS_REVIEW_ICON = '\u{274C}';  // ❌
+const REVIEW_DONE_ICON = '\u{2705}';    // ✅
+
 // Agent-status icons (WL-0MSBQUJQX005RAT9). Glyph mapping confirmed by the
 // user: working → 🟢 (green circle), blocked → ⛔ (no-entry sign), idle → ⚪
 // (white circle). `done`/`unknown`/absent → no icon.
@@ -252,6 +255,19 @@ export function effortIcon(effort: string | undefined | null, opts?: IconOptions
   return EFFORT_ICONS[key] || '';
 }
 
+/**
+ * Get the "needs producer review" icon.
+ */
+export function needsProducerReviewIcon(
+  needsReview: boolean | undefined,
+  opts?: IconOptions,
+): string {
+  if (needsReview === undefined) return '';
+  if (opts?.noIcons) {
+    return needsReview ? '[REVIEW]' : '[OK]';
+  }
+  return needsReview ? NEEDS_REVIEW_ICON : REVIEW_DONE_ICON;
+}
 
 // ── Icon legend (help screen) ───────────────────────────────────────────
 
@@ -259,7 +275,7 @@ export function effortIcon(effort: string | undefined | null, opts?: IconOptions
  * A single row of the help screen's icon legend (WL-0MV85R2G6000G7BU).
  *
  * `category` groups the row in the overlay (status/stage/priority/epic/risk/
- * effort/audit/agent/coverage); `glyph` is the exact glyph
+ * effort/audit/producer-review/agent/coverage); `glyph` is the exact glyph
  * rendered in work-item rows; `meaning` is a short human-readable label.
  */
 export interface IconLegendEntry {
@@ -310,6 +326,8 @@ export const ICON_LEGEND: readonly IconLegendEntry[] = [
   { category: 'audit', glyph: '\u{2753}', meaning: 'No audit recorded yet' },
   { category: 'audit', glyph: '\u{23F3}', meaning: 'Stale audit (passed)' },
   { category: 'audit', glyph: '\u{26A0}', meaning: 'Stale audit (failed)' },
+  { category: 'producer-review', glyph: '\u{274C}', meaning: 'Needs producer review' },
+  { category: 'producer-review', glyph: '\u{2705}', meaning: 'Producer review done' },
   { category: 'agent', glyph: '\u{26AA}', meaning: 'Agent idle' },
   { category: 'agent', glyph: '\u{1F7E2}', meaning: 'Agent working' },
   { category: 'agent', glyph: '\u{26D4}', meaning: 'Agent blocked' },
@@ -338,6 +356,8 @@ export function iconLegendGlyphs(): string[] {
   glyphs.add(AUDIT_UNKNOWN);
   glyphs.add(AUDIT_STALE_PASSED);
   glyphs.add(AUDIT_STALE_FAILED);
+  glyphs.add(NEEDS_REVIEW_ICON);
+  glyphs.add(REVIEW_DONE_ICON);
   collect(AGENT_STATE_ICONS);
   glyphs.add(AUDIT_COVERED_FALLBACK);
   return [...glyphs];
@@ -797,6 +817,7 @@ export interface IconPrefixItem {
   priority?: string;
   auditResult?: boolean | null;
   auditedAt?: string | null;
+  needsProducerReview?: boolean;
   updatedAt?: string;
   issueType?: string;
   childCount?: number;
@@ -848,7 +869,11 @@ export function getIconPrefixParts(
   // can never diverge (WL-0MSGIXHHI009KFW9).
   const secondIcon = stageDisplayIcon(item, { noIcons });
 
-  const coreIcons = [sIcon, secondIcon].filter(Boolean).join('');
+  // Column 3: producer review flag
+  const prIcon = needsProducerReviewIcon(item.needsProducerReview, { noIcons });
+
+  // Concatenate core icons without spaces between them
+  const coreIcons = [sIcon, secondIcon, prIcon].filter(Boolean).join('');
 
   // Column 4: epic icon (child count is no longer shown in prefix)
   const epicSuffix = item.issueType === 'epic' ? epicIcon({ noIcons }) : '';
@@ -880,7 +905,8 @@ export function getIconPrefixParts(
  *   1. Agent status (fixed-width reserved slot, WL-0MSBQUJQX005RAT9)
  *   2. Status icon
  *   3. Stage icon (for in_review items, shows audit-aware icon instead)
- *   4. Optional epic icon
+ *   4. Producer review flag
+ *   5. Optional epic icon
  */
 export function getIconPrefix(item: IconPrefixItem, opts?: IconOptions): string {
   return getIconPrefixParts(item, opts).text;

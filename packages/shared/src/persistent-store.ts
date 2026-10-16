@@ -338,6 +338,7 @@ export class SqlitePersistentStore {
         githubIssueNumber INTEGER,
         githubIssueId INTEGER,
         githubIssueUpdatedAt TEXT
+        ,needsProducerReview INTEGER NOT NULL DEFAULT 0
         ,auditWaiver TEXT
        )
     `);
@@ -617,8 +618,8 @@ export class SqlitePersistentStore {
     // Use INSERT ... ON CONFLICT DO UPDATE to avoid triggering DELETE (which would cascade and remove comments)
     const stmt = this.db.prepare(`
       INSERT INTO workitems
-      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, auditWaiver)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      (id, title, description, status, priority, sortIndex, parentId, createdAt, updatedAt, activityAt, tags, assignee, stage, issueType, createdBy, deletedBy, deleteReason, risk, effort, githubIssueNumber, githubIssueId, githubIssueUpdatedAt, needsProducerReview, auditWaiver)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         title = excluded.title,
         description = excluded.description,
@@ -641,6 +642,7 @@ export class SqlitePersistentStore {
         githubIssueNumber = excluded.githubIssueNumber,
         githubIssueId = excluded.githubIssueId,
         githubIssueUpdatedAt = excluded.githubIssueUpdatedAt,
+        needsProducerReview = excluded.needsProducerReview,
         auditWaiver = excluded.auditWaiver
     `);
 
@@ -693,6 +695,7 @@ export class SqlitePersistentStore {
       item.githubIssueNumber ?? null,
       item.githubIssueId ?? null,
       item.githubIssueUpdatedAt ?? null,
+      item.needsProducerReview ? 1 : 0,
       auditWaiverVal,
     ];
 
@@ -1702,6 +1705,7 @@ export class SqlitePersistentStore {
       assignee?: string;
       stage?: string;
       deleted?: boolean;
+      needsProducerReview?: boolean;
       issueType?: string;
     }
   ): FtsSearchResult[] {
@@ -1718,7 +1722,7 @@ export class SqlitePersistentStore {
       // We extract snippets from each searchable column and pick the best one.
       // BM25 column weights: title=10, description=5, comments=2, tags=3
       // JOIN with workitems table to support filtering by priority, assignee,
-      // stage, issueType, and deleted status.
+      // stage, issueType, needsProducerReview, and deleted status.
       let sql = `
         SELECT
           worklog_fts.itemId,
@@ -1764,6 +1768,11 @@ export class SqlitePersistentStore {
       if (options?.issueType) {
         sql += ` AND workitems.issueType = ?`;
         params.push(options.issueType);
+      }
+
+      if (options?.needsProducerReview !== undefined) {
+        sql += ` AND workitems.needsProducerReview = ?`;
+        params.push(options.needsProducerReview ? 1 : 0);
       }
 
       // By default exclude deleted items; include them when deleted: true
@@ -1851,6 +1860,7 @@ export class SqlitePersistentStore {
       assignee?: string;
       stage?: string;
       deleted?: boolean;
+      needsProducerReview?: boolean;
       issueType?: string;
     }
   ): FtsSearchResult[] {
@@ -1885,6 +1895,9 @@ export class SqlitePersistentStore {
     }
     if (options?.issueType) {
       items = items.filter(i => i.issueType === options.issueType);
+    }
+    if (options?.needsProducerReview !== undefined) {
+      items = items.filter(i => i.needsProducerReview === options.needsProducerReview);
     }
     // By default exclude deleted items; include them when deleted: true
     if (!options?.deleted) {
@@ -2134,6 +2147,7 @@ export class SqlitePersistentStore {
         githubIssueNumber: row.githubIssueNumber ?? undefined,
         githubIssueId: row.githubIssueId ?? undefined,
         githubIssueUpdatedAt: row.githubIssueUpdatedAt || undefined,
+        needsProducerReview: Boolean(row.needsProducerReview),
         auditWaiver: parseAuditWaiver(row.auditWaiver),
       };
     } catch (error) {
@@ -2163,6 +2177,7 @@ export class SqlitePersistentStore {
         githubIssueNumber: row.githubIssueNumber ?? undefined,
         githubIssueId: row.githubIssueId ?? undefined,
         githubIssueUpdatedAt: row.githubIssueUpdatedAt || undefined,
+        needsProducerReview: Boolean(row.needsProducerReview),
         auditWaiver: parseAuditWaiver(row.auditWaiver),
       };
     }

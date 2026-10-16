@@ -63,12 +63,10 @@ describe('icon legend — coverage (WL-0MV85R1V6000IL4E)', () => {
     }
   });
 
-  // RED-pinned contract (WL-0MVAMS4RO000H3B0 F1): the `producer-review`
-  // category and its legend rows (❌ / ✅) were removed with
-  // `needsProducerReview` (WL-0MV85WFYU0071YQ9); F4 restores the shared
-  // icons legend entries and flips `it.fails(` → `it(`. (The ❌/✅ glyphs
-  // already exist under `audit`, so only the dedicated category is red.)
-  it.fails('RED (F4 flips it.fails→it): legend covers the producer-review category', () => {
+  // Producer-review category (restored by F2, WL-0MVAMS4RO000H3B0): the
+  // `producer-review` legend rows were removed with `needsProducerReview`
+  // (WL-0MV85WFYU0071YQ9) and restored by F2's shared-icons restore.
+  it('covers the producer-review category', () => {
     const categories = new Set(ICON_LEGEND.map((e) => e.category));
     expect(categories.has('producer-review')).toBe(true);
   });

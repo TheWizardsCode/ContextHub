@@ -68,6 +68,7 @@ export default function register(ctx: PluginContext): void {
     .option('--created-by <createdBy>', 'Created by (interoperability field)')
     .option('--deleted-by <deletedBy>', 'Deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'Delete reason (interoperability field)')
+    .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag for the new item (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--audit-file <file>', 'Read audit text from a file')
@@ -79,7 +80,7 @@ export default function register(ctx: PluginContext): void {
     .option('--dedup-window <duration>', 'Dedup match window: recent non-terminal same-title items created within this window are reused instead of creating a twin (e.g. 30s, 5m, 1h; default 5m)')
     .action(async (...rawArgs: any[]) =>
       withStoreMutationLock(ctx.dataPath, async () => {
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','audit','auditText','auditFile','prefix','noReSort','reSortSync','allowDuplicate','dedupWindow']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','prefix','noReSort','reSortSync','allowDuplicate','dedupWindow']);
       let options: CreateOptions = normalized.options as any || {};
       utils.requireInitialized();
       const db = utils.getDatabase(options.prefix);
@@ -248,6 +249,9 @@ export default function register(ctx: PluginContext): void {
         createdBy: options.createdBy || '',
         deletedBy: options.deletedBy || '',
         deleteReason: options.deleteReason || '',
+        needsProducerReview: (options.needsProducerReview !== undefined) ?
+          (['true','yes','1'].includes(String(options.needsProducerReview).toLowerCase())) :
+          false,
       });
 
       // Write audit result to the dedicated audit_results table

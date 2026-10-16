@@ -29,6 +29,7 @@ import {
   riskIcon,
   effortIcon,
   auditIcon,
+  needsProducerReviewIcon,
   stageDisplayIcon,
   getIconPrefixParts,
   isCoveredByParent,
@@ -1770,6 +1771,10 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
     if (result === false) return 'not ready';
     return 'unknown';
   };
+  const reviewLabel = (needsReview: boolean | undefined): string | undefined => {
+    if (needsReview === undefined) return undefined;
+    return needsReview ? 'needs review' : 'reviewed';
+  };
 
   addMeta('ID', item.id);
   addMeta('Title', item.title);
@@ -1821,6 +1826,11 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
     addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
   }
   addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
+
+  // Producer-review row (restored WL-0MVAMS4RO000H3B0 F2): the flag drives a
+  // `Reviewed` metadata row, mirroring the list-row ✓/✗ producer column so the
+  // list and metadata can never diverge (WL-0MSGIXHHI009KFW9).
+  addMeta('Reviewed', iconText(noIcons ? '' : needsProducerReviewIcon(item.needsProducerReview), reviewLabel(item.needsProducerReview)));
 
   // Related Docs — every .md path referenced in the item's `Key Files:`
   // section, joined with a compact delimiter so multi-file values fit the

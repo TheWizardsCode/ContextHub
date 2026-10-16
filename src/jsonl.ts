@@ -407,6 +407,11 @@ export function importFromJsonlContent(content: string): { items: WorkItem[], co
         if (item.description) {
           item.description = stripWorklogMarkers(item.description);
         }
+        // Preserve presence/absence of the new boolean field so round-trip
+        // export/import does not introduce properties that weren't in the source.
+        if ((item as any).needsProducerReview !== undefined) {
+          (item as any).needsProducerReview = Boolean((item as any).needsProducerReview);
+        }
         // Normalize status to canonical hyphenated form (e.g. in_progress -> in-progress)
         // on import so all downstream consumers see consistent values.
         item.status = (normalizeStatusValue(item.status) ?? item.status) as WorkItem['status'];

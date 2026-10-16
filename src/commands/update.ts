@@ -41,6 +41,7 @@ export default function register(ctx: PluginContext): void {
     .option('--created-by <createdBy>', 'New created by (interoperability field)')
     .option('--deleted-by <deletedBy>', 'New deleted by (interoperability field)')
     .option('--delete-reason <deleteReason>', 'New delete reason (interoperability field)')
+    .option('--needs-producer-review <true|false>', 'Set needsProducerReview flag (true|false|yes|no)')
     .option('--audit <text>', 'Legacy alias for --audit-text')
     .option('--audit-text <text>', 'Set structured audit text. First non-empty line must be "Ready to close: Yes" or "Ready to close: No" (see docs/AUDIT_STATUS.md)')
     .option('--audit-file <file>', 'Read audit text from a file')
@@ -54,14 +55,14 @@ export default function register(ctx: PluginContext): void {
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','audit','auditText','auditFile','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync']);
       // Robust detection of --no-re-sort that accepts multiple forms Commander
       // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
       const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','audit','auditText','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync'
+        'title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync'
       ];
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
@@ -195,6 +196,18 @@ export default function register(ctx: PluginContext): void {
         });
         process.exit(1);
       }
+      let needsProducerReviewCandidate: boolean | undefined;
+      if (hasProvided('needsProducerReview')) {
+        const raw = String(options.needsProducerReview).toLowerCase();
+        const truthy = ['true', 'yes', '1'];
+        const falsy = ['false', 'no', '0'];
+        if (truthy.includes(raw)) needsProducerReviewCandidate = true;
+        else if (falsy.includes(raw)) needsProducerReviewCandidate = false;
+        else {
+          output.error(`Invalid value for --needs-producer-review: ${options.needsProducerReview}`, { success: false, error: 'invalid-arg' });
+          process.exit(1);
+        }
+      }
 
       let doNotDelegateRaw: string | undefined;
       if (hasProvided('doNotDelegate')) {
@@ -230,6 +243,7 @@ export default function register(ctx: PluginContext): void {
         if (createdByCandidate !== undefined) updates.createdBy = createdByCandidate;
         if (deletedByCandidate !== undefined) updates.deletedBy = deletedByCandidate;
         if (deleteReasonCandidate !== undefined) updates.deleteReason = deleteReasonCandidate;
+        if (needsProducerReviewCandidate !== undefined) updates.needsProducerReview = needsProducerReviewCandidate;
 
         // Soft-delete guard (SA-0MUJBLZC60085DI9 AC1): a soft-deleted work
         // item (non-empty `deletedBy`) must never be resurrected by an

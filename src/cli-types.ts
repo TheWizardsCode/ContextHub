@@ -28,6 +28,8 @@ export interface CreateOptions {
   createdBy?: string;
   deletedBy?: string;
   deleteReason?: string;
+  /** Accepts true|false|yes|no to set needsProducerReview flag for the new item */
+  needsProducerReview?: string;
   /** Legacy audit flag (kept for compatibility) */
   audit?: string;
   /** Preferred audit flag for structured writes */
@@ -104,6 +106,8 @@ export interface UpdateOptions {
   stage?: string;
   /** Accepts true|false|yes|no to set or clear do-not-delegate tag */
   doNotDelegate?: string;
+  /** Accepts true|false|yes|no to set needsProducerReview flag */
+  needsProducerReview?: string;
   risk?: string;
   effort?: string;
   issueType?: string;
