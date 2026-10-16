@@ -364,6 +364,47 @@ describe('upsertItems() no-op guard (WL-0MSORD6HC005QVZX)', () => {
   });
 });
 
+// ── WL-0MVB9557U009LEIF: omitted needsProducerReview must not look changed ──
+//
+// Stored items round-trip needsProducerReview through Boolean() (SQLite
+// INTEGER column), so a stored false reads back as `false`. Import/upsert
+// callers may omit the key entirely (undefined) — an omitted flag must be
+// equivalent to `false`, otherwise every no-op re-import is treated as a
+// semantic change and updatedAt is wrongly bumped.
+
+describe('import()/upsertItems() omit-needsProducerReview no-op guard (WL-0MVB9557U009LEIF)', () => {
+  /** Strip needsProducerReview so the incoming item carries `undefined`. */
+  function withoutFlag(item: WorkItem): WorkItem {
+    const copy: Partial<WorkItem> = { ...item };
+    delete copy.needsProducerReview;
+    return copy as WorkItem;
+  }
+
+  it('import() preserves updatedAt when the incoming item omits the flag', () => {
+    const stored = makeItem({ id: 'WI-NPR-IMP', needsProducerReview: false });
+    db.import([stored]);
+    // Re-import with the key omitted (undefined) — must be a no-op.
+    db.import([withoutFlag(stored)]);
+    expect(db.get(stored.id)?.needsProducerReview).toBe(false);
+    expect(db.get(stored.id)?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('upsertItems() preserves updatedAt when the incoming item omits the flag', () => {
+    const stored = makeItem({ id: 'WI-NPR-UPS', needsProducerReview: false });
+    db.import([stored]);
+    db.upsertItems([withoutFlag(stored)]);
+    expect(db.get(stored.id)?.updatedAt).toBe(FIXED_TS);
+  });
+
+  it('import() still bumps updatedAt when the omitted flag differs from a stored true', () => {
+    const stored = makeItem({ id: 'WI-NPR-TRUE', needsProducerReview: true });
+    db.import([stored]);
+    db.import([withoutFlag(stored)]);
+    // Boolean(undefined) === false, so this IS a genuine change.
+    expect(db.get(stored.id)?.updatedAt).not.toBe(FIXED_TS);
+  });
+});
+
 // ── WL-0MSN6ZCTN0027U2R: needsProducerReview flag flips must not bump updatedAt ──
 
 describe('update() needsProducerReview flag-only does not bump updatedAt (WL-0MSN6ZCTN0027U2R)', () => {
