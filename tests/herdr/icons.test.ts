@@ -373,3 +373,67 @@ describe('getIconPrefix', () => {
     expect(withoutIcons.indexOf('[MED ]')).toBeLessThan(withoutIcons.indexOf('[IDLE]'));
   });
 });
+
+// ── Producer-review icons (restored contract WL-0MVAMS4RO000H3B0 F1) ────
+// RED-pinned with it.fails(`: `needsProducerReviewIcon` and the producer
+// prefix column were removed from `@worklog/shared/icons`
+// (WL-0MV85WFYU0071YQ9) and are being restored (F2/F4). The module is
+// loaded dynamically so this file does not break while the export is
+// absent; F4 flips `it.fails(` → `it(`.
+
+async function loadSharedIcons(): Promise<Record<string, any>> {
+  return import('@worklog/shared/icons');
+}
+
+describe('needsProducerReviewIcon (RED-contract, restored)', () => {
+  it.fails('RED (F4 flips it.fails→it): returns needs-review icon when true', async () => {
+    const icons = await loadSharedIcons();
+    const result = icons.needsProducerReviewIcon(true);
+    expect(result).toBeTruthy();
+  });
+
+  it.fails('RED (F4 flips it.fails→it): returns done icon when false', async () => {
+    const icons = await loadSharedIcons();
+    const result = icons.needsProducerReviewIcon(false);
+    expect(result).toBeTruthy();
+  });
+
+  it.fails('RED (F4 flips it.fails→it): returns empty when undefined', async () => {
+    const icons = await loadSharedIcons();
+    expect(icons.needsProducerReviewIcon(undefined)).toBe('');
+  });
+});
+
+describe('getIconPrefix producer column (RED-contract, restored)', () => {
+  it.fails('RED (F4 flips it.fails→it): includes producer review icon', async () => {
+    const icons = await loadSharedIcons();
+    const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', needsProducerReview: true };
+    const prefix = icons.getIconPrefix(item);
+    expect(prefix).toBeTruthy();
+    expect(prefix).toContain('\u{274C}'); // ❌
+  });
+
+  it.fails('RED (F4 flips it.fails→it): renders the [REVIEW]/[OK] text fallback in noIcons mode', async () => {
+    const icons = await loadSharedIcons();
+    const flagged = icons.getIconPrefix(
+      { id: 'T1', title: 'Test', status: 'open', needsProducerReview: true } as WorkItem,
+      { noIcons: true },
+    );
+    expect(flagged).toContain('[REVIEW]');
+
+    const clear = icons.getIconPrefix(
+      { id: 'T2', title: 'Test', status: 'open', needsProducerReview: false } as WorkItem,
+      { noIcons: true },
+    );
+    expect(clear).toContain('[OK]');
+  });
+
+  it.fails('RED (F4 flips it.fails→it): getIconPrefixParts exposes the producer column for the coverage dimmer', async () => {
+    const icons = await loadSharedIcons();
+    const parts = icons.getIconPrefixParts(
+      { status: 'open', needsProducerReview: true } as any,
+    );
+    expect(parts.text).toContain('\u{274C}'); // ❌
+    expect(parts.stageEnd).toBeGreaterThanOrEqual(0);
+  });
+});

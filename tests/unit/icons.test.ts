@@ -938,6 +938,112 @@ function collectRepoFiles(dir: string): string[] {
   return files;
 }
 
+// ─── Producer Review Icons (restored contract WL-0MVAMS4RO000H3B0 F1) ───
+// RED-pinned with it.fails(`: the `needsProducerReviewIcon`/… exports were
+// removed from `src/theme.ts` (WL-0MV85WFYU0071YQ9) and are being restored.
+// The theme module is loaded lazily so the file does not break while the
+// exports are absent; F5 flips `it.fails(` → `it(`.
+
+describe('needsProducerReviewIcon (RED-contract, restored)', () => {
+  async function loadTheme(): Promise<any> {
+    return import('../../src/theme.js');
+  }
+
+  it.fails('returns ❌ for true (needs review)', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewIcon(true)).toBe('\u{274C}'); // ❌
+  });
+
+  it.fails('returns ✅ for false (review complete)', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewIcon(false)).toBe('\u{2705}'); // ✅
+  });
+
+  it.fails('returns ✅ for null (defaults to not needed)', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewIcon(null)).toBe('\u{2705}'); // ✅
+  });
+
+  it.fails('returns ✅ for undefined (defaults to not needed)', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewIcon(undefined)).toBe('\u{2705}'); // ✅
+  });
+
+  describe('with noIcons option', () => {
+    it.fails('returns text fallback for true', async () => {
+      const theme = await loadTheme();
+      expect(theme.needsProducerReviewIcon(true, { noIcons: true })).toBe('[NEEDS_PRODUCER]');
+    });
+
+    it.fails('returns text fallback for false', async () => {
+      const theme = await loadTheme();
+      expect(theme.needsProducerReviewIcon(false, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+
+    it.fails('returns text fallback for null', async () => {
+      const theme = await loadTheme();
+      expect(theme.needsProducerReviewIcon(null, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+
+    it.fails('returns text fallback for undefined', async () => {
+      const theme = await loadTheme();
+      expect(theme.needsProducerReviewIcon(undefined, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+  });
+});
+
+describe('needsProducerReviewFallback (RED-contract, restored)', () => {
+  async function loadTheme(): Promise<any> {
+    return import('../../src/theme.js');
+  }
+
+  it.fails('returns bracketed text for true', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewFallback(true)).toBe('[NEEDS_PRODUCER]');
+  });
+
+  it.fails('returns bracketed text for false', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewFallback(false)).toBe('[PRODUCER_OK]');
+  });
+
+  it.fails('returns bracketed text for null', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewFallback(null)).toBe('[PRODUCER_OK]');
+  });
+
+  it.fails('returns bracketed text for undefined', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewFallback(undefined)).toBe('[PRODUCER_OK]');
+  });
+});
+
+describe('needsProducerReviewLabel (RED-contract, restored)', () => {
+  async function loadTheme(): Promise<any> {
+    return import('../../src/theme.js');
+  }
+
+  it.fails('returns label for true', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewLabel(true)).toBe('Needs producer review');
+  });
+
+  it.fails('returns label for false', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewLabel(false)).toBe('Producer review complete');
+  });
+
+  it.fails('returns label for null', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewLabel(null)).toBe('Producer review complete');
+  });
+
+  it.fails('returns label for undefined', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewLabel(undefined)).toBe('Producer review complete');
+  });
+});
+
 describe('repo-wide grep guard (WL-0MT2GMTAZ003VKVL)', () => {
   it('no file imports from a removed icons.js/icons.ts path', () => {
     const offenders: string[] = [];

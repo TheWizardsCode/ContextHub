@@ -113,34 +113,67 @@ describe('migrations: add audit field', () => {
 });
 
 describe('migrations: needsProducerReview column', () => {
-  it('lists the drop migration as pending when the column is present', () => {
+  it.fails('RED (F2 flips it.fails→it): lists the new restore migration as pending when the column is missing', () => {
     const tempDir = createTempDir();
     try {
       const dbPath = path.join(tempDir, 'worklog.db');
-      createLegacyDbWithoutAudit(dbPath);
+      createLegacyDbWithoutNeedsProducerReview(dbPath);
 
       const pending = listPendingMigrations(dbPath);
-      expect(pending.map(p => p.id)).toContain('20261015-drop-needsProducerReview');
+      // The restore (F2) adds a NEW migration that re-adds the column
+      // (documented interface: id '20261016-restore-needsProducerReview').
+      expect(pending.map(p => p.id)).toContain('20261016-restore-needsProducerReview');
     } finally {
       cleanupTempDir(tempDir);
     }
   });
 
-  it('drops the needsProducerReview column and preserves the historical add-migration', () => {
+  it.fails('RED (F2 flips it.fails→it): applies the new restore migration, re-adding the column, and creates a backup', () => {
     const tempDir = createTempDir();
     try {
       const dbPath = path.join(tempDir, 'worklog.db');
-      createLegacyDbWithoutAudit(dbPath);
+      createLegacyDbWithoutNeedsProducerReview(dbPath);
+
+      const dryRun = runMigrations({ dryRun: true }, dbPath);
+      expect(dryRun.applied.map(a => a.id)).toContain('20261016-restore-needsProducerReview');
 
       const applied = runMigrations({ confirm: true }, dbPath);
-      expect(applied.applied.map(a => a.id)).toContain('20261015-drop-needsProducerReview');
+      expect(applied.applied.map(a => a.id)).toContain('20261016-restore-needsProducerReview');
       // The migration framework creates a backup before applying.
       expect(applied.backups.length).toBeGreaterThanOrEqual(1);
 
       const db = new Database(dbPath, { readonly: true });
       try {
         const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
-        expect(cols.map(c => c.name)).not.toContain('needsProducerReview');
+        expect(cols.map(c => c.name)).toContain('needsProducerReview');
+      } finally {
+        db.close();
+      }
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+
+  it.fails('RED (F2 flips it.fails→it): the shipped 20261015-drop-… migration is a metadata-sentinel no-op and never re-drops the column', () => {
+    const tempDir = createTempDir();
+    try {
+      const dbPath = path.join(tempDir, 'worklog.db');
+      createLegacyDbWithoutAudit(dbPath);
+
+      // After the restore, running migrations must keep the flag column in
+      // place: the historical drop migration is neutralised into a
+      // metadata-sentinel no-op (mirroring 20260210-add-…).
+      const applied = runMigrations({ confirm: true }, dbPath);
+      expect(applied.applied.map(a => a.id)).not.toContain('20261015-drop-needsProducerReview');
+
+      // Idempotent: a second run applies nothing new.
+      const secondRun = runMigrations({ confirm: true }, dbPath);
+      expect(secondRun.applied).toHaveLength(0);
+
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
+        expect(cols.map(c => c.name)).toContain('needsProducerReview');
       } finally {
         db.close();
       }
