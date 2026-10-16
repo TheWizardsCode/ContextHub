@@ -26,11 +26,12 @@ export function truncatePaneTitle(title: string): string {
  * {@link truncatePaneTitle} cuts the ID off long titles, so preserving the
  * suffix keeps every spawned pane's ID visible.
  *
- * Historically this was also load-bearing for hydrator matching: the hydrator
- * used to match an `in_progress` work item to a live pane by the ID embedded
- * in the pane title (WL-0MSOJLZD9004P8PI). It now matches the **exact** label
- * of a workspace tab (WL-0MV24RM9I0051GEF), so the pane-title suffix is no
- * longer a correctness signal for demotion.
+ * This suffix preservation is ALSO load-bearing for the hydrator's active-tab
+ * detection (WL-0MV1BWETT005GSUJ): the hydrator matches an `in_progress` work
+ * item to a live workspace pane by extracting the work-item ID from the pane
+ * title (the producer's rule — a pane with the work item id as the title
+ * means the item is being worked). The ID must therefore survive title
+ * truncation for the match to be reliable, which this helper guarantees.
  *
  * When the suffix alone does not fit the bound, this falls back to plain
  * truncation (never exceeds {@link MAX_PANE_TITLE_LENGTH}).

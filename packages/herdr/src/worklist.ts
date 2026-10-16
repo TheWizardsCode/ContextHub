@@ -494,7 +494,7 @@ export class WorkItemListState {
   items: WorkItem[];
 
   /**
-   * All loaded items (unfiltered). Lets the tab-marker refresh re-evaluate
+   * All loaded items (unfiltered). Lets the pane-marker refresh re-evaluate
    * every item — including those excluded by the active stage/priority
    * filter — without a `wl` re-fetch (WL-0MV1BWETT005GSUJ).
    */
@@ -5458,7 +5458,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; applyActiveTabMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -5474,7 +5474,7 @@ export async function runWorklistTui(
     downtimeWorker: options?.downtimeWorker,
     downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
     mergeAgentStates: options?.mergeAgentStates,
-    applyActiveTabMarkers: options?.applyActiveTabMarkers,
+    applyActivePaneMarkers: options?.applyActivePaneMarkers,
     subscriber: options?.subscriber ?? null,
     agentTracker: options?.agentTracker ?? null,
     onDowntimeToggle: options?.onDowntimeToggle,
@@ -5492,18 +5492,18 @@ export async function runWorklistTui(
   let termSize = getTermSize();
 
   /**
-   * Apply the tab-based active marker to freshly fetched items: any item with
-   * an exact-match tab in THIS workspace is shown as `in-progress` (marker +
-   * Group N), independent of the worklog status the demotion loop maintains.
-   * This makes the selection list's marker reflect tab existence directly
-   * (WL-0MV1BWETT005GSUJ). The production implementation is injected by
-   * `index.ts` (same pattern as `mergeAgentStates`); when absent it is a
-   * no-op, so tests never spawn `herdr`. Fail-open — a tab lookup failure
-   * leaves every item unchanged.
+   * Apply the pane-based active marker to freshly fetched items: any item
+   * with a matching pane title in THIS workspace is shown as `in-progress`
+   * (marker + Group N), independent of the worklog status the demotion loop
+   * maintains. This makes the selection list's marker reflect pane existence
+   * directly (WL-0MV1BWETT005GSUJ). The production implementation is
+   * injected by `index.ts` (same pattern as `mergeAgentStates`); when absent
+   * it is a no-op, so tests never spawn `herdr`. Fail-open — a pane lookup
+   * failure leaves every item unchanged.
    */
-  const applyTabMarkers = async (list: WorkItem[]): Promise<void> => {
+  const applyPaneMarkers = async (list: WorkItem[]): Promise<void> => {
     try {
-      await opts.applyActiveTabMarkers?.(list);
+      await opts.applyActivePaneMarkers?.(list);
     } catch {
       // Fail-open: a marker failure must never break the refresh/render.
     }
@@ -5516,10 +5516,10 @@ export async function runWorklistTui(
   } catch {
     items = [];
   }
-  // Reflect open item tabs on the very first render (no 30 s wait). Kicked
+  // Reflect open item panes on the very first render (no 30 s wait). Kicked
   // off without blocking TUI startup; the marker lands on a follow-up render
-  // once the tab lookup resolves (fail-open).
-  void applyTabMarkers(items).then(() => render());
+  // once the pane lookup resolves (fail-open).
+  void applyPaneMarkers(items).then(() => render());
 
   // Fetch total actionable count (best effort — failure is silent)
   fetchActionableCount().then((count) => {
@@ -5532,15 +5532,15 @@ export async function runWorklistTui(
   const state = new WorkItemListState(items, termSize);
 
   /**
-   * Re-evaluate tab existence against the CURRENT items (no `wl` re-fetch)
+   * Re-evaluate pane existence against the CURRENT items (no `wl` re-fetch)
    * and re-render. Called on the hydrate cadence and on focus-resume so an
-   * opened/closed work-item tab changes the marker within one cadence even
+   * opened/closed work-item pane changes the marker within one cadence even
    * though it does not touch the worklog DB (which is why the DB-gated
-   * refresh tick cannot be relied on for this). Spawns only `herdr tab list`,
-   * never `wl`. Fail-open (see `applyTabMarkers`).
+   * refresh tick cannot be relied on for this). Spawns only `herdr pane list`,
+   * never `wl`. Fail-open (see `applyPaneMarkers`).
    */
-  const refreshTabMarkers = async (): Promise<void> => {
-    await applyTabMarkers(state.allItems());
+  const refreshPaneMarkers = async (): Promise<void> => {
+    await applyPaneMarkers(state.allItems());
     render();
   };
 
@@ -6096,11 +6096,11 @@ export async function runWorklistTui(
             attachFresh([topLevel]);
           }
         }
-        // Tab-based active marker (WL-0MV1BWETT005GSUJ): items with an
-        // exact-match tab in this workspace are shown in-progress even when
-        // the worklog status is still `open` (e.g. a claim that was released
-        // before the tab was (re)opened). Fail-open.
-        await applyTabMarkers(newItems);
+        // Pane-based active marker (WL-0MV1BWETT005GSUJ): items with a
+        // matching pane title in this workspace are shown in-progress even
+        // when the worklog status is still `open` (e.g. a claim that was
+        // released before the pane was (re)opened). Fail-open.
+        await applyPaneMarkers(newItems);
         state.refreshItems(newItems);
         // Blocked-by rows survive refreshes (WL-0MV8Q5X8U004KKAP): the
         // blocker cache is keyed by item ID and invalidated per item only
@@ -7521,18 +7521,18 @@ export async function runWorklistTui(
         panePaused = false;
         // Hydrator focus-resume (AC4): the hidden→visible transition also
         // re-checks `in_progress` claims immediately — the same runner the
-        // 30 s hydrate task uses — so a claim whose item tab was closed while
+        // 30 s hydrate task uses — so a claim whose item pane was closed while
         // the pane was hidden is released as soon as focus returns (no wait
         // for the next hydrate tick). This runs BEFORE the DB-change gate
-        // because opening/closing a work-item tab does not touch the worklog
+        // because opening/closing a work-item pane does not touch the worklog
         // DB (WL-0MV1BWETT005GSUJ). `paneGate.visible()` is already cached
         // true here, so the runner proceeds without a new visibility probe.
         void runHydrator();
-        // Selection-list marker (WL-0MV1BWETT005GSUJ): re-evaluate tab
+        // Selection-list marker (WL-0MV1BWETT005GSUJ): re-evaluate pane
         // existence independently of the DB-change gate below — opening or
-        // closing a work-item tab does not touch the worklog DB, so a
+        // closing a work-item pane does not touch the worklog DB, so a
         // DB-gated refresh can never show/clear its marker.
-        void refreshTabMarkers();
+        void refreshPaneMarkers();
         // DB-change gate: skip the refresh when the DB is unchanged (same as
         // the regular refresh tick).
         if (tracker && !tracker.dbChanged()) {
@@ -7561,22 +7561,22 @@ export async function runWorklistTui(
     },
   });
 
-  // Active-tab marker task (WL-0MV1BWETT005GSUJ): the selection-list marker
-  // must reflect tab existence, but the regular refresh tick is DB-change
-  // gated and opening/closing a work-item tab does NOT touch the worklog DB.
-  // This task re-evaluates tabs on the hydrator cadence and re-renders,
-  // spawning only `herdr tab list` (never `wl`), so the zero-`wl`-when-idle
+  // Active-pane marker task (WL-0MV1BWETT005GSUJ): the selection-list marker
+  // must reflect pane existence, but the regular refresh tick is DB-change
+  // gated and opening/closing a work-item pane does NOT touch the worklog DB.
+  // This task re-evaluates panes on the hydrator cadence and re-renders,
+  // spawning only `herdr pane list` (never `wl`), so the zero-`wl`-when-idle
   // guarantee holds. Visibility- and typing-gated like the hydrator.
   if (opts.autoRefresh) {
     scheduler.addTask({
-      id: 'active-tab-marker',
+      id: 'active-pane-marker',
       intervalMs: HYDRATOR_INTERVAL_MS,
       singleFlight: true,
       runTimeoutMs: HYDRATOR_RUN_TIMEOUT_MS,
       run: async () => {
         if (inputActive()) return;
         if (!(await paneGate.visible())) return;
-        await refreshTabMarkers();
+        await refreshPaneMarkers();
       },
     });
   }

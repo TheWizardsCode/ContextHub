@@ -1,17 +1,18 @@
 /**
- * packages/herdr/src/worklist-active-tab-marker.test.ts — Integration tests
- * for the tab-based in-progress marker in the selection list
+ * packages/herdr/src/worklist-active-pane-marker.test.ts — Integration tests
+ * for the pane-title-based in-progress marker in the selection list
  * (WL-0MV1BWETT005GSUJ).
  *
- * The producer rejected the hydrator-only fix: "I see no markers on active
- * items that have open panes." The selection list's in-progress marker must
- * therefore reflect **tab existence**, not only the worklog status the
- * demotion loop maintains. `runWorklistTui` accepts an `applyActiveTabMarkers`
- * seam (injected by `index.ts`; a no-op in tests); the refresh cycle marks
- * every item with an exact-match tab in the current workspace as `in-progress`
- * before rendering.
+ * The producer rejected the tab-label fix as unreliable and directed a single
+ * simple rule: "Look for a pane in this workspace with the work item id as
+ * the title. If it exists then work item is busy." The selection list's
+ * in-progress marker must therefore reflect **pane-title existence**, not
+ * only the worklog status the demotion loop maintains. `runWorklistTui`
+ * accepts an `applyActivePaneMarkers` seam (injected by `index.ts`; a no-op
+ * in tests); the refresh cycle marks every item whose work-item ID appears in
+ * a current-workspace pane title as `in-progress` before rendering.
  *
- * Run: npx vitest run packages/herdr/src/worklist-active-tab-marker.test.ts
+ * Run: npx vitest run packages/herdr/src/worklist-active-pane-marker.test.ts
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -32,15 +33,17 @@ vi.mock('./notify.js', () => ({
 import { runWorklistTui } from './worklist.js';
 import { setExecFileAsync, resetExecFileAsync } from './fetcher.js';
 import type { WorkItem } from './fetcher.js';
-import { applyActiveTabMarkers as applyTabMarkersToItems, type HydratorTab } from './hydrator.js';
+import { applyActivePaneMarkers as applyPaneMarkersToItems, type HydratorPane } from './hydrator.js';
 
 const IN_PROGRESS_ICON = '\u{1F504}'; // 🔄
 const OPEN_ICON = '\u{1F513}'; // 🔓
 
-// Realistic work-item IDs: `collectTabWorkItemIds` only matches labels that
-// look exactly like a work-item ID (prefix + dash + 6+ base36 chars).
+// Realistic work-item IDs (prefix + dash + 6+ base36 chars).
 const ITEM = 'WL-0MV1BWETT005GSUJ';
 const OTHER_ITEM = 'WL-0MV24T2VJ007Q49J';
+
+/** A realistic dispatched pane title: the ID survives as a trailing suffix. */
+const titleFor = (id: string): string => `Downtime triggered implement Foo - ${id}`;
 
 let dataHandler: ((chunk: Buffer) => void) | undefined;
 let writes: string[];
@@ -105,53 +108,55 @@ async function quit(p: Promise<unknown>): Promise<void> {
   await p;
 }
 
-describe('worklist — tab-based in-progress marker', () => {
-  it('shows the in-progress marker for a worklog-open item with a matching workspace tab', async () => {
+describe('worklist — pane-title-based in-progress marker', () => {
+  it('shows the in-progress marker for a worklog-open item with a matching workspace pane title', async () => {
     vi.useFakeTimers();
     process.env.HERDR_PANE_ID = 'w1:pCM';
     process.env.HERDR_WORKSPACE_ID = 'w1';
     setExecFileAsync(makeExecMock() as any);
 
     const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
-      { id: ITEM, title: 'Tab is open', status: 'open', stage: 'plan_complete' },
+      { id: ITEM, title: 'Pane is open', status: 'open', stage: 'plan_complete' },
     ]);
-    const listTabs = vi.fn(async (_workspaceId?: string): Promise<HydratorTab[]> => [
-      { tab_id: 'w1:t1', label: ITEM, workspace_id: 'w1' },
-    ]);
+    const listActivePanes = vi.fn(
+      async (_workspaceId?: string): Promise<HydratorPane[]> => [
+        { pane_id: 'w1:p1', label: titleFor(ITEM), workspace_id: 'w1' },
+      ],
+    );
 
     const p = runWorklistTui(fetcher, [], undefined, {
       autoRefresh: true,
       refreshIntervalMs: 30_000,
       autoSync: false,
       showHelpText: false,
-      applyActiveTabMarkers: (items) => applyTabMarkersToItems(items, listTabs, 'w1'),
+      applyActivePaneMarkers: (items) => applyPaneMarkersToItems(items, listActivePanes, 'w1'),
     });
     await vi.advanceTimersByTimeAsync(0);
 
-    // First auto-refresh applies the tab marker before rendering.
+    // First auto-refresh applies the pane marker before rendering.
     await vi.advanceTimersByTimeAsync(30_000);
 
     const output = writes.join('');
     expect(output).toContain(ITEM);
     expect(output).toContain(IN_PROGRESS_ICON);
     expect(output).not.toContain(OPEN_ICON);
-    // The tab lookup is scoped to the current workspace.
-    expect(listTabs).toHaveBeenCalledWith('w1');
+    // The pane lookup is scoped to the current workspace.
+    expect(listActivePanes).toHaveBeenCalledWith('w1');
 
     await quit(p);
   });
 
-  it('keeps the open marker when no tab matches the item', async () => {
+  it('keeps the open marker when no pane title matches the item', async () => {
     vi.useFakeTimers();
     process.env.HERDR_PANE_ID = 'w1:pCM';
     process.env.HERDR_WORKSPACE_ID = 'w1';
     setExecFileAsync(makeExecMock() as any);
 
     const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
-      { id: OTHER_ITEM, title: 'No tab open', status: 'open', stage: 'plan_complete' },
+      { id: OTHER_ITEM, title: 'No pane open', status: 'open', stage: 'plan_complete' },
     ]);
-    const listTabs = vi.fn(async (): Promise<HydratorTab[]> => [
-      { tab_id: 'w1:t1', label: ITEM, workspace_id: 'w1' },
+    const listActivePanes = vi.fn(async (): Promise<HydratorPane[]> => [
+      { pane_id: 'w1:p1', label: titleFor(ITEM), workspace_id: 'w1' },
     ]);
 
     const p = runWorklistTui(fetcher, [], undefined, {
@@ -159,7 +164,7 @@ describe('worklist — tab-based in-progress marker', () => {
       refreshIntervalMs: 30_000,
       autoSync: false,
       showHelpText: false,
-      applyActiveTabMarkers: (items) => applyTabMarkersToItems(items, listTabs, 'w1'),
+      applyActivePaneMarkers: (items) => applyPaneMarkersToItems(items, listActivePanes, 'w1'),
     });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(30_000);
@@ -172,17 +177,18 @@ describe('worklist — tab-based in-progress marker', () => {
     await quit(p);
   });
 
-  it('does not mark an item whose tab is in another workspace', async () => {
+  it('does not mark an item whose pane is in another workspace', async () => {
     vi.useFakeTimers();
     process.env.HERDR_PANE_ID = 'w1:pCM';
     process.env.HERDR_WORKSPACE_ID = 'w1';
     setExecFileAsync(makeExecMock() as any);
 
+    const OTHER = 'WL-0MV25EE4E0028KDI';
     const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
-      { id: 'WL-0MV25EE4E0028KDI', title: 'Tab elsewhere', status: 'open', stage: 'plan_complete' },
+      { id: OTHER, title: 'Pane elsewhere', status: 'open', stage: 'plan_complete' },
     ]);
-    const listTabs = vi.fn(async (): Promise<HydratorTab[]> => [
-      { tab_id: 'w2:t1', label: 'WL-0MV25EE4E0028KDI', workspace_id: 'w2' },
+    const listActivePanes = vi.fn(async (): Promise<HydratorPane[]> => [
+      { pane_id: 'w2:p1', label: titleFor(OTHER), workspace_id: 'w2' },
     ]);
 
     const p = runWorklistTui(fetcher, [], undefined, {
@@ -190,7 +196,7 @@ describe('worklist — tab-based in-progress marker', () => {
       refreshIntervalMs: 30_000,
       autoSync: false,
       showHelpText: false,
-      applyActiveTabMarkers: (items) => applyTabMarkersToItems(items, listTabs, 'w1'),
+      applyActivePaneMarkers: (items) => applyPaneMarkersToItems(items, listActivePanes, 'w1'),
     });
     await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(30_000);
@@ -202,42 +208,42 @@ describe('worklist — tab-based in-progress marker', () => {
     await quit(p);
   });
 
-  it('clears the marker within one hydrator cadence when the tab closes (no DB change, no wl refetch)', async () => {
+  it('clears the marker within one hydrator cadence when the pane closes (no DB change, no wl refetch)', async () => {
     vi.useFakeTimers();
     process.env.HERDR_PANE_ID = 'w1:pCM';
     process.env.HERDR_WORKSPACE_ID = 'w1';
     setExecFileAsync(makeExecMock() as any);
 
     const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
-      { id: ITEM, title: 'Tab is open', status: 'open', stage: 'plan_complete' },
+      { id: ITEM, title: 'Pane is open', status: 'open', stage: 'plan_complete' },
     ]);
-    // Mutable tab set: the item starts with an exact-ID tab, then the tab is
-    // closed while the worklog DB stays untouched.
-    let tabs: HydratorTab[] = [{ tab_id: 'w1:t1', label: ITEM, workspace_id: 'w1' }];
-    const listTabs = vi.fn(async (): Promise<HydratorTab[]> => tabs);
+    // Mutable pane set: the item starts with a matching pane title, then the
+    // pane is closed while the worklog DB stays untouched.
+    let panes: HydratorPane[] = [{ pane_id: 'w1:p1', label: titleFor(ITEM), workspace_id: 'w1' }];
+    const listActivePanes = vi.fn(async (): Promise<HydratorPane[]> => panes);
 
     const p = runWorklistTui(
       fetcher,
-      [{ id: ITEM, title: 'Tab is open', status: 'open', stage: 'plan_complete' }],
+      [{ id: ITEM, title: 'Pane is open', status: 'open', stage: 'plan_complete' }],
       undefined,
       {
         autoRefresh: true,
-        // Longer than the marker cadence so ONLY the new active-tab-marker
+        // Longer than the marker cadence so ONLY the new active-pane-marker
         // task (not the DB-gated refresh tick) can update the marker here.
         refreshIntervalMs: 5 * 60_000,
         autoSync: false,
         showHelpText: false,
-        applyActiveTabMarkers: (items) => applyTabMarkersToItems(items, listTabs, 'w1'),
+        applyActivePaneMarkers: (items) => applyPaneMarkersToItems(items, listActivePanes, 'w1'),
       },
     );
     await vi.advanceTimersByTimeAsync(0);
-    // Initial load marks the item (exact-ID tab is open).
+    // Initial load marks the item (matching pane title is open).
     expect(writes.join('')).toContain(IN_PROGRESS_ICON);
 
-    // Close the tab; the next marker cadence must clear the marker even though
-    // no worklog write (DB change) happened and the refresh tick is disabled
-    // for the duration of this test.
-    tabs = [];
+    // Close the pane; the next marker cadence must clear the marker even
+    // though no worklog write (DB change) happened and the refresh tick is
+    // disabled for the duration of this test.
+    panes = [];
     writes.length = 0;
     await vi.advanceTimersByTimeAsync(30_000);
 
@@ -245,7 +251,7 @@ describe('worklist — tab-based in-progress marker', () => {
     expect(output).toContain(ITEM);
     expect(output).toContain(OPEN_ICON);
     expect(output).not.toContain(IN_PROGRESS_ICON);
-    expect(listTabs.mock.calls.length).toBeGreaterThan(1);
+    expect(listActivePanes.mock.calls.length).toBeGreaterThan(1);
 
     await quit(p);
   });

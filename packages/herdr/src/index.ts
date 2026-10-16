@@ -50,7 +50,7 @@ import {
   stripAgentPromptPrefix,
 } from './pane-title.js';
 import { showToast } from './notify.js';
-import { applyActiveTabMarkers, createProductionHydratorDeps } from './hydrator.js';
+import { applyActivePaneMarkers, createProductionHydratorDeps } from './hydrator.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -2459,11 +2459,13 @@ export async function main(): Promise<void> {
       // expanded children) on every refresh cycle (WL-0MSBQUJQX005RAT9).
       // Fail-open: herdr errors yield no icons; the list keeps working.
       mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
-      // Tab-based active marker (WL-0MV1BWETT005GSUJ): stamp `in-progress` on
-      // items whose exact-ID tab is open in the current workspace so the
-      // selection list's marker reflects tab existence. Fail-open.
-      applyActiveTabMarkers: (items) =>
-        applyActiveTabMarkers(items, hydratorDeps.listTabs, hydratorWorkspaceId),
+      // Pane-based active marker (WL-0MV1BWETT005GSUJ): stamp `in-progress`
+      // on items whose work-item ID appears in a current-workspace pane
+      // title so the selection list's marker reflects pane existence
+      // (the producer's rule: a pane with the work item id as the title
+      // means the item is being worked). Fail-open.
+      applyActivePaneMarkers: (items) =>
+        applyActivePaneMarkers(items, hydratorDeps.listActivePanes, hydratorWorkspaceId),
       subscriber: eventSubscriber,
       agentTracker,
       modeSwitchWorker,
