@@ -5784,10 +5784,15 @@ export async function runWorklistTui(
     if (!subscriber || !agentTracker) return;
     try {
       const current = new Set(subscriber.getTrackedPaneIds());
+      const missing: string[] = [];
       for (const entry of agentTracker.snapshot()) {
-        if (!current.has(entry.paneId)) {
-          await subscriber.addPaneSubscription(entry.paneId);
-        }
+        if (!current.has(entry.paneId)) missing.push(entry.paneId);
+      }
+      if (missing.length > 0) {
+        // Batch: herdr accepts ONE events.subscribe per connection, so all
+        // new panes are applied by re-establishing the connection ONCE with
+        // the combined set (WL-0MVAS988R008PNH6) — never one restart per pane.
+        await subscriber.addPaneSubscriptions(missing);
       }
     } catch {
       // Fail-open: a subscription sync failure keeps polling as fallback.
@@ -5875,8 +5880,25 @@ export async function runWorklistTui(
         scheduleAgentEventRender();
       },
       onError: () => {
-        // Socket errors are already handled by the subscriber's reconnect
-        // logic; no TUI action needed (fail-open).
+        // The event stream dropped (socket error/close). The subscriber
+        // reconnects with backoff; meanwhile flip back to the resume-poll
+        // fallback so a hidden → visible transition still refreshes
+        // immediately while events are down (WL-0MVAS988R008PNH6 AC3/AC1).
+        // `onReconnected` below restores the event path on recovery.
+        if (eventsActive) {
+          eventsActive = false;
+          void paneGate.visible().then((visible) => {
+            if (!visible) startResumePoll();
+          });
+        }
+      },
+      onReconnected: () => {
+        // Stream re-established (restart or backoff reconnect): the event
+        // path drives focus/refresh again — stop the resume-poll fallback
+        // and top up per-pane subscriptions for any pane tracked meanwhile.
+        eventsActive = true;
+        stopResumePoll();
+        void syncPaneSubscriptions();
       },
     });
 

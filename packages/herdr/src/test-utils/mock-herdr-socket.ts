@@ -49,6 +49,13 @@ export interface MockClient {
   pushEvents(events: HerdrEventFrame[]): void;
   /** Close the client connection. */
   close(): void;
+  /**
+   * Every request frame the client sent on THIS connection, in order
+   * (id, method, params). Used to assert the one-request-per-connection
+   * discipline: a healthy subscriber sends exactly one `events.subscribe`
+   * per socket (WL-0MVAS988R008PNH6).
+   */
+  requests: Array<{ id: string | number | null; method: string; params: unknown }>;
 }
 
 /**
@@ -112,6 +119,39 @@ export class MockHerdrSocket {
    */
   private handleConnection(socket: net.Socket): void {
     let buffer = '';
+    // Created up front so every request frame (including the initial
+    // events.subscribe) is recorded on the MockClient.requests array.
+    const requests: Array<{ id: string | number | null; method: string; params: unknown }> = [];
+    const client: MockClient = {
+      sendFrame: (f: string) => {
+        socket.write(f + '\n');
+      },
+      pushEvent: (e: HerdrEventFrame) => {
+        this.sendToClient(socket, {
+          jsonrpc: '2.0',
+          id: null,
+          notification: true,
+          data: e.data,
+          event: e.event,
+        });
+      },
+      pushEvents: (events: HerdrEventFrame[]) => {
+        for (const e of events) {
+          socket.write(JSON.stringify({
+            jsonrpc: '2.0',
+            id: null,
+            notification: true,
+            data: e.data,
+            event: e.event,
+          }) + '\n');
+        }
+      },
+      close: () => {
+        socket.end();
+      },
+      requests,
+    };
+    this.clients.add(client);
 
     socket.on('data', (chunk: Buffer) => {
       buffer += chunk.toString();
@@ -132,6 +172,15 @@ export class MockHerdrSocket {
           continue;
         }
 
+        if (!request || typeof request !== 'object') continue;
+        const req = request as Record<string, unknown>;
+        if (typeof req.method !== 'string') continue;
+        requests.push({
+          id: (typeof req.id === 'string' || typeof req.id === 'number') ? req.id : null,
+          method: req.method,
+          params: req.params,
+        });
+
         if (!this.isSubscribeRequest(request)) {
           // Not an events.subscribe request — send an error
           this.sendToClient(socket, {
@@ -148,42 +197,11 @@ export class MockHerdrSocket {
           id: this.extractId(request),
           result: { type: 'subscription_started' },
         });
-
-        // Register this socket as a connected client
-        const client: MockClient = {
-          sendFrame: (f: string) => {
-            socket.write(f + '\n');
-          },
-          pushEvent: (e: HerdrEventFrame) => {
-            this.sendToClient(socket, {
-              jsonrpc: '2.0',
-              id: null,
-              notification: true,
-              data: e.data,
-              event: e.event,
-            });
-          },
-          pushEvents: (events: HerdrEventFrame[]) => {
-            for (const e of events) {
-              socket.write(JSON.stringify({
-                jsonrpc: '2.0',
-                id: null,
-                notification: true,
-                data: e.data,
-                event: e.event,
-              }) + '\n');
-            }
-          },
-          close: () => {
-            socket.end();
-          },
-        };
-        this.clients.add(client);
-
-        socket.on('close', () => {
-          this.clients.delete(client);
-        });
       }
+    });
+
+    socket.on('close', () => {
+      this.clients.delete(client);
     });
 
     socket.on('error', () => {

@@ -317,10 +317,29 @@ Event types include `pane_agent_status_changed`, `pane_focused`,
 
 ### Subscriber lifecycle
 
-- The subscriber (`packages/herdr/src/events.ts`) connects at plugin start,
-  reconnects with exponential backoff (500ms base, capped at 10s) on socket
-  errors, and closes/unsubscribes on TUI exit (no leaked connections).
-- Per-pane subscriptions are synced from the shared
+The subscriber (`packages/herdr/src/events.ts`) connects at plugin start,
+reconnects with exponential backoff (500 ms base, capped at 10 s) on socket
+errors, and closes/unsubscribes on TUI exit (no leaked connections).
+
+**One request per connection (WL-0MVAS988R008PNH6).** The herdr API server
+handles exactly **one** JSON-RPC request per connection. An `events.subscribe`
+stream therefore **occupies** its connection: any second request frame on that
+socket — another `events.subscribe`, a `ping`, even `pane.list` — makes the
+server reset the connection, logged as `events.subscribe …
+outcome="stream_closed"`. Keepalives are neither required nor accepted on the
+stream: an idle subscription stays open indefinitely (verified against herdr
+0.9.5 — a 40 s+ idle probe never closed), so the client sends nothing after
+the single initial request.
+
+Consequently a pane-set change is applied by **re-establishing a fresh
+connection** whose single initial request carries the complete subscription
+set (`addPaneSubscription(s)` / `removePaneSubscription(s)`); the subscriber
+never resends `events.subscribe` on the live socket. Batched panes and
+changes landing during an in-flight reconnect coalesce into one rebuild, and
+backoff resets on every successful subscribe — so routine stream closes
+reconnect promptly at the base delay instead of ratcheting to the 10 s cap.
+
+- Per-pane subscriptions are synced (batched) from the shared
   `.worklog/agent-panes.json` pane set and updated on `pane_agent_detected`
   (add) and `pane_closed`/`pane_exited` (drop).
 - **Session scope (limitation):** events are scoped to the herdr **session**
@@ -329,7 +348,9 @@ Event types include `pane_agent_status_changed`, `pane_focused`,
   split across **different** sessions does not share events.
 - **Fail-open:** an unreachable socket / older herdr (pre-0.7.5) / transient
   reconnect keeps today's polling (`herdr agent list`, `herdr tab get`);
-  socket errors never crash the TUI.
+  socket errors never crash the TUI. While the stream is down the worklist
+  re-enables the tab-level `resume-poll` fallback and restores the event path
+  on reconnect.
 
 ## Related
 

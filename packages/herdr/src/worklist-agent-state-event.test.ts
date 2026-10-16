@@ -307,7 +307,10 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
     seedStateFile(sf.path, [{ workItemId: 'WL-LATE', paneId: 'w5:p55' }]);
     await sleep(20);
 
-    // A pane_agent_detected event triggers the re-read.
+    // A pane_agent_detected event triggers the re-read. Subscribing the
+    // late pane re-establishes the subscription on a FRESH connection
+    // (WL-0MVAS988R008PNH6: herdr accepts one events.subscribe per
+    // connection), so the status event is pushed on the CURRENT client.
     client!.pushEvent({ event: 'pane_agent_detected', data: { pane_id: 'w5:p55' } });
     await sleep(100);
 
@@ -315,7 +318,9 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
     expect(tracker.getPaneId('WL-LATE')).toBe('w5:p55');
 
     // And a status event for that late pane updates the icon.
-    client!.pushEvent({
+    const liveClient = mockServer.getFirstClient();
+    expect(liveClient).toBeDefined();
+    liveClient!.pushEvent({
       event: 'pane_agent_status_changed',
       data: { pane_id: 'w5:p55', agent_status: 'idle' },
     });

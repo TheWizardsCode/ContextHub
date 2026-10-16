@@ -695,4 +695,53 @@ describe('worklist — event-driven focus/visibility (WL-0MSHB7DHO004RHBJ)', () 
     await subscriber.close();
     await quit(p);
   });
+
+  it('after a stream close + reconnect, a pane_focused event for the current pane refreshes again (WL-0MVAS988R008PNH6)', async () => {
+    // AC3: when the events stream reconnects after a server-side close, the
+    // pane-focus → refresh path must resume — the list refreshes the moment
+    // the pane regains focus instead of waiting for the next 30 s tick.
+    const { createMockSocket } = await import('./test-utils/mock-herdr-socket.js');
+    const { HerdrEventSubscriber } = await import('./events.js');
+    const mockServer = await createMockSocket();
+    const subscriber = new HerdrEventSubscriber({
+      socketPath: mockServer.getAddress(),
+      callbacks: {},
+      reconnectBaseDelayMs: 50,
+      maxReconnectAttempts: 10,
+    });
+    process.env.HERDR_PANE_ID = 'w1:pCM';
+    setExecFileAsync(makeExecMock(true) as any);
+
+    const fetcher = vi.fn().mockResolvedValue([]);
+    const p = runWorklistTui(fetcher, undefined, undefined, {
+      autoRefresh: true,
+      refreshIntervalMs: 30_000,
+      autoSync: false,
+      showHelpText: false,
+      subscriber,
+    });
+    await new Promise((r) => setTimeout(r, 100));
+    const client = mockServer.getFirstClient();
+    expect(client).toBeDefined();
+    fetcher.mockClear();
+
+    // Server-side stream close (the stream_closed scenario) → the
+    // subscriber reconnects to the same mock address automatically.
+    client!.close();
+    await new Promise((r) => setTimeout(r, 400));
+    expect(subscriber.health().status).toBe('active');
+    fetcher.mockClear();
+
+    // Focus the pane again on the RECONNECTED stream → immediate refresh.
+    const clients = mockServer.getConnectedClients();
+    const newest = clients[clients.length - 1];
+    expect(newest).toBeDefined();
+    newest!.pushEvent({ event: 'pane_focused', data: { pane_id: 'w1:pCM' } });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(fetcher).toHaveBeenCalled();
+
+    await subscriber.close();
+    await mockServer.stop();
+    await quit(p);
+  });
 });

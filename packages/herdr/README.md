@@ -1402,6 +1402,31 @@ process churn and memory pressure (WL-0MSB1N0HB0007N6N).
   tab get` exec) and triggers an instant refresh on the hidden → visible
   transition. The 2s resume-poll becomes a fallback that runs only while
   the event path is unavailable.
+- **One request per connection (WL-0MVAS988R008PNH6)** — herdr's API server
+  handles exactly **one** JSON-RPC request per connection; a streaming
+  `events.subscribe` response occupies the connection, and any second frame
+  on it (another subscribe, a `ping`, even a `pane.list`) makes the server
+  **reset** the connection, which shows up in `herdr-server.log` as
+  `events.subscribe … outcome="stream_closed"`. The subscriber therefore
+  keeps each subscription connection write-once: when the tracked pane set
+  changes (a pane is seen/closed), it **re-establishes a fresh connection**
+  carrying the complete subscription set in that connection's single initial
+  request, instead of resending `events.subscribe` on the live socket.
+  Batched pane changes and changes landing mid-reconnect coalesce into one
+  rebuild, and reconnect backoff resets on every successful subscribe — so a
+  pane-set change no longer collapses into the previous ~10 s reconnect loop.
+  An idle subscription stays open indefinitely and expects **no** keepalive
+  (verified against herdr 0.9.5: a 40 s+ idle probe never closed); sending a
+  keepalive on the stream is actively harmful, so the subscriber sends
+  nothing after the initial request.
+- **Fast pane-focus refresh on a visible tab (WL-0MVAS988R008PNH6 AC2)** —
+  when the worklog pane regains keyboard focus inside an already-visible tab,
+  the server pushes `pane_focused` for the current pane; the handler
+  (`worklist.ts` `onPaneFocused`) applies the visibility value to the gate,
+  clears `[paused — hidden]`, and calls `doRefresh(true)` + `runHydrator()`
+  immediately — no 30 s wait. If the stream drops, the subscriber flips back
+  to the resume-poll fallback and re-establishes the event path on
+  reconnect (`onReconnected`), so focus refresh keeps working.
 - **Fail-open** — when visibility cannot be determined (no `HERDR_TAB_ID`
   env, herdr CLI missing/erroring, unparseable output, or the event
   subscription unavailable) the pane is treated as visible and polling
