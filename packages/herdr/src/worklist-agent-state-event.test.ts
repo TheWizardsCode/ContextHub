@@ -154,6 +154,25 @@ const GREEN_CIRCLE = '\u{1F7E2}'; // 🟢 working
 const RED_CIRCLE = '\u{26D4}'; // ⛔ blocked
 const WHITE_CIRCLE = '\u{26AA}'; // ⚪ idle
 
+/**
+ * Build a subscriber exactly like the production wiring (packages/herdr/src/
+ * index.ts): the initial tracked pane set is seeded from the agent tracker's
+ * shared state file BEFORE the first connect, so the initial events.subscribe
+ * already covers the known panes (WL-0MVAS988R008PNH6 — one request per
+ * connection: the pane set cannot be changed on a live socket, so anything
+ * not in the initial subscribe triggers a fresh connection).
+ */
+function makeSubscriber(
+  server: MockHerdrSocket,
+  tracker: AgentTracker,
+): HerdrEventSubscriber {
+  return new HerdrEventSubscriber({
+    socketPath: server.getAddress(),
+    callbacks: {},
+    trackedPaneIds: tracker.snapshot().map((e) => e.paneId),
+  });
+}
+
 describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
   it('a pane_agent_status_changed event updates the icon with no agent-list exec', async () => {
     const sf = makeStateFile();
@@ -161,7 +180,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
 
     const tracker = new AgentTracker({ stateFile: sf.path, ttlMs: 60_000 });
     const mockServer: MockHerdrSocket = await createMockSocket();
-    const subscriber = new HerdrEventSubscriber({ socketPath: mockServer.getAddress(), callbacks: {} });
+    const subscriber = makeSubscriber(mockServer, tracker);
     const execMock = makeVisibleExecMock();
     setExecFileAsync(execMock as any);
 
@@ -207,7 +226,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
     const sf = makeStateFile();
     const tracker = new AgentTracker({ stateFile: sf.path, ttlMs: 60_000 });
     const mockServer = await createMockSocket();
-    const subscriber = new HerdrEventSubscriber({ socketPath: mockServer.getAddress(), callbacks: {} });
+    const subscriber = makeSubscriber(mockServer, tracker);
     setExecFileAsync(makeVisibleExecMock() as any);
 
     const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
@@ -246,7 +265,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
 
     const tracker = new AgentTracker({ stateFile: sf.path, ttlMs: 60_000 });
     const mockServer = await createMockSocket();
-    const subscriber = new HerdrEventSubscriber({ socketPath: mockServer.getAddress(), callbacks: {} });
+    const subscriber = makeSubscriber(mockServer, tracker);
     setExecFileAsync(makeVisibleExecMock() as any);
 
     const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
@@ -287,7 +306,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
     const sf = makeStateFile();
     const tracker = new AgentTracker({ stateFile: sf.path, ttlMs: 60_000 });
     const mockServer = await createMockSocket();
-    const subscriber = new HerdrEventSubscriber({ socketPath: mockServer.getAddress(), callbacks: {} });
+    const subscriber = makeSubscriber(mockServer, tracker);
     setExecFileAsync(makeVisibleExecMock() as any);
 
     const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
@@ -339,7 +358,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
 
     const tracker = new AgentTracker({ stateFile: sf.path, ttlMs: 60_000 });
     const mockServer = await createMockSocket();
-    const subscriber = new HerdrEventSubscriber({ socketPath: mockServer.getAddress(), callbacks: {} });
+    const subscriber = makeSubscriber(mockServer, tracker);
     setExecFileAsync(makeVisibleExecMock() as any);
 
     const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
