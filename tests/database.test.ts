@@ -1232,6 +1232,7 @@ describe('WorklogDatabase', () => {
         githubIssueNumber: undefined,
         githubIssueId: undefined,
         githubIssueUpdatedAt: undefined,
+        needsProducerReview: false,
         ...overrides,
       };
     }
