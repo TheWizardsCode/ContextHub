@@ -123,6 +123,7 @@ describe('formatItemLine — truncation must never mangle emoji (WL-0MU3U1AMP004
       auditResult: true,
       auditedAt: '2026-09-17T10:00:30.000Z',
       updatedAt: '2026-09-17T10:00:00.000Z',
+      needsProducerReview: false,
     });
     for (const cols of [...NARROW_WIDTHS, WIDE]) {
       const line = formatItemLine(item, cols);

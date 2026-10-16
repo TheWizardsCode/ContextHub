@@ -160,6 +160,29 @@ describe('formatDetailContent', () => {
     expect(joined).not.toContain('Audited At');
   });
 
+  it('displays needsProducerReview=true with review-needed indicator', () => {
+    const item = makeItem({ needsProducerReview: true });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).toContain('Reviewed');
+    expect(joined).toContain('\u274C'); // NEEDS_REVIEW_ICON (❌)
+  });
+
+  it('displays needsProducerReview=false with reviewed indicator', () => {
+    const item = makeItem({ needsProducerReview: false });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).toContain('Reviewed');
+    expect(joined).toContain('\u2705'); // REVIEW_DONE_ICON (✅)
+  });
+
+  it('omits needsProducerReview when undefined', () => {
+    const item = makeItem({ needsProducerReview: undefined });
+    const lines = formatDetailContent(item, 80);
+    const joined = lines.join('\n');
+    expect(joined).not.toContain('Reviewed');
+  });
+
   it('displays githubIssueNumber when present', () => {
     const item = makeItem({ githubIssueNumber: '123' });
     const lines = formatDetailContent(item, 80);
@@ -179,11 +202,14 @@ describe('formatDetailContent', () => {
     const item = makeItem({
       auditResult: true,
       auditedAt: '2025-06-15T10:30:00Z',
+      needsProducerReview: false,
     });
     const lines = formatDetailContent(item, 80);
     const joined = lines.join('\n');
-    // Audit + Audited At are compressed onto one row (WL-0MSNIX4V60012266).
+    // Audit + Audited At are compressed onto one row (WL-0MSNIX4V60012266);
+    // Reviewed stays a separate row.
     expect(joined).toContain('Audit+AuditedAt');
+    expect(joined).toContain('Reviewed');
   });
 });
 

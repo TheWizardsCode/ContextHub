@@ -954,6 +954,7 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
       status: 'open',
       stage: 'plan_complete',
       priority: 'high',
+      needsProducerReview: false,
     };
     const defaultFetcher = vi.fn().mockResolvedValue([live]);
 
@@ -965,6 +966,7 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
     expect(items[0].status).toBe('open');
     expect(items[0].stage).toBe('plan_complete');
     expect(items[0].priority).toBe('high');
+    expect(items[0].needsProducerReview).toBe(false);
     // …with the dispatch annotation overlaid, and NOT marked log-only.
     expect(items[0].isLogDerived).toBe(true);
     expect(items[0].isLogOnly).toBeFalsy();
@@ -985,6 +987,7 @@ describe('dispatches filter axis (WL-0MUL2IZLF002S9X5)', () => {
       status: 'completed',
       stage: 'in_review',
       priority: 'high',
+      needsProducerReview: false,
     };
     const defaultFetcher = vi.fn().mockResolvedValue([live]);
 
@@ -1624,18 +1627,18 @@ describe('dispatchChordCommand', () => {
     expect(onCommand).toHaveBeenCalledWith('/skill:audit TEST-123', undefined, undefined, undefined, 'Item TEST-123');
   });
 
-  it('routes !!wl update producer-hold commands through onCommand', () => {
+  it('routes !!wl reviewed producer-review commands through onCommand', () => {
     const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     const result = dispatchChordCommand(
-      "!!wl update <id> --assignee Map && wl comment add <id> --body '<producer_comment>'",
+      "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>'",
       state,
       onCommand,
     );
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
-      "!!wl update TEST-123 --assignee Map && wl comment add TEST-123 --body '<producer_comment>'",
+      "!!wl reviewed TEST-123 && wl comment add TEST-123 --body '<producer_comment>'",
       undefined,
       undefined,
       undefined,
@@ -1648,13 +1651,13 @@ describe('dispatchChordCommand', () => {
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     const result = dispatchChordCommand(
-      '!!wl update <id> --assignee "" && wl audit-set <id> --ready-to-close yes --summary \'Approved by manual review\'',
+      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
       state,
       onCommand,
     );
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
-      '!!wl update TEST-123 --assignee "" && wl audit-set TEST-123 --ready-to-close yes --summary \'Approved by manual review\'',
+      "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
       undefined,
       undefined,
       undefined,
@@ -1667,13 +1670,13 @@ describe('dispatchChordCommand', () => {
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     const result = dispatchChordCommand(
-      '!!wl update <id> --assignee "" --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary \'Rejected by manual review. <reason>\'',
+      "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
       state,
       onCommand,
     );
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
-      '!!wl update TEST-123 --assignee "" --status open --stage plan_complete && wl audit-set TEST-123 --ready-to-close no --summary \'Rejected by manual review. <reason>\'',
+      "!!wl reviewed TEST-123 false && wl update TEST-123 --status open --stage plan_complete && wl audit-set TEST-123 --ready-to-close no --summary 'Rejected by manual review. <reason>'",
       undefined,
       undefined,
       undefined,
@@ -1745,14 +1748,14 @@ describe('dispatchChordCommand', () => {
     }
   });
 
-  it('dispatchChordCommand forwards onRefresh for !!wl update with openPane=false (WL-0MTIB7JAN004MQ8N)', () => {
+  it('dispatchChordCommand forwards onRefresh for !!wl reviewed with openPane=false (WL-0MTIB7JAN004MQ8N)', () => {
     const state = new WorkItemListState([makeItem('TEST-123')], TERM_80x24);
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     const onRefresh = vi.fn();
-    const result = dispatchChordCommand('!!wl update <id> --assignee Map', state, onCommand, undefined, undefined, false, onRefresh as any);
+    const result = dispatchChordCommand('!!wl reviewed <id> false', state, onCommand, undefined, undefined, false, onRefresh as any);
     expect(result).toBe(true);
-    expect(onCommand).toHaveBeenCalledWith('!!wl update TEST-123 --assignee Map', undefined, false, onRefresh, 'Item TEST-123');
+    expect(onCommand).toHaveBeenCalledWith('!!wl reviewed TEST-123 false', undefined, false, onRefresh, 'Item TEST-123');
   });
 
   it('routes !!wl search commands through onCommand (WL-0MTA217DZ003H5K8)', () => {
@@ -1823,7 +1826,7 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
     expect(step1).toBeNull(); // still collecting
     expect(step2).toBe('chord-complete');
     expect(chordState.resolvedOpenPane).toBe(false);
-    expect(chordState.resolvedCommand).toContain('wl update <id> --assignee ""');
+    expect(chordState.resolvedCommand).toContain('wl reviewed <id> false');
   });
 
   it('processChordInput leaves resolvedOpenPane undefined for chords without open_pane', () => {
@@ -1855,7 +1858,7 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
     state.selectedIndex = 0;
     const onCommand = vi.fn();
     const result = dispatchChordCommand(
-      "!!wl update <id> --assignee \"\" && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+      "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
       state,
       onCommand,
       undefined,
@@ -1864,7 +1867,7 @@ describe('openPane plumbing (WL-0MSJLD1I70045ZUL)', () => {
     );
     expect(result).toBe(true);
     expect(onCommand).toHaveBeenCalledWith(
-      "!!wl update TEST-123 --assignee \"\" && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
+      "!!wl reviewed TEST-123 false && wl audit-set TEST-123 --ready-to-close yes --summary 'Approved by manual review'",
       undefined,
       false,
       undefined,
@@ -2200,7 +2203,7 @@ describe('isImplementCommand', () => {
     expect(isImplementCommand('/skill:audit <id>')).toBe(false);
     expect(isImplementCommand('/intake <id>')).toBe(false);
     expect(isImplementCommand('/plan <id>')).toBe(false);
-    expect(isImplementCommand('!!wl update <id> --assignee Map')).toBe(false);
+    expect(isImplementCommand('!!wl reviewed <id>')).toBe(false);
   });
 });
 
@@ -3136,6 +3139,7 @@ function makeRichItem(): WorkItem {
     createdAt: '2026-08-01T10:00:00.000Z',
     updatedAt: '2026-08-02T10:00:00.000Z',
     childCount: 2,
+    needsProducerReview: true,
     auditResult: true,
     auditedAt: '2026-08-03T10:00:00.000Z',
     githubIssueNumber: '42',
@@ -3197,6 +3201,7 @@ describe('formatMetadataPanel — field rendering and scrolling', () => {
     expect(joined).toContain('Updated');
     expect(joined).toContain('Children');
     expect(joined).toContain('2');
+    expect(joined).toContain('Reviewed');
     expect(joined).toContain('Audit');
     expect(joined).toContain('GitHub Issue');
     expect(joined).toContain('#42');
@@ -3441,11 +3446,10 @@ describe('formatMetadataPanel — description preview (WL-0MT9ZJF28004UJ28)', ()
     expect(top).not.toContain('p1');
     // The four compacted field pairs (Status+Stage, Priority+Type,
     // Created+Updated, Audit+AuditedAt, WL-0MSNIX4V60012266) remove 4
-    // rows from the rich item, dropping the ID row (WL-0MSHIJR7T007Q9R7)
-    // and the retired Reviewed row (WL-0MV85WGIT004PHRC) removes two more,
-    // so the p1..p3 preview window sits 5 rows
-    // earlier than before (offset 13 instead of 19).
-    const previewView = formatMetadataPanel(item, 80, 3, 13).join('\n');
+    // rows from the rich item, and dropping the ID row (WL-0MSHIJR7T007Q9R7)
+    // removes one more, so the p1..p3 preview window sits 5 rows
+    // earlier than before (offset 14 instead of 19).
+    const previewView = formatMetadataPanel(item, 80, 3, 14).join('\n');
     expect(previewView).toContain('p1');
     expect(previewView).toContain('p3');
     // [m/M scroll] indicator still shown when content overflows
@@ -3830,11 +3834,11 @@ describe('command recording in dispatch paths', () => {
   it('records commands with an explicit item ID (no <id> placeholder)', () => {
     const state = new WorkItemListState([], TERM_80x24);
     const onCommand = vi.fn();
-    const result = executeResolvedCommand('!!wl update WL-TEST-1 --assignee Map', state, onCommand);
+    const result = executeResolvedCommand('!!wl reviewed WL-TEST-1', state, onCommand);
     expect(result).toBe('dispatched');
     const last = getLastCommand('WL-TEST-1');
     expect(last).not.toBeNull();
-    expect(last!.command).toBe('!!wl update WL-TEST-1 --assignee Map');
+    expect(last!.command).toBe('!!wl reviewed WL-TEST-1');
   });
 
   it('does not record commands without an item ID', () => {
@@ -4002,11 +4006,11 @@ describe('pairMetaRows — compound row compression (WL-0MSNIX4V60012266)', () =
     expect(new Map(createdOnly).has('Created+Updated')).toBe(false);
   });
 
-  it('keeps all other rows (ID, Title, Risk, Effort, Children, Parent, Tags, GitHub Issue) unchanged', () => {
+  it('keeps all other rows (ID, Title, Risk, Effort, Children, Parent, Tags, GitHub Issue, Reviewed) unchanged', () => {
     const raw = buildMetaRows(makeRichItem());
     const rawMap = new Map(raw);
     const paired = new Map(pairMetaRows(raw));
-    for (const label of ['ID', 'Title', 'Risk', 'Effort', 'Children', 'Parent', 'Tags', 'GitHub Issue']) {
+    for (const label of ['ID', 'Title', 'Risk', 'Effort', 'Children', 'Parent', 'Tags', 'GitHub Issue', 'Reviewed']) {
       expect(paired.get(label)).toBe(rawMap.get(label));
     }
     // The four pairs are the ONLY rows that change shape.
@@ -4021,7 +4025,7 @@ describe('pairMetaRows — compound row compression (WL-0MSNIX4V60012266)', () =
     expect(labels[1]).toBe('Title');
     expect(labels[2]).toBe('Status+Stage');
     expect(labels[3]).toBe('Priority+Type');
-    expect(labels[labels.length - 1]).toBe('Audit+AuditedAt');
+    expect(labels[labels.length - 1]).toBe('Reviewed');
   });
 });
 
@@ -4074,8 +4078,8 @@ describe('metadata views — paired-row compression (WL-0MSNIX4V60012266)', () =
 // icons as the list rows, paired with their text label (icon + text, e.g.
 // `🔄 in_progress`, `⭐ high`, `📥 intake_complete`). The Stage row mirrors
 // the list's audit-aware in_review icon via the shared stageDisplayIcon
-// helper; the Type row shows the epic icon for epic items only; the Audit
-// row pairs its icon with a text label. With icons disabled the
+// helper; the Type row shows the epic icon for epic items only; Audit and
+// Reviewed rows pair their icons with text labels. With icons disabled the
 // values fall back to plain text — no emoji, no bracketed fallbacks.
 
 describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', () => {
@@ -4100,10 +4104,14 @@ describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', 
     expect(new Map(buildMetaRows(makeRichItem())).get('Type')).toBe('feature');
   });
 
-  it('pairs the Audit icon with a text label', () => {
+  it('pairs Audit and Reviewed icons with text labels', () => {
     // makeRichItem: auditResult true → `✅ ready to close`,
+    // needsProducerReview true → `❌ needs review`.
     const rows = new Map(buildMetaRows(makeRichItem()));
     expect(rows.get('Audit')).toBe('\u{2705} ready to close'); // ✅
+    expect(rows.get('Reviewed')).toBe('\u{274C} needs review'); // ❌
+    const reviewed = new Map(buildMetaRows({ ...makeRichItem(), needsProducerReview: false }));
+    expect(reviewed.get('Reviewed')).toBe('\u{2705} reviewed'); // ✅
   });
 
   it('renders plain text values when icons are disabled (no emoji, no [BRACKET] fallbacks)', () => {
@@ -4115,9 +4123,10 @@ describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', 
     expect(rows.get('Risk')).toBe('medium');
     expect(rows.get('Effort')).toBe('3');
     expect(rows.get('Audit')).toBe('ready to close');
+    expect(rows.get('Reviewed')).toBe('needs review');
     // No icon glyphs leak into the noIcons values.
     for (const [label, value] of rows) {
-      if (['Status', 'Stage', 'Priority', 'Type', 'Risk', 'Effort', 'Audit'].includes(label)) {
+      if (['Status', 'Stage', 'Priority', 'Type', 'Risk', 'Effort', 'Audit', 'Reviewed'].includes(label)) {
         expect(value).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}\u{2299}]/u);
         expect(value).not.toMatch(/^\[/);
       }

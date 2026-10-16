@@ -61,12 +61,8 @@ export interface SessionSample {
   itemStage?: string;
   /** Pane kind — determines which close policies apply. */
   kind: 'plan' | 'intake' | 'audit' | 'risk-effort' | 'implement' | 'unknown';
-  /**
-   * Whether the work item is held by the producer (the assignee hold that
-   * replaced the retired producer-review flag, WL-0MV85WGIT004PHRC). A held
-   * item never auto-closes.
-   */
-  producerHold: boolean;
+  /** Whether the work item has needsProducerReview set. */
+  needsProducerReview: boolean;
   /** Whether this pane is the invoking / current operator pane. */
   isInvokingPane: boolean;
   /** Number of child processes spawned by this session. */
@@ -110,8 +106,8 @@ export interface CloseReasonSnapshot {
   idleMs: number;
   /** Work-item stage, when known. */
   itemStage?: string;
-  /** Whether the item is held by the producer (assignee hold). */
-  producerHold: boolean;
+  /** Whether the item needs producer review. */
+  needsProducerReview: boolean;
   /** Whether this pane is the invoking / current operator pane. */
   isInvokingPane: boolean;
   /** Number of live child processes. */
@@ -181,7 +177,7 @@ function endsWithMarker(text: string): boolean {
 
 /**
  * Classify one session into a close decision. The never-close guards
- * (`implement`, producer hold, invoking pane, live children) take
+ * (`implement`, `needsProducerReview`, invoking pane, live children) take
  * precedence over the marker, idle, and dead-agent paths (parent AC3, AC4).
  *
  * Classification order (first match wins):
@@ -220,7 +216,7 @@ export function classifySession(
     agentProcessAlive: sample.agentProcessAlive === true,
     idleMs: typeof sample.idleMs === 'number' && Number.isFinite(sample.idleMs) ? sample.idleMs : 0,
     itemStage: typeof sample.itemStage === 'string' ? sample.itemStage : undefined,
-    producerHold: sample.producerHold === true,
+    needsProducerReview: sample.needsProducerReview === true,
     isInvokingPane: sample.isInvokingPane === true,
     agentStatus,
     childProcessCount:
@@ -245,7 +241,7 @@ export function classifySession(
   if (sample.kind === 'implement') {
     return decide(false, 'implement');
   }
-  if (sample.producerHold) {
+  if (sample.needsProducerReview) {
     return decide(false, 'producer-review');
   }
   if (sample.isInvokingPane) {

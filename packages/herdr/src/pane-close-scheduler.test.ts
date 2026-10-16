@@ -33,7 +33,7 @@ function pane(overrides: Partial<PaneStatus> = {}): PaneStatus {
     lastAssistantText: '',
     agentProcessAlive: true,
     idleMs: 0,
-    producerHold: false,
+    needsProducerReview: false,
     isInvokingPane: false,
     childProcessCount: 0,
     ...overrides,

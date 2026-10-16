@@ -228,13 +228,13 @@ describe('blocked-questions prompt instruction', () => {
     expect(prompt).toContain('/skill:intake WL-ABC');
   });
 
-  it('instructs recording questions in a comment, holding the item for the producer, and stopping', () => {
+  it('instructs recording questions in a comment, flagging needs-producer-review, and stopping', () => {
     const prompt = buildDowntimePrompt('plan', candidate);
     expect(prompt).toContain('comment');
-    expect(prompt).toContain('--assignee Map');
+    expect(prompt).toContain('--needs-producer-review true');
     expect(prompt).toContain('stop');
     expect(BLOCKED_QUESTIONS_INSTRUCTION).toContain('wl comment add');
-    expect(BLOCKED_QUESTIONS_INSTRUCTION).toContain('wl update <id> --assignee Map');
+    expect(BLOCKED_QUESTIONS_INSTRUCTION).toContain('wl update <id> --needs-producer-review true');
   });
 
   it('BLOCKED_QUESTIONS_INSTRUCTION includes the final-summary directive', () => {

@@ -81,10 +81,10 @@
       "r",
       "p"
     ],
-    "command": "!!wl update <id> --assignee Map && wl comment add <id> --body '<producer_comment>' --author <author>",
+    "command": "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>' --author <author>",
     "view": "both",
-    "label": "Producer Hold",
-    "description": "Assign the item to the producer (scheduling hold) and add a review comment (r p)."
+    "label": "Producer Review",
+    "description": "Toggle the 'Needs Producer Review' flag (r p)."
   },
   {
     "chord": [
@@ -134,7 +134,7 @@
       "a",
       "y"
     ],
-    "command": "!!wl update <id> --assignee \"\" && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
+    "command": "!!wl reviewed <id> false && wl audit-set <id> --ready-to-close yes --summary 'Approved by manual review'",
     "view": "both",
     "stages": [
       "in_review"
@@ -148,7 +148,7 @@
       "a",
       "r"
     ],
-    "command": "!!wl update <id> --assignee \"\" --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
+    "command": "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'",
     "view": "both",
     "stages": [
       "in_review"

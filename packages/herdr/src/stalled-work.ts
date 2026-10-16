@@ -39,7 +39,6 @@ import {
   type DowntimeSkillKind,
   type HerdrPaneRecord,
 } from './downtime-worker.js';
-import { isProducerHold } from './producer-hold.js';
 
 // ── Guard inputs ──────────────────────────────────────────────────────
 
@@ -76,7 +75,7 @@ export interface StalledPaneGuards {
  *  - `no-item-id`               — the label has no parseable work-item id.
  *  - `kind-unknown`             — the label carries no dispatch kind.
  *  - `item-terminal`            — the item is completed/deleted or in_review/done.
- *  - `producer-hold`            — the item is held by the producer (assignee).
+ *  - `needs-producer-review`    — the item is flagged for producer review.
  *  - `agent-working`            — the agent is actively working (not stalled).
  *  - `agent-blocked`            — the agent is blocked (never hijacked).
  *  - `kind-stale`               — the item advanced past the pane's kind.
@@ -92,7 +91,7 @@ export type StalledPaneReason =
   | 'no-item-id'
   | 'kind-unknown'
   | 'item-terminal'
-  | 'producer-hold'
+  | 'needs-producer-review'
   | 'agent-working'
   | 'agent-blocked'
   | 'kind-stale'
@@ -264,10 +263,9 @@ export function classifyStalledPane(
     return { stalled: false, reason: 'item-terminal' };
   }
 
-  // 4. A producer-held item is a hard exclusion (the assignee hold that
-  //    replaced the removed producer-review flag).
-  if (isProducerHold(itemInfo.assignee)) {
-    return { stalled: false, reason: 'producer-hold' };
+  // 4. Producer-review flag is a hard exclusion.
+  if (itemInfo.needsProducerReview === true) {
+    return { stalled: false, reason: 'needs-producer-review' };
   }
 
   // 5. The agent must be neither actively working nor blocked.
@@ -396,8 +394,8 @@ export interface ResumeStalledPaneDeps {
   readEntries(cwd: string): Promise<DowntimeLogEntry[]>;
   /** Append a dispatch-attempt marker to the item root's rolling log. */
   recordAttempt(cwd: string, entry: DowntimeLogEntry): Promise<void>;
-  /** Apply the producer scheduling hold to an item whose attempt budget is exhausted. */
-  markProducerHold(itemId: string, cwd: string): Promise<boolean>;
+  /** Flag an item whose attempt budget is exhausted for producer review. */
+  markNeedsProducerReview(itemId: string, cwd: string): Promise<boolean>;
   /**
    * Consume the pane's durable machine-wide model-cooldown marker after a
    * SUCCESSFUL resume (WL-0MV5639GG00085Q7), so the same pane is not woken
@@ -533,16 +531,16 @@ export type StalledResumeOutcome =
       kind: DowntimeSkillKind;
     };
 
-/** Best-effort producer scheduling hold — never throws. */
+/** Best-effort producer-review escalation — never throws. */
 async function flagStalledResumeBudgetExhausted(
   deps: ResumeStalledPaneDeps,
   itemId: string,
   cwd: string,
 ): Promise<void> {
   try {
-    await deps.markProducerHold(itemId, cwd);
+    await deps.markNeedsProducerReview(itemId, cwd);
   } catch {
-    // fail-closed: a hold write failure must never crash the worker
+    // fail-closed: a flag write failure must never crash the worker
   }
 }
 
@@ -564,7 +562,7 @@ function stalledResumeSessionPath(pane: HerdrPaneRecord): string | undefined {
  *
  * It records a dispatch attempt for `(item, kind)` on success, so the existing
  * per-item/per-kind attempt cap applies to resumes too, and enforces that cap
- * up front — escalating via the producer scheduling hold when exhausted.
+ * up front — escalating via `needsProducerReview` when exhausted.
  *
  * FAIL-SAFE: every not-resumed outcome (a classifier exclusion, a concurrent
  * resume, a `blocked` agent, `agent_prompt_stalled`, a vanished pane, or any

@@ -192,7 +192,7 @@ describe('F4 cross-root offer-list dispatch', () => {
       recordAttempt: async (cwd, entry) => {
         recorded.push({ ...entry, cwd } as DowntimeLogEntry);
       },
-      markProducerHold: async () => true,
+      markNeedsProducerReview: async () => true,
       maxAttempts: 3,
       now: () => Date.now(),
     };
@@ -245,7 +245,7 @@ describe('F4 cross-root offer-list dispatch', () => {
       startAgent: async () => ({ ok: true }),
       readEntries: async () => [],
       recordAttempt: async () => undefined,
-      markProducerHold: async () => true,
+      markNeedsProducerReview: async () => true,
       maxAttempts: 3,
     };
 

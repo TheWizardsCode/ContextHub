@@ -13,7 +13,7 @@
  *  2. Marker-less, dead agent → close (reap)
  *  3. Marker-less, live agent, idle < threshold → no close
  *  4. `implement` pane → no close, even when idle/marked
- *  5. `producerHold=true` → no close
+ *  5. `needsProducerReview=true` → no close
  *  6. Invoking pane → no close
  *  7. Pane with live children → no close
  *  8. Already-closed pane → idempotent, no duplicate close
@@ -38,7 +38,7 @@ function pane(overrides: Partial<PaneStatus> = {}): PaneStatus {
     lastAssistantText: '',
     agentProcessAlive: true,
     idleMs: 0,
-    producerHold: false,
+    needsProducerReview: false,
     isInvokingPane: false,
     childProcessCount: 0,
     ...overrides,
@@ -137,13 +137,13 @@ describe('reaper — implement pane never closes', () => {
   });
 });
 
-describe('reaper — producer-held pane never closes', () => {
-  it('skips items held by the producer (AC2)', async () => {
+describe('reaper — needsProducerReview pane never closes', () => {
+  it('skips items awaiting producer review (AC2)', async () => {
     const { runReaper } = await import('./pane-close-reaper');
     const panes = [pane({
       kind: 'plan',
       lastAssistantText: '</end_session>',
-      producerHold: true,
+      needsProducerReview: true,
       agentProcessAlive: false,
     })];
     const deps = makeDeps(panes);
@@ -600,7 +600,7 @@ describe('runReaper — detailed reason snapshot in the ledger (parent AC4.1/AC4
         agentProcessAlive: false,
         idleMs: 1234,
         itemStage: 'plan_complete',
-        producerHold: false,
+        needsProducerReview: false,
         childProcessCount: 0,
       });
     } finally {
@@ -690,7 +690,7 @@ describe('runReaperCli', () => {
       kind: 'plan',
       close: true,
       reasonCode: 'marker',
-      producerHold: false,
+      needsProducerReview: false,
     });
     expect(Array.isArray(output.panes[0].sessionTail)).toBe(true);
   });

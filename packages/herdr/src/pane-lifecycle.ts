@@ -36,7 +36,6 @@
  */
 
 import type { DowntimeLogEntry, PaneLifecycleKind } from './downtime-log.js';
-import { isProducerHold } from './producer-hold.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -92,12 +91,7 @@ export interface PaneItemState {
    * historical default, WL-0MTH7G2O1004BHN5).
    */
   auditResult?: boolean | null;
-  /**
-   * Current assignee (empty/absent = unassigned). The producer scheduling
-   * hold — which replaced the retired producer-review flag — is recognised
-   * when this is the reserved producer-hold identity (WL-0MV85WGIT004PHRC).
-   */
-  assignee?: string;
+  needsProducerReview?: boolean;
   /** Agent session state for the pane (idle/working/blocked/done/unknown). */
   agentState?: string;
 }
@@ -259,7 +253,7 @@ export function classifyPaneLifecycle(
         'none',
       );
     }
-    if (isProducerHold(item?.assignee)) {
+    if (item?.needsProducerReview === true) {
       return decision(
         kind,
         'requires-attention',
@@ -341,7 +335,7 @@ export function classifyPaneLifecycle(
 
   // 3. Producer-review gate (AC3): a review-blocked item is not making
   // progress — flag it so the pane does not linger silently.
-  if (isProducerHold(item?.assignee)) {
+  if (item?.needsProducerReview === true) {
     return decision(
       kind,
       'requires-attention',

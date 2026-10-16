@@ -861,8 +861,8 @@ describe('audit selection (selectAuditCandidate)', () => {
 
   it('does not select an item whose updatedAt did not move (flag-only flip, WL-0MSN6ZCTN0027U2R)', () => {
     // The worklog core guarantees (packages/shared/src/database.ts update())
-    // that a flag-only classification change does NOT bump updatedAt — so after
-    // the change the item still has its pre-audit updatedAt and the audit
+    // that flipping needsProducerReview does NOT bump updatedAt — so after
+    // the flip the item still has its pre-audit updatedAt and the audit
     // remains fresh.  selectAuditCandidate must therefore not re-dispatch
     // a redundant /skill:audit for it.
     const afterFlagFlip: AuditCandidate = {

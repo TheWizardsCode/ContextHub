@@ -471,15 +471,15 @@ export interface HerdrReaperIo {
   closePane(paneId: string): Promise<boolean>;
   /** Resolve the invoking pane id (never closed). */
   invokingPaneId?: string;
-  /** Optional producer-hold lookup; absent → false (fail-closed default). */
-  getProducerHold?(itemId: string): Promise<boolean>;
+  /** Optional producer-review lookup; absent → false (fail-closed default). */
+  getNeedsProducerReview?(itemId: string): Promise<boolean>;
   /**
    * Optional combined item-info lookup (parent AC6). When supplied it
-   * supersedes `getProducerHold` and additionally populates
+   * supersedes `getNeedsProducerReview` and additionally populates
    * `PaneStatus.itemStage` so the close-decision snapshot records the
-   * work-item stage. Absent → falls back to `getProducerHold`.
+   * work-item stage. Absent → falls back to `getNeedsProducerReview`.
    */
-  getItemInfo?(itemId: string): Promise<{ producerHold: boolean; stage?: string }>;
+  getItemInfo?(itemId: string): Promise<{ needsProducerReview: boolean; stage?: string }>;
   /**
    * Count session-scoped child processes for a pane (parent AC1/AC3);
    * absent → 0. Receives the parsed pane so callers can probe by session
@@ -505,8 +505,8 @@ export interface HerdrReaperIo {
  *
  * Fail-closed at every boundary: an unreadable pane list yields no panes; a
  * pane with no resolvable session file is skipped entirely (never closed on
- * ambiguous evidence); the producer-hold lookup defaults to false only when
- * the lookup is absent.
+ * ambiguous evidence); `needsProducerReview` defaults to false only when the
+ * lookup is absent.
  */
 export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
   const now = io.now ?? (() => Date.now());
@@ -550,27 +550,25 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
         const status = (pane.agentStatus ?? '').toLowerCase();
         const agentProcessAlive = status !== 'done' && status !== 'exited' && status !== '';
 
-        // Producer-hold + item-stage lookup (parent AC2/AC6). Prefer the
-        // combined `getItemInfo`; fall back to the boolean-only lookup. The
-        // producer hold is derived from the item's assignee (the retirenee of
-        // the removed producer-review flag, WL-0MV85WGIT004PHRC).
-        let producerHold = false;
+        // Producer-review + item-stage lookup (parent AC2/AC6). Prefer the
+        // combined `getItemInfo`; fall back to the boolean-only lookup.
+        let needsProducerReview = false;
         let itemStage: string | undefined;
         if (itemId !== '' && typeof io.getItemInfo === 'function') {
           try {
             const info = await io.getItemInfo(itemId);
-            producerHold = info.producerHold === true;
+            needsProducerReview = info.needsProducerReview === true;
             itemStage = typeof info.stage === 'string' && info.stage !== '' ? info.stage : undefined;
           } catch {
             // fail-closed: an unreadable item must never be closed without
-            // evidence — treat as producer-held (never auto-close).
-            producerHold = true;
+            // evidence — treat as review-blocked (never auto-close).
+            needsProducerReview = true;
           }
-        } else if (itemId !== '' && typeof io.getProducerHold === 'function') {
+        } else if (itemId !== '' && typeof io.getNeedsProducerReview === 'function') {
           try {
-            producerHold = await io.getProducerHold(itemId);
+            needsProducerReview = await io.getNeedsProducerReview(itemId);
           } catch {
-            producerHold = true;
+            needsProducerReview = true;
           }
         }
 
@@ -588,7 +586,7 @@ export function createHerdrReaperDeps(io: HerdrReaperIo): ReaperDeps {
           agentProcessAlive,
           agentStatus: pane.agentStatus,
           idleMs,
-          producerHold,
+          needsProducerReview,
           isInvokingPane: pane.paneId === io.invokingPaneId,
           childProcessCount: (await io.childProcessCount?.(pane)) ?? 0,
           ageSinceDispatchMs,

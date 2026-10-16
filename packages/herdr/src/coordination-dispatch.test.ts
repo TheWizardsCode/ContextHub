@@ -84,7 +84,7 @@ function itemInfo(overrides: Partial<DowntimeItemInfo> & { id: string }): Downti
     auditedAt: overrides.auditedAt,
     updatedAt: overrides.updatedAt,
     sortIndex: overrides.sortIndex,
-    assignee: overrides.assignee,
+    needsProducerReview: overrides.needsProducerReview,
   };
 }
 
@@ -131,7 +131,7 @@ function headItem(overrides: Partial<DowntimeHerdrItem> & { id: string }): Downt
     auditedAt: overrides.auditedAt,
     updatedAt: overrides.updatedAt,
     sortIndex: overrides.sortIndex,
-    assignee: overrides.assignee,
+    needsProducerReview: overrides.needsProducerReview,
   };
 }
 
@@ -717,7 +717,7 @@ describe('dispatchFromCoordination', () => {
 // later skipped or removed).
 
 describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', () => {
-  it('removes a held-by-assignee entry without cursor advance and dispatches next eligible', async () => {
+  it('removes a needsProducerReview entry without cursor advance and dispatches next eligible', async () => {
     const stale = makeEntry('inst-stale', 'WL-STALE', '/roots/contexthub');
     const ok = makeEntry('inst-ok', 'WL-OK', '/roots/sorraagents');
     writeCoordinationFile(testDir, { version: 1, entries: [stale, ok] });
@@ -728,7 +728,7 @@ describe('dispatchFromCoordination eligibility re-check (WL-0MTOC170J001QMIT)', 
 
     const deps = makeCoordinationDeps({
       fetchItem: vi.fn(async (id: string) => {
-        if (id === 'WL-STALE') return { ok: true, info: itemInfo({ id: 'WL-STALE', status: 'open', stage: 'idea', assignee: 'producer' }) } as const;
+        if (id === 'WL-STALE') return { ok: true, info: itemInfo({ id: 'WL-STALE', status: 'open', stage: 'idea', needsProducerReview: true }) } as const;
         return { ok: true, info: itemInfo({ id: 'WL-OK', status: 'open', stage: 'idea' }) } as const;
       }),
     });
@@ -1587,7 +1587,7 @@ describe('review-queue depth gate — coordination leader path (WL-0MTTSWC1X005P
 // A critical item blocked by a NON-SAFETY filter (stale dispatched marker,
 // review-queue depth hold) must still be OFFERED — otherwise the check-in
 // floats a lower-priority head item and the leader never dispatches the
-// critical work. Safety gates (assignee hold, code-freeze split-by-
+// critical work. Safety gates (needsProducerReview, code-freeze split-by-
 // skill) still apply to the offer.
 
 describe('critical-first offer on coordination path (WL-0MU6UL3XY001M3VT)', () => {
@@ -1626,12 +1626,12 @@ describe('critical-first offer on coordination path (WL-0MU6UL3XY001M3VT)', () =
     expect(result.candidate.id).toBe('CR-1');
   });
 
-  it('computeMostImportantItem: an assignee-held critical item is NOT offered (safety gate)', async () => {
+  it('computeMostImportantItem: needsProducerReview critical item is NOT offered (safety gate)', async () => {
     const deps = makeCoordinationDeps({
       getHerdrListHead: vi.fn().mockResolvedValue({
         ok: true,
         items: [
-          { ...criticalHead('CR-PR'), assignee: 'producer' },
+          { ...criticalHead('CR-PR'), needsProducerReview: true },
           nonCriticalHead('IMP-1'),
         ],
       }),
@@ -1950,7 +1950,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
         priority: 'high',
         risk: 'Low',
         effort: 'S',
-        assignee: 'producer',
+        needsProducerReview: true,
         sortIndex: i,
       }),
     );
@@ -2088,7 +2088,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
           priority: 'high',
           risk: 'Low',
           effort: 'S',
-          assignee: 'producer',
+          needsProducerReview: true,
           sortIndex: 1000,
         }),
         eligibleBacklog('WL-RANK-ELIGIBLE', 2000),
@@ -2237,7 +2237,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
         priority: 'high',
         risk: 'Low',
         effort: 'S',
-        assignee: 'producer',
+        needsProducerReview: true,
         sortIndex: 1000,
       });
       const getHerdrListHead = vi.fn(async (_cwd: string, limit = SPRINT) => ({

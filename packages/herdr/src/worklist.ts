@@ -5149,12 +5149,17 @@ export function dispatchChordCommand(
     return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
 
-  // ── Data-modifying wl commands (close/delete/update/search) ──
+  // ── Producer review / audit compound commands ───────────
+  if (command.startsWith('!!wl reviewed')) {
+    return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
+  }
+
+  // ── Data-modifying wl commands (close/delete/update/reviewed/search) ──
   // These mutate the work-item data set or change the list contents, so
   // they are routed here (not the generic callback path) so the caller's
   // isWlModifyingCommand check sees 'dispatched' and triggers an immediate
   // list refresh after the command completes (WL-0MTA217DZ003H5K8).
-  if (/^!!\s*wl\s+(close|delete|update|search)\b/i.test(command)) {
+  if (/^!!\s*wl\s+(close|delete|update|reviewed|search)\b/i.test(command)) {
     return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.includes('&& wl audit-set')) {
@@ -6151,8 +6156,9 @@ export async function runWorklistTui(
   // selection list reflects the change without waiting for the auto-refresh
   // cycle (WL-0MTA217DZ003H5K8).
   const isWlModifyingCommand = (cmd: string): boolean => {
-    // Commands like "!!wl close <id>", "!!wl delete <id>", "!!wl update <id> ..."
-    if (/^!!\s*wl\s+(close|delete|update|search)\b/i.test(cmd)) return true;
+    // Commands like "!!wl close <id>", "!!wl delete <id>", "!!wl update <id> ...",
+    // "!!wl reviewed <id> ...", "!!wl search ..."
+    if (/^!!\s*wl\s+(close|delete|update|reviewed|search)\b/i.test(cmd)) return true;
     return false;
   };
 

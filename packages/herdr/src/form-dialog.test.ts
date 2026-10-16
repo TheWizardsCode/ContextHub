@@ -580,7 +580,7 @@ describe('shellQuote', () => {
 
 describe('substituteIdentifiers — shell-route escaping', () => {
   const AR_TEMPLATE =
-    '!!wl update <id> --assignee "" --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary \'Rejected by manual review. <reason>\'';
+    "!!wl reviewed <id> false && wl update <id> --status open --stage plan_complete && wl audit-set <id> --ready-to-close no --summary 'Rejected by manual review. <reason>'";
 
   it('escapes only the apostrophe inside the existing single-quoted summary', () => {
     const out = substituteIdentifiers(AR_TEMPLATE, { reason: "don't" });
@@ -591,7 +591,7 @@ describe('substituteIdentifiers — shell-route escaping', () => {
 
   it('escapes an apostrophe inside a producer-comment quoted body', () => {
     const template =
-      '!!wl update <id> --assignee Map && wl comment add <id> --body \'<producer_comment>\' --author <author>';
+      "!!wl reviewed <id> && wl comment add <id> --body '<producer_comment>' --author <author>";
     const out = substituteIdentifiers(template, {
       producer_comment: "it's a comment; rm -rf /",
       author: 'Map',

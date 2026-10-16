@@ -168,9 +168,9 @@ describe('getIconPrefix — fixed-width agent slot (AC3 alignment invariance)', 
   });
 });
 
-describe('isAuditFresh — hold updates must not make a valid audit stale (WL-0MSN6ZCTN0027U2R)', () => {
+describe('isAuditFresh — flag-only updates must not make a valid audit stale (WL-0MSN6ZCTN0027U2R)', () => {
   // The worklog core guarantees (packages/shared/src/database.ts update())
-  // that an assignee hold change does NOT bump updatedAt; only content
+  // that flipping needsProducerReview does NOT bump updatedAt; only content
   // changes do.  These tests pin the herdr-side consequence: a previously
   // fresh audit stays fresh and the passed icon is shown (not the stale
   // hourglass).  herdr itself is unchanged.

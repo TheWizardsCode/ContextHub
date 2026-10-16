@@ -31,7 +31,6 @@ import {
 } from './pane-close-herdr.js';
 import type { ReaperDeps } from './pane-close-reaper.js';
 import { runReaperCli } from './pane-close-reaper.js';
-import { isProducerHold } from './producer-hold.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -119,9 +118,7 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
       }
     },
     invokingPaneId,
-    // Item lookup (parent AC2/AC6): producer-hold (derived from the item's
-    // assignee — the producer hold replaced the retired producer-review
-    // flag) + work-item stage.
+    // Item lookup (parent AC2/AC6): producer-review flag + work-item stage.
     getItemInfo: async (itemId: string) => {
       const { stdout } = await io.execFileAsync('wl', ['show', itemId, '--json'], {
         encoding: 'utf8',
@@ -130,11 +127,11 @@ export function createPaneCloseCliDeps(io: PaneCloseCliIo, fixtureRaw?: string):
         cwd: io.cwd,
       });
       const parsed = extractJsonValue(stdout) as {
-        workItem?: { assignee?: string; stage?: string };
+        workItem?: { needsProducerReview?: boolean; stage?: string };
       };
       // Fail-closed: an unreadable item is treated as review-blocked.
       return {
-        producerHold: isProducerHold(parsed?.workItem?.assignee),
+        needsProducerReview: parsed?.workItem?.needsProducerReview === true,
         stage: parsed?.workItem?.stage,
       };
     },
