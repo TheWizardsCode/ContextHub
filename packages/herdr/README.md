@@ -57,6 +57,7 @@ cd packages/herdr && npm run build
 - Links the plugin from the **main checkout** with `herdr plugin link <main-checkout>/packages/herdr/herdr-plugin.toml`. When the build runs inside a linked git worktree (as happens during `/skill:implement`), the main checkout is resolved via `git worktree list` so the global herdr plugin is never registered against a transient worktree path — a worktree-based link would dangle once the worktree is cleaned up and silently break `prefix+l` (WL-0MSRG481O007QVEA). `herdr plugin link` updates an existing link in place, so a stale link from an older build is corrected automatically.
 - Inserts the `prefix+l` → `worklog-selection-list.open-worklog-tab` keybinding into your herdr config (`~/.config/herdr/config.toml`, or `$HERDR_CONFIG_PATH` when set) **only if** it is not already present — re-running the build never creates duplicate keybindings.
 - Migrates a legacy `prefix+l` → `worklog-selection-list.open-worklist` (or intermediate `open-podcast-editor-tab`) binding in-place to the new action, so the Worklog tab name takes effect without a manual config edit. When the new binding is already present, any leftover legacy block is purged instead, so a stale duplicate `prefix+l` key cannot survive a partially-migrated config (WL-0MSRG4828007ITI4).
+- Installs the plugin's npm dependencies (`npm ci`/`npm install` in `packages/herdr`) and then **links `@worklog/shared` to the live workspace package**: `install-herdr.sh` runs `packages/herdr/scripts/link-shared.mjs`, which replaces npm's packaged **copy** of `@worklog/shared` (a `file:` dependency) with a relative symlink to `packages/shared`. A packaged copy goes stale whenever `packages/shared` changes — the plugin would then import a missing export and herdr would close the pane on startup (WL-0MVAY631M004RZ3Q). With the symlink the plugin always reads current Shared code after a build. The plugin's own `postinstall` and `npm run build` (which now compiles `packages/shared` first) re-assert the same link, so a plain `npm install` or `npm run build` inside `packages/herdr` is safe too.
 - Warns (without failing the build) when `herdr` is not on PATH or the config cannot be written, so `npm run build` succeeds in CI/offline environments.
 
 Alternatively, `npm run install` (or `npm run install:plugin` for the herdr step alone) runs the same install script outside of a build context.
@@ -2341,15 +2342,41 @@ This plugin only **reads** the marker; writing/clearing it is the ship release p
 ## Development
 
 ```bash
-# Run tests
-npx vitest run tests/herdr/
-
 # Run the plugin directly (outside Herdr)
-npx tsx packages/herdr/src/index.ts
+# src/start.ts is the resilient pane entry (the manifest command); it wraps
+# src/index.ts so a stale @worklog/shared fails with an actionable message.
+npx tsx packages/herdr/src/start.ts
 
-# Build TypeScript
-cd packages/herdr && npx tsc
+# Run tests
+npx vitest run tests/herdr/ tests/unit/start-launcher.test.ts
+
+# Build TypeScript (compiles packages/shared first, then the plugin)
+cd packages/herdr && npm run build
 ```
+
+## Troubleshooting
+
+### The Worklog tab closes immediately on open
+
+The pane intentionally never dies silently. The entry launcher
+(`src/start.ts`) prints an actionable diagnostic and — when it is attached
+to a real terminal — stays open until you press Enter.
+
+If it reports **"The plugin loaded a STALE copy of the shared Worklog code"**
+(or an ESM error like `does not provide an export named ...`), the compiled
+`packages/shared/dist` predates the current source. Rebuild from the
+repository root and reopen the tab:
+
+```bash
+npm run build
+```
+
+`npm run build` rebuilds `packages/shared/dist` and re-links
+`packages/herdr/node_modules/@worklog/shared` to the live workspace package
+(via `scripts/install-herdr.sh` step 0b / `link-shared.mjs`). If you only
+want to refresh the plugin dependency without a full build, run
+`npm install --prefix packages/herdr` (its `postinstall` re-links the
+symlink).
 
 ## License
 

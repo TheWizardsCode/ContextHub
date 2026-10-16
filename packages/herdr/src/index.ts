@@ -2210,7 +2210,7 @@ export function uninitializedReport(startDir: string): string {
   ].join('\n') + '\n';
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   // Check if wl is available
   const wlAvailable = await checkWlAvailable();
   if (!wlAvailable) {

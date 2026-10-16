@@ -17,7 +17,10 @@
 #     `herdr plugin link` updates an existing link in place, so a stale
 #     worktree link is corrected automatically on the next build. The
 #     dependency install (step 0) also targets the MAIN checkout for the
-#     same reason (WL-0MSRLH52R003CK49).
+#     same reason (WL-0MSRLH52R003CK49). Step 0b then replaces npm's packaged
+#     COPY of @worklog/shared with a symlink to the live workspace package
+#     (WL-0MVAY631M004RZ3Q), so a stale vendored copy can never crash the
+#     pane with an ESM "does not provide an export named ..." error.
 #   - The keybinding block is inserted only when a binding for
 #     `worklog-selection-list.open-worklog-tab` is not already present.
 #   - Legacy `open-worklist` and `open-podcast-editor-tab` prefix+l bindings
@@ -107,6 +110,25 @@ if [ -d "${HERDR_DIR}" ] && [ -f "${HERDR_DIR}/package.json" ]; then
     fi
   else
     echo "Warning: 'npm' not found on PATH — skipping herdr dependency install." >&2
+  fi
+fi
+
+# ── 0b. Link @worklog/shared to the live workspace package ──────────────
+# npm installs the `file:` dependency as a packaged COPY that silently goes
+# stale whenever packages/shared changes — the plugin then imports a missing
+# export and herdr closes the pane on startup (WL-0MVAY631M004RZ3Q).
+# Replace the copy with a symlink to packages/shared so the plugin always
+# reads current Shared code after a build. Best-effort: a linking failure
+# only warns (the src/start.ts launcher still explains the stale state).
+if [ -d "${HERDR_DIR}" ] && [ -f "${HERDR_DIR}/scripts/link-shared.mjs" ]; then
+  if command -v node >/dev/null 2>&1; then
+    if node "${HERDR_DIR}/scripts/link-shared.mjs" "${HERDR_DIR}"; then
+      :
+    else
+      echo "Warning: 'node link-shared.mjs' failed in ${HERDR_DIR} — @worklog/shared may resolve to a stale copy." >&2
+    fi
+  else
+    echo "Warning: 'node' not found on PATH — cannot link @worklog/shared in ${HERDR_DIR}." >&2
   fi
 fi
 
