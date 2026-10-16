@@ -647,6 +647,17 @@ pause switch (`r p` → `wl update <id> --assignee Map`), so the worker never
 consumes local slots on items awaiting a human decision. Clearing the
 assignee makes the item dispatchable again on the next idle poll.
 
+> **Status-neutral audit-tier claim (WL-0MV85WCJJ0087VMP).** When the audit
+tier does dispatch, its claim is deliberately STATUS-NEUTRAL: `claimWorkItem`
+writes ONLY the assignee (`wl update <id> --assignee <agent>
+--if-status completed --if-stage in_review --if-assignee ""`), never
+`--status`/`--stage`. The audited item stays `completed`/`in_review`
+throughout — no `in-progress`/`in_review` hybrid exists, so a failed audit
+Phase 2 restores via the guarded rollback (`--assignee "" --if-assignee
+<agent>`) and the item is re-selectable on the next idle poll. A non-empty
+assignee is an intentional scheduling hold: it makes the claim fail stale
+(`--if-assignee ""` CAS) and excludes the item from every tier's selection.
+
 > **Single-active-audit guarantee (WL-0MT3PHW4I002SNOV):** exactly one
 > audit is dispatched at a time during downtime dispatch — strictly
 > sequential, never fan-out across candidates. Before the audit tier

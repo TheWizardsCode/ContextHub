@@ -95,7 +95,12 @@ audit passed even after subsequent minor updates made the audit appear stale.
 
 Note: an assignee hold (e.g. applying the producer scheduling hold) does **not**
 move `updatedAt` (WL-0MSN6ZCTN0027U2R), so a previously fresh audit stays fresh — the
-stale-passed icon is only reached by genuine content changes.
+stale-passed icon is only reached by genuine content changes. The
+**status-neutral audit-tier claim** (WL-0MV85WCJJ0087VMP) reinforces this: the
+herdr audit tier claims a `completed`/`in_review` item by writing only the
+assignee (`--if-assignee ""` CAS), never `--status`/`--stage`, so the stage
+bucket and its icon never flicker to a review-queue hold nor an
+`in-progress` bucket while the audit is dispatched.
 
 The stale-passed icon only applies to `in_review` items. The regular audit
 icons (✅ / ❌ / ❔) are used for fresh audits, and the stage icon (🔍) is
