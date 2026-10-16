@@ -26,7 +26,7 @@ async function loadRegisterReviewed(): Promise<(ctx: any) => void> {
 }
 
 describe('reviewed command', () => {
-  it.fails('RED: toggles needsProducerReview when value omitted', async () => {
+  it('toggles needsProducerReview when value omitted (F3 restored)', async () => {
     const registerReviewed = await loadRegisterReviewed();
     const ctx = createTestContext();
     registerReviewed(ctx as any);
@@ -38,7 +38,7 @@ describe('reviewed command', () => {
     expect(Boolean(item.needsProducerReview)).toBe(true);
   });
 
-  it.fails('RED: sets needsProducerReview when value provided', async () => {
+  it('sets needsProducerReview when value provided (F3 restored)', async () => {
     const registerReviewed = await loadRegisterReviewed();
     const ctx = createTestContext();
     registerReviewed(ctx as any);

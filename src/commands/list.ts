@@ -28,6 +28,7 @@ export default function register(ctx: PluginContext): void {
     .option('--tags <tags>', 'Filter by tags (comma-separated)')
     .option('-a, --assignee <assignee>', 'Filter by assignee')
     .option('--stage <stage>', 'Filter by stage')
+    .option('--needs-producer-review [value]', 'Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)')
     .option('-f, --fields <fields>', 'Comma-separated list of fields to include in output (id always included)')
     .option('--prefix <prefix>', 'Override the default prefix')
     .option('--no-icons', 'Disable icon rendering for clean text output')
@@ -91,6 +92,22 @@ export default function register(ctx: PluginContext): void {
       }
       if (options.assignee) query.assignee = options.assignee;
       if (options.stage) query.stage = options.stage;
+      if (options.needsProducerReview !== undefined) {
+        if (options.needsProducerReview === true) {
+          query.needsProducerReview = true;
+        } else {
+          // Accept common boolean-like CLI values
+          const raw = String(options.needsProducerReview).toLowerCase();
+          const truthy = ['true', 'yes', '1', ''];
+          const falsy = ['false', 'no', '0'];
+          if (truthy.includes(raw)) query.needsProducerReview = true;
+          else if (falsy.includes(raw)) query.needsProducerReview = false;
+          else {
+            output.error(`Invalid value for --needs-producer-review: ${options.needsProducerReview}`, { success: false, error: 'invalid-arg' });
+            process.exit(1);
+          }
+        }
+      }
       
       let items = db.list(query);
 
@@ -180,6 +197,7 @@ export default function register(ctx: PluginContext): void {
           const arB = auditMapForSort.get(b.id);
           const reviewCmp = compareInReviewItems(
             { id: a.id, stage: a.stage, priority: a.priority, filePaths: [],
+              needsProducerReview: a.needsProducerReview,
               auditResult: arA ? arA.readyToClose : null,
               auditedAt: arA ? arA.auditedAt : null,
               fingerprint: arA ? arA.fingerprint : null,
@@ -187,6 +205,7 @@ export default function register(ctx: PluginContext): void {
               updatedAt: a.updatedAt,
             },
             { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
+              needsProducerReview: b.needsProducerReview,
               auditResult: arB ? arB.readyToClose : null,
               auditedAt: arB ? arB.auditedAt : null,
               fingerprint: arB ? arB.fingerprint : null,

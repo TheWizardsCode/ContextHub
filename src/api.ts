@@ -10,6 +10,14 @@ import { loadConfig } from './config.js';
 import { buildAuditEntry, extractAuditFingerprint, hasAcceptanceCriteria } from './audit.js';
 import { getConfiguredUserEmail } from './sync.js';
 
+function parseNeedsProducerReview(value: unknown): boolean | undefined {
+  if (value === undefined || value === null) return undefined;
+  const raw = String(value).toLowerCase();
+  if (['true', 'yes', '1'].includes(raw)) return true;
+  if (['false', 'no', '0'].includes(raw)) return false;
+  return undefined;
+}
+
 function normalizeCreateInputWithAudit(input: CreateWorkItemInput, db: WorklogDatabase): { input: CreateWorkItemInput; auditResult: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null } | null } {
   const rawAudit = (input as any).audit;
   if (typeof rawAudit === 'string') {
@@ -231,6 +239,14 @@ export function createAPI(db: WorklogDatabase) {
     if (req.query.stage) {
       query.stage = req.query.stage as string;
     }
+    if (req.query.needsProducerReview !== undefined) {
+      const parsed = parseNeedsProducerReview(req.query.needsProducerReview);
+      if (parsed === undefined) {
+        res.status(400).json({ error: 'Invalid needsProducerReview value' });
+        return;
+      }
+      query.needsProducerReview = parsed;
+    }
 
     // Interoperability metadata filters
     if (req.query.issueType) {
@@ -443,6 +459,14 @@ export function createAPI(db: WorklogDatabase) {
     }
     if (req.query.stage) {
       query.stage = req.query.stage as string;
+    }
+    if (req.query.needsProducerReview !== undefined) {
+      const parsed = parseNeedsProducerReview(req.query.needsProducerReview);
+      if (parsed === undefined) {
+        res.status(400).json({ error: 'Invalid needsProducerReview value' });
+        return;
+      }
+      query.needsProducerReview = parsed;
     }
 
     // Interoperability metadata filters

@@ -58,6 +58,8 @@ export interface ListOptions {
   tags?: string;
   assignee?: string;
   stage?: string;
+  /** 'true'|'false'|'yes'|'no' (string form from CLI); parsed to boolean by command */
+  needsProducerReview?: string | boolean;
   /** Include deleted items in list output when present */
   deleted?: boolean;
   prefix?: string;
@@ -198,6 +200,8 @@ export interface CloseOptions { reason?: string; author?: string; prefix?: strin
 
 export interface DeleteOptions { prefix?: string; recursive?: boolean; sync?: boolean }
 
+export interface ReviewedOptions { prefix?: string }
+
 export interface InterviewOptions {
   prefix?: string;
   /** Non-interactive JSON output mode (no prompts, no mutation). */
@@ -229,6 +233,8 @@ export interface SearchOptions {
   stage?: string;
   /** Include deleted items in search results when present */
   deleted?: boolean;
+  /** 'true'|'false'|'yes'|'no' (string form from CLI); parsed to boolean by command */
+  needsProducerReview?: string | boolean;
   issueType?: string;
   limit?: string;
   rebuildIndex?: boolean;

@@ -593,7 +593,7 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
     return { id: 'WL-x', stage: 'in_review', filePaths: [], priority: 'medium', ...overrides };
   }
 
-  it.fails('RED: inReviewBucket returns all six buckets with needsProducerReview first (flip it.fails→it when F4 restores grouping)', () => {
+  it('inReviewBucket returns all six buckets with needsProducerReview first (F3 restored core grouping)', () => {
     expect(inReviewBucket({
       stage: 'in_review', needsProducerReview: true,
       auditResult: null, auditedAt: null, updatedAt,
@@ -619,7 +619,7 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
     })).toBe(0);
   });
 
-  it.fails('RED: orders the six buckets: needsProducerReview → failed fresh → failed stale → no audit → passed stale → passed fresh (flip it.fails→it when F4 restores grouping)', () => {
+  it('orders the six buckets: needsProducerReview → failed fresh → failed stale → no audit → passed stale → passed fresh (F3 restored core grouping)', () => {
     const items = [
       inReviewItem({ id: 'WL-passed-fresh', auditResult: true, auditedAt: freshAuditedAt, updatedAt }),
       inReviewItem({ id: 'WL-passed-stale', auditResult: true, auditedAt: staleAuditedAt, updatedAt }),

@@ -36,6 +36,7 @@ export default function register(ctx: PluginContext): void {
     .option('-a, --assignee <assignee>', 'Filter by assignee')
     .option('--stage <stage>', 'Filter by stage')
     .option('--deleted', 'Include deleted items in results')
+    .option('--needs-producer-review [value]', 'Filter by needsProducerReview flag (true|false|yes|no; default true when omitted)')
     .option('--issue-type <type>', 'Filter by issue type')
     .option('-f, --fields <fields>', 'Comma-separated list of fields to include in output (id always included)')
     .option('-l, --limit <n>', 'Maximum number of results (default: 20)')
@@ -132,6 +133,24 @@ export default function register(ctx: PluginContext): void {
         parentId = utils.normalizeCliId(parentId, options.prefix) || parentId;
       }
 
+      // Parse --needs-producer-review boolean flag (matching list.ts logic)
+      let needsProducerReview: boolean | undefined;
+      if (options.needsProducerReview !== undefined) {
+        if (options.needsProducerReview === true) {
+          needsProducerReview = true;
+        } else {
+          const raw = String(options.needsProducerReview).toLowerCase();
+          const truthy = ['true', 'yes', '1', ''];
+          const falsy = ['false', 'no', '0'];
+          if (truthy.includes(raw)) needsProducerReview = true;
+          else if (falsy.includes(raw)) needsProducerReview = false;
+          else {
+            output.error(`Invalid value for --needs-producer-review: ${options.needsProducerReview}`, { success: false, error: 'invalid-arg' });
+            process.exit(1);
+          }
+        }
+      }
+
       // Execute search
       let rawResults: { results: FtsSearchResult[]; ftsUsed: boolean; warning?: string };
       try {
@@ -144,6 +163,7 @@ export default function register(ctx: PluginContext): void {
           assignee: options.assignee,
           stage: options.stage,
           deleted: options.deleted,
+          needsProducerReview,
           issueType: options.issueType,
         });
       } catch (err) {

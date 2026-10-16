@@ -847,8 +847,8 @@ export interface GroupableItem {
   stage?: string;
   filePaths: string[];
   priority?: string;
-  // Optional audit fields — used for in_review bucket sort (the producer-review
-  // flag was retired in favour of the assignee-hold convention, WL-0MV85WFYU0071YQ9)
+  // Optional audit fields — used for in_review bucket sort
+  needsProducerReview?: boolean;
   auditResult?: boolean | null;
   auditedAt?: string | null;
   updatedAt?: string | null;

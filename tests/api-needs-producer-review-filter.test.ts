@@ -50,7 +50,7 @@ describe('API needsProducerReview filter', () => {
     }
   }
 
-  it.fails('RED: filters items by needsProducerReview (F2/F3 flip to it)', async () => {
+  it('filters items by needsProducerReview (F3 restored)', async () => {
     const needsReview = db.create({ title: 'Needs review', needsProducerReview: true });
     const noReview = db.create({ title: 'No review', needsProducerReview: false });
 
@@ -63,7 +63,7 @@ describe('API needsProducerReview filter', () => {
     expect(resFalse.body.map((i: any) => i.id)).toEqual([noReview.id]);
   });
 
-  it.fails('RED: rejects invalid needsProducerReview values (F2/F3 flip to it)', async () => {
+  it('rejects invalid needsProducerReview values (F3 restored)', async () => {
     const res = await getItems('/items?needsProducerReview=maybe');
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Invalid');
