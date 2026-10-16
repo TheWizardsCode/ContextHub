@@ -23,7 +23,7 @@ The downtime dispatcher does **not** maintain its own ranking. The Herdr selecti
 and the coordination leader path `dispatchFromCoordination`) derives
 its candidate from the **Herdr list head** (first ordered item) and applies every remaining
 safety gate as a **sequential filter** on that ordered sequence (scheduled-prompt → code-freeze
-→ assignee-hold gate (WL-0MV85WCJJ0087VMP) → dispatched-marker → free-slot minimums →
+→ producer-review gate (WL-0MTIAL65N004T22F) → dispatched-marker → free-slot minimums →
 active-audit single-flight → freshness/recency → CAS claim → spawn). **Critical escalation
 (WL-0MU6UL3XY001M3VT):** before the normal sequence walk, open critical items in the head are
 escalated by `selectCriticalFirstCandidates` — a blocked critical item bypasses the NON-safety
@@ -123,7 +123,7 @@ SAME canonical ranking path (`getHerdrListHead` → `fetchNextItems` →
 returns only the newly visible tail. The critical-only filter of the defensive
 escape hatch above is lifted for the fallback (any ranked item in the extended
 tail is eligible), but every existing safety gate still applies as a
-**sequential filter** — classify/assignee-hold/freshness/caps,
+**sequential filter** — classify/producer-review/freshness/caps,
 dispatched-marker exclusion, attempt budget, non-terminal cooldown,
 code-freeze, audit slot minimum, in-flight (critical) guard, and the
 review-queue hold. A gated own-backlog item is skipped exactly like an in-view
@@ -247,7 +247,7 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    (`DEFAULT_LEADER_CHECK_IN_MS = 4 min`) and followers every 5 minutes
    (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H — was 30 min, clamped ≥ 60 s),
    recomputing their worklog's **most-important item** (or removing their entry on a genuinely empty backlog / `wl` error fail-open — entry retained) and upserting (`add` if absent, `update` if changed). When the leader removes an entry on dispatch, the owning instance re-offers **immediately** on its next tick (observed missing-own-entry, no extra poll loop; fail-open on unreadable file degrades to next interval — WL-0MTMPSCL8000O45H AC2). The leader also renews the lease inside its 5-min TTL (`DEFAULT_LEASE_TTL_SECONDS = 300`) on the same cadence. Leadership is re-derived every tick from the lease file; a missing/unreadable coordination or lease file is fail-safe (no dispatch that cycle, never a crash, check-in cadence does not spin-loop on errors).
-2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**. A non-dispatchable entry (closed/in_progress/done, audit-now-fresh, held by a non-empty assignee, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via `removeEntry` **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the tier loop **continues to the next entry**. Entries do **not** expire by wall-clock age.
+2. **Dispatch** — the leader validates eligibility **at dispatch time** (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` / `isAuditFresh` / stage+status) as the **sole gate**. A non-dispatchable entry (closed/in_progress/done, audit-now-fresh, `needsProducerReview === true`, above-caps plan_complete, or otherwise `classifyItemForDispatch(...) === null`) is removed eagerly via `removeEntry` **without** advancing the round-robin cursor (`advanceRoundRobinCursor` only on successful dispatch), without spawning a pane or writing a dispatched marker, and the tier loop **continues to the next entry**. Entries do **not** expire by wall-clock age.
 3. **Pruning — retired (WL-0MTMPIQBE001J41P)** — wall-clock TTL pruning on `lastUpdated` is removed (`pruneStaleEntries` is a no-op returning `0`, no age-based removal on the machine `downtime-coordination.json` or legacy per-worklog file). Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log`; coordination log records are separate from the dispatch log.
 
 ### Leader-only dispatch
@@ -260,7 +260,7 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
 3. Otherwise the leader reads the coordination OFFER list and dispatches the
    first offer in **file order** that passes the dispatch-time filters
    (`fetchItem(workItemId, worklogRoot)` → `classifyItemForDispatch` +
-   assignee-hold gate + code-freeze split-by-skill + free-slot minimums;
+   producer-review gate + code-freeze split-by-skill + free-slot minimums;
    see *Ranking contract* above — the cross-root tier priority / critical
    override / round-robin ordering are retired by WL-0MTK1ILM2009QYB2).
    Each entry is eligibility re-checked at dispatch time; stale entries are
@@ -437,8 +437,7 @@ agent exits, the pane is closed by the reaper, or the audit ends with no
 recorded result. Those closes are recorded in the rolling dispatch log as
 `entryType: 'pane-close'` entries carrying a `reasonCode`
 (`agent-ended-no-terminal`, `audit-ended-no-result`, `producer-review`,
-`risk-effort-incomplete`, …).  (The `producer-review` reason code is retained
-for a pane whose item is held by the producer.) Before this control, such an item became
+`risk-effort-incomplete`, …). Before this control, such an item became
 re-eligible as soon as the dispatched success-marker was released, so a
 repeatedly failing session could be re-selected on the very next idle cycle
 and burn local-LLM slots in a tight loop.
@@ -511,11 +510,11 @@ consume local-LLM slots across many idle cycles without escalation.
   `dispatchFromCoordination`). The cap is evaluated after the
   duplicate-dispatch marker guard and the in-flight guard, so it never
   bypasses either.
-- **Escalation (AC3).** Reaching the cap applies the producer scheduling
-  hold — the item is assigned to the producer (`wl update <id> --assignee
-  Map`) so it surfaces for human triage. The hold is applied at most once per
-  dispatch cycle, and once held the existing assignee-hold exclusion stops
-  all further automatic dispatch.
+- **Escalation (AC3).** Reaching the cap flags the item
+  `needsProducerReview = true` (`markNeedsProducerReview`, backed by
+  `wl reviewed <id> true`) so it surfaces for human triage. The flag is set
+  at most once per dispatch cycle, and once set the existing global
+  producer-review exclusion stops all further automatic dispatch.
 - **Stage advancement resets (AC4).** Only markers whose dispatched-at
   `stage` equals the item's current stage count. A stage advancement leaves
   the earlier markers at the old stage, so the item gets a fresh budget at
@@ -597,7 +596,7 @@ machine-readable reason:
 | `no-item-id` | The label has no parseable work-item id. |
 | `kind-unknown` | The label carries no recognisable dispatch kind. |
 | `item-terminal` | The item is completed/deleted or `in_review`/`done`. |
-| `producer-hold` | The item is held by the producer (assignee hold; hard exclusion). |
+| `needs-producer-review` | The item is flagged `needsProducerReview === true` (hard exclusion). |
 | `agent-working` | The agent is actively working. |
 | `agent-blocked` | The agent status is `blocked` (never hijacked). |
 | `kind-stale` | The item has already advanced past the pane's dispatched kind. |
@@ -642,8 +641,8 @@ item; the resume always targets the candidate's `paneId`:
 
 A successful resume records a dispatch attempt for `(item, kind)` in the item
 root's rolling dispatch log, so the existing per-item/per-kind attempt cap
-applies to resumes too; the cap is enforced up front and escalates via the
-producer scheduling hold when exhausted. Concurrent resumes of the same
+applies to resumes too; the cap is enforced up front and escalates via
+`needsProducerReview` when exhausted. Concurrent resumes of the same
 `(paneId, itemId)` are prevented by an in-process in-flight guard (a second
 attempt is the neutral `concurrent-resume` skip).
 
@@ -664,7 +663,7 @@ session-only entry cannot be mapped to a pane record and is ignored):
   becomes a candidate **without** waiting for the generic stall threshold (the
   `last-activity`/`stall-threshold` checks are bypassed). Every other safety
   gate still applies — the non-terminal pane-close cooldown, the
-  per-item/per-kind attempt cap, the producer-hold exclusion and the
+  per-item/per-kind attempt cap, the `needsProducerReview` flag and the
   kind-vs-stage (`kind-stale`) check.
 
 A due cooldown candidate is ordered **before** generic stall candidates and is
@@ -716,7 +715,7 @@ split-by-skill), so a resume can never bypass the freeze.
 Each candidate carries the **item's own worklog root**, resolved from the
 pane's `cwd` first and then from the pi session-log path in `agent_session`
 (`defaultStalledPaneRootResolver`). The resume reads the item and its rolling
-log, records the attempt and applies the producer hold against **that** root —
+log, records the attempt and flags producer review against **that** root —
 never the leader's ambient root. When neither `cwd` nor `agent_session`
 resolves to a valid worklog root the pane is **skipped** (fail closed) rather
 than resumed against the wrong database.
@@ -1130,7 +1129,7 @@ negligible cost.
 ### Producer-review gate (WL-0MTIAL65N004T22F)
 
 Every dispatch tier — audit, critical (including its dependency-frontier walk), implement,
-plan, and intake — excludes items held by a non-empty assignee. Classification
+plan, and intake — excludes items with `needsProducerReview === true`. Classification
 (`classifyItemForDispatch`) and every `select*` helper check strict `=== true` only, so
 absent/false/undefined remain dispatchable. Parsers preserve the flag via `Boolean(...)`
 coercion; a missing or unparseable field never crashes the dispatcher. The coordination
@@ -1138,13 +1137,14 @@ leader path equally skips review-gated entries (retaining them for later re-offe
 flag is cleared). The filter report is "no candidate" (not a `wl-error` strike) and the
 no-candidate cooldown is not triggered while review-gated work exists.
 
-**Live Herdr-head thread (WL-0MU72WJ8C0005GIE).** The assignee hold reaches
+**Live Herdr-head thread (WL-0MU72WJ8C0005GIE).** The flag reaches
 `classifyItemForDispatch` on BOTH dispatch paths. The normal scan in
 `dispatchFromHerdrList` builds its `DowntimeItemInfo` field-by-field from the Herdr
-head item, so it must thread the assignee hold explicitly; the offer path
+head item, so it must thread `needsProducerReview` explicitly; the offer path
 (`computeMostImportantItem`) passes the item object directly, so it always honoured
-the hold. Before the threading fix (`022f1b24`) the two paths disagreed and the live
-path auto-dispatched a held item — the regression suite pins the agreement.
+the flag. Before the threading fix (`022f1b24`) the two paths disagreed and the live
+path auto-dispatched a `needsProducerReview: true` item — the regression suite
+(`needsProducerReview === true blocks a non-critical item…`) pins the agreement.
 
 ### Review-queue depth gate — producer review policy (WL-0MT2UQWOR007CYY9; live-path rewire WL-0MTTSWC1X005P4VD)
 
@@ -1237,7 +1237,7 @@ What the contract now guarantees:
    the non-safety filters named in AC1); the pre-dispatch CAS claim still
    serialises concurrent panes.
 2. **Safety gates still block.** The scan applies ONLY the safety gates:
-   a held (non-empty-assignee) candidate is excluded; the code-freeze /
+   `needsProducerReview === true` excludes the candidate; the code-freeze /
    ambiguous split-by-skill rule pauses audit/implement-kind candidates
    while plan/intake/risk-effort prep still dispatches (Q1); per-tier
    free-slot minimums gate the dispatch path; the CAS claim and
@@ -1259,7 +1259,7 @@ What the contract now guarantees:
 (WL-0MUBEZ6PE002WLP4 / F3 WL-0MUBVKXQJ000L8EO).** The unconditional bypass
 above traded starvation for a *duplicate-dispatch window*: a critical item
 whose `status` reverted to `open` at its marker's stage (H5 — an aborted
-`implement.py start` reset, a hold release, a rolled-back
+`implement.py start` reset, a `wl reviewed <id> true` release, a rolled-back
 dispatch) while its dispatch pane was still live was re-selected by the
 critical-first scan, the CAS claim succeeded (the DB genuinely said `open`),
 and a **second pane spawned for the same in-flight item** (H1+H5, confirmed by
@@ -1589,7 +1589,7 @@ in the pane's workspace (`dirHasRecentModifications`, 2-minute window,
 bounded scan), and the count of spawned child processes from
 `herdr pane process-info` (excluding the pane's own foreground
 process-group leader, so an idle agent is not misclassified as having
-children). The work-item stage and producer-hold state are fetched once
+children). The work-item stage and producer-review flag are fetched once
 per pane (`getItemInfo`) and recorded in every
 `CloseReasonSnapshot`/reaper-ledger row (parent AC6).
 
@@ -1637,7 +1637,7 @@ status refresh unchanged at 30s.**
 | No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
-| Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; applies the producer hold and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
+| Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
 | Stalled-work scan | enabled (`downtimeStallScanEnabled`; re-read live; `false` disables the pre-dispatch scan and falls through to normal dispatch, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_SCAN_ENABLED` (`downtime-worker.ts`) |
 | Stalled-work threshold | **5 min** / `300000` ms (`downtimeStallThresholdMs`; minimum continuous not-`working` duration before an in-place resume; clamped to 60 s – 60 min; invalid/missing falls back to the default, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`, `clampDowntimeStallThresholdMs` (`downtime-worker.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
@@ -1893,7 +1893,7 @@ trace.
 - **Same icons as the live views.** The log decides which items appear and
   their order, but a row for an item that still exists in `wl` is rendered
   from the **live work item** (the same data the other Herdr views use), so
-  its status/stage/audit/priority icons are identical to those
+  its status/stage/audit/producer-review/priority icons are identical to those
   views (WL-0MUGLL9SS002E1D2). Only items no longer present in `wl` fall back
   to log-derived metadata: they render the dispatch marker's stage icon and
   show `—` for fields the log does not carry.

@@ -14,7 +14,7 @@ this skill lets a producer review idle panes (with work-item context and a
 log tail) and close a chosen subset.
 
 **Never closes anything without explicit producer approval.** The
-never-close guards (implement panes, `producerHold=true` items, the
+never-close guards (implement panes, `needsProducerReview=true` items, the
 invoking pane, and panes with live child processes) apply universally — to
 both this skill and the automatic reaper.
 
@@ -56,7 +56,7 @@ record per pane:
       "kind": "implement",
       "close": false,
       "reasonCode": "implement",
-      "reasonSnapshot": { "producerHold": false, "isInvokingPane": false },
+      "reasonSnapshot": { "needsProducerReview": false, "isInvokingPane": false },
       "sessionTail": ["...last 20 session lines..."],
       "success": true
     }
@@ -83,11 +83,11 @@ record per pane:
 2. **Classify (AC2).** Shell out to the shared bridge with
    `--json --dry-run --workspace <id>`. Fail closed on any bridge error.
 3. **Report (AC3).** Render `## Idle` and `## Active` tables (pane id, tab,
-   title, work-item id, `producerHold`, reason).
+   title, work-item id, `needsProducerReview`, reason).
 4. **Log tails (AC4).** For each idle pane, print the last 20 log lines under
    the heading `<pane title> Needs Review <true|false>`.
 5. **Recommend (AC5).** Build the "Recommended to close" table, excluding the
-   invoking pane (`HERDR_PANE_ID`) and any pane with `producerHold=true`.
+   invoking pane (`HERDR_PANE_ID`) and any pane with `needsProducerReview=true`.
 6. **Approve (AC6).** Prompt `yes` / `select N,M` / `no`. Ambiguity or `no`
    closes nothing. The invoking pane is never closed.
 7. **Re-verify and close (AC7).** Immediately before closing, re-read the pane
@@ -128,7 +128,7 @@ cd "${CONTEXTHUB_DIR:-$HOME/projects/ContextHub}/packages/herdr" && npm run buil
 - **Shared reaper for closure** — the bridge uses `createHerdrReaperDeps` and
   `runReaper` for pane enumeration and classification.
 - **Never-close guards** (universal): `implement` panes,
-  `producerHold=true` items, the invoking pane, and panes with live
+  `needsProducerReview=true` items, the invoking pane, and panes with live
   child processes.
 - **Approval gate is mandatory** — nothing is closed unattended.
 - **Workspace-scoped only** — no cross-workspace roll-up.
@@ -143,7 +143,7 @@ python3 -m pytest tests/ -q
 ```
 
 Offline fixture tests cover workspace resolution, classification mapping,
-marker-mid-message rejection, work-item-id parsing, `producerHold`
+marker-mid-message rejection, work-item-id parsing, `needsProducerReview`
 mapping, recommendation rules, and approval gating (no approval → zero close
 calls).
 

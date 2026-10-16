@@ -62,8 +62,7 @@ completed/in_review queue and takes one of three actions depending on queue
 state:
 
 - **Sparse queue (< 10 items):** Finds the next ready work item via `wl next`
-  and holds it for the producer (assigns it to the producer-hold identity,
-  the assignee hold that replaced the removed producer-review flag).
+  and flags it for producer review (`needsProducerReview: true`).
 - **Full queue (>= 10 items):** Finds the first item (by `sortIndex`) that
   does **not** have a valid audit result ("Ready to close: Yes") and runs
   the audit runner on it.
@@ -90,8 +89,8 @@ After passing the completion-detection gate above:
    to count items.
 3. **If count < 10 (sparse queue):**
    - Call `wl next --json` to find the next ready work item.
-   - If found, hold it for the producer via `wl update <id> --assignee Map`.
-   - Report which item was held.
+   - If found, set `needsProducerReview: true` via `wl update <id> --needs-producer-review true`.
+   - Report which item was flagged.
    - If no item returned by `wl next`, report gracefully.
 4. **If count >= 10 (full queue):**
    - Sort items by `sortIndex` ascending.
@@ -136,7 +135,8 @@ Human-readable text printed to stdout (displayed in the Pi chat interface).
 
 ## Related Work Items
 
-- WL-0MV85WGIT004PHRC — re-homed the producer hold onto the assignee
+- WL-0MLQ0ZHQE0JBX8Y6 — TUI filter shortcut for needsProducerReview
+- WL-0MLGTWT4S1X4HDD9 — `--needs-producer-review` filter for `wl list`
 - WL-0MR6XG7RX008AF2W — Closing question in audit skill output
 - WL-0MLYTKTI20V31KYW — Structured audit report format
 - WL-0MM347F9D1EGKLSQ — sortIndex selection with batch mode

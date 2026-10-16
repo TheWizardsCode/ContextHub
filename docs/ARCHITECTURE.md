@@ -209,7 +209,7 @@ auto-sync) does not deadlock.
 
 The locked commands are: `wl update`; `wl comment add/update/delete`;
 `wl audit-set`; `wl close`; `wl delete`; `wl dep add/rm`; `wl create`;
-`wl interview`; `wl audit-waive/unwaive`; `wl re-sort`; the
+`wl reviewed`; `wl interview`; `wl audit-waive/unwaive`; `wl re-sort`; the
 writing `wl doctor` subcommands; `wl github import`; `wl github push`;
 `wl import`; `wl init`; and `wl migrate`. See
 [docs/design/incremental-sync.md § 9](design/incremental-sync.md#9-concurrency--existing-protections)

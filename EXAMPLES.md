@@ -77,10 +77,10 @@ worklog update WI-0J8L1JQ3H8ZQ2K6F -P null
 # Add tags
 worklog update WI-0J8L1JQ3H8ZQ2K6D --tags "urgent,reviewed"
 
-# Hold the item for the producer (assignee scheduling hold)
-worklog update WI-0J8L1JQ3H8ZQ2K6D --assignee Map
-# Release the hold
-worklog update WI-0J8L1JQ3H8ZQ2K6D --assignee ""
+# Toggle needs-producer-review flag
+worklog reviewed WI-0J8L1JQ3H8ZQ2K6D
+# Set needs-producer-review flag explicitly
+worklog reviewed WI-0J8L1JQ3H8ZQ2K6D true
 ```
 
 ### Audit Operations

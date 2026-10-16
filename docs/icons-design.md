@@ -21,7 +21,7 @@
 > help screen (pressing `?`) renders an **Icons** legend explaining every glyph
 > shown in a work-item row. The legend is grouped by the icon **category**
 > (`Status`, `Stage`, `Priority`, `Epic`, `Risk`, `Effort`, `Audit`,
-> `Agent`, `Coverage`) under a heading per group, with each
+> `Producer review`, `Agent`, `Coverage`) under a heading per group, with each
 > group's icons on a single line. The category name prefix is removed from each
 > meaning because the group heading already names it (e.g. `Status: open — not
 > started` renders as `open — not started` under **Status**). The on-screen
@@ -93,14 +93,9 @@ When an audit result is `readyToClose: true` but the audit timestamp is stale
 in column 2 instead of the stage icon. This preserves the information that
 audit passed even after subsequent minor updates made the audit appear stale.
 
-Note: an assignee hold (e.g. applying the producer scheduling hold) does **not**
-move `updatedAt` (WL-0MSN6ZCTN0027U2R), so a previously fresh audit stays fresh — the
-stale-passed icon is only reached by genuine content changes. The
-**status-neutral audit-tier claim** (WL-0MV85WCJJ0087VMP) reinforces this: the
-herdr audit tier claims a `completed`/`in_review` item by writing only the
-assignee (`--if-assignee ""` CAS), never `--status`/`--stage`, so the stage
-bucket and its icon never flicker to a review-queue hold nor an
-`in-progress` bucket while the audit is dispatched.
+Note: flag-only flips of `needsProducerReview` do **not** move `updatedAt`
+(WL-0MSN6ZCTN0027U2R), so a previously fresh audit stays fresh — the
+stale-passed icon is only reached by genuine content changes.
 
 The stale-passed icon only applies to `in_review` items. The regular audit
 icons (✅ / ❌ / ❔) are used for fresh audits, and the stage icon (🔍) is
@@ -116,13 +111,14 @@ The stale-passed icon was chosen to be visually distinct from:
 and its green colour still conveys a positive (passed) result even when the
 check mark is not shown.
 
-## 3b. Producer Hold (retired)
+## 3b. Producer Review Flag Icons
 
-> The producer-review flag was removed (WL-0MV85WGIT004PHRC). The producer
-> scheduling hold is expressed as the item's **assignee** (`wl update <id>
-> --assignee Map`); held in_review items rank first in the review queue via
-> the grouping predicate (bucket 1 in `packages/herdr/src/grouping.ts`) — no
-> dedicated icon column is rendered.
+| State                    | Icon   | Text Fallback       | Accessible Label              |
+|--------------------------|--------|---------------------|-------------------------------|
+| Needs producer review    | `❌`   | `[NEEDS_PRODUCER]`  | "Needs producer review"       |
+| Producer review complete | `✅`   | `[PRODUCER_OK]`     | "Producer review complete"    |
+
+The producer review flag is always shown in the third icon column of the TUI selection list, replacing the audit result icon for all stages.
 
 ## 4. Epic Icons
 
@@ -349,6 +345,7 @@ old herdr copy had diverged, the shared module keeps the *herdr* choices:
 | Epic | `⊙` | `🏰` |
 | Risk critical | `💥` | `🚨` (key `severe`) |
 | Effort levels | `🔹 🔷 🔶 💠` | `🐜 🐇 🐕 🐘 🐋` |
+| Producer review undefined | `''` (nothing shown) | `✅` (defaults to complete) |
 
 ### 13.2 CLI List Rendering
 
@@ -359,7 +356,8 @@ Icons are prepended before the title in CLI list output:
 [OPEN][PRODUCER_OK] Set up CI pipeline  ← when fallback
 ```
 
-> The Pi-based TUI browse list (which rendered status/stage/epic icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
+> The Pi-based TUI browse list (which rendered status/stage/producer-review/
+> epic icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
 > has been removed — work item browsing is now provided by the Herdr plugin.
 > `src/theme.ts` remains the CLI's self-contained icon source; the Herdr
 > plugin imports from the shared `@worklog/shared/icons` module.
@@ -377,11 +375,8 @@ column aligns across rows, and the columns are (left to right):
 | 1 | Agent status | Fixed-width reserved slot (`AGENT_SLOT_WIDTH`) |
 | 2 | Status icon | `statusIcon` |
 | 3 | Stage / audit icon | `stageDisplayIcon` (audit-aware for `in_review`) |
-| 4 | Epic icon | Optional, when `issueType === 'epic'` |
-
-> The producer-review icon column was removed with the flag
-> (WL-0MV85WGIT004PHRC); the producer hold is visible through the review
-> queue ordering (grouping bucket 1), not a dedicated column.
+| 4 | Producer review flag | `needsProducerReviewIcon` |
+| 5 | Epic icon | Optional, when `issueType === 'epic'` |
 
 When the priority is missing the priority column is empty; the fixed-width
 padding keeps the remaining columns aligned. In `noIcons` mode the priority

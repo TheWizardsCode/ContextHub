@@ -250,22 +250,7 @@ the primary content gate instead of the 60 s time gate
 `audit_runner._compute_content_fingerprint` (skipped when the audit skill is not
 installed).
 
-**Status-neutral audit-tier claim (WL-0MV85WCJJ0087VMP).** The herdr audit
-tier claims a `completed`/`in_review` item `status-neutrally`: it writes ONLY
-the assignee via a CAS-guarded update
-(`wl update <id> --assignee <agent> --if-status completed --if-stage in_review
---if-assignee ""`), never `--status`/`--stage`. The item therefore reads back
-`completed`/`in_review` throughout the dispatch — no `in-progress`/`in_review`
-hybrid is ever created — so the audit runner's pre-audit capture and
-failure-restore are exact, and no `_STATUS_STAGE_COMPAT` coercion to
-`plan_complete` is reachable for review-queue items (root cause
-WL-0MV7W77AY005MGBL). The claim carries the **assignee-hold** semantics: a
-non-empty assignee is an intentional hold from auto-dispatch
-(`--if-assignee ""` fails stale on it), the producer hold is the reserved
-sentinel `Map` (`wl update <id> --assignee Map`), and clearing the assignee
-releases the hold.
-
-Applying an assignee hold does not bump `updatedAt`
+Flag-only flips of `needsProducerReview` do not bump `updatedAt`
 (WL-0MSN6ZCTN0027U2R), and neither do comment writes (WL-0MUBVH6JM0093KVM):
 comment create/update/delete bump `activityAt` only. `updatedAt` therefore
 changes only when tracked *content* changes (or an audit is persisted), so a
