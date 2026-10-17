@@ -169,6 +169,7 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
 
     // idleAllSlotsFree: 4 of 4 slots free, total 4 → forwarded verbatim so
     // the spawn boundary never has to reach back into the worker.
+    // Observable contract: spawnAgentPane boundary call
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.any(String),
       expect.objectContaining({
@@ -401,6 +402,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     const result = await worker.tick();
 
     expect(result.dispatched).toBe(true);
+    // Observable contract: spawnAgentPane boundary call
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       '/skill:refactor',
       expect.objectContaining({ paneName: 'Downtime /skill:refactor' }),
@@ -849,6 +851,7 @@ describe('three-strike rule on CLI errors (createDowntimeWorker)', () => {
     expect(worker.paused).toBe(true);
     expect(worker.errorStrikes).toBe(0);
     expect(deps.recordError).toHaveBeenCalledTimes(3);
+    // Observable contract: recordError boundary dep — three-strike bookkeeping is the observable failure contract
     expect(deps.recordError).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: '/repo' }),
     );

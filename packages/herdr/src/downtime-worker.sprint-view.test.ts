@@ -110,6 +110,7 @@ describe('critical-first scan on Herdr-head path (WL-0MU6UL3XY001M3VT)', () => {
         expect(outcome.dispatched).toBe(true);
         expect(outcome.kind).toBe('implement');
         expect(outcome.candidate?.id).toBe('CR-1');
+        // Observable contract: claimItem boundary CAS call
         expect(deps.claimItem).toHaveBeenCalledWith(
           'CR-1', { status: 'open', stage: 'plan_complete' }, root,
         );
@@ -341,6 +342,7 @@ describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)'
       expect(outcome.kind).toBe('implement');
       expect(outcome.candidate?.id).toBe('NPR-ALLOWED');
       // The gated item was never claimed.
+      // Observable contract: negative boundary assertion — proves claimItem NOT called for blocked items; unique NOP coverage
       expect(deps.claimItem).not.toHaveBeenCalledWith('NPR-GATED', expect.any(Object), '/repo');
     });
 
@@ -355,6 +357,7 @@ describe('Herdr-head dispatch threads needsProducerReview (WL-0MU72WJ8C0005GIE)'
       expect(outcome.dispatched).toBe(true);
       expect(outcome.kind).toBe('intake');
       expect(outcome.candidate?.id).toBe('NPR-IDEA-ALLOWED');
+      // Observable contract: negative boundary assertion — proves claimItem NOT called for blocked items; unique NOP coverage
       expect(deps.claimItem).not.toHaveBeenCalledWith('NPR-IDEA-GATED', expect.any(Object), '/repo');
     });
 
@@ -834,6 +837,7 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
 
       await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 20 });
 
+      // Observable contract: getHerdrListHead boundary dep — count arg proves effective browseItemCount is forwarded
       expect(getHerdrListHead).toHaveBeenCalledWith('/repo', 20);
     });
 
@@ -855,6 +859,7 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
 
       await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+      // Observable contract: getHerdrListHead boundary dep — count arg proves effective browseItemCount is forwarded
       expect(getHerdrListHead).toHaveBeenCalledWith('/repo', 20);
     });
 
@@ -864,6 +869,7 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
 
       await computeMostImportantItem(deps, '/repo', Date.now(), 33);
 
+      // Observable contract: getHerdrListHead boundary dep — count arg proves effective browseItemCount is forwarded
       expect(getHerdrListHead).toHaveBeenCalledWith('/repo', 33);
     });
 
@@ -874,7 +880,9 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
       await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 15 });
       await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', browseItemCount: 40 });
 
+      // Observable contract: Nth ordering assertion — proves browseItemCount re-read per dispatch cycle; outcome cannot prove the per-cycle sequence
       expect(getHerdrListHead).toHaveBeenNthCalledWith(1, '/repo', 15);
+      // Observable contract: Nth ordering assertion — proves browseItemCount re-read per dispatch cycle; outcome cannot prove the per-cycle sequence
       expect(getHerdrListHead).toHaveBeenNthCalledWith(2, '/repo', 40);
     });
   });
@@ -900,6 +908,7 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
       // The critical-only extension still consulted the SAME ranking path
       // (never a second ranking).
       expect(getHerdrListHead).toHaveBeenCalledTimes(2);
+      // Observable contract: Nth ordering assertion — proves browseItemCount re-read per dispatch cycle; outcome cannot prove the per-cycle sequence
       expect(getHerdrListHead).toHaveBeenNthCalledWith(
         2,
         '/repo',
@@ -1048,6 +1057,7 @@ describe('sprint-view-only dispatch window (WL-0MUNS8X97007C9H9; supersedes WL-0
 
       expect(extended.map((i) => i.id)).toEqual(['C', 'E']);
       expect(extended.every((i) => i.priority === 'critical')).toBe(true);
+      // Observable contract: `dep` injected boundary adapter — proves extended-window count forwarded
       expect(dep).toHaveBeenCalledWith('/repo', 1 + DOWNTIME_DISPATCH_EXTEND_MAX);
     });
 
@@ -1149,6 +1159,7 @@ describe('dispatched success-marker staleness on the live path (WL-0MU6UL0RJ008I
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('PLN-1');
+    // Observable contract: spawnAgentPane boundary call
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan PLN-1'),
       expect.anything(),

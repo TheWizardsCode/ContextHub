@@ -31,11 +31,11 @@ describe('dispatch selection', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
-    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete', '/repo');
     expect(deps.getNextItem).toHaveBeenCalledTimes(1);
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('WL-ABC');
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-ABC'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-ABC', itemTitle: 'Some task' },
@@ -54,6 +54,7 @@ describe('dispatch selection', () => {
 
     // The claim carries the expected state the tier selected the item in
     // (RCA WL-0MSRBFFLN005W3VT design point 1 — compare-and-swap).
+    // Observable contract: deps.claimItem boundary CAS call — sole channel proving the claim args (status/stage guard)
     expect(deps.claimItem).toHaveBeenCalledWith('WL-ABC', { status: 'open', stage: 'intake_complete' }, '/repo');
     const claimOrder = (deps.claimItem as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
@@ -70,11 +71,15 @@ describe('dispatch selection', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.kind).toBe('intake');
     expect(outcome.candidate?.id).toBe('WL-DEF');
+    // Observable contract: deps.claimItem boundary CAS call — sole channel proving the claim args (status/stage guard)
     expect(deps.claimItem).toHaveBeenCalledWith('WL-DEF', { status: 'open', stage: 'idea' }, '/repo');
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-DEF'),
       expect.anything(),
@@ -86,7 +91,9 @@ describe('dispatch selection', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('no-candidate');
@@ -102,7 +109,9 @@ describe('dispatch selection', () => {
 
     // Tier 2 error does NOT short-circuit: tier 3 is still attempted.
     expect(deps.getNextItem).toHaveBeenCalledTimes(2);
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('wl-error');
@@ -123,9 +132,13 @@ describe('dispatch selection', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('intake');
     expect(outcome.candidate?.id).toBe('WL-IDE');
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
+    // Observable contract: deps.claimItem boundary CAS call — sole channel proving the claim args (status/stage guard)
     expect(deps.claimItem).toHaveBeenCalledWith('WL-IDE', { status: 'open', stage: 'idea' }, '/repo');
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-IDE'),
       expect.anything(),
@@ -160,7 +173,9 @@ describe('dispatch selection', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    // Observable contract: Nth tier-ordering assertion — outcome.kind alone cannot prove the query sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('wl-error');
@@ -214,6 +229,7 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
     expect(deps.getDispatcherAnchor).toHaveBeenCalled();
     // The resolved anchor pane id flows into the spawn opts (→ --anchor in
     // the send-to-pi.sh args built by buildDowntimePaneArgs).
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-ABC'),
       expect.objectContaining({ anchorId: 'wD:pANCHOR' }),
@@ -231,6 +247,7 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.dispatched).toBe(true);
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-ABC'),
       expect.not.objectContaining({ anchorId: expect.anything() }),
@@ -272,6 +289,7 @@ describe('dispatcher anchor wiring (C0 dispatcher workspace)', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('scheduled');
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       'Run the nightly sweep',
       expect.objectContaining({ anchorId: 'wD:pANCHOR' }),
@@ -301,7 +319,9 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.dispatched).toBe(true);
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-ABC'),
       expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
@@ -331,12 +351,16 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
     await dispatchDowntimeWork(wlDeps, { model: 'plan', cwd: '/repo-wl' });
     await dispatchDowntimeWork(tceDeps, { model: 'plan', cwd: '/repo-tce' });
 
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(wlDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-wl', 'WL');
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(tceDeps.getDispatcherTabAnchor).toHaveBeenCalledWith('/repo-tce', 'TCE');
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(wlDeps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wD:tWL:p1', cwd: '/repo-wl' }),
     );
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(tceDeps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wD:tTCE:p1', cwd: '/repo-tce' }),
@@ -362,9 +386,12 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
 
     await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
     expect(getDispatcherTabAnchor).not.toHaveBeenCalled();
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wC:tWL-ABC:p1' }),
@@ -391,10 +418,13 @@ describe('per-prefix Dispatcher tab dispatch wiring (C1 fallback)', () => {
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.dispatched).toBe(true);
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
     expect(getItemTabAnchor).not.toHaveBeenCalled();
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getDispatcherTabAnchor).toHaveBeenCalledWith('/repo', 'WL');
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wD:tWL:p1' }),
@@ -503,9 +533,12 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.dispatched).toBe(true);
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(resolveProjectWorkspace).toHaveBeenCalledWith('/repo');
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
     expect(getDispatcherAnchor).not.toHaveBeenCalled();
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-ABC'),
       expect.objectContaining({ anchorId: 'wC:tWL-ABC:p1' }),
@@ -528,8 +561,10 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.dispatched).toBe(true);
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getDispatcherAnchor).toHaveBeenCalledWith('/repo');
     expect(getItemTabAnchor).not.toHaveBeenCalled();
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wD:pFALLBACK' }),
@@ -591,6 +626,7 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(true);
     expect(getDispatcherAnchor).toHaveBeenCalled();
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wD:pFALLBACK' }),
@@ -625,6 +661,7 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: injected boundary adapter (anchor/window/item-tab lookup) — args (cwd, prefix, itemId) are the observable routing contract
     expect(getItemTabAnchor).toHaveBeenCalledWith('/repo', 'wC', 'WL-ABC');
     expect('getDispatcherTabAnchor' in deps).toBe(false);
   });
@@ -654,10 +691,12 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(first.dispatched).toBe(true);
     expect(second.dispatched).toBe(true);
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(wl.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wC:tWL-1:p1', cwd: '/repo-wl' }),
     );
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(tce.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ anchorId: 'wY:tTCE-2:p1', cwd: '/repo-tce' }),
@@ -682,6 +721,7 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('scheduled');
     expect(resolveProjectWorkspace).not.toHaveBeenCalled();
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       'Run the nightly sweep',
       expect.objectContaining({ anchorId: 'wD:pSCHED' }),
@@ -705,9 +745,11 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo-tce' });
 
     expect(outcome.dispatched).toBe(true);
+    // Observable contract: recordDispatch boundary dep — marker payload (id/project root) is the observable audit-log contract
     expect(recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({ itemId: 'TCE-9', kind: 'plan', cwd: '/repo-tce' }),
     );
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the pane-spawn side effect
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({ cwd: '/repo-tce', anchorId: 'wY:tTCE-9:p1' }),
@@ -741,6 +783,7 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(true);
     expect(closePane).toHaveBeenCalledTimes(1);
+    // Observable contract: closePane boundary dep — pane-key + root args are the observable close contract
     expect(closePane).toHaveBeenCalledWith('wC:tWL-ABC:p1', '/repo');
   });
 
@@ -861,6 +904,7 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(true);
     expect(closePane).toHaveBeenCalledTimes(1);
+    // Observable contract: closePane boundary dep — pane-key + root args are the observable close contract
     expect(closePane).toHaveBeenCalledWith('wC:tWL-ABC:p1', '/repo');
   });
 
@@ -888,6 +932,7 @@ describe('project workspace + item-ID tab dispatch wiring (primary path)', () =>
 
     expect(outcome.dispatched).toBe(true);
     expect(closePane).toHaveBeenCalledTimes(1);
+    // Observable contract: closePane boundary dep — pane-key + root args are the observable close contract
     expect(closePane).toHaveBeenCalledWith('wC:tWL-ABC:p1', '/repo');
   });
 

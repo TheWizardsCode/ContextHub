@@ -167,6 +167,7 @@ describe('dispatch log: selection path/reason + pane id enrichment (WL-0MUBVL251
 
     await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: recordDispatch boundary dep — selectionPath/selectionReason payload is the observable audit-log contract
     expect(deps.recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         itemId: 'CR-SEL',
@@ -184,6 +185,7 @@ describe('dispatch log: selection path/reason + pane id enrichment (WL-0MUBVL251
 
     await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: recordDispatch boundary dep — selectionPath/selectionReason payload is the observable audit-log contract
     expect(deps.recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         itemId: 'IMP-SEL',

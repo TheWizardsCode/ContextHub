@@ -47,7 +47,9 @@ describe('dispatch audit tier', () => {
     expect(outcome.kind).toBe('audit');
     expect(outcome.candidate?.id).toBe('WL-AUD');
     expect(deps.getNextItem).not.toHaveBeenCalled();
+    // Observable contract: deps.claimItem boundary CAS call — sole channel proving the claim args
     expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' }, '/repo');
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit WL-AUD'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-AUD', itemTitle: 'Audit me' },
@@ -81,7 +83,9 @@ describe('dispatch audit tier', () => {
     expect(outcome.kind).toBe('intake');
     expect(outcome.candidate?.id).toBe('WL-IDE');
     expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
+    // Observable contract: Nth tier-ordering (audit→plan→intake fallback) — outcome.kind alone cannot prove sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    // Observable contract: Nth tier-ordering (plan→intake fallback) — retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
   });
 
@@ -171,15 +175,19 @@ describe('audit tier interim freshness re-check (WL-0MT8KSTOE00871E7)', () => {
     expect(outcome.candidate?.id).toBe('WL-PLN');
     // No AUDIT dispatch side-effects: the audit candidate is never claimed,
     // no audit comment/marker, no audit spawn.
+    // Observable contract: deps.claimItem boundary CAS call — sole channel proving the claim args
     expect(deps.claimItem).toHaveBeenCalledWith('WL-PLN', { status: 'open', stage: 'intake_complete' }, '/repo');
+    // Observable contract: negative boundary assertion — proves recordDispatch NOT called with the downgraded marker; unique no-op coverage
     expect(deps.recordDispatch).not.toHaveBeenCalledWith(
       expect.objectContaining({ itemId: 'WL-AUD', kind: 'audit' }),
     );
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-PLN'),
       expect.any(Object),
     );
     // The re-check was performed exactly once on the candidate.
+    // Observable contract: hasFreshAudit boundary dep — sole channel proving the interim-audit check ran on the right item
     expect(deps.hasFreshAudit).toHaveBeenCalledWith('WL-AUD', '/repo');
   });
 
@@ -260,8 +268,10 @@ describe('audit tier interim freshness re-check (WL-0MT8KSTOE00871E7)', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('audit');
+    // Observable contract: deps.claimItem boundary CAS call — sole channel proving the claim args
     expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', { status: 'completed', stage: 'in_review' }, '/repo');
     expect(deps.recordDispatch).toHaveBeenCalledTimes(1); // marker/comment written
+    // Observable contract: deps.spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit WL-AUD'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-AUD', itemTitle: 'Audit me' },
@@ -331,6 +341,7 @@ describe('dispatch active-audit single-flight (parent WL-0MT3PHW4I002SNOV)', () 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     // The single-flight check runs first, then the candidate lookup.
+    // Observable contract: getActiveAudit boundary dep — cwd arg is the observable audit-state query contract
     expect(deps.getActiveAudit).toHaveBeenCalledWith('/repo');
     expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
     expect(outcome.dispatched).toBe(true);
@@ -414,6 +425,7 @@ describe('dispatch active-audit single-flight (parent WL-0MT3PHW4I002SNOV)', () 
 
       expect(outcome.kind).toBe('implement');
       expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+      // Observable contract: stderrSpy observable output stream — sole channel for the skipped/saturated reason log (producer Q1-A/plan-A)
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('Downtime audit tier skipped: audit-in-flight'),
       );
@@ -542,6 +554,7 @@ describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: getActiveAudit boundary dep — cwd arg observable; host-wide skip behaviour
     expect(deps.getActiveAudit).toHaveBeenCalledWith('/repo');
     expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(outcome.dispatched).toBe(true);
@@ -604,15 +617,19 @@ describe('dispatch host-wide audit saturation (WL-0MUIVE0YG000UVIA)', () => {
 
       expect(outcome.kind).toBe('implement');
       expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
+      // Observable contract: stderrSpy observable output stream — sole channel for the skipped/saturated reason log (producer Q1-A/plan-A)
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('Downtime audit tier skipped: audit-host-saturated'),
       );
+      // Observable contract: stderrSpy observable output stream — sole channel for the skipped/saturated reason log (producer Q1-A/plan-A)
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('concurrentAudits=1'),
       );
+      // Observable contract: stderrSpy observable output stream — sole channel for the skipped/saturated reason log (producer Q1-A/plan-A)
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('contentionQueueDepth=0'),
       );
+      // Observable contract: stderrSpy observable output stream — sole channel for the skipped/saturated reason log (producer Q1-A/plan-A)
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('freeSlots=2'),
       );
@@ -869,6 +886,7 @@ describe('dispatch audit trail', () => {
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('claim-rolled-back');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // Observable contract: rollbackClaim boundary dep — sole channel proving the rollback CAS args
     expect(deps.rollbackClaim).toHaveBeenCalledWith(
       'WL-ABC',
       { status: 'open', stage: 'intake_complete' },
@@ -890,6 +908,7 @@ describe('dispatch audit trail', () => {
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('claim-rolled-back');
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // Observable contract: rollbackClaim boundary dep — sole channel proving the rollback CAS args
     expect(deps.rollbackClaim).toHaveBeenCalledWith(
       'WL-ABC',
       { status: 'open', stage: 'intake_complete' },
@@ -1045,6 +1064,7 @@ describe('dispatch CAS claim race', () => {
     // A failure trace is appended so the audit log distinguishes
     // "attempted" from "opened" (AC2) — it never logs success for a pane
     // that never appeared.
+    // Observable contract: recordDispatchFailure boundary dep — failure-trace payload is the observable recovery contract
     expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
       expect.objectContaining({
         itemId: 'WL-ABC',
@@ -1070,6 +1090,7 @@ describe('dispatch CAS claim race', () => {
     expect(outcome.reason).toBe('spawn-failed');
     expect(outcome.exitCode).toBe(1);
     // The failure trace carries the exit code for the audit log (AC2).
+    // Observable contract: recordDispatchFailure boundary dep — failure-trace payload is the observable recovery contract
     expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
       expect.objectContaining({ itemId: 'WL-ABC', kind: 'plan', exitCode: 1 }),
     );
@@ -1090,9 +1111,11 @@ describe('dispatch CAS claim race', () => {
     expect(outcome.reason).toBe('spawn-failed');
     // The failure trace is preserved AND the claim is rolled back to the
     // tier's pre-claim state — the item returns to the selectable backlog.
+    // Observable contract: recordDispatchFailure boundary dep — failure-trace payload is the observable recovery contract
     expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
       expect.objectContaining({ itemId: 'WL-ABC', kind: 'plan', error: 'ENOENT: send-to-pi.sh' }),
     );
+    // Observable contract: rollbackClaim boundary dep — sole channel proving the rollback CAS args
     expect(deps.rollbackClaim).toHaveBeenCalledWith(
       'WL-ABC',
       { status: 'open', stage: 'intake_complete' },
@@ -1116,6 +1139,7 @@ describe('dispatch CAS claim race', () => {
     // The audit tier's pre-claim state is completed/in_review, NOT open —
     // rolling back to `open` would silently move the item out of the audit
     // queue (WL-0MT32F908002YFFA AC1/AC2).
+    // Observable contract: rollbackClaim boundary dep — sole channel proving the rollback CAS args
     expect(deps.rollbackClaim).toHaveBeenCalledWith(
       'WL-AUD',
       { status: 'completed', stage: 'in_review' },

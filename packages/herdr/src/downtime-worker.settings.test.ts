@@ -89,6 +89,7 @@ describe('endpoint failures and poller', () => {
     const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
     const poller = createDowntimePoller('http://proxy:8000', fetcher);
     await poller.poll();
+    // Observable contract: fetcher injected boundary adapter — URL arg is the sole observable channel for URL construction (producer plan-A)
     expect(fetcher).toHaveBeenCalledWith('http://proxy:8000/llama/local/status', expect.anything());
   });
 
@@ -96,6 +97,7 @@ describe('endpoint failures and poller', () => {
     const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
     const poller = createDowntimePoller('http://proxy:8000/', fetcher);
     await poller.poll();
+    // Observable contract: fetcher injected boundary adapter — URL arg is the sole observable channel for URL construction (producer plan-A)
     expect(fetcher).toHaveBeenCalledWith('http://proxy:8000/llama/local/status', expect.anything());
   });
 
