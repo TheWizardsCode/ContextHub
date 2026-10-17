@@ -150,6 +150,49 @@ async function waitForClient(
   return client;
 }
 
+/**
+ * Poll a predicate until it is true or the timeout elapses — never wait a
+ * fixed interval for async work to land. The event → render round-trip is
+ * microtask-scheduled after socket data arrives, so a fixed 100 ms sleep is
+ * flaky under heavy concurrent load (WL-0MVBO2AAE0067XOI).
+ */
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 5_000,
+  description = 'condition',
+): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(`timed out after ${timeoutMs}ms waiting for ${description}`);
+    }
+    await sleep(10);
+  }
+}
+
+/**
+ * Wait until the captured TUI output satisfies `predicate`, polling instead
+ * of sleeping a fixed interval. Positive checks (`toContain`) must not race
+ * the microtask-scheduled agent-event render; negative checks must not pass
+ * before the pruning render has landed (WL-0MVBO2AAE0067XOI).
+ */
+async function waitForWrites(
+  predicate: (captured: string[]) => boolean,
+  timeoutMs = 5_000,
+  description = 'TUI output condition',
+): Promise<void> {
+  const start = Date.now();
+  while (!predicate(writes)) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(
+        `timed out after ${timeoutMs}ms waiting for ${description}; last output: ` +
+          JSON.stringify(writes.join('').slice(-200)),
+      );
+    }
+    await sleep(10);
+  }
+}
+
 const GREEN_CIRCLE = '\u{1F7E2}'; // 🟢 working
 const RED_CIRCLE = '\u{26D4}'; // ⛔ blocked
 const WHITE_CIRCLE = '\u{26AA}'; // ⚪ idle
@@ -207,7 +250,9 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       event: 'pane_agent_status_changed',
       data: { pane_id: 'w3:p99', agent_status: 'working' },
     });
-    await sleep(100);
+    // Poll, never fixed-sleep: the event → render round-trip is
+    // microtask-scheduled, so a fixed sleep is flaky under load.
+    await waitForWrites((w) => w.join('').includes(GREEN_CIRCLE), 5_000, 'GREEN_CIRCLE after working event');
 
     const output = writes.join('');
     expect(output).toContain(GREEN_CIRCLE);
@@ -249,7 +294,10 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       event: 'pane_agent_status_changed',
       data: { pane_id: 'w3:p99', agent_status: 'blocked' },
     });
-    await sleep(100);
+    // Poll, never fixed-sleep: the icon flip is microtask-scheduled after
+    // the socket event arrives, so a fixed sleep races the render under
+    // load (WL-0MVBO2AAE0067XOI).
+    await waitForWrites((w) => w.join('').includes(RED_CIRCLE), 5_000, 'RED_CIRCLE after blocked event');
 
     expect(writes.join('')).toContain(RED_CIRCLE);
 
@@ -287,14 +335,20 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       event: 'pane_agent_status_changed',
       data: { pane_id: 'w3:p99', agent_status: 'working' },
     });
-    await sleep(100);
+    await waitForWrites((w) => w.join('').includes(GREEN_CIRCLE), 5_000, 'GREEN_CIRCLE after working event');
     expect(writes.join('')).toContain(GREEN_CIRCLE);
 
-    // A pane_closed event prunes → icon clears.
+    // A pane_closed event prunes → icon clears. Only inspect output
+    // produced AFTER the event: wait until a fresh render landed past the
+    // mark and confirm the post-event output no longer carries the icon.
+    const paneClosedMark = writes.length;
     client!.pushEvent({ event: 'pane_closed', data: { pane_id: 'w3:p99' } });
-    await sleep(100);
-    writes.length = 0; // only inspect output produced AFTER the event
-    expect(writes.join('')).not.toContain(GREEN_CIRCLE);
+    await waitForWrites(
+      (w) => w.length > paneClosedMark && !w.slice(paneClosedMark).join('').includes(GREEN_CIRCLE),
+      5_000,
+      'GREEN_CIRCLE cleared after pane_closed',
+    );
+    expect(writes.slice(paneClosedMark).join('')).not.toContain(GREEN_CIRCLE);
 
     await subscriber.close();
     await mockServer.stop();
@@ -331,7 +385,8 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
     // (WL-0MVAS988R008PNH6: herdr accepts one events.subscribe per
     // connection), so the status event is pushed on the CURRENT client.
     client!.pushEvent({ event: 'pane_agent_detected', data: { pane_id: 'w5:p55' } });
-    await sleep(100);
+    // Poll, never fixed-sleep: the re-read is async (event → tracker).
+    await waitFor(() => tracker.getPaneId('WL-LATE') === 'w5:p55', 5_000, 'late association re-read');
 
     // The association is now visible to this instance.
     expect(tracker.getPaneId('WL-LATE')).toBe('w5:p55');
@@ -343,7 +398,7 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       event: 'pane_agent_status_changed',
       data: { pane_id: 'w5:p55', agent_status: 'idle' },
     });
-    await sleep(100);
+    await waitForWrites((w) => w.join('').includes(WHITE_CIRCLE), 5_000, 'WHITE_CIRCLE after idle event');
     expect(writes.join('')).toContain(WHITE_CIRCLE);
 
     await subscriber.close();
@@ -379,13 +434,19 @@ describe('worklist — event-driven agent status (WL-0MSHB7DHO004RHBJ)', () => {
       event: 'pane_agent_status_changed',
       data: { pane_id: 'w3:p99', agent_status: 'working' },
     });
-    await sleep(100);
+    await waitForWrites((w) => w.join('').includes(GREEN_CIRCLE), 5_000, 'GREEN_CIRCLE after working event');
     expect(writes.join('')).toContain(GREEN_CIRCLE);
 
+    const paneExitedMark = writes.length;
     client!.pushEvent({ event: 'pane_exited', data: { pane_id: 'w3:p99' } });
-    await sleep(100);
-    writes.length = 0; // only inspect output produced AFTER the event
-    expect(writes.join('')).not.toContain(GREEN_CIRCLE);
+    // pane_exited clears the icon like pane_closed; wait for the pruning
+    // render to land past the mark, then check the post-event output.
+    await waitForWrites(
+      (w) => w.length > paneExitedMark && !w.slice(paneExitedMark).join('').includes(GREEN_CIRCLE),
+      5_000,
+      'GREEN_CIRCLE cleared after pane_exited',
+    );
+    expect(writes.slice(paneExitedMark).join('')).not.toContain(GREEN_CIRCLE);
 
     await subscriber.close();
     await mockServer.stop();
