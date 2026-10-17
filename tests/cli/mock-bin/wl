@@ -125,9 +125,6 @@ if (command === 'update') {
   if (args.includes('--description')) {
     item.description = String(parseOption(['--description']) || item.description);
   }
-  if (args.includes('--reviewed')) {
-    item.needsProducerReview = String(parseOption(['--reviewed']) || 'false') === 'true';
-  }
   if (isJson) {
     jsonOut({ success: true, workItem: item });
   } else {

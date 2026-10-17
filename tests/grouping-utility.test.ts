@@ -593,7 +593,7 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
     return { id: 'WL-x', stage: 'in_review', filePaths: [], priority: 'medium', ...overrides };
   }
 
-  it('inReviewBucket returns correct bucket for each category', () => {
+  it('inReviewBucket returns all six buckets with needsProducerReview first (F3 restored core grouping)', () => {
     expect(inReviewBucket({
       stage: 'in_review', needsProducerReview: true,
       auditResult: null, auditedAt: null, updatedAt,
@@ -619,7 +619,7 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
     })).toBe(0);
   });
 
-  it('orders the six buckets: needsProducerReview → failed fresh → failed stale → no audit → passed stale → passed fresh', () => {
+  it('orders the six buckets: needsProducerReview → failed fresh → failed stale → no audit → passed stale → passed fresh (F3 restored core grouping)', () => {
     const items = [
       inReviewItem({ id: 'WL-passed-fresh', auditResult: true, auditedAt: freshAuditedAt, updatedAt }),
       inReviewItem({ id: 'WL-passed-stale', auditResult: true, auditedAt: staleAuditedAt, updatedAt }),
@@ -671,13 +671,13 @@ describe('in_review 6-bucket sort (WL-0MSLPM5ZB003TADT)', () => {
     expect(sorted.map(i => (i as { id: string }).id)).toEqual(['WL-a', 'WL-b', 'WL-c']);
   });
 
-  it('does not apply bucket sort to non-in_review items', () => {
+  it('does not apply bucket sort to non-in_review items even when flagged (restored contract WL-0MVAMS4RO000H3B0 F1)', () => {
     const a = { id: 'WL-a', stage: 'plan_complete', filePaths: [], priority: 'medium', needsProducerReview: true };
     const b = { id: 'WL-b', stage: 'plan_complete', filePaths: [], priority: 'medium' };
     expect(compareGroupableItems(a, b)).toBeLessThan(0); // WL-a < WL-b lexicographically
   });
 
-  it('compareInReviewItems returns 0 for non-in_review items', () => {
+  it('compareInReviewItems returns 0 for non-in_review items even when flagged (restored contract WL-0MVAMS4RO000H3B0 F1)', () => {
     const a = { id: 'WL-a', stage: 'plan_complete', filePaths: [], priority: 'medium', needsProducerReview: true } as any;
     const b = { id: 'WL-b', stage: 'intake_complete', filePaths: [], priority: 'medium' } as any;
     expect(compareInReviewItems(a, b)).toBe(0);

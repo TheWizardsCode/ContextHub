@@ -425,7 +425,6 @@ export function seedWorkItems(
     tags?: string[];
     assignee?: string;
     stage?: string;
-    needsProducerReview?: boolean;
     githubIssueNumber?: number;
     githubIssueId?: number;
     githubIssueUpdatedAt?: string;
@@ -463,7 +462,6 @@ export function seedWorkItems(
       githubIssueNumber: item.githubIssueNumber,
       githubIssueId: item.githubIssueId,
       githubIssueUpdatedAt: item.githubIssueUpdatedAt,
-      needsProducerReview: item.needsProducerReview ?? false,
       auditWaiver: item.auditWaiver ?? null,
       audit: item.audit,
     }));

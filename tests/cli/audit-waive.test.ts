@@ -123,8 +123,7 @@ describe('audit-waive / audit-unwaive', () => {
         deleteReason: '',
         risk: '',
         effort: '',
-        needsProducerReview: false,
-        auditWaiver: { reason: 'round-trip me', author: 'producer', waivedAt },
+          auditWaiver: { reason: 'round-trip me', author: 'producer', waivedAt },
       };
 
       exportToJsonl([item], [], file, [], []);

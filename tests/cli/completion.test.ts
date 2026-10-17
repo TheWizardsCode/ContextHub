@@ -17,7 +17,7 @@ const KNOWN_COMMANDS = [
   'init', 'status', 'create', 'list', 'show', 'update', 'delete',
   'export', 'import', 'next', 'in-progress', 'sync', 'github',
   'comment', 'close', 'recent', 'plugins', 'migrate', 'dep',
-  're-sort', 'doctor', 'reviewed', 'search', 'unlock', 'audit',
+  're-sort', 'doctor', 'search', 'unlock', 'audit',
   'completion',
 ];
 

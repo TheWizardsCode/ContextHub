@@ -6,7 +6,11 @@
  *   status:  'open'   (regression from in-progress, completed, deleted, etc.)
  *   stage:   'idea'   (regression from in_progress, plan_complete, done, in_review, etc.)
  *   priority:'medium' (regression from high, critical, low, etc.)
- *   assignee: ''      (regression from any non-empty string)
+ *
+ * `assignee` is deliberately NOT regression-guarded (WL-0MV85WBZ2004VDUQ,
+ * epic Q1 option (a)): it is a scheduling hold whose clear must propagate
+ * cross-root, so an empty assignee is a meaningful value resolved by
+ * timestamp/tie-break rather than a regression default.
  *
  * effort/risk are NEVER imported (excluded from merge lists by construction).
  */
@@ -253,14 +257,17 @@ describe('Same-timestamp merge: regression detection', () => {
     expect(result.merged[0].priority).toBe('critical');
   });
 
-  it('detects assignee regression at same timestamp', () => {
+  it('keeps local assignee at same timestamp (empty assignee is not a regression default)', () => {
+    // `assignee` is no longer regression-guarded (WL-0MV85WBZ2004VDUQ,
+    // Q1 option (a)); at equal timestamps the deterministic lexicographic
+    // tie-break keeps the local non-empty value.
     const localItem = mkItem({
       assignee: 'alice',
       updatedAt: '2024-06-01T12:00:00.000Z',
     });
     const remoteItem = mkItem({
       assignee: '',
-      updatedAt: '2024-06-01T12:00:00.000Z', // same timestamp, assignee regressed
+      updatedAt: '2024-06-01T12:00:00.000Z',
     });
 
     const result = mergeWorkItems([localItem], [remoteItem]);
@@ -430,8 +437,96 @@ describe('Regression conflict detail structure', () => {
 
 // ── Multiple regression fields simultaneously ────────────────────────────
 
+// ── Q1(a): assignee clears propagate cross-root (WL-0MV85WBZ2004VDUQ) ────
+
+describe('Q1(a): assignee clears are not regression-guarded (WL-0MV85WBZ2004VDUQ)', () => {
+  it('clears a local non-empty assignee from a newer remote empty value without acceptRegressions', () => {
+    const localItem = mkItem({
+      assignee: 'Map',
+      updatedAt: '2024-06-01T12:00:00.000Z',
+    });
+    const remoteItem = mkItem({
+      assignee: '',
+      updatedAt: '2024-06-02T12:00:00.000Z', // newer clear
+    });
+
+    const result = mergeWorkItems([localItem], [remoteItem]);
+
+    expect(result.merged).toHaveLength(1);
+    expect(result.merged[0].assignee).toBe('');
+    // The clear is a normal merge, not a refused regression.
+    const assigneeRegression = result.conflictDetails.some(cd =>
+      cd.fields.some(fd => fd.field === 'assignee' &&
+        (fd.reason.toLowerCase().includes('regression') || fd.reason.toLowerCase().includes('refused')))
+    );
+    expect(assigneeRegression).toBe(false);
+  });
+
+  it('keeps a newer local non-empty assignee over an older remote empty value', () => {
+    const localItem = mkItem({
+      assignee: 'Map',
+      updatedAt: '2024-06-02T12:00:00.000Z', // newer local hold
+    });
+    const remoteItem = mkItem({
+      assignee: '',
+      updatedAt: '2024-06-01T12:00:00.000Z',
+    });
+
+    const result = mergeWorkItems([localItem], [remoteItem]);
+
+    expect(result.merged[0].assignee).toBe('Map');
+  });
+
+  it('still propagates a newer remote assignee assignment into a local empty value', () => {
+    const localItem = mkItem({
+      assignee: '',
+      updatedAt: '2024-06-01T12:00:00.000Z',
+    });
+    const remoteItem = mkItem({
+      assignee: 'alice',
+      updatedAt: '2024-06-02T12:00:00.000Z',
+    });
+
+    const result = mergeWorkItems([localItem], [remoteItem]);
+
+    expect(result.merged[0].assignee).toBe('alice');
+  });
+
+  it('does not weaken the status/stage/priority regression guard', () => {
+    const localItem = mkItem({
+      status: 'in-progress',
+      stage: 'in_progress',
+      priority: 'high',
+      updatedAt: '2024-06-01T12:00:00.000Z',
+    });
+    const remoteItem = mkItem({
+      status: 'open',
+      stage: 'idea',
+      priority: 'medium',
+      updatedAt: '2024-06-02T12:00:00.000Z', // newer, but all regressions
+    });
+
+    const result = mergeWorkItems([localItem], [remoteItem]);
+
+    expect(result.merged[0].status).toBe('in-progress');
+    expect(result.merged[0].stage).toBe('in_progress');
+    expect(result.merged[0].priority).toBe('high');
+
+    const regressionFields = result.conflictDetails
+      .flatMap(cd => cd.fields)
+      .filter(fd => /regression|refused/i.test(fd.reason))
+      .map(fd => fd.field);
+    expect(regressionFields).toContain('status');
+    expect(regressionFields).toContain('stage');
+    expect(regressionFields).toContain('priority');
+    expect(regressionFields).not.toContain('assignee');
+  });
+});
+
+// ── Multiple regression fields simultaneously ────────────────────────────
+
 describe('Multiple simultaneous regressions', () => {
-  it('detects regression across status, stage, priority, and assignee', () => {
+  it('resolves status/stage regressions and propagates a newer assignee clear', () => {
     const localItem = mkItem({
       status: 'completed',
       stage: 'done',
@@ -452,13 +547,13 @@ describe('Multiple simultaneous regressions', () => {
     expect(result.merged).toHaveLength(1);
     const merged = result.merged[0];
 
-    // All local non-default values preserved
+    // Regressed close state preserved; priority refused; assignee clear propagates.
     expect(merged.status).toBe('completed');
     expect(merged.stage).toBe('done');
     expect(merged.priority).toBe('high');
-    expect(merged.assignee).toBe('alice');
+    expect(merged.assignee).toBe('');
 
-    // Verify conflict details contain regression information
+    // Verify conflict details contain regression information (status/priority)
     const regressionConflicts = extractRegressionConflicts(result);
     expect(regressionConflicts.length).toBeGreaterThan(0);
   });

@@ -536,12 +536,12 @@ describe('update batch behaviour', () => {
       }
     });
 
-    it('should handle batch update with needs-producer-review flag', async () => {
+    it('should handle batch update with --assignee', async () => {
       const id1 = await createItem();
       const id2 = await createItem();
 
       const { stdout } = await execAsync(
-        `tsx ${cliPath} --json update ${id1} ${id2} --needs-producer-review true`
+        `tsx ${cliPath} --json update ${id1} ${id2} --assignee producer`
       );
 
       const result = JSON.parse(stdout);
@@ -549,7 +549,7 @@ describe('update batch behaviour', () => {
       expect(result.results).toHaveLength(2);
       for (const r of result.results) {
         expect(r.success).toBe(true);
-        expect(r.workItem.needsProducerReview).toBe(true);
+        expect(r.workItem.assignee).toBe('producer');
       }
     });
 

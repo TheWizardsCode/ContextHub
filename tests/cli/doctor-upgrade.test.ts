@@ -110,6 +110,10 @@ describe('doctor upgrade command', () => {
       const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
       // After all migrations, audit column should be dropped in favor of audit_results table
       expect(cols.map(c => c.name)).not.toContain('audit');
+      // needsProducerReview is RESTORED (WL-0MVAMS4RO000H3B0 F2): the wrongful
+      // removal (WL-0MV85WFYU0071YQ9 / RCA WL-0MVAOYBZM0065AEN) was reverted;
+      // the column must be present after migrating.
+      expect(cols.map(c => c.name)).toContain('needsProducerReview');
       // audit_results table should exist
       const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='audit_results'").all() as any[];
       expect(tables.length).toBe(1);

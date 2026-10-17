@@ -128,7 +128,7 @@ try:
     for p in (panes if isinstance(panes, list) else []):
         label = p.get('label', '')
         cmd = ' '.join(p.get('command', []) or [])
-        if label == 'Work Items' or 'worklog-selection-list' in cmd or 'packages/herdr/src/index.ts' in cmd:
+        if label == 'Work Items' or 'worklog-selection-list' in cmd or 'packages/herdr/src/index.ts' in cmd or 'packages/herdr/src/start.ts' in cmd:
             print(p.get('pane_id', ''))
             break
 except:

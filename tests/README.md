@@ -78,7 +78,6 @@ Tests live under the top-level `tests/` directory:
 - **`fresh-install.test.ts`** — Clean install scenario
 - **`update-batch.test.ts`** — Batch update operations
 - **`update-do-not-delegate.test.ts`** — Do-not-delegate flag handling
-- **`reviewed.test.ts`** — `wl reviewed` toggle
 - **`misc.test.ts`** — Miscellaneous CLI edge cases
 - **`helpers-tree-rendering.test.ts`** — Tree display formatting
 - **`action-opts-normalization.test.ts`** — Option normalization
@@ -124,7 +123,7 @@ different layers — they are not duplicates:
   `src/theme.ts` (a distinct module from `@worklog/shared/icons`).
 - **`tests/herdr/icons.test.ts`** — herdr display integration tests for the
   shared `@worklog/shared/icons` functions (status/stage/priority/audit/epic/
-  risk/effort/needsProducerReview icons, `stageColor`, general
+  risk/effort icons, `stageColor`, general
   `getIconPrefix`).
 - **`packages/herdr/src/icons.test.ts`** — herdr package unit tests for the
   shared `@worklog/shared/icons` `iconsEnabled` flag, fixed-width agent-slot

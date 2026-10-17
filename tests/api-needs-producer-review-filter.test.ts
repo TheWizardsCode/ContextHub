@@ -1,11 +1,11 @@
 /**
  * API-level filtering of work items by the `needsProducerReview` flag.
  *
- * Migrated from the legacy `test/validator.test.ts` (WL-0MV4UUK120029UR5,
- * child of WL-0MV28X3BT0079JM3). The only genuinely unique coverage in that
- * legacy file was the REST API `needsProducerReview` filter and its HTTP 400
- * response for an invalid value; the CLI-documentation validator assertion it
- * also contained remains covered by `test/validator.test.ts`.
+ * Test-first contract (item WL-0MVAMS4RO000H3B0, child F1): restored from
+ * the deleted corpus (`e0f04202^`). RED-pinned via `it.fails` so the
+ * configured suite stays green while the contract is failing; the
+ * implementation children (F2 flag + F3 CLI/API) flip `it.fails(` → `it(`
+ * when the flag, the DB column and the API query param are restored.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -50,7 +50,7 @@ describe('API needsProducerReview filter', () => {
     }
   }
 
-  it('filters items by needsProducerReview', async () => {
+  it('filters items by needsProducerReview (F3 restored)', async () => {
     const needsReview = db.create({ title: 'Needs review', needsProducerReview: true });
     const noReview = db.create({ title: 'No review', needsProducerReview: false });
 
@@ -63,7 +63,7 @@ describe('API needsProducerReview filter', () => {
     expect(resFalse.body.map((i: any) => i.id)).toEqual([noReview.id]);
   });
 
-  it('rejects invalid needsProducerReview values', async () => {
+  it('rejects invalid needsProducerReview values (F3 restored)', async () => {
     const res = await getItems('/items?needsProducerReview=maybe');
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Invalid');

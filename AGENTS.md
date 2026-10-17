@@ -4,6 +4,19 @@ Read the global agent instructions at `~/.pi/agent/AGENTS.md` — they define th
 
 ## Project-specific guidance
 
+### Claim pattern & scheduling hold (WL-0MV82CHGQ000HAZZ)
+
+The assignee field doubles as the scheduling hold. Implement/plan/intake tiers
+claim with a status flip (`wl update <id> --status in_progress --assignee
+<agent>`); the herdr **audit tier** claims **status-neutrally** — assignee CAS
+only (`wl update <id> --assignee <agent> --if-status completed --if-stage
+in_review --if-assignee ""`), so the item stays `completed`/`in_review`. A
+non-empty assignee is an intentional hold from auto-dispatch (producer sentinel
+`wl update <id> --assignee Map`; clear `--assignee ""` to release); claims
+clear the assignee on session end. See
+[docs/dev/downtime-dispatcher.md](./docs/dev/downtime-dispatcher.md) and the
+global instructions (`~/.pi/agent/AGENTS.md`).
+
 ### Architecture Notes for Agents
 
 Worklog uses **SQLite as the runtime source of truth** with an **ephemeral JSONL pattern** for Git sync:

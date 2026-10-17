@@ -403,6 +403,150 @@ describe('HerdrEventSubscriber — mock socket', () => {
     });
   });
 
+  // ── Keepalive & reconnect resilience (WL-0MVAS988R008PNH6) ─────────
+
+  describe('keepalive & reconnect resilience (WL-0MVAS988R008PNH6)', () => {
+    /** Per-pane pane.agent_status_changed pane ids of a client's subscribe. */
+    function subscribePaneIds(
+      client: NonNullable<ReturnType<MockHerdrSocket['getFirstClient']>>,
+    ): string[] {
+      const sub = client.requests.find((r) => r.method === 'events.subscribe');
+      const params = sub?.params as
+        | { subscriptions?: Array<{ type: string; pane_id?: string }> }
+        | undefined;
+      return (params?.subscriptions ?? [])
+        .filter((s) => s.type === 'pane.agent_status_changed')
+        .map((s) => s.pane_id ?? '');
+    }
+
+    it('write-once discipline: a pane-set change never sends a second request on the live socket', async () => {
+      // Regression (WL-0MVAS988R008PNH6): the real herdr server accepts
+      // exactly ONE request per connection — any second request resets the
+      // connection (`stream_closed`). The subscriber must apply pane-set
+      // changes by re-establishing a fresh connection, never by writing a
+      // second frame on the established subscription socket.
+      const callbacks: HerdrEventCallbacks = {};
+      const subscriber = new HerdrEventSubscriber({
+        socketPath: mockServer.getAddress(),
+        callbacks,
+        trackedPaneIds: ['w1:p1'],
+        reconnectBaseDelayMs: 50,
+        maxReconnectAttempts: 5,
+      });
+
+      await subscriber.connect();
+      const firstClient = mockServer.getFirstClient();
+      expect(firstClient).toBeDefined();
+      // The initial subscribe is the ONLY request on the first connection.
+      expect(firstClient!.requests.map((r) => r.method)).toEqual(['events.subscribe']);
+
+      const addResult = await subscriber.addPaneSubscription('w1:p2');
+      expect(addResult.type).toBe('subscribed');
+      expect(subscriber.getTrackedPaneIds()).toEqual(['w1:p1', 'w1:p2']);
+
+      await new Promise((r) => setTimeout(r, 50));
+      // The original socket saw NO second request — still exactly one frame.
+      expect(firstClient!.requests.length).toBe(1);
+
+      // The panes were applied via a NEW connection (the old one is gone
+      // from the mock's client set) carrying the full set.
+      const clients = mockServer.getConnectedClients();
+      expect(clients.length).toBeGreaterThan(0);
+      const newest = clients[clients.length - 1];
+      // The surviving connection is not the original one.
+      expect(newest).not.toBe(firstClient);
+      expect(subscribePaneIds(newest)).toEqual(['w1:p1', 'w1:p2']);
+      expect(newest.requests.length).toBe(1); // one request on the new socket too
+      expect(subscriber.health().status).toBe('active');
+
+      await subscriber.close();
+    });
+
+    it('a closed/errored stream reconnects and re-subscribes with the full pane set (backoff reset)', async () => {
+      const onReconnected = vi.fn();
+      const subscriber = new HerdrEventSubscriber({
+        socketPath: mockServer.getAddress(),
+        callbacks: { onReconnected },
+        trackedPaneIds: ['w1:p1'],
+        reconnectBaseDelayMs: 50,
+        maxReconnectAttempts: 5,
+      });
+
+      await subscriber.connect();
+      const first = mockServer.getFirstClient();
+      expect(first).toBeDefined();
+
+      // Server closes the stream (the stream_closed scenario).
+      first!.close();
+
+      // Wait for the backoff reconnect to land.
+      await new Promise((r) => setTimeout(r, 400));
+
+      expect(subscriber.health().status).toBe('active');
+      const clients = mockServer.getConnectedClients();
+      // The dead connection is gone; a fresh one re-subscribed.
+      const newest = clients[clients.length - 1];
+      expect(newest).toBeDefined();
+      expect(subscribePaneIds(newest)).toEqual(['w1:p1']);
+      expect(newest.requests.length).toBe(1);
+      // The stream was re-established after a loss → onReconnected fired.
+      expect(onReconnected).toHaveBeenCalled();
+
+      await subscriber.close();
+    });
+
+    it('batched pane adds coalesce into a single reconnect with the full set', async () => {
+      const subscriber = new HerdrEventSubscriber({
+        socketPath: mockServer.getAddress(),
+        callbacks: {},
+        trackedPaneIds: ['w1:p1'],
+        reconnectBaseDelayMs: 50,
+        maxReconnectAttempts: 5,
+      });
+      await subscriber.connect();
+      const first = mockServer.getFirstClient();
+      expect(first).toBeDefined();
+
+      const result = await subscriber.addPaneSubscriptions(['w1:p2', 'w1:p3']);
+      expect(result.type).toBe('subscribed');
+      expect(subscriber.getTrackedPaneIds()).toEqual(['w1:p1', 'w1:p2', 'w1:p3']);
+
+      await new Promise((r) => setTimeout(r, 50));
+      // One restart connection only — never one per added pane.
+      const clients = mockServer.getConnectedClients();
+      const newest = clients[clients.length - 1];
+      expect(subscribePaneIds(newest)).toEqual(['w1:p1', 'w1:p2', 'w1:p3']);
+      // The original socket received no second frame.
+      expect(first!.requests.length).toBe(1);
+      expect(subscriber.health().status).toBe('active');
+
+      await subscriber.close();
+    });
+
+    it('steady-state idle subscription sends no further frames (no keepalive ping needed on the stream)', async () => {
+      // Documented finding (WL-0MVAS988R008PNH6): the herdr server keeps an
+      // idle subscription open indefinitely and expects NO keepalive on the
+      // stream — a ping on the subscription socket would reset it. Assert the
+      // subscriber stays silent on the established socket over time.
+      const subscriber = new HerdrEventSubscriber({
+        socketPath: mockServer.getAddress(),
+        callbacks: {},
+        trackedPaneIds: ['w1:p1'],
+      });
+      await subscriber.connect();
+      const client = mockServer.getFirstClient();
+      expect(client).toBeDefined();
+
+      await new Promise((r) => setTimeout(r, 150));
+
+      expect(client!.requests.length).toBe(1);
+      expect(client!.requests[0].method).toBe('events.subscribe');
+      expect(subscriber.health().status).toBe('active');
+
+      await subscriber.close();
+    });
+  });
+
   // ── F2: close / cleanup ────────────────────────────────────────────
 
   describe('close / cleanup', () => {

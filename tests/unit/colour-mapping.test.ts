@@ -22,7 +22,6 @@ function createMockWorkItem(overrides: Partial<WorkItem> = {}): WorkItem {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     assignee: '',
-    needsProducerReview: false,
     ...overrides,
   };
 }

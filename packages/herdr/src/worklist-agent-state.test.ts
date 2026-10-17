@@ -1,12 +1,15 @@
 /**
- * packages/herdr/src/worklist-agent-state.test.ts — Integration tests for
- * merging agent-status state into fetched work items (WL-0MSBQUJQX005RAT9).
+ * packages/herdr/src/worklist-agent-state.test.ts — Integration tests for the
+ * green-circle (agent slot) icon rendering in the selection list
+ * (WL-0MSBQUJQX005RAT9 + WL-0MV1BWETT005GSUJ).
  *
- * runWorklistTui accepts a `mergeAgentStates` callback that is applied to
- * freshly fetched items (top-level + expanded children) on every refresh
- * cycle. This verifies the plumbing: when the callback stamps an
- * `agentState` on an item, the row renders the agent-status icon; without
- * it, the row renders no agent icon.
+ * The row's green-circle icon is authored from `item.agentState`: the
+ * pane-existence marker (`markItemsActiveByPane` / `applyActivePaneMarkers`)
+ * stamps `'working'` on an item when a pane in the current workspace carries
+ * the item's ID in its title and clears it otherwise. These tests verify the
+ * RENDERER contract directly: an item carrying `agentState='working'` renders
+ * the green circle, an item without it renders none, and the fixed-width
+ * agent slot keeps the item-ID column aligned across rows.
  *
  * Run: npx vitest run packages/herdr/src/worklist-agent-state.test.ts
  */
@@ -93,34 +96,26 @@ async function quit(p: Promise<unknown>): Promise<void> {
   await p;
 }
 
-const GREEN_CIRCLE = '\u{1F7E2}'; // 🟢 — the agent working icon
+const GREEN_CIRCLE = '\u{1F7E2}'; // 🟢 — the green circle (work-item pane open)
 
-describe('worklist — agent-state merge into fetched items', () => {
-  it('renders the agent-status icon when mergeAgentStates stamps an agentState', async () => {
+describe('worklist — green-circle agent slot rendering', () => {
+  it('renders the green circle when the item carries agentState (an open work-item pane)', async () => {
     vi.useFakeTimers();
     process.env.HERDR_PANE_ID = 'w1:pCM';
     setExecFileAsync(makeExecMock() as any);
 
-    const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
-      { id: 'WL-1', title: 'Task one', status: 'open', stage: 'idea' },
-    ]);
+    const items: WorkItem[] = [
+      { id: 'WL-1', title: 'Task one', status: 'open', stage: 'idea', agentState: 'working' },
+    ];
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => items);
 
-    const p = runWorklistTui(fetcher, [], undefined, {
+    const p = runWorklistTui(fetcher, items, undefined, {
       autoRefresh: true,
       refreshIntervalMs: 30_000,
       autoSync: false,
       showHelpText: false,
-      mergeAgentStates: async (items: WorkItem[]) => {
-        for (const it of items) {
-          if (it.id === 'WL-1') it.agentState = 'working';
-        }
-      },
     });
     await vi.advanceTimersByTimeAsync(0);
-    fetcher.mockClear();
-
-    // Trigger the first auto-refresh cycle, which applies mergeAgentStates.
-    await vi.advanceTimersByTimeAsync(30_000);
 
     const output = writes.join('');
     expect(output).toContain(GREEN_CIRCLE);
@@ -129,7 +124,7 @@ describe('worklist — agent-state merge into fetched items', () => {
     await quit(p);
   });
 
-  it('renders no agent icon when no agentState is stamped', async () => {
+  it('renders no green circle when no agentState is present', async () => {
     vi.useFakeTimers();
     process.env.HERDR_PANE_ID = 'w1:pCM';
     setExecFileAsync(makeExecMock() as any);
@@ -156,26 +151,22 @@ describe('worklist — agent-state merge into fetched items', () => {
     await quit(p);
   });
 
-  it('keeps rows aligned: item IDs share a column with and without the agent icon', async () => {
+  it('keeps rows aligned: item IDs share a column with and without the green circle', async () => {
     vi.useFakeTimers();
     process.env.HERDR_PANE_ID = 'w1:pCM';
     setExecFileAsync(makeExecMock() as any);
 
-    const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
-      { id: 'WL-AGENT', title: 'Has agent', status: 'open', stage: 'idea' },
-      { id: 'WL-PLAIN', title: 'No agent', status: 'open', stage: 'idea' },
-    ]);
+    const items: WorkItem[] = [
+      { id: 'WL-AGENT', title: 'Has pane', status: 'open', stage: 'idea', agentState: 'working' },
+      { id: 'WL-PLAIN', title: 'No pane', status: 'open', stage: 'idea' },
+    ];
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => items);
 
-    const p = runWorklistTui(fetcher, [], undefined, {
+    const p = runWorklistTui(fetcher, items, undefined, {
       autoRefresh: true,
       refreshIntervalMs: 30_000,
       autoSync: false,
       showHelpText: false,
-      mergeAgentStates: async (items: WorkItem[]) => {
-        for (const it of items) {
-          if (it.id === 'WL-AGENT') it.agentState = 'working';
-        }
-      },
     });
     await vi.advanceTimersByTimeAsync(0);
     fetcher.mockClear();

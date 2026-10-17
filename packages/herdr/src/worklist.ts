@@ -13,11 +13,11 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState } from './fetcher.js';
+import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, fetchBlockersForItem, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState, type BlockerRef } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
-import { AgentTracker, mergeAgentStatesCached } from './agent-tracker.js';
+import { AgentTracker } from './agent-tracker.js';
 import { readCodeFreezeState, readCodeFreezeStatus, writeCodeFreezeMarker, clearCodeFreezeMarker } from './code-freeze.js';
 import { runShipGuard, formatBlockedNotice } from './ship-guard.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
@@ -25,7 +25,6 @@ import {
   statusIcon,
   stageIcon,
   priorityIcon,
-  epicIcon,
   riskIcon,
   effortIcon,
   auditIcon,
@@ -37,6 +36,7 @@ import {
   stageColor,
   applyPriorityColour,
   priorityColor,
+  ICON_LEGEND,
   type IconOptions,
 } from '@worklog/shared/icons';
 import {
@@ -444,7 +444,7 @@ export class NavigationStack {
 
 // ── State ─────────────────────────────────────────────────────────────
 
-export type ViewMode = 'list' | 'detail' | 'filter' | 'form';
+export type ViewMode = 'list' | 'detail' | 'filter' | 'form' | 'help';
 
 /**
  * A group heading row in the display-rows model (WL-0MSL5MPSZ003TG94).
@@ -493,7 +493,7 @@ export class WorkItemListState {
   items: WorkItem[];
 
   /**
-   * All loaded items (unfiltered). Lets the tab-marker refresh re-evaluate
+   * All loaded items (unfiltered). Lets the pane-marker refresh re-evaluate
    * every item — including those excluded by the active stage/priority
    * filter — without a `wl` re-fetch (WL-0MV1BWETT005GSUJ).
    */
@@ -613,6 +613,20 @@ export class WorkItemListState {
    * leaves the panel blank (WL-0MSAYNVBY006LM9X-FT4).
    */
   metaScrollOffset = 0;
+
+  /**
+   * Active blockers of the current selection, supplied by the render loop so
+   * the metadata-panel scroll clamp counts the same `Blocked By` rows the
+   * renderer shows (WL-0MV8EZRDJ001TDA8). Null while unresolved or absent.
+   */
+  metaBlockedBy: BlockerRef[] | null = null;
+
+  /**
+   * Active blockers of the detail item, supplied by the render loop so the
+   * detail-view scroll clamp counts the `Blocked By` rows the renderer shows
+   * (WL-0MVBMLY2Z0032CYR). Null while unresolved or absent.
+   */
+  detailBlockedBy: BlockerRef[] | null = null;
 
   /** Set of expanded item IDs (for hierarchical display). */
   expandedItems: Set<string> = new Set();
@@ -975,14 +989,28 @@ export class WorkItemListState {
     const maxCols = this.termSize.cols;
     const viewportHeight = Math.max(10, this.termSize.rows - 4);
     // The header + ToC block is pinned at the top; only the body below
-    // scrolls (WL-0MSHWHULZ001FL8I / WL-0MSI28AP80002F5S).
-    const allLines = formatDetailContent(this.detailItem, maxCols);
+    // scrolls (WL-0MSHWHULZ001FL8I / WL-0MSI28AP80002F5S). The content
+    // height must include the `Blocked By` rows the renderer shows or they
+    // become unreachable when the view scrolls (WL-0MVBMLY2Z0032CYR).
+    const allLines = formatDetailContent(this.detailItem, maxCols, undefined, false, 0, true, 0, this.detailBlockedBy);
     const tocLines = formatDetailToC(this.detailItem, maxCols).length;
     const pinnedHeight = DETAIL_HEADER_LINES + tocLines;
     const bodyLines = Math.max(0, allLines.length - pinnedHeight);
     const bodyViewport = Math.max(1, viewportHeight - pinnedHeight);
     const maxScroll = Math.max(0, bodyLines - bodyViewport);
     this.detailScrollOffset = Math.min(maxScroll, this.detailScrollOffset + amount);
+  }
+
+  // ── Selection-preserving list scroll (drag-to-scroll) ───────────
+  /**
+   * Scroll the list by a given number of rows **without** changing the
+   * selected index.  Clamps `scrollOffset` to `[0, maxOffset]` using the
+   * same `_listHeight()` / `flatCount` maths as `_adjustScroll`.  (WL-0MSI72S0Y0060BRK)
+   */
+  scrollBy(rows: number): void {
+    const listHeight = this._listHeight();
+    const maxOffset = Math.max(0, this.flatCount - listHeight);
+    this.scrollOffset = Math.max(0, Math.min(maxOffset, this.scrollOffset + rows));
   }
 
   // ── Metadata panel scroll ───────────────────────────────────────
@@ -1025,8 +1053,8 @@ export class WorkItemListState {
     }
     const selected = this.getSelectedItem();
     if (!selected) return;
-    const allLines = formatMetadataPanel(selected, this.termSize.cols, ph, 0);
-    const maxScroll = Math.max(0, allLines.length - ph);
+    const contentHeight = metadataPanelContentHeight(selected, this.termSize.cols, ph, undefined, false, this.metaBlockedBy);
+    const maxScroll = Math.max(0, contentHeight - ph);
     this.metaScrollOffset = Math.min(maxScroll, this.metaScrollOffset + amount);
   }
 
@@ -1611,6 +1639,13 @@ export function formatTooltipLines(
   cols: number,
   noIcons = false,
 ): string[] {
+  // NOTE — `Blocked By` parity decision (WL-0MV8Q5X8U004KKAP AC-5): the
+  // hover tooltip deliberately omits the blocker rows. Blockers are the
+  // metadata panel's job (the SELECTED item's `Blocked By` rows in
+  // `formatMetadataPanel`); the tooltip is a compact pane-status summary and
+  // rendering its own async blocker lookup would duplicate the uncoordinated
+  // async preview path whose flicker WL-0MV8Q5X8U004KKAP fixes. Kept
+  // documented-out-of-scope rather than silently divergent.
   const parts: string[] = [];
 
   // ID + Title line.
@@ -1624,7 +1659,7 @@ export function formatTooltipLines(
 
   // Priority + Type (compact row).
   const priorityStr = item.priority ? `${priorityIcon(item.priority, { noIcons })} ${item.priority}` : '';
-  const typeStr = item.issueType ? `${item.issueType === 'epic' && !noIcons ? epicIcon() : ''}${item.issueType}` : '';
+  const typeStr = item.issueType ? `${item.issueType}` : '';
   const typeLabel = typeStr ? `${ANSI.dim}Type:${ANSI.reset} ${typeStr}` : '';
   const priorityLabel = priorityStr ? `${ANSI.dim}Priority:${ANSI.reset} ${priorityStr}` : '';
   if (priorityLabel && typeLabel) {
@@ -1690,17 +1725,17 @@ export function formatTooltipOverlay(cols: number, lines: string[]): string[] {
  *
  * Includes every tracked field: ID, Title, Status, Stage, Priority, Type,
  * Risk, Effort, Children, Parent, Tags, GitHub Issue, Created, Updated,
- * Audit, Reviewed, and Audited At. When the item's `Key Files:` section
+ * Audit, and Audited At. When the item's `Key Files:` section
  * contains `.md` paths, a `Related Docs` row lists every one of them (joined
  * with `, `); the row is omitted when there are no `.md` Key Files
  * (WL-0MSGTLSUT002NF29). Fields that are unset are omitted.
  * Timestamps (Created, Updated, Audited At) are rendered in local time as
  * `DD/MM/YY HH:MM` via {@link formatTimestamp}.
  *
- * Icon-bearing fields (Status, Stage, Priority, Type, Risk, Effort, Audit,
- * Reviewed) render as **icon + text label**, using the same icon helpers as
- * the list rows (statusIcon, stageDisplayIcon, priorityIcon, epicIcon,
- * riskIcon, effortIcon, auditIcon, needsProducerReviewIcon) so the metadata
+ * Icon-bearing fields (Status, Stage, Priority, Type, Risk, Effort, Audit)
+ * render as **icon + text label**, using the same icon helpers as
+ * the list rows (statusIcon, stageDisplayIcon, priorityIcon,
+ * riskIcon, effortIcon, auditIcon) so the metadata
  * section and the list can never diverge (WL-0MSGIXHHI009KFW9). With icons
  * disabled the values fall back to plain text — the metadata deliberately
  * does NOT use the list's `[BRACKET]` fallbacks.
@@ -1738,7 +1773,7 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
     return icon ? `${icon} ${text}` : text;
   };
 
-  // Text labels paired with the Audit/Reviewed icons (AC5).
+  // Text labels paired with the Audit icons (AC5).
   const auditLabel = (result: boolean | null | undefined): string | undefined => {
     if (result === true) return 'ready to close';
     if (result === false) return 'not ready';
@@ -1773,9 +1808,10 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
     addMeta('Covered by', item.parentId);
   }
   addMetaOrDash('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
-  // Type shows the epic icon (⊙) for epic items only, matching the list;
-  // non-epic types remain text-only (AC3).
-  addMeta('Type', iconText(noIcons ? '' : (item.issueType === 'epic' ? epicIcon() : ''), item.issueType));
+  // Type renders as plain text for every issue type — the `⊙` epic icon was
+  // removed (WL-0MVAQ873D007LNWD); parent items are marked by the list's
+  // expand arrow, so the indicator added no information.
+  addMeta('Type', item.issueType);
   addMetaOrDash('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
   addMetaOrDash('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
   // Dispatch provenance for log-derived rows (WL-0MUL2IY8L009S3PQ).
@@ -1798,8 +1834,12 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
   } else {
     addMeta('Audit', iconText(noIcons ? '' : auditIcon(item.auditResult), auditLabel(item.auditResult)));
   }
-  addMeta('Reviewed', iconText(noIcons ? '' : needsProducerReviewIcon(item.needsProducerReview), reviewLabel(item.needsProducerReview)));
   addMeta('Audited At', item.auditedAt ? formatTimestamp(item.auditedAt) : undefined);
+
+  // Producer-review row (restored WL-0MVAMS4RO000H3B0 F2): the flag drives a
+  // `Reviewed` metadata row, mirroring the list-row ✓/✗ producer column so the
+  // list and metadata can never diverge (WL-0MSGIXHHI009KFW9).
+  addMeta('Reviewed', iconText(noIcons ? '' : needsProducerReviewIcon(item.needsProducerReview), reviewLabel(item.needsProducerReview)));
 
   // Related Docs — every .md path referenced in the item's `Key Files:`
   // section, joined with a compact delimiter so multi-file values fit the
@@ -1978,39 +2018,22 @@ function buildDescriptionPreview(
 }
 
 /**
- * Format the metadata panel shown below the selection list.
+ * Build the FULL, unpadded metadata-panel content lines for an item.
  *
- * Renders the selected item's fields (via {@link buildMetaRows}) plus a
- * description preview (up to 3 lines) and a last command line when the item's
- * status is `in-progress`. The panel scrolls independently with its own offset:
- * when the content is taller than the panel,
- * `metaScrollOffset` selects the visible window and a `[m/M scroll]`
- * indicator is appended to the last line.
- *
- * @param item - Selected work item (or null for an empty panel).
- * @param maxCols - Terminal width (lines are truncated to fit).
- * @param panelRows - Number of rows available for the panel.
- * @param metaScrollOffset - Vertical scroll offset into the panel content.
- * @param lastCommand - Most recent command for the item (shown only when the
- *                      item status is `in-progress`).
- * @returns Exactly `panelRows` lines ready for the renderer.
+ * Shared by {@link formatMetadataPanel} (which truncates, slices and pads
+ * them to the panel viewport) and {@link metadataPanelContentHeight} (the
+ * `m`/`M` scroll clamp), so the rendered window and the scroll clamp can
+ * never diverge (WL-0MV8EZRDJ001TDA8).
  */
-export function formatMetadataPanel(
-  item: WorkItem | null,
+function buildMetadataPanelLines(
+  item: WorkItem,
   maxCols: number,
   panelRows: number,
-  metaScrollOffset = 0,
   lastCommand?: string | null,
   noIcons = false,
+  blockedBy?: BlockerRef[] | null,
 ): string[] {
   const lines: string[] = [];
-  if (!item) {
-    // Blank panel — pad to the full height
-    while (lines.length < panelRows) {
-      lines.push('');
-    }
-    return lines;
-  }
 
   // Header separator identifying the selected item
   lines.push(` ${ANSI.dim}── ${item.id} ──${ANSI.reset}`);
@@ -2019,6 +2042,17 @@ export function formatMetadataPanel(
   // Audit+AuditedAt onto single rows for a more compact display (WL-0MSNIX4V60012266).
   // Drop the ID row since the panel header already shows the ID (WL-0MSHIJR7T007Q9R7).
   const metaRows = pairMetaRows(buildMetaRows(item, noIcons)).filter(([label]) => label !== 'ID');
+  // Blocked By rows (WL-0MV8EZRDJ001TDA8) — one row per ACTIVE blocker, at
+  // the END of the metadata section (after every field row, before the
+  // description preview). ``${id} — ${title}`` keeps both readable; a
+  // title-less blocker falls back to the bare ID rather than a dangling
+  // separator. The blocker's status is appended as an icon + text suffix
+  // when the edge carries one (WL-0MVBMLY2Z0032CYR). Omitted entirely when
+  // there are no active blockers.
+  for (const blocker of blockedBy ?? []) {
+    if (!blocker || !blocker.id) continue;
+    metaRows.push(['Blocked By', formatBlockerValue(blocker, noIcons)]);
+  }
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
     for (const [label, value] of metaRows) {
@@ -2047,21 +2081,106 @@ export function formatMetadataPanel(
     }
   }
 
+  return lines;
+}
+
+/**
+ * Format a single `Blocked By` row value (WL-0MVBMLY2Z0032CYR):
+ * ``<id> — <title>`` with the blocker's status appended as an icon + text
+ * suffix when the edge carries one (``<id> — <title> <icon> <status>``),
+ * consistent with the Status/Stage/Priority row convention
+ * (WL-0MSGIXHHI009KFW9). A title-less blocker falls back to the bare ID;
+ * a status-less blocker renders ID (+ title) alone — the status suffix is
+ * only appended when present. `noIcons` gates the emoji exactly like every
+ * other meta row: icons disabled → plain text status only.
+ */
+function formatBlockerValue(blocker: BlockerRef, noIcons: boolean): string {
+  const base = blocker.title ? `${blocker.id} — ${blocker.title}` : blocker.id;
+  const status = (blocker.status ?? '').trim();
+  if (!status) return base;
+  const icon = noIcons ? '' : statusIcon(status);
+  return icon ? `${base} ${icon} ${status}` : `${base} ${status}`;
+}
+
+/**
+ * Height (in lines) of the metadata panel's full content for `item` at
+ * `panelRows` — the value the `m`/`M` scroll clamp subtracts the panel
+ * height from (WL-0MV8EZRDJ001TDA8). Unlike {@link formatMetadataPanel}'s
+ * return value (always exactly `panelRows` lines after padding), this is the
+ * UNPADDED content length, so the scroll offset can reach the true bottom of
+ * the panel.
+ */
+export function metadataPanelContentHeight(
+  item: WorkItem | null,
+  maxCols: number,
+  panelRows: number,
+  lastCommand?: string | null,
+  noIcons = false,
+  blockedBy?: BlockerRef[] | null,
+): number {
+  if (!item) return 0;
+  return buildMetadataPanelLines(item, maxCols, panelRows, lastCommand, noIcons, blockedBy).length;
+}
+
+/**
+ * Format the metadata panel shown below the selection list.
+ *
+ * Renders the selected item's fields (via {@link buildMetaRows}) plus a
+ * description preview (up to 3 lines) and a last command line when the item's
+ * status is `in-progress`. The panel scrolls independently with its own offset:
+ * when the content is taller than the panel,
+ * `metaScrollOffset` selects the visible window and a `[m/M scroll]`
+ * indicator is appended to the last line.
+ *
+ * @param item - Selected work item (or null for an empty panel).
+ * @param maxCols - Terminal width (lines are truncated to fit).
+ * @param panelRows - Number of rows available for the panel.
+ * @param metaScrollOffset - Vertical scroll offset into the panel content.
+ * @param lastCommand - Most recent command for the item (shown only when the
+ *                      item status is `in-progress`).
+ * @param noIcons - Icons gated off for this frame.
+ * @param blockedBy - Active dependency blockers of the selected item
+ *                    (WL-0MV8EZRDJ001TDA8). One `Blocked By` row is appended
+ *                    per blocker, after the metadata rows and before the
+ *                    description preview. Omitted entirely when empty, so an
+ *                    unblocked item's panel is byte-for-byte unchanged.
+ * @returns Exactly `panelRows` lines ready for the renderer.
+ */
+export function formatMetadataPanel(
+  item: WorkItem | null,
+  maxCols: number,
+  panelRows: number,
+  metaScrollOffset = 0,
+  lastCommand?: string | null,
+  noIcons = false,
+  blockedBy?: BlockerRef[] | null,
+): string[] {
+  const lines: string[] = [];
+  if (!item) {
+    // Blank panel — pad to the full height
+    while (lines.length < panelRows) {
+      lines.push('');
+    }
+    return lines;
+  }
+
+  const content = buildMetadataPanelLines(item, maxCols, panelRows, lastCommand, noIcons, blockedBy);
+
   // Truncate to fit the terminal width
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].length > 0) {
-      lines[i] = truncateLine(lines[i], maxCols);
+  for (let i = 0; i < content.length; i++) {
+    if (content[i].length > 0) {
+      content[i] = truncateLine(content[i], maxCols);
     }
   }
 
   // Apply independent scrolling
-  const maxScroll = Math.max(0, lines.length - panelRows);
+  const maxScroll = Math.max(0, content.length - panelRows);
   const safeOffset = Math.min(metaScrollOffset, maxScroll);
-  const visible = lines.slice(safeOffset, safeOffset + panelRows);
+  const visible = content.slice(safeOffset, safeOffset + panelRows);
 
   // Scroll indicator when content overflows
-  if (lines.length > panelRows) {
-    const percent = Math.round(((safeOffset + panelRows) / lines.length) * 100);
+  if (content.length > panelRows) {
+    const percent = Math.round(((safeOffset + panelRows) / content.length) * 100);
     const indicator = ` ${ANSI.dim}[m/M scroll ${Math.min(percent, 100)}%]${ANSI.reset}`;
     visible[visible.length - 1] = truncateLine(visible[visible.length - 1] + indicator, maxCols);
   }
@@ -2186,17 +2305,21 @@ export function formatDetailToC(
  *
  * Metadata section includes: Status, Priority, Stage, Type, Risk, Effort,
  * Children, Tags, GitHub Issue (number), Created, Updated, Audit
- * (auditResult icon + text label), Reviewed (needsProducerReview icon +
- * text label), and Audited At (ISO timestamp). Rendered as a markdown
+ * (auditResult icon + text label), and Audited At (ISO timestamp). Rendered as a markdown
  * table; icon-bearing values are `icon + text` via the shared
  * {@link buildMetaRows} (WL-0MSGIXHHI009KFW9). ID and Title are shown in
  * the header (from the shared {@link buildMetaRows} set they are omitted
  * from the table to avoid duplication).
  *
- * When the item has ≥1 `.md` Key File, a pinned `Related Docs` ToC is
- * rendered at the top (see {@link formatDetailToC}); the md viewer section
- * below renders the file at `detailRenderedIndex` (default 0 = first file,
- * preserving the existing auto-render behavior).
+ * `Blocked By` rows (WL-0MVBMLY2Z0032CYR): the detail view renders the
+ * SAME active blockers the selection-list metadata panel shows — one row
+ * per blocker (`<id> — <title> <status-icon> <status>`) appended to the
+ * metadata table, reversing the documented divergence (WL-0MV8Q5X8U004KKAP
+ * AC-5). The rows arrive pre-resolved from the render loop via the same
+ * single-flight + signature-keyed cache as the preview, so the detail view
+ * never spawns an uncoordinated async lookup and cannot re-open the
+ * WL-0MV8Q5X8U004KKAP flicker class; an expired/failed lookup simply
+ * passes no rows (fail-open).
  */
 export function formatDetailContent(
   item: WorkItem | null,
@@ -2206,6 +2329,7 @@ export function formatDetailContent(
   detailToCIndex = 0,
   detailToCFocus = true,
   detailRenderedIndex = 0,
+  blockedBy?: BlockerRef[] | null,
 ): string[] {
   if (!item) return [];
 
@@ -2230,6 +2354,15 @@ export function formatDetailContent(
   const metaRows = pairMetaRows(
     buildMetaRows(item, noIcons).filter(([label]) => label !== 'ID' && label !== 'Title'),
   );
+  // `Blocked By` rows (WL-0MVBMLY2Z0032CYR) — one row per ACTIVE blocker
+  // after the metadata table, mirroring the selection-list preview:
+  // ``<id> — <title>`` plus the blocker's status (icon + text) when the
+  // edge carries one. Omitted entirely when there are none, so an
+  // unblocked item's detail view is unchanged.
+  for (const blocker of blockedBy ?? []) {
+    if (!blocker || !blocker.id) continue;
+    metaRows.push(['Blocked By', formatBlockerValue(blocker, noIcons)]);
+  }
 
   // Render the metadata as a markdown table
   if (metaRows.length > 0) {
@@ -2517,11 +2650,12 @@ export function formatDetailView(
   detailToCIndex = 0,
   detailToCFocus = true,
   detailRenderedIndex = 0,
+  blockedBy?: BlockerRef[] | null,
 ): string {
   // The Related Docs ToC is pinned at the top of the detail view; only the
   // body below it scrolls (WL-0MSHWHULZ001FL8I).
   const tocLines = formatDetailToC(item, maxCols, detailToCIndex, detailToCFocus, noIcons);
-  const allLines = formatDetailContent(item, maxCols, readFile, noIcons, detailToCIndex, detailToCFocus, detailRenderedIndex);
+  const allLines = formatDetailContent(item, maxCols, readFile, noIcons, detailToCIndex, detailToCFocus, detailRenderedIndex, blockedBy);
   if (allLines.length === 0) return '';
 
   const pinnedHeight = DETAIL_HEADER_LINES + tocLines.length;
@@ -2716,20 +2850,23 @@ export function formatChordHintsForHelp(
 }
 
 /**
+ * Literal footer advertisement for the help screen (WL-0MV85QZXN002T51A).
+ *
+ * `?` is a reserved key handled by the key loop, not a registry chord, so it
+ * has no `shortcuts.json` entry to format. The hint is prepended to the
+ * dynamic shortcut hints so it stays visible even when the footer is
+ * truncated in a narrow pane. It replaces the retired `d:downtime toggle`
+ * single-key advertisement and the `alt+m mouse on/off` suffix (parent
+ * WL-0MTV97GV20088CS7): both bindings still work, only their inline
+ * advertising moved to the help screen.
+ */
+export const HELP_FOOTER_HINT = '?: Help';
+
+/**
  * Build the dynamic footer hint string for the visible shortcut entries.
  *
- * Most chord leaders collapse to a single `<leader>:<firstWord>...` hint
- * (e.g. `u:update...`), which keeps the footer compact for homogeneous
- * variant families. The podcast-progression family (`w-r`/`w-s`/`w-b`) is
- * the exception: its sub-chords are distinct, stage-gated steps whose labels
- * differ after the shared leading word, so collapsing them hid the
- * sub-options from the producer (OSL-0MUQ59IRF009ICIF AC5).
- *
- * A leader is expanded (every sub-chord hinted) only when its entries carry
- * an explicit work-item-type allowlist — the marker that the entries were
- * authored as type-specific progression steps rather than generic variants.
- * Ungated families (`u`, `f`, `a`, `x`, `P`, `r`, `n`) keep the collapsed
- * form, preserving existing behaviour.
+ * The `?: Help` advertisement is always prepended; the `d` single-key
+ * downtime-toggle entry is no longer advertised (its binding is unchanged).
  *
  * @param entries - Shortcut entries already filtered by stage/view/issue type.
  * @returns Space-joined hint string (empty when no entry yields a hint).
@@ -2745,6 +2882,11 @@ export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
   const grouped = new Map<string, ShortcutEntry[]>();
   const parts: string[] = [];
   for (const e of entries) {
+    // Skip the d single-key downtime-toggle entry — only its advertisement
+    // changes; the key binding remains in shortcuts.json (WL-0MV85QZXN002T51A).
+    if (e.chord?.length === 1 && e.chord[0] === 'd') {
+      continue;
+    }
     if (e.chord && e.chord.length >= 2) {
       const leader = e.chord[0];
       const group = grouped.get(leader) ?? [];
@@ -2769,7 +2911,263 @@ export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
       parts.push(`${leader}:${labelOf(group[0]).split(/\s+/)[0]}...`);
     }
   }
+  // Advertise the help screen ahead of the dynamic hints (parent
+  // WL-0MTV97GV20088CS7 AC1). The `d:downtime toggle` advertisement is
+  // dropped above but its key binding is untouched.
+  parts.unshift(HELP_FOOTER_HINT);
   return parts.join('  ');
+}
+
+/** A single row in the help screen's icon legend. */
+export interface HelpIconRow {
+  /** Icon category (the name prefix, e.g. `status`) used to group the legend. */
+  category: string;
+  /** The glyph (or noIcons text fallback) as rendered in the list. */
+  glyph: string;
+  /** Short human-readable meaning of the glyph. */
+  meaning: string;
+}
+
+/**
+ * Word-wrap a single logical line into lines of at most `cols` display
+ * cells, indenting continuation lines by `indent` columns. Keeps the FULL
+ * text — never truncates — so a long description still reads completely and
+ * the pane's physical row budget stays exact (producer audit on
+ * WL-0MTV97GV20088CS7: "full (not truncated) descriptions").
+ */
+function wrapHelpLine(text: string, cols: number, indent: number): string[] {
+  if (cols <= 1) return [text];
+  const words = text.split(/\s+/).filter(w => w.length > 0);
+  const lines: string[] = [];
+  let current = '';
+  let currentWidth = 0;
+  for (const word of words) {
+    const width = visibleLength(word);
+    if (current === '') {
+      current = word;
+      currentWidth = width;
+      continue;
+    }
+    if (currentWidth + 1 + width <= cols) {
+      current += ` ${word}`;
+      currentWidth += 1 + width;
+    } else {
+      lines.push(current);
+      current = `${' '.repeat(indent)}${word}`;
+      currentWidth = indent + width;
+    }
+  }
+  if (current !== '') lines.push(current);
+  return lines.length > 0 ? lines : [text];
+}
+
+/**
+ * Explicit group headings for chord-leader families whose member labels do
+ * not share a common first word (so the derived heading would be a bare key).
+ * Unknown leaders fall back to the label-derived heading in
+ * {@link helpGroupHeading}, so future chords are still grouped.
+ */
+const HELP_LEADER_LABELS: Record<string, string> = {
+  r: 'Review',
+};
+
+/**
+ * Render a human-readable group heading for a chord-leader command family: the
+ * leader key plus the shared first label word when a strict majority of the
+ * group's labels agree (e.g. `c — create`, `a — audit`), else the bare leader
+ * key (`r`). Derived from live registry data so future chords keep working.
+ */
+function helpGroupHeading(leader: string, group: ShortcutEntry[]): string {
+  const explicit = HELP_LEADER_LABELS[leader];
+  if (explicit) return `${leader} \u2014 ${explicit}`;
+  const counts = new Map<string, number>();
+  for (const e of group) {
+    const word = (e.label ?? e.command).split(/\s+/)[0] ?? '';
+    if (word) counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+  let best = '';
+  let bestCount = 0;
+  for (const [word, count] of counts) {
+    if (count > bestCount) {
+      bestCount = count;
+      best = word;
+    }
+  }
+  if (bestCount > group.length / 2) {
+    return `${leader} \u2014 ${best.charAt(0).toUpperCase()}${best.slice(1)}`;
+  }
+  return leader;
+}
+
+/** Human-readable heading for an icon category (e.g. `status` → `Status`). */
+function helpCategoryHeading(category: string): string {
+  return category
+    .split('-')
+    .map(w => (w ? w.charAt(0).toUpperCase() + w.slice(1) : w))
+    .join(' ');
+}
+
+/**
+ * Strip the leading category name from an icon meaning (the producer audit's
+ * "remove the name prefix"): the group heading already names the category, so
+ * `Status: open — not started` renders as `open — not started` under `Status`.
+ * Meanings that do not start with the category label are returned unchanged.
+ */
+function helpMeaningWithoutCategory(category: string, meaning: string): string {
+  const label = helpCategoryHeading(category);
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Strip a leading `<Category>` optionally followed by a separator
+  // (`:`, `—`, `–`, `-`) and/or whitespace. `Audit passed — …` under the
+  // `Audit` heading becomes `passed — …`; unrelated meanings are untouched.
+  const re = new RegExp(`^\\s*${escaped}\\s*[:\\u2014\\u2013-]?\\s*`, 'i');
+  const stripped = meaning.replace(re, '').trim();
+  return stripped.length > 0 ? stripped : meaning;
+}
+
+/** ANSI 256-colour code for the help-screen title (gold, WL-0MTV97GV20088CS7 rework). */
+const HELP_TITLE_COLOUR = 220;
+/** ANSI 256-colour code for the top-level section headings (Commands / Icons). */
+const HELP_SECTION_COLOUR = 39;
+/** ANSI 256-colour code for the command-family and icon-category sub-headings. */
+const HELP_GROUP_COLOUR = 36;
+
+/** Style a help-screen title line (bold + gold). */
+function helpTitle(text: string): string {
+  return `${ANSI.bold}${ANSI.fg(HELP_TITLE_COLOUR)}${text}${ANSI.reset}`;
+}
+
+/** Style a top-level help section heading (bold + blue). */
+function helpSectionHeading(text: string): string {
+  return `${ANSI.bold}${ANSI.fg(HELP_SECTION_COLOUR)}${text}${ANSI.reset}`;
+}
+
+/** Style a help sub-heading (command family / icon category, bold + cyan). */
+function helpSubHeading(text: string): string {
+  return `${ANSI.bold}${ANSI.fg(HELP_GROUP_COLOUR)}${text}${ANSI.reset}`;
+}
+
+/**
+ * Render the full-pane `?` help overlay (WL-0MV85R14Y003RII9; layout reworked
+ * per the producer audits of 2026-10-15 and 2026-10-16).
+ *
+ * Two sections are produced, each under a coloured heading:
+ * - **Commands** — every supplied shortcut entry in a SINGLE column with its
+ *   FULL (never truncated) description, grouped under a heading per chord
+ *   leader family (`c — Create`, `a — Audit`, …) so groups are separated;
+ * - **Icons** — the glyph legend (supplied by the caller from the shared icon
+ *   source of truth), grouped by category under a heading (`Status`, `Stage`,…)
+ *   with the category name prefix removed from each meaning and every group
+ *   listed on a single line under its heading.
+ *
+ * Layout (2026-10-16 audit): sections and sub-headings are separated by blank
+ * lines, and every heading level is coloured (title gold, section headings
+ * blue, sub-headings cyan).
+ *
+ * The output honours the `rows - 1` render budget (matching the list
+ * viewport contract, WL-0MTV979LK005YB1B): the title line and the dismiss
+ * footer (`? / Esc / q`) are always shown, and the content between them is a
+ * scrolling window at `scrollOffset`. When the full content is longer than
+ * the budget the footer appends a scroll hint (`[↑↓/j:k scroll  g/G top/bot]`)
+ * mirroring the detail view (WL-0MSHWHULZ001FL8I); further content is
+ * revealed by scrolling.
+ *
+ * Display-only: it takes no state and mutates nothing.
+ *
+ * @param entries     - Shortcut entries filtered by stage/view/issue type.
+ * @param cols        - Pane width in terminal cells.
+ * @param rows        - Pane height in terminal cells.
+ * @param iconRows    - Icon legend rows (empty when no legend is supplied).
+ * @param scrollOffset - Vertical offset into the full content (clamped to the
+ *                       last window; default 0 = top of the document).
+ */
+export function formatHelpScreen(
+  entries: ShortcutEntry[],
+  cols: number,
+  rows: number,
+  iconRows: ReadonlyArray<HelpIconRow> = [],
+  scrollOffset = 0,
+): string {
+  const budget = Math.max(2, rows - 1);
+  const title = helpTitle('Help');
+  const footerBase = '? / Esc / q  close';
+  // Title + footer are always reserved; the remainder is the scroll window.
+  const contentBudget = Math.max(0, budget - 2);
+  const lineWidth = Math.max(20, cols - 2);
+
+  // ── Commands: single column, grouped by chord leader with headings ──
+  const grouped = new Map<string, ShortcutEntry[]>();
+  for (const e of entries) {
+    const leader = (e.chord && e.chord.length > 0) ? e.chord[0] : '';
+    const list = grouped.get(leader) ?? [];
+    list.push(e);
+    grouped.set(leader, list);
+  }
+
+  const content: string[] = [];
+  // Leading blank: separates the pinned title from the first section heading
+  // (2026-10-16 audit: "blank lines to separate the sections").
+  content.push('');
+  content.push(helpSectionHeading('Commands'));
+  content.push('');
+  for (const [leader, group] of grouped) {
+    content.push(helpSubHeading(helpGroupHeading(leader, group)));
+    for (const e of group) {
+      const chord = (e.chord ?? []).join(' ');
+      const label = e.label ?? e.command;
+      const text = e.description
+        ? `${chord}  ${label} \u2014 ${e.description}`
+        : `${chord}  ${label}`;
+      content.push(...wrapHelpLine(`  ${text}`, lineWidth, 6));
+    }
+    // A blank line separates each command family under the section.
+    content.push('');
+  }
+
+  // ── Icons: grouped by category with a heading, one line per group ──
+  if (iconRows.length > 0) {
+    // The blank separator above already follows the last command family;
+    // keep a clean exchange between the two top-level sections.
+    content.push(helpSectionHeading('Icons'));
+    content.push('');
+    const byCategory = new Map<string, HelpIconRow[]>();
+    for (const row of iconRows) {
+      const list = byCategory.get(row.category) ?? [];
+      list.push(row);
+      byCategory.set(row.category, list);
+    }
+    for (const [category, rows] of byCategory) {
+      content.push(helpSubHeading(helpCategoryHeading(category)));
+      const tokens = rows
+        .map(r => `${r.glyph} ${helpMeaningWithoutCategory(category, r.meaning)}`)
+        .join('   ');
+      content.push(...wrapHelpLine(`  ${tokens}`, lineWidth, 4));
+      // A blank line separates each icon category under the section.
+      content.push('');
+    }
+  }
+
+  // ── Scroll window (2026-10-16 audit: "we need to be able to scroll") ──
+  const maxScroll = Math.max(0, content.length - contentBudget);
+  const safeOffset = Math.min(scrollOffset, maxScroll);
+  const visible = content.slice(safeOffset, safeOffset + contentBudget);
+
+  let footer = footerBase;
+  if (maxScroll > 0) {
+    const percent = content.length > 0
+      ? Math.round(((safeOffset + contentBudget) / content.length) * 100)
+      : 0;
+    const hint = `${ANSI.dim}[↑↓/j:k scroll  g/G top/bot  ${Math.min(100, percent)}%]${ANSI.reset}`;
+    // Keep the dismiss keys discoverable on narrow panes (WL-0MTV979LK005YB1B):
+    // only append the scroll hint when the footer still fits the pane width.
+    if (visibleLength(`${footerBase}   ${hint}`.replace(/\x1b\[[0-9;]*m/g, '')) <= cols) {
+      footer = `${footerBase}   ${hint}`;
+    }
+  }
+
+  const out = [title, ...visible];
+  while (out.length < budget - 1) out.push('');
+  out.push(footer);
+  return out.slice(0, budget).join('\n');
 }
 
 /**
@@ -2856,6 +3254,14 @@ export function keyToAction(key: string): KeyAction {
       return 'toggle-expand';
     case '\x1b':
       return 'back';
+    // Ctrl+r (\x12) — immediate manual refresh of the selection list
+    // (WL-0MV85T0LT008UT9H). The legacy bare-`r` refresh stays removed:
+    // `r` is the Producer Review / Interview chord leader (WL-0MS4LDWHW0062FTA)
+    // and is resolved via the ShortcutRegistry, not here. \x12 is not a chord
+    // leader and not a single-key shortcut, so the existing
+    // `action === 'refresh'` branch fires `doRefresh(true)`.
+    case '\x12':
+      return 'refresh';
     // '/' filter prompt removed — use f-* chords instead
     // 'r' is a single-key Producer Review shortcut — resolved via ShortcutRegistry
     // 'S' is the Ship It shortcut — resolved via ShortcutRegistry (opens the
@@ -3149,6 +3555,49 @@ export interface ParsedMouseEvent {
  * inclusive (<=). */
 export const DOUBLE_CLICK_WINDOW_MS = 400;
 
+/** Minimum pointer displacement (in terminal cells / rows) before a
+ * held-button motion event is treated as a drag-to-scroll gesture rather
+ * than click jitter.  SGR coordinates are 1-based cell positions so a
+ * threshold of 1 row distinguishes deliberate scrolling from incidental
+ * movement.  (WL-0MSI72S0Y0060BRK) */
+export const DRAG_THRESHOLD_CELLS = 1;
+
+/** State tracker for an active drag-to-scroll gesture.  Tracks the press
+ * origin, a fractional accumulator for proportional scrolling, and the
+ * pre-press selection/scroll so the drag can restore them when it
+ * activates — ensuring a drag never leaves the selection moved by the
+ * initial press.  (WL-0MSI72S0Y0060BRK) */
+export interface MouseDragState {
+  /** Origin of the press (x, y) or null when no drag is active. */
+  origin: { x: number; y: number } | null;
+  /** Fractional row/line accumulator — integer parts are dispatched as
+   * discrete scroll deltas. */
+  accumulator: number;
+  /** True when the drag has crossed the threshold and is actively
+   * scrolling. */
+  active: boolean;
+  /** Snapshot of selectedIndex and scrollOffset taken at press time, used
+   * to restore state when the drag activates so the drag never leaves the
+   * selection moved by the initial press. */
+  prePressSelection: { selectedIndex: number; scrollOffset: number } | null;
+  /** True once the pre-press selection has been restored for this drag
+   * gesture — the restore happens exactly once, on the first threshold-
+   * crossing motion; subsequent drag events accumulate scroll on top of
+   * the restored state. */
+  restored: boolean;
+}
+
+/** Create a fresh drag state (helper for tests). */
+export function createDragState(): MouseDragState {
+  return {
+    origin: null,
+    accumulator: 0,
+    active: false,
+    prePressSelection: null,
+    restored: false,
+  };
+}
+
 /** Prior left-press coordinates plus an injectable clock for deterministic
  * double-click tests. */
 export interface MouseClickState {
@@ -3158,7 +3607,18 @@ export interface MouseClickState {
   now: number;
 }
 
-/** Dispatchable mouse action — mirrors the list/detail/filter key paths. */
+/** Internal drag bookkeeping action — emitted on the first press and
+ * never dispatched to the state switch (it triggers state capture only).
+ * (WL-0MSI72S0Y0060BRK) */
+type DragAction =
+  | { type: 'drag-start' }
+  | { type: 'drag-list'; rows: number }
+  | { type: 'drag-detail'; lines: number };
+
+/** Dispatchable mouse action — mirrors the list/detail/filter key paths.
+ * Drag actions are emitted by `mapMouseDrag` and dispatched by
+ * `handleMouseInput`; the drag consumer never emits `select-row` /
+ * `open-detail`, so a drag-release can never click.  (WL-0MSI72S0Y0060BRK) */
 export type MouseAction =
   | { type: 'select-row'; index: number } // list: click/tap an item row
   | { type: 'open-detail' } // list: double-click (Enter-equivalent)
@@ -3170,6 +3630,7 @@ export type MouseAction =
   | { type: 'filter-stage'; index: number } // filter: tap a stage option
   | { type: 'hover-row'; index: number } // list: motion over an item row (tooltip)
   | { type: 'hover-none' } // list: motion over chrome rows (pointer left the rows)
+  | DragAction // internal drag actions (drag-start, drag-list, drag-detail)
   | null; // inert: chrome rows, motion, releases, unknown buttons
 
 /**
@@ -3322,10 +3783,13 @@ function filterStageIndexForColumn(x: number): number | null {
 
 /**
  * Map a parsed SGR mouse event to a dispatchable action for the current
- * state. Gate rules (WL-0MSGHM5BQ0096BNJ AC2–AC6): release events and
- * motion (button & 32) are inert; wheel 64/65 navigate (list) or scroll the
- * detail (detail) and are ignored in filter mode; only the left button
- * selects; two left presses on the same row within
+ * state. Gate rules (WL-0MSGHM5BQ0096BNJ AC2–AC6, WL-0MSI72S0Y0060BRK):
+ * release events are inert; button-less motion (button & 32 and & 3 = 3)
+ * drives the hover tooltip in list mode (left-button-held motion is a drag
+ * candidate handled by {@link handleMouseInput} via {@link mapMouseDrag} —
+ * it never returns a navigation/select action); wheel 64/65 navigate (list)
+ * or scroll the detail (detail) and are ignored in filter mode; only the
+ * left button selects; two left presses on the same row within
  * {@link DOUBLE_CLICK_WINDOW_MS} open the detail view (list mode) or go
  * back (detail mode); filter-mode taps on the stage-options row select a
  * stage.
@@ -3338,15 +3802,13 @@ export function mapMouseToAction(
 ): MouseAction {
   // Release events are consumed but inert — presses drive selection (AC6).
   if (ev.release) return null;
-  // Motion events (button & 32): never navigate, but trigger hover tooltip
-  // in list mode (WL-0MT9XRZDK006GMUH). They remain inert in detail/filter.
-  if ((ev.button & 32) !== 0) {
+  // Motion events (button & 32): button-less motion triggers the hover
+  // tooltip in list mode; left-button-held motion is handled separately
+  // in handleMouseInput via mapMouseDrag (AC4).
+  if ((ev.button & 32) !== 0 && (ev.button & 3) === 3) {
+    // Button-less motion → hover tooltip (WL-0MT9XRZDK006GMUH).
     if (state.mode === 'list') {
       const index = mapListRowToIndex(state, ev.y, termSize);
-      // Motion over a visible list row → hover-row (tooltip candidate).
-      // Motion over chrome/blank rows (header, fold indicators, footer,
-      // panel) → hover-none: the pointer has left the rows area, allowing
-      // a dismissed tooltip to re-show on the next re-entry (AC2).
       return index !== null ? { type: 'hover-row', index } : { type: 'hover-none' };
     }
     return null; // detail/filter: motion is inert
@@ -3393,13 +3855,114 @@ export function mapMouseToAction(
   return index !== null ? { type: 'select-row', index } : null;
 }
 
+/** Pure function that maps a drag candidate SGR mouse event to a drag
+ * action, driven by the supplied `dragState` tracker.
+ *
+ * Behaviour (WL-0MSI72S0Y0060BRK):
+ *
+ *   - Left-button press: record origin + pre-press selection → `drag-start`
+ *   - Left-button motion past `DRAG_THRESHOLD_CELLS`: return `drag-list`
+ *     (list mode, whole-row deltas) or `drag-detail` (detail mode, lines)
+ *   - Sub-threshold motion / release / filter mode / detail single-click: null
+ *
+ * Drag actions never emit `select-row` / `open-detail`; releases are inert.
+ */
+export function mapMouseDrag(
+  state: WorkItemListState,
+  ev: ParsedMouseEvent,
+  dragState: MouseDragState,
+  termSize: TermSize,
+): MouseAction {
+  // Filter mode and detail single-clicks: drag is out of scope (constraints).
+  if (state.mode === 'filter') return null;
+
+  // ── Left-button press: capture state and emit drag-start ─────────
+  if (!ev.release && ev.button === 0) {
+    dragState.origin = { x: ev.x, y: ev.y };
+    dragState.accumulator = 0;
+    dragState.active = false;
+    dragState.restored = false;
+    dragState.prePressSelection = {
+      selectedIndex: state.selectedIndex,
+      scrollOffset: state.scrollOffset,
+    };
+    return { type: 'drag-start' };
+  }
+
+  // ── Release: end the drag; return null (inert) ──────────────────
+  if (ev.release) {
+    dragState.origin = null;
+    dragState.accumulator = 0;
+    dragState.active = false;
+    dragState.restored = false;
+    dragState.prePressSelection = null;
+    return null;
+  }
+
+  // ── Motion (left button held): compute deltas ───────────────────
+  // Only process motion for the left button (button bits 0, with motion bit 32).
+  // Other button+motion combos (e.g. middle+motion) are inert — fall through.
+  if ((ev.button & 3) !== 0 || (ev.button & 32) === 0) {
+    return null;
+  }
+
+  if (!dragState.origin) return null;
+
+  const deltaY = ev.y - dragState.origin.y;
+
+  if (state.mode === 'list') {
+    // List mode: scroll proportional to vertical movement, snapped to whole
+    // rows. A fractional accumulator converts continuous movement into
+    // discrete row steps.
+    dragState.accumulator += deltaY;
+    let rows = 0;
+    while (dragState.accumulator >= DRAG_THRESHOLD_CELLS) {
+      dragState.accumulator -= DRAG_THRESHOLD_CELLS;
+      rows++;
+    }
+    while (dragState.accumulator <= -DRAG_THRESHOLD_CELLS) {
+      dragState.accumulator += DRAG_THRESHOLD_CELLS;
+      rows--;
+    }
+    // Reset accumulator for next delta
+    if (rows !== 0) {
+      dragState.origin = { x: ev.x, y: ev.y };
+      dragState.active = true;
+    }
+    return rows !== 0 ? { type: 'drag-list', rows } : null;
+  }
+
+  if (state.mode === 'detail') {
+    // Detail mode: scroll proportional to vertical movement, 1 row ≈ 1 line.
+    dragState.accumulator += deltaY;
+    let lines = 0;
+    while (dragState.accumulator >= DRAG_THRESHOLD_CELLS) {
+      dragState.accumulator -= DRAG_THRESHOLD_CELLS;
+      lines++;
+    }
+    while (dragState.accumulator <= -DRAG_THRESHOLD_CELLS) {
+      dragState.accumulator += DRAG_THRESHOLD_CELLS;
+      lines--;
+    }
+    if (lines !== 0) {
+      dragState.origin = { x: ev.x, y: ev.y };
+      dragState.active = true;
+    }
+    return lines !== 0 ? { type: 'drag-detail', lines } : null;
+  }
+
+  // Other modes (e.g. filter): drag is out of scope.
+  return null;
+}
+
 /**
  * Wire a raw stdin chunk into the mouse path — the onData entry point
- * (WL-0MSGHM5BQ0096BNJ AC2–AC6, fix WL-0MSZBWT500034E74). Parses SGR mouse
- * events via {@link consumeMouseChunk}, maps them to an action via
- * {@link mapMouseToAction}, dispatches it against `state` (mirroring the
- * handleKeypress action handling), and tracks the double-click window in
- * `clickState`.
+ * (WL-0MSGHM5BQ0096BNJ AC2–AC6, fix WL-0MSZBWT500034E74, WL-0MSI72S0Y0060BRK).
+ * Parses SGR mouse events via {@link consumeMouseChunk}, maps them to an
+ * action via {@link mapMouseToAction}, dispatches it against `state`
+ * (mirroring the handleKeypress action handling), tracks the double-click
+ * window in `clickState`, and drives drag-to-scroll via {@link mapMouseDrag}
+ * with the accumulated `dragState`.
  *
  * Returns true when the chunk was mouse-shaped (fully consumed — it must
  * NOT reach the keyboard path); false for plain keys and foreign escape
@@ -3419,6 +3982,7 @@ export function handleMouseInput(
   key: string,
   termSize: TermSize,
   clickState: MouseClickState,
+  dragState?: MouseDragState,
 ): boolean {
   const bufferBefore = mouseChunkBuffer;
   const mouseEvent = consumeMouseChunk(key);
@@ -3433,19 +3997,69 @@ export function handleMouseInput(
     return mouseChunkBuffer !== bufferBefore;
   }
 
+  // Drag-state tracker — callers that only exercise click/wheel behaviour
+  // may omit it; drag tracking then uses a fresh per-event tracker (no
+  // cross-event state, so no drag can activate).
+  const ds: MouseDragState = dragState ?? createDragState();
+
   // Current clock for the double-click window (Date.now; deterministic
   // tests inject clickState directly into mapMouseToAction instead).
   const now = Date.now();
   clickState.now = now;
   const action = mapMouseToAction(state, mouseEvent, termSize, clickState);
 
-  // Advance the tracker AFTER the double-click check — the next event's
-  // window compares against THIS press (fix WL-0MSZBWT500034E74).
+  // Advance the double-click tracker AFTER the double-click check — the next
+  // event's window compares against THIS press (fix WL-0MSZBWT500034E74).
   if (!mouseEvent.release && mouseEvent.button === 0) {
     clickState.lastClick = { x: mouseEvent.x, y: mouseEvent.y, at: now };
   }
 
-  if (action === null) return true; // consumed but inert (motion, release, chrome)
+  // Update the drag-state tracker on every mouse event (press / motion /
+  // release).  mapMouseDrag captures the pre-press selection and returns
+  // the appropriate drag action (drag-start / drag-list / drag-detail) or
+  // null for inert events.
+  const dragAction = mapMouseDrag(state, mouseEvent, ds, termSize);
+
+  if (action === null && dragAction === null) return true; // consumed but inert
+
+  // Dispatch drag actions — they override regular mouse actions when the
+  // drag mapper returns something (left-held motion in list/detail mode).
+  if (dragAction !== null) {
+    switch (dragAction.type) {
+      case 'drag-start':
+        // Bookkeeping only — mapMouseDrag already captured the pre-press
+        // selection.  Fall through to the regular dispatch so the press
+        // still selects (click behaviour preserved); a later threshold-
+        // crossing motion restores the pre-press selection.
+        break;
+      case 'drag-list':
+        // Restore the pre-press selection/scroll exactly once, on the first
+        // threshold-crossing motion — a drag never leaves the selection
+        // moved by the initial press (AC3).  Subsequent drag events
+        // accumulate scroll on top of the restored state.
+        if (!ds.restored && ds.prePressSelection) {
+          state.selectedIndex = ds.prePressSelection.selectedIndex;
+          state.scrollOffset = ds.prePressSelection.scrollOffset;
+          ds.restored = true;
+        }
+        state.scrollBy(dragAction.rows);
+        return true;
+      case 'drag-detail':
+        if (!ds.restored && ds.prePressSelection) {
+          state.selectedIndex = ds.prePressSelection.selectedIndex;
+          state.scrollOffset = ds.prePressSelection.scrollOffset;
+          ds.restored = true;
+        }
+        if (state.detailItem) {
+          dragAction.lines > 0
+            ? state.detailScrollDown(dragAction.lines)
+            : state.detailScrollUp(-dragAction.lines);
+        }
+        return true;
+    }
+  }
+
+  if (action === null) return true; // consumed but inert
 
   // Dispatch mouse actions (mirrors the handleKeypress action handling).
   switch (action.type) {
@@ -3627,6 +4241,11 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   totalCount?: number,
   chordState?: ChordState | null,
   detailScrollOffset?: number,
+  /**
+   * Retained for positional call-site compatibility only — the
+   * `[auto-refresh on]` header indicator it drove was removed in
+   * WL-0MV85T0LT008UT9H. Callers/tests pass it positionally; do not remove.
+   */
   autoRefresh?: boolean,
   expandedItems?: Set<string>,
   chordHelpHints?: string,
@@ -3656,6 +4275,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
    * (AH-0MUDYTQ55002NUSJ)
    */
   sprintAuditsOutstanding?: boolean,
+  /** Active dependency blockers of the selected item, rendered as `Blocked By` rows (WL-0MV8EZRDJ001TDA8). */
+  metaBlockedBy?: BlockerRef[] | null,
+  /** Active dependency blockers of the detail item, rendered as `Blocked By` rows (WL-0MVBMLY2Z0032CYR). */
+  detailBlockedBy?: BlockerRef[] | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -3671,6 +4294,11 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     totalCount?: number,
     chordState?: ChordState | null,
     detailScrollOffset?: number,
+    /**
+     * Retained for positional call-site compatibility only — the
+     * `[auto-refresh on]` header indicator it drove was removed in
+     * WL-0MV85T0LT008UT9H. Callers/tests pass it positionally; do not remove.
+     */
     autoRefresh?: boolean,
     expandedItems?: Set<string>,
     chordHelpHints?: string,
@@ -3691,6 +4319,9 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     sprintCompletedCount?: number,
     browseItemCount?: number,
     sprintAuditsOutstanding?: boolean,
+    metaBlockedBy?: BlockerRef[] | null,
+    /** Active dependency blockers of the detail item, rendered as `Blocked By` rows (WL-0MVBMLY2Z0032CYR). */
+    detailBlockedBy?: BlockerRef[] | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -3717,6 +4348,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
         detailToCIndex ?? 0,
         detailToCFocus ?? true,
         detailRenderedIndex ?? 0,
+        detailBlockedBy,
       );
     }
 
@@ -3734,17 +4366,19 @@ export function createListRenderer(getShowIcons?: () => boolean): (
 
     // ── Render list mode ──────────────────────────────────────────
 
-    // Header with total count and auto-refresh indicator. `totalItems` is
+    // Header with total count. `totalItems` is
     // the count of WorkItem rows only (heading rows are excluded so the
     // header reconciles with per-group heading counts).
+    // `autoRefresh` is intentionally unused since WL-0MV85T0LT008UT9H removed
+    // the `[auto-refresh on]` header indicator; it is retained for
+    // positional call-site compatibility (the production call site and many
+    // tests pass it positionally). The setting still controls the scheduler
+    // tick — the shortcut is independent of it.
     const totalItems = displayRows.filter((row) => !isHeadingRow(row)).length;
     const filterLabel = activeFilter ? ` (filtered: ${activeFilter})` : '';
     let header = ` ${ANSI.bold}Work Items${ANSI.reset} — ${totalItems} item(s)${filterLabel}`;
     if (totalCount !== undefined && totalCount > totalItems) {
       header += ` (top ${totalItems} of ${totalCount})`;
-    }
-    if (autoRefresh) {
-      header += ` ${ANSI.dim}[auto-refresh on]${ANSI.reset}`;
     }
     if (panePaused) {
       header += ` ${ANSI.fg(220)}[paused — hidden]${ANSI.reset}`;
@@ -3926,7 +4560,12 @@ export function createListRenderer(getShowIcons?: () => boolean): (
         const navHint = (navStackDepth && navStackDepth > 0)
           ? ` ${ANSI.dim}[esc] back${navStackDepth > 1 ? ` (${navStackDepth} levels)` : ''}${ANSI.reset}`
           : '';
-        const chordHelpSuffix = chordHelpHints ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}` : '';
+        // Gate the dynamic hint line behind showHelpText so `false` hides
+        // the `?: Help` advertisement too, not only the chord-in-progress
+        // footer (WL-0MV85QZXN002T51A AC3).
+        const chordHelpSuffix = (helpEnabled && chordHelpHints)
+          ? ` ${ANSI.fg(220)}${chordHelpHints}${ANSI.reset}`
+          : '';
         const footerLine = navHint + chordHelpSuffix || ' ';
         // ── Footer wrap guard (WL-0MTV979LK005YB1B) ──────────────
         // In narrow panes the dynamic help line can exceed `cols`,
@@ -3962,6 +4601,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
           metaScrollOffset ?? 0,
           metaLastCommand,
           noIcons,
+          metaBlockedBy,
         );
     for (const line of panelLines) {
       output.push(line);
@@ -4019,6 +4659,60 @@ function logCommandForItem(command: string, itemId?: string): void {
 }
 
 /**
+ * Invoke the resolved-command callback, forwarding the optional routing
+ * flags with the strict "append only when explicitly set" arity rules shared
+ * by every dispatch path:
+ *
+ *  - `openPane` is appended only when explicitly set (`false`); an undefined
+ *    value keeps the 2-arg call byte-compatible so shortcuts without
+ *    `open_pane` open a pane exactly as before (WL-0MSJLD1I70045ZUL).
+ *  - `onRefresh` occupies the 4th slot and is forwarded when present so a
+ *    background (no-pane) dispatch can refresh the list on child exit
+ *    (WL-0MT1KB70U0012X6T).
+ *  - `paneTitle` occupies the 5th slot; only pane-opening routes with a
+ *    selected item carry one (WL-0MSJ4E8UA005KG9Y).
+ *  - `focus` is appended as the 6th arg only when `true`, so callers
+ *    without a focus flag see today's arity (WL-0MT70LC6B009TL3Q).
+ *
+ * Extracted so the placeholder form dialog honours `open_pane` /
+ * `onRefresh` / `focus` exactly like the placeholder-free paths
+ * (WL-0MV6J4HQ0009OJPQ).
+ */
+function invokeOnCommand(
+  onCommand: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => void,
+  command: string,
+  model: string | undefined,
+  openPane: boolean | undefined,
+  onRefresh: (() => Promise<void>) | undefined,
+  paneTitle: string | undefined,
+  focus: boolean | undefined,
+): void {
+  if (openPane === undefined) {
+    if (paneTitle !== undefined) {
+      if (focus === true) onCommand(command, model, undefined, undefined, paneTitle, true);
+      else onCommand(command, model, undefined, undefined, paneTitle);
+    } else {
+      if (focus === true) onCommand(command, model, undefined, undefined, undefined, true);
+      else onCommand(command, model);
+    }
+  } else if (onRefresh) {
+    if (paneTitle !== undefined) {
+      if (focus === true) onCommand(command, model, openPane, onRefresh, paneTitle, true);
+      else onCommand(command, model, openPane, onRefresh, paneTitle);
+    } else {
+      if (focus === true) onCommand(command, model, openPane, onRefresh, undefined, true);
+      else onCommand(command, model, openPane, onRefresh);
+    }
+  } else if (paneTitle !== undefined) {
+    if (focus === true) onCommand(command, model, openPane, undefined, paneTitle, true);
+    else onCommand(command, model, openPane, undefined, paneTitle);
+  } else {
+    if (focus === true) onCommand(command, model, openPane, undefined, undefined, true);
+    else onCommand(command, model, openPane);
+  }
+}
+
+/**
  * Resolve `<id>` placeholders in a command and route it through the
  * output mechanism. Used by {@link dispatchChordCommand} for agent
  * workflow and audit command families.
@@ -4066,46 +4760,11 @@ function resolveAndRouteCommand(
       selected && (isAgentCommand(resolvedCommand) || resolvedCommand.startsWith('!'))
         ? selected.title
         : undefined;
-    // The openPane flag is passed only when explicitly set (false): an
-    // undefined third arg keeps the 2-arg call identical to today's
-    // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL). Focus (WL-0MT70LC6B009TL3Q) follows the same
-    // "append when explicitly true" rule: omitted/false keeps the current
-    // no-focus default. The onRefresh hook is appended only for
-    // background (no-pane) dispatches (openPane === false) so they can
-    // trigger a refresh when the child exits (WL-0MT1KB70U0012X6T);
-    // pane-opening paths keep their existing arity. The focuses arg slots
-    // after paneTitle so callers that pass a title keep their position;
-    // callers that don't pass a focus flag see no extra arg (backward
-    // compatible). Pane titles are appended only when the command opens a
-    // pane and a title exists.
-    // Focus handling (WL-0MT70LC6B009TL3Q): when focus is true, the new pane
-    // is zoomed. The value is appended as a 6th arg only when true so
-    // omitting/undefined stays backward compatible — callers without a focus
-    // flag see today's arity (no trailing undefined).
-    if (openPane === undefined) {
-      if (paneTitle !== undefined) {
-        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, paneTitle, true);
-        else onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
-      } else {
-        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, undefined, true);
-        else onCommand(resolvedCommand, model);
-      }
-    } else if (onRefresh) {
-      if (paneTitle !== undefined) {
-        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle, true);
-        else onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
-      } else {
-        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, undefined, true);
-        else onCommand(resolvedCommand, model, openPane, onRefresh);
-      }
-    } else if (paneTitle !== undefined) {
-      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, paneTitle, true);
-      else onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
-    } else {
-      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, undefined, true);
-      else onCommand(resolvedCommand, model, openPane);
-    }
+    // Forward openPane/onRefresh/paneTitle/focus with the shared arity rules
+    // (invokeOnCommand) so shortcuts without an explicit open_pane stay
+    // byte-compatible (WL-0MSJLD1I70045ZUL, WL-0MT1KB70U0012X6T,
+    // WL-0MT70LC6B009TL3Q).
+    invokeOnCommand(onCommand, resolvedCommand, model, openPane, onRefresh, paneTitle, focus);
   }
   return true;
 }
@@ -4187,13 +4846,26 @@ export function formatCodeFreezeDialog(maxCols: number, maxRows: number, reason?
 }
 
 /**
- * Full-pane "Ship mode blocked" notice (WL-0MUD6DDZC007ZSIW). Renders the
- * guard's plain-text blocked notice inside the same box style as the Code
- * Freeze dialog, so the blocked state reuses the established in-pane modal
- * pattern (esc/enter/q dismiss). Shown INSTEAD of the Ship It dialog when
- * live agent panes are working on project items — the dialog never opens.
+ * Render a full-pane, dismissable modal notice: a centred box with a bold
+ * accent-coloured title, a body, and a dim dismiss-key footer.
+ *
+ * Extracted from {@link formatBlockedShipDialog} so the Ship-mode blocked
+ * notice and the podcast w-chord dispatch notice (OSL-0MUQ59IRF009ICIF)
+ * share one implementation and render identically apart from title/accent.
+ *
+ * @param maxCols - Terminal width.
+ * @param maxRows - Terminal height (the box is padded to fill it).
+ * @param title - Bold title line (rendered in the accent colour).
+ * @param body - Body text; `\n` is honoured and each line is padded.
+ * @param accent - ANSI 256-colour code for the title.
  */
-export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: string): string {
+export function formatNoticeDialog(
+  maxCols: number,
+  maxRows: number,
+  title: string,
+  body: string,
+  accent: number,
+): string {
   const lines: string[] = [];
   const dialogWidth = Math.min(maxCols - 4, 76);
   const effectiveWidth = Math.max(52, dialogWidth);
@@ -4210,7 +4882,7 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
 
   lines.push('');
   lines.push(borderLine('┌', '┐'));
-  lines.push(padLine(`${ANSI.bold}${ANSI.fg(196)}⛔ SHIP MODE BLOCKED${ANSI.reset}`));
+  lines.push(padLine(`${ANSI.bold}${ANSI.fg(accent)}${title}${ANSI.reset}`));
   lines.push(padLine(''));
   for (const raw of body.split('\n')) {
     lines.push(padLine(raw));
@@ -4226,6 +4898,52 @@ export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: 
     lines.push('');
   }
   return lines.join('\n');
+}
+
+/**
+ * Outcome of a podcast w-chord dispatch attempt, surfaced to the operator.
+ *
+ * - `dispatched` — the command resolved and was sent to a Pi agent pane.
+ * - `error` — `resolvePodcastTarget` refused to resolve the command (e.g. no
+ *   script in `Key Files:`, or the belt-and-braces "never author a duplicate"
+ *   guard). Nothing was dispatched.
+ */
+export interface PodcastNotice {
+  kind: 'dispatched' | 'error';
+  body: string;
+}
+
+/**
+ * Render the persistent, dismissable notice for a podcast w-chord dispatch
+ * attempt (OSL-0MUQ59IRF009ICIF).
+ *
+ * The w-chords' failure and confirmation feedback used to be transient
+ * fire-and-forget `herdr notification` toasts that were easy to miss — the
+ * reported symptom was "nothing happens". This notice stays on screen until
+ * the operator dismisses it, so a refused dispatch can never be mistaken for
+ * a silently dropped keypress.
+ */
+export function formatPodcastNotice(
+  maxCols: number,
+  maxRows: number,
+  notice: PodcastNotice,
+): string {
+  const title = notice.kind === 'dispatched'
+    ? '✅ WRITE CHORD DISPATCHED'
+    : '⚠ WRITE CHORD — NOT DISPATCHED';
+  const accent = notice.kind === 'dispatched' ? 82 : 196;
+  return formatNoticeDialog(maxCols, maxRows, title, notice.body, accent);
+}
+
+/**
+ * Full-pane "Ship mode blocked" notice (WL-0MUD6DDZC007ZSIW). Renders the
+ * guard's plain-text blocked notice inside the same box style as the Code
+ * Freeze dialog, so the blocked state reuses the established in-pane modal
+ * pattern (esc/enter/q dismiss). Shown INSTEAD of the Ship It dialog when
+ * live agent panes are working on project items — the dialog never opens.
+ */
+export function formatBlockedShipDialog(maxCols: number, maxRows: number, body: string): string {
+  return formatNoticeDialog(maxCols, maxRows, '⛔ SHIP MODE BLOCKED', body, 196);
 }
 
 /**
@@ -4427,7 +5145,6 @@ export async function resolveDispatchDetail(
  * - `/wl <stage>` — stage filter actions (applied internally)
  * - `/skill:implement`, `/skill:audit` — agent skill invocations
  * - `/intake`, `/plan` — agent workflow commands
- * - `!!wl reviewed` — producer review toggle
  * - Compound audit commands containing `&& wl audit-set`
  *
  * @param command - The resolved command string (may contain `<id>` placeholders)
@@ -4534,12 +5251,13 @@ export function dispatchChordCommand(
   if (command.startsWith('!!wl reviewed')) {
     return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
-  // ── Data-modifying wl commands (close/delete/update/search) ──
+
+  // ── Data-modifying wl commands (close/delete/update/reviewed/search) ──
   // These mutate the work-item data set or change the list contents, so
   // they are routed here (not the generic callback path) so the caller's
   // isWlModifyingCommand check sees 'dispatched' and triggers an immediate
   // list refresh after the command completes (WL-0MTA217DZ003H5K8).
-  if (/^!!\s*wl\s+(close|delete|update|search)\b/i.test(command)) {
+  if (/^!!\s*wl\s+(close|delete|update|reviewed|search)\b/i.test(command)) {
     return resolveAndRouteCommand(command, state, onCommand, model, openPane, onRefresh, focus);
   }
   if (command.includes('&& wl audit-set')) {
@@ -4726,7 +5444,7 @@ export async function resolvePodcastTarget(
  * Routing priority:
  * 1. {@link dispatchChordCommand} — handles `/wl <stage>` (internal filter),
  *    `/skill:implement`, `/skill:audit`, `/skill:ship`, `/intake`, `/plan`,
- *    `!!wl reviewed`, and compound `&& wl audit-set` commands (resolves
+ *    and compound `&& wl audit-set` commands (resolves
  *    `<id>` and routes to `onCommand`). Returns 'dispatched'.
  * 2. Code Freeze guard — when `codeFreezeActive` is true and the command is
  *    an implement command, the command is NOT routed; returns 'blocked' so
@@ -4771,7 +5489,7 @@ export function executeResolvedCommand(
   }
 
   // Try dispatchChordCommand first — handles /wl, /downtime, /skill:,
-  // /intake, /plan, !!wl reviewed, and compound audit commands. Focus
+  // /intake, /plan, and compound audit commands. Focus
   // (WL-0MT70LC6B009TL3Q) is threaded through so the new pane can be focused
   // when requested (only `P n` today).
   if (dispatchChordCommand(command, state, onCommand, model, onDowntimeToggle, openPane, onRefresh, focus)) {
@@ -4812,35 +5530,11 @@ export function executeResolvedCommand(
     // The openPane flag is passed only when explicitly set (false): an
     // undefined third arg keeps the 2-arg call identical to today's
     // dispatch, so shortcuts without open_pane are byte-compatible
-    // (WL-0MSJLD1I70045ZUL). Focus (WL-0MT70LC6B009TL3Q) follows the same
-    // append-when-explicitly-true rule — omitted/false keeps today's arity.
-    // The onRefresh hook is appended only for background (no-pane)
-    // dispatches (openPane === false) so they can trigger a refresh when
-    // the child exits (WL-0MT1KB70U0012X6T); pane-opening paths keep their
-    // existing arity.
-    if (openPane === undefined) {
-      if (paneTitle !== undefined) {
-        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, paneTitle, true);
-        else onCommand(resolvedCommand, model, undefined, undefined, paneTitle);
-      } else {
-        if (focus === true) onCommand(resolvedCommand, model, undefined, undefined, undefined, true);
-        else onCommand(resolvedCommand, model);
-      }
-    } else if (onRefresh) {
-      if (paneTitle !== undefined) {
-        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle, true);
-        else onCommand(resolvedCommand, model, openPane, onRefresh, paneTitle);
-      } else {
-        if (focus === true) onCommand(resolvedCommand, model, openPane, onRefresh, undefined, true);
-        else onCommand(resolvedCommand, model, openPane, onRefresh);
-      }
-    } else if (paneTitle !== undefined) {
-      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, paneTitle, true);
-      else onCommand(resolvedCommand, model, openPane, undefined, paneTitle);
-    } else {
-      if (focus === true) onCommand(resolvedCommand, model, openPane, undefined, undefined, true);
-      else onCommand(resolvedCommand, model, openPane);
-    }
+    // (WL-0MSJLD1I70045ZUL). `focus`/`onRefresh`/`paneTitle` follow the rules
+    // documented on invokeOnCommand. Centralised so the placeholder form
+    // dialog (WL-0MV6J4HQ0009OJPQ) and the placeholder-free paths can never
+    // drift apart.
+    invokeOnCommand(onCommand, resolvedCommand, model, openPane, onRefresh, paneTitle, focus);
   }
   return 'callback';
 }
@@ -4862,7 +5556,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; applyActiveTabMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -4877,8 +5571,7 @@ export async function runWorklistTui(
     onCommand: options?.onCommand,
     downtimeWorker: options?.downtimeWorker,
     downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
-    mergeAgentStates: options?.mergeAgentStates,
-    applyActiveTabMarkers: options?.applyActiveTabMarkers,
+    applyActivePaneMarkers: options?.applyActivePaneMarkers,
     subscriber: options?.subscriber ?? null,
     agentTracker: options?.agentTracker ?? null,
     onDowntimeToggle: options?.onDowntimeToggle,
@@ -4896,18 +5589,17 @@ export async function runWorklistTui(
   let termSize = getTermSize();
 
   /**
-   * Apply the tab-based active marker to freshly fetched items: any item with
-   * an exact-match tab in THIS workspace is shown as `in-progress` (marker +
-   * Group N), independent of the worklog status the demotion loop maintains.
-   * This makes the selection list's marker reflect tab existence directly
-   * (WL-0MV1BWETT005GSUJ). The production implementation is injected by
-   * `index.ts` (same pattern as `mergeAgentStates`); when absent it is a
-   * no-op, so tests never spawn `herdr`. Fail-open — a tab lookup failure
-   * leaves every item unchanged.
+   * Apply the pane-based active marker to freshly fetched items: any item
+   * with a matching pane title in THIS workspace is shown as `in-progress`
+   * (marker + Group N), independent of the worklog status the demotion loop
+   * maintains. This makes the selection list's marker reflect pane existence
+   * directly (WL-0MV1BWETT005GSUJ). The production implementation is
+   * injected by `index.ts`; when absent it is a no-op, so tests never spawn
+   * `herdr`. Fail-open — a pane lookup failure leaves every item unchanged.
    */
-  const applyTabMarkers = async (list: WorkItem[]): Promise<void> => {
+  const applyPaneMarkers = async (list: WorkItem[]): Promise<void> => {
     try {
-      await opts.applyActiveTabMarkers?.(list);
+      await opts.applyActivePaneMarkers?.(list);
     } catch {
       // Fail-open: a marker failure must never break the refresh/render.
     }
@@ -4920,10 +5612,10 @@ export async function runWorklistTui(
   } catch {
     items = [];
   }
-  // Reflect open item tabs on the very first render (no 30 s wait). Kicked
+  // Reflect open item panes on the very first render (no 30 s wait). Kicked
   // off without blocking TUI startup; the marker lands on a follow-up render
-  // once the tab lookup resolves (fail-open).
-  void applyTabMarkers(items).then(() => render());
+  // once the pane lookup resolves (fail-open).
+  void applyPaneMarkers(items).then(() => render());
 
   // Fetch total actionable count (best effort — failure is silent)
   fetchActionableCount().then((count) => {
@@ -4936,15 +5628,15 @@ export async function runWorklistTui(
   const state = new WorkItemListState(items, termSize);
 
   /**
-   * Re-evaluate tab existence against the CURRENT items (no `wl` re-fetch)
+   * Re-evaluate pane existence against the CURRENT items (no `wl` re-fetch)
    * and re-render. Called on the hydrate cadence and on focus-resume so an
-   * opened/closed work-item tab changes the marker within one cadence even
+   * opened/closed work-item pane changes the marker within one cadence even
    * though it does not touch the worklog DB (which is why the DB-gated
-   * refresh tick cannot be relied on for this). Spawns only `herdr tab list`,
-   * never `wl`. Fail-open (see `applyTabMarkers`).
+   * refresh tick cannot be relied on for this). Spawns only `herdr pane list`,
+   * never `wl`. Fail-open (see `applyPaneMarkers`).
    */
-  const refreshTabMarkers = async (): Promise<void> => {
-    await applyTabMarkers(state.allItems());
+  const refreshPaneMarkers = async (): Promise<void> => {
+    await applyPaneMarkers(state.allItems());
     render();
   };
 
@@ -4952,10 +5644,113 @@ export async function runWorklistTui(
   // showIcons setting change applies without a plugin restart — same pattern
   // as getShowHelpText). The renderer is created per-TUI-run with the getter.
   const renderer = createListRenderer(opts.getShowIcons);
+
+  // ── Metadata-panel dependency blockers (WL-0MV8EZRDJ001TDA8) ────────
+  // Resolved for the SELECTED item only (never every list row) and cached by
+  // item ID. The cache SURVIVES list refreshes (WL-0MV8Q5X8U004KKAP): the
+  // previous implementation cleared it on EVERY refresh, which re-entered the
+  // unresolved frame and made the `Blocked By` line flicker on/off endlessly
+  // under the frequent refresh traffic of a live workspace (DB-change watch
+  // + auto-sync + `wl next` re-sorts all bump the read-cache counter).
+  //
+  // Invalidation: a cached entry is reused while the item's payload signature
+  // (status/stage/updatedAt) is unchanged. A signature change — a dependency
+  // add/remove reconciles the from-item's status (`blocked` ↔ `open`) and
+  // bumps `updatedAt` — invalidates just that entry. While a re-resolve is in
+  // flight the last known value is still served (stale-while-revalidate), so
+  // a refresh never blanks the line and a stable selection shows exactly one
+  // unresolved→resolved transition. The render path never blocks: an item
+  // with no cached value renders without `Blocked By` rows and a follow-up
+  // render shows them once the async lookup lands.
+  //
+  // Single-flight: the in-flight lookup is memoised per item, so repeated
+  // renders/refreshes while it is pending share one spawn (no race/duplicate)
+  // and the resolved value is re-rendered from cache thereafter.
+  //
+  // Fail-open — a lookup error caches an empty list so a broken `wl dep list`
+  // can never break rendering or navigation (mirrors resolveMetaLastCommand).
+  const blockerCache = new Map<string, { blockers: BlockerRef[]; signature: string }>();
+  const blockerInFlight = new Map<string, Promise<BlockerRef[]>>();
+
+  /**
+   * Payload signature of an item whose change can invalidate its cached
+   * blockers. A dependency edge add/remove reconciles the from-item's status
+   * and bumps `updatedAt` (packages/shared/src/database.ts
+   * `reconcileDependentStatus`), so a signature change is the refresh-time
+   * signal that the item's edges may have changed. Fields absent from a
+   * payload collapse to empty strings, keeping the comparison stable.
+   *
+   * Known residual: an edge change that leaves the from-item's payload
+   * untouched (e.g. adding a second blocker to an already-`blocked` item, or
+   * a blocker target completing while other blockers keep the item `blocked`)
+   * does not change the signature and the cache serves the last resolved rows
+   * until the item itself changes or it is re-selected. This is the accepted
+   * trade-off of the AC-2 invalidation rule (reuse until the item changes)
+   * — the alternative (re-resolve on every refresh) is the flicker this item
+   * fixes.
+   */
+  const blockerSignature = (item: WorkItem): string =>
+    `${item.id}|${item.status ?? ''}|${item.stage ?? ''}|${item.updatedAt ?? ''}`;
+
+  const resolveMetaBlockers = (item: WorkItem | null): BlockerRef[] | undefined => {
+    if (!item) return undefined;
+    // Synthetic log-derived rows have no live `wl` counterpart; blockers are
+    // only meaningful for live rows, so skip the lookup (WL-0MUL2IY8L009S3PQ).
+    if (item.isLogDerived || item.isLogOnly) return undefined;
+    const signature = blockerSignature(item);
+    const cached = blockerCache.get(item.id);
+    // Cached value whose signature still matches the payload — reuse it,
+    // never re-entering the unresolved frame or re-spawning the lookup.
+    if (cached !== undefined && cached.signature === signature) return cached.blockers;
+    if (!blockerInFlight.has(item.id)) {
+      // Fail-open even against an unexpectedly unavailable helper (tests may
+      // replace the fetcher module): never let the lookup break a render.
+      let lookup: Promise<BlockerRef[]>;
+      try {
+        lookup = fetchBlockersForItem(item.id);
+      } catch {
+        // Synchronous throw: cache the fail-open empty list and stop.
+        blockerCache.set(item.id, { blockers: [], signature });
+        return [];
+      }
+      const inFlight = lookup
+        .then((blockers) => {
+          blockerCache.set(item.id, { blockers, signature });
+          return blockers;
+        })
+        .catch(() => {
+          // Fail-open: never surface a blocker lookup failure.
+          blockerCache.set(item.id, { blockers: [], signature });
+          return [] as BlockerRef[];
+        })
+        .finally(() => {
+          blockerInFlight.delete(item.id);
+          render();
+        });
+      blockerInFlight.set(item.id, inFlight);
+    }
+    // A re-resolve is in flight: serve the last known value so a refresh
+    // never drops the line (stale-while-revalidate). On a first resolve
+    // there is none yet, so render no rows this frame and let the follow-up
+    // render show them — the one unresolved→resolved transition per selection.
+    return cached?.blockers;
+  };
   const chordState: ChordState = createChordState();
   let formState: FormState | null = null;
   /** Saved mode before entering form overlay (to restore on cancel) */
   let preFormMode: ViewMode = 'list';
+  /**
+   * The mode the help overlay returns to when dismissed (WL-0MV85R14Y003RII9).
+   * Mirrors the `preFormMode` pattern: opening help records the mode, and
+   * `?`/Esc/`q` restore it without mutating list state.
+   */
+  let preHelpMode: ViewMode = 'list';
+  /**
+   * Vertical scroll offset of the help overlay's content window (2026-10-16
+   * producer audit: the overlay must be scrollable). Reset to 0 every time
+   * the overlay opens; clamped to the last window in `formatHelpScreen`.
+   */
+  let helpScrollOffset = 0;
   /**
    * Ship It confirmation dialog (WL-0MSGG5N5Z0074TLY). Non-null while the
    * dialog is open; its buffer holds the typed confirmation input. The
@@ -4986,6 +5781,12 @@ export async function runWorklistTui(
    */
   let blockedNotice: string | null = null;
 
+  // Persistent, dismissable notice for a podcast w-chord dispatch attempt
+  // (OSL-0MUQ59IRF009ICIF). Replaces the transient toast for the w-r/w-s/w-b
+  // (and t) markers so a refused dispatch — e.g. the belt-and-braces
+  // "already present" guard — can never look like a silently dropped key.
+  let podcastNotice: PodcastNotice | null = null;
+
   /**
    * Single source of truth for "the user is typing" (WL-0MTV67MZU003H7SH):
    * true while any text-input overlay (`formState`, `shipItDialog`, or the
@@ -4995,7 +5796,7 @@ export async function runWorklistTui(
    * command-completion hook). See {@link isInputActive}.
    */
   const inputActive = (): boolean =>
-    isInputActive(formState, shipItDialog, blockedNotice !== null);
+    isInputActive(formState, shipItDialog, blockedNotice !== null || podcastNotice !== null);
 
   /**
    * Re-read the code-freeze marker tri-state. Fail-open for browsing: an
@@ -5085,10 +5886,15 @@ export async function runWorklistTui(
     if (!subscriber || !agentTracker) return;
     try {
       const current = new Set(subscriber.getTrackedPaneIds());
+      const missing: string[] = [];
       for (const entry of agentTracker.snapshot()) {
-        if (!current.has(entry.paneId)) {
-          await subscriber.addPaneSubscription(entry.paneId);
-        }
+        if (!current.has(entry.paneId)) missing.push(entry.paneId);
+      }
+      if (missing.length > 0) {
+        // Batch: herdr accepts ONE events.subscribe per connection, so all
+        // new panes are applied by re-establishing the connection ONCE with
+        // the combined set (WL-0MVAS988R008PNH6) — never one restart per pane.
+        await subscriber.addPaneSubscriptions(missing);
       }
     } catch {
       // Fail-open: a subscription sync failure keeps polling as fallback.
@@ -5096,28 +5902,30 @@ export async function runWorklistTui(
   };
 
   /**
-   * Re-apply the tracker's cached states to the live items and re-render
-   * (coalesced per microtask so event storms do not thrash the TUI).
+   * Re-evaluate pane existence and re-render after a pane lifecycle event
+   * (agent status change, agent detected, pane closed/exited). The row's
+   * green-circle icon is pane-title existence (WL-0MV1BWETT005GSUJ), so an
+   * event that opens or closes a work-item pane must refresh the pane list.
+   * Single-flight across concurrent events; visibility-gated so a hidden tab
+   * spawns no `herdr`; fail-open (see `applyPaneMarkers`).
    */
-  let agentEventRenderPending = false;
-  const scheduleAgentEventRender = (): void => {
-    if (agentEventRenderPending) return;
-    agentEventRenderPending = true;
-    Promise.resolve().then(() => {
-      agentEventRenderPending = false;
-      // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and its
-      // open overlay) while a text-input overlay is active. Icons catch up on
-      // the next non-typing render/refresh.
-      if (inputActive()) return;
+  let paneMarkerRefreshInFlight: Promise<void> | null = null;
+  const refreshPaneMarkersFromEvent = (): void => {
+    if (paneMarkerRefreshInFlight) return;
+    paneMarkerRefreshInFlight = (async () => {
       try {
-        if (agentTracker) {
-          mergeAgentStatesCached(state.items, agentTracker);
+        // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and
+        // its open overlay) while a text-input overlay is active.
+        if (inputActive()) return;
+        if (await paneGate.visible()) {
+          await refreshPaneMarkers();
         }
-        render();
       } catch {
-        // Fail-open: render failures never crash the TUI.
+        // Fail-open: pane-marker failures never crash the TUI.
+      } finally {
+        paneMarkerRefreshInFlight = null;
       }
-    });
+    })();
   };
 
   if (subscriber) {
@@ -5144,40 +5952,64 @@ export async function runWorklistTui(
         // task uses (WL-0MSHB7DHO004RHBJ + WL-0MV1BWETT005GSUJ).
         void runHydrator();
       },
-      // Agent-status events update the tracker's cached state map and
-      // re-render the icons immediately (no `herdr agent list` exec).
+      // Agent-status events keep the tracker's association bookkeeping
+      // fresh (the shared `.worklog/agent-panes.json` feeds the hover
+      // tooltip and pane subscriptions); the ROW icon is pane-title
+      // existence, refreshed from the pane list so a pane that just
+      // appeared/disappeared updates the green circle without a 30 s wait.
+      // (WL-0MV1BWETT005GSUJ — no longer any `herdr agent list` icon merge.)
       onAgentStatusChanged: (data) => {
         if (!agentTracker) return;
         agentTracker.applyAgentStatusChanged(data.pane_id, data.agent_status);
-        scheduleAgentEventRender();
+        refreshPaneMarkersFromEvent();
       },
       // A new agent pane appeared (possibly from another herdr instance):
       // re-read the shared file for late associations and add the pane to
-      // the per-pane subscription set (AC3).
+      // the per-pane subscription set (AC3), then refresh the pane-existence
+      // icons.
       onAgentDetected: (data) => {
         if (!agentTracker || !subscriber) return;
         const grew = agentTracker.applyAgentDetected();
         if (grew) void syncPaneSubscriptions();
         void subscriber.addPaneSubscription(data.pane_id).catch(() => {});
-        scheduleAgentEventRender();
+        refreshPaneMarkersFromEvent();
       },
-      // A pane closed/exited: prune its associations so its icons disappear
-      // immediately and drop the per-pane subscription (best-effort).
+      // A pane closed/exited: prune its associations so its hover metadata
+      // disappears immediately and drop the per-pane subscription
+      // (best-effort); the pane-existence marker (green circle) is re-read
+      // from the pane list.
       onPaneClosed: (data) => {
         if (!agentTracker || !subscriber) return;
         agentTracker.applyPaneGone(data.pane_id);
         void subscriber.removePaneSubscription(data.pane_id).catch(() => {});
-        scheduleAgentEventRender();
+        refreshPaneMarkersFromEvent();
       },
       onPaneExited: (data) => {
         if (!agentTracker || !subscriber) return;
         agentTracker.applyPaneGone(data.pane_id);
         void subscriber.removePaneSubscription(data.pane_id).catch(() => {});
-        scheduleAgentEventRender();
+        refreshPaneMarkersFromEvent();
       },
       onError: () => {
-        // Socket errors are already handled by the subscriber's reconnect
-        // logic; no TUI action needed (fail-open).
+        // The event stream dropped (socket error/close). The subscriber
+        // reconnects with backoff; meanwhile flip back to the resume-poll
+        // fallback so a hidden → visible transition still refreshes
+        // immediately while events are down (WL-0MVAS988R008PNH6 AC3/AC1).
+        // `onReconnected` below restores the event path on recovery.
+        if (eventsActive) {
+          eventsActive = false;
+          void paneGate.visible().then((visible) => {
+            if (!visible) startResumePoll();
+          });
+        }
+      },
+      onReconnected: () => {
+        // Stream re-established (restart or backoff reconnect): the event
+        // path drives focus/refresh again — stop the resume-poll fallback
+        // and top up per-pane subscriptions for any pane tracked meanwhile.
+        eventsActive = true;
+        stopResumePoll();
+        void syncPaneSubscriptions();
       },
     });
 
@@ -5375,12 +6207,20 @@ export async function runWorklistTui(
             attachFresh([topLevel]);
           }
         }
-        // Tab-based active marker (WL-0MV1BWETT005GSUJ): items with an
-        // exact-match tab in this workspace are shown in-progress even when
-        // the worklog status is still `open` (e.g. a claim that was released
-        // before the tab was (re)opened). Fail-open.
-        await applyTabMarkers(newItems);
+        // Pane-based active marker (WL-0MV1BWETT005GSUJ): items with a
+        // matching pane title in this workspace are shown in-progress even
+        // when the worklog status is still `open` (e.g. a claim that was
+        // released before the pane was (re)opened). Fail-open.
+        await applyPaneMarkers(newItems);
         state.refreshItems(newItems);
+        // Blocked-by rows survive refreshes (WL-0MV8Q5X8U004KKAP): the
+        // blocker cache is keyed by item ID and invalidated per item only
+        // when its payload signature changes (status/stage/updatedAt — see
+        // blockerSignature above), so an unrelated refresh reuses the last
+        // resolved rows instead of re-running the async lookup and dropping
+        // the `Blocked By` line for a frame (the endless flicker fix). A
+        // dependency edge change reconciles the from-item's status and
+        // bumps updatedAt, so the very next refresh invalidates that item.
         // Re-read the Code Freeze marker so a freeze that started (or ended)
         // since the last refresh is reflected in the banner promptly.
         refreshFreezeState();
@@ -5391,14 +6231,10 @@ export async function runWorklistTui(
         // state unchanged. Queue depth never writes the disable marker
         // (WL-0MTTSWC1X005P4VD).
         applySprintState(await reviewStatePromise);
-        // Merge agent-status state into the refreshed items (top-level +
-        // expanded children) so the agent icons reflect the latest tracker
-        // state (WL-0MSBQUJQX005RAT9). Fail-open: no herdr CLI → no icons.
-        try {
-          await opts.mergeAgentStates?.(newItems);
-        } catch {
-          // Fail-open: a merge failure must never break the refresh cycle.
-        }
+        // The pane-existence marker (in-progress status + green-circle icon)
+        // was already applied to `newItems` above by `applyPaneMarkers`; the
+        // row icons are pane-title existence, not the event-driven agent
+        // tracker (WL-0MV1BWETT005GSUJ). No separate agent merge runs here.
         if (showNotification && newItems.length !== oldLen) {
           const diff = newItems.length - oldLen;
           const msg = diff > 0 ? `+${diff} new` : `${diff} removed`;
@@ -5445,11 +6281,12 @@ export async function runWorklistTui(
   // clear-filter `/wl`.
 
   // True when a command modifies the work-item data set (close, delete,
-  // update, reviewed, search), warranting an immediate list refresh so the
+  // update, search), warranting an immediate list refresh so the
   // selection list reflects the change without waiting for the auto-refresh
   // cycle (WL-0MTA217DZ003H5K8).
   const isWlModifyingCommand = (cmd: string): boolean => {
-    // Commands like "!!wl close <id>", "!!wl delete <id>", "!!wl update <id> ..."
+    // Commands like "!!wl close <id>", "!!wl delete <id>", "!!wl update <id> ...",
+    // "!!wl reviewed <id> ...", "!!wl search ..."
     if (/^!!\s*wl\s+(close|delete|update|reviewed|search)\b/i.test(cmd)) return true;
     return false;
   };
@@ -5592,15 +6429,21 @@ export async function runWorklistTui(
   // double-clicks within {@link DOUBLE_CLICK_WINDOW_MS}. (WL-0MSGHM5BQ0096BNJ AC3)
   let clickState: MouseClickState = { lastClick: null, now: 0 };
 
+  // Drag-to-scroll state tracker (WL-0MSI72S0Y0060BRK): persists across
+  // onData calls so the drag mapper can accumulate fractional movement
+  // and restore the pre-press selection when the drag activates.
+  let dragState: MouseDragState = createDragState();
+
   // ── Mouse event dispatch (WL-0MSGHM5BQ0096BNJ AC2–AC6) ─────────
   // handleMouseInput parses SGR mouse events from the raw chunk BEFORE the
   // keypress path and dispatches them (click select, double-click open,
-  // wheel/scroll, filter tap). Mouse-shaped sequences are fully consumed;
-  // plain keys and foreign escapes fall through to the keyboard handler
-  // untouched (AC6). See the fix note in handleMouseInput for the
-  // single-click-select vs double-click-open ordering (WL-0MSZBWT500034E74).
+  // wheel/scroll, filter tap, drag-to-scroll). Mouse-shaped sequences are
+  // fully consumed; plain keys and foreign escapes fall through to the
+  // keyboard handler untouched (AC6). See the fix note in handleMouseInput
+  // for the single-click-select vs double-click-open ordering
+  // (WL-0MSZBWT500034E74).
   const dispatchMouse = (key: string): boolean =>
-    handleMouseInput(state, key, termSize, clickState);
+    handleMouseInput(state, key, termSize, clickState, dragState);
 
   const handleKeyInput = async (key: string): Promise<void> => {
 
@@ -5614,9 +6457,10 @@ export async function runWorklistTui(
     }
 
     // Try mouse event dispatch first — only runs when the pane is not in a
-    // modal state (code-freeze notice, form, ship-it dialog), matching the
-    // keyboard path. Mouse input is ignored during those modal states.
-    if (!codeFreezeNotice && blockedNotice === null && formState === null && shipItDialog === null) {
+    // modal state (code-freeze notice, form, ship-it dialog, help overlay),
+    // matching the keyboard path. Mouse input is ignored during those modal
+    // states.
+    if (!codeFreezeNotice && blockedNotice === null && podcastNotice === null && formState === null && shipItDialog === null && state.mode !== 'help') {
       if (dispatchMouse(key)) {
         render();
         return;
@@ -5643,6 +6487,19 @@ export async function runWorklistTui(
     if (blockedNotice !== null) {
       if (key === '\x1b' || key === '\r' || key === '\n' || key === 'q') {
         blockedNotice = null;
+      }
+      render();
+      return;
+    }
+
+    // ── Podcast w-chord dispatch notice handling (OSL-0MUQ59IRF009ICIF) ──
+    // Persistent modal surfacing the outcome of a w-r/w-s/w-b dispatch: a
+    // refused resolution ("nothing happens") or a successful dispatch. Esc,
+    // Enter or q dismisses it and returns to the list; all other keys are
+    // consumed so the notice cannot be scrolled away unnoticed.
+    if (podcastNotice !== null) {
+      if (key === '\x1b' || key === '\r' || key === '\n' || key === 'q') {
+        podcastNotice = null;
       }
       render();
       return;
@@ -5713,7 +6570,52 @@ export async function runWorklistTui(
     // Quit on a bare `q` — but NOT while a chord is pending, because `q`
     // may be the chord's next key (e.g. the `c q` create-quick chord,
     // WL-0MTCLB50D0026YA7). Chord-mode handling below consumes the key
-    // when `chordState.pendingKeys` is non-empty.
+    // when `chordState.pendingKeys` is non-empty. Help mode is handled
+    // first (below) so `q` dismisses the overlay instead of quitting.
+
+    // ── Help overlay mode (WL-0MV85R14Y003RII9) ─────────────────
+    // Full-pane, display-only overlay. `?`, Esc and `q` dismiss it back to
+    // the recorded pre-help mode; scroll keys (j/k/arrow/PageUp/PageDown,
+    // g/G) move the content window; every other key is consumed so no
+    // command is dispatched and no list state is mutated (2026-10-16 audit:
+    // the overlay must be scrollable).
+    if (state.mode === 'help') {
+      const pageSize = Math.max(5, termSize.rows - 4);
+      if (key === '?' || key === '\x1b' || key === 'q') {
+        helpScrollOffset = 0;
+        state.mode = preHelpMode;
+      } else if (key === 'j' || key === '\x1b[B') {
+        helpScrollOffset += 1;
+      } else if (key === 'k' || key === '\x1b[A') {
+        helpScrollOffset = Math.max(0, helpScrollOffset - 1);
+      } else if (key === '\x1b[6~') {
+        helpScrollOffset += pageSize;
+      } else if (key === '\x1b[5~') {
+        helpScrollOffset = Math.max(0, helpScrollOffset - pageSize);
+      } else if (key === 'g') {
+        helpScrollOffset = 0;
+      } else if (key === 'G') {
+        helpScrollOffset = Number.MAX_SAFE_INTEGER; // clamped in the formatter
+      }
+      render();
+      return;
+    }
+    // Open the help overlay from the list view. Reserved key `?` (no
+    // registry chord, no navigation action) — only offered while help text
+    // is enabled, matching the footer hint gate (WL-0MV85QZXN002T51A AC3).
+    if (
+      state.mode === 'list'
+      && key === '?'
+      && chordState.pendingKeys.length === 0
+      && opts.getShowHelpText()
+    ) {
+      preHelpMode = state.mode;
+      helpScrollOffset = 0;
+      state.mode = 'help';
+      render();
+      return;
+    }
+
     if (key === 'q' && state.mode !== 'filter' && chordState.pendingKeys.length === 0) {
       cleanup();
       resolve(undefined);
@@ -5747,6 +6649,10 @@ export async function runWorklistTui(
         chordState.resolvedModel = null;
         chordState.resolvedOpenPane = undefined;
         chordState.resolvedFocus = undefined;
+        // True when the resolved command carried a podcast-progression marker
+        // (OSL-0MUQ59IRF009ICIF): its outcome is surfaced as the persistent
+        // podcastNotice instead of the transient 'Sent' toast.
+        let podcastMarkerCommand = false;
         if (command) {
           // Podcast-progression markers (<podcast-target>/<podcast-script>/
           // <podcast-review>/<podcast-both>) are resolved from the selected
@@ -5757,11 +6663,12 @@ export async function runWorklistTui(
               || command.includes('<podcast-review>') || command.includes('<podcast-both>')) {
             const podcast = await resolvePodcastTarget(command, state.getSelectedItem());
             if (podcast.error) {
-              showToast('Error', { body: podcast.error });
+              podcastNotice = { kind: 'error', body: podcast.error };
               render();
               return;
             }
             command = podcast.command ?? command;
+            podcastMarkerCommand = true;
           }
           // Ship It confirmation (WL-0MSGG5N5Z0074TLY): the dev→main
           // release command, however it reaches this path, requires a typed
@@ -5920,7 +6827,15 @@ export async function runWorklistTui(
                   return;
                 }
                 if (opts.onCommand) {
-                  opts.onCommand(finalCmd, model ?? undefined);
+                  // Forward openPane/onRefresh/focus with the same arity rules
+                  // as the placeholder-free paths (invokeOnCommand): a form-
+                  // triggered shortcut carrying `open_pane: false` must run in
+                  // the background exactly like a placeholder-free one
+                  // (WL-0MV6J4HQ0009OJPQ). paneTitle is intentionally not
+                  // computed here — the form path has never supplied one, so
+                  // pane-opening form dispatches stay byte-compatible with
+                  // today's 2-arg call.
+                  invokeOnCommand(opts.onCommand, finalCmd, model ?? undefined, openPane, opts.onRefresh, undefined, focus);
                 }
               },
               // onCancel
@@ -5946,6 +6861,10 @@ export async function runWorklistTui(
               // Code Freeze — show the notice dialog; the command was NOT
               // routed, no pane spawned, no work item claimed.
               codeFreezeNotice = true;
+            } else if (podcastMarkerCommand) {
+              // Persistent in-pane confirmation (OSL-0MUQ59IRF009ICIF): the
+              // resolved podcast command replaces the transient 'Sent' toast.
+              podcastNotice = { kind: 'dispatched', body: command };
             } else if (result === 'noop') {
               showToast('Skipped', { body: `${command.length > 60 ? command.substring(0, 57) + '...' : command} (no item)` });
             } else {
@@ -5956,7 +6875,7 @@ export async function runWorklistTui(
             // so the filtered view shows every root item in the stage matching
             // the stage's status rule, not just the already-loaded subset
             // (WL-0MSDT8X1V003206G).
-            // Modifying-command dispatch (close, delete, update, reviewed,
+            // Modifying-command dispatch (close, delete, update,
             // search): refetch so the selection list reflects the change
             // immediately instead of waiting for the auto-refresh cycle
             // (WL-0MTA217DZ003H5K8).
@@ -6026,6 +6945,9 @@ export async function runWorklistTui(
         // openPane: undefined (default) = open a pane; false = background,
         // no pane (WL-0MSJLD1I70045ZUL).
         const singleOpenPane = singleEntry.openPane ?? undefined;
+        // True when the command carried a podcast-progression marker: its
+        // outcome uses the persistent podcastNotice (OSL-0MUQ59IRF009ICIF).
+        let singlePodcastMarker = false;
         // Podcast-progression markers (<podcast-target>/<podcast-script>/
         // <podcast-review>/<podcast-both>) are resolved from the selected
         // item's context BEFORE the generic modal-form check so they never
@@ -6035,11 +6957,12 @@ export async function runWorklistTui(
             || singleCmd.includes('<podcast-review>') || singleCmd.includes('<podcast-both>')) {
           const podcast = await resolvePodcastTarget(singleCmd, state.getSelectedItem());
           if (podcast.error) {
-            showToast('Error', { body: podcast.error });
+            podcastNotice = { kind: 'error', body: podcast.error };
             render();
             return;
           }
           singleCmd = podcast.command ?? singleCmd;
+          singlePodcastMarker = true;
         }
         // Ship It (S) — typed-confirmation dialog (WL-0MSGG5N5Z0074TLY):
         // the dev→main release shortcut does NOT dispatch immediately. It
@@ -6106,6 +7029,9 @@ export async function runWorklistTui(
           if (result === 'blocked') {
             // Code Freeze — show the notice dialog; no pane spawned.
             codeFreezeNotice = true;
+          } else if (singlePodcastMarker) {
+            // Persistent in-pane confirmation (OSL-0MUQ59IRF009ICIF).
+            podcastNotice = { kind: 'dispatched', body: singleCmd };
           } else {
             // Surface a brief toast, then continue
             showToast('Sent', { body: singleCmd.length > 60 ? singleCmd.substring(0, 57) + '...' : singleCmd });
@@ -6114,7 +7040,7 @@ export async function runWorklistTui(
           // so the filtered view shows every root item in the stage matching
           // the stage's status rule, not just the already-loaded subset
           // (WL-0MSDT8X1V003206G).
-          // Modifying-command dispatch (close, delete, update, reviewed,
+          // Modifying-command dispatch (close, delete, update,
           // search): refetch so the selection list reflects the change
           // immediately instead of waiting for the auto-refresh cycle
           // (WL-0MTA217DZ003H5K8).
@@ -6192,13 +7118,11 @@ export async function runWorklistTui(
           // survive the flatten (which may hold a copy with a corrected
           // depth) — see WorkItemListState.attachChildren.
           state.attachChildren(selected.id, children);
-          // Merge agent-status state into the freshly loaded children so
-          // their rows show agent icons too (WL-0MSBQUJQX005RAT9).
-          try {
-            await opts.mergeAgentStates?.([selected]);
-          } catch {
-            // Fail-open: a merge failure must never break expansion.
-          }
+          // The pane-existence marker recurses into children, so newly
+          // expanded children pick up their green-circle / in-progress
+          // markers on the next pane-marker pass (the 30 s cadence or the
+          // next refresh) — same behaviour as the status marker
+          // (WL-0MV1BWETT005GSUJ).
           state.toggleExpand(selected.id);
           render();
           return;
@@ -6263,6 +7187,42 @@ export async function runWorklistTui(
     }
   };
 
+  /**
+   * Build the command list shown in the `?` help overlay (WL-0MV85R14Y003RII9).
+   *
+   * Derived live from the ShortcutRegistry for the selected item's stage and
+   * issue type, so a future shortcut appears automatically. Mirrors the
+   * footer's list-view filter (`view === 'list' | 'both'`); unlike the footer
+   * it never collapses a chord family — the overlay enumerates every entry.
+   */
+  const buildHelpEntries = (): ShortcutEntry[] => {
+    if (!shortcutRegistry) return [];
+    const reg = shortcutRegistry as ShortcutRegistry;
+    const displayItems = state.getDisplayRows();
+    const selIdx = state.selectedIndex;
+    const selItem = displayItems.length > 0 && selIdx < displayItems.length
+      ? displayItems[selIdx]
+      : undefined;
+    const selStage = selItem !== undefined && !isHeadingRow(selItem) ? selItem.stage : undefined;
+    const selIssueType = selItem !== undefined && !isHeadingRow(selItem) ? selItem.issueType : undefined;
+    return reg
+      .getEntriesForStage(selStage, codeFreezeActive, selIssueType)
+      .filter(e => e.view === 'list' || e.view === 'both');
+  };
+
+  /**
+   * Build the icon legend shown in the `?` help overlay (WL-0MV85R2G6000G7BU).
+   * Rows come from the shared `ICON_LEGEND` (the single icon source of truth)
+   * so a newly added row glyph cannot silently miss the legend — the drift
+   * guard in packages/shared/src/icons-legend.test.ts enforces it.
+   */
+  const buildHelpIconLegend = (): HelpIconRow[] =>
+    ICON_LEGEND.map((entry) => ({
+      category: entry.category,
+      glyph: entry.glyph,
+      meaning: entry.meaning,
+    }));
+
   const render = (): void => {
     termSize = getTermSize();
     state.termSize = termSize;
@@ -6300,6 +7260,39 @@ export async function runWorklistTui(
       return;
     }
 
+    // ── Podcast w-chord dispatch notice overlay rendering ──────
+    // Persistent modal for a w-r/w-s/w-b dispatch outcome
+    // (OSL-0MUQ59IRF009ICIF). Rendered above the list so a refused dispatch
+    // is impossible to miss; the operator dismisses it with Esc/Enter/q.
+    if (podcastNotice !== null) {
+      const dialogOutput = formatPodcastNotice(termSize.cols, termSize.rows, podcastNotice);
+      process.stdout.write(ANSI.clear);
+      process.stdout.write(ANSI.cursorHome);
+      process.stdout.write(dialogOutput);
+      return;
+    }
+
+    // ── Help overlay rendering (WL-0MV85R14Y003RII9) ──────────
+    // Full-pane, read-only `?` help screen: every list-view shortcut
+    // (grouped by chord leader) plus the icon legend, clipped to the
+    // `rows - 1` budget with the dismiss footer always visible, and a
+    // scrollable content window (2026-10-16 audit). Nothing is
+    // dispatched and no list state is read or mutated beyond the registry.
+    if (state.mode === 'help') {
+      const helpEntries = buildHelpEntries();
+      const helpOutput = formatHelpScreen(
+        helpEntries,
+        termSize.cols,
+        termSize.rows,
+        buildHelpIconLegend(),
+        helpScrollOffset,
+      );
+      process.stdout.write(ANSI.clear);
+      process.stdout.write(ANSI.cursorHome);
+      process.stdout.write(helpOutput);
+      return;
+    }
+
     // Use the display-rows model for list rendering (headings + items,
     // WL-0MSL5MPSZ003TG94). Heading rows have no stage/issueType, so
     // shortcut hints fall back to defaults for heading selections.
@@ -6333,17 +7326,6 @@ export async function runWorklistTui(
       }
     }
 
-    // Mouse-tracking toggle hint (WL-0MT0AP2LR000JFWN): appends the Alt+m
-    // toggle to the footer shortcut hints so the user knows how to switch
-    // between mouse interaction and native text-selection (drag-select).
-    // Shown whenever help text is enabled.
-    if (opts.getShowHelpText()) {
-      const mouseHint = mouseTrackingEnabled
-        ? `alt+m mouse on`
-        : `alt+m mouse off`;
-      dynamicHints = dynamicHints ? `${dynamicHints}  ${mouseHint}` : ` ${mouseHint}`;
-    }
-
     // Look up the selected item's last recorded command for the metadata
     // panel (only shown for actively-worked, status in-progress items). Best
     // effort: a missing or unreadable log yields undefined and the panel falls
@@ -6351,6 +7333,27 @@ export async function runWorklistTui(
     const metaLastCommand = state.mode === 'list'
       ? resolveMetaLastCommand(state.getSelectedItem())
       : undefined;
+
+    // Active dependency blockers for the metadata panel's `Blocked By` rows
+    // (WL-0MV8EZRDJ001TDA8). Cached/async; the render path never blocks.
+    const metaBlockers = state.mode === 'list'
+      ? resolveMetaBlockers(state.getSelectedItem())
+      : undefined;
+    // Keep the state's `m`/`M` scroll clamp in sync with the rows the
+    // renderer will actually show.
+    state.metaBlockedBy = metaBlockers ?? null;
+    // Detail view: the SAME single-flight + signature-keyed cache resolves
+    // the detail item's active blockers so `formatDetailContent` can render
+    // `Blocked By` rows without re-opening the WL-0MV8Q5X8U004KKAP flicker
+    // class (WL-0MVBMLY2Z0032CYR). Sharing the per-item cache/in-flight memo
+    // means a detail lookup never duplicates a preview lookup for the same
+    // item: mode switches between the two surfaces reuse the resolved rows.
+    const detailBlockers = state.mode === 'detail'
+      ? resolveMetaBlockers(state.detailItem)
+      : undefined;
+    // Keep the detail scroll-bounds calculation in sync with the rows the
+    // renderer will actually show (detailScrollDown clamp, WL-0MVBMLY2Z0032CYR).
+    state.detailBlockedBy = detailBlockers ?? null;
 
     // ── Hover tooltip (WL-0MT9XRZDK006GMUH) ────────────────────────
     // Build the tooltip lines for the currently hovered row when it is a
@@ -6418,6 +7421,8 @@ export async function runWorklistTui(
       loadSettings().browseItemCount ?? opts.browseItemCount,
       // Outstanding-audit flag driving the banner copy (AH-0MUDYTQ55002NUSJ).
       sprintAuditsOutstanding,
+      metaBlockers,
+      detailBlockers,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
@@ -6653,18 +7658,18 @@ export async function runWorklistTui(
         panePaused = false;
         // Hydrator focus-resume (AC4): the hidden→visible transition also
         // re-checks `in_progress` claims immediately — the same runner the
-        // 30 s hydrate task uses — so a claim whose item tab was closed while
+        // 30 s hydrate task uses — so a claim whose item pane was closed while
         // the pane was hidden is released as soon as focus returns (no wait
         // for the next hydrate tick). This runs BEFORE the DB-change gate
-        // because opening/closing a work-item tab does not touch the worklog
+        // because opening/closing a work-item pane does not touch the worklog
         // DB (WL-0MV1BWETT005GSUJ). `paneGate.visible()` is already cached
         // true here, so the runner proceeds without a new visibility probe.
         void runHydrator();
-        // Selection-list marker (WL-0MV1BWETT005GSUJ): re-evaluate tab
+        // Selection-list marker (WL-0MV1BWETT005GSUJ): re-evaluate pane
         // existence independently of the DB-change gate below — opening or
-        // closing a work-item tab does not touch the worklog DB, so a
+        // closing a work-item pane does not touch the worklog DB, so a
         // DB-gated refresh can never show/clear its marker.
-        void refreshTabMarkers();
+        void refreshPaneMarkers();
         // DB-change gate: skip the refresh when the DB is unchanged (same as
         // the regular refresh tick).
         if (tracker && !tracker.dbChanged()) {
@@ -6693,22 +7698,22 @@ export async function runWorklistTui(
     },
   });
 
-  // Active-tab marker task (WL-0MV1BWETT005GSUJ): the selection-list marker
-  // must reflect tab existence, but the regular refresh tick is DB-change
-  // gated and opening/closing a work-item tab does NOT touch the worklog DB.
-  // This task re-evaluates tabs on the hydrator cadence and re-renders,
-  // spawning only `herdr tab list` (never `wl`), so the zero-`wl`-when-idle
+  // Active-pane marker task (WL-0MV1BWETT005GSUJ): the selection-list marker
+  // must reflect pane existence, but the regular refresh tick is DB-change
+  // gated and opening/closing a work-item pane does NOT touch the worklog DB.
+  // This task re-evaluates panes on the hydrator cadence and re-renders,
+  // spawning only `herdr pane list` (never `wl`), so the zero-`wl`-when-idle
   // guarantee holds. Visibility- and typing-gated like the hydrator.
   if (opts.autoRefresh) {
     scheduler.addTask({
-      id: 'active-tab-marker',
+      id: 'active-pane-marker',
       intervalMs: HYDRATOR_INTERVAL_MS,
       singleFlight: true,
       runTimeoutMs: HYDRATOR_RUN_TIMEOUT_MS,
       run: async () => {
         if (inputActive()) return;
         if (!(await paneGate.visible())) return;
-        await refreshTabMarkers();
+        await refreshPaneMarkers();
       },
     });
   }

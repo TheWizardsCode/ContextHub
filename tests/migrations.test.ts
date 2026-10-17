@@ -112,31 +112,32 @@ describe('migrations: add audit field', () => {
   });
 });
 
-describe('migrations: add needsProducerReview column', () => {
-  it('lists the needsProducerReview migration as pending when the column is missing', () => {
+describe('migrations: needsProducerReview column', () => {
+  it('lists the new restore migration as pending when the column is missing (F2)', () => {
     const tempDir = createTempDir();
     try {
       const dbPath = path.join(tempDir, 'worklog.db');
       createLegacyDbWithoutNeedsProducerReview(dbPath);
 
       const pending = listPendingMigrations(dbPath);
-      expect(pending.map(p => p.id)).toContain('20260210-add-needsProducerReview');
+      // The restore (F2) adds a NEW migration that re-adds the column.
+      expect(pending.map(p => p.id)).toContain('20261016-restore-needsProducerReview');
     } finally {
       cleanupTempDir(tempDir);
     }
   });
 
-  it('applies the needsProducerReview migration and creates a backup', () => {
+  it('applies the new restore migration, re-adding the column, and creates a backup (F2)', () => {
     const tempDir = createTempDir();
     try {
       const dbPath = path.join(tempDir, 'worklog.db');
       createLegacyDbWithoutNeedsProducerReview(dbPath);
 
       const dryRun = runMigrations({ dryRun: true }, dbPath);
-      expect(dryRun.applied.map(a => a.id)).toContain('20260210-add-needsProducerReview');
+      expect(dryRun.applied.map(a => a.id)).toContain('20261016-restore-needsProducerReview');
 
       const applied = runMigrations({ confirm: true }, dbPath);
-      expect(applied.applied.map(a => a.id)).toContain('20260210-add-needsProducerReview');
+      expect(applied.applied.map(a => a.id)).toContain('20261016-restore-needsProducerReview');
       // The migration framework creates a backup before applying.
       expect(applied.backups.length).toBeGreaterThanOrEqual(1);
 
@@ -147,6 +148,33 @@ describe('migrations: add needsProducerReview column', () => {
       } finally {
         db.close();
       }
+    } finally {
+      cleanupTempDir(tempDir);
+    }
+  });
+
+  it('keeps the column after the neutralised historical drop migration runs (F2)', () => {
+    const tempDir = createTempDir();
+    try {
+      const dbPath = path.join(tempDir, 'worklog.db');
+      // Legacy DB that still HAS the column: the historical drop migration is
+      // pending but neutralised, so running migrations must leave the column
+      // in place.
+      createLegacyDbWithoutAudit(dbPath);
+      expect((new Database(dbPath, { readonly: true }).prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>).map(c => c.name)).toContain('needsProducerReview');
+
+      runMigrations({ confirm: true }, dbPath);
+      const db = new Database(dbPath, { readonly: true });
+      try {
+        const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as Array<{ name: string }>;
+        expect(cols.map(c => c.name)).toContain('needsProducerReview');
+      } finally {
+        db.close();
+      }
+
+      // Idempotent: a second run applies nothing new.
+      const secondRun = runMigrations({ confirm: true }, dbPath);
+      expect(secondRun.applied).toHaveLength(0);
     } finally {
       cleanupTempDir(tempDir);
     }

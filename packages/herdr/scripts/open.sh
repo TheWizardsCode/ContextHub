@@ -122,7 +122,7 @@ fi
 echo "[open-worklist] resolved cwd='$cwd'" >&2
 
 # Pass the resolved CWD as an environment variable instead of using
-# --cwd.  The pane command ("npx tsx src/index.ts") uses a RELATIVE
+# --cwd.  The pane command ("npx tsx src/start.ts") uses a RELATIVE
 # path, so changing CWD via --cwd would break script resolution.
 # The plugin reads HERDR_RESOLVED_CWD to find the correct .worklog/.
 exec "$herdr_bin" plugin pane open \

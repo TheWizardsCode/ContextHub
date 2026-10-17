@@ -122,7 +122,6 @@ async function run() {
       deleteReason: '',
       risk: '',
       effort: '',
-      needsProducerReview: false,
     }, overrides);
     items.set(id, item);
     return id;

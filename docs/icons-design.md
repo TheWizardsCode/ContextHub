@@ -17,6 +17,26 @@
 > of those intentionally differ from the CLI's `src/theme.ts` choices (see
 > §13.1).
 
+> **Help-screen legend (WL-0MTV97GV20088CS7):** the herdr worklist's full-pane
+> help screen (pressing `?`) renders an **Icons** legend explaining every glyph
+> shown in a work-item row. The legend is grouped by the icon **category**
+> (`Status`, `Stage`, `Priority`, `Epic`, `Risk`, `Effort`, `Audit`,
+> `Producer review`, `Agent`, `Coverage`) under a heading per group, with each
+> group's icons on a single line. The category name prefix is removed from each
+> meaning because the group heading already names it (e.g. `Status: open — not
+> started` renders as `open — not started` under **Status**). Since the
+> 2026-10-16 producer audit, every heading level is colour-coded (title gold,
+> section headings blue, category sub-headings cyan) and separated by blank
+> lines, and the whole overlay scrolls when content exceeds the pane height
+> (`j/k`, arrows, PageUp/PageDown, `g/G`; the footer shows a live percentage;
+> the title and the `? / Esc / q` dismiss line stay pinned). The on-screen
+> legend is generated from `ICON_LEGEND` in `@worklog/shared/icons` (the same
+> single source of truth the row renderer uses); a drift test in
+> `packages/shared/src/icons-legend.test.ts` fails whenever a row glyph has no
+> legend entry. The wording in this specification is the authoritative
+> reference for those meanings — keep `ICON_LEGEND` aligned with the tables
+> below.
+
 ## Overview
 
 This document defines the icon set for work item **priority** and **status** used
@@ -36,13 +56,13 @@ across the CLI (chalk) and TUI rendering paths. It covers:
 |-----------|--------|---------------|-------------------------|---------------------|
 | critical  | `🚨`   | `[CRIT]`      | "Critical priority"     | Rotating light - urgent/danger |
 | high      | `⭐`   | `[HIGH]`      | "High priority"         | Star - important     |
-| medium    | `📋`   | `[MED]`       | "Medium priority"       | Clipboard - standard task |
+| medium    | `🟨`   | `[MED]`       | "Medium priority"       | Yellow square - standard task |
 | low       | `🐢`   | `[LOW]`       | "Low priority"          | Turtle - slow/low priority |
 
 **Colour association:** The emoji colours are enhanced with chalk color tags to match the existing colour scheme in the theme (`theme.priority` colours) so scanning by colour remains consistent.
 - critical: red (🚨)
 - high: orange (⭐)
-- medium: yellow (📋)
+- medium: yellow (🟨)
 - low: white (🐢)
 
 > The underlying title/id text colour scheme is priority-based: critical → red, high → orange, medium → yellow, low → white (revised 2026-09-08, WL-0MSJ2JFMO007PGQ6). See [COLOUR-MAPPING.md](COLOUR-MAPPING.md).
@@ -327,7 +347,6 @@ old herdr copy had diverged, the shared module keeps the *herdr* choices:
 |------|----------------------|--------------------|
 | Audit unknown | `❓` | `❔` |
 | Audit stale-passed | `⏳` | `🟩` (see §3a) |
-| Epic | `⊙` | `🏰` |
 | Risk critical | `💥` | `🚨` (key `severe`) |
 | Effort levels | `🔹 🔷 🔶 💠` | `🐜 🐇 🐕 🐘 🐋` |
 | Producer review undefined | `''` (nothing shown) | `✅` (defaults to complete) |
@@ -342,7 +361,7 @@ Icons are prepended before the title in CLI list output:
 ```
 
 > The Pi-based TUI browse list (which rendered status/stage/producer-review/
-> epic icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
+> icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
 > has been removed — work item browsing is now provided by the Herdr plugin.
 > `src/theme.ts` remains the CLI's self-contained icon source; the Herdr
 > plugin imports from the shared `@worklog/shared/icons` module.
@@ -356,12 +375,15 @@ column aligns across rows, and the columns are (left to right):
 
 | Column | Content | Notes |
 |--------|---------|-------|
-| 0 | Priority icon | `🚨` critical, `⭐` high, `📋` medium, `🐢` low (added WL-0MTQYTA20009YXBT) |
+| 0 | Priority icon | `🚨` critical, `⭐` high, `🟨` medium, `🐢` low (added WL-0MTQYTA20009YXBT) |
 | 1 | Agent status | Fixed-width reserved slot (`AGENT_SLOT_WIDTH`) |
 | 2 | Status icon | `statusIcon` |
 | 3 | Stage / audit icon | `stageDisplayIcon` (audit-aware for `in_review`) |
 | 4 | Producer review flag | `needsProducerReviewIcon` |
-| 5 | Epic icon | Optional, when `issueType === 'epic'` |
+
+> The epic column (formerly column 5, `⊙` for `issueType === 'epic'`) was
+> removed in WL-0MVAQ873D007LNWD — parent items are already marked by the
+> expand arrow, so the indicator was redundant.
 
 When the priority is missing the priority column is empty; the fixed-width
 padding keeps the remaining columns aligned. In `noIcons` mode the priority
@@ -472,5 +494,5 @@ Description: A test item for audit formatting
 **TUI list:**
 ```
 ▸ 🚨 ⭐ Set up CI pipeline (TEST-1)
-  ├── 📋 🔄 Write tests (TEST-2)
+  ├── 🟨 🔄 Write tests (TEST-2)
 ```

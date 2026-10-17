@@ -174,6 +174,14 @@ export interface UpdateWorkItemInput {
    * stage matches. Composes with `ifStatus` (both must match).
    */
   ifStage?: string;
+  /**
+   * CAS guard (status-neutral claim): when present, the update only applies
+   * if the item's CURRENT assignee matches. The empty string is a meaningful
+   * expected value — it matches an unassigned item — and is distinguishable
+   * from the guard being omitted. Composes with `ifStatus`/`ifStage` in one
+   * atomic transaction (WL-0MV85WBDB003J35W).
+   */
+  ifAssignee?: string;
 }
 export interface WorkItemQuery {
   status?: WorkItemStatus[];

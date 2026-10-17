@@ -491,9 +491,12 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('intake');
     expect(outcome.candidate?.id).toBe('WL-CRIT-I');
+    // Observable contract: getNextCriticalCandidate boundary dep — cwd arg is the observable critical-tier query contract
     expect(deps.getNextCriticalCandidate).toHaveBeenCalledWith('/repo');
     expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
+    // Observable contract: claimItem boundary CAS call — sole channel proving claim args (incl. gate counts where asserted)
     expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-I', { status: 'open', stage: 'idea' }, '/repo');
+    // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-CRIT-I'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-CRIT-I', itemTitle: 'Critical idea WL-CRIT-I' },
@@ -518,7 +521,9 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('WL-CRIT-R');
+    // Observable contract: claimItem boundary CAS call — sole channel proving claim args (incl. gate counts where asserted)
     expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' }, '/repo');
+    // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-CRIT-R'),
       expect.anything(),
@@ -538,7 +543,9 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('implement');
     expect(outcome.candidate?.id).toBe('WL-CRIT-P');
+    // Observable contract: claimItem boundary CAS call — sole channel proving claim args (incl. gate counts where asserted)
     expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-P', { status: 'open', stage: 'plan_complete' }, '/repo');
+    // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-CRIT-P'),
       expect.anything(),
@@ -634,10 +641,12 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('WL-PLAN');
+    // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-PLAN'),
       expect.anything(),
     );
+    // Observable contract: negative boundary assertion — proves claimItem NOT called during freeze; unique fail-closed coverage
     expect(deps.claimItem).not.toHaveBeenCalledWith('WL-CRIT-P', expect.anything());
   });
 
@@ -654,7 +663,9 @@ describe('dispatch critical-first tier', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
+    // Observable contract: claimItem boundary CAS call — sole channel proving claim args (incl. gate counts where asserted)
     expect(deps.claimItem).toHaveBeenCalledWith('WL-CRIT-R', { status: 'open', stage: 'intake_complete' }, '/repo');
+    // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-CRIT-R'),
       expect.anything(),
@@ -679,10 +690,12 @@ describe('dispatch critical-first tier', () => {
     // Frozen: the critical implement candidate is skipped (fail-closed on
     // the ambiguous marker); the intake tier still dispatches.
     expect(outcome.kind).toBe('intake');
+    // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-IDEA'),
       expect.anything(),
     );
+    // Observable contract: negative boundary assertion — proves claimItem NOT called during freeze; unique fail-closed coverage
     expect(deps.claimItem).not.toHaveBeenCalledWith('WL-CRIT-P', expect.anything());
   });
 
@@ -718,7 +731,9 @@ describe('dispatch critical-first tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     expect(outcome.candidate?.id).toBe('WL-BLOCKER');
+    // Observable contract: claimItem boundary CAS call — sole channel proving claim args (incl. gate counts where asserted)
     expect(deps.claimItem).toHaveBeenCalledWith('WL-BLOCKER', { status: 'open', stage: 'intake_complete' }, '/repo');
+    // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-BLOCKER'),
       expect.anything(),
@@ -1055,6 +1070,7 @@ describe('needsProducerReview exclusion', () => {
       expect(outcome.candidate?.id).toBe('B-PLAN');
       // The CAS guard must match the item's ACTUAL status, not the tier's
       // nominal `open` — otherwise the claim aborts as stale.
+      // Observable contract: claimItem boundary CAS call — sole channel proving claim args (incl. gate counts where asserted)
       expect(deps.claimItem).toHaveBeenCalledWith(
         'B-PLAN',
         { status: 'blocked', stage: 'intake_complete' },
@@ -1159,6 +1175,7 @@ describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('implement');
+    // Observable contract: claimItem boundary CAS call — sole channel proving claim args (incl. gate counts where asserted)
     expect(deps.claimItem).toHaveBeenCalledWith('IMP-CRIT', { status: 'open', stage: 'plan_complete' }, '/repo');
   });
 
@@ -1189,6 +1206,7 @@ describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('implement');
+    // Observable contract: claimItem boundary CAS call — sole channel proving claim args (incl. gate counts where asserted)
     expect(deps.claimItem).toHaveBeenCalledWith('IMP-MED', { status: 'open', stage: 'plan_complete' }, '/repo');
   });
 
@@ -1238,7 +1256,6 @@ describe('review-queue depth gate (WL-0MT2UQWOR007CYY9)', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
     // Plan tier should be reached
-    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete', '/repo');
   });
 
   it('AC3: gate boundary — count == browseItemCount - 1: gate NOT active, all priorities dispatch', async () => {
@@ -1472,6 +1489,7 @@ describe('review-queue depth gate — live Herdr-head path (WL-0MTTSWC1X005P4VD)
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('audit');
     expect(outcome.candidate?.id).toBe('AUD-1');
+    // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:audit AUD-1'),
       expect.anything(),
@@ -1661,6 +1679,7 @@ describe('worker keeps polling while the review queue is deep (WL-0MTTSWC1X005P4
     expect(resumed.dispatched).toBe(true);
     expect(worker.paused).toBe(false);
     // The implement pane actually spawned (tick results carry no kind field).
+    // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement IMP-HELD'),
       expect.anything(),

@@ -311,12 +311,16 @@ are now recovered automatically:
 
 - **`marker-write-failed`** (the marker write failed AFTER the successful
   claim): `dispatchClaimedTier` calls `rollbackClaim` (→
-  `rollbackClaimWorkItem`) to reverse the CAS transition —
+  `rollbackClaimWorkItem`) to reverse the CAS transition. The plan/intake/
+  implement/risk-effort tiers keep the legacy status restore —
   `--status <pre-claim status> --if-status in_progress [--if-stage
-  <pre-claim stage> --stage <pre-claim stage>]`. Plan/intake/implement/
-  risk-effort roll back to `open` at the original stage; the audit tier
-  rolls back to `completed`/`in_review` so the item stays in the audit
-  queue. A successful rollback reports the neutral outcome
+  <pre-claim stage> --stage <pre-claim stage>]`, rolling back to `open` at
+  the original stage. The AUDIT tier claim is STATUS-NEUTRAL
+  (WL-0MV85WCJJ0087VMP): it never flips status/stage, so its rollback
+  clears only the claiming agent's assignee, guarded by
+  `--assignee "" --if-assignee <agent>` — the item stays at
+  `completed`/`in_review` (never a hybrid write) and only THIS claim's
+  state is reverted. A successful rollback reports the neutral outcome
   `claim-rolled-back`; a stale/failed rollback (a concurrent human/agent
   already moved the item) reports `marker-write-failed` and leaves the item
   untouched (fail-closed).
@@ -331,6 +335,67 @@ are now recovered automatically:
   panes).
 
 A STANDING success marker (no `outcome`) excludes the item for its tier **for a bounded lifetime**, so a dispatched item is never double-dispatched while its pane may still be running — and never stranded forever if it is not (see below).
+
+### Status-neutral audit-tier claim (WL-0MV85WCJJ0087VMP)
+
+The AUDIT tier claim is deliberately STATUS-NEUTRAL: an audited
+`completed`/`in_review` item must never enter the `in_progress`/`in_review`
+hybrid that stranding autocracies were built on. `claimItem` (→
+`claimWorkItem`) writes ONLY the assignee for the audit tier:
+
+```
+wl update <id> --assignee <agent> --if-status completed --if-stage in_review --if-assignee ""
+```
+
+- No `--status`/`--stage` — the item reads back `completed`/`in_review`
+  throughout the claim (AC: no hybrid state).
+- `--if-assignee ""` is the exclusive claim token: only an UNASSIGNED item
+  may be claimed, so assigning an item (e.g. to the producer) makes the
+  claim fail stale at every re-claim.
+- A failed audit Phase 2 restores via the status-neutral rollback
+  (`--assignee "" --if-assignee <agent>`), so the item can never be stranded
+  off the review queue.
+- Assignee-based scheduling hold: `classifyItemForDispatch` and every tier's
+  `select*` helper exclude items with a non-empty assignee, and the parse
+  helpers (`parseShowItemOutput`, `parseAuditCandidatesOutput`,
+  `parseNextCandidatesOutput`, `parseImplementCandidatesOutput`,
+  `parseCriticalCandidatesOutput`) carry the field so the exclusion holds at
+  every selection path.
+
+Every OTHER tier keeps the legacy status-flip claim
+(`--status in_progress` + the tier's status/stage CAS), and its rollback
+keeps the legacy status restore guarded by `--if-status in_progress`.
+
+### Producer-hold sentinel (WL-0MV85WDOM007BKF8)
+
+The **scheduling-hold convention**: a non-empty `assignee` means the item is
+intentionally held from auto-dispatch — `classifyItemForDispatch` and every
+tier's `select*` helper exclude it, and the audit claim's `--if-assignee ""`
+CAS fails stale on it. Assigning an item therefore *pauses its automatic
+scheduling*, with no magic DB flag involved.
+
+The per-item **producer pause switch** is assigning the item to the
+producer's wl identity. The reserved sentinel is
+`PRODUCER_HOLD_ASSIGNEE` (`'Map'`, the producer's wl identity), recognised
+by `isProducerHold()`. Because the value is self-describing, the ship
+release gate can key on it: an item assigned to the producer means "the
+producer owns it" and is not shippable until it has a passing audit
+(epic WL-0MV82CHGQ000HAZZ Q2; re-homed ship gate — SA-tracked).
+
+Rules:
+
+- Assigning to the producer (`wl update <id> --assignee Map`) holds the item
+  at every tier — claims fail stale and selectors skip it.
+- Clearing the assignee (`wl update <id> --assignee ""`) **releases** the
+  hold and makes the item dispatchable again.
+- The sentinel never collides with an automated agent identity
+  (`pi`, `implement`, `@github-copilot`, …); comparison is exact
+  (whitespace-tolerant), not case-insensitive.
+- **Clearing discipline:** every assignee writer clears the assignee on
+  session end so a finished/aborted claim never silently suppresses future
+  auto-dispatch. `status_lifecycle`'s failure-exit already clears; the
+  dispatch claim/rollback paths clear it on every terminal outcome
+  (WL-0MV85WD400091OZ6).
 
 ### Success-marker lifetime (WL-0MU6UL0RJ008IHGT)
 
@@ -1045,6 +1110,22 @@ falls through/deferred; a per-worklog active audit still reports
 `audit-in-flight`; the observability line carries the concurrent-audit count
 and slot state).
 
+### Soft-delete exclusion (SA-0MUJBLZC60085DI9)
+
+Every dispatch path excludes soft-deleted items — those with a non-empty
+`deletedBy` (set by `wl delete`, which may leave the item's `status`
+untouched). `isSoftDeleted()` (trim-aware) is applied in
+`classifyItemForDispatch` (the Herdr-head and coordination paths) and in every
+`select*` helper (audit, implement, plan/intake, critical). The parse helpers
+(`parseNextCandidatesOutput`, `parseImplementCandidatesOutput`,
+`parseCriticalCandidatesOutput`, `parseAuditCandidatesOutput`,
+`parseShowItemOutput`) carry `deletedBy` to those filters, and the fetcher's
+`normalizeItem` preserves it so the live Herdr head carries the field. Before
+this guard a deleted item whose status was not `deleted` could be re-selected
+and worked a second time. The guard is a neutral sequential filter (never a
+strike, never `no-candidate` metadata) and is a single-field check, so it has
+negligible cost.
+
 ### Producer-review gate (WL-0MTIAL65N004T22F)
 
 Every dispatch tier — audit, critical (including its dependency-frontier walk), implement,
@@ -1352,6 +1433,27 @@ forwarded to the sole
 dispatch call — no per-worklog duplication (F5 WL-0MTII48OV008P2QU;
 WL-0MT50LKAK001EF5Q single cap source). v1 scope is single-machine; a
 multi-machine (real flock/NFS) extension is future work.
+
+#### Cross-root `assignee` merge rule (WL-0MV85WBZ2004VDUQ)
+
+`assignee` is a scheduling hold, not a protected data field: assigning an item
+holds it from auto-dispatch and clearing the assignee releases it. Cross-root
+sync therefore treats a cleared `assignee` (`''`) as **meaningful intent**
+rather than an absent/default value:
+
+- `assignee` is **not** a regression-guarded merge field (it is absent from
+  `mergeParticipatingFields` in `src/sync.ts`). A newer remote `''` clears a
+  local non-empty assignee and propagates **without** `--accept-regressions`.
+- Empty-vs-non-empty assignee merges resolve **last-writer-wins** by
+  `updatedAt` (deterministic lexicographic tie-break at equal timestamps) via
+  `isEmptyMeaningfulField()` — so a stale local claim can never resurrect a
+  released hold, and a newer local hold is not cleared by a stale remote `''`.
+- `status`, `stage` and `priority` remain regression-guarded unchanged: a
+  newer remote default is still refused and the local value kept.
+
+Rationale and the accepted answer to the epic's Q1 live in the parent epic
+appendix (Option A — status-neutral assignee CAS claim). Cross-root coverage:
+`tests/cli/sync-assignee-clear.test.ts` (two worklog roots, real `wl sync`).
 
 ### Owner lease, pane liveness & contention feedback (WL-0MTYZXSLN008HZOW;
     pane-count cap removed by WL-0MU2EP6JL006A1U3)

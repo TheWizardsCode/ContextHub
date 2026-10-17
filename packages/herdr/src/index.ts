@@ -41,7 +41,7 @@ import {
   extractJson,
   extractItems,
 } from './fetcher.js';
-import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
+import { AgentTracker, AGENT_PANES_FILE } from './agent-tracker.js';
 import {
   isAgentCommand,
   buildManuallyTriggeredPaneTitle,
@@ -50,7 +50,7 @@ import {
   stripAgentPromptPrefix,
 } from './pane-title.js';
 import { showToast } from './notify.js';
-import { applyActiveTabMarkers, createProductionHydratorDeps } from './hydrator.js';
+import { applyActivePaneMarkers, createProductionHydratorDeps } from './hydrator.js';
 import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
@@ -2094,7 +2094,19 @@ export function createDowntimeDeps(
       // a CAS claim whose dispatch never completed — restore the item to its
       // pre-claim status+stage so a future idle period can re-select it.
       // Race-safe (--if-status in_progress) and fail-closed (never throws).
-      return rollbackClaimWorkItem(itemId, original, cwd);
+      //
+      // Status-neutral audit-tier rollback (WL-0MV85WCJJ0087VMP): the audit
+      // claim never flips status/stage, so the rollback must not rewrite
+      // them either — it clears only the claiming agent's assignee, guarded
+      // by `--if-assignee <agent>`. Every other tier keeps the legacy
+      // status/stage restore and ALSO clears this claim's assignee
+      // (WL-0MV85WD400091OZ6), so a failed dispatch never leaves a non-empty
+      // assignee (a scheduling hold) behind.
+      return rollbackClaimWorkItem(
+        itemId,
+        { ...original, assignee },
+        cwd,
+      );
     },
     // Producer-review flag (WL-0MUKYEXMK0033MFK AC3): set
     // `needsProducerReview = true` when an item exhausts its automatic
@@ -2198,7 +2210,7 @@ export function uninitializedReport(startDir: string): string {
   ].join('\n') + '\n';
 }
 
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
   // Check if wl is available
   const wlAvailable = await checkWlAvailable();
   if (!wlAvailable) {
@@ -2285,9 +2297,10 @@ async function main(): Promise<void> {
       const currentSettings = loadSettings();
       const count = clampBrowseItemCount(currentSettings.browseItemCount ?? defaultSettings.browseItemCount);
       const items = await fetchNextItems(count);
-      // Merge agent-status state into the fetched items (fail-open: no herdr
-      // CLI → no icons, list still works). Also covers the initial load.
-      await mergeAgentStates(items, agentTracker);
+      // The pane-existence marker (in-progress status + green-circle icon)
+      // is applied by the worklist's `applyPaneMarkers` seam on the initial
+      // load and every refresh (WL-0MV1BWETT005GSUJ); no separate
+      // agent-state merge runs here.
       return items;
     } catch {
       return [];
@@ -2443,15 +2456,16 @@ async function main(): Promise<void> {
       // Re-read on every render so a showIcons change applies on the next
       // refresh (no plugin restart needed), matching showHelpText behavior.
       getShowIcons: () => loadSettings().showIcons ?? true,
-      // Merge agent-status state into freshly fetched items (top-level +
-      // expanded children) on every refresh cycle (WL-0MSBQUJQX005RAT9).
-      // Fail-open: herdr errors yield no icons; the list keeps working.
-      mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
-      // Tab-based active marker (WL-0MV1BWETT005GSUJ): stamp `in-progress` on
-      // items whose exact-ID tab is open in the current workspace so the
-      // selection list's marker reflects tab existence. Fail-open.
-      applyActiveTabMarkers: (items) =>
-        applyActiveTabMarkers(items, hydratorDeps.listTabs, hydratorWorkspaceId),
+      // Pane-based active marker (WL-0MV1BWETT005GSUJ): stamp `in-progress`
+      // AND the green-circle icon on items whose work-item ID appears in a
+      // current-workspace pane title, so the selection list's marker and
+      // green circle both reflect pane existence (the producer's rule: a
+      // pane with the work item id as the title means the item is being
+      // worked; the green circle appears exactly when such a pane is open
+      // and never otherwise). The event-driven agent-state merge
+      // (WL-0MSBQUJQX005RAT9) is no longer used for row icons. Fail-open.
+      applyActivePaneMarkers: (items) =>
+        applyActivePaneMarkers(items, hydratorDeps.listActivePanes, hydratorWorkspaceId),
       subscriber: eventSubscriber,
       agentTracker,
       modeSwitchWorker,

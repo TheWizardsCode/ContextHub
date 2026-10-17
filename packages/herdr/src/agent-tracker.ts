@@ -412,6 +412,12 @@ export class AgentTracker {
  * into children), setting `agentState` only for states with a rendered icon
  * (`idle` / `working` / `blocked`). `done` / `unknown` / missing states are
  * left unset so no icon renders. Fail-open: never throws.
+ *
+ * NOTE: the production worklist no longer calls this for its ROW icons
+ * (WL-0MV1BWETT005GSUJ) — the green-circle icon is pane-title existence
+ * (`markItemsActiveByPane` in hydrator.ts), which is guaranteed to appear
+ * for every open work-item pane and to disappear when none exists. These
+ * merge helpers remain as a retained module API and for tests.
  */
 export async function mergeAgentStates(items: WorkItem[], tracker: AgentTracker): Promise<void> {
   let states: Map<string, AgentState>;

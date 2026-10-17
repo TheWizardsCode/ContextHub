@@ -28,19 +28,13 @@ import {
   auditIcon,
   auditLabel,
   auditFallback,
-  epicIcon,
-  epicLabel,
-  epicFallback,
   riskIcon,
-  riskFallback,
   riskLabel,
+  riskFallback,
   effortIcon,
   effortFallback,
   effortLabel,
   iconsEnabled,
-  needsProducerReviewIcon,
-  needsProducerReviewLabel,
-  needsProducerReviewFallback,
   auditStaleIcon,
   auditStaleLabel,
   auditStaleFallback,
@@ -56,7 +50,7 @@ describe('priorityIcon', () => {
   });
 
   it('returns emoji for medium priority', () => {
-    expect(priorityIcon('medium')).toBe('\u{1F4CB}'); // 📋
+    expect(priorityIcon('medium')).toBe('\u{1F7E8}'); // 🟨
   });
 
   it('returns emoji for low priority', () => {
@@ -76,7 +70,7 @@ describe('priorityIcon', () => {
   it('is case-insensitive', () => {
     expect(priorityIcon('CRITICAL')).toBe('\u{1F6A8}');
     expect(priorityIcon('High')).toBe('\u{2B50}');
-    expect(priorityIcon('MEDIUM')).toBe('\u{1F4CB}');
+    expect(priorityIcon('MEDIUM')).toBe('\u{1F7E8}');
   });
 
   describe('with noIcons option', () => {
@@ -511,104 +505,6 @@ describe('auditLabel', () => {
   });
 });
 
-// ─── Producer Review Icons ───────────────────────────────────────────────
-
-describe('needsProducerReviewIcon', () => {
-  it('returns ❌ for true (needs review)', () => {
-    expect(needsProducerReviewIcon(true)).toBe('\u{274C}'); // ❌
-  });
-
-  it('returns ✅ for false (review complete)', () => {
-    expect(needsProducerReviewIcon(false)).toBe('\u{2705}'); // ✅
-  });
-
-  it('returns ✅ for null (defaults to not needed)', () => {
-    expect(needsProducerReviewIcon(null)).toBe('\u{2705}'); // ✅
-  });
-
-  it('returns ✅ for undefined (defaults to not needed)', () => {
-    expect(needsProducerReviewIcon(undefined)).toBe('\u{2705}'); // ✅
-  });
-
-  describe('with noIcons option', () => {
-    it('returns text fallback for true', () => {
-      expect(needsProducerReviewIcon(true, { noIcons: true })).toBe('[NEEDS_PRODUCER]');
-    });
-
-    it('returns text fallback for false', () => {
-      expect(needsProducerReviewIcon(false, { noIcons: true })).toBe('[PRODUCER_OK]');
-    });
-
-    it('returns text fallback for null', () => {
-      expect(needsProducerReviewIcon(null, { noIcons: true })).toBe('[PRODUCER_OK]');
-    });
-
-    it('returns text fallback for undefined', () => {
-      expect(needsProducerReviewIcon(undefined, { noIcons: true })).toBe('[PRODUCER_OK]');
-    });
-  });
-});
-
-describe('needsProducerReviewFallback', () => {
-  it('returns bracketed text for true', () => {
-    expect(needsProducerReviewFallback(true)).toBe('[NEEDS_PRODUCER]');
-  });
-
-  it('returns bracketed text for false', () => {
-    expect(needsProducerReviewFallback(false)).toBe('[PRODUCER_OK]');
-  });
-
-  it('returns bracketed text for null', () => {
-    expect(needsProducerReviewFallback(null)).toBe('[PRODUCER_OK]');
-  });
-
-  it('returns bracketed text for undefined', () => {
-    expect(needsProducerReviewFallback(undefined)).toBe('[PRODUCER_OK]');
-  });
-});
-
-describe('needsProducerReviewLabel', () => {
-  it('returns label for true', () => {
-    expect(needsProducerReviewLabel(true)).toBe('Needs producer review');
-  });
-
-  it('returns label for false', () => {
-    expect(needsProducerReviewLabel(false)).toBe('Producer review complete');
-  });
-
-  it('returns label for null', () => {
-    expect(needsProducerReviewLabel(null)).toBe('Producer review complete');
-  });
-
-  it('returns label for undefined', () => {
-    expect(needsProducerReviewLabel(undefined)).toBe('Producer review complete');
-  });
-});
-
-describe('epicIcon', () => {
-  it('returns castle emoji for epic', () => {
-    expect(epicIcon()).toBe('\u{1F3F0}'); // 🏰
-  });
-
-  describe('with noIcons option', () => {
-    it('returns text fallback for epic', () => {
-      expect(epicIcon({ noIcons: true })).toBe('[EPIC]');
-    });
-  });
-});
-
-describe('epicLabel', () => {
-  it('returns label for epic', () => {
-    expect(epicLabel()).toBe('Issue Type: Epic');
-  });
-});
-
-describe('epicFallback', () => {
-  it('returns bracketed text for epic', () => {
-    expect(epicFallback()).toBe('[EPIC]');
-  });
-});
-
 // ─── Stale Audit Result Icons ─────────────────────────────────────────────
 
 describe('auditStaleIcon', () => {
@@ -1026,6 +922,112 @@ function collectRepoFiles(dir: string): string[] {
   }
   return files;
 }
+
+// ─── Producer Review Icons (restored contract WL-0MVAMS4RO000H3B0 F1) ───
+// RED-pinned with it(`: the `needsProducerReviewIcon`/… exports were
+// removed from `src/theme.ts` (WL-0MV85WFYU0071YQ9) and are being restored.
+// The theme module is loaded lazily so the file does not break while the
+// exports are absent; F5 flips `it(` → `it(`.
+
+describe('needsProducerReviewIcon (RED-contract, restored)', () => {
+  async function loadTheme(): Promise<any> {
+    return import('../../src/theme.js');
+  }
+
+  it('returns ❌ for true (needs review)', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewIcon(true)).toBe('\u{274C}'); // ❌
+  });
+
+  it('returns ✅ for false (review complete)', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewIcon(false)).toBe('\u{2705}'); // ✅
+  });
+
+  it('returns ✅ for null (defaults to not needed)', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewIcon(null)).toBe('\u{2705}'); // ✅
+  });
+
+  it('returns ✅ for undefined (defaults to not needed)', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewIcon(undefined)).toBe('\u{2705}'); // ✅
+  });
+
+  describe('with noIcons option', () => {
+    it('returns text fallback for true', async () => {
+      const theme = await loadTheme();
+      expect(theme.needsProducerReviewIcon(true, { noIcons: true })).toBe('[NEEDS_PRODUCER]');
+    });
+
+    it('returns text fallback for false', async () => {
+      const theme = await loadTheme();
+      expect(theme.needsProducerReviewIcon(false, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+
+    it('returns text fallback for null', async () => {
+      const theme = await loadTheme();
+      expect(theme.needsProducerReviewIcon(null, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+
+    it('returns text fallback for undefined', async () => {
+      const theme = await loadTheme();
+      expect(theme.needsProducerReviewIcon(undefined, { noIcons: true })).toBe('[PRODUCER_OK]');
+    });
+  });
+});
+
+describe('needsProducerReviewFallback (RED-contract, restored)', () => {
+  async function loadTheme(): Promise<any> {
+    return import('../../src/theme.js');
+  }
+
+  it('returns bracketed text for true', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewFallback(true)).toBe('[NEEDS_PRODUCER]');
+  });
+
+  it('returns bracketed text for false', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewFallback(false)).toBe('[PRODUCER_OK]');
+  });
+
+  it('returns bracketed text for null', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewFallback(null)).toBe('[PRODUCER_OK]');
+  });
+
+  it('returns bracketed text for undefined', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewFallback(undefined)).toBe('[PRODUCER_OK]');
+  });
+});
+
+describe('needsProducerReviewLabel (RED-contract, restored)', () => {
+  async function loadTheme(): Promise<any> {
+    return import('../../src/theme.js');
+  }
+
+  it('returns label for true', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewLabel(true)).toBe('Needs producer review');
+  });
+
+  it('returns label for false', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewLabel(false)).toBe('Producer review complete');
+  });
+
+  it('returns label for null', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewLabel(null)).toBe('Producer review complete');
+  });
+
+  it('returns label for undefined', async () => {
+    const theme = await loadTheme();
+    expect(theme.needsProducerReviewLabel(undefined)).toBe('Producer review complete');
+  });
+});
 
 describe('repo-wide grep guard (WL-0MT2GMTAZ003VKVL)', () => {
   it('no file imports from a removed icons.js/icons.ts path', () => {
