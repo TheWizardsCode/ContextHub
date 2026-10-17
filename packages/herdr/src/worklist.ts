@@ -25,7 +25,6 @@ import {
   statusIcon,
   stageIcon,
   priorityIcon,
-  epicIcon,
   riskIcon,
   effortIcon,
   auditIcon,
@@ -1651,7 +1650,7 @@ export function formatTooltipLines(
 
   // Priority + Type (compact row).
   const priorityStr = item.priority ? `${priorityIcon(item.priority, { noIcons })} ${item.priority}` : '';
-  const typeStr = item.issueType ? `${item.issueType === 'epic' && !noIcons ? epicIcon() : ''}${item.issueType}` : '';
+  const typeStr = item.issueType ? `${item.issueType}` : '';
   const typeLabel = typeStr ? `${ANSI.dim}Type:${ANSI.reset} ${typeStr}` : '';
   const priorityLabel = priorityStr ? `${ANSI.dim}Priority:${ANSI.reset} ${priorityStr}` : '';
   if (priorityLabel && typeLabel) {
@@ -1726,7 +1725,7 @@ export function formatTooltipOverlay(cols: number, lines: string[]): string[] {
  *
  * Icon-bearing fields (Status, Stage, Priority, Type, Risk, Effort, Audit)
  * render as **icon + text label**, using the same icon helpers as
- * the list rows (statusIcon, stageDisplayIcon, priorityIcon, epicIcon,
+ * the list rows (statusIcon, stageDisplayIcon, priorityIcon,
  * riskIcon, effortIcon, auditIcon) so the metadata
  * section and the list can never diverge (WL-0MSGIXHHI009KFW9). With icons
  * disabled the values fall back to plain text — the metadata deliberately
@@ -1800,9 +1799,10 @@ export function buildMetaRows(item: WorkItem, noIcons = false): Array<[string, s
     addMeta('Covered by', item.parentId);
   }
   addMetaOrDash('Priority', iconText(noIcons ? '' : priorityIcon(item.priority), item.priority));
-  // Type shows the epic icon (⊙) for epic items only, matching the list;
-  // non-epic types remain text-only (AC3).
-  addMeta('Type', iconText(noIcons ? '' : (item.issueType === 'epic' ? epicIcon() : ''), item.issueType));
+  // Type renders as plain text for every issue type — the `⊙` epic icon was
+  // removed (WL-0MVAQ873D007LNWD); parent items are marked by the list's
+  // expand arrow, so the indicator added no information.
+  addMeta('Type', item.issueType);
   addMetaOrDash('Risk', iconText(noIcons ? '' : riskIcon(item.risk), item.risk));
   addMetaOrDash('Effort', iconText(noIcons ? '' : effortIcon(item.effort), item.effort));
   // Dispatch provenance for log-derived rows (WL-0MUL2IY8L009S3PQ).

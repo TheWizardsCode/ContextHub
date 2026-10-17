@@ -1774,7 +1774,7 @@ cyan):
   derived live from the shortcut registry, so future shortcut additions
   appear automatically under their leader heading.
 - **Icons** — a legend explaining every glyph rendered in a work-item row,
-  grouped by category under a heading (`Status`, `Stage`, `Priority`, `Epic`,
+  grouped by category under a heading (`Status`, `Stage`, `Priority`,
   `Risk`, `Effort`, `Audit`, `Producer review`, `Agent`, `Coverage`) with
   each group's icons listed on a single line under its own heading. The
   category name prefix is
@@ -1819,8 +1819,9 @@ first rows), so a long list never scrolls off the top.
   helpers as the list rows, so the two sections can never diverge: e.g.
   `🔄 in_progress`, `⭐ high`, `📥 intake_complete`. The Stage row mirrors
   the list's audit-aware `in_review` icon (✅/❌/❓ when the audit is fresh,
-  ⏳ when stale-but-passed, 🔍 otherwise); the Type row shows the epic icon
-  (⊙) for `epic` items only (other types stay text-only); and the Audit and
+  ⏳ when stale-but-passed, 🔍 otherwise); the Type row renders the plain
+  issue-type label (`epic`, `feature`, …) with no icon — the `⊙` epic glyph
+  was removed (WL-0MVAQ873D007LNWD); and the Audit and
   Reviewed rows pair their icons with text labels (`✅ ready to close`,
   `❌ needs review`, …). When icons are disabled (`showIcons: false`) every
   metadata value falls back to **plain text** — no emoji and no bracketed

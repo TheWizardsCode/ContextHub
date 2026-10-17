@@ -125,11 +125,16 @@ describe('help screen layout — grouped icon legend (WL-0MTV97GV20088CS7)', () 
   const lines = frame.split('\n');
 
   it('groups icons by category under headings', () => {
+    // `Producer Review` was deliberately absent from this list: the
+    // needsProducerReview removal (WL-0MV85WFYU0071YQ9) deleted the
+    // producer-review icon category from ICON_LEGEND, so no such heading is
+    // rendered anymore. `Epic` is likewise absent: the epic glyph removal
+    // (WL-0MVAQ873D007LNWD) dropped the epic legend category, so no epic
+    // heading is rendered.
     for (const heading of [
       'Status',
       'Stage',
       'Priority',
-      'Epic',
       'Risk',
       'Effort',
       'Audit',
@@ -149,10 +154,11 @@ describe('help screen layout — grouped icon legend (WL-0MTV97GV20088CS7)', () 
     expect(frame).not.toContain('Status: open');
     expect(frame).not.toContain('Stage: idea');
     expect(frame).not.toContain('Priority: critical');
-    expect(frame).not.toContain('Epic — parent work item');
     // … and the bare meaning remains under its heading.
     expect(frame).toContain('open — not started');
-    expect(frame).toContain('parent work item');
+    // The epic meaning is gone too (its legend entry was removed with the
+    // glyph, WL-0MVAQ873D007LNWD).
+    expect(frame).not.toContain('parent work item');
   });
 
   it('lists each group on a single line under its heading on a wide pane', () => {

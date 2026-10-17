@@ -7,7 +7,7 @@
  * home so the plugin no longer carries a duplicate that can drift.
  *
  * The icon glyphs deliberately preserve the values the herdr worklist has
- * always rendered (❓ unknown audit, ⏳ stale-passed, ⊙ epic, 💥 critical
+ * always rendered (❓ unknown audit, ⏳ stale-passed, 💥 critical
  * risk, `[ready]`/`[?]` text fallbacks) so removing the local copy does not
  * change any rendered output (parent WL-0MSJ4BT4Z002HH9B AC3: "the worklist
  * renders icons/colours identically").
@@ -99,9 +99,6 @@ const EFFORT_ICONS: Record<string, string> = {
   large:   '\u{1F536}',  // 🔶
   xlarge:  '\u{1F4A0}',  // 💠
 };
-
-const EPIC_ICON = '\u{2299}';    // ⊙
-const EPIC_FALLBACK = '[EPIC]';
 
 const AUDIT_READY = '\u{2705}';      // ✅
 const AUDIT_NOT_READY = '\u{274C}';  // ❌
@@ -213,14 +210,6 @@ export function auditStaleIcon(result: boolean | null | undefined, opts?: IconOp
 }
 
 /**
- * Get the epic icon.
- */
-export function epicIcon(opts?: IconOptions): string {
-  if (opts?.noIcons) return EPIC_FALLBACK;
-  return EPIC_ICON;
-}
-
-/**
  * Get the icon for a tracked agent's current state.
  *
  * `working → 🟢`, `blocked → ⛔`, `idle → ⚪`. `done`, `unknown`, or an
@@ -274,7 +263,7 @@ export function needsProducerReviewIcon(
 /**
  * A single row of the help screen's icon legend (WL-0MV85R2G6000G7BU).
  *
- * `category` groups the row in the overlay (status/stage/priority/epic/risk/
+ * `category` groups the row in the overlay (status/stage/priority/risk/
  * effort/audit/producer-review/agent/coverage); `glyph` is the exact glyph
  * rendered in work-item rows; `meaning` is a short human-readable label.
  */
@@ -312,7 +301,6 @@ export const ICON_LEGEND: readonly IconLegendEntry[] = [
   { category: 'priority', glyph: '\u{2B50}', meaning: 'Priority: high' },
   { category: 'priority', glyph: '\u{1F7E8}', meaning: 'Priority: medium' },
   { category: 'priority', glyph: '\u{1F422}', meaning: 'Priority: low' },
-  { category: 'epic', glyph: '\u{2299}', meaning: 'Epic — parent work item' },
   { category: 'risk', glyph: '\u{1F7E2}', meaning: 'Risk: low' },
   { category: 'risk', glyph: '\u{1F7E1}', meaning: 'Risk: medium' },
   { category: 'risk', glyph: '\u{1F534}', meaning: 'Risk: high' },
@@ -348,7 +336,6 @@ export function iconLegendGlyphs(): string[] {
   collect(STATUS_ICONS);
   collect(STAGE_ICONS);
   collect(PRIORITY_ICONS);
-  glyphs.add(EPIC_ICON);
   collect(RISK_ICONS);
   collect(EFFORT_ICONS);
   glyphs.add(AUDIT_READY);
@@ -875,13 +862,10 @@ export function getIconPrefixParts(
   // Concatenate core icons without spaces between them
   const coreIcons = [sIcon, secondIcon, prIcon].filter(Boolean).join('');
 
-  // Column 4: epic icon (child count is no longer shown in prefix)
-  const epicSuffix = item.issueType === 'epic' ? epicIcon({ noIcons }) : '';
-
   // Build full prefix and pad to fixed width for alignment. The agent slot
   // is included in the total, so rows with and without an agent still land
   // at exactly ICON_PREFIX_WIDTH cells.
-  let prefix = [priorityIconText, agentSlot, coreIcons, epicSuffix].filter(Boolean).join('');
+  let prefix = [priorityIconText, agentSlot, coreIcons].filter(Boolean).join('');
   const width = stringDisplayWidth(prefix);
   if (width < ICON_PREFIX_WIDTH) {
     prefix = prefix.padEnd(prefix.length + (ICON_PREFIX_WIDTH - width), ' ');
@@ -906,7 +890,6 @@ export function getIconPrefixParts(
  *   2. Status icon
  *   3. Stage icon (for in_review items, shows audit-aware icon instead)
  *   4. Producer review flag
- *   5. Optional epic icon
  */
 export function getIconPrefix(item: IconPrefixItem, opts?: IconOptions): string {
   return getIconPrefixParts(item, opts).text;

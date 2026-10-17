@@ -3,7 +3,7 @@
  * system.
  *
  * Layer note: exercises the shared `@worklog/shared/icons` functions as used
- * by the herdr display layer (status/stage/priority/audit/epic/risk/effort
+ * by the herdr display layer (status/stage/priority/audit/risk/effort
  * icons, `stageColor`, and general `getIconPrefix`
  * behaviour). It is not a duplicate of:
  *   - tests/unit/icons.test.ts — the CLI `src/theme.ts` icon vocabulary; or
@@ -20,7 +20,6 @@ import {
   stageIcon,
   priorityIcon,
   auditIcon,
-  epicIcon,
   riskIcon,
   effortIcon,
   auditStaleIcon,
@@ -131,16 +130,6 @@ describe('auditStaleIcon', () => {
   });
 });
 
-describe('epicIcon', () => {
-  it('returns epic icon', () => {
-    expect(epicIcon()).toBeTruthy();
-  });
-
-  it('returns text fallback in noIcons mode', () => {
-    expect(epicIcon({ noIcons: true })).toMatch(/epic/i);
-  });
-});
-
 describe('riskIcon', () => {
   it('returns icon for known risk levels', () => {
     ['low', 'medium', 'high', 'critical'].forEach((r) => {
@@ -193,6 +182,12 @@ describe('getIconPrefix', () => {
     expect(prefix.length).toBeGreaterThan(0);
   });
 
+  it('renders an epic item identically to a non-epic item (no epic column)', () => {
+    const epic: WorkItem = { id: 'T1', title: 'Test', status: 'open', issueType: 'epic' };
+    const task: WorkItem = { id: 'T2', title: 'Test', status: 'open', issueType: 'task' };
+    expect(getIconPrefix(epic)).toBe(getIconPrefix(task));
+  });
+
   it('includes the audit icon for in_review items', () => {
     const item: WorkItem = { id: 'T1', title: 'Test', status: 'in_progress', stage: 'in_review' };
     const prefix = getIconPrefix(item);
@@ -205,10 +200,13 @@ describe('getIconPrefix', () => {
     expect(prefix).not.toMatch(/\(3\)/);
   });
 
-  it('includes epic icon for epic type', () => {
+  it('no longer renders an epic icon for epic types', () => {
     const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', issueType: 'epic' };
     const prefix = getIconPrefix(item);
-    expect(prefix).toBeTruthy();
+    // The epic glyph (and its text fallback) were removed from the prefix
+    // (WL-0MVAQ873D007LNWD); parent items are marked by the expand arrow.
+    expect(prefix).not.toContain('\u{2299}'); // ⊙
+    expect(prefix).not.toContain('[EPIC]');
   });
 
   it('pads icon-mode prefixes to the fixed width and shows fallbacks in noIcons mode', () => {
@@ -259,7 +257,7 @@ describe('getIconPrefix', () => {
   it('prefixes with different icon counts align to the same column width', () => {
     // Item with only status icon
     const minimal: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', childCount: 0 };
-    // Item with status + stage + agent + epic icon (child count removed from prefix)
+    // Item with status + stage + agent (child count removed from prefix)
     const maximal: WorkItem = {
       id: 'T2', title: 'T', status: 'completed', stage: 'in_review',
       issueType: 'epic' as const, childCount: 5,

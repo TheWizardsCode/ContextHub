@@ -258,20 +258,6 @@ const EFFORT_LABEL: Record<string, string> = {
   xlarge:        'Effort: XL (extra large)',
 };
 
-// ─── Epic Icons ──────────────────────────────────────────────────────────
-
-const EPIC_ICON: Record<string, string> = {
-  epic: '\u{1F3F0}',   // 🏰 Castle - large feature with dependencies
-};
-
-const EPIC_FALLBACK: Record<string, string> = {
-  epic: '[EPIC]',
-};
-
-const EPIC_LABEL: Record<string, string> = {
-  epic: 'Issue Type: Epic',
-};
-
 // ─── Stage Icons ───────────────────────────────────────────────────────
 
 const STAGE_ICON: Record<string, string> = {
@@ -600,40 +586,4 @@ export function needsProducerReviewLabel(needsProducerReview: boolean | null | u
  */
 export function needsProducerReviewFallback(needsProducerReview: boolean | null | undefined): string {
   return PRODUCER_REVIEW_FALLBACK[producerReviewKey(needsProducerReview)] ?? '';
-}
-
-// ─── Epic Public API ────────────────────────────────────────────────────
-
-/**
- * Get the icon string (emoji or text fallback) for an epic work item.
- *
- * Epic icon: 🏰 (castle) — represents a large feature with dependencies.
- * Fallback: [EPIC]
- *
- * @param opts - Options controlling fallback behaviour.
- * @returns The icon string (emoji or bracketed text).
- */
-export function epicIcon(opts?: IconOptions): string {
-  if (opts?.noIcons === true) {
-    return EPIC_FALLBACK.epic;
-  }
-  return EPIC_ICON.epic;
-}
-
-/**
- * Get the accessible label for the epic icon.
- *
- * @returns A human-readable label ("Issue Type: Epic").
- */
-export function epicLabel(): string {
-  return EPIC_LABEL.epic;
-}
-
-/**
- * Get the text fallback for the epic icon.
- *
- * @returns The bracketed text label ("[EPIC]").
- */
-export function epicFallback(): string {
-  return EPIC_FALLBACK.epic;
 }

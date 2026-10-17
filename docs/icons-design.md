@@ -347,7 +347,6 @@ old herdr copy had diverged, the shared module keeps the *herdr* choices:
 |------|----------------------|--------------------|
 | Audit unknown | `❓` | `❔` |
 | Audit stale-passed | `⏳` | `🟩` (see §3a) |
-| Epic | `⊙` | `🏰` |
 | Risk critical | `💥` | `🚨` (key `severe`) |
 | Effort levels | `🔹 🔷 🔶 💠` | `🐜 🐇 🐕 🐘 🐋` |
 | Producer review undefined | `''` (nothing shown) | `✅` (defaults to complete) |
@@ -362,7 +361,7 @@ Icons are prepended before the title in CLI list output:
 ```
 
 > The Pi-based TUI browse list (which rendered status/stage/producer-review/
-> epic icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
+> icons via `getIconPrefix` in `packages/tui/extensions/Worklog/lib/browse.ts`)
 > has been removed — work item browsing is now provided by the Herdr plugin.
 > `src/theme.ts` remains the CLI's self-contained icon source; the Herdr
 > plugin imports from the shared `@worklog/shared/icons` module.
@@ -381,7 +380,10 @@ column aligns across rows, and the columns are (left to right):
 | 2 | Status icon | `statusIcon` |
 | 3 | Stage / audit icon | `stageDisplayIcon` (audit-aware for `in_review`) |
 | 4 | Producer review flag | `needsProducerReviewIcon` |
-| 5 | Epic icon | Optional, when `issueType === 'epic'` |
+
+> The epic column (formerly column 5, `⊙` for `issueType === 'epic'`) was
+> removed in WL-0MVAQ873D007LNWD — parent items are already marked by the
+> expand arrow, so the indicator was redundant.
 
 When the priority is missing the priority column is empty; the fixed-width
 padding keeps the remaining columns aligned. In `noIcons` mode the priority

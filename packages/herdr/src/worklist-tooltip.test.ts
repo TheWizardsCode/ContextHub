@@ -202,6 +202,10 @@ describe('formatTooltipLines — metadata formatting (AC1/AC7)', () => {
     expect(text).toContain('critical');
     expect(text).toContain('Type:');
     expect(text).toContain('epic');
+    // The epic glyph was removed from the tooltip Type line
+    // (WL-0MVAQ873D007LNWD); epic renders as plain text like every other type.
+    expect(text).not.toContain('\u{2299}'); // ⊙
+    expect(text).toContain('epic');
     expect(text).toContain('Risk:');
     expect(text).toContain('High');
     expect(text).toContain('Effort:');

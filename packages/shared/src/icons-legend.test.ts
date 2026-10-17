@@ -24,7 +24,6 @@ const REQUIRED_CATEGORIES = [
   'status',
   'stage',
   'priority',
-  'epic',
   'risk',
   'effort',
   'audit',
@@ -69,6 +68,15 @@ describe('icon legend — coverage (WL-0MV85R1V6000IL4E)', () => {
   it('covers the producer-review category', () => {
     const categories = new Set(ICON_LEGEND.map((e) => e.category));
     expect(categories.has('producer-review')).toBe(true);
+  });
+
+  // The epic glyph and its legend category were removed
+  // (WL-0MVAQ873D007LNWD): parent items are marked by the expand arrow, so
+  // the `⊙` indicator was redundant. Guard against both creeping back.
+  it('no longer advertises the retired epic glyph or category', () => {
+    const categories = new Set(ICON_LEGEND.map((e) => e.category));
+    expect(categories.has('epic')).toBe(false);
+    expect(iconLegendGlyphs()).not.toContain('\u{2299}'); // ⊙
   });
 
   it('pairs every glyph with a short, non-empty meaning', () => {

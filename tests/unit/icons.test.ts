@@ -28,9 +28,6 @@ import {
   auditIcon,
   auditLabel,
   auditFallback,
-  epicIcon,
-  epicLabel,
-  epicFallback,
   riskIcon,
   riskLabel,
   riskFallback,
@@ -505,18 +502,6 @@ describe('auditLabel', () => {
 
   it('returns label for unknown (undefined)', () => {
     expect(auditLabel(undefined)).toBe('Audit: Not run');
-  });
-});
-
-describe('epicLabel', () => {
-  it('returns label for epic', () => {
-    expect(epicLabel()).toBe('Issue Type: Epic');
-  });
-});
-
-describe('epicFallback', () => {
-  it('returns bracketed text for epic', () => {
-    expect(epicFallback()).toBe('[EPIC]');
   });
 });
 

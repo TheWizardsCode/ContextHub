@@ -4078,7 +4078,7 @@ describe('metadata views — paired-row compression (WL-0MSNIX4V60012266)', () =
 // icons as the list rows, paired with their text label (icon + text, e.g.
 // `🔄 in_progress`, `⭐ high`, `📥 intake_complete`). The Stage row mirrors
 // the list's audit-aware in_review icon via the shared stageDisplayIcon
-// helper; the Type row shows the epic icon for epic items only; Audit and
+// helper; the Type row renders plain text (no icon) for every type; Audit and
 // Reviewed rows pair their icons with text labels. With icons disabled the
 // values fall back to plain text — no emoji, no bracketed fallbacks.
 
@@ -4098,9 +4098,10 @@ describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', 
     expect(rows.get('Effort')).toBe('3');
   });
 
-  it('shows the epic icon on the Type row for epic items only', () => {
+  it('renders the Type row as plain text for every type (no epic icon)', () => {
     const epic = { ...makeRichItem(), issueType: 'epic' };
-    expect(new Map(buildMetaRows(epic)).get('Type')).toBe('\u{2299} epic'); // ⊙
+    // The `⊙` epic icon was removed from the Type row (WL-0MVAQ873D007LNWD).
+    expect(new Map(buildMetaRows(epic)).get('Type')).toBe('epic');
     expect(new Map(buildMetaRows(makeRichItem())).get('Type')).toBe('feature');
   });
 
@@ -4127,7 +4128,7 @@ describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', 
     // No icon glyphs leak into the noIcons values.
     for (const [label, value] of rows) {
       if (['Status', 'Stage', 'Priority', 'Type', 'Risk', 'Effort', 'Audit', 'Reviewed'].includes(label)) {
-        expect(value).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}\u{2299}]/u);
+        expect(value).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}]/u);
         expect(value).not.toMatch(/^\[/);
       }
     }

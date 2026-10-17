@@ -522,6 +522,8 @@ describe('help screen overlay — icon legend (WL-0MV85R1V6000IL4E)', () => {
         // A dedicated legend section exists.
         expect(frame).toContain('Icons');
         // Every required category is explained in prose the user can read.
+        // 'epic' is intentionally absent: the ⊙ indicator was removed
+        // (WL-0MVAQ873D007LNWD), so the legend no longer has an epic section.
         const lower = frame.toLowerCase();
         for (const word of [
           'priority',
@@ -529,7 +531,6 @@ describe('help screen overlay — icon legend (WL-0MV85R1V6000IL4E)', () => {
           'stage',
           'risk',
           'effort',
-          'epic',
           'audit',
           'review',
           'agent',
