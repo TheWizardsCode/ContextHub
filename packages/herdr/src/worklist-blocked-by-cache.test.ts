@@ -332,18 +332,81 @@ describe('Blocked By flicker fix (WL-0MV8Q5X8U004KKAP)', () => {
 });
 
 // ---------------------------------------------------------------------------
-// AC-5: detail-view/tooltip parity decision (documented out of scope)
+// Detail-view parity (WL-0MVBMLY2Z0032CYR, reverses WL-0MV8Q5X8U004KKAP AC-5)
 // ---------------------------------------------------------------------------
 
-describe('detail-view/tooltip parity decision (WL-0MV8Q5X8U004KKAP AC-5)', () => {
-  it('formatDetailContent omits Blocked By (documented divergence; metadata panel is canonical)', () => {
+/** Every rendered frame (list AND detail), simplest form for detail-mode asserts. */
+function allSegments(): string[] {
+  return writes
+    .join('')
+    .split(ANSI.clear)
+    .map((seg) => stripAnsi(seg.replace(/^\x1b\[H/, '')));
+}
+
+describe('detail-view Blocked By parity (WL-0MVBMLY2Z0032CYR)', () => {
+  it('formatDetailContent renders the active Blocked By rows with blocker status', () => {
+    const item = blockedItem();
+    const lines = formatDetailContent(item, 80, undefined, false, 0, true, 0, [
+      { id: 'WL-B1', title: 'First blocker', status: 'in-progress' },
+    ]).join('\n');
+    expect(lines).toContain('Blocked By');
+    expect(lines).toContain('WL-B1 — First blocker');
+    expect(lines).toContain('in-progress');
+  });
+
+  it('formatDetailContent omits Blocked By when no blockers are passed (no-versus-some preserved)', () => {
     const item = blockedItem();
     const lines = formatDetailContent(item, 80).join('\n');
-    expect(lines).toContain(item.id);
-    // Pins the documented-out-of-scope decision: the detail view does NOT
-    // render the list metadata panel's Blocked By rows (see the NOTE on the
-    // function). If parity is later implemented, this test must flip.
     expect(lines).not.toContain('Blocked By');
+  });
+
+  it('the detail view renders Blocked By rows with status through the shared single-flight lookup', async () => {
+    blockerMock.mockResolvedValue([{ id: 'WL-B1', title: 'First blocker', status: 'in-progress' }]);
+    const { tui } = startTui([blockedItem(), makeItem('WL-OTHER')]);
+    try {
+      // Enter detail mode BEFORE the list-mode lookup resolves: the detail
+      // render shares the same in-flight/single-flight blocker lookup, so a
+      // mode switch never spawns a second `wl dep list`.
+      dataHandler?.(Buffer.from('\r'));
+      await settle();
+      await vi.waitFor(() => expect(blockerMock).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => {
+        const last = allSegments()[allSegments().length - 1];
+        expect(last).toContain('WL-BLOCKED'); // detail header
+        expect(last).toMatch(/Blocked By\s+\|\s+WL-B1 — First blocker/);
+      });
+      const resolved = allSegments()[allSegments().length - 1];
+      expect(blockerMock).toHaveBeenCalledTimes(1);
+
+      // Refresh cycles while still in detail mode reuse the cache: the rows
+      // stay put (no flicker) and the lookup never re-runs.
+      await watchRefresh();
+      await watchRefresh();
+      const after = allSegments()[allSegments().length - 1];
+      expect(after).toMatch(/Blocked By\s+\|\s+WL-B1 — First blocker/);
+      expect(blockerMock).toHaveBeenCalledTimes(1);
+      expect(resolved).toMatch(/WL-B1 — First blocker \u{1F504} in-progress/u); // icon + text
+    } finally {
+      await quit(tui);
+    }
+  });
+
+  it('fail-open in the detail view: a rejected lookup yields no rows and never breaks rendering', async () => {
+    blockerMock.mockRejectedValue(new Error('wl exploded'));
+    const { tui } = startTui([blockedItem(), makeItem('WL-OTHER')]);
+    try {
+      dataHandler?.(Buffer.from('\r'));
+      await settle();
+      await watchRefresh();
+      await vi.waitFor(() => {
+        const last = allSegments()[allSegments().length - 1];
+        expect(last).toContain('WL-BLOCKED');
+      });
+      const last = allSegments()[allSegments().length - 1];
+      expect(last).not.toContain('Blocked By');
+    } finally {
+      await quit(tui);
+    }
   });
 
   it('formatTooltipLines omits Blocked By (documented divergence)', () => {

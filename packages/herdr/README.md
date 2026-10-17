@@ -1836,26 +1836,30 @@ first rows), so a long list never scrolls off the top.
 - When the item has at least one **active dependency blocker** (an outbound
   `depends-on` edge whose target is neither `completed`/`deleted` nor at
   stage `in_review`/`done`), the panel appends one **`Blocked By`** row per
-  blocker — `Blocked By  WL-xxxxxxxx — <title>` — at the end of the metadata
-  section (before the description preview). The rows appear for ANY selected
-  item with active blockers, regardless of its stored `status` (a
-  dependency-blocked `open` item is covered), and are omitted entirely when
-  there are none, so unblocked items render byte-for-byte as before. The
-  lookup runs only for the **selected** item (`wl dep list`, with a `wl
-  show` stage enrichment per still-possible blocker), is cached per item ID,
-  and is **reused across list refreshes** (WL-0MV8Q5X8U004KKAP): the cache
-  is invalidated only when the selected item's own payload changes
-  (`status`/`stage`/`updatedAt` — a dependency add/remove reconciles the
-  from-item's status and bumps `updatedAt`), so repeated refresh triggers
-  (DB-change watch, auto-sync cycles, `wl next` re-sorts) never drop the
-  resolved rows and the `Blocked By` line cannot flicker on/off; the
-  in-flight lookup is single-flight (one `wl dep list` spawn per item until
-  its edges change). While a re-resolve is in flight the last known rows are
-  still rendered (never a blank frame). The render path never blocks on it —
-  a failed or unparseable lookup simply yields no rows (fail-open). The
-  detail view and hover tooltip deliberately omit the rows (documented out
-  of scope, AC-5); the selection-list metadata panel is the canonical place
-  to see blockers.
+  blocker — `Blocked By  WL-xxxxxxxx — <title> [<status-icon> <status>]` —
+  at the end of the metadata section (before the description preview). The
+  blocker's `status` from the `wl dep list` edge is appended as an icon +
+  text suffix when present (consistent with the Status row convention,
+  WL-0MSGIXHHI009KFW9); a status-less edge renders the ID + title alone.
+  The rows appear for ANY selected item with active blockers, regardless of
+  its stored `status` (a dependency-blocked `open` item is covered), and
+  are omitted entirely when there are none, so unblocked items render
+  byte-for-byte as before. The lookup runs only for the **selected** item
+  (`wl dep list`, with a `wl show` stage enrichment per still-possible
+  blocker), is cached per item ID, and is **reused across list refreshes**
+  (WL-0MV8Q5X8U004KKAP): the cache is invalidated only when the selected
+  item's own payload changes (`status`/`stage`/`updatedAt` — a dependency
+  add/remove reconciles the from-item's status and bumps `updatedAt`), so
+  repeated refresh triggers (DB-change watch, auto-sync cycles, `wl next`
+  re-sorts) never drop the resolved rows and the `Blocked By` line cannot
+  flicker on/off; the in-flight lookup is single-flight (one `wl dep list`
+  spawn per item until its edges change). While a re-resolve is in flight
+  the last known rows are still rendered (never a blank frame). The render
+  path never blocks on it — a failed or unparseable lookup simply yields no
+  rows (fail-open). The detail view renders the SAME rows via the same
+  cache (WL-0MVBMLY2Z0032CYR, see [Metadata panel](#metadata-panel)); the
+  hover tooltip deliberately omits them (it is a compact pane-status
+  summary and renders no async lookup).
 - For actively-worked items (`status = in-progress`), the panel
   additionally shows **`Last command:`** — the most recent command the
   plugin dispatched against that item (`none yet` until the first
@@ -2165,7 +2169,7 @@ packages/herdr/
   - The merge is **deterministic and deduplicated** (dedup key = `view` + `chord`); within the local file, later entries win for the same `view`+`chord`.
   - Local entries are validated with the same rules as bundled entries: an invalid entry is **logged and skipped**, and a missing/malformed local file (bad JSON, non-array) falls back to bundled-only with an error logged — a broken local file never crashes the plugin.
   - When no worklog root is resolved (uninitialized project) or no local file exists, the registry is exactly the bundled defaults and all dispatch behaviour is unchanged.
-- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). `formatMetadataPanel` appends one `Blocked By  <id> — <title>` row per blocker at the end of the metadata rows. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
+- **Metadata panel** — The selected item's metadata is shown in a panel below the list (`formatMetadataPanel` in `worklist.ts`). The list takes up to the full pane height and the panel fills the remaining space (minimum 3 rows), computed via `computeDynamicLayout` (WL-0MSQ44MDX008U69J); the panel scrolls independently (`m`/`M`) with a scroll indicator. Row building is shared with the detail view via `buildMetaRows`, so the two views never drift apart (see WL-0MSAYNVBY006LM9X). **`Blocked By` rows (WL-0MV8EZRDJ001TDA8, flicker fix WL-0MV8Q5X8U004KKAP; detail-view parity and blocker status WL-0MVBMLY2Z0032CYR):** the selected item's active blockers are resolved via `fetchBlockersForItem` (`fetcher.ts`: `wl dep list <id> --json` + `wl show` stage enrichment, filtered with the shared `isActiveBlocker` predicate and parsed with `parseDepListBlockersOutput`), cached per item ID in `runWorklistTui` and **kept across refreshes** — the cache is invalidated per item only when its payload signature (`status`/`stage`/`updatedAt`) changes, so unrelated refresh cycles reuse the resolved rows instead of re-entering the unresolved frame (this was the endless `Blocked By` flicker: `blockerCache.clear()` ran on every refresh); while a re-resolve is in flight the last known value is still rendered (single-flight, no duplicate spawns). Each `wl dep list` edge's `status` is passed through on the `BlockerRef` and rendered as an icon + text suffix on the row (a status-less edge renders the ID + title alone). `formatMetadataPanel` appends one `Blocked By  <id> — <title> [<status>]` row per blocker at the end of the metadata rows, and `formatDetailContent` renders the SAME rows in the detail-view metadata table (the detail view resolves blockers through the same single-flight + signature-keyed cache, so the two surfaces never spawn duplicate lookups or flicker; a failed lookup yields no rows — fail-open). The detail-view scroll clamp (`detailScrollDown`) counts the rows so they are reachable when the view scrolls. The `m`/`M` scroll clamp uses the unpadded content height (`metadataPanelContentHeight`) so the offset reaches the true bottom of the panel.
 - **Command log** — Dispatched commands targeting a work item are recorded in `command-log.ts` before execution; the panel surfaces the last command for `in_progress` items. Recording is fire-and-forget (never breaks dispatch) and the log file is written atomically (see WL-0MSAYNVBY006LM9X).
 
 ## Code Freeze

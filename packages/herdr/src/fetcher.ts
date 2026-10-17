@@ -942,11 +942,16 @@ export async function fetchItemDetails(id: string): Promise<WorkItem | null> {
 /**
  * A dependency blocker of a work item, as shown in the metadata panel
  * (WL-0MV8EZRDJ001TDA8). Display-only: the id and title are all the
- * `Blocked By` rows need.
+ * `Blocked By` rows need; when the `wl dep list` edge carries a `status`
+ * it is passed through so the row can render the blocker's state
+ * (icon + text, WL-0MVBMLY2Z0032CYR). The status is optional — an edge
+ * without one still renders the ID + title alone.
  */
 export interface BlockerRef {
   id: string;
   title: string;
+  /** The blocker's status as reported by the `wl dep list` edge (absent when the edge has none). */
+  status?: string;
 }
 
 /**
@@ -980,7 +985,12 @@ export async function fetchBlockersForItem(id: string): Promise<BlockerRef[]> {
           ? undefined
           : (await fetchItemDetails(edge.id))?.stage;
       if (!isActiveBlocker({ id: edge.id, status: edge.status, stage })) continue;
-      blockers.push({ id: edge.id, title: edge.title });
+      // The edge's `status` is already on the `dep list` edge — pass it
+      // through (no per-blocker lookup): the panel renders it as an icon +
+      // text suffix on the `Blocked By` row (WL-0MVBMLY2Z0032CYR). A
+      // status-less edge yields a ref without the field.
+      const edgeStatus = edge.status;
+      blockers.push({ id: edge.id, title: edge.title, ...(edgeStatus ? { status: edgeStatus } : {}) });
     }
     return blockers;
   } catch {

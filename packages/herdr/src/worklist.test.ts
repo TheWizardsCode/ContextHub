@@ -3277,6 +3277,32 @@ describe('formatMetadataPanel — Blocked By rows (WL-0MV8EZRDJ001TDA8)', () => 
     expect(lines).not.toContain('WL-NOTITLE —');
   });
 
+  it('appends the blocker status (icon + text) after the title when present', () => {
+    const blockers = [
+      { id: 'WL-B1', title: 'First blocker', status: 'in-progress' },
+      { id: 'WL-B2', title: 'Second blocker', status: 'blocked' },
+    ];
+    const lines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, false, blockers));
+    expect(lines).toMatch(/Blocked By\s+WL-B1 — First blocker \u{1F504} in-progress/u);
+    expect(lines).toMatch(/Blocked By\s+WL-B2 — Second blocker \u{26D4} blocked/u);
+  });
+
+  it('renders the blocker status as plain text only when icons are disabled (noIcons)', () => {
+    const blockers = [{ id: 'WL-B1', title: 'First blocker', status: 'in-progress' }];
+    const withIcons = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, false, blockers));
+    expect(withIcons).toContain('🔄');
+    const noIconLines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, true, blockers));
+    expect(noIconLines).toMatch(/Blocked By\s+WL-B1 — First blocker in-progress/);
+    expect(noIconLines).not.toContain('🔄');
+  });
+
+  it('renders no status suffix when the blocker has no status', () => {
+    const lines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, false, [
+      { id: 'WL-B1', title: 'No status ref' },
+    ]));
+    expect(lines).toMatch(/Blocked By\s+WL-B1 — No status ref\s*$/m);
+  });
+
   it('renders the Blocked By rows after the metadata rows and before the description preview', () => {
     const item = { ...makeRichItem(), description: 'Some description here.' };
     const raw = formatMetadataPanel(item, 80, 30, 0, undefined, false, [
@@ -3573,6 +3599,33 @@ describe('WorkItemListState — metadata scroll state', () => {
 
     expect(plainMax).toBeGreaterThan(0);
     expect(blockedMax).toBeGreaterThan(plainMax);
+  });
+
+  it('clamps detailScrollDown to include Blocked By rows (WL-0MVBMLY2Z0032CYR)', () => {
+    const state = new WorkItemListState([makeRichItem()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem(); // enter detail mode
+    // A deliberately tiny viewport forces overflow in both cases (a 24-row
+    // term and a short item keep plainMax at 0). The detail-scroll clamp
+    // must count the `Blocked By` rows the renderer shows or they become
+    // unreachable when the view scrolls.
+    const blockers = Array.from({ length: 6 }, (_, i) => ({
+      id: `WL-B${i}`,
+      title: `Blocker ${i}`,
+    }));
+
+    state.detailScrollDown(9999);
+    const plainMax = state.detailScrollOffset;
+
+    // The render loop keeps state.detailBlockedBy in sync with the rows it
+    // shows; detailScrollDown must clamp against THOSE rows.
+    state.detailScrollOffset = 0;
+    state.detailBlockedBy = blockers;
+    state.detailScrollDown(9999);
+    const blockedMax = state.detailScrollOffset;
+
+    expect(blockedMax).toBeGreaterThan(plainMax);
+    expect(blockedMax).toBeGreaterThan(0);
   });
 
   it('metaScrollUp clamps at zero', () => {
@@ -4646,6 +4699,56 @@ function makeKeyFilesItem(id: string, paths: string[]): WorkItem {
     ].join('\n'),
   };
 }
+
+// ── formatDetailContent — Blocked By rows (WL-0MVBMLY2Z0032CYR) ───────
+// The detail view renders the SAME active `Blocked By` rows as the
+// selection-list preview (reversing the documented divergence
+// WL-0MV8Q5X8U004KKAP AC-5): one row per blocker after the metadata table,
+// with the blocker's status (icon + text) appended when present.
+
+describe('formatDetailContent — Blocked By rows (WL-0MVBMLY2Z0032CYR)', () => {
+  const visibleOf = (lines: string[]): string => lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+  it('renders one Blocked By row per active blocker with ID, title and status (icon + text)', () => {
+    const blockers = [
+      { id: 'WL-B1', title: 'First blocker', status: 'in-progress' },
+      { id: 'WL-B2', title: 'Second blocker' },
+    ];
+    const joined = visibleOf(formatDetailContent(makeRichItem(), 80, undefined, false, 0, true, 0, blockers));
+    expect(joined).toMatch(/\| Blocked By\s+\| WL-B1 — First blocker \u{1F504} in-progress \|/u);
+    expect(joined).toMatch(/\| Blocked By\s+\| WL-B2 — Second blocker \|/);
+  });
+
+  it('places the Blocked By rows after the metadata table and before the description body', () => {
+    const item = { ...makeRichItem(), description: 'Body text here.' };
+    const lines = visibleOf(formatDetailContent(item, 80, undefined, false, 0, true, 0, [
+      { id: 'WL-B1', title: 'First blocker', status: 'blocked' },
+    ])).split('\n');
+    const metaIdx = lines.findIndex((l) => l.includes('| Status'));
+    const blockerIdx = lines.findIndex((l) => l.includes('WL-B1'));
+    const descIdx = lines.findIndex((l) => l.includes('Description'));
+    expect(metaIdx).toBeGreaterThan(-1);
+    expect(blockerIdx).toBeGreaterThan(-1);
+    expect(descIdx).toBeGreaterThan(-1);
+    expect(metaIdx).toBeLessThan(blockerIdx);
+    expect(blockerIdx).toBeLessThan(descIdx);
+  });
+
+  it('renders the blocker status as plain text only when icons are disabled (noIcons)', () => {
+    const joined = visibleOf(formatDetailContent(makeRichItem(), 80, undefined, true, 0, true, 0, [
+      { id: 'WL-B1', title: 'First blocker', status: 'in-progress' },
+    ]));
+    expect(joined).toMatch(/\| Blocked By\s+\| WL-B1 — First blocker in-progress \|/);
+    expect(joined).not.toContain('🔄');
+  });
+
+  it('omits the Blocked By rows entirely when there are no active blockers', () => {
+    for (const blockedBy of [undefined, null, []]) {
+      const joined = formatDetailContent(makeRichItem(), 80, undefined, false, 0, true, 0, blockedBy as never).join('\n');
+      expect(joined).not.toContain('Blocked By');
+    }
+  });
+});
 
 describe('buildMetaRows — Related Docs row (WL-0MSHWHRIF001YHF8)', () => {
   it('emits a Related Docs row listing every .md path from Key Files, joined with ", "', () => {

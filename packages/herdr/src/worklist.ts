@@ -621,6 +621,13 @@ export class WorkItemListState {
    */
   metaBlockedBy: BlockerRef[] | null = null;
 
+  /**
+   * Active blockers of the detail item, supplied by the render loop so the
+   * detail-view scroll clamp counts the `Blocked By` rows the renderer shows
+   * (WL-0MVBMLY2Z0032CYR). Null while unresolved or absent.
+   */
+  detailBlockedBy: BlockerRef[] | null = null;
+
   /** Set of expanded item IDs (for hierarchical display). */
   expandedItems: Set<string> = new Set();
 
@@ -982,8 +989,10 @@ export class WorkItemListState {
     const maxCols = this.termSize.cols;
     const viewportHeight = Math.max(10, this.termSize.rows - 4);
     // The header + ToC block is pinned at the top; only the body below
-    // scrolls (WL-0MSHWHULZ001FL8I / WL-0MSI28AP80002F5S).
-    const allLines = formatDetailContent(this.detailItem, maxCols);
+    // scrolls (WL-0MSHWHULZ001FL8I / WL-0MSI28AP80002F5S). The content
+    // height must include the `Blocked By` rows the renderer shows or they
+    // become unreachable when the view scrolls (WL-0MVBMLY2Z0032CYR).
+    const allLines = formatDetailContent(this.detailItem, maxCols, undefined, false, 0, true, 0, this.detailBlockedBy);
     const tocLines = formatDetailToC(this.detailItem, maxCols).length;
     const pinnedHeight = DETAIL_HEADER_LINES + tocLines;
     const bodyLines = Math.max(0, allLines.length - pinnedHeight);
@@ -2037,11 +2046,12 @@ function buildMetadataPanelLines(
   // the END of the metadata section (after every field row, before the
   // description preview). ``${id} — ${title}`` keeps both readable; a
   // title-less blocker falls back to the bare ID rather than a dangling
-  // separator. Omitted entirely when there are no active blockers.
+  // separator. The blocker's status is appended as an icon + text suffix
+  // when the edge carries one (WL-0MVBMLY2Z0032CYR). Omitted entirely when
+  // there are no active blockers.
   for (const blocker of blockedBy ?? []) {
     if (!blocker || !blocker.id) continue;
-    const value = blocker.title ? `${blocker.id} — ${blocker.title}` : blocker.id;
-    metaRows.push(['Blocked By', value]);
+    metaRows.push(['Blocked By', formatBlockerValue(blocker, noIcons)]);
   }
   if (metaRows.length > 0) {
     const fieldWidth = Math.max(...metaRows.map(([l]) => l.length), 6);
@@ -2072,6 +2082,24 @@ function buildMetadataPanelLines(
   }
 
   return lines;
+}
+
+/**
+ * Format a single `Blocked By` row value (WL-0MVBMLY2Z0032CYR):
+ * ``<id> — <title>`` with the blocker's status appended as an icon + text
+ * suffix when the edge carries one (``<id> — <title> <icon> <status>``),
+ * consistent with the Status/Stage/Priority row convention
+ * (WL-0MSGIXHHI009KFW9). A title-less blocker falls back to the bare ID;
+ * a status-less blocker renders ID (+ title) alone — the status suffix is
+ * only appended when present. `noIcons` gates the emoji exactly like every
+ * other meta row: icons disabled → plain text status only.
+ */
+function formatBlockerValue(blocker: BlockerRef, noIcons: boolean): string {
+  const base = blocker.title ? `${blocker.id} — ${blocker.title}` : blocker.id;
+  const status = (blocker.status ?? '').trim();
+  if (!status) return base;
+  const icon = noIcons ? '' : statusIcon(status);
+  return icon ? `${base} ${icon} ${status}` : `${base} ${status}`;
 }
 
 /**
@@ -2283,21 +2311,15 @@ export function formatDetailToC(
  * the header (from the shared {@link buildMetaRows} set they are omitted
  * from the table to avoid duplication).
  *
- * NOTE — `Blocked By` parity decision (WL-0MV8Q5X8U004KKAP AC-5): this
- * detail view deliberately does NOT render the `Blocked By` rows that the
- * selection-list metadata panel shows. The rows need an async per-item
- * lookup (`fetchBlockersForItem`) that the list mode resolves in the
- * render loop (single-flight + cache, so it never blanks on refresh); a
- * detail-view copy would add a second, uncoordinated async render path
- * (plus a matching update to its scroll-bounds calculation) and re-open
- * exactly the flicker class WL-0MV8Q5X8U004KKAP fixes. Divergence is
- * documented out of scope; the selection-list metadata panel remains the
- * canonical place to see what a selected item is blocked on.
- *
- * When the item has ≥1 `.md` Key File, a pinned `Related Docs` ToC is
- * rendered at the top (see {@link formatDetailToC}); the md viewer section
- * below renders the file at `detailRenderedIndex` (default 0 = first file,
- * preserving the existing auto-render behavior).
+ * `Blocked By` rows (WL-0MVBMLY2Z0032CYR): the detail view renders the
+ * SAME active blockers the selection-list metadata panel shows — one row
+ * per blocker (`<id> — <title> <status-icon> <status>`) appended to the
+ * metadata table, reversing the documented divergence (WL-0MV8Q5X8U004KKAP
+ * AC-5). The rows arrive pre-resolved from the render loop via the same
+ * single-flight + signature-keyed cache as the preview, so the detail view
+ * never spawns an uncoordinated async lookup and cannot re-open the
+ * WL-0MV8Q5X8U004KKAP flicker class; an expired/failed lookup simply
+ * passes no rows (fail-open).
  */
 export function formatDetailContent(
   item: WorkItem | null,
@@ -2307,6 +2329,7 @@ export function formatDetailContent(
   detailToCIndex = 0,
   detailToCFocus = true,
   detailRenderedIndex = 0,
+  blockedBy?: BlockerRef[] | null,
 ): string[] {
   if (!item) return [];
 
@@ -2331,6 +2354,15 @@ export function formatDetailContent(
   const metaRows = pairMetaRows(
     buildMetaRows(item, noIcons).filter(([label]) => label !== 'ID' && label !== 'Title'),
   );
+  // `Blocked By` rows (WL-0MVBMLY2Z0032CYR) — one row per ACTIVE blocker
+  // after the metadata table, mirroring the selection-list preview:
+  // ``<id> — <title>`` plus the blocker's status (icon + text) when the
+  // edge carries one. Omitted entirely when there are none, so an
+  // unblocked item's detail view is unchanged.
+  for (const blocker of blockedBy ?? []) {
+    if (!blocker || !blocker.id) continue;
+    metaRows.push(['Blocked By', formatBlockerValue(blocker, noIcons)]);
+  }
 
   // Render the metadata as a markdown table
   if (metaRows.length > 0) {
@@ -2618,11 +2650,12 @@ export function formatDetailView(
   detailToCIndex = 0,
   detailToCFocus = true,
   detailRenderedIndex = 0,
+  blockedBy?: BlockerRef[] | null,
 ): string {
   // The Related Docs ToC is pinned at the top of the detail view; only the
   // body below it scrolls (WL-0MSHWHULZ001FL8I).
   const tocLines = formatDetailToC(item, maxCols, detailToCIndex, detailToCFocus, noIcons);
-  const allLines = formatDetailContent(item, maxCols, readFile, noIcons, detailToCIndex, detailToCFocus, detailRenderedIndex);
+  const allLines = formatDetailContent(item, maxCols, readFile, noIcons, detailToCIndex, detailToCFocus, detailRenderedIndex, blockedBy);
   if (allLines.length === 0) return '';
 
   const pinnedHeight = DETAIL_HEADER_LINES + tocLines.length;
@@ -4244,6 +4277,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   sprintAuditsOutstanding?: boolean,
   /** Active dependency blockers of the selected item, rendered as `Blocked By` rows (WL-0MV8EZRDJ001TDA8). */
   metaBlockedBy?: BlockerRef[] | null,
+  /** Active dependency blockers of the detail item, rendered as `Blocked By` rows (WL-0MVBMLY2Z0032CYR). */
+  detailBlockedBy?: BlockerRef[] | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -4285,6 +4320,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     browseItemCount?: number,
     sprintAuditsOutstanding?: boolean,
     metaBlockedBy?: BlockerRef[] | null,
+    /** Active dependency blockers of the detail item, rendered as `Blocked By` rows (WL-0MVBMLY2Z0032CYR). */
+    detailBlockedBy?: BlockerRef[] | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -4311,6 +4348,7 @@ export function createListRenderer(getShowIcons?: () => boolean): (
         detailToCIndex ?? 0,
         detailToCFocus ?? true,
         detailRenderedIndex ?? 0,
+        detailBlockedBy,
       );
     }
 
@@ -7304,6 +7342,18 @@ export async function runWorklistTui(
     // Keep the state's `m`/`M` scroll clamp in sync with the rows the
     // renderer will actually show.
     state.metaBlockedBy = metaBlockers ?? null;
+    // Detail view: the SAME single-flight + signature-keyed cache resolves
+    // the detail item's active blockers so `formatDetailContent` can render
+    // `Blocked By` rows without re-opening the WL-0MV8Q5X8U004KKAP flicker
+    // class (WL-0MVBMLY2Z0032CYR). Sharing the per-item cache/in-flight memo
+    // means a detail lookup never duplicates a preview lookup for the same
+    // item: mode switches between the two surfaces reuse the resolved rows.
+    const detailBlockers = state.mode === 'detail'
+      ? resolveMetaBlockers(state.detailItem)
+      : undefined;
+    // Keep the detail scroll-bounds calculation in sync with the rows the
+    // renderer will actually show (detailScrollDown clamp, WL-0MVBMLY2Z0032CYR).
+    state.detailBlockedBy = detailBlockers ?? null;
 
     // ── Hover tooltip (WL-0MT9XRZDK006GMUH) ────────────────────────
     // Build the tooltip lines for the currently hovered row when it is a
@@ -7372,6 +7422,7 @@ export async function runWorklistTui(
       // Outstanding-audit flag driving the banner copy (AH-0MUDYTQ55002NUSJ).
       sprintAuditsOutstanding,
       metaBlockers,
+      detailBlockers,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

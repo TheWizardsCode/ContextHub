@@ -5,8 +5,10 @@
  * `fetchBlockersForItem(id)` runs `wl dep list <id> --json`, keeps only the
  * outbound `depends-on` edges that still block via the shared
  * `isActiveBlocker` predicate (`completed`/`deleted` status, or stage
- * `in_review`/`done`), and returns `{ id, title }` rows. It is fail-open:
- * a failed/unparseable lookup yields `[]` and never throws.
+ * `in_review`/`done`), and returns `{ id, title, status? }` rows — the
+ * edge's `status` is passed through so the metadata panel can render it
+ * (WL-0MVBMLY2Z0032CYR). It is fail-open: a failed/unparseable lookup
+ * yields `[]` and never throws.
  *
  * Stages are not part of a `wl dep list` edge, so each non-terminal edge is
  * enriched via `wl show` before classification (mirroring the hydrator's
@@ -71,7 +73,7 @@ afterEach(() => {
 });
 
 describe('fetchBlockersForItem — active blockers (WL-0MV8EZRDJ001TDA8)', () => {
-  it('returns one { id, title } per active outbound depends-on edge', async () => {
+  it('returns one { id, title, status } per active outbound depends-on edge', async () => {
     installExecMock([
       { id: 'WL-B1', title: 'First blocker', status: 'open', direction: 'depends-on' },
       { id: 'WL-B2', title: 'Second blocker', status: 'in-progress', direction: 'depends-on' },
@@ -80,9 +82,33 @@ describe('fetchBlockersForItem — active blockers (WL-0MV8EZRDJ001TDA8)', () =>
     const blockers = await fetchBlockersForItem('WL-X');
 
     expect(blockers).toEqual([
-      { id: 'WL-B1', title: 'First blocker' },
-      { id: 'WL-B2', title: 'Second blocker' },
+      { id: 'WL-B1', title: 'First blocker', status: 'open' },
+      { id: 'WL-B2', title: 'Second blocker', status: 'in-progress' },
     ]);
+  });
+
+  it('passes the edge status through to the blocker ref (no extra lookups)', async () => {
+    installExecMock([
+      { id: 'WL-B1', title: 'First blocker', status: 'blocked', direction: 'depends-on' },
+    ]);
+
+    const blockers = await fetchBlockersForItem('WL-X');
+
+    expect(blockers).toEqual([{ id: 'WL-B1', title: 'First blocker', status: 'blocked' }]);
+    // The stage enrichment still ran (one wl show), but the status came from
+    // the `dep list` edge itself — no per-blocker `wl show` for status.
+    const depSpawns = spawns.filter((s) => s.startsWith('dep list'));
+    expect(depSpawns).toHaveLength(1);
+  });
+
+  it('omits the status field when the edge carries none', async () => {
+    installExecMock([
+      { id: 'WL-B1', title: 'No status ref', direction: 'depends-on' },
+    ]);
+
+    const blockers = await fetchBlockersForItem('WL-X');
+
+    expect(blockers).toEqual([{ id: 'WL-B1', title: 'No status ref' }]);
   });
 
   it('queries wl dep list for the requested item', async () => {
@@ -104,7 +130,7 @@ describe('fetchBlockersForItem — active blockers (WL-0MV8EZRDJ001TDA8)', () =>
 
     const blockers = await fetchBlockersForItem('WL-X');
 
-    expect(blockers).toEqual([{ id: 'WL-OPEN', title: 'Still blocking' }]);
+    expect(blockers).toEqual([{ id: 'WL-OPEN', title: 'Still blocking', status: 'blocked' }]);
   });
 
   it('filters out non-terminal edges whose target is at a terminal stage', async () => {
@@ -119,7 +145,7 @@ describe('fetchBlockersForItem — active blockers (WL-0MV8EZRDJ001TDA8)', () =>
 
     const blockers = await fetchBlockersForItem('WL-X');
 
-    expect(blockers).toEqual([{ id: 'WL-ACTIVE', title: 'Active' }]);
+    expect(blockers).toEqual([{ id: 'WL-ACTIVE', title: 'Active', status: 'in-progress' }]);
   });
 
   it('ignores inbound (depended-on-by) edges', async () => {
@@ -130,7 +156,7 @@ describe('fetchBlockersForItem — active blockers (WL-0MV8EZRDJ001TDA8)', () =>
 
     const blockers = await fetchBlockersForItem('WL-X');
 
-    expect(blockers).toEqual([{ id: 'WL-DOWN', title: 'Blocks us' }]);
+    expect(blockers).toEqual([{ id: 'WL-DOWN', title: 'Blocks us', status: 'open' }]);
   });
 
   it('returns an empty array when there are no outbound edges', async () => {
