@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.0.22 (2026-10-17)
+> **Release focus:** This release focuses on making the worklist clearer and more responsive, with better visibility into blocked items, priorities, review status, and in-progress markers, plus instant refresh and a new help screen for shortcuts. It also improves reliability around audits, quick-create, rejections, and finish-gate so work isn't stranded or interrupted.
+### Features
+- Blocked items now show exactly what's holding them up, right in the list. (WL-0MV8EZRDJ001TDA8)
+- Medium-priority items now show a yellow square, so you can tell priority apart from stage at a glance. (WL-0MV7WQTJ9003SAV1)
+- Press Ctrl+R to refresh the worklist instantly, and enjoy a cleaner header. (WL-0MV85T0LT008UT9H)
+- Failed audits no longer strand work off the review queue; items stay in review and can be re-dispatched. (WL-0MV82CHGQ000HAZZ)
+- The producer-review status icon is back in the selection list, so you can see at a glance which items await review. (WL-0MVAMS4RO000H3B0)
+- The worklist now refreshes instantly when you focus its pane, so new items appear without waiting. (WL-0MVAS988R008PNH6)
+- Blocked items now show each blocker's status in both the preview and detail views. (WL-0MVBMLY2Z0032CYR)
+- Quick-create now runs in the background without interrupting your work. (WL-0MV6J5JXL002D8C4)
+- Epic items now show a plain "epic" label instead of a redundant icon, making lists cleaner and easier to scan. (WL-0MVAQ873D007LNWD)
+- The in-progress marker now reliably shows which work items are actively being worked on. (WL-0MV1BWETT005GSUJ)
+- Press ? to open a help screen listing all shortcuts and icon meanings. (WL-0MTV97GV20088CS7)
+### Bug Fixes
+- Blocked items now show their "Blocked By" info steadily instead of flickering on and off. (WL-0MV8Q5X8U004KKAP)
+- The Worklog selection pane no longer crashes on startup after updates. (WL-0MVAY631M004RZ3Q)
+- Failed audits no longer silently remove items from the review queue. (WL-0MV7W77AY005MGBL)
+- Rejecting an item with a reason now runs quietly in the background without opening a command pane. (WL-0MV6J4HQ0009OJPQ)
+- Finish-gate no longer fails when other agents update shared branches mid-run. (WL-0MV5MYBKJ0033P8U)
+- Tests now pass reliably regardless of where the project is checked out. (WL-0MTT7XTN6006MHHV)
+- Separate-process audits now correctly read child results, so parent audits no longer wrongly show "not ready to close. (WL-0MU0FHSEP003PCDY)
+### Other
+- Downtime worker tests are now more reliable, so future updates are less likely to break them. (WL-0MV5RYKQD000L5LM)
+- Updated the shared tools guide so players can find the new agent and lease-release scripts. (WL-0MSRWFPRT009S0SO)
+
 ## v1.0.21 (2026-10-13)
 > **Release focus:** This release focuses on making the worklist more reliable and complete, ensuring blocked, in-progress, and reworked items always appear and that data refreshes instantly. It also fixes several crashes and data-loss issues that could occur when saving changes during conflicts or busy periods, and improves recovery behaviour when AI providers or long outages interrupt queued jobs.
 ### Features
