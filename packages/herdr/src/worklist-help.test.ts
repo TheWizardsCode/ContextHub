@@ -380,6 +380,102 @@ describe('help screen overlay — small-pane behaviour (WL-0MV85R0JD004CHAE)', (
   });
 });
 
+// ── 2026-10-16 audit: the help text must be scrollable ──────────────────
+// The producer audit of the `?` overlay required blank-line separated
+// sections, coloured headings and SCROLLABLE text. The reworked overlay
+// opens at the top of the document and takes j/k/arrow/PageUp/PageDown and
+// g/G to move the content window; the footer advertises the scroll
+// capability whenever the full content exceeds the pane height, and every
+// scroll key is consumed by the overlay (nothing is dispatched).
+
+describe('help screen overlay — scrolling (WL-0MTV97GV20088CS7 2026-10-16 audit)', () => {
+  it('scrolls the content window with j/k and g/G on a short pane', async () => {
+    const rows = 12;
+    const cols = 100;
+    const items = [makeItem('A')];
+    await runWithTui(
+      items,
+      async (h) => {
+        h.press('?');
+        await h.waitForFrame(isHelpOpen, 'help open on short pane');
+
+        // The footer advertises scrolling once content overflows the pane.
+        await h.waitForFrame(
+          (f) => f.includes('j:k scroll') && f.includes('g/G'),
+          'footer shows scroll hint',
+        );
+
+        // Top of the document: the early command families are visible and
+        // the last icon category (`Coverage`) is not.
+        const topFrame = h.frame();
+        expect(topFrame).toContain('d — Downtime');
+        expect(topFrame).not.toContain('Coverage');
+
+        // j scrolls down one line (the window moves away from the top).
+        h.press('j');
+        await h.waitForFrame((f) => f !== topFrame, 'j scrolls the window down');
+
+        // PageDown jumps by a page; repeated PageDown reveals the legend.
+        for (let i = 0; i < 40; i += 1) h.press('\x1b[6~');
+        await h.waitForFrame(
+          (f) => f.includes('Coverage'),
+          'scrolling down reveals the last icon category',
+        );
+
+        // G jumps to the very bottom of the document.
+        h.press('G');
+        await h.waitForFrame(
+          (f) => f.includes('Coverage') && f.includes('j:k scroll'),
+          'G jumps to the bottom of the help text',
+        );
+
+        // g returns to the top of the document.
+        h.press('g');
+        await h.waitForFrame(
+          (f) => f.includes('d — Downtime') && f.includes('Commands'),
+          'g returns to the top of the help text',
+        );
+
+        // Esc still dismisses the scrolled overlay back to the list.
+        h.press('\x1b');
+        await h.waitForFrame(isListMode, 'list after Esc from scrolled help');
+
+        // The list frame is untouched by the scrolling session: opening
+        // help again starts fresh at the top, not at the previous offset.
+        h.press('?');
+        await h.waitForFrame(isHelpOpen, 'help reopened after dismiss');
+        expect(h.frame()).toContain('d — Downtime');
+        expect(h.frame()).not.toContain('Coverage');
+      },
+      { rows, cols },
+    );
+  });
+
+  it('scroll keys are consumed — no command is dispatched while scrolling', async () => {
+    const items = [makeItem('A')];
+    const onCommand = vi.fn();
+    await runWithTui(
+      items,
+      async (h) => {
+        h.press('?');
+        await h.waitForFrame(isHelpOpen, 'help open');
+
+        // j/k/g/G are scroll keys inside the overlay — they must never
+        // dispatch the list-view commands bound to those single keys.
+        h.press('j');
+        h.press('k');
+        h.press('g');
+        h.press('G');
+        await delay(80);
+
+        expect(onCommand).not.toHaveBeenCalled();
+        expect(isHelpOpen(h.frame())).toBe(true);
+      },
+      { onCommand: onCommand as any, rows: 12 },
+    );
+  });
+});
+
 // ── AC5: showHelpText gate ──────────────────────────────────────────────
 
 describe('help screen overlay — showHelpText gate (WL-0MV85R0JD004CHAE)', () => {

@@ -1761,26 +1761,34 @@ spawns panes, or mutates the worklog — and is dismissed with `?`, `Esc` or
 `q`, returning to the list with the selection, filters and navigation stack
 unchanged.
 
-The overlay has two sections:
+The overlay has two sections, separated by blank lines, with colour-coded
+headings (title gold, section headings blue, command/category sub-headings
+cyan):
 
 - **Commands** — every shortcut registered for the list view listed in a
   single column, each row showing the chord key(s), label and the FULL
   (untruncated, word-wrapped) description. Commands are grouped by chord
   leader under a heading per family (`d — Downtime`, `c — Create`, `u —
-  Update`, `f — Filter`, …) so the sections read logically. The list is
+  Update`, `f — Filter`, …) so the sections read logically, with a blank
+  line separating each family. The list is
   derived live from the shortcut registry, so future shortcut additions
   appear automatically under their leader heading.
 - **Icons** — a legend explaining every glyph rendered in a work-item row,
   grouped by category under a heading (`Status`, `Stage`, `Priority`, `Epic`,
   `Risk`, `Effort`, `Audit`, `Producer review`, `Agent`, `Coverage`) with
-  each group's icons listed on a single line. The category name prefix is
+  each group's icons listed on a single line under its own heading. The
+  category name prefix is
   removed from each meaning (the heading already names the group), and the
   legend is derived from the shared icon source of truth so new row glyphs
   cannot silently miss it.
 
 The footer advertises the screen as `?: Help`. When content exceeds the pane
-height the overlay is clipped (scrolled) but the dismiss hint line (`? / Esc /
-q`) stays visible. The `d` downtime toggle and `Alt+m` mouse-tracking bindings
+height the overlay is **scrollable** (2026-10-16 audit): the content window
+moves with `j`/`↓` (down one line), `k`/`↑` (up one line), PageUp/PageDown
+(page), `g`/`G` (top/bottom), and the footer shows a live percentage
+(`[↑↓/j:k scroll g/G top/bot]`). The title and the dismiss hint line
+(`? / Esc / q`) stay pinned, and scrolling mutates no list state. The `d`
+downtime toggle and `Alt+m` mouse-tracking bindings
 remain fully functional; only their inline footer advertisements were removed
 in favour of the help screen.
 

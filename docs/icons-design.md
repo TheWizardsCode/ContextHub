@@ -24,7 +24,12 @@
 > `Producer review`, `Agent`, `Coverage`) under a heading per group, with each
 > group's icons on a single line. The category name prefix is removed from each
 > meaning because the group heading already names it (e.g. `Status: open — not
-> started` renders as `open — not started` under **Status**). The on-screen
+> started` renders as `open — not started` under **Status**). Since the
+> 2026-10-16 producer audit, every heading level is colour-coded (title gold,
+> section headings blue, category sub-headings cyan) and separated by blank
+> lines, and the whole overlay scrolls when content exceeds the pane height
+> (`j/k`, arrows, PageUp/PageDown, `g/G`; the footer shows a live percentage;
+> the title and the `? / Esc / q` dismiss line stay pinned). The on-screen
 > legend is generated from `ICON_LEGEND` in `@worklog/shared/icons` (the same
 > single source of truth the row renderer uses); a drift test in
 > `packages/shared/src/icons-legend.test.ts` fails whenever a row glyph has no

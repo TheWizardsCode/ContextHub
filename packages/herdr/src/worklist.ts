@@ -2991,41 +2991,73 @@ function helpMeaningWithoutCategory(category: string, meaning: string): string {
   return stripped.length > 0 ? stripped : meaning;
 }
 
+/** ANSI 256-colour code for the help-screen title (gold, WL-0MTV97GV20088CS7 rework). */
+const HELP_TITLE_COLOUR = 220;
+/** ANSI 256-colour code for the top-level section headings (Commands / Icons). */
+const HELP_SECTION_COLOUR = 39;
+/** ANSI 256-colour code for the command-family and icon-category sub-headings. */
+const HELP_GROUP_COLOUR = 36;
+
+/** Style a help-screen title line (bold + gold). */
+function helpTitle(text: string): string {
+  return `${ANSI.bold}${ANSI.fg(HELP_TITLE_COLOUR)}${text}${ANSI.reset}`;
+}
+
+/** Style a top-level help section heading (bold + blue). */
+function helpSectionHeading(text: string): string {
+  return `${ANSI.bold}${ANSI.fg(HELP_SECTION_COLOUR)}${text}${ANSI.reset}`;
+}
+
+/** Style a help sub-heading (command family / icon category, bold + cyan). */
+function helpSubHeading(text: string): string {
+  return `${ANSI.bold}${ANSI.fg(HELP_GROUP_COLOUR)}${text}${ANSI.reset}`;
+}
+
 /**
  * Render the full-pane `?` help overlay (WL-0MV85R14Y003RII9; layout reworked
- * per the producer audit of 2026-10-15).
+ * per the producer audits of 2026-10-15 and 2026-10-16).
  *
- * Two sections are produced:
+ * Two sections are produced, each under a coloured heading:
  * - **Commands** — every supplied shortcut entry in a SINGLE column with its
  *   FULL (never truncated) description, grouped under a heading per chord
- *   leader family (`c — create`, `a — audit`, …) so groups are separated;
+ *   leader family (`c — Create`, `a — Audit`, …) so groups are separated;
  * - **Icons** — the glyph legend (supplied by the caller from the shared icon
  *   source of truth), grouped by category under a heading (`Status`, `Stage`,…)
  *   with the category name prefix removed from each meaning and every group
  *   listed on a single line under its heading.
  *
- * The output is clipped to the `rows - 1` render budget (matching the list
- * viewport contract, WL-0MTV979LK005YB1B): a title line is always shown and
- * the dismiss footer (`? / Esc / q`) is always the final line, even when the
- * content is longer than the pane.
+ * Layout (2026-10-16 audit): sections and sub-headings are separated by blank
+ * lines, and every heading level is coloured (title gold, section headings
+ * blue, sub-headings cyan).
+ *
+ * The output honours the `rows - 1` render budget (matching the list
+ * viewport contract, WL-0MTV979LK005YB1B): the title line and the dismiss
+ * footer (`? / Esc / q`) are always shown, and the content between them is a
+ * scrolling window at `scrollOffset`. When the full content is longer than
+ * the budget the footer appends a scroll hint (`[↑↓/j:k scroll  g/G top/bot]`)
+ * mirroring the detail view (WL-0MSHWHULZ001FL8I); further content is
+ * revealed by scrolling.
  *
  * Display-only: it takes no state and mutates nothing.
  *
- * @param entries   - Shortcut entries filtered by stage/view/issue type.
- * @param cols      - Pane width in terminal cells.
- * @param rows      - Pane height in terminal cells.
- * @param iconRows  - Icon legend rows (empty when no legend is supplied).
+ * @param entries     - Shortcut entries filtered by stage/view/issue type.
+ * @param cols        - Pane width in terminal cells.
+ * @param rows        - Pane height in terminal cells.
+ * @param iconRows    - Icon legend rows (empty when no legend is supplied).
+ * @param scrollOffset - Vertical offset into the full content (clamped to the
+ *                       last window; default 0 = top of the document).
  */
 export function formatHelpScreen(
   entries: ShortcutEntry[],
   cols: number,
   rows: number,
   iconRows: ReadonlyArray<HelpIconRow> = [],
+  scrollOffset = 0,
 ): string {
   const budget = Math.max(2, rows - 1);
-  const title = 'Help';
-  const footer = '? / Esc / q  close';
-  // Title + footer are always reserved; the remainder is scrollable content.
+  const title = helpTitle('Help');
+  const footerBase = '? / Esc / q  close';
+  // Title + footer are always reserved; the remainder is the scroll window.
   const contentBudget = Math.max(0, budget - 2);
   const lineWidth = Math.max(20, cols - 2);
 
@@ -3039,9 +3071,13 @@ export function formatHelpScreen(
   }
 
   const content: string[] = [];
-  content.push('Commands');
+  // Leading blank: separates the pinned title from the first section heading
+  // (2026-10-16 audit: "blank lines to separate the sections").
+  content.push('');
+  content.push(helpSectionHeading('Commands'));
+  content.push('');
   for (const [leader, group] of grouped) {
-    content.push(helpGroupHeading(leader, group));
+    content.push(helpSubHeading(helpGroupHeading(leader, group)));
     for (const e of group) {
       const chord = (e.chord ?? []).join(' ');
       const label = e.label ?? e.command;
@@ -3050,12 +3086,16 @@ export function formatHelpScreen(
         : `${chord}  ${label}`;
       content.push(...wrapHelpLine(`  ${text}`, lineWidth, 6));
     }
+    // A blank line separates each command family under the section.
+    content.push('');
   }
 
   // ── Icons: grouped by category with a heading, one line per group ──
   if (iconRows.length > 0) {
+    // The blank separator above already follows the last command family;
+    // keep a clean exchange between the two top-level sections.
+    content.push(helpSectionHeading('Icons'));
     content.push('');
-    content.push('Icons');
     const byCategory = new Map<string, HelpIconRow[]>();
     for (const row of iconRows) {
       const list = byCategory.get(row.category) ?? [];
@@ -3063,15 +3103,35 @@ export function formatHelpScreen(
       byCategory.set(row.category, list);
     }
     for (const [category, rows] of byCategory) {
-      content.push(helpCategoryHeading(category));
+      content.push(helpSubHeading(helpCategoryHeading(category)));
       const tokens = rows
         .map(r => `${r.glyph} ${helpMeaningWithoutCategory(category, r.meaning)}`)
         .join('   ');
       content.push(...wrapHelpLine(`  ${tokens}`, lineWidth, 4));
+      // A blank line separates each icon category under the section.
+      content.push('');
     }
   }
 
-  const out = [title, ...content.slice(0, contentBudget)];
+  // ── Scroll window (2026-10-16 audit: "we need to be able to scroll") ──
+  const maxScroll = Math.max(0, content.length - contentBudget);
+  const safeOffset = Math.min(scrollOffset, maxScroll);
+  const visible = content.slice(safeOffset, safeOffset + contentBudget);
+
+  let footer = footerBase;
+  if (maxScroll > 0) {
+    const percent = content.length > 0
+      ? Math.round(((safeOffset + contentBudget) / content.length) * 100)
+      : 0;
+    const hint = `${ANSI.dim}[↑↓/j:k scroll  g/G top/bot  ${Math.min(100, percent)}%]${ANSI.reset}`;
+    // Keep the dismiss keys discoverable on narrow panes (WL-0MTV979LK005YB1B):
+    // only append the scroll hint when the footer still fits the pane width.
+    if (visibleLength(`${footerBase}   ${hint}`.replace(/\x1b\[[0-9;]*m/g, '')) <= cols) {
+      footer = `${footerBase}   ${hint}`;
+    }
+  }
+
+  const out = [title, ...visible];
   while (out.length < budget - 1) out.push('');
   out.push(footer);
   return out.slice(0, budget).join('\n');
@@ -5650,6 +5710,12 @@ export async function runWorklistTui(
    */
   let preHelpMode: ViewMode = 'list';
   /**
+   * Vertical scroll offset of the help overlay's content window (2026-10-16
+   * producer audit: the overlay must be scrollable). Reset to 0 every time
+   * the overlay opens; clamped to the last window in `formatHelpScreen`.
+   */
+  let helpScrollOffset = 0;
+  /**
    * Ship It confirmation dialog (WL-0MSGG5N5Z0074TLY). Non-null while the
    * dialog is open; its buffer holds the typed confirmation input. The
    * dialog is bottom-anchored — the selection list stays visible above it.
@@ -6468,11 +6534,27 @@ export async function runWorklistTui(
 
     // ── Help overlay mode (WL-0MV85R14Y003RII9) ─────────────────
     // Full-pane, display-only overlay. `?`, Esc and `q` dismiss it back to
-    // the recorded pre-help mode; every other key is consumed so no command
-    // is dispatched and no list state is mutated.
+    // the recorded pre-help mode; scroll keys (j/k/arrow/PageUp/PageDown,
+    // g/G) move the content window; every other key is consumed so no
+    // command is dispatched and no list state is mutated (2026-10-16 audit:
+    // the overlay must be scrollable).
     if (state.mode === 'help') {
+      const pageSize = Math.max(5, termSize.rows - 4);
       if (key === '?' || key === '\x1b' || key === 'q') {
+        helpScrollOffset = 0;
         state.mode = preHelpMode;
+      } else if (key === 'j' || key === '\x1b[B') {
+        helpScrollOffset += 1;
+      } else if (key === 'k' || key === '\x1b[A') {
+        helpScrollOffset = Math.max(0, helpScrollOffset - 1);
+      } else if (key === '\x1b[6~') {
+        helpScrollOffset += pageSize;
+      } else if (key === '\x1b[5~') {
+        helpScrollOffset = Math.max(0, helpScrollOffset - pageSize);
+      } else if (key === 'g') {
+        helpScrollOffset = 0;
+      } else if (key === 'G') {
+        helpScrollOffset = Number.MAX_SAFE_INTEGER; // clamped in the formatter
       }
       render();
       return;
@@ -6487,6 +6569,7 @@ export async function runWorklistTui(
       && opts.getShowHelpText()
     ) {
       preHelpMode = state.mode;
+      helpScrollOffset = 0;
       state.mode = 'help';
       render();
       return;
@@ -7153,7 +7236,8 @@ export async function runWorklistTui(
     // ── Help overlay rendering (WL-0MV85R14Y003RII9) ──────────
     // Full-pane, read-only `?` help screen: every list-view shortcut
     // (grouped by chord leader) plus the icon legend, clipped to the
-    // `rows - 1` budget with the dismiss footer always visible. Nothing is
+    // `rows - 1` budget with the dismiss footer always visible, and a
+    // scrollable content window (2026-10-16 audit). Nothing is
     // dispatched and no list state is read or mutated beyond the registry.
     if (state.mode === 'help') {
       const helpEntries = buildHelpEntries();
@@ -7162,6 +7246,7 @@ export async function runWorklistTui(
         termSize.cols,
         termSize.rows,
         buildHelpIconLegend(),
+        helpScrollOffset,
       );
       process.stdout.write(ANSI.clear);
       process.stdout.write(ANSI.cursorHome);

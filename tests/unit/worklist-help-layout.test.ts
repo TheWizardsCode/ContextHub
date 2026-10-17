@@ -1,13 +1,18 @@
 /**
  * tests/unit/worklist-help-layout.test.ts — Help-screen layout contract
- * (parent WL-0MTV97GV20088CS7; producer audit rejected the first layout on
- * 2026-10-15).
+ * (parent WL-0MTV97GV20088CS7; producer audits rejected earlier layouts on
+ * 2026-10-15 and 2026-10-16).
  *
- * The producer audit of the `?` help overlay required:
+ * The 2026-10-15 producer audit required:
  *   - command chords in a SINGLE column with FULL (never ellipsis-truncated)
  *     descriptions, grouped logically with headings separating groups;
  *   - icons grouped by their category prefix under headings, with the prefix
  *     removed from the meaning and each group on a single line.
+ *
+ * The 2026-10-16 producer audit required:
+ *   - blank lines separating the sections;
+ *   - colours for the headings;
+ *   - the ability to scroll the text.
  *
  * These pins assert the reworked `formatHelpScreen()` output directly (the
  * public formatter the render loop calls). The overlay's open/dismiss and
@@ -24,6 +29,11 @@ import { describe, it, expect } from 'vitest';
 import { formatHelpScreen } from '../../packages/herdr/src/worklist.js';
 import { loadShortcutConfig } from '../../packages/herdr/src/shortcut-config.js';
 import { ICON_LEGEND } from '@worklog/shared/icons';
+
+/** Strip ANSI SGR escape sequences so layout assertions match visible text. */
+function stripAnsi(s: string): string {
+  return s.replace(/\x1b\[[0-9;]*m/g, '');
+}
 
 /** The list-view entries the render path feeds to `formatHelpScreen()`. */
 const entries = loadShortcutConfig()
@@ -42,13 +52,14 @@ const flatten = (frame: string): string => frame.replace(/\s+/g, ' ').trim();
 
 describe('help screen layout — single-column grouped commands (WL-0MTV97GV20088CS7)', () => {
   const frame = formatHelpScreen(entries, 200, 200, iconRows);
+  const lines = frame.split('\n');
 
   it('renders every command description in full, never truncated with an ellipsis', () => {
     // The rejected grid ellipsis-truncated every description to the column
     // width; the reworked layout must carry the whole text (word-wrapped).
     expect(frame).not.toContain('\u2026');
 
-    const flat = flatten(frame);
+    const flat = flatten(stripAnsi(frame));
     for (const entry of entries) {
       if (!entry.description) continue;
       expect(
@@ -64,7 +75,6 @@ describe('help screen layout — single-column grouped commands (WL-0MTV97GV2008
   });
 
   it('separates command families with a heading per chord leader', () => {
-    const lines = frame.split('\n');
     for (const heading of [
       'd — Downtime',
       'c — Create',
@@ -73,8 +83,40 @@ describe('help screen layout — single-column grouped commands (WL-0MTV97GV2008
       'u — Update',
       'f — Filter',
     ]) {
-      expect(lines, `missing group heading "${heading}"`).toContain(heading);
+      expect(
+        lines.map(stripAnsi),
+        `missing group heading "${heading}"`,
+      ).toContain(heading);
     }
+  });
+
+  it('separates sections and families with blank lines (2026-10-16 audit)', () => {
+    const visible = lines.map(stripAnsi);
+    // A blank line separates the title from the first section heading.
+    expect(visible.indexOf('')).toBeGreaterThanOrEqual(0);
+    // A blank line separates each command family: headings are never adjacent.
+    const familyIndices = visible.map((l, i) => (l.startsWith('d — ') || l.startsWith('c — ') || l.startsWith('i — ') ? i : -1)).filter(i => i >= 0);
+    for (const idx of familyIndices) {
+      expect(visible[idx - 1] ?? '', `family heading at ${idx} is not preceded by a blank line`).toBe('');
+      expect(visible[idx + 1] ?? 'EOF', `family heading at ${idx} is not followed by content`).not.toBe('');
+    }
+  });
+
+  it('colours the headings at every level (2026-10-16 audit)', () => {
+    // Title, section headings and sub-headings each carry bold + a 256-colour
+    // foreground code and are terminated by a reset — never plain text.
+    expect(frame).toMatch(/\x1b/);
+    const expectStyled = (text: string): void => {
+      const line = lines.find(l => stripAnsi(l).trim() === text.trim());
+      expect(line, `heading "${text}" should exist`).toBeDefined();
+      expect(line, `heading "${text}" should carry ANSI styling`).toMatch(/\x1b\[1m/);
+      expect(line, `heading "${text}" should carry a colour`).toMatch(/\x1b\[38;5;\d+m/);
+      expect(line, `heading "${text}" should be reset`).toContain('\x1b[0m');
+    };
+    expectStyled('Help');
+    expectStyled('Commands');
+    expectStyled('d — Downtime');
+    expectStyled('Icons');
   });
 });
 
@@ -83,10 +125,6 @@ describe('help screen layout — grouped icon legend (WL-0MTV97GV20088CS7)', () 
   const lines = frame.split('\n');
 
   it('groups icons by category under headings', () => {
-    // `Producer Review` was deliberately absent from this list: the
-    // needsProducerReview removal (WL-0MV85WFYU0071YQ9) deleted the
-    // producer-review icon category from ICON_LEGEND, so no such heading is
-    // rendered anymore.
     for (const heading of [
       'Status',
       'Stage',
@@ -98,11 +136,15 @@ describe('help screen layout — grouped icon legend (WL-0MTV97GV20088CS7)', () 
       'Agent',
       'Coverage',
     ]) {
-      expect(lines, `missing icon group heading "${heading}"`).toContain(heading);
+      expect(
+        lines.map(stripAnsi),
+        `missing icon group heading "${heading}"`,
+      ).toContain(heading);
     }
   });
 
   it('removes the category name prefix from each meaning', () => {
+    const frame = formatHelpScreen(entries, 200, 260, iconRows);
     // The prefix is gone …
     expect(frame).not.toContain('Status: open');
     expect(frame).not.toContain('Stage: idea');
@@ -120,6 +162,41 @@ describe('help screen layout — grouped icon legend (WL-0MTV97GV20088CS7)', () 
   });
 });
 
+describe('help screen layout — scrolling (2026-10-16 audit)', () => {
+  it('shows a scroll hint in the footer when content overflows the pane', () => {
+    const rows = 12;
+    const small = formatHelpScreen(entries, 100, rows, iconRows);
+    const visible = stripAnsi(small);
+    // Dismiss keys stay discoverable…
+    expect(visible).toContain('? / Esc / q');
+    // … and the footer advertises the scroll capability.
+    expect(visible).toMatch(/↑↓\/j:k scroll/);
+    expect(visible).toMatch(/g\/G top\/bot/);
+  });
+
+  it('scrolls the content window to reveal hidden lines', () => {
+    const rows = 12;
+    const top = formatHelpScreen(entries, 100, rows, iconRows, 0);
+    const bottom = formatHelpScreen(entries, 100, rows, iconRows, 10_000);
+    const topVisible = stripAnsi(top);
+    const bottomVisible = stripAnsi(bottom);
+    // Top shows the early command families; the bottom window shows the last
+    // icon category (`Coverage`) instead of the top of the document.
+    expect(topVisible).toContain('d — Downtime');
+    expect(topVisible).not.toContain('Coverage');
+    expect(bottomVisible).toContain('Coverage');
+    expect(bottomVisible.match(/Coverage/g) ?? []).toHaveLength(1);
+    // Scrolling further is clamped — the last window is stable.
+    expect(bottomVisible).toBe(
+      stripAnsi(formatHelpScreen(entries, 100, rows, iconRows, 20_000)),
+    );
+    // The budget invariant holds for every window.
+    for (const f of [top, bottom]) {
+      expect(f.split('\n').length).toBeLessThanOrEqual(rows - 1);
+    }
+  });
+});
+
 describe('help screen layout — pane budget (WL-0MTV97GV20088CS7)', () => {
   it('clips to the rows - 1 budget while keeping the dismiss keys visible', () => {
     const cols = 100;
@@ -128,10 +205,12 @@ describe('help screen layout — pane budget (WL-0MTV97GV20088CS7)', () => {
     const lines = small.split('\n');
 
     expect(lines.length).toBeLessThanOrEqual(rows - 1);
-    expect(small).toContain('? / Esc / q');
+    expect(stripAnsi(small)).toContain('? / Esc / q');
     // No rendered line overflows the pane width (wrap, never truncate).
+    // ANSI colour codes are invisible, so measure the visible text.
     for (const line of lines) {
-      expect(line.length, `line overflows ${cols} cols: ${JSON.stringify(line)}`)
+      const visible = stripAnsi(line);
+      expect(visible.length, `line overflows ${cols} cols: ${JSON.stringify(line)}`)
         .toBeLessThanOrEqual(cols);
     }
   });
