@@ -117,12 +117,17 @@ const AUDIT_COVERED_FALLBACK = '[COVERED]';
 const NEEDS_REVIEW_ICON = '\u{274C}';  // ❌
 const REVIEW_DONE_ICON = '\u{2705}';    // ✅
 
-// Agent-status icons (WL-0MSBQUJQX005RAT9). Glyph mapping confirmed by the
-// user: working → 🟢 (green circle), blocked → ⛔ (no-entry sign), idle → ⚪
-// (white circle). `done`/`unknown`/absent → no icon.
+// Agent-slot icons (WL-0MSBQUJQX005RAT9, repurposed for pane existence by
+// WL-0MV1BWETT005GSUJ). The worklist's selection list stamps `working` — the
+// green circle — on an item when a pane in the current workspace carries the
+// item's ID in its title (an open work-item pane), and clears it otherwise;
+// so in the list the glyph means "work-item pane open", never a live agent
+// status. `blocked`/`idle` remain valid `agentStatusIcon` states for other
+// consumers (the icon-fn API is unchanged). `done`/`unknown`/absent → no
+// icon.
 const AGENT_STATE_ICONS: Record<string, string> = {
   idle:    '\u{26AA}',   // ⚪
-  working: '\u{1F7E2}',  // 🟢
+  working: '\u{1F7E2}',  // 🟢 (green circle — list meaning: "work-item pane open")
   blocked: '\u{26D4}',   // ⛔
 };
 
@@ -210,11 +215,15 @@ export function auditStaleIcon(result: boolean | null | undefined, opts?: IconOp
 }
 
 /**
- * Get the icon for a tracked agent's current state.
+ * Get the icon for an item's agent slot.
  *
- * `working → 🟢`, `blocked → ⛔`, `idle → ⚪`. `done`, `unknown`, or an
- * absent state render no icon (the agent finished or the pane is gone).
- * Text fallbacks follow the `[TEXT]` convention for noIcons mode.
+ * In the worklist selection list the stamped value is `working` — the
+ * green circle — which now (WL-0MV1BWETT005GSUJ) means "a work-item pane
+ * is open in this workspace", i.e. the item is being worked, regardless of
+ * the pane's live agent status. `blocked → ⛔`, `idle → ⚪` remain valid
+ * `agentStatusIcon` states for other consumers. `done`, `unknown`, or an
+ * absent state render no icon. Text fallbacks follow the `[TEXT]`
+ * convention for noIcons mode.
  */
 export function agentStatusIcon(state: string | undefined, opts?: IconOptions): string {
   const key = (state || '').toLowerCase();
@@ -317,7 +326,7 @@ export const ICON_LEGEND: readonly IconLegendEntry[] = [
   { category: 'producer-review', glyph: '\u{274C}', meaning: 'Needs producer review' },
   { category: 'producer-review', glyph: '\u{2705}', meaning: 'Producer review done' },
   { category: 'agent', glyph: '\u{26AA}', meaning: 'Agent idle' },
-  { category: 'agent', glyph: '\u{1F7E2}', meaning: 'Agent working' },
+  { category: 'agent', glyph: '\u{1F7E2}', meaning: 'Work-item pane open' },
   { category: 'agent', glyph: '\u{26D4}', meaning: 'Agent blocked' },
   { category: 'coverage', glyph: '[COVERED]', meaning: 'Child covered by parent audit' },
 ];
@@ -843,9 +852,10 @@ export function getIconPrefixParts(
   // Column 0: priority icon (new, WL-0MTQYTA20009YXBT)
   const priorityIconText = priorityIcon(item.priority, { noIcons });
 
-  // Column 1: agent status — fixed-width reserved slot so rows with and
-  // without an agent keep the remaining icons and the item-ID column at
-  // identical columns (AC3, WL-0MSBQUJQX005RAT9).
+  // Column 1: agent slot — fixed-width reserved slot so rows with and
+  // without an open work-item pane keep the remaining icons and the
+  // item-ID column at identical columns (AC3, WL-0MSBQUJQX005RAT9; the
+  // green circle = work-item pane open, WL-0MV1BWETT005GSUJ).
   const agentIcon = agentStatusIcon(item.agentState, { noIcons });
   const agentSlot = agentIcon !== '' ? agentIcon : ' '.repeat(AGENT_SLOT_WIDTH);
 

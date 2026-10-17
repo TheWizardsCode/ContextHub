@@ -18,7 +18,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
 - **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items, matches each against the panes of the current workspace (the pane title contains the work-item ID), and releases any claim with no matching pane so it re-enters the dispatchable pool: `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
 - **Mode-switch worker (activity-gated proxy mode switching)** — Automatically switches the llama-proxy between fast (cloud) and cheap (local) modes: agent-route commands fire an immediate fast switch (fail-open), while a full operator-idle window plus a proxy-idle check triggers the cheap switch (fail-closed). The proxy URL reuses `downtimeProxyUrl` and the plugin's switches are manual overrides that the proxy's own time schedule reclaims. See [Mode-switch worker](#mode-switch-worker-activity-gated-proxy-mode-switching-wl-0msn3fwv5008kqe9).
-- **Agent status tracking** — When an agent command carrying a work-item ID is dispatched, the worklist records which pi agent pane is attached to that item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes. The list shows a live agent-status icon at the start of each row's icon prefix: 🟢 working, ⛔ blocked, ⚪ idle. Done/closed items (and items without an agent) show no icon. The icon is a fixed-width slot so the item-ID column never shifts. Hovering a pane-associated row shows a tooltip with the work-item metadata (including the recorded command and pane start time). See [Agent status icons](#agent-status-icons).
+- **Work-item pane indicator** — The selection list shows a green circle icon (🟢) in the icon prefix of every item with an open work-item pane in the current workspace: a pane whose title carries the work-item ID (the dispatch pane-title convention preserves the ID as a trailing suffix). The icon appears exactly when such a pane is open and never otherwise (producer's rule, WL-0MV1BWETT005GSUJ) — it is pane existence, not a live agent status. The worklist also records which pi agent pane is attached to each dispatched item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes (used for the hover tooltip). The icon occupies a fixed-width slot so the item-ID column never shifts. See [Green-circle icon (work-item pane open)](#green-circle-icon-work-item-pane-open).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
 - **Worklog tab** — The `open-worklog-tab` action (bound to `prefix+l`) opens the worklist pane in a new tab and renames that tab to **`Worklog`** so it is instantly recognisable in the tab row among other open tabs. See [Worklog tab](#worklog-tab).
@@ -33,7 +33,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 
 ## Requirements
 
-- [Herdr](https://herdr.dev) v0.7.0 or later (the plugin loads on 0.7.0–0.7.4 with polling-only behavior; the event-driven status path — immediate agent-status icons and focus/visibility updates — requires herdr ≥ 0.7.5 and degrades to polling on older versions)
+- [Herdr](https://herdr.dev) v0.7.0 or later (the plugin loads on 0.7.0–0.7.4 with polling-only behavior; the event-driven path — immediate pane-existence icon and focus/visibility updates — requires herdr ≥ 0.7.5 and degrades to polling on older versions)
 - [Worklog CLI (`wl`)](https://github.com/your-org/worklog) installed and on PATH
 
 ## Installation
@@ -209,22 +209,22 @@ Semantics:
 This view is **per-worklog-root**; machine-wide cross-project aggregation is
 out of scope here and tracked separately (WL-0MTJQOZ0K007KD40).
 
-### Agent status icons
+### Green-circle icon (work-item pane open)
 
-Rows that have a worklist-spawned pi agent pane attached show the agent's live status as the first icon in the row's icon prefix:
+The row's green-circle icon (the second icon of the icon prefix) shows whether a **work-item pane is open in the current workspace** — the producer's rule (WL-0MV1BWETT005GSUJ):
 
 | Icon | Meaning |
 |------|---------|
-| 🟢 | Agent is working on the item |
-| ⛔ | Agent is blocked |
-| ⚪ | Agent is idle (spawned but not currently active) |
-| *(none)* | No agent attached, or the agent finished (`done`/closed) |
+| 🟢 | A pane in this workspace has the work-item ID in its title (the item is being worked on) |
+| *(none)* | No such pane is open in this workspace |
 
-The icon occupies a fixed-width slot, so the remaining icons and the item-ID column stay perfectly aligned whether or not a row has an agent. State is refreshed from the herdr CLI on each worklist refresh (with a short TTL); if the CLI is unavailable the list renders without icons rather than failing.
+The icon is pane-existence, not a live agent status: a freshly-spawned or `unknown`-status pane, and even a `done` agent whose pane is still open, show the green circle; the moment the pane closes (or is moved to another workspace) the icon disappears. It is driven by the same `herdr pane list --workspace <id>` pane-title lookup as the in-progress marker (`markItemsActiveByPane` in `packages/herdr/src/hydrator.ts`; see `docs/dev/herdr-hydrator.md`) and is refreshed on the initial load, every refresh, the 30 s hydrator cadence, focus-resume, and pane lifecycle events. The icon occupies a fixed-width slot, so the remaining icons and the item-ID column stay perfectly aligned whether or not a row has a pane. Fail-open: if the pane lookup is unavailable the list renders without green circles rather than failing.
 
-**Event-driven updates (herdr ≥ 0.7.5, WL-0MSHB7DHO004RHBJ)** — when the herdr event subscription is active, a `pane_agent_status_changed` event updates the icon **immediately** (within one render cycle, no `herdr agent list` exec). `pane_agent_detected` re-reads the shared `.worklog/agent-panes.json` so agents spawned by any herdr instance in the same session (including late-spawned ones) are picked up; `pane_closed`/`pane_exited` prune associations so icons clear instantly. Rapid status changes are coalesced per render cycle (no render thrash). `herdr agent list` remains the one-time initial snapshot and the fail-open poll fallback when events are unavailable.
+The shared event-driven agent-status tracker (`AgentTracker`, `.worklog/agent-panes.json`) is still used for record-keeping (hover tooltip, dispatch bookkeeping), but it no longer drives the row icon (a pane absent from `herdr agent list` used to be pruned and lose its icon permanently, and a `done` status used to clear the icon while the pane stayed open — both violated the pane-existence rule).
 
-**Hover tooltip (WL-0MT9XRZDK006GMUH)** — hovering the mouse over a row with an agent icon shows a tooltip in the footer area above the metadata panel, replacing the footer hints while visible:
+**Event-driven refresh (herdr ≥ 0.7.5, WL-0MSHB7DHO004RHBJ)** — `pane_agent_status_changed`, `pane_agent_detected`, `pane_closed` and `pane_exited` events re-run the pane-title lookup immediately (no 30 s wait), so opening or closing a work-item pane updates the green circle promptly.
+
+**Hover tooltip (WL-0MT9XRZDK006GMUH)** — hovering the mouse over a row with a recorded work-item pane association shows a tooltip in the footer area above the metadata panel, replacing the footer hints while visible:
 
 | Field | Source |
 |-------|--------|

@@ -160,6 +160,42 @@ describe('pane-based active marker (selection list)', () => {
     expect(items[0].status).toBe('in-progress');
   });
 
+  it('stamps the green-circle agentState when a matching pane exists and clears it otherwise', () => {
+    const items = [
+      { id: WL, status: 'open', stage: 'plan_complete' },
+      { id: OTHER, status: 'open', stage: 'plan_complete' },
+    ];
+    markItemsActiveByPane(items, new Set([WL]));
+    // Matching pane → green circle (agentState 'working').
+    expect(items[0].agentState).toBe('working');
+    // No matching pane → no green circle.
+    expect(items[1].agentState).toBeUndefined();
+  });
+
+  it('clears a stale green circle when the pane closes and restores it when it reopens (producer rule)', () => {
+    const items = [{ id: WL, status: 'open', stage: 'plan_complete', agentState: 'working' }];
+    // Pane closed: a matching pane no longer exists → the green circle clears
+    // even though a stale agentState was previously stamped.
+    markItemsActiveByPane(items, new Set());
+    expect(items[0].agentState).toBeUndefined();
+    // Pane reopened → green circle returns.
+    markItemsActiveByPane(items, new Set([WL]));
+    expect(items[0].agentState).toBe('working');
+  });
+
+  it('stamps the green circle regardless of the item stage (open pane = worked on)', () => {
+    // Terminal in_review / completed items keep their review STATUS marker,
+    // but an OPEN pane still means the item is being worked → green circle.
+    const items = [
+      { id: WL, status: 'completed', stage: 'in_review' },
+      { id: OTHER, status: 'completed', stage: 'done' },
+    ];
+    markItemsActiveByPane(items, new Set([WL])); // only WL has a matching pane
+    expect(items[0].status).toBe('completed'); // review marker untouched
+    expect(items[0].agentState).toBe('working'); // but green circle present
+    expect(items[1].agentState).toBeUndefined(); // no matching pane in this workspace
+  });
+
   it('leaves an item without a matching pane unchanged', () => {
     const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
     markItemsActiveByPane(items, new Set([OTHER]));
@@ -204,7 +240,9 @@ describe('pane-based active marker (selection list)', () => {
   it('keeps the bookkeeping status out of the serialized item shape', () => {
     const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
     markItemsActiveByPane(items, new Set([WL]));
-    expect(Object.keys(items[0])).toEqual(['id', 'status', 'stage']);
+    // Only real fields (id/status/stage + the green-circle agentState) are
+    // enumerable; the base-status bookkeeping Symbol is not.
+    expect(Object.keys(items[0]).sort()).toEqual(['agentState', 'id', 'stage', 'status']);
   });
 
   it('applyActivePaneMarkers scopes the pane lookup to the current workspace', async () => {

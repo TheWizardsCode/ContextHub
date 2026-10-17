@@ -54,8 +54,12 @@
  * `applyActivePaneMarkers` — an item with a matching pane title is rendered
  * `in-progress` (marker + Group N) even when its worklog status is still
  * `open`, so the marker reflects pane existence rather than only the status
- * the demotion loop maintains. The production wiring injects this through
- * the worklist's `applyActivePaneMarkers` seam (`index.ts`).
+ * the demotion loop maintains. The marker ALSO stamps the row's green-circle
+ * icon (`agentState='working'`) for pane-matched items and clears it for
+ * unmatched ones — the producer's rule that a green circle appears exactly
+ * when a work-item pane is open in this workspace and never otherwise. The
+ * production wiring injects this through the worklist's
+ * `applyActivePaneMarkers` seam (`index.ts`).
  *
  * Opening/closing a work-item pane does NOT touch the worklog DB, so the
  * DB-change-gated refresh tick can never update this marker for it. The
@@ -328,15 +332,17 @@ export function extractWorkItemIdsFromPaneTitles(
 
 /**
  * Minimal item shape for pane-based active marking. `WorkItem` structurally
- * satisfies it (id + optional status/stage/children), so the worklist can
- * pass live items without this dependency-light module importing a worklog
- * type.
+ * satisfies it (id + optional status/stage/children/agentState), so the
+ * worklist can pass live items without this dependency-light module
+ * importing a worklog type.
  */
 export interface ActivePaneItem {
   id: string;
   status?: string;
   stage?: string;
   children?: ActivePaneItem[];
+  /** Agent-slot state stamped by the pane marker (`working` = pane open). */
+  agentState?: string;
 }
 
 /**
@@ -359,13 +365,24 @@ type PaneMarkedActivePaneItem = ActivePaneItem & {
  * pane-title existence, not only the worklog status the demotion loop
  * maintains (WL-0MV1BWETT005GSUJ). Recurses into children.
  *
+ * The same pane membership also drives the row's green-circle (agent-slot)
+ * icon: an item with a matching pane gets `agentState='working'` (the green
+ * circle), an item without one gets it cleared — the producer's rule that a
+ * green circle appears exactly when a work-item pane is open in this
+ * workspace and never otherwise. The icon is therefore independent of the
+ * event-driven agent-status tracker, which could not honour that invariant
+ * (a freshly-spawned/`unknown` pane is absent from `herdr agent list`, an
+ * agent `done` state prunes the icon even with the pane still open, and a
+ * closed pane's icon could linger until an event/TTL refresh landed).
+ *
  * Idempotent: each item's pre-marker status is captured on first sight and
  * restored on every later pass, so calling this again after a pane closes
  * clears the marker (back to the true worklog status) without a `wl`
  * re-fetch — the marker refresh spawns only `herdr pane list`. Terminal
- * `in_review`/`completed` items are left untouched: they already carry the
- * review/audit marker and belong in the In Review group, and a lingering pane
- * on a finished item must not re-open it in the list.
+ * `in_review`/`completed` items are left untouched by the STATUS marker
+ * (they already carry the review/audit marker and belong in the In Review
+ * group), but the GREEN CIRCLE still reflects pane existence for them — an
+ * open pane means the item is being worked, regardless of its stage.
  *
  * Pure and synchronous — the caller owns pane fetching (see
  * `applyActivePaneMarkers`).
@@ -394,6 +411,12 @@ export function markItemsActiveByPane(
       if (status !== 'completed' && stage !== 'in_review') {
         item.status = 'in-progress';
       }
+      // Green circle: a pane in this workspace whose title carries the item
+      // ID exists ⇒ the item is being worked, regardless of agent state.
+      item.agentState = 'working';
+    } else {
+      // No matching pane ⇒ no green circle (clear any stale stamp).
+      delete item.agentState;
     }
     const children = item.children;
     if (Array.isArray(children) && children.length > 0) {

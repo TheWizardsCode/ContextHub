@@ -41,7 +41,7 @@ import {
   extractJson,
   extractItems,
 } from './fetcher.js';
-import { AgentTracker, AGENT_PANES_FILE, mergeAgentStates } from './agent-tracker.js';
+import { AgentTracker, AGENT_PANES_FILE } from './agent-tracker.js';
 import {
   isAgentCommand,
   buildManuallyTriggeredPaneTitle,
@@ -2297,9 +2297,10 @@ export async function main(): Promise<void> {
       const currentSettings = loadSettings();
       const count = clampBrowseItemCount(currentSettings.browseItemCount ?? defaultSettings.browseItemCount);
       const items = await fetchNextItems(count);
-      // Merge agent-status state into the fetched items (fail-open: no herdr
-      // CLI → no icons, list still works). Also covers the initial load.
-      await mergeAgentStates(items, agentTracker);
+      // The pane-existence marker (in-progress status + green-circle icon)
+      // is applied by the worklist's `applyPaneMarkers` seam on the initial
+      // load and every refresh (WL-0MV1BWETT005GSUJ); no separate
+      // agent-state merge runs here.
       return items;
     } catch {
       return [];
@@ -2455,15 +2456,14 @@ export async function main(): Promise<void> {
       // Re-read on every render so a showIcons change applies on the next
       // refresh (no plugin restart needed), matching showHelpText behavior.
       getShowIcons: () => loadSettings().showIcons ?? true,
-      // Merge agent-status state into freshly fetched items (top-level +
-      // expanded children) on every refresh cycle (WL-0MSBQUJQX005RAT9).
-      // Fail-open: herdr errors yield no icons; the list keeps working.
-      mergeAgentStates: (items) => mergeAgentStates(items, agentTracker),
       // Pane-based active marker (WL-0MV1BWETT005GSUJ): stamp `in-progress`
-      // on items whose work-item ID appears in a current-workspace pane
-      // title so the selection list's marker reflects pane existence
-      // (the producer's rule: a pane with the work item id as the title
-      // means the item is being worked). Fail-open.
+      // AND the green-circle icon on items whose work-item ID appears in a
+      // current-workspace pane title, so the selection list's marker and
+      // green circle both reflect pane existence (the producer's rule: a
+      // pane with the work item id as the title means the item is being
+      // worked; the green circle appears exactly when such a pane is open
+      // and never otherwise). The event-driven agent-state merge
+      // (WL-0MSBQUJQX005RAT9) is no longer used for row icons. Fail-open.
       applyActivePaneMarkers: (items) =>
         applyActivePaneMarkers(items, hydratorDeps.listActivePanes, hydratorWorkspaceId),
       subscriber: eventSubscriber,

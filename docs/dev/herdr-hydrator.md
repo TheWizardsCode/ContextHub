@@ -86,22 +86,34 @@ display overlay:
   sight (a non-enumerable `Symbol` property) and restored on every later
   pass, so a **closed** pane clears the marker back to the true worklog
   status without a `wl` re-fetch.
+- The same pass also drives the row's **green-circle icon** (the agent slot
+  of the icon prefix): an item with a matching pane gets
+  `agentState = 'working'` (the green circle) and an item without one gets it
+  cleared. This is the producer's rule — the green circle appears exactly
+  when a work-item pane is open in this workspace and never otherwise. The
+  icon no longer depends on the event-driven agent-status tracker
+  (WL-0MSBQUJQX005RAT9), which could not honour that invariant (a
+  freshly-spawned/`unknown` pane is absent from `herdr agent list` and was
+  pruned — losing its icon permanently; an agent `done` state pruned the
+  icon even while the pane stayed open).
 - `applyActivePaneMarkers(items, listActivePanes, workspaceId)` fetches the
   workspace panes (fail-open) and applies the marker; the production wiring
   injects it into `runWorklistTui`'s `applyActivePaneMarkers` seam from
-  `index.ts` (the same "inject from the caller" pattern as
-  `mergeAgentStates`).
+  `index.ts`.
 - **Update cadence.** Opening or closing a work-item pane does **not** touch
   the worklog DB, so the DB-change-gated refresh tick can never update this
   marker for it. The worklist therefore re-applies it on the initial load, on
   every full refresh, on the `active-pane-marker` scheduler task (the
-  hydrator cadence, `HYDRATOR_INTERVAL_MS`), and on focus-resume. The marker
-  task spawns only `herdr pane list` (never `wl`), so the
-  zero-`wl`-when-idle guarantee holds; it is visibility- and typing-gated
-  like the hydrator.
-- Terminal `in_review`/`completed` items are deliberately left untouched:
-  they already carry the review/audit marker and belong in the In Review
-  group.
+  hydrator cadence, `HYDRATOR_INTERVAL_MS`), on focus-resume, and after pane
+  lifecycle events (`pane_agent_status_changed` / `pane_agent_detected` /
+  `pane_closed` / `pane_exited`) so the green circle tracks open/closed
+  panes without the 30 s wait. The marker task spawns only `herdr pane list`
+  (never `wl`), so the zero-`wl`-when-idle guarantee holds; it is
+  visibility- and typing-gated like the hydrator.
+- Terminal `in_review`/`completed` items are deliberately left untouched by
+  the STATUS marker: they already carry the review/audit marker and belong
+  in the In Review group. The green circle STILL reflects pane existence for
+  them — an open pane means the item is being worked regardless of stage.
 
 ## Files
 
@@ -139,6 +151,8 @@ display overlay:
 | stage/status compatibility | `compatibleStage`, blocked-at-`in_progress` case |
 | focus-resume immediate run | `createHydratorRunner` (visibility flip) |
 | selection-list marker (pane → in-progress) | `pane-based active marker (selection list)` + `worklist-active-pane-marker.test.ts` |
+| green circle (pane → `agentState`) stamp/clear | `markItemsActiveByPane` cases + `worklist-active-pane-marker.test.ts` |
+| event-driven pane refresh (no `herdr agent list` exec) | `worklist-agent-state-event.test.ts` |
 | fail-open error paths | `runHydrationOnce` (missing list, missing panes, failed demotion) |
 
 ## Related
@@ -146,5 +160,6 @@ display overlay:
 - `WL-0MSOJLZD9004P8PI` (this feature) · `WL-0MTTSWE0G008M1VA` (folded-in
   no-activity timeout, deleted) · `WL-0MTTS9FY00055QJV` (RCA root cause E) ·
   `WL-0MSJ4E8UA005KG9Y` (pane-title format, completed) ·
-  `WL-0MV1BWETT005GSUJ` (pane-title active-detection rework) ·
-  `WL-0MSBQUJQX005RAT9` (agent-panes association — out of scope here).
+  `WL-0MV1BWETT005GSUJ` (pane-title active-detection rework, this item) ·
+  `WL-0MSBQUJQX005RAT9` (agent-panes association — now record-keeping only;
+  the row green-circle icon is pane-title existence, WL-0MV1BWETT005GSUJ).

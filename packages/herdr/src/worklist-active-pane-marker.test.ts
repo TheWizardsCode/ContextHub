@@ -37,6 +37,7 @@ import { applyActivePaneMarkers as applyPaneMarkersToItems, type HydratorPane } 
 
 const IN_PROGRESS_ICON = '\u{1F504}'; // 🔄
 const OPEN_ICON = '\u{1F513}'; // 🔓
+const GREEN_CIRCLE = '\u{1F7E2}'; // 🟢 — green circle (work-item pane open)
 
 // Realistic work-item IDs (prefix + dash + 6+ base36 chars).
 const ITEM = 'WL-0MV1BWETT005GSUJ';
@@ -140,6 +141,8 @@ describe('worklist — pane-title-based in-progress marker', () => {
     expect(output).toContain(ITEM);
     expect(output).toContain(IN_PROGRESS_ICON);
     expect(output).not.toContain(OPEN_ICON);
+    // The open pane also shows the green-circle icon (agent slot).
+    expect(output).toContain(GREEN_CIRCLE);
     // The pane lookup is scoped to the current workspace.
     expect(listActivePanes).toHaveBeenCalledWith('w1');
 
@@ -173,6 +176,8 @@ describe('worklist — pane-title-based in-progress marker', () => {
     expect(output).toContain(OTHER_ITEM);
     expect(output).toContain(OPEN_ICON);
     expect(output).not.toContain(IN_PROGRESS_ICON);
+    // No matching pane → no green circle (never appears without an open pane).
+    expect(output).not.toContain(GREEN_CIRCLE);
 
     await quit(p);
   });
@@ -237,12 +242,14 @@ describe('worklist — pane-title-based in-progress marker', () => {
       },
     );
     await vi.advanceTimersByTimeAsync(0);
-    // Initial load marks the item (matching pane title is open).
+    // Initial load marks the item (matching pane title is open) — in-progress
+    // marker AND green circle.
     expect(writes.join('')).toContain(IN_PROGRESS_ICON);
+    expect(writes.join('')).toContain(GREEN_CIRCLE);
 
-    // Close the pane; the next marker cadence must clear the marker even
-    // though no worklog write (DB change) happened and the refresh tick is
-    // disabled for the duration of this test.
+    // Close the pane; the next marker cadence must clear BOTH the marker and
+    // the green circle even though no worklog write (DB change) happened and
+    // the refresh tick is disabled for the duration of this test.
     panes = [];
     writes.length = 0;
     await vi.advanceTimersByTimeAsync(30_000);
@@ -251,6 +258,7 @@ describe('worklist — pane-title-based in-progress marker', () => {
     expect(output).toContain(ITEM);
     expect(output).toContain(OPEN_ICON);
     expect(output).not.toContain(IN_PROGRESS_ICON);
+    expect(output).not.toContain(GREEN_CIRCLE);
     expect(listActivePanes.mock.calls.length).toBeGreaterThan(1);
 
     await quit(p);

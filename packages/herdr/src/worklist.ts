@@ -17,7 +17,7 @@ import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetc
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
-import { AgentTracker, mergeAgentStatesCached } from './agent-tracker.js';
+import { AgentTracker } from './agent-tracker.js';
 import { readCodeFreezeState, readCodeFreezeStatus, writeCodeFreezeMarker, clearCodeFreezeMarker } from './code-freeze.js';
 import { runShipGuard, formatBlockedNotice } from './ship-guard.js';
 import type { ShortcutRegistry, ShortcutEntry } from './shortcut-config.js';
@@ -5518,7 +5518,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; mergeAgentStates?: (items: WorkItem[]) => Promise<void>; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -5533,7 +5533,6 @@ export async function runWorklistTui(
     onCommand: options?.onCommand,
     downtimeWorker: options?.downtimeWorker,
     downtimePollIntervalMs: options?.downtimePollIntervalMs ?? DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
-    mergeAgentStates: options?.mergeAgentStates,
     applyActivePaneMarkers: options?.applyActivePaneMarkers,
     subscriber: options?.subscriber ?? null,
     agentTracker: options?.agentTracker ?? null,
@@ -5557,9 +5556,8 @@ export async function runWorklistTui(
    * (marker + Group N), independent of the worklog status the demotion loop
    * maintains. This makes the selection list's marker reflect pane existence
    * directly (WL-0MV1BWETT005GSUJ). The production implementation is
-   * injected by `index.ts` (same pattern as `mergeAgentStates`); when absent
-   * it is a no-op, so tests never spawn `herdr`. Fail-open — a pane lookup
-   * failure leaves every item unchanged.
+   * injected by `index.ts`; when absent it is a no-op, so tests never spawn
+   * `herdr`. Fail-open — a pane lookup failure leaves every item unchanged.
    */
   const applyPaneMarkers = async (list: WorkItem[]): Promise<void> => {
     try {
@@ -5866,28 +5864,30 @@ export async function runWorklistTui(
   };
 
   /**
-   * Re-apply the tracker's cached states to the live items and re-render
-   * (coalesced per microtask so event storms do not thrash the TUI).
+   * Re-evaluate pane existence and re-render after a pane lifecycle event
+   * (agent status change, agent detected, pane closed/exited). The row's
+   * green-circle icon is pane-title existence (WL-0MV1BWETT005GSUJ), so an
+   * event that opens or closes a work-item pane must refresh the pane list.
+   * Single-flight across concurrent events; visibility-gated so a hidden tab
+   * spawns no `herdr`; fail-open (see `applyPaneMarkers`).
    */
-  let agentEventRenderPending = false;
-  const scheduleAgentEventRender = (): void => {
-    if (agentEventRenderPending) return;
-    agentEventRenderPending = true;
-    Promise.resolve().then(() => {
-      agentEventRenderPending = false;
-      // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and its
-      // open overlay) while a text-input overlay is active. Icons catch up on
-      // the next non-typing render/refresh.
-      if (inputActive()) return;
+  let paneMarkerRefreshInFlight: Promise<void> | null = null;
+  const refreshPaneMarkersFromEvent = (): void => {
+    if (paneMarkerRefreshInFlight) return;
+    paneMarkerRefreshInFlight = (async () => {
       try {
-        if (agentTracker) {
-          mergeAgentStatesCached(state.items, agentTracker);
+        // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and
+        // its open overlay) while a text-input overlay is active.
+        if (inputActive()) return;
+        if (await paneGate.visible()) {
+          await refreshPaneMarkers();
         }
-        render();
       } catch {
-        // Fail-open: render failures never crash the TUI.
+        // Fail-open: pane-marker failures never crash the TUI.
+      } finally {
+        paneMarkerRefreshInFlight = null;
       }
-    });
+    })();
   };
 
   if (subscriber) {
@@ -5914,36 +5914,43 @@ export async function runWorklistTui(
         // task uses (WL-0MSHB7DHO004RHBJ + WL-0MV1BWETT005GSUJ).
         void runHydrator();
       },
-      // Agent-status events update the tracker's cached state map and
-      // re-render the icons immediately (no `herdr agent list` exec).
+      // Agent-status events keep the tracker's association bookkeeping
+      // fresh (the shared `.worklog/agent-panes.json` feeds the hover
+      // tooltip and pane subscriptions); the ROW icon is pane-title
+      // existence, refreshed from the pane list so a pane that just
+      // appeared/disappeared updates the green circle without a 30 s wait.
+      // (WL-0MV1BWETT005GSUJ — no longer any `herdr agent list` icon merge.)
       onAgentStatusChanged: (data) => {
         if (!agentTracker) return;
         agentTracker.applyAgentStatusChanged(data.pane_id, data.agent_status);
-        scheduleAgentEventRender();
+        refreshPaneMarkersFromEvent();
       },
       // A new agent pane appeared (possibly from another herdr instance):
       // re-read the shared file for late associations and add the pane to
-      // the per-pane subscription set (AC3).
+      // the per-pane subscription set (AC3), then refresh the pane-existence
+      // icons.
       onAgentDetected: (data) => {
         if (!agentTracker || !subscriber) return;
         const grew = agentTracker.applyAgentDetected();
         if (grew) void syncPaneSubscriptions();
         void subscriber.addPaneSubscription(data.pane_id).catch(() => {});
-        scheduleAgentEventRender();
+        refreshPaneMarkersFromEvent();
       },
-      // A pane closed/exited: prune its associations so its icons disappear
-      // immediately and drop the per-pane subscription (best-effort).
+      // A pane closed/exited: prune its associations so its hover metadata
+      // disappears immediately and drop the per-pane subscription
+      // (best-effort); the pane-existence marker (green circle) is re-read
+      // from the pane list.
       onPaneClosed: (data) => {
         if (!agentTracker || !subscriber) return;
         agentTracker.applyPaneGone(data.pane_id);
         void subscriber.removePaneSubscription(data.pane_id).catch(() => {});
-        scheduleAgentEventRender();
+        refreshPaneMarkersFromEvent();
       },
       onPaneExited: (data) => {
         if (!agentTracker || !subscriber) return;
         agentTracker.applyPaneGone(data.pane_id);
         void subscriber.removePaneSubscription(data.pane_id).catch(() => {});
-        scheduleAgentEventRender();
+        refreshPaneMarkersFromEvent();
       },
       onError: () => {
         // The event stream dropped (socket error/close). The subscriber
@@ -6186,14 +6193,10 @@ export async function runWorklistTui(
         // state unchanged. Queue depth never writes the disable marker
         // (WL-0MTTSWC1X005P4VD).
         applySprintState(await reviewStatePromise);
-        // Merge agent-status state into the refreshed items (top-level +
-        // expanded children) so the agent icons reflect the latest tracker
-        // state (WL-0MSBQUJQX005RAT9). Fail-open: no herdr CLI → no icons.
-        try {
-          await opts.mergeAgentStates?.(newItems);
-        } catch {
-          // Fail-open: a merge failure must never break the refresh cycle.
-        }
+        // The pane-existence marker (in-progress status + green-circle icon)
+        // was already applied to `newItems` above by `applyPaneMarkers`; the
+        // row icons are pane-title existence, not the event-driven agent
+        // tracker (WL-0MV1BWETT005GSUJ). No separate agent merge runs here.
         if (showNotification && newItems.length !== oldLen) {
           const diff = newItems.length - oldLen;
           const msg = diff > 0 ? `+${diff} new` : `${diff} removed`;
@@ -7077,13 +7080,11 @@ export async function runWorklistTui(
           // survive the flatten (which may hold a copy with a corrected
           // depth) — see WorkItemListState.attachChildren.
           state.attachChildren(selected.id, children);
-          // Merge agent-status state into the freshly loaded children so
-          // their rows show agent icons too (WL-0MSBQUJQX005RAT9).
-          try {
-            await opts.mergeAgentStates?.([selected]);
-          } catch {
-            // Fail-open: a merge failure must never break expansion.
-          }
+          // The pane-existence marker recurses into children, so newly
+          // expanded children pick up their green-circle / in-progress
+          // markers on the next pane-marker pass (the 30 s cadence or the
+          // next refresh) — same behaviour as the status marker
+          // (WL-0MV1BWETT005GSUJ).
           state.toggleExpand(selected.id);
           render();
           return;
