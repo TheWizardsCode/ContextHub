@@ -9,15 +9,15 @@
  *     hydrator CLI shape with minimal valid JSON and records the exact
  *     `(bin, args, options)` of every spawn, so tests can assert the stdio
  *     and argument contract.
- *   • `makeWorstCaseTabs()` / `makeWorstCaseItems()` build the load profile
- *     the fix must survive (50+ tabs, 20+ in-progress items).
+ *   • `makeWorstCasePanes()` / `makeWorstCaseItems()` build the load profile
+ *     the fix must survive (50+ panes, 20+ in-progress items).
  *
  * No `vitest` import: these are plain builders consumed by the test file (and
  * by the implementation children's tests), so they stay usable outside a
  * vitest runtime.
  */
 
-import type { HydratorItem, HydratorTab } from './hydrator.js';
+import type { HydratorItem, HydratorPane } from './hydrator.js';
 
 // ── Recording exec seam ───────────────────────────────────────────────
 
@@ -44,8 +44,8 @@ export interface HydratorExecHarness {
 
 /**
  * Build a recording exec seam that answers the four hydrator CLI shapes with
- * minimal valid JSON and records every call. The tab-listing shape answers
- * `herdr tab list` (the hydrator's active-detection input).
+ * minimal valid JSON and records every call. The pane-listing shape answers
+ * `herdr pane list` (the hydrator's active-detection input).
  */
 export function hydratorExecRouter(): HydratorExecHarness {
   const calls: RecordedSpawn[] = [];
@@ -57,8 +57,8 @@ export function hydratorExecRouter(): HydratorExecHarness {
       options: (options ?? {}) as Record<string, unknown>,
     });
 
-    if (bin === 'herdr' && args.includes('tab') && args.includes('list')) {
-      return { stdout: JSON.stringify({ result: { tabs: [] } }), stderr: '' };
+    if (bin === 'herdr' && args.includes('pane') && args.includes('list')) {
+      return { stdout: JSON.stringify({ result: { panes: [] } }), stderr: '' };
     }
     if (args.includes('dep')) {
       return { stdout: JSON.stringify({ outbound: [] }), stderr: '' };
@@ -83,20 +83,21 @@ function padded(n: number, width: number): string {
 }
 
 /**
- * Worst-case tab volume: `count` tabs (default 60) split across the current
- * workspace (`wCurrent`, even indices) and another workspace, each labelled
- * with an exact work-item ID as a real per-item tab would be.
+ * Worst-case pane volume: `count` panes (default 60) split across the current
+ * workspace (`wCurrent`, even indices) and another workspace, each titled
+ * with a work-item ID (a real dispatched pane title carries the ID as a
+ * preserved suffix, so the fixture embeds the ID in the label).
  */
-export function makeWorstCaseTabs(count = 60): HydratorTab[] {
+export function makeWorstCasePanes(count = 60): HydratorPane[] {
   return Array.from({ length: count }, (_, i) => ({
-    tab_id: `tab-${i}`,
-    label: `WL-TAB${padded(i, 7)}`,
+    pane_id: `pane-${i}`,
+    label: `Downtime triggered implement fixture item - WL-PANE${padded(i, 7)}`,
     workspace_id: i % 2 === 0 ? 'wCurrent' : 'wOther',
   }));
 }
 
 /**
- * Worst-case in-progress volume: `count` (default 25) tab-less candidates,
+ * Worst-case in-progress volume: `count` (default 25) pane-less candidates,
  * all at `plan_complete` so every one is eligible for demotion.
  */
 export function makeWorstCaseItems(count = 25): HydratorItem[] {

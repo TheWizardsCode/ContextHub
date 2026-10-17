@@ -734,6 +734,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
     });
 
     expect(deps.markNeedsProducerReview).toHaveBeenCalledTimes(1);
+    // Observable contract: markNeedsProducerReview boundary dep — itemId+cwd args are the observable producer-flag contract
     expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
   });
 
@@ -809,6 +810,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
       expect('noCandidate' in result).toBe(false);
       expect('candidate' in result).toBe(false);
     }
+    // Observable contract: markNeedsProducerReview boundary dep — itemId+cwd args are the observable producer-flag contract
     expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
   });
 
@@ -869,6 +871,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
     expect(outcome.reason).toBe('attempt-budget-exhausted');
     expect(deps.claimItem).not.toHaveBeenCalled();
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // Observable contract: markNeedsProducerReview boundary dep — itemId+cwd args are the observable producer-flag contract
     expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('IMP-1', cwd);
   });
 
@@ -890,6 +893,7 @@ describe('per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK)', () => {
 
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('attempt-budget-exhausted');
+    // Observable contract: markNeedsProducerReview boundary dep — itemId+cwd args are the observable producer-flag contract
     expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('PLN-1', cwd);
   });
 });
@@ -966,6 +970,7 @@ describe('stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2)', () 
 
     expect(outcome).toEqual({ dispatched: false, reason: 'stalled-resume' });
     expect(scanStalledPanes).toHaveBeenCalledTimes(1);
+    // Observable contract: resumeStalledPane boundary dep — sole channel proving the resume path ran
     expect(resumeStalledPane).toHaveBeenCalledWith(
       expect.objectContaining({ cwd: '/repo', kind: 'implement' }),
       expect.objectContaining({ enabled: true, thresholdMs: expect.any(Number) }),
@@ -1426,10 +1431,12 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
       const outcome = await dispatchFallback(deps, coordinationDir, cwd);
 
       // The fallback was attempted (post-implementation) — RED before it lands.
+      // Observable contract: getHerdrListHead boundary dep — cwd+count args are the observable scan seam contract
       expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
       // The frozen implement is never claimed; the plan fallback dispatches.
       expect(outcome.dispatched).toBe(true);
       expect(outcome.candidate?.id).toBe('WL-OOV-PLAN');
+      // Observable contract: negative boundary assertion — proves claimItem NOT called for out-of-view items; unique NOP coverage
       expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-IMPL', expect.anything(), expect.anything());
     },
   );
@@ -1447,9 +1454,11 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
 
       const outcome = await dispatchFallback(deps, coordinationDir, cwd);
 
+      // Observable contract: getHerdrListHead boundary dep — cwd+count args are the observable scan seam contract
       expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
       expect(outcome.dispatched).toBe(true);
       expect(outcome.candidate?.id).toBe('WL-OOV-PLAN');
+      // Observable contract: negative boundary assertion — proves claimItem NOT called for out-of-view items; unique NOP coverage
       expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-IMPL', expect.anything(), expect.anything());
     },
   );
@@ -1482,11 +1491,14 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
         markerStaleWindowMs: WINDOW_MS,
       });
 
+      // Observable contract: getHerdrListHead boundary dep — cwd+count args are the observable scan seam contract
       expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
       // The exhausted item is flagged and skipped; the next eligible dispatches.
       expect(outcome.dispatched).toBe(true);
       expect(outcome.candidate?.id).toBe('WL-OOV-FRESH');
+      // Observable contract: markNeedsProducerReview boundary dep — itemId+cwd args are the observable producer-flag contract
       expect(deps.markNeedsProducerReview).toHaveBeenCalledWith('WL-OOV-BUDGET', cwd);
+      // Observable contract: negative boundary assertion — proves claimItem NOT called for out-of-view items; unique NOP coverage
       expect(deps.claimItem).not.toHaveBeenCalledWith('WL-OOV-BUDGET', expect.anything(), expect.anything());
     },
   );
@@ -1515,6 +1527,7 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
 
       const outcome = await dispatchFallback(deps, coordinationDir, cwd);
 
+      // Observable contract: getHerdrListHead boundary dep — cwd+count args are the observable scan seam contract
       expect(deps.getHerdrListHead).toHaveBeenCalledWith(cwd, expect.any(Number));
       expect(outcome.dispatched).toBe(false);
       expect(outcome.reason).toBe('in-flight-pane');

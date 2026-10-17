@@ -164,7 +164,6 @@ describe('SQLite binding round-trip', () => {
       assignee: 'agent',
       stage: 'idea',
       issueType: 'task',
-      needsProducerReview: true,
     });
 
     // Write audit to the audit_results table
@@ -186,24 +185,12 @@ describe('SQLite binding round-trip', () => {
     expect(loaded!.assignee).toBe('agent');
     expect(loaded!.stage).toBe('idea');
     expect(loaded!.issueType).toBe('task');
-    expect(loaded!.needsProducerReview).toBe(true);
     const auditResult = db.getAuditResult(created.id);
     expect(auditResult).not.toBeNull();
     expect(auditResult?.author).toBe('roundtrip');
     // Date fields should be valid ISO strings
     expect(() => new Date(loaded!.createdAt).toISOString()).not.toThrow();
     expect(() => new Date(loaded!.updatedAt).toISOString()).not.toThrow();
-  });
-
-  it('round-trips a work item with needsProducerReview false', () => {
-    const created = db.create({
-      title: 'No review needed',
-      needsProducerReview: false,
-    });
-
-    const loaded = db.get(created.id);
-    expect(loaded).toBeDefined();
-    expect(loaded!.needsProducerReview).toBe(false);
   });
 
   it('round-trips a work item with empty tags', () => {
@@ -232,13 +219,11 @@ describe('SQLite binding round-trip', () => {
     const created = db.create({
       title: 'Will update',
       tags: ['original'],
-      needsProducerReview: false,
     });
 
     const updated = db.update(created.id, {
       title: 'Updated title',
       tags: ['new', 'tags'],
-      needsProducerReview: true,
       priority: 'critical',
     });
 
@@ -246,7 +231,6 @@ describe('SQLite binding round-trip', () => {
     const loaded = db.get(created.id);
     expect(loaded!.title).toBe('Updated title');
     expect(loaded!.tags).toEqual(['new', 'tags']);
-    expect(loaded!.needsProducerReview).toBe(true);
     expect(loaded!.priority).toBe('critical');
   });
 

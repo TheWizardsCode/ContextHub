@@ -2,18 +2,7 @@
  * Unit tests for mouse/touch input handling in the Herdr worklist selection
  * list (parent WL-0MSGHM5BQ0096BNJ, child WL-0MSI720DX002E9WC).
  *
- * TDD RED phase (C1): the mouse path is NOT implemented yet, so this module
- * fails to load with "does not provide an export named 'parseMouseEvent'" /
- * "'mapMouseToAction'" (etc.) from src/worklist.ts. This is the expected,
- * documented red state — the tests go green when the implementation children
- * land:
- *   - C2 (WL-0MSI7278X0008XGM): ANSI mouse constants, parseMouseEvent +
- *     split-chunk buffering, lifecycle emission in runWorklistTui.
- *   - C3 (WL-0MSI72EYW00050N2): row mapping, mapMouseToAction, dispatch
- *     (double-click window, wheel/touch scroll, filter-tap, drag-motion
- *     guard).
- *
- * ── Contract under test (implemented by C2/C3) ──────────────────────────
+ * ── Contract under test ────────────────────────────────────────────
  *
  *   export interface ParsedMouseEvent {
  *     button: number;    // raw SGR button code (0=left, 1=middle, 2=right,
@@ -52,6 +41,11 @@
  *     | { type: 'scroll-detail-up' }           // detail mode: wheel up (j/k-equiv)
  *     | { type: 'scroll-detail-down' }         // detail mode: wheel down (j/k-equiv)
  *     | { type: 'filter-stage'; index: number }// filter mode: tap a stage option
+ *     | { type: 'hover-row'; index: number }   // list: button-less motion over an item row
+ *     | { type: 'hover-none' }                 // list: button-less motion over chrome rows
+ *     | { type: 'drag-list'; rows: number }    // list: left-held motion past threshold
+ *     | { type: 'drag-detail'; lines: number } // detail: left-held motion past threshold
+ *     | { type: 'drag-start' }                 // bookkeeping: left press captured (internal)
  *     | null;                                  // inert: chrome rows, motion, unknown
  *
  *   export function mapMouseToAction(
@@ -60,6 +54,28 @@
  *     termSize: TermSize,
  *     clickState?: MouseClickState,   // absent → treated as a plain single click
  *   ): MouseAction | null;
+ *
+ *   export const DRAG_THRESHOLD_CELLS = 1;
+ *     // Drag dead-zone (parent Q2 correction): 1 terminal cell/row.
+ *
+ *   export interface MouseDragState {
+ *     origin: { x: number; y: number } | null;
+ *     accumulator: number;   // fractional scroll accumulator
+ *     active: boolean;       // true once the threshold was crossed
+ *     prePressSelection: { selectedIndex: number; scrollOffset: number } | null;
+ *     restored: boolean;     // pre-press restore performed exactly once
+ *   }
+ *
+ *   export function mapMouseDrag(
+ *     state: WorkItemListState,
+ *     ev: ParsedMouseEvent,
+ *     dragState: MouseDragState,
+ *     termSize: TermSize,
+ *   ): MouseAction | null;
+ *     // PURE drag mapper: left press → drag-start; left-held motion past
+ *     // DRAG_THRESHOLD_CELLS → drag-list (whole rows) / drag-detail (lines);
+ *     // sub-threshold motion, releases and filter mode → null. Never emits
+ *     // select-row / open-detail (WL-0MSI72S0Y0060BRK).
  *
  *   // ANSI.mouseEnable / ANSI.mouseDisable added to the ANSI object:
  *   ANSI.mouseEnable  === '\x1b[?1000h\x1b[?1002h\x1b[?1006h'
@@ -86,10 +102,23 @@
  *   (AC5) filter mode: tapping the stage-options row (y=3 of the filter
  *         prompt layout) maps the tapped column to a stage index
  *         ('[i] name' marker spans); other rows are inert.
- *   (AC6) motion events (button & 32) NEVER return a navigation action
- *         (drag-motion guard); release events are consumed but inert; truly
- *         unknown sequences parse to null and the keyboard path is
+ *   (AC6) motion events NEVER return a navigation action (drag-motion
+ *         guard): button-less motion (button 3 | 32) maps to hover, left-
+ *         held motion (button 32) is a drag candidate consumed by
+ *         handleMouseInput, and click/select actions never fire from motion
+ *         (WL-0MSI72S0Y0060BRK). Release events are consumed but inert;
+ *         truly unknown sequences parse to null and the keyboard path is
  *         untouched ('\x1b[A' arrows etc. still work).
+ *
+ * ── Drag-to-scroll gate rules (WL-0MSI72S0Y0060BRK) ────────────────────
+ *   (D1) left press captures the pre-press selection and emits drag-start;
+ *   (D2) left-held motion past DRAG_THRESHOLD_CELLS scrolls the list by
+ *        whole rows (scrollBy, clamped to [0, maxOffset]) or the detail by
+ *        whole lines (existing detail clamp), never moving the selection;
+ *   (D3) sub-threshold motion is inert; a release ends the drag and never
+ *        clicks (no select-row / open-detail from the drag consumer);
+ *   (D4) button-less motion still drives hover; drag is inert in filter
+ *        mode and the metadata panel; plain clicks/double-clicks unchanged.
  *
  * ── Fixture geometry (TERM_80x24, 1-based rows, verified against the
  *    renderer at authoring time) ────────────────────────────────────────
@@ -117,9 +146,12 @@ import {
   mapMouseToAction,
   handleMouseInput,
   DOUBLE_CLICK_WINDOW_MS,
+  DRAG_THRESHOLD_CELLS,
+  createDragState,
+  mapMouseDrag,
   runWorklistTui,
 } from './worklist.js';
-import type { ParsedMouseEvent, MouseAction, MouseClickState, TermSize } from './worklist.js';
+import type { ParsedMouseEvent, MouseAction, MouseClickState, MouseDragState, TermSize } from './worklist.js';
 import type { WorkItem } from './fetcher.js';
 import { setExecFileAsync, resetExecFileAsync } from './fetcher.js';
 
@@ -146,6 +178,18 @@ function makeListState(n: number): WorkItemListState {
 /** Left-press event helper. */
 function press(button: number, x: number, y: number): ParsedMouseEvent {
   return { button, x, y, release: false };
+}
+
+/** Build a WorkItem with a long description so the detail view scrolls. */
+function makeScrollableItem(id: string): WorkItem {
+  const item = makeItem(id);
+  item.description = [
+    `# ${id} title`,
+    '',
+    '## Notes',
+    ...Array.from({ length: 80 }, (_, i) => `lorem ipsum dolor line ${i}`),
+  ].join('\n');
+  return item;
 }
 
 // ── AC1: ANSI mouse lifecycle sequences ────────────────────────────────
@@ -489,37 +533,45 @@ describe('mapMouseToAction — wheel and touch scroll (AC4)', () => {
 
 // ── AC6: drag-motion guard + button semantics ──────────────────────────
 
-// Motion events (button & 32) map to hover actions in list mode
-// (WL-0MT9XRZDK006GMUH): they NEVER navigate/select — they drive the
-// hover tooltip instead (AC5: motion is consumed, never leaking to
-// keyboard handlers).
+// Motion events (button & 32) are split by the SGR button field
+// (WL-0MSI72S0Y0060BRK): button-less motion ((button & 3) === 3) maps to
+// hover actions (WL-0MT9XRZDK006GMUH); left-button-held motion
+// ((button & 3) === 0) is a drag candidate handled by handleMouseInput —
+// mapMouseToAction returns null for it (motion never navigates/selects).
 
 describe('mapMouseToAction — drag-motion guard and button codes (AC6)', () => {
-  it('never navigates/jumps the selection on motion events — maps to hover instead', () => {
+  it('never navigates/jumps the selection on motion events — button-less maps to hover', () => {
     const state = makeListState(30);
-    // 35 = 3 | 32 (motion carrying release marker), 33 = 1 | 32, 32 alone.
-    // Row 5 → display-row index 3 — motion over a visible item row maps to
-    // a hover-row action (tooltip candidate), never a select/open action.
-    expect(mapMouseToAction(state, press(32, 5, 5), TERM_80x24)).toEqual({ type: 'hover-row', index: 3 });
-    expect(mapMouseToAction(state, press(33, 5, 5), TERM_80x24)).toEqual({ type: 'hover-row', index: 3 });
+    // 35 = 3 | 32 (button-less motion). Row 5 → display-row index 3 —
+    // motion over a visible item row maps to a hover-row action (tooltip
+    // candidate), never a select/open action.
     expect(mapMouseToAction(state, press(35, 5, 5), TERM_80x24)).toEqual({ type: 'hover-row', index: 3 });
   });
 
-  it('maps motion over chrome/blank rows to hover-none (pointer left the rows)', () => {
+  it('left-held motion (32) and middle-held motion (33) are NOT hover — left is a drag candidate', () => {
+    const state = makeListState(30);
+    // 32 = 0 | 32 (left button held + motion) → the drag mapper owns it;
+    // mapMouseToAction returns null (never hover, never select).
+    expect(mapMouseToAction(state, press(32, 5, 5), TERM_80x24)).toBeNull();
+    // 33 = 1 | 32 (middle button held + motion) → inert.
+    expect(mapMouseToAction(state, press(33, 5, 5), TERM_80x24)).toBeNull();
+  });
+
+  it('maps button-less motion over chrome/blank rows to hover-none (pointer left the rows)', () => {
     const state = makeListState(30);
     // Header row 1 and metadata panel rows are NOT list rows → hover-none.
-    expect(mapMouseToAction(state, press(32, 5, 1), TERM_80x24)).toEqual({ type: 'hover-none' });
-    expect(mapMouseToAction(state, press(32, 5, 21), TERM_80x24)).toEqual({ type: 'hover-none' });
+    expect(mapMouseToAction(state, press(35, 5, 1), TERM_80x24)).toEqual({ type: 'hover-none' });
+    expect(mapMouseToAction(state, press(35, 5, 21), TERM_80x24)).toEqual({ type: 'hover-none' });
   });
 
   it('guards motion in detail and filter modes (motion stays inert)', () => {
     const d = makeListState(3);
     d.mode = 'detail';
     d.detailItem = makeItem('a');
-    expect(mapMouseToAction(d, press(32, 5, 5), TERM_80x24)).toBeNull();
+    expect(mapMouseToAction(d, press(35, 5, 5), TERM_80x24)).toBeNull();
     const f = makeListState(3);
     f.mode = 'filter';
-    expect(mapMouseToAction(f, press(34, 5, 3), TERM_80x24)).toBeNull();
+    expect(mapMouseToAction(f, press(35, 5, 3), TERM_80x24)).toBeNull();
   });
 
   it('ignores release events for click actions (press drives selection)', () => {
@@ -531,6 +583,300 @@ describe('mapMouseToAction — drag-motion guard and button codes (AC6)', () => 
     const state = makeListState(30);
     expect(mapMouseToAction(state, press(1, 5, 5), TERM_80x24)).toBeNull();
     expect(mapMouseToAction(state, press(2, 5, 5), TERM_80x24)).toBeNull();
+  });
+});
+
+// ── WL-0MSI72S0Y0060BRK: drag-to-scroll ────────────────────────────────
+// Drag-to-scroll splits motion by the SGR button field: button-less motion
+// ((button & 3) === 3) keeps driving the hover tooltip, while left-button-
+// held motion ((button & 32) !== 0, (button & 3) === 0) drives drag-to-
+// scroll in the list and detail views.  A drag never selects/opens; a
+// drag-release never clicks; sub-threshold jitter is inert.
+
+describe('DRAG_THRESHOLD_CELLS (WL-0MSI72S0Y0060BRK)', () => {
+  it('is defined as a 1-row dead-zone for cell-granular pointer reports', () => {
+    expect(DRAG_THRESHOLD_CELLS).toBe(1);
+  });
+
+  it('createDragState returns a fresh zeroed tracker', () => {
+    const ds = createDragState();
+    expect(ds).toEqual({
+      origin: null,
+      accumulator: 0,
+      active: false,
+      prePressSelection: null,
+      restored: false,
+    });
+  });
+});
+
+describe('mapMouseDrag — threshold dead-zone and drag-start (WL-0MSI72S0Y0060BRK)', () => {
+  it('a left press emits drag-start and records origin + pre-press state', () => {
+    const state = makeListState(30);
+    state.selectedIndex = 5;
+    state.scrollOffset = 5;
+    const ds = createDragState();
+    expect(mapMouseDrag(state, press(0, 5, 5), ds, TERM_80x24)).toEqual({ type: 'drag-start' });
+    expect(ds.origin).toEqual({ x: 5, y: 5 });
+    expect(ds.active).toBe(false);
+    expect(ds.prePressSelection).toEqual({ selectedIndex: 5, scrollOffset: 5 });
+  });
+
+  it('sub-threshold motion (0 rows from origin) is inert', () => {
+    const state = makeListState(30);
+    const ds = createDragState();
+    mapMouseDrag(state, press(0, 5, 5), ds, TERM_80x24); // press at y=5
+    expect(mapMouseDrag(state, press(32, 5, 5), ds, TERM_80x24)).toBeNull(); // motion, same row
+    expect(ds.active).toBe(false);
+  });
+
+  it('motion just short of the threshold stays inert; crossing it activates', () => {
+    const state = makeListState(30);
+    const ds = createDragState();
+    mapMouseDrag(state, press(0, 5, 5), ds, TERM_80x24);
+    expect(mapMouseDrag(state, press(32, 5, 5), ds, TERM_80x24)).toBeNull(); // 0 delta
+    expect(mapMouseDrag(state, press(32, 5, 6), ds, TERM_80x24)).toEqual({ type: 'drag-list', rows: 1 }); // 1 row
+    expect(ds.active).toBe(true);
+  });
+
+  it('a release ends the drag and returns null', () => {
+    const state = makeListState(30);
+    const ds = createDragState();
+    mapMouseDrag(state, press(0, 5, 5), ds, TERM_80x24);
+    mapMouseDrag(state, press(32, 5, 6), ds, TERM_80x24);
+    expect(mapMouseDrag(state, { button: 0, x: 5, y: 6, release: true }, ds, TERM_80x24)).toBeNull();
+    expect(ds.origin).toBeNull();
+    expect(ds.active).toBe(false);
+    expect(ds.prePressSelection).toBeNull();
+  });
+});
+
+describe('mapMouseDrag — list drag (WL-0MSI72S0Y0060BRK AC1)', () => {
+  it('maps vertical motion to proportional whole-row deltas', () => {
+    const state = makeListState(30);
+    const ds = createDragState();
+    mapMouseDrag(state, press(0, 5, 5), ds, TERM_80x24); // press
+    expect(mapMouseDrag(state, press(32, 5, 6), ds, TERM_80x24)).toEqual({ type: 'drag-list', rows: 1 });
+    expect(mapMouseDrag(state, press(32, 5, 8), ds, TERM_80x24)).toEqual({ type: 'drag-list', rows: 2 });
+  });
+
+  it('negative motion scrolls up (back toward the start)', () => {
+    const state = makeListState(30);
+    const ds = createDragState();
+    mapMouseDrag(state, press(0, 5, 10), ds, TERM_80x24); // press at y=10
+    expect(mapMouseDrag(state, press(32, 5, 8), ds, TERM_80x24)).toEqual({ type: 'drag-list', rows: -2 });
+  });
+
+  it('never returns select-row/open-detail from a drag', () => {
+    const state = makeListState(30);
+    const ds = createDragState();
+    mapMouseDrag(state, press(0, 5, 5), ds, TERM_80x24);
+    mapMouseDrag(state, press(32, 5, 9), ds, TERM_80x24);
+    // A drag crossing the threshold must not select the row under the pointer.
+    const second = createDragState();
+    expect(mapMouseDrag(state, press(32, 5, 12), second, TERM_80x24)).toBeNull(); // no origin → inert
+    expect(mapMouseDrag(state, press(32, 5, 12), ds, TERM_80x24)).toEqual({ type: 'drag-list', rows: 3 });
+  });
+});
+
+describe('mapMouseDrag — detail drag (WL-0MSI72S0Y0060BRK AC2)', () => {
+  it('maps motion in detail mode to whole-line deltas (1 row ≈ 1 line)', () => {
+    const state = new WorkItemListState([makeScrollableItem('a')], TERM_80x24);
+    state.mode = 'detail';
+    state.detailItem = makeScrollableItem('a');
+    const ds = createDragState();
+    mapMouseDrag(state, press(0, 5, 5), ds, TERM_80x24); // press
+    expect(mapMouseDrag(state, press(32, 5, 6), ds, TERM_80x24)).toEqual({ type: 'drag-detail', lines: 1 });
+    expect(mapMouseDrag(state, press(32, 5, 9), ds, TERM_80x24)).toEqual({ type: 'drag-detail', lines: 3 });
+  });
+
+  it('negative motion maps to upward line deltas', () => {
+    const state = new WorkItemListState([makeScrollableItem('a')], TERM_80x24);
+    state.mode = 'detail';
+    state.detailItem = makeScrollableItem('a');
+    const ds = createDragState();
+    mapMouseDrag(state, press(0, 5, 10), ds, TERM_80x24);
+    expect(mapMouseDrag(state, press(32, 5, 8), ds, TERM_80x24)).toEqual({ type: 'drag-detail', lines: -2 });
+  });
+});
+
+describe('mapMouseDrag — filter mode and other buttons (WL-0MSI72S0Y0060BRK)', () => {
+  it('is inert in filter mode (out of scope)', () => {
+    const state = makeListState(3);
+    state.mode = 'filter';
+    const ds = createDragState();
+    expect(mapMouseDrag(state, press(0, 5, 3), ds, TERM_80x24)).toBeNull();
+    expect(mapMouseDrag(state, press(32, 5, 8), ds, TERM_80x24)).toBeNull();
+  });
+
+  it('is inert for middle/right-button motion (not a drag candidate)', () => {
+    const state = makeListState(30);
+    const ds = createDragState();
+    mapMouseDrag(state, press(1, 5, 5), ds, TERM_80x24); // middle press
+    expect(mapMouseDrag(state, press(33, 5, 8), ds, TERM_80x24)).toBeNull(); // 33 = 1 | 32
+  });
+
+  it('does not start a drag without a prior left press', () => {
+    const state = makeListState(30);
+    const ds = createDragState();
+    expect(mapMouseDrag(state, press(32, 5, 8), ds, TERM_80x24)).toBeNull(); // no origin
+  });
+});
+
+// ── Drag-vs-click isolation via handleMouseInput ───────────────────────
+// A press that turns into a drag must restore the pre-press selection; a
+// drag-release never selects; a press-release that never moves still
+// selects exactly as before.
+
+describe('handleMouseInput — drag-vs-click isolation (WL-0MSI72S0Y0060BRK AC3)', () => {
+  const click0 = (): MouseClickState => ({ lastClick: null, now: 0 });
+
+  it('a drag that crosses the threshold restores the pre-press selection and never selects', () => {
+    const state = makeListState(30);
+    const click = click0();
+    const drag = createDragState();
+    // Snapshot the selection BEFORE the press — the drag must restore it.
+    const prePress = { selectedIndex: state.selectedIndex, scrollOffset: state.scrollOffset };
+    // Press on row 6 (index 4) — selects momentarily (click behaviour), but
+    // the drag-state captures the pre-press selection at the same time.
+    handleMouseInput(state, '\x1b[<0;5;6M', TERM_80x24, click, drag);
+    // Drag down 2 rows — activates and scrolls the list past the threshold.
+    handleMouseInput(state, '\x1b[<32;5;7M', TERM_80x24, click, drag);
+    handleMouseInput(state, '\x1b[<32;5;8M', TERM_80x24, click, drag);
+    // Selection restored to the pre-press value (AC3) — a drag never leaves
+    // the selection moved by the initial press.
+    expect(state.selectedIndex).toBe(prePress.selectedIndex);
+    // List scrolled by the drag distance.
+    expect(state.scrollOffset).toBe(prePress.scrollOffset + 2);
+    expect(state.mode).toBe('list'); // never opened detail
+  });
+
+  it('a drag release never selects or opens the row it was pressed on', () => {
+    const state = makeListState(30);
+    const click = click0();
+    const drag = createDragState();
+    handleMouseInput(state, '\x1b[<0;5;6M', TERM_80x24, click, drag); // press on row 6
+    handleMouseInput(state, '\x1b[<32;5;9M', TERM_80x24, click, drag); // drag 3 rows
+    const preRelease = { selectedIndex: state.selectedIndex, mode: state.mode };
+    handleMouseInput(state, '\x1b[<0;5;9m', TERM_80x24, click, drag); // release
+    expect(state.selectedIndex).toBe(preRelease.selectedIndex); // unchanged by release
+    expect(state.mode).toBe(preRelease.mode); // list — no detail open
+  });
+
+  it('a press-release that never crosses the threshold still selects exactly as before', () => {
+    const state = makeListState(30);
+    const click = click0();
+    const drag = createDragState();
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click, drag); // press on row 3 (index 1)
+    expect(state.selectedIndex).toBe(1); // still selects on press
+    handleMouseInput(state, '\x1b[<0;5;3m', TERM_80x24, click, drag); // release — inert
+    expect(state.selectedIndex).toBe(1);
+    expect(state.mode).toBe('list');
+  });
+
+  it('a plain click still opens detail on a double-click (no drag interference)', () => {
+    const state = makeListState(30);
+    const click = click0();
+    const drag = createDragState();
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click, drag);
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click, drag); // second press, same row
+    expect(state.mode).toBe('detail'); // double-click still opens
+  });
+});
+
+// ── drag-detail dispatch + clamping via handleMouseInput ──────────────
+
+describe('handleMouseInput — detail drag dispatch and clamping (WL-0MSI72S0Y0060BRK AC2)', () => {
+  const click0 = (): MouseClickState => ({ lastClick: null, now: 0 });
+
+  const detailState = (): WorkItemListState => {
+    const state = new WorkItemListState([makeScrollableItem('a')], TERM_80x24);
+    state.mode = 'detail';
+    state.detailItem = makeScrollableItem('a');
+    return state;
+  };
+
+  it('scrolls the detail view by whole lines in both focus states', () => {
+    const state = detailState();
+    const click = click0();
+    const drag = createDragState();
+    handleMouseInput(state, '\x1b[<0;5;5M', TERM_80x24, click, drag); // press
+    handleMouseInput(state, '\x1b[<32;5;7M', TERM_80x24, click, drag); // drag down 2
+    expect(state.detailScrollOffset).toBeGreaterThan(0);
+    const offset = state.detailScrollOffset;
+    handleMouseInput(state, '\x1b[<32;5;6M', TERM_80x24, click, drag); // drag up 1
+    expect(state.detailScrollOffset).toBe(offset - 1);
+    expect(state.selectedIndex).toBe(0); // selection untouched by detail drag
+  });
+
+  it('clamps the detail scroll at the content bounds (no overscroll)', () => {
+    const state = detailState();
+    const click = click0();
+    const drag = createDragState();
+    handleMouseInput(state, '\x1b[<0;5;5M', TERM_80x24, click, drag); // press
+    // Drag down in steps until the offset stops growing (clamped at the
+    // content maxScroll bound).
+    let last = -1;
+    for (let i = 1; i <= 200 && state.detailScrollOffset > last; i++) {
+      last = state.detailScrollOffset;
+      handleMouseInput(state, `\x1b[<32;5;${5 + i}M`, TERM_80x24, click, drag);
+    }
+    const maxScroll = state.detailScrollOffset;
+    expect(maxScroll).toBeGreaterThan(0); // the long description is scrollable
+    handleMouseInput(state, '\x1b[<32;5;250M', TERM_80x24, click, drag); // far beyond
+    expect(state.detailScrollOffset).toBe(maxScroll); // clamped, no overscroll
+  });
+
+  it('clamps the list scroll at 0 / maxOffset without moving the selection', () => {
+    const state = makeListState(30);
+    const click = click0();
+    const drag = createDragState();
+    handleMouseInput(state, '\x1b[<0;5;5M', TERM_80x24, click, drag);
+    // Drag far up — offset must clamp at 0.
+    handleMouseInput(state, '\x1b[<32;5;2M', TERM_80x24, click, drag);
+    expect(state.scrollOffset).toBe(0);
+    expect(state.selectedIndex).toBe(0); // unchanged
+    // Drag far down — offset must clamp at maxOffset.
+    handleMouseInput(state, '\x1b[<32;5;40M', TERM_80x24, click, drag);
+    const maxOffset = Math.max(0, state.flatCount - state._listHeight());
+    expect(state.scrollOffset).toBe(maxOffset); // clamped, no overscroll
+    expect(state.selectedIndex).toBe(0); // selection never moved
+  });
+});
+
+// ── Hover/drag separation via handleMouseInput ────────────────────────
+
+describe('handleMouseInput — hover/drag split (WL-0MSI72S0Y0060BRK AC4)', () => {
+  const click0 = (): MouseClickState => ({ lastClick: null, now: 0 });
+
+  it('button-less motion still drives the hover tooltip', () => {
+    const state = makeListState(30);
+    const click = click0();
+    const drag = createDragState();
+    handleMouseInput(state, '\x1b[<35;5;5M', TERM_80x24, click, drag); // 35 = 3|32 — button-less motion
+    expect(state.hoveredRowIndex).toBe(3); // row 5 → display index 3
+    handleMouseInput(state, '\x1b[<35;5;1M', TERM_80x24, click, drag); // chrome row
+    expect(state.hoveredRowIndex).toBeNull();
+  });
+
+  it('left-button-held motion drives drag, never hover', () => {
+    const state = makeListState(30);
+    const click = click0();
+    const drag = createDragState();
+    handleMouseInput(state, '\x1b[<0;5;5M', TERM_80x24, click, drag); // press
+    handleMouseInput(state, '\x1b[<32;5;7M', TERM_80x24, click, drag); // 32 = left held + motion
+    expect(state.hoveredRowIndex).toBeNull(); // drag, not hover
+    expect(state.scrollOffset).toBeGreaterThan(0); // list scrolled
+  });
+
+  it('drag is inert in filter mode', () => {
+    const state = makeListState(3);
+    state.mode = 'filter';
+    const click = click0();
+    const drag = createDragState();
+    handleMouseInput(state, '\x1b[<0;5;3M', TERM_80x24, click, drag);
+    handleMouseInput(state, '\x1b[<32;5;8M', TERM_80x24, click, drag);
+    expect(state.scrollOffset).toBe(0);
   });
 });
 
@@ -745,7 +1091,7 @@ describe('runWorklistTui — Alt+m mouse-tracking toggle (WL-0MT0AP2LR000JFWN)',
     }
   });
 
-  it('footer shows the current mouse-tracking state (on/off)', async () => {
+  it('footer no longer advertises mouse-tracking state while Alt+m still toggles', async () => {
     const { dataListeners, writes, restore } = setupFakeTty();
     try {
       const tui = runWorklistTui(
@@ -755,22 +1101,28 @@ describe('runWorklistTui — Alt+m mouse-tracking toggle (WL-0MT0AP2LR000JFWN)',
         { autoRefresh: false, autoSync: false },
       );
 
-      // Initial render: hint says mouse on.
+      // The footer advertisement was removed (WL-0MV85QZXN002T51A AC3).
       await vi.waitFor(() => {
-        expect(writes.join('')).toContain('alt+m mouse on');
+        expect(writes.join('')).toContain(ANSI.mouseEnable);
       });
+      expect(writes.join('')).not.toContain('alt+m mouse on');
+      expect(writes.join('')).not.toContain('alt+m mouse off');
 
-      // Alt+m → hint flips to mouse off.
+      // Alt+m still toggles mouse tracking OFF (disable sequences emitted).
       dataListeners.forEach((cb) => cb(Buffer.from('\x1bm')));
       await vi.waitFor(() => {
-        expect(writes.join('')).toContain('alt+m mouse off');
+        expect(writes.join('')).toContain(ANSI.mouseDisable);
       });
 
-      // Alt+m again → hint flips back to mouse on.
+      // Alt+m again still toggles it back ON (a second enable sequence).
       dataListeners.forEach((cb) => cb(Buffer.from('\x1bm')));
       await vi.waitFor(() => {
-        expect(writes.join('')).toContain('alt+m mouse on');
+        const enableCount = writes.join('').split(ANSI.mouseEnable).length - 1;
+        expect(enableCount).toBe(2);
       });
+      // Still no footer advertisement after toggling.
+      expect(writes.join('')).not.toContain('alt+m mouse on');
+      expect(writes.join('')).not.toContain('alt+m mouse off');
 
       dataListeners.forEach((cb) => cb(Buffer.from('q')));
       await tui;

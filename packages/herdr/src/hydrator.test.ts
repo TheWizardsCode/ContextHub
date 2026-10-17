@@ -12,12 +12,12 @@ import { resetExecFileAsync, setExecFileAsync } from './fetcher.js';
 import {
   hydratorExecRouter,
   makeWorstCaseItems,
-  makeWorstCaseTabs,
+  makeWorstCasePanes,
 } from './hydrator.fixtures.js';
 import {
   ALLOWED_STAGES_BY_STATUS,
-  applyActiveTabMarkers,
-  collectTabWorkItemIds,
+  applyActivePaneMarkers,
+  collectPaneWorkItemIds,
   compatibleStage,
   createHydratorFileLog,
   createHydratorRunner,
@@ -27,14 +27,13 @@ import {
   extractWorkItemIdsFromText,
   isActiveBlocker,
   isActivePaneMatch,
-  hasItemTab,
-  markItemsActiveByTab,
+  markItemsActiveByPane,
   runHydrationOnce,
   type HydrationResult,
   type HydratorDepTarget,
   type HydratorDeps,
   type HydratorItem,
-  type HydratorTab,
+  type HydratorPane,
 } from './hydrator.js';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -71,7 +70,7 @@ function makeDeps(overrides: Partial<ContractDeps> = {}): {
   const applied: AppliedDemotion[] = [];
   const deps: ContractDeps = {
     listInProgressItems: async () => [],
-    listTabs: async () => [],
+    listActivePanes: async () => [],
     listOutboundDeps: async () => [],
     applyDemotion: async (id, status, stage) => {
       applied.push({ id, status, stage });
@@ -112,66 +111,101 @@ describe('extractWorkItemIdsFromText', () => {
   });
 });
 
-// ── Active-tab matching ───────────────────────────────────────────────
+// ── Active-pane matching (WL-0MV1BWETT005GSUJ) ───────────────────────
 
-describe('active-tab matching', () => {
-  const tab = (label: string, workspace_id?: string): HydratorTab => ({
-    tab_id: `t-${label.length}-${workspace_id ?? 'x'}`,
+describe('active-pane matching', () => {
+  const pane = (label: string, workspace_id?: string): HydratorPane => ({
+    pane_id: `p-${label.length}-${workspace_id ?? 'x'}`,
     label,
     workspace_id,
   });
 
-  it('matches an item whose ID is the exact label of a tab', () => {
-    const tabs = [tab('Work Items'), tab(WL)];
-    expect(hasItemTab(WL, tabs)).toBe(true);
-    expect(collectTabWorkItemIds(tabs).has(WL)).toBe(true);
+  it('matches an item whose ID appears in a pane title', () => {
+    const panes = [pane('Work Items'), pane(`Downtime triggered implement Foo - ${WL}`)];
+    expect(isActivePaneMatch(WL, panes)).toBe(true);
+    expect(collectPaneWorkItemIds(panes).has(WL)).toBe(true);
   });
 
-  it('rejects a tab label that merely contains the item ID (exact match only)', () => {
-    const tabs = [tab(`implement ${WL}`), tab(`plan ${WL} - extra`)];
-    expect(hasItemTab(WL, tabs)).toBe(false);
-    expect(collectTabWorkItemIds(tabs).has(WL)).toBe(false);
+  it('matches when the pane title equals the item ID', () => {
+    const panes = [pane(WL)];
+    expect(isActivePaneMatch(WL, panes)).toBe(true);
   });
 
-  it('ignores tabs whose label is not a work-item ID', () => {
-    const tabs = [tab('Work Items'), tab('Downtime')];
-    expect(collectTabWorkItemIds(tabs).size).toBe(0);
-    expect(hasItemTab(WL, tabs)).toBe(false);
+  it('ignores panes whose title carries no work-item ID', () => {
+    const panes = [pane('Work Items'), pane('Downtime')];
+    expect(collectPaneWorkItemIds(panes).size).toBe(0);
+    expect(isActivePaneMatch(WL, panes)).toBe(false);
   });
 
-  it('only considers tabs in the given workspace', () => {
-    const tabs = [tab(WL, 'wOther')];
-    expect(hasItemTab(WL, tabs, 'wCurrent')).toBe(false);
-    expect(hasItemTab(WL, tabs, 'wOther')).toBe(true);
+  it('only considers panes in the given workspace', () => {
+    const panes = [pane(`Downtime - ${WL}`, 'wOther')];
+    expect(isActivePaneMatch(WL, panes, 'wCurrent')).toBe(false);
+    expect(isActivePaneMatch(WL, panes, 'wOther')).toBe(true);
   });
 
-  it('includes tabs with an unknown workspace when filtering (fail-open)', () => {
-    const tabs = [tab(WL)];
-    expect(hasItemTab(WL, tabs, 'wCurrent')).toBe(true);
+  it('includes panes with an unknown workspace when filtering (fail-open)', () => {
+    const panes = [pane(`Downtime - ${WL}`)];
+    expect(isActivePaneMatch(WL, panes, 'wCurrent')).toBe(true);
   });
 });
 
-// ── Tab-based active marker for the selection list (WL-0MV1BWETT005GSUJ) ──
+// ── Pane-based active marker for the selection list (WL-0MV1BWETT005GSUJ) ──
 
-describe('tab-based active marker (selection list)', () => {
+describe('pane-based active marker (selection list)', () => {
   const OTHER = 'WL-0MV24T2VJ007Q49J';
 
-  it('marks an item with a matching tab as in-progress even when the worklog status is open', () => {
+  it('marks an item with a matching pane title as in-progress even when the worklog status is open', () => {
     const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
-    markItemsActiveByTab(items, new Set([WL]));
+    markItemsActiveByPane(items, new Set([WL]));
     expect(items[0].status).toBe('in-progress');
   });
 
-  it('leaves an item without a matching tab unchanged', () => {
+  it('stamps the green-circle agentState when a matching pane exists and clears it otherwise', () => {
+    const items = [
+      { id: WL, status: 'open', stage: 'plan_complete' },
+      { id: OTHER, status: 'open', stage: 'plan_complete' },
+    ];
+    markItemsActiveByPane(items, new Set([WL]));
+    // Matching pane → green circle (agentState 'working').
+    expect(items[0].agentState).toBe('working');
+    // No matching pane → no green circle.
+    expect(items[1].agentState).toBeUndefined();
+  });
+
+  it('clears a stale green circle when the pane closes and restores it when it reopens (producer rule)', () => {
+    const items = [{ id: WL, status: 'open', stage: 'plan_complete', agentState: 'working' }];
+    // Pane closed: a matching pane no longer exists → the green circle clears
+    // even though a stale agentState was previously stamped.
+    markItemsActiveByPane(items, new Set());
+    expect(items[0].agentState).toBeUndefined();
+    // Pane reopened → green circle returns.
+    markItemsActiveByPane(items, new Set([WL]));
+    expect(items[0].agentState).toBe('working');
+  });
+
+  it('stamps the green circle regardless of the item stage (open pane = worked on)', () => {
+    // Terminal in_review / completed items keep their review STATUS marker,
+    // but an OPEN pane still means the item is being worked → green circle.
+    const items = [
+      { id: WL, status: 'completed', stage: 'in_review' },
+      { id: OTHER, status: 'completed', stage: 'done' },
+    ];
+    markItemsActiveByPane(items, new Set([WL])); // only WL has a matching pane
+    expect(items[0].status).toBe('completed'); // review marker untouched
+    expect(items[0].agentState).toBe('working'); // but green circle present
+    expect(items[1].agentState).toBeUndefined(); // no matching pane in this workspace
+  });
+
+  it('leaves an item without a matching pane unchanged', () => {
     const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
-    markItemsActiveByTab(items, new Set([OTHER]));
+    markItemsActiveByPane(items, new Set([OTHER]));
     expect(items[0].status).toBe('open');
   });
 
   it('marks matching children recursively', () => {
     const child = { id: WL, status: 'open', stage: 'plan_complete' };
     const parent = { id: 'WL-PARENT000000', status: 'open', stage: 'idea', children: [child] };
-    markItemsActiveByTab([parent], new Set([WL]));
+    markItemsActiveByPane([parent], new Set([WL]));
     expect(parent.status).toBe('open');
     expect(child.status).toBe('in-progress');
   });
@@ -181,42 +215,44 @@ describe('tab-based active marker (selection list)', () => {
       { id: WL, status: 'open', stage: 'in_review' },
       { id: OTHER, status: 'completed', stage: 'done' },
     ];
-    markItemsActiveByTab(items, new Set([WL, OTHER]));
+    markItemsActiveByPane(items, new Set([WL, OTHER]));
     expect(items[0].status).toBe('open');
     expect(items[1].status).toBe('completed');
   });
 
-  it('is idempotent: a still-open tab keeps the marker and a closed tab clears it', () => {
+  it('is idempotent: a still-open pane keeps the marker and a closed pane clears it', () => {
     const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
-    markItemsActiveByTab(items, new Set([WL]));
+    markItemsActiveByPane(items, new Set([WL]));
     expect(items[0].status).toBe('in-progress');
-    // Tab still open — a repeated pass must not mistake the marker for the
+    // Pane still open — a repeated pass must not mistake the marker for the
     // true status and clobber the base bookkeeping.
-    markItemsActiveByTab(items, new Set([WL]));
+    markItemsActiveByPane(items, new Set([WL]));
     expect(items[0].status).toBe('in-progress');
-    // Tab closed — the marker clears back to the true worklog status without
+    // Pane closed — the marker clears back to the true worklog status without
     // any `wl` re-fetch.
-    markItemsActiveByTab(items, new Set());
+    markItemsActiveByPane(items, new Set());
     expect(items[0].status).toBe('open');
-    // Tab re-opened — the marker comes back.
-    markItemsActiveByTab(items, new Set([WL]));
+    // Pane re-opened — the marker comes back.
+    markItemsActiveByPane(items, new Set([WL]));
     expect(items[0].status).toBe('in-progress');
   });
 
   it('keeps the bookkeeping status out of the serialized item shape', () => {
     const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
-    markItemsActiveByTab(items, new Set([WL]));
-    expect(Object.keys(items[0])).toEqual(['id', 'status', 'stage']);
+    markItemsActiveByPane(items, new Set([WL]));
+    // Only real fields (id/status/stage + the green-circle agentState) are
+    // enumerable; the base-status bookkeeping Symbol is not.
+    expect(Object.keys(items[0]).sort()).toEqual(['agentState', 'id', 'stage', 'status']);
   });
 
-  it('applyActiveTabMarkers scopes the tab lookup to the current workspace', async () => {
+  it('applyActivePaneMarkers scopes the pane lookup to the current workspace', async () => {
     const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
     const seen: Array<string | undefined> = [];
-    await applyActiveTabMarkers(
+    await applyActivePaneMarkers(
       items,
       async (workspaceId) => {
         seen.push(workspaceId);
-        return [{ tab_id: 't1', label: WL, workspace_id: 'wCurrent' }];
+        return [{ pane_id: 'wC:p1', label: `Downtime triggered - ${WL}`, workspace_id: 'wCurrent' }];
       },
       'wCurrent',
     );
@@ -224,19 +260,19 @@ describe('tab-based active marker (selection list)', () => {
     expect(items[0].status).toBe('in-progress');
   });
 
-  it('does not mark an item whose only matching tab is in another workspace', async () => {
+  it('does not mark an item whose only matching pane is in another workspace', async () => {
     const items = [{ id: WL, status: 'open', stage: 'plan_complete' }];
-    await applyActiveTabMarkers(
+    await applyActivePaneMarkers(
       items,
-      async () => [{ tab_id: 't1', label: WL, workspace_id: 'wOther' }],
+      async () => [{ pane_id: 'wO:p1', label: `Downtime - ${WL}`, workspace_id: 'wOther' }],
       'wCurrent',
     );
     expect(items[0].status).toBe('open');
   });
 
-  it('fails open when the tab lookup throws or returns null (no marker cleared)', async () => {
+  it('fails open when the pane lookup throws or returns null (no marker cleared)', async () => {
     const thrown = [{ id: WL, status: 'open', stage: 'plan_complete' }];
-    await applyActiveTabMarkers(
+    await applyActivePaneMarkers(
       thrown,
       async () => {
         throw new Error('herdr unavailable');
@@ -246,7 +282,7 @@ describe('tab-based active marker (selection list)', () => {
     expect(thrown[0].status).toBe('open');
 
     const nulled = [{ id: WL, status: 'open', stage: 'plan_complete' }];
-    await applyActiveTabMarkers(nulled, async () => null, 'wCurrent');
+    await applyActivePaneMarkers(nulled, async () => null, 'wCurrent');
     expect(nulled[0].status).toBe('open');
   });
 });
@@ -330,44 +366,40 @@ describe('decideDemotion', () => {
   });
 });
 
-// ── Running-pane liveness (AC2 / F1) ──────────────────────────────────
+// ── Pane-title active detection (AC2 / WL-0MV1BWETT005GSUJ) ──────────
+// A pane in the current workspace whose title contains the item ID → active;
+// otherwise not. No agent-liveness checks: pane-title existence is the signal.
 
-describe('running-pane liveness (AC2)', () => {
-  const tab = (label: string, agent_status?: string, workspace_id?: string): HydratorTab => ({
-    tab_id: `t-${label}-${agent_status ?? 'none'}`,
+describe('pane-title active detection (AC2)', () => {
+  const pane = (label: string, agent_status?: string, workspace_id?: string): HydratorPane => ({
+    pane_id: `p-${label.length}-${agent_status ?? 'none'}`,
     label,
     ...(workspace_id !== undefined ? { workspace_id } : {}),
     ...(agent_status !== undefined ? { agent_status } : {}),
   });
 
-  it('isActivePaneMatch: matches an exact-label tab hosting a working agent', () => {
-    const panes = [tab('Work Items'), tab(WL, 'working')];
-    expect(isActivePaneMatch(WL, panes)).toBe(true);
+  it('isActivePaneMatch: matches a pane whose title carries the ID regardless of agent_status', () => {
+    // Pane-title existence is the signal — agent_status is irrelevant.
+    const titled = `Downtime triggered implement Foo - ${WL}`;
+    expect(isActivePaneMatch(WL, [pane(titled, 'working')])).toBe(true);
+    expect(isActivePaneMatch(WL, [pane(titled, 'done')])).toBe(true);
+    expect(isActivePaneMatch(WL, [pane(titled, 'exited')])).toBe(true);
+    expect(isActivePaneMatch(WL, [pane(titled)])).toBe(true); // absent status also counts
   });
 
-  it('isActivePaneMatch: does NOT match a done (finished) pane (F1 repro)', () => {
-    const panes = [tab(WL, 'done')];
-    expect(isActivePaneMatch(WL, panes)).toBe(false);
-  });
-
-  it('isActivePaneMatch: does NOT match an exited pane', () => {
-    const panes = [tab(WL, 'exited')];
-    expect(isActivePaneMatch(WL, panes)).toBe(false);
-  });
-
-  it('isActivePaneMatch: fail-open — an un-reported agent_status still counts as active', () => {
-    const panes = [tab(WL)];
-    expect(isActivePaneMatch(WL, panes)).toBe(true);
-  });
-
-  it('isActivePaneMatch: exact label only (a containing label is not a match)', () => {
-    const panes = [tab(`implement ${WL}`, 'working')];
-    expect(isActivePaneMatch(WL, panes)).toBe(false);
+  it('isActivePaneMatch: matches a pane whose title IS exactly the item ID', () => {
+    expect(isActivePaneMatch(WL, [pane(WL)])).toBe(true);
   });
 
   it('isActivePaneMatch: scopes to the current workspace', () => {
-    expect(isActivePaneMatch(WL, [tab(WL, 'working', 'wOther')], 'wCurrent')).toBe(false);
-    expect(isActivePaneMatch(WL, [tab(WL, 'working', 'wCurrent')], 'wCurrent')).toBe(true);
+    const titled = `Downtime - ${WL}`;
+    expect(isActivePaneMatch(WL, [pane(titled, 'working', 'wOther')], 'wCurrent')).toBe(false);
+    expect(isActivePaneMatch(WL, [pane(titled, 'working', 'wCurrent')], 'wCurrent')).toBe(true);
+  });
+
+  it('isActivePaneMatch: no match when the pane title carries no work-item ID', () => {
+    expect(isActivePaneMatch(WL, [pane('Work Items')])).toBe(false);
+    expect(isActivePaneMatch(WL, [pane('A general shell')])).toBe(false);
   });
 });
 
@@ -376,14 +408,14 @@ describe('running-pane liveness (AC2)', () => {
 describe('extractWorkItemIdsFromPaneTitles (AC1)', () => {
   it('extracts every work-item ID found in pane labels', () => {
     const panes = [
-      { tab_id: 't1', label: `implement ${WL} --focused` },
-      { tab_id: 't2', label: 'Work Items' },
+      { pane_id: 'p1', label: `implement ${WL} --focused` },
+      { pane_id: 'p2', label: 'Work Items' },
     ];
     expect(extractWorkItemIdsFromPaneTitles(panes)).toEqual([WL]);
   });
 
   it('returns an empty array when no pane label carries an ID', () => {
-    expect(extractWorkItemIdsFromPaneTitles([{ tab_id: 't1', label: 'Nothing here' }])).toEqual([]);
+    expect(extractWorkItemIdsFromPaneTitles([{ pane_id: 'p1', label: 'Nothing here' }])).toEqual([]);
     expect(extractWorkItemIdsFromPaneTitles([])).toEqual([]);
   });
 });
@@ -391,42 +423,31 @@ describe('extractWorkItemIdsFromPaneTitles (AC1)', () => {
 // ── Orchestration ─────────────────────────────────────────────────────
 
 describe('runHydrationOnce', () => {
-  it('demotes a tab-less in_review item to completed', async () => {
+  it('demotes a pane-less in_review item to completed', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'in_review' }],
-      listTabs: async () => [],
+      listActivePanes: async () => [],
     });
     const result = await runHydrationOnce(deps);
     expect(result).toMatchObject({ ok: true, considered: 1, demoted: 1 });
     expect(applied).toEqual([{ id: WL, status: 'completed', stage: 'in_review' }]);
   });
 
-  it('demotes a tab-less plain item to open at intake_complete (AC3 else-branch)', async () => {
+  it('demotes a pane-less plain item to open at intake_complete (AC3 else-branch)', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listTabs: async () => [],
+      listActivePanes: async () => [],
     });
     await runHydrationOnce(deps);
     expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
   });
 
-  it('demotes an item whose only matching tab hosts a done agent (F1)', async () => {
+  it('keeps an item whose pane title carries the item ID (agent_status irrelevant)', async () => {
+    // Pane-title existence is the sole signal — agent_status (done/working/absent) is irrelevant.
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listTabs: async () => [
-        { tab_id: 't1', label: WL, agent_status: 'done', workspace_id: 'wCurrent' },
-      ],
-    });
-    const result = await runHydrationOnce(deps, 'wCurrent');
-    expect(result.demoted).toBe(1);
-    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
-  });
-
-  it('keeps an item whose matching tab hosts a working agent', async () => {
-    const { deps, applied } = makeDeps({
-      listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listTabs: async () => [
-        { tab_id: 't1', label: WL, agent_status: 'working', workspace_id: 'wCurrent' },
+      listActivePanes: async () => [
+        { pane_id: 'wC:p1', label: `Downtime triggered - ${WL}`, agent_status: 'done', workspace_id: 'wCurrent' },
       ],
     });
     const result = await runHydrationOnce(deps, 'wCurrent');
@@ -437,18 +458,18 @@ describe('runHydrationOnce', () => {
   it('demotes to blocked when an outbound dependency is active', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'in_progress' }],
-      listTabs: async () => [],
+      listActivePanes: async () => [],
       listOutboundDeps: async () => [{ id: 'WL-OTHER', status: 'open', stage: 'plan_complete' }],
     });
     await runHydrationOnce(deps);
     expect(applied).toEqual([{ id: WL, status: 'blocked', stage: 'plan_complete' }]);
   });
 
-  it('does not query dependencies when a matching tab exists', async () => {
+  it('does not query dependencies when a matching pane exists', async () => {
     const listOutboundDeps = vi.fn(async () => []) as unknown as HydratorDeps['listOutboundDeps'];
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listTabs: async () => [{ tab_id: 't1', label: WL, workspace_id: 'w1' }],
+      listActivePanes: async () => [{ pane_id: 'w1:p1', label: `Downtime triggered - ${WL}`, workspace_id: 'w1' }],
       listOutboundDeps,
     });
     const result = await runHydrationOnce(deps, 'w1');
@@ -457,26 +478,26 @@ describe('runHydrationOnce', () => {
     expect(listOutboundDeps).not.toHaveBeenCalled();
   });
 
-  it('leaves a tab-matched item untouched even when the dep list would block', async () => {
+  it('leaves a pane-matched item untouched even when the dep list would block', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'in_review' }],
-      listTabs: async () => [{ tab_id: 't1', label: WL }],
+      listActivePanes: async () => [{ pane_id: 'p1', label: `Downtime triggered - ${WL}` }],
       listOutboundDeps: async () => [{ id: 'WL-OTHER', status: 'open' }],
     });
     await runHydrationOnce(deps);
     expect(applied).toEqual([]);
   });
 
-  it('fails open (no demotion) when the tab list is unavailable', async () => {
+  it('fails open (no demotion) when the pane list is unavailable', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listTabs: async () => {
+      listActivePanes: async () => {
         throw new Error('herdr missing');
       },
     });
     const result = await runHydrationOnce(deps);
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain('tab list');
+    expect(result.reason).toContain('pane list');
     expect(applied).toEqual([]);
   });
 
@@ -485,7 +506,7 @@ describe('runHydrationOnce', () => {
       listInProgressItems: async () => {
         throw new Error('wl missing');
       },
-      listTabs: async () => [],
+      listActivePanes: async () => [],
     });
     const result = await runHydrationOnce(deps);
     expect(result.ok).toBe(false);
@@ -495,7 +516,7 @@ describe('runHydrationOnce', () => {
   it('counts a failed demotion as skipped, not demoted', async () => {
     const { deps } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listTabs: async () => [],
+      listActivePanes: async () => [],
       applyDemotion: async () => false,
     });
     const result = await runHydrationOnce(deps);
@@ -505,7 +526,7 @@ describe('runHydrationOnce', () => {
   it('treats a throwing dependency lookup as not-blocked and still releases the item', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listTabs: async () => [],
+      listActivePanes: async () => [],
       listOutboundDeps: async () => {
         throw new Error('dep lookup failed');
       },
@@ -522,7 +543,7 @@ describe('runHydrationOnce', () => {
         { id: WL, status: 'in-progress', stage: 'in_review' },
         { id: other, status: 'in-progress', stage: 'plan_complete' },
       ],
-      listTabs: async () => [],
+      listActivePanes: async () => [],
     });
     const result = await runHydrationOnce(deps);
     expect(result.demoted).toBe(2);
@@ -549,7 +570,7 @@ describe('createHydratorRunner', () => {
   it('runs the hydration cycle when visible', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [{ id: WL, status: 'in-progress', stage: 'plan_complete' }],
-      listTabs: async () => [],
+      listActivePanes: async () => [],
     });
     const run = createHydratorRunner(deps, { isVisible: async () => true });
     const result = await run();
@@ -564,7 +585,7 @@ describe('createHydratorRunner', () => {
     ]);
     const { deps, applied } = makeDeps({
       listInProgressItems,
-      listTabs: async () => [],
+      listActivePanes: async () => [],
     });
     const run = createHydratorRunner(deps, { isVisible: async () => visible });
 
@@ -586,7 +607,7 @@ describe('createProductionHydratorDeps', () => {
   it('exposes the four injectable seams', () => {
     const deps = createProductionHydratorDeps();
     expect(typeof deps.listInProgressItems).toBe('function');
-    expect(typeof deps.listTabs).toBe('function');
+    expect(typeof deps.listActivePanes).toBe('function');
     expect(typeof deps.listOutboundDeps).toBe('function');
     expect(typeof deps.applyDemotion).toBe('function');
   });
@@ -602,30 +623,47 @@ describe('createProductionHydratorDeps', () => {
 //
 // Contract pinned here (implement to this):
 //   • every hydrator CLI spawn passes `{ stdin: 'ignore', stderr: 'pipe' }`;
-//   • `runHydrationOnce` passes the workspace id to `listTabs`, which
-//     the production deps translate to `herdr tab list [--workspace <id>]`;
+//   • `runHydrationOnce` passes the workspace id to `listActivePanes`, which
+//     the production deps translate to `herdr pane list [--workspace <id>]`;
 //   • each step runs under a per-step timeout (`HydratorDeps.stepTimeoutMs`,
 //     default below the 20 s watchdog); a timeout aborts the run with
 //     `ok: false` and a `reason` containing the step label;
 //   • each step logs `... <label> ... elapsed <n>ms ...` measured with the
 //     injected `HydratorDeps.now` clock;
 //   • at most `HydratorDeps.maxItemsPerTick` candidates are processed per tick
-//     (default 50), each checked against its tab/dependency before demotion.
-// Step labels: `in-progress-list`, `tab-list`, `dep-list`, `demotion-apply`.
+//     (default 50), each checked against its pane/dependency before demotion.
+// Step labels: `in-progress-list`, `pane-list`, `dep-list`, `demotion-apply`.
 
 // ── Verification edge cases (WL-0MV24T2VJ007Q49J) ──────────────────────
 
-describe('pane-title-only ID no longer counts (verification)', () => {
-  it('demotes an in-progress item whose ID appears only in a tab label that contains (not equals) the ID', async () => {
+describe('pane-title matching (verification)', () => {
+  it('keeps an in-progress item whose ID appears in a pane title (producer rule)', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
         { id: WL, status: 'in-progress', stage: 'plan_complete' },
       ],
-      // Simulates the old pane-title behaviour: a tab whose label *contains*
-      // the ID but is not the exact ID (e.g. "implement WL-0MSOJLZD9004P8PI").
-      // Under the tab-matching contract this does NOT count as active.
-      listTabs: async () => [
-        { tab_id: 't1', label: `implement ${WL}`, workspace_id: 'wCurrent' },
+      // A dispatched pane is titled e.g. "Downtime triggered implement Foo -
+      // WL-0MSOJLZD9004P8PI" — the ID appears in the title, which is the
+      // active signal (WL-0MV1BWETT005GSUJ).
+      listActivePanes: async () => [
+        { pane_id: 'wC:p1', label: `Downtime triggered implement Foo - ${WL}`, workspace_id: 'wCurrent' },
+      ],
+    });
+
+    const result = await runHydrationOnce(deps, 'wCurrent');
+
+    expect(result.ok).toBe(true);
+    expect(result.demoted).toBe(0);
+    expect(applied).toEqual([]);
+  });
+
+  it('demotes when no pane title carries the ID', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      listActivePanes: async () => [
+        { pane_id: 'wC:p1', label: 'A general shell session', workspace_id: 'wCurrent' },
       ],
     });
 
@@ -633,101 +671,98 @@ describe('pane-title-only ID no longer counts (verification)', () => {
 
     expect(result.ok).toBe(true);
     expect(result.demoted).toBe(1);
-    // The item is demoted because its ID is not an *exact* tab label match.
     expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
   });
 });
 
 describe('workspace scoping at orchestration level', () => {
-  it('demotes when the only matching tab is in a different workspace', async () => {
+  it('demotes when the only matching pane is in a different workspace', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
         { id: WL, status: 'in-progress', stage: 'plan_complete' },
       ],
-      listTabs: async () => [
-        { tab_id: 't1', label: WL, workspace_id: 'wOther' },
+      listActivePanes: async () => [
+        { pane_id: 'wO:p1', label: `Downtime triggered - ${WL}`, workspace_id: 'wOther' },
       ],
     });
 
     await runHydrationOnce(deps, 'wCurrent');
 
-    // Tab exists but in the wrong workspace → item demoted.
+    // Pane exists but in the wrong workspace → item demoted.
     expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
   });
 
-  it('keeps an item when a matching tab is in the current workspace', async () => {
+  it('keeps an item when a matching pane is in the current workspace', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
         { id: WL, status: 'in-progress', stage: 'plan_complete' },
       ],
-      listTabs: async () => [
-        { tab_id: 't1', label: 'Work Items' },
-        { tab_id: 't2', label: WL, workspace_id: 'wCurrent' },
+      listActivePanes: async () => [
+        { pane_id: 'wC:p1', label: 'Work Items' },
+        { pane_id: 'wC:p2', label: `Downtime triggered - ${WL}`, workspace_id: 'wCurrent' },
       ],
     });
 
     await runHydrationOnce(deps, 'wCurrent');
 
-    // Exact tab in current workspace → item not demoted.
+    // Pane in current workspace → item not demoted.
     expect(applied).toEqual([]);
   });
 });
 
-describe('unparseable tab list output fails open', () => {
-  it('does not demote when parseTabListOutput returns null (unparseable output)', async () => {
+describe('unparseable pane list output fails open', () => {
+  it('does not demote when the pane seam returns null (unparseable output)', async () => {
     const { deps, applied } = makeDeps({
       listInProgressItems: async () => [
         { id: WL, status: 'in-progress', stage: 'plan_complete' },
       ],
-      // Simulates parseTabListOutput returning null (e.g. garbled JSON output).
-      // This is the unparseable path of the tab-list seam.
-      listTabs: async () => null,
+      // Simulates the pane-list seam returning null (e.g. garbled JSON output).
+      listActivePanes: async () => null,
     });
 
     const result = await runHydrationOnce(deps, 'wCurrent');
 
     expect(result.ok).toBe(false);
-    expect(result.reason).toContain('tab list');
+    expect(result.reason).toContain('pane list');
     expect(applied).toEqual([]);
   });
 });
 
-describe('no pane list in production hydrator spawns', () => {
-  it('asserts that every hydrator CLI spawn uses tab list, never pane list', async () => {
+describe('production active-detection spawns (pane list)', () => {
+  it('asserts that every hydrator CLI spawn uses pane list, never tab list', async () => {
     const { calls, exec } = hydratorExecRouter();
     setExecFileAsync(exec as never);
     const deps = createProductionHydratorDeps();
 
     await deps.listInProgressItems();
-    await deps.listTabs();
+    await deps.listActivePanes();
     await deps.listOutboundDeps(WL);
     await deps.applyDemotion(WL, 'open', 'plan_complete');
 
-    // Every recorded spawn must not include `pane`.
+    // Every recorded spawn must not include `tab` for the active-detection
+    // lookup (pane titles are the signal).
     expect(calls).toHaveLength(4);
-    for (const call of calls) {
-      expect(call.args.join(' ')).not.toContain('pane');
-    }
-    // The second call (listTabs) must use `herdr tab list` (bin may be a
-    // full path when HERDR_BIN_PATH is set).
-    const tabCall = calls.find((call) => call.args.includes('tab'));
-    expect(tabCall).toBeDefined();
-    expect(tabCall!.bin.endsWith('herdr')).toBe(true);
-    expect(tabCall!.args).toEqual(['tab', 'list']);
+    // The seam uses `herdr pane list` (bin may be a full path when
+    // HERDR_BIN_PATH is set).
+    const paneCall = calls.find(
+      (call) => call.bin.endsWith('herdr') && call.args.includes('pane'),
+    );
+    expect(paneCall).toBeDefined();
+    expect(paneCall!.args).toEqual(['pane', 'list']);
   });
 });
 
-describe('closed tab clears the in-progress marker (cadence re-evaluation)', () => {
-  it('a tab present keeps the item; removing the tab demotes on next run', async () => {
-    let visibleTab: string | undefined = WL;
+describe('closed pane clears the in-progress marker (cadence re-evaluation)', () => {
+  it('a pane present keeps the item; removing the pane demotes on next run', async () => {
+    let visiblePane: string | undefined = `Downtime triggered - ${WL}`;
     const applied: AppliedDemotion[] = [];
     const { deps } = makeDeps({
       listInProgressItems: async () => [
         { id: WL, status: 'in-progress', stage: 'plan_complete' },
       ],
-      listTabs: async () =>
-        visibleTab
-          ? [{ tab_id: 't1', label: visibleTab, workspace_id: 'wCurrent' }]
+      listActivePanes: async () =>
+        visiblePane
+          ? [{ pane_id: 'wC:p1', label: visiblePane, workspace_id: 'wCurrent' }]
           : [],
       applyDemotion: async (id, status, stage) => {
         applied.push({ id, status, stage });
@@ -738,16 +773,16 @@ describe('closed tab clears the in-progress marker (cadence re-evaluation)', () 
       isVisible: async () => true,
     });
 
-    // Tab is present — no demotion.
+    // Pane is present — no demotion.
     const result1 = await run();
     expect(result1?.ok).toBe(true);
     expect(result1?.demoted).toBe(0);
     expect(applied).toHaveLength(0);
 
-    // Simulate the user closing the work-item tab.
-    visibleTab = undefined;
+    // Simulate the user closing the work-item pane.
+    visiblePane = undefined;
 
-    // Next cadence run — tab gone → demotion.
+    // Next cadence run — pane gone → demotion.
     const result2 = await run();
     expect(result2?.ok).toBe(true);
     expect(result2?.demoted).toBe(1);
@@ -839,14 +874,14 @@ describe('production log sink (AC5)', () => {
       listInProgressItems: async () => [
         { id: WL, status: 'in-progress', stage: 'plan_complete' },
       ],
-      listTabs: async () => {
+      listActivePanes: async () => {
         throw new Error('herdr missing');
       },
     });
     const result = await runHydrationOnce(deps);
     expect(result.ok).toBe(false);
     expect(logs.length).toBeGreaterThan(0);
-    expect(logs.some((l) => l.includes('tab-list'))).toBe(true);
+    expect(logs.some((l) => l.includes('pane-list'))).toBe(true);
   });
 
   it('createHydratorFileLog appends bounded lines to <cwd>/.worklog/logs/hydrator.log', async () => {
@@ -878,14 +913,14 @@ describe('hydrator CLI stdio isolation (AC1)', () => {
 
     const deps = createProductionHydratorDeps();
     await deps.listInProgressItems();
-    await deps.listTabs();
+    await deps.listActivePanes();
     await deps.listOutboundDeps(WL);
     await deps.applyDemotion(WL, 'open', 'plan_complete');
 
-    // All four hydrator spawn shapes were exercised (in-progress list, tab
+    // All four hydrator spawn shapes were exercised (in-progress list, pane
     // list, per-item dep list, demotion apply).
     expect(calls).toHaveLength(4);
-    expect(calls.some((call) => call.args.includes('tab'))).toBe(true);
+    expect(calls.some((call) => call.args.includes('pane'))).toBe(true);
     expect(calls.some((call) => call.args.includes('dep'))).toBe(true);
     expect(calls.some((call) => call.args.includes('update'))).toBe(true);
     for (const call of calls) {
@@ -894,17 +929,17 @@ describe('hydrator CLI stdio isolation (AC1)', () => {
   });
 });
 
-// ── AC4: workspace-scoped tab listing ─────────────────────────────────
+// ── AC4: workspace-scoped pane listing ────────────────────────────────
 
-describe('workspace-scoped tab listing (AC4)', () => {
-  it('passes the current workspace id to the tab-list seam', async () => {
+describe('workspace-scoped pane listing (AC4)', () => {
+  it('passes the current workspace id to the pane-list seam', async () => {
     const seen: Array<string | undefined> = [];
     const { deps } = makeDeps({
       listInProgressItems: async () => [],
-      listTabs: (async (workspaceId?: string) => {
+      listActivePanes: (async (workspaceId?: string) => {
         seen.push(workspaceId);
         return [];
-      }) as HydratorDeps['listTabs'],
+      }) as HydratorDeps['listActivePanes'],
     });
 
     await runHydrationOnce(deps, 'wCurrent');
@@ -912,21 +947,21 @@ describe('workspace-scoped tab listing (AC4)', () => {
     expect(seen).toEqual(['wCurrent']);
   });
 
-  it('runs "herdr tab list --workspace <id>" when the workspace id is known', async () => {
+  it('runs "herdr pane list --workspace <id>" when the workspace id is known', async () => {
     const { calls, exec } = hydratorExecRouter();
     setExecFileAsync(exec as never);
     const deps = createProductionHydratorDeps();
-    const listTabs = deps.listTabs as (
+    const listActivePanes = deps.listActivePanes as (
       workspaceId?: string,
-    ) => Promise<HydratorTab[] | null>;
+    ) => Promise<HydratorPane[] | null>;
 
-    await listTabs('wCurrent');
+    await listActivePanes('wCurrent');
 
-    const tabCall = calls.find((call) => call.args.includes('tab'));
-    expect(tabCall).toBeDefined();
-    const index = tabCall!.args.indexOf('--workspace');
+    const paneCall = calls.find((call) => call.args.includes('pane'));
+    expect(paneCall).toBeDefined();
+    const index = paneCall!.args.indexOf('--workspace');
     expect(index).toBeGreaterThanOrEqual(0);
-    expect(tabCall!.args[index + 1]).toBe('wCurrent');
+    expect(paneCall!.args[index + 1]).toBe('wCurrent');
   });
 
   it('omits the --workspace filter when the workspace id is unknown', async () => {
@@ -934,11 +969,11 @@ describe('workspace-scoped tab listing (AC4)', () => {
     setExecFileAsync(exec as never);
     const deps = createProductionHydratorDeps();
 
-    await deps.listTabs();
+    await deps.listActivePanes();
 
-    const tabCall = calls.find((call) => call.args.includes('tab'));
-    expect(tabCall).toBeDefined();
-    expect(tabCall!.args).not.toContain('--workspace');
+    const paneCall = calls.find((call) => call.args.includes('pane'));
+    expect(paneCall).toBeDefined();
+    expect(paneCall!.args).not.toContain('--workspace');
   });
 });
 
@@ -959,7 +994,7 @@ describe('per-step timeouts (AC2)', () => {
     const { deps } = makeDeps({
       // The first lookup wedges like a hung `wl`/`herdr` child.
       listInProgressItems: () => new Promise<HydratorItem[]>(() => {}),
-      listTabs: async () => [],
+      listActivePanes: async () => [],
       listOutboundDeps,
       applyDemotion,
       stepTimeoutMs: 1_000,
@@ -992,7 +1027,7 @@ describe('per-step timeouts (AC2)', () => {
     const applyDemotion = vi.fn(async () => true);
     const { deps } = makeDeps({
       listInProgressItems: async () => items,
-      listTabs: async () => [],
+      listActivePanes: async () => [],
       listOutboundDeps,
       applyDemotion,
       stepTimeoutMs: 500,
@@ -1030,7 +1065,7 @@ describe('per-step timing logs (AC3)', () => {
         clock += 7;
         return [{ id: WL, status: 'in-progress', stage: 'plan_complete' }];
       },
-      listTabs: async () => {
+      listActivePanes: async () => {
         clock += 3;
         return [];
       },
@@ -1050,7 +1085,7 @@ describe('per-step timing logs (AC3)', () => {
     const lineFor = (label: string): string | undefined =>
       logs.find((line) => line.includes(label));
     expect(lineFor('in-progress-list')).toMatch(/elapsed 7ms/);
-    expect(lineFor('tab-list')).toMatch(/elapsed 3ms/);
+    expect(lineFor('pane-list')).toMatch(/elapsed 3ms/);
     expect(lineFor('dep-list')).toMatch(/elapsed 5ms/);
     expect(lineFor('demotion-apply')).toMatch(/elapsed 12ms/);
   });
@@ -1065,7 +1100,7 @@ describe('per-tick processing cap (AC5)', () => {
     const demoted: string[] = [];
     const { deps } = makeDeps({
       listInProgressItems: async () => items,
-      listTabs: async () => [],
+      listActivePanes: async () => [],
       listOutboundDeps: async (id) => {
         depChecked.push(id);
         return [];
@@ -1091,13 +1126,13 @@ describe('per-tick processing cap (AC5)', () => {
     expect(result.demoted).toBe(10);
   });
 
-  it('honours the cap under a 60-tab / 25-item worst case', async () => {
-    const tabs = makeWorstCaseTabs(60);
+  it('honours the cap under a 60-pane / 25-item worst case', async () => {
+    const panes = makeWorstCasePanes(60);
     const items = makeWorstCaseItems(25);
     const depChecked: string[] = [];
     const { deps } = makeDeps({
       listInProgressItems: async () => items,
-      listTabs: async () => tabs,
+      listActivePanes: async () => panes,
       listOutboundDeps: async (id) => {
         depChecked.push(id);
         return [];
@@ -1116,7 +1151,7 @@ describe('per-tick processing cap (AC5)', () => {
     const items = makeWorstCaseItems(60);
     const { deps } = makeDeps({
       listInProgressItems: async () => items,
-      listTabs: async () => [],
+      listActivePanes: async () => [],
       listOutboundDeps: async () => [],
       applyDemotion: async () => true,
     });

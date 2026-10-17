@@ -69,6 +69,7 @@ afterAll(() => {
 function runScript(
   args: string[],
   envOverrides: Record<string, string> = {},
+  scriptPath: string = SCRIPT,
 ): { status: number; log: string[] } {
   let status = 0;
   // Strip herdr-related env from the test runner itself so the script
@@ -82,7 +83,7 @@ function runScript(
   delete env.HERDR_RESOLVED_CWD;
   Object.assign(env, envOverrides);
   try {
-    execFileSync('bash', [SCRIPT, ...args], {
+    execFileSync('bash', [scriptPath, ...args], {
       encoding: 'utf-8',
       env: env as NodeJS.ProcessEnv,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -100,6 +101,25 @@ function runScript(
 /** Return the `pane split` invocation (if any) from the recorded log. */
 function splitInvocation(log: string[]): string | undefined {
   return log.find((line) => line.includes('pane split'));
+}
+
+/**
+ * Extract the arguments forwarded to `run-pi-agent.sh` from a `pane run`
+ * log line. The logged line is:
+ *
+ *   pane run <pane-id> exec bash <launcher-path> <lease-id> [--model <m>] <cmd>
+ *
+ * The launcher path is an absolute path into the checkout/worktree, so it can
+ * legitimately contain arbitrary substrings (e.g. `code`). Assertions about
+ * the forwarded pi arguments must therefore exclude it; otherwise the test is
+ * sensitive to where the repository happens to be checked out
+ * (WL-0MTT7XTN6006MHHV).
+ */
+function piArgsFromRunLine(run: string): string {
+  const marker = 'run-pi-agent.sh';
+  const idx = run.lastIndexOf(marker);
+  if (idx === -1) return run;
+  return run.slice(idx + marker.length).trim();
 }
 
 describe('send-to-pi.sh --cwd propagation', () => {
@@ -187,8 +207,38 @@ describe('send-to-pi.sh --model forwarding', () => {
     expect(status).toBe(0);
     const run = log.find((line) => line.includes('pane run'));
     expect(run).toBeDefined();
-    expect(run).not.toContain('--model');
-    expect(run).not.toContain('code');
+    // Assert on the forwarded pi args only — the launcher path may itself
+    // contain `code` depending on the checkout location (WL-0MTT7XTN6006MHHV).
+    const piArgs = piArgsFromRunLine(run!);
+    expect(piArgs).not.toContain('--model');
+    expect(piArgs).not.toContain('code');
+  });
+
+  it('omits --model even when the checkout path contains "code" (path-insensitive)', () => {
+    // Reproduce a checkout/worktree whose absolute path contains `code`: the
+    // launcher path baked into the `pane run` log line then contains `code`
+    // too. The assertion must only inspect the forwarded pi args, so the test
+    // passes regardless of where the repository lives (WL-0MTT7XTN6006MHHV).
+    const codeDir = join(tmpDir, 'some-code-checkout');
+    mkdirSync(codeDir, { recursive: true });
+    writeFileSync(join(codeDir, 'run-pi-agent.sh'), '#!/usr/bin/env bash\n');
+    const codeScript = join(codeDir, 'send-to-pi.sh');
+    writeFileSync(codeScript, readFileSync(SCRIPT, 'utf-8'));
+
+    const { status, log } = runScript(
+      ['--no-resize', '--cwd', '/tmp/project-root', '/skill:implement <id>'],
+      {},
+      codeScript,
+    );
+    expect(status).toBe(0);
+    const run = log.find((line) => line.includes('pane run'));
+    expect(run).toBeDefined();
+    // Sanity check: the raw line really does contain `code` (via the path),
+    // so a naive assertion on the whole line would fail here.
+    expect(run).toContain('code');
+    const piArgs = piArgsFromRunLine(run!);
+    expect(piArgs).not.toContain('--model');
+    expect(piArgs).not.toContain('code');
   });
 });
 

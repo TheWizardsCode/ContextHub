@@ -149,22 +149,25 @@ describe('refresh notification rendering', () => {
     expect(input).toContain('5');
   });
 
-  it('shows auto-refresh indicator in header', () => {
+  it('shows auto-refresh indicator in header (removal regression: none rendered)', () => {
     const renderer = createListRenderer();
     const items = makeItems(3);
     const result = renderer(
       items, 0, 0, defaultTermSize, null, 'list', null, undefined, undefined, 0, false,
     );
-    // Without auto-refresh, no indicator
+    // The `[auto-refresh on]` header segment was removed entirely
+    // (WL-0MV85T0LT008UT9H) — never render it, regardless of the setting.
     expect(result).not.toContain('auto');
   });
 
-  it('shows auto-refresh enabled in header when active', () => {
+  it('no longer renders an auto-refresh header indicator when active', () => {
     const renderer = createListRenderer();
     const items = makeItems(3);
     const result = renderer(
       items, 0, 0, defaultTermSize, null, 'list', null, undefined, undefined, 0, true,
     );
-    expect(result).toContain('auto');
+    // The setting still drives the scheduler tick (WL-0MSJ1OLTL009N4IQ), but
+    // the header segment was removed — even `true` renders nothing.
+    expect(result).not.toContain('auto');
   });
 });

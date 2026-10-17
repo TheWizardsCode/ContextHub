@@ -1340,13 +1340,18 @@ export class WorklogDatabase {
 
   /**
    * Conditional update (compare-and-swap, RCA WL-0MSRBFFLN005W3VT design
-   * point 1): apply `input` ONLY if the item's current status/stage match the
-   * expected guard. Runs the check and the write inside a single `BEGIN
-   * IMMEDIATE` transaction (see `PersistentStore.transactionImmediate`), so
-   * two concurrent `wl update --if-status/--if-stage` processes serialize on
-   * the SQLite write lock: exactly one observes the expected state and wins;
-   * the loser observes the winner's committed transition and fails `stale`
-   * without writing.
+   * point 1): apply `input` ONLY if the item's current status/stage/assignee
+   * match the expected guard. Runs the check and the write inside a single
+   * `BEGIN IMMEDIATE` transaction (see `PersistentStore.transactionImmediate`),
+   * so two concurrent `wl update --if-status/--if-stage/--if-assignee`
+   * processes serialize on the SQLite write lock: exactly one observes the
+   * expected state and wins; the loser observes the winner's committed
+   * transition and fails `stale` without writing.
+   *
+   * `expected.assignee` distinguishes an explicit empty-string guard (match
+   * an unassigned item — the status-neutral audit-tier claim) from an omitted
+   * guard (`undefined`): the empty string is a meaningful expected value, not
+   * a "no guard" sentinel.
    *
    * @returns `{ok:true, item}` on success; `{ok:false, reason:'not-found'}`
    * when the id is absent; `{ok:false, reason:'stale'}` when the guard
@@ -1355,7 +1360,7 @@ export class WorklogDatabase {
   updateIfMatches(
     id: string,
     input: UpdateWorkItemInput,
-    expected: { status?: string; stage?: string } = {},
+    expected: { status?: string; stage?: string; assignee?: string } = {},
   ): UpdateIfMatchesResult {
     return this.store.transactionImmediate(() => {
       const current = this.store.getWorkItem(id);
@@ -1370,6 +1375,9 @@ export class WorklogDatabase {
         }
       }
       if (expected.stage !== undefined && current.stage !== expected.stage) {
+        return { ok: false, reason: 'stale' };
+      }
+      if (expected.assignee !== undefined && (current.assignee ?? '') !== expected.assignee) {
         return { ok: false, reason: 'stale' };
       }
       const updated = this.update(id, input);
@@ -3059,7 +3067,11 @@ export class WorklogDatabase {
    * stripped) so that whitespace-only differences do NOT count as semantic
    * changes — e.g. a second worklog store that strips trailing newlines from
    * descriptions would otherwise re-timestamp every item on every `wl sync`
-   * (WL-0MSORD6HC005QVZX). All other fields use strict equality; arrays
+   * (WL-0MSORD6HC005QVZX). `needsProducerReview` is normalised through
+   * `Boolean()` so that an omitted flag (undefined on incoming items) is
+   * equivalent to an explicit `false` (the value stored items round-trip
+   * to) — no-op re-imports must not bump `updatedAt` (WL-0MVB9557U009LEIF).
+   * All other fields use strict equality; arrays
    * (tags) are compared by value.
    *
    * Shared by {@link hasWorkItemChanged} (16-field tracked set, used by
@@ -3075,6 +3087,14 @@ export class WorklogDatabase {
         // are not semantic changes — compare normalized text only.
         return String(oldVal ?? '').trim() !== String(newVal ?? '').trim();
       }
+      if (f === 'needsProducerReview') {
+        // Stored items round-trip this flag through Boolean() (SQLite INTEGER
+        // column), while incoming import/upsert items may omit the key
+        // (undefined). Normalise so an omitted flag is equivalent to an
+        // explicit false — otherwise every no-op re-import looks like a
+        // semantic change and updatedAt gets bumped (WL-0MVB9557U009LEIF).
+        return Boolean(oldVal) !== Boolean(newVal);
+      }
       if (Array.isArray(oldVal) && Array.isArray(newVal)) {
         return JSON.stringify(oldVal) !== JSON.stringify(newVal);
       }
@@ -3087,7 +3107,9 @@ export class WorklogDatabase {
    * tracked field has semantically changed.
    *
    * Uses the same field set and comparison logic as the no-op guard in {@link update}
-   * (via {@link compareTrackedFields}).
+   * (via {@link compareTrackedFields}). `needsProducerReview` is compared via
+   * `Boolean()` normalisation, so incoming items that omit the flag are not
+   * treated as changed against stored `false` values (WL-0MVB9557U009LEIF).
    */
   private hasWorkItemChanged(oldItem: WorkItem, newItem: WorkItem): boolean {
     const fieldsToCompare: (keyof WorkItem)[] = [
@@ -3126,6 +3148,12 @@ export class WorklogDatabase {
    * `updatedAt` is preserved so that sync operations do not silently
    * re-timestamp unchanged items. Changed items get a new `updatedAt`;
    * entirely new items use the incoming value as-is.
+   *
+   * `needsProducerReview` is compared via `Boolean()` normalisation (see
+   * {@link compareTrackedFields}), so an omitted flag on incoming items is
+   * treated as unchanged against a stored `false` — a no-op re-import must
+   * not re-timestamp every item (WL-0MVB9557U009LEIF). A genuine flip to
+   * `true` still counts as a change.
    *
    * Comparison is whitespace-insensitive for `title` and `description`
    * (via {@link compareTrackedFields}): trailing-newline strips / leading or
@@ -3209,7 +3237,8 @@ export class WorklogDatabase {
    *
    * **No-op guard**: For each item that already exists in the store AND has
    * identical tracked fields (same field set as {@link hasWorkItemChanged},
-   * whitespace-insensitive for `title`/`description`), the save is entirely
+   * whitespace-insensitive for `title`/`description`, `Boolean()`-normalised
+   * for `needsProducerReview`), the save is entirely
    * skipped — preserving the existing `updatedAt`. Items whose tracked fields
    * differ, or that are new, get a fresh `updatedAt` timestamp.
    *

@@ -29,6 +29,7 @@ export default function register(ctx: PluginContext): void {
     .option('-s, --status <status>', 'New status')
     .option('--if-status <status>', 'Only apply the update if the current status matches (CAS guard)')
     .option('--if-stage <stage>', 'Only apply the update if the current stage matches (CAS guard)')
+    .option('--if-assignee <assignee>', 'Only apply the update if the current assignee matches (CAS guard; "" matches an unassigned item)')
     .option('-p, --priority <priority>', 'New priority')
     .option('-P, --parent <parentId>', 'New parent ID (use "null" to detach / set parentId to null)')
     .option('--tags <tags>', 'New tags (comma-separated)')
@@ -54,14 +55,14 @@ export default function register(ctx: PluginContext): void {
       // --no-re-sort: skip auto re-sort
       // --re-sort-sync: force synchronous re-sort (blocking)
       // Normalize re-sort flags from commander/options
-      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync']);
+      const normalized = normalizeActionArgs(rawArgs, ['title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFile','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync']);
       // Robust detection of --no-re-sort that accepts multiple forms Commander
       // may expose (`noReSort`, `reSort: false`) and also checks raw argv.
       const cliNoReSort = process.argv.includes('--no-re-sort') || process.argv.includes('--noReSort');
       const reSortNo = (((normalized.options as any)?.noReSort === true) || ((normalized.options as any)?.reSort === false) || cliNoReSort);
       const reSortSync = Boolean((normalized.options as any)?.reSortSync);
       const knownOptionKeys = [
-        'title','description','descriptionFile','status','ifStatus','ifStage','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync'
+        'title','description','descriptionFile','status','ifStatus','ifStage','ifAssignee','priority','parent','tags','assignee','stage','risk','effort','issueType','createdBy','deletedBy','deleteReason','needsProducerReview','audit','auditText','auditFingerprint','doNotDelegate','prefix','noReSort','reSortSync'
       ];
       const argsHint = rawArgs.map(a => Array.isArray(a) ? `array(${a.length})` : `${typeof a}:${String(a).slice(0,100)}`);
       if (process.env.WL_DEBUG_UPDATE_ACTION) {
@@ -133,6 +134,14 @@ export default function register(ctx: PluginContext): void {
       // the stored `in-progress`.
       const ifStatusCandidate = hasProvided('ifStatus') ? options.ifStatus : undefined;
       const ifStageCandidate = hasProvided('ifStage') ? options.ifStage : undefined;
+      // `--if-assignee` is a status-neutral CAS guard (WL-0MV85WBDB003J35W).
+      // An explicit empty string is a meaningful expected value (match an
+      // unassigned item) and must be preserved as-is — it is distinguishable
+      // from the flag being omitted via `hasProvided`, which is why this is
+      // read through `String(...)` rather than a truthiness check.
+      const ifAssigneeCandidate = hasProvided('ifAssignee')
+        ? String(options.ifAssignee)
+        : undefined;
       if (ifStatusCandidate !== undefined) {
         const normalized = normalizeStatusValue(String(ifStatusCandidate));
         const valid =
@@ -235,6 +244,41 @@ export default function register(ctx: PluginContext): void {
         if (deletedByCandidate !== undefined) updates.deletedBy = deletedByCandidate;
         if (deleteReasonCandidate !== undefined) updates.deleteReason = deleteReasonCandidate;
         if (needsProducerReviewCandidate !== undefined) updates.needsProducerReview = needsProducerReviewCandidate;
+
+        // Soft-delete guard (SA-0MUJBLZC60085DI9 AC1): a soft-deleted work
+        // item (non-empty `deletedBy`) must never be resurrected by an
+        // update. `wl delete` sets `deletedBy` and may leave the status
+        // untouched, so without this guard `wl update <id> --status open`
+        // rewrites the status and the downtime dispatcher re-selects the
+        // deleted item. Reject any mutation other than an explicit change to
+        // the delete-attribution fields themselves (`--deleted-by` /
+        // `--delete-reason`) — the administrative override. The guard runs
+        // before any write so a rejected id is never partially mutated.
+        const existingForSoftDeleteGuard = db.get(normalizedId);
+        if (
+          existingForSoftDeleteGuard &&
+          String(existingForSoftDeleteGuard.deletedBy ?? '').trim() !== ''
+        ) {
+          // Note: `updates.status`/`updates.stage` are only populated later,
+          // per-id, by the status/stage validation block — so the candidate
+          // flags above must be checked directly here.
+          const mutatesNonDeleteField =
+            statusCandidate !== undefined ||
+            stageCandidate !== undefined ||
+            Object.keys(updates).some(
+              (key) => key !== 'deletedBy' && key !== 'deleteReason',
+            ) ||
+            auditCandidate !== undefined;
+          if (mutatesNonDeleteField) {
+            const message =
+              `Work item ${normalizedId} is soft-deleted ` +
+              `(deletedBy: ${existingForSoftDeleteGuard.deletedBy}) and cannot be updated. ` +
+              `Create a new work item instead.`;
+            results.push({ id: normalizedId, success: false, error: 'deleted-item', message });
+            continue;
+          }
+        }
+
         if (auditCandidate !== undefined) {
           const current = db.get(normalizedId);
           if (!current) {
@@ -465,19 +509,26 @@ export default function register(ctx: PluginContext): void {
         const itemBeforeUpdate = db.get(normalizedId);
         const oldPriority = (itemBeforeUpdate?.priority) as WorkItemPriority | undefined;
         // CAS claim path (RCA WL-0MSRBFFLN005W3VT design point 1): when
-        // --if-status/--if-stage are provided the update applies ONLY if the
-        // item still matches — the check and the write run in one immediate
-        // transaction so exactly one concurrent claimer wins. A guard
-        // mismatch fails per-id with error `stale` (no write); the herdr
+        // --if-status/--if-stage/--if-assignee are provided the update applies
+        // ONLY if the item still matches — the check and the write run in one
+        // immediate transaction so exactly one concurrent claimer wins. A
+        // guard mismatch fails per-id with error `stale` (no write); the herdr
         // downtime worker maps that to an aborted dispatch (no pane, no
         // marker, no success record).
         let item: WorkItem | null = null;
-        if (ifStatusCandidate !== undefined || ifStageCandidate !== undefined) {
+        if (
+          ifStatusCandidate !== undefined ||
+          ifStageCandidate !== undefined ||
+          ifAssigneeCandidate !== undefined
+        ) {
           const cas = db.updateIfMatches(normalizedId, updates, {
             ...(ifStatusCandidate !== undefined
               ? { status: String(ifStatusCandidate) }
               : {}),
             ...(ifStageCandidate !== undefined ? { stage: String(ifStageCandidate) } : {}),
+            ...(ifAssigneeCandidate !== undefined
+              ? { assignee: ifAssigneeCandidate }
+              : {}),
           });
           if (!cas.ok) {
             if (cas.reason === 'not-found') {
@@ -488,10 +539,14 @@ export default function register(ctx: PluginContext): void {
               // already claimed or changed the item. Report a distinct error
               // code so callers can distinguish a lost race from a real CLI
               // failure.
+              const guards = [
+                ifStatusCandidate !== undefined ? '--if-status' : null,
+                ifStageCandidate !== undefined ? '--if-stage' : null,
+                ifAssigneeCandidate !== undefined ? '--if-assignee' : null,
+              ].filter(Boolean).join('/');
               const message =
                 `Conditional update skipped: ${normalizedId} no longer matches ` +
-                `--if-status${ifStageCandidate !== undefined ? '/--if-stage' : ''} ` +
-                `(another process may have claimed it)`;
+                `${guards} (another process may have claimed it)`;
               results.push({ id: normalizedId, success: false, error: 'stale', message });
             }
             continue;

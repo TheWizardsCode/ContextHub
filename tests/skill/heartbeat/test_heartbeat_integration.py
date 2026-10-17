@@ -140,9 +140,9 @@ class TestHeartbeatIntegration(unittest.TestCase):
     # Sparse queue: check_queue() flags next item via real wl
     # ------------------------------------------------------------------
 
-    def test_sparse_queue_flags_next_item_via_real_wl(self):
-        """With < 10 completed/in_review items, check_queue() flags the
-        next item for producer review using the real wl CLI."""
+    def test_sparse_queue_holds_next_item_via_real_wl(self):
+        """With < 10 completed/in_review items, check_queue() holds the
+        next item for the producer using the real wl CLI."""
         # Create 3 completed/in_review items
         for i in range(3):
             self._create_completed_item(f'Sparse Item {i}')
@@ -154,8 +154,8 @@ class TestHeartbeatIntegration(unittest.TestCase):
         # (because we chdir'd to the temp dir, run_wl subprocess sees our DB)
         result = heartbeat.check_queue()
 
-        self.assertIn('Flagged', result)
-        self.assertIn('producer review', result)
+        self.assertIn('Held', result)
+        self.assertIn('producer', result)
         self.assertIn('3', result)  # 3 completed/in_review items
         self.assertIn('below threshold', result)
 

@@ -25,14 +25,15 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
     id: '20260210-add-needsProducerReview',
     description: 'Add needsProducerReview INTEGER column to workitems (default 0)',
     safe: true,
-    requiredColumn: 'needsProducerReview',
+    requiredColumn: '__meta:needsProducerReview_added',
     apply: (db: Database.Database) => {
-      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
-      const existingCols = new Set(cols.map(c => String(c.name)));
-      if (!existingCols.has('needsProducerReview')) {
-        // Idempotent add column
-        db.exec(`ALTER TABLE workitems ADD COLUMN needsProducerReview INTEGER NOT NULL DEFAULT 0`);
-      }
+      // Historical migration — preserved for history (WL-0MV85WFYU0071YQ9).
+      // The column has been dropped by 20261015-drop-needsProducerReview;
+      // this entry must never re-add it, so it only records completion via a
+      // metadata sentinel (mirrors the add-audit migration's noop pattern).
+      try {
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('needsProducerReview_added', '1');
+      } catch (_e) { /* best-effort */ }
     }
   },
   {
@@ -199,6 +200,46 @@ const MIGRATIONS: Array<{ id: string; description: string; safe: boolean; requir
       if (!cols.some(c => String(c.name) === 'auditWaiver')) {
         db.exec(`ALTER TABLE workitems ADD COLUMN auditWaiver TEXT`);
       }
+    }
+  },
+  {
+    id: '20261015-drop-needsProducerReview',
+    description: 'Legacy: Drop needsProducerReview column (reverted — the flag was restored by 20261016-restore-needsProducerReview)',
+    safe: false,
+    requiredColumn: '__meta:needsProducerReview_dropped',
+    apply: (db: Database.Database) => {
+      // NEUTRALISED (WL-0MVAMS4RO000H3B0 F2): the removal was a wrongful
+      // deletion (RCA WL-0MVAOYBZM0065AEN); the flag is restored by
+      // 20261016-restore-needsProducerReview. This historical entry must
+      // never drop the column again, so it only records completion via a
+      // metadata sentinel (mirrors the add-audit noop pattern). Existing
+      // databases that already applied the original drop keep the sentinel
+      // and the restore migration re-adds the column.
+      try {
+        db.prepare('INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)').run('needsProducerReview_dropped', '1');
+      } catch (_e) { /* best-effort */ }
+    }
+  },
+  {
+    id: '20261016-restore-needsProducerReview',
+    description: 'Restore needsProducerReview column (re-add after the reverted removal) and convert producer-hold assignees (WL-0MVAMS4RO000H3B0 F2)',
+    safe: true,
+    requiredColumn: 'needsProducerReview',
+    apply: (db: Database.Database) => {
+      // Re-add the column when it is missing (fresh databases get it from the
+      // persistent-store schema; already-migrated databases lost it to the
+      // now-neutralised drop migration). Idempotent.
+      const cols = db.prepare(`PRAGMA table_info('workitems')`).all() as any[];
+      const existingCols = new Set(cols.map(c => String(c.name)));
+      if (!existingCols.has('needsProducerReview')) {
+        db.exec(`ALTER TABLE workitems ADD COLUMN needsProducerReview INTEGER NOT NULL DEFAULT 0`);
+      }
+      // Q3=A conversion: any surviving producer-hold item (assignee 'Map',
+      // the retired assignee-hold convention) is marked as needing producer
+      // review so the review queue is not silently emptied by the restore.
+      try {
+        db.exec(`UPDATE workitems SET needsProducerReview = 1 WHERE trim(assignee) = 'Map' AND needsProducerReview = 0`);
+      } catch (_e) { /* best-effort: columns may be absent on partial schemas */ }
     }
   }
 ];

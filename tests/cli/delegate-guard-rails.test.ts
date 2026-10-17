@@ -129,7 +129,6 @@ function createDelegateTestContext() {
       deleteReason: '',
       risk: '',
       effort: '',
-      needsProducerReview: false,
       githubIssueNumber: overrides.githubIssueNumber,
       ...overrides,
     };

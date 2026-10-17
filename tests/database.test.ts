@@ -245,10 +245,10 @@ describe('WorklogDatabase', () => {
   describe('list', () => {
     beforeEach(() => {
       // Create test data
-      db.create({ title: 'Task 1', status: 'open', priority: 'high', needsProducerReview: true });
+      db.create({ title: 'Task 1', status: 'open', priority: 'high' });
       db.create({ title: 'Task 2', status: 'in-progress', priority: 'medium' });
       db.create({ title: 'Task 3', status: 'completed', priority: 'low' });
-      db.create({ title: 'Task 4', status: 'open', priority: 'high', tags: ['backend'], needsProducerReview: true });
+      db.create({ title: 'Task 4', status: 'open', priority: 'high', tags: ['backend'] });
       db.create({ title: 'Task 5', status: 'blocked', priority: 'critical', assignee: 'alice' });
     });
 
@@ -344,17 +344,6 @@ describe('WorklogDatabase', () => {
       expect(items[0].id).toBe(child.id);
     });
 
-    it('should filter by needsProducerReview true', () => {
-      const items = db.list({ needsProducerReview: true });
-      expect(items).toHaveLength(2);
-      items.forEach(item => expect(item.needsProducerReview).toBe(true));
-    });
-
-    it('should filter by needsProducerReview false', () => {
-      const items = db.list({ needsProducerReview: false });
-      expect(items).toHaveLength(3);
-      items.forEach(item => expect(item.needsProducerReview).not.toBe(true));
-    });
   });
 
   describe('update', () => {
@@ -1344,7 +1333,6 @@ describe('WorklogDatabase', () => {
         issueType: '',
         risk: '' as const,
         effort: '' as const,
-        needsProducerReview: false,
         createdAt: item.createdAt,
         updatedAt: originalUpdatedAt, // Pass through the original timestamp
       });
@@ -1376,7 +1364,6 @@ describe('WorklogDatabase', () => {
         issueType: '',
         risk: '' as const,
         effort: '' as const,
-        needsProducerReview: false,
         createdAt: item1.createdAt,
         updatedAt: originalUpdatedAt1,
       });
@@ -1392,7 +1379,6 @@ describe('WorklogDatabase', () => {
         issueType: '',
         risk: '' as const,
         effort: '' as const,
-        needsProducerReview: false,
         createdAt: item2.createdAt,
         updatedAt: originalUpdatedAt2,
       });
@@ -1424,7 +1410,6 @@ describe('WorklogDatabase', () => {
         issueType: item.issueType,
         risk: item.risk as '' | 'Low' | 'Medium' | 'High' | 'Critical',
         effort: item.effort as '' | 'Small' | 'Medium' | 'Large' | 'XLarge',
-        needsProducerReview: false,
         createdAt: item.createdAt,
         updatedAt: originalUpdatedAt,
       });
@@ -1591,7 +1576,6 @@ describe('WorklogDatabase', () => {
         deleteReason: '',
         risk: '' as const,
         effort: '' as const,
-        needsProducerReview: false,
         ...overrides,
       };
     }

@@ -44,25 +44,27 @@ class TestQueueLengthBranching(unittest.TestCase):
                 'success': True,
                 'workItem': {'id': 'WL-NEXT1', 'title': 'Next Ready Item'}
             },
-            # Third call: wl update --needs-producer-review true
+            # Third call: wl update --assignee Map
             {
                 'success': True,
-                'workItem': {'id': 'WL-NEXT1', 'title': 'Next Ready Item', 'needsProducerReview': True}
+                'workItem': {'id': 'WL-NEXT1', 'title': 'Next Ready Item', 'assignee': 'Map'}
             },
         ]
 
         result = heartbeat.check_queue()
 
-        # Should print the flagging message
-        self.assertIn('Flagged', result)
+        # Should print the holding message
+        self.assertIn('Held', result)
         self.assertIn('WL-NEXT1', result)
         self.assertIn('Next Ready Item', result)
         self.assertIn('3', result)
         self.assertIn('below threshold', result)
 
-        # Verify wl update was called with --needs-producer-review true
+        # Verify wl update was called with --assignee Map
         update_call = [c for c in mock_run_wl.call_args_list if 'update' in str(c)]
         self.assertEqual(len(update_call), 1)
+        self.assertIn('--assignee', update_call[0].args[0])
+        self.assertIn('Map', update_call[0].args[0])
 
     @patch('heartbeat.run_wl')
     @patch('heartbeat.subprocess')
@@ -288,22 +290,22 @@ class TestSparseQueueEdgeCases(unittest.TestCase):
         result = heartbeat.check_queue()
 
         self.assertIn('No next item', result)
-        self.assertIn('flag for review', result)
+        self.assertIn('hold for the producer', result)
 
     @patch('heartbeat.run_wl')
     def test_single_item_queue(self, mock_run_wl):
-        """Single item in queue should still flag next item."""
+        """Single item in queue should still hold the next item."""
         mock_run_wl.side_effect = [
             {'success': True, 'count': 1, 'workItems': [
                 {'id': 'WL-1', 'title': 'Only Item', 'sortIndex': 100, 'auditResult': None}
             ]},
             {'success': True, 'workItem': {'id': 'WL-NEXT', 'title': 'Next Item'}},
-            {'success': True, 'workItem': {'id': 'WL-NEXT', 'needsProducerReview': True}},
+            {'success': True, 'workItem': {'id': 'WL-NEXT', 'assignee': 'Map'}},
         ]
 
         result = heartbeat.check_queue()
 
-        self.assertIn('Flagged', result)
+        self.assertIn("Held", result)
         self.assertIn('WL-NEXT', result)
 
 

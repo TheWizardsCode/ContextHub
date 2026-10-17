@@ -30,6 +30,32 @@
  * the TUI, never blocks refresh/sync.
  *
  * AC1–AC5 of WL-0MSHB7DHO004RHBJ covered.
+ *
+ * # One request per connection (WL-0MVAS988R008PNH6)
+ *
+ * Herdr's API server handles exactly ONE JSON-RPC request per connection
+ * (verified against herdr 0.9.5): a streaming `events.subscribe` response
+ * occupies the connection, and ANY second request — another subscribe, a
+ * `ping`, even a `pane.list` — causes the server to RESET the connection
+ * (TCP RST), logging the outstanding subscription as `stream_closed`. The
+ * previous design resent `events.subscribe` on the live socket whenever the
+ * tracked pane set changed (`resendSubscribeRequest`), so every pane-seen/
+ * pane-gone event killed the subscription: after each reconnect the startup
+ * sync re-added panes, killing the fresh connection too — the ~10 s
+ * reconnect loop observed in herdr-server.log (sub-100…sub-115, matching
+ * MAX_RECONNECT_DELAY_MS). A plain idle subscription never closes (40 s+
+ * probe); the server expects NO keepalive on the stream — sending one is
+ * actively harmful.
+ *
+ * The fix is the "keepalive the server expects": write exactly ONE request
+ * per connection. Pane-set changes (`addPaneSubscription` /
+ * `removePaneSubscription`) update `trackedPaneIds` and then re-establish a
+ * FRESH connection carrying the complete subscription set in the single
+ * initial request (bounded: batched pane changes and changes landing while a
+ * reconnect is in flight coalesce into one rebuild via a version counter).
+ * Reconnect backoff is retained for genuine socket failures and reset on
+ * every successful subscribe, so routine stream closes reconnect promptly
+ * at the base delay instead of ratcheting to the 10 s cap.
  */
 
 import net from 'node:net';
@@ -123,6 +149,14 @@ export interface HerdrEventCallbacks {
   onPaneExited?: (data: PaneExitedEvent) => void;
   /** Called when a socket error occurs (for logging / monitoring). */
   onError?: (error: Error) => void;
+  /**
+   * Called after the subscription is (re-)established following a prior
+   * stream loss or a pane-set restart. Lets callers flip their
+   * "events active" state back on (e.g. re-enable the pane_focused → refresh
+   * path and stop the resume-poll fallback). NOT called for the very first
+   * successful subscribe — `connect()` resolves for that (WL-0MVAS988R008PNH6).
+   */
+  onReconnected?: () => void;
 }
 
 /**
@@ -209,6 +243,19 @@ export class HerdrEventSubscriber {
   private pendingCallbacks = new Map<string, PendingCallback>();
 
   /**
+   * Monotonic version of the tracked pane set. Every add/remove bumps it;
+   * the restart loop re-subscribes until the version is stable, coalescing
+   * pane-set changes that land while a reconnect is in flight.
+   */
+  private subscriptionVersion = 0;
+
+  /** Single-flight promise for an in-progress (or scheduled) restart. */
+  private restartPromise: Promise<EventResult> | null = null;
+
+  /** True once the very first subscribe has succeeded (drives onReconnected). */
+  private everActive = false;
+
+  /**
    * @param options Configuration options.
    */
   constructor(options: {
@@ -252,8 +299,7 @@ export class HerdrEventSubscriber {
       const result = await this.doConnect();
       this.isConnecting = false;
       if (result.type === 'subscribed') {
-        this.reconnectAttempts = 0;
-        this.currentHealth = { status: 'active', paneCount: this.trackedPaneIds.length };
+        this.markSubscribed();
       }
       return result;
     } catch (err: any) {
@@ -526,101 +572,181 @@ export class HerdrEventSubscriber {
   }
 
   /**
-   * Add a per-pane subscription for a new pane.
+   * Add per-pane subscriptions for new panes (one or more).
    *
    * When a `pane_agent_detected` event arrives for a pane not yet tracked,
    * callers should invoke this to add a per-pane `pane.agent_status_changed`
-   * subscription. The pane ID is added to the tracked set and a new
-   * subscribe request is sent.
+   * subscription. The pane IDs are added to the tracked set, then the
+   * connection is re-established ONCE with the complete subscription set.
+   *
+   * WL-0MVAS988R008PNH6: herdr's server accepts exactly one request per
+   * connection, so a pane-set change is applied by restarting the
+   * connection with the full set in the single initial `events.subscribe`
+   * request — NEVER by writing a second request on the live socket (which
+   * the server answers by resetting the connection).
+   *
+   * @param paneIds The pane IDs to subscribe to.
+   * @returns Result of the subscription update.
+   */
+  async addPaneSubscriptions(paneIds: string[]): Promise<EventResult> {
+    if (this.isClosed) {
+      return { type: 'error', error: 'Subscriber is closed' };
+    }
+
+    let changed = false;
+    for (const paneId of paneIds) {
+      if (!this.trackedPaneIds.includes(paneId)) {
+        this.trackedPaneIds.push(paneId);
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return { type: 'subscribed', subscriptions: this.getSubscriptionCount() };
+    }
+
+    this.subscriptionVersion++;
+    return this.restartSubscription();
+  }
+
+  /**
+   * Add a per-pane subscription for a single new pane.
    *
    * @param paneId The pane ID to subscribe to.
    * @returns Result of the subscription update.
    */
-  async addPaneSubscription(paneId: string): Promise<EventResult> {
-    if (this.isClosed) {
-      return { type: 'error', error: 'Subscriber is closed' };
-    }
-    if (this.trackedPaneIds.includes(paneId)) {
-      return { type: 'subscribed', subscriptions: this.getSubscriptionCount() };
-    }
-
-    this.trackedPaneIds.push(paneId);
-
-    // Resend subscribe request with the new pane
-    return this.resendSubscribeRequest();
+  addPaneSubscription(paneId: string): Promise<EventResult> {
+    return this.addPaneSubscriptions([paneId]);
   }
 
   /**
-   * Remove a per-pane subscription.
+   * Remove per-pane subscriptions (one or more panes).
+   *
+   * The pane IDs are dropped from the tracked set and the connection is
+   * re-established once with the remaining subscriptions (same
+   * one-request-per-connection discipline as addPaneSubscriptions).
+   *
+   * @param paneIds The pane IDs to remove.
+   * @returns Result of the subscription update.
+   */
+  async removePaneSubscriptions(paneIds: string[]): Promise<EventResult> {
+    if (this.isClosed) {
+      return { type: 'error', error: 'Subscriber is closed' };
+    }
+
+    let changed = false;
+    for (const paneId of paneIds) {
+      const idx = this.trackedPaneIds.indexOf(paneId);
+      if (idx !== -1) {
+        this.trackedPaneIds.splice(idx, 1);
+        changed = true;
+      }
+    }
+    if (!changed) {
+      return { type: 'unavailable', reason: 'Pane not tracked' };
+    }
+
+    this.subscriptionVersion++;
+    return this.restartSubscription();
+  }
+
+  /**
+   * Remove a per-pane subscription for a single pane.
    *
    * @param paneId The pane ID to remove.
    * @returns Result of the subscription update.
    */
-  async removePaneSubscription(paneId: string): Promise<EventResult> {
+  removePaneSubscription(paneId: string): Promise<EventResult> {
+    return this.removePaneSubscriptions([paneId]);
+  }
+
+  /**
+   * Re-establish the subscription via a fresh connection, single-flight.
+   *
+   * A pane-set change cannot be applied in place (the server accepts one
+   * request per connection), so the subscriber tears the current socket
+   * down and runs a fresh `events.subscribe` carrying the complete tracked
+   * set. Batched calls (and changes landing while a restart is in flight)
+   * coalesce: `subscriptionVersion` is bumped by every add/remove, and the
+   * loop re-subscribes until the version is stable.
+   *
+   * A deliberate restart is not a failure: reconnect backoff is reset so a
+   * subsequent genuine stream close reconnects promptly at the base delay.
+   */
+  private restartSubscription(): Promise<EventResult> {
+    if (this.restartPromise) {
+      return this.restartPromise;
+    }
+    this.restartPromise = this.runRestartLoop().finally(() => {
+      this.restartPromise = null;
+    });
+    return this.restartPromise;
+  }
+
+  private async runRestartLoop(): Promise<EventResult> {
+    let result: EventResult = { type: 'error', error: 'Subscription restart failed' };
+    let stableVersion = -1;
+    while (this.subscriptionVersion !== stableVersion) {
+      stableVersion = this.subscriptionVersion;
+      result = await this.connectWithCurrentSet();
+      if (this.isClosed || this.subscriptionVersion === stableVersion) {
+        break;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Tear down the current socket (no error path) and connect with the full
+   * current tracked pane set — exactly one request on the fresh connection.
+   */
+  private async connectWithCurrentSet(): Promise<EventResult> {
     if (this.isClosed) {
       return { type: 'error', error: 'Subscriber is closed' };
     }
 
-    const idx = this.trackedPaneIds.indexOf(paneId);
-    if (idx === -1) {
-      return { type: 'unavailable', reason: 'Pane not tracked' };
+    // Deliberate re-establishment: not a failure, so start from a clean
+    // backoff slate (a later genuine close reconnects at the base delay).
+    this.reconnectAttempts = 0;
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
     }
 
-    this.trackedPaneIds.splice(idx, 1);
+    this.isConnecting = true;
+    if (this.socket) {
+      // Drop the old socket without triggering the error/reconnect path.
+      this.socket.removeAllListeners();
+      this.socket.destroy();
+      this.socket = null;
+    }
 
-    // Resend subscribe request without this pane
-    return this.resendSubscribeRequest();
+    const result = await this.doConnect();
+    this.isConnecting = false;
+    if (result.type === 'subscribed') {
+      this.markSubscribed();
+    } else {
+      this.currentHealth = {
+        status: 'unavailable',
+        reason: result.type === 'error' ? result.error : result.reason,
+      };
+    }
+    return result;
   }
 
   /**
-   * Resend the events.subscribe request with the current tracked pane set.
+   * Record a successful subscription: reset backoff, update health, and
+   * notify callers when the stream was (re-)established after a prior loss
+   * or restart (never for the very first subscribe — callers await
+   * `connect()` for that).
    */
-  private resendSubscribeRequest(): Promise<EventResult> {
-    if (!this.socket || this.socket.destroyed || this.socket.writable === false) {
-      // Rollback: the pane was added/removed but we couldn't resubscribe
-      // This is a best-effort operation; in practice the reconnect
-      // mechanism will resubscribe with the correct pane set.
-      return Promise.resolve({ type: 'error', error: 'Socket not connected' });
+  private markSubscribed(): void {
+    const wasActive = this.everActive;
+    this.everActive = true;
+    this.reconnectAttempts = 0;
+    this.currentHealth = { status: 'active', paneCount: this.trackedPaneIds.length };
+    if (wasActive) {
+      this.callbacks.onReconnected?.();
     }
-
-    const subscriptions: SubscriptionEntry[] = [
-      { type: 'pane.focused' },
-      { type: 'pane.agent_detected' },
-      { type: 'pane.closed' },
-      { type: 'pane.exited' },
-    ];
-
-    for (const paneId of this.trackedPaneIds) {
-      subscriptions.push({
-        type: 'pane.agent_status_changed',
-        pane_id: paneId,
-      });
-    }
-
-    const id = `resub-${++this.requestCounter}`;
-    const frame = frameRequest(id, 'events.subscribe', { subscriptions });
-
-    return new Promise<EventResult>((resolve, reject) => {
-      const callback: PendingCallback = {
-        resolve: () => {
-          resolve({ type: 'subscribed', subscriptions: this.getSubscriptionCount() });
-        },
-        reject: (err) => {
-          resolve({ type: 'error', error: err.message });
-        },
-      };
-
-      this.pendingCallbacks.set(id, callback);
-
-      const timeout = setTimeout(() => {
-        this.pendingCallbacks.delete(id);
-        resolve({ type: 'error', error: 'Resubscribe timed out' });
-      }, this.timeoutMs);
-
-      this.socket!.write(frame + '\n', () => {
-        // Write callback — if write fails, the error handler will catch it
-      });
-    });
   }
 
   /**

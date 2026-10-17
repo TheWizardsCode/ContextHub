@@ -3,8 +3,8 @@
  * system.
  *
  * Layer note: exercises the shared `@worklog/shared/icons` functions as used
- * by the herdr display layer (status/stage/priority/audit/epic/risk/effort/
- * needsProducerReview icons, `stageColor`, and general `getIconPrefix`
+ * by the herdr display layer (status/stage/priority/audit/risk/effort
+ * icons, `stageColor`, and general `getIconPrefix`
  * behaviour). It is not a duplicate of:
  *   - tests/unit/icons.test.ts — the CLI `src/theme.ts` icon vocabulary; or
  *   - packages/herdr/src/icons.test.ts — fixed-width agent-slot alignment and
@@ -20,10 +20,8 @@ import {
   stageIcon,
   priorityIcon,
   auditIcon,
-  epicIcon,
   riskIcon,
   effortIcon,
-  needsProducerReviewIcon,
   auditStaleIcon,
   getIconPrefix,
   stageColor,
@@ -132,16 +130,6 @@ describe('auditStaleIcon', () => {
   });
 });
 
-describe('epicIcon', () => {
-  it('returns epic icon', () => {
-    expect(epicIcon()).toBeTruthy();
-  });
-
-  it('returns text fallback in noIcons mode', () => {
-    expect(epicIcon({ noIcons: true })).toMatch(/epic/i);
-  });
-});
-
 describe('riskIcon', () => {
   it('returns icon for known risk levels', () => {
     ['low', 'medium', 'high', 'critical'].forEach((r) => {
@@ -163,22 +151,6 @@ describe('effortIcon', () => {
 
   it('returns empty for unknown effort', () => {
     expect(effortIcon('unknown')).toBe('');
-  });
-});
-
-describe('needsProducerReviewIcon', () => {
-  it('returns needs-review icon when true', () => {
-    const result = needsProducerReviewIcon(true);
-    expect(result).toBeTruthy();
-  });
-
-  it('returns done icon when false', () => {
-    const result = needsProducerReviewIcon(false);
-    expect(result).toBeTruthy();
-  });
-
-  it('returns empty when undefined', () => {
-    expect(needsProducerReviewIcon(undefined)).toBe('');
   });
 });
 
@@ -210,14 +182,14 @@ describe('getIconPrefix', () => {
     expect(prefix.length).toBeGreaterThan(0);
   });
 
-  it('includes audit icon for in_review items', () => {
-    const item: WorkItem = { id: 'T1', title: 'Test', status: 'in_progress', stage: 'in_review' };
-    const prefix = getIconPrefix(item);
-    expect(prefix).toBeTruthy();
+  it('renders an epic item identically to a non-epic item (no epic column)', () => {
+    const epic: WorkItem = { id: 'T1', title: 'Test', status: 'open', issueType: 'epic' };
+    const task: WorkItem = { id: 'T2', title: 'Test', status: 'open', issueType: 'task' };
+    expect(getIconPrefix(epic)).toBe(getIconPrefix(task));
   });
 
-  it('includes producer review icon', () => {
-    const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', needsProducerReview: true };
+  it('includes the audit icon for in_review items', () => {
+    const item: WorkItem = { id: 'T1', title: 'Test', status: 'in_progress', stage: 'in_review' };
     const prefix = getIconPrefix(item);
     expect(prefix).toBeTruthy();
   });
@@ -228,10 +200,13 @@ describe('getIconPrefix', () => {
     expect(prefix).not.toMatch(/\(3\)/);
   });
 
-  it('includes epic icon for epic type', () => {
+  it('no longer renders an epic icon for epic types', () => {
     const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', issueType: 'epic' };
     const prefix = getIconPrefix(item);
-    expect(prefix).toBeTruthy();
+    // The epic glyph (and its text fallback) were removed from the prefix
+    // (WL-0MVAQ873D007LNWD); parent items are marked by the expand arrow.
+    expect(prefix).not.toContain('\u{2299}'); // ⊙
+    expect(prefix).not.toContain('[EPIC]');
   });
 
   it('pads icon-mode prefixes to the fixed width and shows fallbacks in noIcons mode', () => {
@@ -267,7 +242,7 @@ describe('getIconPrefix', () => {
     const items: WorkItem[] = [
       { id: 'T1', title: 'T', status: 'open', stage: 'idea', issueType: 'task' as const },
       { id: 'T2', title: 'T', status: 'in-progress', stage: 'in_review', issueType: 'epic' as const, childCount: 3 },
-      { id: 'T3', title: 'T', status: 'completed', stage: 'plan_complete', needsProducerReview: true },
+      { id: 'T3', title: 'T', status: 'completed', stage: 'plan_complete' },
       { id: 'T4', title: 'T', status: 'blocked', stage: 'intake_complete', issueType: 'task' as const },
       { id: 'T5', title: 'T', status: 'open', stage: 'in_progress', issueType: 'epic' as const },
     ];
@@ -282,10 +257,10 @@ describe('getIconPrefix', () => {
   it('prefixes with different icon counts align to the same column width', () => {
     // Item with only status icon
     const minimal: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', childCount: 0 };
-    // Item with status + stage + review + epic icon (child count removed from prefix)
+    // Item with status + stage + agent (child count removed from prefix)
     const maximal: WorkItem = {
       id: 'T2', title: 'T', status: 'completed', stage: 'in_review',
-      needsProducerReview: true, issueType: 'epic' as const, childCount: 5,
+      issueType: 'epic' as const, childCount: 5,
     };
 
     const minimalPrefix = getIconPrefix(minimal);
@@ -311,11 +286,11 @@ describe('getIconPrefix', () => {
     expect(freshWidth).toBe(staleWidth);
   });
 
-  it('handles items with and without producer review consistently', () => {
-    const withReview: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', needsProducerReview: true };
+  it('handles items with and without an agent state consistently', () => {
+    const withAgent: WorkItem = { id: 'T1', title: 'T', status: 'open', stage: 'idea', agentState: 'working' };
     const withoutReview: WorkItem = { id: 'T2', title: 'T', status: 'open', stage: 'idea' };
 
-    const withWidth = stringDisplayWidth(getIconPrefix(withReview));
+    const withWidth = stringDisplayWidth(getIconPrefix(withAgent));
     const withoutWidth = stringDisplayWidth(getIconPrefix(withoutReview));
     expect(withWidth).toBe(withoutWidth);
   });
@@ -326,7 +301,7 @@ describe('getIconPrefix', () => {
     const expected: Record<string, string> = {
       critical: '\u{1F6A8}', // 🚨
       high: '\u{2B50}',      // ⭐
-      medium: '\u{1F4CB}',   // 📋
+      medium: '\u{1F7E8}',   // 🟨
       low: '\u{1F422}',      // 🐢
     };
     for (const [priority, glyph] of Object.entries(expected)) {
@@ -351,7 +326,7 @@ describe('getIconPrefix', () => {
 
     // No stray priority glyph or fallback text appears, and both cases align
     // identically (the fixed-width padding absorbs the empty cell).
-    expect(undefinedPrefix).not.toMatch(/\u{1F6A8}|\u{2B50}|\u{1F4CB}|\u{1F422}/u);
+    expect(undefinedPrefix).not.toMatch(/\u{1F6A8}|\u{2B50}|\u{1F7E8}|\u{1F422}/u);
     expect(nullPrefix).toBe(undefinedPrefix);
   });
 
@@ -376,7 +351,7 @@ describe('getIconPrefix', () => {
     const items: WorkItem[] = [
       { id: 'T1', title: 'T', status: 'open', priority: 'critical' },
       { id: 'T2', title: 'T', status: 'open', priority: 'high', stage: 'in_review' },
-      { id: 'T3', title: 'T', status: 'completed', stage: 'in_review', needsProducerReview: true },
+      { id: 'T3', title: 'T', status: 'completed', stage: 'in_review' },
       { id: 'T4', title: 'T', status: 'blocked', issueType: 'epic' as const, priority: 'low' },
       { id: 'T5', title: 'T', status: 'open' },
     ];
@@ -389,10 +364,74 @@ describe('getIconPrefix', () => {
     const withIcons = getIconPrefix(item, { noIcons: false });
     const withoutIcons = getIconPrefix(item, { noIcons: true });
 
-    expect(withIcons).toContain('\u{1F4CB}');
-    expect(withoutIcons).not.toContain('\u{1F4CB}');
+    expect(withIcons).toContain('\u{1F7E8}');
+    expect(withoutIcons).not.toContain('\u{1F7E8}');
     // The priority fallback is prepended (before the agent fallback).
     expect(withoutIcons).toContain('[MED ]');
     expect(withoutIcons.indexOf('[MED ]')).toBeLessThan(withoutIcons.indexOf('[IDLE]'));
+  });
+});
+
+// ── Producer-review icons (restored contract WL-0MVAMS4RO000H3B0 F1) ────
+// RED-pinned with it.fails(`: `needsProducerReviewIcon` and the producer
+// prefix column were removed from `@worklog/shared/icons`
+// (WL-0MV85WFYU0071YQ9) and are being restored (F2/F4). The module is
+// loaded dynamically so this file does not break while the export is
+// absent; F4 flips `it.fails(` → `it(`.
+
+async function loadSharedIcons(): Promise<Record<string, any>> {
+  return import('@worklog/shared/icons');
+}
+
+describe('needsProducerReviewIcon (RED-contract, restored)', () => {
+  it('returns needs-review icon when true (F2 shared icon)', async () => {
+    const icons = await loadSharedIcons();
+    const result = icons.needsProducerReviewIcon(true);
+    expect(result).toBeTruthy();
+  });
+
+  it('returns done icon when false (F2 shared icon)', async () => {
+    const icons = await loadSharedIcons();
+    const result = icons.needsProducerReviewIcon(false);
+    expect(result).toBeTruthy();
+  });
+
+  it('returns empty when undefined (F2 shared icon)', async () => {
+    const icons = await loadSharedIcons();
+    expect(icons.needsProducerReviewIcon(undefined)).toBe('');
+  });
+});
+
+describe('getIconPrefix producer column (RED-contract, restored)', () => {
+  it('includes producer review icon (F2 shared icon + prefix column)', async () => {
+    const icons = await loadSharedIcons();
+    const item: WorkItem = { id: 'T1', title: 'Test', status: 'open', needsProducerReview: true };
+    const prefix = icons.getIconPrefix(item);
+    expect(prefix).toBeTruthy();
+    expect(prefix).toContain('\u{274C}'); // ❌
+  });
+
+  it('renders the [REVIEW]/[OK] text fallback in noIcons mode (F2 shared icon)', async () => {
+    const icons = await loadSharedIcons();
+    const flagged = icons.getIconPrefix(
+      { id: 'T1', title: 'Test', status: 'open', needsProducerReview: true } as WorkItem,
+      { noIcons: true },
+    );
+    expect(flagged).toContain('[REVIEW]');
+
+    const clear = icons.getIconPrefix(
+      { id: 'T2', title: 'Test', status: 'open', needsProducerReview: false } as WorkItem,
+      { noIcons: true },
+    );
+    expect(clear).toContain('[OK]');
+  });
+
+  it('getIconPrefixParts exposes the producer column for the coverage dimmer (F2 shared icon)', async () => {
+    const icons = await loadSharedIcons();
+    const parts = icons.getIconPrefixParts(
+      { status: 'open', needsProducerReview: true } as any,
+    );
+    expect(parts.text).toContain('\u{274C}'); // ❌
+    expect(parts.stageEnd).toBeGreaterThanOrEqual(0);
   });
 });

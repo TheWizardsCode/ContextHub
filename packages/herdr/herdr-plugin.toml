@@ -15,11 +15,16 @@ platforms = ["linux", "macos", "windows"]
 command = ["npm", "run", "build"]
 
 # Pane: work item selection list
+#
+# Entry is src/start.ts — the resilient launcher that wraps index.ts in a
+# dynamic import so a stale @worklog/shared (missing an ESM export) fails
+# with an actionable diagnostic instead of a silent pane exit
+# (WL-0MVAY631M004RZ3Q).
 [[panes]]
 id = "worklist"
 title = "Work Items"
 placement = "tab"
-command = ["npx", "tsx", "src/index.ts"]
+command = ["npx", "tsx", "src/start.ts"]
 
 # Main action: toggle the worklist pane
 [[actions]]

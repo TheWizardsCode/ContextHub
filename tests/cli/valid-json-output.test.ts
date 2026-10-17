@@ -317,22 +317,15 @@ describe('valid-json-output', () => {
   // ──────────────────────────────────────────────
 
   describe('management commands', () => {
-    it('reviewed --json outputs valid JSON with no preamble', async () => {
-      // reviewed toggles needsProducerReview, then back
+    it('update --json outputs valid JSON with no preamble', async () => {
       const { stdout } = await execAsync(
-        `tsx ${cliPath} --json reviewed ${itemId}`,
+        `tsx ${cliPath} --json update ${itemId} --assignee producer`,
       );
-      let result = expectValidJson(stdout);
+      const result = expectValidJson(stdout);
       expect(result.success).toBe(true);
       expect(result.workItem).toBeDefined();
       expect(result.workItem.id).toBe(itemId);
-
-      // Toggle back to original state
-      const { stdout: stdout2 } = await execAsync(
-        `tsx ${cliPath} --json reviewed ${itemId}`,
-      );
-      result = expectValidJson(stdout2);
-      expect(result.success).toBe(true);
+      expect(result.workItem.assignee).toBe('producer');
     });
 
     it('re-sort --json outputs valid JSON with no preamble', async () => {

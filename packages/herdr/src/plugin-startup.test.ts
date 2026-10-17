@@ -7,9 +7,10 @@
  * `modeSwitchWorker` const that is declared AFTER the downtime worker — so
  * the whole plugin died before the TUI ever rendered.
  *
- * This is an end-to-end guard: it runs the real entry point (the same command
- * herdr's pane manifest uses, `npx tsx src/index.ts`) and asserts it reaches
- * the TUI instead of crashing during wiring.
+ * This is an end-to-end guard: it runs the real entry point (the command
+ * herdr's pane manifest uses — `npx tsx src/start.ts`, the resilient
+ * launcher that wraps `src/index.ts`) and asserts it reaches the TUI
+ * instead of crashing during wiring.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -24,7 +25,7 @@ interface StartupResult {
 /** Run the plugin entry point and resolve with its combined output. */
 function runPluginStartup(cwd: string, timeoutMs: number): Promise<StartupResult> {
   return new Promise((resolve) => {
-    const child = spawn('npx', ['tsx', 'src/index.ts'], {
+    const child = spawn('npx', ['tsx', 'src/start.ts'], {
       cwd,
       // stdin is closed so the TUI tears down instead of blocking on input.
       stdio: ['ignore', 'pipe', 'pipe'],

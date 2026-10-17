@@ -37,7 +37,6 @@ function makeItem(id: string, overrides: Record<string, unknown> = {}): any {
     deleteReason: '',
     risk: '',
     effort: '',
-    needsProducerReview: false,
     ...overrides,
   };
 }

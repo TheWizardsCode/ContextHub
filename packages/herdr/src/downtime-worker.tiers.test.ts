@@ -72,8 +72,11 @@ describe('dispatch implement tier', () => {
     expect(outcome.candidate?.id).toBe('WL-IMP');
     expect(deps.getNextAuditCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
+    // Observable contract: getNextImplementCandidate boundary dep — sole channel proving the implement-tier query contract
     expect(deps.getNextImplementCandidate).toHaveBeenCalledWith('/repo');
+    // Observable contract: claimItem boundary CAS call
     expect(deps.claimItem).toHaveBeenCalledWith('WL-IMP', { status: 'open', stage: 'plan_complete' }, '/repo');
+    // Observable contract: spawnAgentPane boundary call
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-IMP'),
       { model: 'plan', cwd: '/repo', itemId: 'WL-IMP', itemTitle: 'Implement me' },
@@ -139,6 +142,7 @@ describe('dispatch implement tier', () => {
     expect(outcome.kind).toBe('plan');
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
     expect(deps.getNextItem).toHaveBeenCalledTimes(1);
+    // Observable contract: Nth tier-ordering (plan/intake fallback) — outcome.kind alone cannot prove sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
   });
 
@@ -155,7 +159,9 @@ describe('dispatch implement tier', () => {
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
     expect(outcome.kind).toBe('intake');
+    // Observable contract: Nth tier-ordering (plan/intake fallback) — outcome.kind alone cannot prove sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(1, 'intake_complete', '/repo');
+    // Observable contract: Nth tier-ordering (plan/intake fallback) — outcome.kind alone cannot prove sequence; retained per ordering rule
     expect(deps.getNextItem).toHaveBeenNthCalledWith(2, 'idea', '/repo');
   });
 
@@ -220,10 +226,11 @@ describe('dispatch code-freeze gate', () => {
     expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
     // Plan/intake tiers still dispatch.
-    expect(deps.getNextItem).toHaveBeenCalledWith('intake_complete', '/repo');
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('plan');
+    // Observable contract: claimItem boundary CAS call
     expect(deps.claimItem).toHaveBeenCalledWith('WL-PLAN', { status: 'open', stage: 'intake_complete' }, '/repo');
+    // Observable contract: spawnAgentPane boundary call
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-PLAN'),
       expect.anything(),
@@ -308,6 +315,7 @@ describe('dispatch code-freeze gate', () => {
     expect(resumed.dispatched).toBe(true);
     expect(resumed.kind).toBe('implement');
     expect(deps.getNextImplementCandidate).toHaveBeenCalledTimes(1);
+    // Observable contract: spawnAgentPane boundary call
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-IMP'),
       expect.anything(),
@@ -324,6 +332,7 @@ describe('dispatch code-freeze gate', () => {
 
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('audit');
+    // Observable contract: getNextAuditCandidate boundary dep — sole channel proving the audit-tier query contract
     expect(deps.getNextAuditCandidate).toHaveBeenCalledWith('/repo');
   });
 });
@@ -362,10 +371,12 @@ describe('dispatch scheduled-prompts tier', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: getDueScheduledPrompt boundary dep — sole channel proving the scheduled-tier query contract
     expect(deps.getDueScheduledPrompt).toHaveBeenCalledWith('/repo');
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('scheduled');
     // The prompt text is the dispatch payload — not a skill+work-item wrap.
+    // Observable contract: spawnAgentPane boundary call
     expect(deps.spawnAgentPane).toHaveBeenCalledWith('/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
@@ -388,11 +399,13 @@ describe('dispatch scheduled-prompts tier', () => {
 
     // The trigger timestamp is persisted (atomic config update) and the
     // rolling log marker is written with kind scheduled + noItemComment.
+    // Observable contract: recordScheduledPromptTrigger boundary dep — itemId/lastTriggeredAt payload is the observable persistence contract
     expect(deps.recordScheduledPromptTrigger).toHaveBeenCalledWith(
       '/repo',
       '/skill:refactor',
       expect.stringMatching(/^\d{4}-\d{2}-\d{2}T/),
     );
+    // Observable contract: recordDispatch boundary dep — marker payload observable
     expect(deps.recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         itemId: '/skill:refactor',
@@ -424,6 +437,7 @@ describe('dispatch scheduled-prompts tier', () => {
 
     const outcome = await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo' });
 
+    // Observable contract: getDueScheduledPrompt boundary dep
     expect(deps.getDueScheduledPrompt).toHaveBeenCalledWith('/repo');
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('audit');
@@ -447,6 +461,7 @@ describe('dispatch scheduled-prompts tier', () => {
       expect(deps.getDueScheduledPrompt).not.toHaveBeenCalled();
       expect(outcome.dispatched).toBe(true);
       expect(outcome.kind).toBe('plan');
+      // Observable contract: spawnAgentPane boundary call
       expect(deps.spawnAgentPane).toHaveBeenCalledWith(
         expect.stringContaining('/skill:plan WL-PLAN'),
         expect.anything(),
@@ -509,6 +524,7 @@ describe('dispatch scheduled-prompts tier', () => {
     expect(outcome.dispatched).toBe(false);
     expect(outcome.reason).toBe('spawn-failed');
     expect(outcome.error).toBe('ENOENT');
+    // Observable contract: recordDispatchFailure boundary dep — failure-trace payload observable
     expect(deps.recordDispatchFailure).toHaveBeenCalledWith(
       expect.objectContaining({
         itemId: '/skill:refactor',

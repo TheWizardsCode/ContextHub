@@ -7,7 +7,7 @@
  * home so the plugin no longer carries a duplicate that can drift.
  *
  * The icon glyphs deliberately preserve the values the herdr worklist has
- * always rendered (❓ unknown audit, ⏳ stale-passed, ⊙ epic, 💥 critical
+ * always rendered (❓ unknown audit, ⏳ stale-passed, 💥 critical
  * risk, `[ready]`/`[?]` text fallbacks) so removing the local copy does not
  * change any rendered output (parent WL-0MSJ4BT4Z002HH9B AC3: "the worklist
  * renders icons/colours identically").
@@ -75,7 +75,7 @@ const STAGE_FALLBACK: Record<string, string> = {
 const PRIORITY_ICONS: Record<string, string> = {
   critical: '\u{1F6A8}',  // 🚨
   high:     '\u{2B50}',   // ⭐
-  medium:   '\u{1F4CB}',  // 📋
+  medium:   '\u{1F7E8}',  // 🟨
   low:      '\u{1F422}',  // 🐢
 };
 
@@ -100,9 +100,6 @@ const EFFORT_ICONS: Record<string, string> = {
   xlarge:  '\u{1F4A0}',  // 💠
 };
 
-const EPIC_ICON = '\u{2299}';    // ⊙
-const EPIC_FALLBACK = '[EPIC]';
-
 const AUDIT_READY = '\u{2705}';      // ✅
 const AUDIT_NOT_READY = '\u{274C}';  // ❌
 const AUDIT_UNKNOWN = '\u{2753}';     // ❓
@@ -120,12 +117,17 @@ const AUDIT_COVERED_FALLBACK = '[COVERED]';
 const NEEDS_REVIEW_ICON = '\u{274C}';  // ❌
 const REVIEW_DONE_ICON = '\u{2705}';    // ✅
 
-// Agent-status icons (WL-0MSBQUJQX005RAT9). Glyph mapping confirmed by the
-// user: working → 🟢 (green circle), blocked → ⛔ (no-entry sign), idle → ⚪
-// (white circle). `done`/`unknown`/absent → no icon.
+// Agent-slot icons (WL-0MSBQUJQX005RAT9, repurposed for pane existence by
+// WL-0MV1BWETT005GSUJ). The worklist's selection list stamps `working` — the
+// green circle — on an item when a pane in the current workspace carries the
+// item's ID in its title (an open work-item pane), and clears it otherwise;
+// so in the list the glyph means "work-item pane open", never a live agent
+// status. `blocked`/`idle` remain valid `agentStatusIcon` states for other
+// consumers (the icon-fn API is unchanged). `done`/`unknown`/absent → no
+// icon.
 const AGENT_STATE_ICONS: Record<string, string> = {
   idle:    '\u{26AA}',   // ⚪
-  working: '\u{1F7E2}',  // 🟢
+  working: '\u{1F7E2}',  // 🟢 (green circle — list meaning: "work-item pane open")
   blocked: '\u{26D4}',   // ⛔
 };
 
@@ -213,19 +215,15 @@ export function auditStaleIcon(result: boolean | null | undefined, opts?: IconOp
 }
 
 /**
- * Get the epic icon.
- */
-export function epicIcon(opts?: IconOptions): string {
-  if (opts?.noIcons) return EPIC_FALLBACK;
-  return EPIC_ICON;
-}
-
-/**
- * Get the icon for a tracked agent's current state.
+ * Get the icon for an item's agent slot.
  *
- * `working → 🟢`, `blocked → ⛔`, `idle → ⚪`. `done`, `unknown`, or an
- * absent state render no icon (the agent finished or the pane is gone).
- * Text fallbacks follow the `[TEXT]` convention for noIcons mode.
+ * In the worklist selection list the stamped value is `working` — the
+ * green circle — which now (WL-0MV1BWETT005GSUJ) means "a work-item pane
+ * is open in this workspace", i.e. the item is being worked, regardless of
+ * the pane's live agent status. `blocked → ⛔`, `idle → ⚪` remain valid
+ * `agentStatusIcon` states for other consumers. `done`, `unknown`, or an
+ * absent state render no icon. Text fallbacks follow the `[TEXT]`
+ * convention for noIcons mode.
  */
 export function agentStatusIcon(state: string | undefined, opts?: IconOptions): string {
   const key = (state || '').toLowerCase();
@@ -267,6 +265,98 @@ export function needsProducerReviewIcon(
     return needsReview ? '[REVIEW]' : '[OK]';
   }
   return needsReview ? NEEDS_REVIEW_ICON : REVIEW_DONE_ICON;
+}
+
+// ── Icon legend (help screen) ───────────────────────────────────────────
+
+/**
+ * A single row of the help screen's icon legend (WL-0MV85R2G6000G7BU).
+ *
+ * `category` groups the row in the overlay (status/stage/priority/risk/
+ * effort/audit/producer-review/agent/coverage); `glyph` is the exact glyph
+ * rendered in work-item rows; `meaning` is a short human-readable label.
+ */
+export interface IconLegendEntry {
+  category: string;
+  glyph: string;
+  meaning: string;
+}
+
+/**
+ * The complete icon legend for the help overlay.
+ *
+ * Every row glyph (see {@link iconLegendGlyphs}, the catalog the row renderer
+ * emits) must have a legend row – the drift guard in
+ * `packages/shared/src/icons-legend.test.ts` fails on any unmapped glyph.
+ * Entries are deliberately authored here so a newly added row glyph is
+ * flagged until the legend explains it (parent WL-0MTV97GV20088CS7 AC5; the
+ * recorded mitigation for full automatic derivation).
+ */
+export const ICON_LEGEND: readonly IconLegendEntry[] = [
+  { category: 'status', glyph: '\u{1F513}', meaning: 'Status: open — not started' },
+  { category: 'status', glyph: '\u{1F504}', meaning: 'Status: in progress' },
+  { category: 'status', glyph: '\u{2714}\u{FE0F}', meaning: 'Status: completed' },
+  { category: 'status', glyph: '\u{26D4}', meaning: 'Status: blocked' },
+  { category: 'status', glyph: '\u{1F5D1}\u{FE0F}', meaning: 'Status: deleted' },
+  { category: 'status', glyph: '\u{1F4AC}', meaning: 'Status: input needed' },
+  { category: 'stage', glyph: '\u{1F4A1}', meaning: 'Stage: idea' },
+  { category: 'stage', glyph: '\u{1F4E5}', meaning: 'Stage: intake complete' },
+  { category: 'stage', glyph: '\u{1F4CB}', meaning: 'Stage: plan complete' },
+  { category: 'stage', glyph: '\u{1F6E0}\u{FE0F}', meaning: 'Stage: in progress (legacy)' },
+  { category: 'stage', glyph: '\u{1F50D}', meaning: 'Stage: in review' },
+  { category: 'stage', glyph: '\u{2714}\u{FE0F}', meaning: 'Stage: completed (legacy)' },
+  { category: 'stage', glyph: '\u{2714}\u{FE0F}', meaning: 'Stage: done' },
+  { category: 'priority', glyph: '\u{1F6A8}', meaning: 'Priority: critical' },
+  { category: 'priority', glyph: '\u{2B50}', meaning: 'Priority: high' },
+  { category: 'priority', glyph: '\u{1F7E8}', meaning: 'Priority: medium' },
+  { category: 'priority', glyph: '\u{1F422}', meaning: 'Priority: low' },
+  { category: 'risk', glyph: '\u{1F7E2}', meaning: 'Risk: low' },
+  { category: 'risk', glyph: '\u{1F7E1}', meaning: 'Risk: medium' },
+  { category: 'risk', glyph: '\u{1F534}', meaning: 'Risk: high' },
+  { category: 'risk', glyph: '\u{1F4A5}', meaning: 'Risk: critical' },
+  { category: 'effort', glyph: '\u{1F539}', meaning: 'Effort: small' },
+  { category: 'effort', glyph: '\u{1F537}', meaning: 'Effort: medium' },
+  { category: 'effort', glyph: '\u{1F536}', meaning: 'Effort: large' },
+  { category: 'effort', glyph: '\u{1F4A0}', meaning: 'Effort: extra large' },
+  { category: 'audit', glyph: '\u{2705}', meaning: 'Audit passed — ready to close' },
+  { category: 'audit', glyph: '\u{274C}', meaning: 'Audit failed — not ready' },
+  { category: 'audit', glyph: '\u{2753}', meaning: 'No audit recorded yet' },
+  { category: 'audit', glyph: '\u{23F3}', meaning: 'Stale audit (passed)' },
+  { category: 'audit', glyph: '\u{26A0}', meaning: 'Stale audit (failed)' },
+  { category: 'producer-review', glyph: '\u{274C}', meaning: 'Needs producer review' },
+  { category: 'producer-review', glyph: '\u{2705}', meaning: 'Producer review done' },
+  { category: 'agent', glyph: '\u{26AA}', meaning: 'Agent idle' },
+  { category: 'agent', glyph: '\u{1F7E2}', meaning: 'Work-item pane open' },
+  { category: 'agent', glyph: '\u{26D4}', meaning: 'Agent blocked' },
+  { category: 'coverage', glyph: '[COVERED]', meaning: 'Child covered by parent audit' },
+];
+
+/**
+ * The catalog of glyphs the work-item row renderer can emit — the single
+ * source of truth (the icon maps and constants). The help-overlay drift guard
+ * compares this catalog against {@link ICON_LEGEND}: adding a row glyph here
+ * without a legend row fails the test.
+ */
+export function iconLegendGlyphs(): string[] {
+  const glyphs = new Set<string>();
+  const collect = (map: Record<string, string>): void => {
+    for (const value of Object.values(map)) glyphs.add(value);
+  };
+  collect(STATUS_ICONS);
+  collect(STAGE_ICONS);
+  collect(PRIORITY_ICONS);
+  collect(RISK_ICONS);
+  collect(EFFORT_ICONS);
+  glyphs.add(AUDIT_READY);
+  glyphs.add(AUDIT_NOT_READY);
+  glyphs.add(AUDIT_UNKNOWN);
+  glyphs.add(AUDIT_STALE_PASSED);
+  glyphs.add(AUDIT_STALE_FAILED);
+  glyphs.add(NEEDS_REVIEW_ICON);
+  glyphs.add(REVIEW_DONE_ICON);
+  collect(AGENT_STATE_ICONS);
+  glyphs.add(AUDIT_COVERED_FALLBACK);
+  return [...glyphs];
 }
 
 // ── Audit freshness ───────────────────────────────────────────────────
@@ -762,9 +852,10 @@ export function getIconPrefixParts(
   // Column 0: priority icon (new, WL-0MTQYTA20009YXBT)
   const priorityIconText = priorityIcon(item.priority, { noIcons });
 
-  // Column 1: agent status — fixed-width reserved slot so rows with and
-  // without an agent keep the remaining icons and the item-ID column at
-  // identical columns (AC3, WL-0MSBQUJQX005RAT9).
+  // Column 1: agent slot — fixed-width reserved slot so rows with and
+  // without an open work-item pane keep the remaining icons and the
+  // item-ID column at identical columns (AC3, WL-0MSBQUJQX005RAT9; the
+  // green circle = work-item pane open, WL-0MV1BWETT005GSUJ).
   const agentIcon = agentStatusIcon(item.agentState, { noIcons });
   const agentSlot = agentIcon !== '' ? agentIcon : ' '.repeat(AGENT_SLOT_WIDTH);
 
@@ -781,13 +872,10 @@ export function getIconPrefixParts(
   // Concatenate core icons without spaces between them
   const coreIcons = [sIcon, secondIcon, prIcon].filter(Boolean).join('');
 
-  // Column 4: epic icon (child count is no longer shown in prefix)
-  const epicSuffix = item.issueType === 'epic' ? epicIcon({ noIcons }) : '';
-
   // Build full prefix and pad to fixed width for alignment. The agent slot
   // is included in the total, so rows with and without an agent still land
   // at exactly ICON_PREFIX_WIDTH cells.
-  let prefix = [priorityIconText, agentSlot, coreIcons, epicSuffix].filter(Boolean).join('');
+  let prefix = [priorityIconText, agentSlot, coreIcons].filter(Boolean).join('');
   const width = stringDisplayWidth(prefix);
   if (width < ICON_PREFIX_WIDTH) {
     prefix = prefix.padEnd(prefix.length + (ICON_PREFIX_WIDTH - width), ' ');
@@ -812,7 +900,6 @@ export function getIconPrefixParts(
  *   2. Status icon
  *   3. Stage icon (for in_review items, shows audit-aware icon instead)
  *   4. Producer review flag
- *   5. Optional epic icon
  */
 export function getIconPrefix(item: IconPrefixItem, opts?: IconOptions): string {
   return getIconPrefixParts(item, opts).text;

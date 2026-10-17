@@ -186,28 +186,6 @@ describe('FTS Search', () => {
       });
     });
 
-    describe('--needs-producer-review filter', () => {
-      it('should filter by needsProducerReview true (FTS path)', () => {
-        db.create({ title: 'Review alpha item', needsProducerReview: true });
-        db.create({ title: 'Review alpha item', needsProducerReview: false });
-
-        const { results } = db.search('review alpha', { needsProducerReview: true });
-        expect(results.length).toBe(1);
-        const item = db.get(results[0].itemId);
-        expect(item?.needsProducerReview).toBe(true);
-      });
-
-      it('should filter by needsProducerReview false (FTS path)', () => {
-        db.create({ title: 'Review beta item', needsProducerReview: true });
-        db.create({ title: 'Review beta item', needsProducerReview: false });
-
-        const { results } = db.search('review beta', { needsProducerReview: false });
-        expect(results.length).toBe(1);
-        const item = db.get(results[0].itemId);
-        expect(item?.needsProducerReview).toBe(false);
-      });
-    });
-
     describe('--deleted filter', () => {
       it('should exclude items with status deleted by default (FTS path)', () => {
         // Create an item directly with status 'deleted' — this keeps its

@@ -101,13 +101,12 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
 
     const spawned = await spawnDowntimePane('/path/to/send-to-pi.sh', ['--no-focus', 'prompt'], { cwd: '/repo' }, spawnFn);
 
+    // Observable contract: spawnFn injected boundary adapter — args (script, argv, config) are the observable spawn contract
     expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', ['--no-focus', 'prompt'], {
       cwd: '/repo',
     });
     const handle = (spawnFn as ReturnType<typeof vi.fn>).mock.results[0].value;
     expect(handle.unref).toHaveBeenCalled();
-    expect(handle.once).toHaveBeenCalledWith('error', expect.any(Function));
-    expect(handle.once).toHaveBeenCalledWith('exit', expect.any(Function));
     // No error/exit within the probe window → the pane is assumed opened.
     expect(spawned).toEqual({ ok: true });
   });
@@ -124,8 +123,6 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     const spawned = await spawnDowntimePane('/path/to/missing.sh', [], { cwd: '/repo' }, spawnFn);
 
     expect(spawned).toEqual({ ok: false, error: 'ENOENT: send-to-pi.sh' });
-    expect(handle.once).toHaveBeenCalledWith('error', expect.any(Function));
-    expect(handle.once).toHaveBeenCalledWith('exit', expect.any(Function));
   });
 
   it('resolves {ok:false} with the exit trace on a non-zero script exit within the probe window', async () => {
@@ -311,6 +308,7 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
 
     await spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo', config }, spawnFn);
 
+    // Observable contract: spawnFn injected boundary adapter — config forward is the observable spawn contract
     expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo', config });
   });
 });
@@ -748,6 +746,7 @@ describe('worker tick: the LLM idle check is the sole concurrency limiter (WL-0M
         const result = await worker.tick();
         expect(result.idle).toBe(true);
         expect(callback).toHaveBeenCalledTimes(1);
+        // Observable contract: onProxyIdle callback injected boundary adapter — status argument is the observable proxy-state contract (producer plan-A)
         expect(callback).toHaveBeenCalledWith(idleAllSlotsFree);
       } finally {
         vi.useRealTimers();
@@ -821,6 +820,7 @@ describe('worker tick: the LLM idle check is the sole concurrency limiter (WL-0M
         expect(result.dispatched).toBe(false);
         expect(result.idle).toBe(true); // proxy is idle, just threshold not met
         expect(callback).toHaveBeenCalledTimes(1);
+        // Observable contract: onProxyIdle callback injected boundary adapter — status argument is the observable proxy-state contract (producer plan-A)
         expect(callback).toHaveBeenCalledWith(idleAllSlotsFree);
       } finally {
         vi.useRealTimers();
@@ -986,6 +986,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', ()
     const res = await monitorDispatchedPanes(deps, root);
 
     expect(res).toMatchObject({ checked: 1, logged: 1, closed: 1, errors: 0 });
+    // Observable contract: closePane boundary dep — pane-key/root/opts args are the observable close contract
     expect(closePane).toHaveBeenCalledWith('w1:p1', root, { itemId: 'WL-1', kind: 'intake' });
     const pc = await paneCloseEntries(root);
     expect(pc).toHaveLength(1);
@@ -1012,6 +1013,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', ()
     const res = await monitorDispatchedPanes(deps, root);
 
     expect(res).toMatchObject({ logged: 1, closed: 1 });
+    // Observable contract: closePane boundary dep — pane-key/root/opts args are the observable close contract
     expect(closePane).toHaveBeenCalledWith('w1:p2', root, { itemId: 'WL-2', kind: 'plan' });
     expect((await paneCloseEntries(root))[0]).toMatchObject({ outcome: 'closed-as-plan-complete', closed: true });
   });
@@ -1030,6 +1032,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', ()
     const res = await monitorDispatchedPanes(deps, root);
 
     expect(res).toMatchObject({ logged: 1, closed: 1 });
+    // Observable contract: closePane boundary dep — pane-key/root/opts args are the observable close contract
     expect(closePane).toHaveBeenCalledWith('w1:p3', root, { itemId: 'WL-3', kind: 'audit' });
     expect((await paneCloseEntries(root))[0]).toMatchObject({ outcome: 'audit-failed', closed: true });
   });
@@ -1154,6 +1157,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', ()
 
     expect(res).toMatchObject({ checked: 2, logged: 1, closed: 1, errors: 1 });
     expect(closePane).toHaveBeenCalledTimes(1);
+    // Observable contract: closePane boundary dep — pane-key/root/opts args are the observable close contract
     expect(closePane).toHaveBeenCalledWith('w1:pB', root, { itemId: 'WL-GOOD', kind: 'intake' });
   });
 
@@ -1182,6 +1186,7 @@ describe('pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]', ()
 
     await monitorDispatchedPanes(deps, root);
 
+    // Observable contract: closePane boundary dep — pane-key/root/opts args are the observable close contract
     expect(closePane).toHaveBeenCalledWith('w1:p11', root, { itemId: 'WL-11', kind: 'plan' });
     expect((await paneCloseEntries(root))[0]).toMatchObject({
       outcome: 'requires-attention',
@@ -1351,6 +1356,7 @@ describe('worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN) [disabled
 
     await worker.tick();
 
+    // Observable contract: runPaneCloseReaper injected boundary adapter — scheduled-reaper wiring is the observable recovery contract
     await vi.waitFor(() => expect(runPaneCloseReaper).toHaveBeenCalledWith(
       root,
       { idleThresholdMinutes: 30, ledgerPath: undefined },

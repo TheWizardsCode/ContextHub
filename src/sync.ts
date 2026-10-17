@@ -123,10 +123,17 @@ export interface MergeOptions {
  * defaults.  The regression guard uses a broader definition so that
  * `status: open`, `stage: idea`, `priority: medium` are recognised as defaults
  * that signal data loss when they overwrite local non-default values.
+ *
+ * `assignee` is intentionally NOT a regression-guarded field
+ * (WL-0MV85WBZ2004VDUQ, epic Q1 option (a)).  It is a scheduling hold whose
+ * clear must propagate cross-root, so an empty value is treated as meaningful
+ * intent and resolved by timestamp rather than refused as a regression.
  */
 export function isRegressionDefault(value: unknown, field: string): boolean {
   if (value === undefined || value === '') {
-    return true;
+    // `assignee` is a scheduling hold whose clear is meaningful intent
+    // (WL-0MV85WBZ2004VDUQ, Q1 option (a)) — empty is never a regression.
+    return field !== 'assignee';
   }
   const str = String(value);
   switch (field) {
@@ -152,6 +159,24 @@ export function isValueRegression(localValue: unknown, remoteValue: unknown, fie
   return !isRegressionDefault(localValue, field) && isRegressionDefault(remoteValue, field);
 }
 
+/**
+ * Merge fields whose empty value carries intent rather than signalling
+ * absence, so it must NOT take part in the "prefer non-default" heuristic.
+ *
+ * `assignee` is a scheduling hold (WL-0MV85WBZ2004VDUQ, epic Q1 option (a)):
+ * assigning an item holds it from auto-dispatch and clearing the assignee
+ * releases it.  If `''` were treated as a default, a newer remote clear would
+ * either be refused as a regression (old behaviour) or lose to a stale local
+ * non-empty value — both resurrect stale claims.  Resolving such fields by
+ * timestamp/tie-break like any other field lets a newer clear win, so it
+ * propagates cross-root without `--accept-regressions`.
+ */
+const EMPTY_IS_MEANINGFUL_FIELDS: ReadonlySet<string> = new Set(['assignee']);
+
+/** True when `field`'s empty value is meaningful (never treated as a default). */
+export function isEmptyMeaningfulField(field: string): boolean {
+  return EMPTY_IS_MEANINGFUL_FIELDS.has(field);
+}
 
 /**
  * Merge two sets of work items with intelligent field-level conflict resolution
@@ -603,8 +628,8 @@ function mergeSameTimestampItems(
       continue;
     }
 
-    const localIsDefault = isDefaultValue(localValue, field, options);
-    const remoteIsDefault = isDefaultValue(remoteValue, field, options);
+    const localIsDefault = !isEmptyMeaningfulField(field as string) && isDefaultValue(localValue, field, options);
+    const remoteIsDefault = !isEmptyMeaningfulField(field as string) && isDefaultValue(remoteValue, field, options);
 
     // Special handling for close state (status=completed + terminal stage):
     // When one version has a close and the other has a different non-close status/stage,
@@ -733,10 +758,10 @@ function mergeSameTimestampItems(
     // ── Regression guard (WL-0MSOYWZTH003JFVD) ──────────────────────
     // Detect when a merge-participating field regresses from a local
     // non-default value to a remote default (e.g. status: completed → open,
-    // stage: done → idea, priority: high → medium, assignee: alice → '').
-    // The guard refuses the import and reports the conflict unless
-    // acceptRegressions is true.
-    const mergeParticipatingFields = ['status', 'stage', 'priority', 'assignee'];
+    // stage: done → idea, priority: high → medium).  The guard refuses the
+    // import and reports the conflict unless acceptRegressions is true.
+    // `assignee` is deliberately excluded (WL-0MV85WBZ2004VDUQ, Q1 option (a)).
+    const mergeParticipatingFields = ['status', 'stage', 'priority'];
     if (mergeParticipatingFields.includes(field as string) && isValueRegression(localValue, remoteValue, field)) {
       const acceptRegressions = options?.acceptRegressions ?? false;
       if (!acceptRegressions) {
@@ -861,8 +886,8 @@ function mergeDifferentTimestampItems(
     }
 
     if (!valuesEqual) {
-      const localIsDefault = isDefaultValue(localValue, field, options);
-      const remoteIsDefault = isDefaultValue(remoteValue, field, options);
+      const localIsDefault = !isEmptyMeaningfulField(field as string) && isDefaultValue(localValue, field, options);
+      const remoteIsDefault = !isEmptyMeaningfulField(field as string) && isDefaultValue(remoteValue, field, options);
 
       if (field === 'tags') {
         const mergedTags = mergeTags(localValue as string[] | undefined, remoteValue as string[] | undefined);
@@ -1041,7 +1066,8 @@ function mergeDifferentTimestampItems(
       }
 
       // ── Regression guard (WL-0MSOYWZTH003JFVD) ─────────────────────
-      const mergeParticipatingFieldsDiff = ['status', 'stage', 'priority', 'assignee'];
+      // `assignee` is deliberately excluded (WL-0MV85WBZ2004VDUQ, Q1 option (a)).
+      const mergeParticipatingFieldsDiff = ['status', 'stage', 'priority'];
       if (mergeParticipatingFieldsDiff.includes(field as string) && isValueRegression(localValue, remoteValue, field)) {
         const acceptRegressionsDiff = options?.acceptRegressions ?? false;
         if (!acceptRegressionsDiff) {

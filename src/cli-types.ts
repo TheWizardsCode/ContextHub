@@ -95,6 +95,12 @@ export interface UpdateOptions {
   ifStatus?: string;
   /** CAS guard: only apply the update if the current stage matches */
   ifStage?: string;
+  /**
+   * CAS guard: only apply the update if the current assignee matches.
+   * An explicit empty string matches an unassigned item (status-neutral
+   * audit-tier claim); omitting the flag applies no assignee guard.
+   */
+  ifAssignee?: string;
   priority?: WorkItemPriority;
   parent?: string;
   tags?: string;

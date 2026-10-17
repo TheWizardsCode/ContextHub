@@ -26,6 +26,7 @@ import {
   computeMetadataPanelHeight,
   computeDynamicLayout,
   formatMetadataPanel,
+  metadataPanelContentHeight,
   resolveMetaLastCommand,
   formatTimestamp,
   buildMetaRows,
@@ -39,6 +40,7 @@ import {
   formatChordHintsForHelp,
   formatFooterShortcutHints,
   resolvePodcastTarget,
+  formatPodcastNotice,
   clearDescriptionPreviewCache,
   isHeadingRow,
   formatItemLine,
@@ -46,6 +48,8 @@ import {
   formatBlockedShipDialog,
   createGatedTick,
   reviewQueueBannerText,
+  runWorklistTui,
+  keyToAction,
 } from './worklist.js';
 import type { DisplayRow } from './worklist.js';
 import type { ChordState } from './worklist.js';
@@ -3234,6 +3238,89 @@ describe('formatMetadataPanel — field rendering and scrolling', () => {
   });
 });
 
+describe('formatMetadataPanel — Blocked By rows (WL-0MV8EZRDJ001TDA8)', () => {
+  // Strip ANSI SGR codes so tests assert on visible text.
+  const visibleOf = (lines: string[]): string => lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+  it('renders one Blocked By row per active blocker with ID and title', () => {
+    const blockers = [
+      { id: 'WL-B1', title: 'First blocker' },
+      { id: 'WL-B2', title: 'Second blocker' },
+    ];
+    const lines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, 'cmd', false, blockers));
+    expect(lines).toMatch(/Blocked By\s+WL-B1 — First blocker/);
+    expect(lines).toMatch(/Blocked By\s+WL-B2 — Second blocker/);
+  });
+
+  it('renders Blocked By rows for a dependency-blocked open item', () => {
+    const item = { ...makeRichItem(), status: 'open', description: undefined };
+    const lines = visibleOf(formatMetadataPanel(item, 80, 20, 0, undefined, false, [
+      { id: 'WL-B1', title: 'Still blocking' },
+    ]));
+    expect(lines).toMatch(/Blocked By\s+WL-B1 — Still blocking/);
+  });
+
+  it('omits the Blocked By rows entirely when there are no active blockers', () => {
+    for (const blockedBy of [undefined, null, []]) {
+      const lines = visibleOf(
+        formatMetadataPanel(makeRichItem(), 80, 20, 0, 'cmd', false, blockedBy as never),
+      );
+      expect(lines).not.toContain('Blocked By');
+    }
+  });
+
+  it('falls back to the ID alone when a blocker has no title', () => {
+    const lines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, false, [
+      { id: 'WL-NOTITLE', title: '' },
+    ]));
+    expect(lines).toMatch(/Blocked By\s+WL-NOTITLE\s*$/m);
+    expect(lines).not.toContain('WL-NOTITLE —');
+  });
+
+  it('appends the blocker status (icon + text) after the title when present', () => {
+    const blockers = [
+      { id: 'WL-B1', title: 'First blocker', status: 'in-progress' },
+      { id: 'WL-B2', title: 'Second blocker', status: 'blocked' },
+    ];
+    const lines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, false, blockers));
+    expect(lines).toMatch(/Blocked By\s+WL-B1 — First blocker \u{1F504} in-progress/u);
+    expect(lines).toMatch(/Blocked By\s+WL-B2 — Second blocker \u{26D4} blocked/u);
+  });
+
+  it('renders the blocker status as plain text only when icons are disabled (noIcons)', () => {
+    const blockers = [{ id: 'WL-B1', title: 'First blocker', status: 'in-progress' }];
+    const withIcons = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, false, blockers));
+    expect(withIcons).toContain('🔄');
+    const noIconLines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, true, blockers));
+    expect(noIconLines).toMatch(/Blocked By\s+WL-B1 — First blocker in-progress/);
+    expect(noIconLines).not.toContain('🔄');
+  });
+
+  it('renders no status suffix when the blocker has no status', () => {
+    const lines = visibleOf(formatMetadataPanel(makeRichItem(), 80, 20, 0, undefined, false, [
+      { id: 'WL-B1', title: 'No status ref' },
+    ]));
+    expect(lines).toMatch(/Blocked By\s+WL-B1 — No status ref\s*$/m);
+  });
+
+  it('renders the Blocked By rows after the metadata rows and before the description preview', () => {
+    const item = { ...makeRichItem(), description: 'Some description here.' };
+    const raw = formatMetadataPanel(item, 80, 30, 0, undefined, false, [
+      { id: 'WL-B1', title: 'First blocker' },
+    ]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
+    const blockerIdx = raw.findIndex((l) => l.includes('WL-B1'));
+    expect(blockerIdx).toBeGreaterThan(-1);
+    // A metadata row (e.g. Status+Stage) precedes it; the Description
+    // preview follows it.
+    const metaIdx = raw.findIndex((l) => l.includes('Status'));
+    const descIdx = raw.findIndex((l) => l.includes('Description'));
+    expect(metaIdx).toBeGreaterThan(-1);
+    expect(descIdx).toBeGreaterThan(-1);
+    expect(metaIdx).toBeLessThan(blockerIdx);
+    expect(blockerIdx).toBeLessThan(descIdx);
+  });
+});
+
 describe('formatMetadataPanel — description preview (WL-0MT9ZJF28004UJ28)', () => {
   // Strip ANSI SGR codes so tests assert on visible text.
   const visibleOf = (lines: string[]): string => lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
@@ -3474,10 +3561,71 @@ describe('WorkItemListState — metadata scroll state', () => {
       /* bannerCount = */ 0,
       TERM_80x24,
     );
-    const content = formatMetadataPanel(state.getSelectedItem()!, TERM_80x24.cols, panelHeight, 0);
-    const maxScroll = Math.max(0, content.length - panelHeight);
+    // The clamp uses the UNPADDED content height (metadataPanelContentHeight),
+    // not formatMetadataPanel's padded return (always exactly panelHeight).
+    const contentHeight = metadataPanelContentHeight(
+      state.getSelectedItem()!,
+      TERM_80x24.cols,
+      panelHeight,
+    );
+    const maxScroll = Math.max(0, contentHeight - panelHeight);
     state.metaScrollDown(100, panelHeight);
     expect(state.metaScrollOffset).toBe(maxScroll);
+    // For a rich item the content genuinely overflows a small panel.
+    state.metaScrollDown(100, 4);
+    expect(state.metaScrollOffset).toBeGreaterThan(0);
+  });
+
+  it('clamps metaScrollDown to include Blocked By rows (WL-0MV8EZRDJ001TDA8)', () => {
+    const state = new WorkItemListState([makeRichItem()], TERM_80x24);
+    // A deliberately small panel height forces overflow in both cases.
+    const panelHeight = 4;
+    const blockers = Array.from({ length: 6 }, (_, i) => ({
+      id: `WL-B${i}`,
+      title: `Blocker ${i}`,
+    }));
+
+    // Without blockers.
+    state.metaScrollDown(1000, panelHeight);
+    const plainMax = state.metaScrollOffset;
+
+    // The render loop keeps state.metaBlockedBy in sync with the rows it
+    // shows; metaScrollDown must clamp against THOSE rows so `m` reaches the
+    // true bottom of the panel.
+    state.metaScrollOffset = 0;
+    state.metaBlockedBy = blockers;
+    state.metaScrollDown(1000, panelHeight);
+    const blockedMax = state.metaScrollOffset;
+
+    expect(plainMax).toBeGreaterThan(0);
+    expect(blockedMax).toBeGreaterThan(plainMax);
+  });
+
+  it('clamps detailScrollDown to include Blocked By rows (WL-0MVBMLY2Z0032CYR)', () => {
+    const state = new WorkItemListState([makeRichItem()], TERM_80x24);
+    state.selectedIndex = 0;
+    state.selectItem(); // enter detail mode
+    // A deliberately tiny viewport forces overflow in both cases (a 24-row
+    // term and a short item keep plainMax at 0). The detail-scroll clamp
+    // must count the `Blocked By` rows the renderer shows or they become
+    // unreachable when the view scrolls.
+    const blockers = Array.from({ length: 6 }, (_, i) => ({
+      id: `WL-B${i}`,
+      title: `Blocker ${i}`,
+    }));
+
+    state.detailScrollDown(9999);
+    const plainMax = state.detailScrollOffset;
+
+    // The render loop keeps state.detailBlockedBy in sync with the rows it
+    // shows; detailScrollDown must clamp against THOSE rows.
+    state.detailScrollOffset = 0;
+    state.detailBlockedBy = blockers;
+    state.detailScrollDown(9999);
+    const blockedMax = state.detailScrollOffset;
+
+    expect(blockedMax).toBeGreaterThan(plainMax);
+    expect(blockedMax).toBeGreaterThan(0);
   });
 
   it('metaScrollUp clamps at zero', () => {
@@ -3571,6 +3719,38 @@ describe('handleKeypress — metadata scroll keys', () => {
 // The manual `wl sync` binding on `S` is removed; `S` now resolves through
 // the ShortcutRegistry (Ship It dialog) like every other shortcut, and stays
 // distinct from lowercase `s` (Search).
+
+// ── Ctrl+r manual refresh (WL-0MV85T0LT008UT9H) ────────────────────────
+// The legacy bare-`r` refresh was removed (it collides with the `r` chord
+// leader); Ctrl+r (\x12) is the re-instated, unambiguous manual-refresh key
+// in list mode. The `refresh` action it returns drives the existing
+// `doRefresh(true)` path, which preserves the selection across the refetch.
+
+describe('Ctrl+r manual refresh (WL-0MV85T0LT008UT9H)', () => {
+  it('maps Ctrl+r (\x12) to the refresh action', () => {
+    expect(keyToAction('\x12')).toBe('refresh');
+  });
+
+  it('handleKeypress returns refresh for Ctrl+r in list mode', () => {
+    const state = new WorkItemListState([makeItem('A'), makeItem('B')], TERM_80x24);
+    expect(handleKeypress(state, '\x12', TERM_80x24)).toBe('refresh');
+    // Navigation state is untouched — the caller performs the refetch.
+    expect(state.mode).toBe('list');
+    expect(state.selectedIndex).toBe(0);
+  });
+
+  it('does not bind Ctrl+r in detail mode (list-mode-only scope)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    state.selectItem();
+    expect(state.mode).toBe('detail');
+    expect(handleKeypress(state, '\x12', TERM_80x24)).toBeNull();
+  });
+
+  it('keeps bare r keyboard-neutral (r remains the chord leader)', () => {
+    const state = new WorkItemListState([makeItem('A')], TERM_80x24);
+    expect(handleKeypress(state, 'r', TERM_80x24)).toBeNull();
+  });
+});
 
 describe('keyToAction — manual sync binding removed', () => {
   it('does not map S to the sync action anymore', () => {
@@ -3951,7 +4131,7 @@ describe('metadata views — paired-row compression (WL-0MSNIX4V60012266)', () =
 // icons as the list rows, paired with their text label (icon + text, e.g.
 // `🔄 in_progress`, `⭐ high`, `📥 intake_complete`). The Stage row mirrors
 // the list's audit-aware in_review icon via the shared stageDisplayIcon
-// helper; the Type row shows the epic icon for epic items only; Audit and
+// helper; the Type row renders plain text (no icon) for every type; Audit and
 // Reviewed rows pair their icons with text labels. With icons disabled the
 // values fall back to plain text — no emoji, no bracketed fallbacks.
 
@@ -3971,9 +4151,10 @@ describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', 
     expect(rows.get('Effort')).toBe('3');
   });
 
-  it('shows the epic icon on the Type row for epic items only', () => {
+  it('renders the Type row as plain text for every type (no epic icon)', () => {
     const epic = { ...makeRichItem(), issueType: 'epic' };
-    expect(new Map(buildMetaRows(epic)).get('Type')).toBe('\u{2299} epic'); // ⊙
+    // The `⊙` epic icon was removed from the Type row (WL-0MVAQ873D007LNWD).
+    expect(new Map(buildMetaRows(epic)).get('Type')).toBe('epic');
     expect(new Map(buildMetaRows(makeRichItem())).get('Type')).toBe('feature');
   });
 
@@ -4000,7 +4181,7 @@ describe('buildMetaRows — icon + text metadata values (WL-0MSGIXHHI009KFW9)', 
     // No icon glyphs leak into the noIcons values.
     for (const [label, value] of rows) {
       if (['Status', 'Stage', 'Priority', 'Type', 'Risk', 'Effort', 'Audit', 'Reviewed'].includes(label)) {
-        expect(value).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}\u{2299}]/u);
+        expect(value).not.toMatch(/[\u{1F300}-\u{1FAFF}\u{2700}-\u{27BF}\u{2600}-\u{26FF}]/u);
         expect(value).not.toMatch(/^\[/);
       }
     }
@@ -4518,6 +4699,56 @@ function makeKeyFilesItem(id: string, paths: string[]): WorkItem {
     ].join('\n'),
   };
 }
+
+// ── formatDetailContent — Blocked By rows (WL-0MVBMLY2Z0032CYR) ───────
+// The detail view renders the SAME active `Blocked By` rows as the
+// selection-list preview (reversing the documented divergence
+// WL-0MV8Q5X8U004KKAP AC-5): one row per blocker after the metadata table,
+// with the blocker's status (icon + text) appended when present.
+
+describe('formatDetailContent — Blocked By rows (WL-0MVBMLY2Z0032CYR)', () => {
+  const visibleOf = (lines: string[]): string => lines.join('\n').replace(/\x1b\[[0-9;]*m/g, '');
+
+  it('renders one Blocked By row per active blocker with ID, title and status (icon + text)', () => {
+    const blockers = [
+      { id: 'WL-B1', title: 'First blocker', status: 'in-progress' },
+      { id: 'WL-B2', title: 'Second blocker' },
+    ];
+    const joined = visibleOf(formatDetailContent(makeRichItem(), 80, undefined, false, 0, true, 0, blockers));
+    expect(joined).toMatch(/\| Blocked By\s+\| WL-B1 — First blocker \u{1F504} in-progress \|/u);
+    expect(joined).toMatch(/\| Blocked By\s+\| WL-B2 — Second blocker \|/);
+  });
+
+  it('places the Blocked By rows after the metadata table and before the description body', () => {
+    const item = { ...makeRichItem(), description: 'Body text here.' };
+    const lines = visibleOf(formatDetailContent(item, 80, undefined, false, 0, true, 0, [
+      { id: 'WL-B1', title: 'First blocker', status: 'blocked' },
+    ])).split('\n');
+    const metaIdx = lines.findIndex((l) => l.includes('| Status'));
+    const blockerIdx = lines.findIndex((l) => l.includes('WL-B1'));
+    const descIdx = lines.findIndex((l) => l.includes('Description'));
+    expect(metaIdx).toBeGreaterThan(-1);
+    expect(blockerIdx).toBeGreaterThan(-1);
+    expect(descIdx).toBeGreaterThan(-1);
+    expect(metaIdx).toBeLessThan(blockerIdx);
+    expect(blockerIdx).toBeLessThan(descIdx);
+  });
+
+  it('renders the blocker status as plain text only when icons are disabled (noIcons)', () => {
+    const joined = visibleOf(formatDetailContent(makeRichItem(), 80, undefined, true, 0, true, 0, [
+      { id: 'WL-B1', title: 'First blocker', status: 'in-progress' },
+    ]));
+    expect(joined).toMatch(/\| Blocked By\s+\| WL-B1 — First blocker in-progress \|/);
+    expect(joined).not.toContain('🔄');
+  });
+
+  it('omits the Blocked By rows entirely when there are no active blockers', () => {
+    for (const blockedBy of [undefined, null, []]) {
+      const joined = formatDetailContent(makeRichItem(), 80, undefined, false, 0, true, 0, blockedBy as never).join('\n');
+      expect(joined).not.toContain('Blocked By');
+    }
+  });
+});
 
 describe('buildMetaRows — Related Docs row (WL-0MSHWHRIF001YHF8)', () => {
   it('emits a Related Docs row listing every .md path from Key Files, joined with ", "', () => {
@@ -5912,7 +6143,9 @@ describe('createListRenderer — header truncation (WL-0MSNI6TQ5003JY1Z)', () =>
     expect(visible.length).toBeLessThanOrEqual(cols);
     // At 120 cols the header may be truncated at the very tail, but the
     // core segments should all be present up to the truncation point.
-    expect(visible).toContain('[auto-refresh on]');
+    // The `[auto-refresh on]` segment was removed entirely — it must never
+    // render, even when `autoRefresh` is passed as true (WL-0MV85T0LT008UT9H).
+    expect(visible).not.toContain('[auto-refresh on]');
     expect(visible).toContain('[paused — hidden]');
     // The downtime segment may be cut at the truncation boundary.
     expect(visible).toContain('[downtime');
@@ -6486,5 +6719,355 @@ describe('formatItemLine — priority title + stage id (WL-0MSJ2JFMO007PGQ6)', (
     const line = formatItemLine({ id: 'WL-999', title: 'No Stage', status: 'open', priority: 'high' } as WorkItem, 200, false, false);
     // id with no stage should render as plain (no stage escape) or default grey
     expect(line).toContain('WL-999');
+  });
+});
+
+// ── Footer help-line: advertise `?: Help`, drop downtime + mouse hints ──
+// Test-first pins for parent help screen work (WL-0MTV97GV20088CS7 AC1, AC2,
+// AC7a). The footer advertises `?: Help` instead of the low-value
+// `d:downtime toggle` single-key entry and the `alt+m mouse on/off` suffix.
+// The key bindings (AC4) are asserted with plain `it` — they stay green; only
+// the advertisement changes.
+describe('footer help-line advertises ?: Help and drops downtime/mouse hints (WL-0MV85QZCC002U28M)', () => {
+  // The live list entries the render path feeds to formatFooterShortcutHints().
+  const listEntries = (): ShortcutEntry[] =>
+    loadShortcutConfig()
+      .getEntriesForStage('plan_complete', false, 'task')
+      .filter(e => e.view === 'list' || e.view === 'both');
+
+  // AC1: the composed footer advertises the help screen.
+  it('advertises the literal ?: Help in the footer hint line', () => {
+    expect(formatFooterShortcutHints(listEntries())).toContain('?: Help');
+  });
+
+  // AC2: the low-value downtime toggle is no longer advertised.
+  it('no longer advertises the d:downtime toggle single-key entry', () => {
+    expect(formatFooterShortcutHints(listEntries())).not.toContain('d:downtime toggle');
+  });
+
+  // AC4: the d binding itself is untouched — only its advertisement changes.
+  // This regression guard is GREEN before and after the implementation.
+  it('keeps the d single-key downtime-toggle binding intact in the registry', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['d'], 'list')?.command).toBe('/downtime toggle');
+  });
+
+  // AC5: the existing showHelpText gate still hides the new `?: Help` hint.
+  it('showHelpText: false hides the ?: Help hint while it is shown when enabled', () => {
+    const renderer = createListRenderer();
+    const hints = formatFooterShortcutHints(listEntries());
+    const items: WorkItem[] = [makeItem('A')];
+    const renderWith = (showHelpText: boolean): string =>
+      renderer(
+        items, 0, 0, TERM_80x24, null, 'list', null,
+        undefined, null, 0, false, undefined, hints,
+        0, false, false, 0, undefined, undefined, undefined,
+        0, false, undefined, showHelpText,
+      );
+    expect(renderWith(true)).toContain('?: Help');
+    expect(renderWith(false)).not.toContain('?: Help');
+  });
+
+  // ── Composed-footer integration: the real TUI render loop ─────────────
+  // The alt+m suffix is appended to the dynamic hints inside render(), not in
+  // formatFooterShortcutHints(), so its removal can only be pinned end-to-end.
+  describe('runWorklistTui composed footer', () => {
+    type StdinListener = (chunk: Buffer) => void;
+
+    // Shared fake-TTY harness (mirrors worklist-mouse.test.ts): swaps
+    // process.stdin for a fake TTY that records data listeners and captures
+    // process.stdout writes.
+    function setupFakeTty(): {
+      dataListeners: StdinListener[];
+      writes: string[];
+      restore: () => void;
+    } {
+      const dataListeners: StdinListener[] = [];
+      const fakeStdin = {
+        isTTY: true,
+        setRawMode: vi.fn(),
+        resume: vi.fn(),
+        pause: vi.fn(),
+        on: (ev: string, cb: StdinListener) => {
+          if (ev === 'data') dataListeners.push(cb);
+        },
+        removeListener: (ev: string, cb: StdinListener) => {
+          if (ev === 'data') {
+            const i = dataListeners.indexOf(cb);
+            if (i >= 0) dataListeners.splice(i, 1);
+          }
+        },
+      };
+      const writes: string[] = [];
+      const writeSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: any) => {
+        writes.push(String(chunk));
+        return true;
+      }) as any);
+      const origStdin = (process as any).stdin;
+      Object.defineProperty(process, 'stdin', { value: fakeStdin, configurable: true, writable: true });
+      setExecFileAsync((async () => ({ stdout: '{"count": 0}' })) as any);
+      return {
+        dataListeners,
+        writes,
+        restore: () => {
+          Object.defineProperty(process, 'stdin', { value: origStdin, configurable: true, writable: true });
+          writeSpy.mockRestore();
+          resetExecFileAsync();
+        },
+      };
+    }
+
+    // Drives the real render loop, then dismisses the TUI. Always dismisses and
+    // drains the TUI promise so a failing assertion never leaks the loop.
+    async function renderFooter(dismissKey = 'q'): Promise<string> {
+      const { dataListeners, writes, restore } = setupFakeTty();
+      let tui: Promise<WorkItem | undefined> | undefined;
+      try {
+        tui = runWorklistTui(async () => [], [], loadShortcutConfig(), {
+          autoRefresh: false,
+          autoSync: false,
+        });
+        await vi.waitFor(() => {
+          expect(writes.length).toBeGreaterThan(0);
+        });
+        return stripAnsi(writes.join(''));
+      } finally {
+        dataListeners.forEach(cb => cb(Buffer.from(dismissKey)));
+        if (tui) await tui.catch(() => undefined);
+        restore();
+      }
+    }
+
+    // AC1 + AC2 + AC3: the composed footer advertises help and no longer
+    // carries the downtime or mouse-tracking advertisements.
+    it('composed TUI footer advertises ?: Help without downtime/mouse hints', async () => {
+      const footer = await renderFooter();
+      expect(footer).toContain('?: Help');
+      expect(footer).not.toContain('d:downtime toggle');
+      expect(footer).not.toContain('alt+m mouse on');
+      expect(footer).not.toContain('alt+m mouse off');
+    });
+
+    // AC4: the Alt+m toggle itself remains functional — its footer hint is
+    // gone but the key binding still toggles mouse tracking. GREEN before and
+    // after the implementation.
+    it('Alt+m still toggles mouse tracking (binding intact)', async () => {
+      const { dataListeners, writes, restore } = setupFakeTty();
+      let tui: Promise<WorkItem | undefined> | undefined;
+      try {
+        tui = runWorklistTui(async () => [], [], loadShortcutConfig(), {
+          autoRefresh: false,
+          autoSync: false,
+        });
+        await vi.waitFor(() => {
+          expect(writes.join('')).toContain(ANSI.mouseEnable);
+        });
+        dataListeners.forEach(cb => cb(Buffer.from('\x1bm')));
+        await vi.waitFor(() => {
+          expect(writes.join('')).toContain(ANSI.mouseDisable);
+        });
+      } finally {
+        dataListeners.forEach(cb => cb(Buffer.from('q')));
+        if (tui) await tui.catch(() => undefined);
+        restore();
+      }
+    });
+  });
+});
+
+// ── `?` help-screen key reservation (WL-0MV85R0JD004CHAE) ──
+// The help overlay is opened by `?` in the key loop, so `?` must not be a
+// registered chord or a navigation action — otherwise the key would conflict
+// (parent AC: `?` must not collide with any registered chord or navigation
+// key). GREEN before and after the implementation (test-first guard only).
+describe('? help-screen key reservation (WL-0MV85R0JD004CHAE)', () => {
+  it('reserves ? — no registry chord and no navigation action claims it', () => {
+    const registry = loadShortcutConfig();
+    expect(registry.lookupChordEntry(['?'], 'list')).toBeUndefined();
+    expect(keyToAction('?')).toBeNull();
+  });
+});
+
+// ── Podcast w-chord dispatch notice (OSL-0MUQ59IRF009ICIF) ──────────────
+//
+// Producer decision (2026-10-14): the w-r/w-s/w-b chords keep their
+// stage/guard semantics (producer choice (a) — `w-s` still errors on a
+// script-bearing item with no open editor notes), and their failure/
+// confirmation feedback must be a PERSISTENT, dismissable in-pane notice
+// rather than a transient fire-and-forget toast. This kills the reported
+// "nothing happens" symptom: a refused dispatch can no longer be mistaken
+// for a silently dropped keypress.
+describe('podcast w-chord dispatch notice (OSL-0MUQ59IRF009ICIF)', () => {
+  // Local shortcuts.json fixture matching the project-local override.
+  const wChordEntries = [
+    { chord: ['w', 'r'], command: '/skill:wiki-podcast-script --review <podcast-review>', view: 'both', label: 'write review', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 's'], command: '/skill:wiki-podcast-script <podcast-target>', view: 'both', label: 'write script', stages: ['intake_complete', 'plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+    { chord: ['w', 'b'], command: '/skill:wiki-podcast-script --review-rewrite <podcast-both>', view: 'both', label: 'write both', stages: ['plan_complete', 'in_review', 'done'], work_item_types: ['podcast'] },
+  ];
+
+  it('formatPodcastNotice renders a titled, dismiss-hinted box for both outcomes', () => {
+    const dispatched = stripAnsiLocal(formatPodcastNotice(100, 30, {
+      kind: 'dispatched',
+      body: '/skill:wiki-podcast-script --review Ep10/Ep10.podcast.md',
+    }));
+    expect(dispatched).toContain('WRITE CHORD DISPATCHED');
+    expect(dispatched).toContain('--review Ep10/Ep10.podcast.md');
+    expect(dispatched).toContain('dismiss');
+
+    const refused = stripAnsiLocal(formatPodcastNotice(100, 30, {
+      kind: 'error',
+      body: 'podcast script already present, review and edit that rather than author a new one',
+    }));
+    expect(refused).toContain('WRITE CHORD — NOT DISPATCHED');
+    expect(refused).toContain('already present');
+    expect(refused).toContain('dismiss');
+  });
+
+  // ── TUI-path harness (mirrors notify-dispatch.test.ts) ────────────
+  let dataHandler: ((chunk: Buffer) => void) | undefined;
+  let writes: string[] = [];
+  let tempRoot: string | undefined;
+
+  function stripAnsiLocal(s: string): string {
+    return s.replace(/\x1b\[[0-9;]*m/g, '');
+  }
+
+  beforeEach(() => {
+    dataHandler = undefined;
+    writes = [];
+    for (const prop of ['on', 'removeListener', 'pause', 'resume', 'setRawMode'] as const) {
+      if (!(prop in process.stdin)) {
+        Object.defineProperty(process.stdin, prop, { value: vi.fn(), configurable: true, writable: true });
+      }
+    }
+    (process.stdin as any).on = vi.fn((event: string, cb: (chunk: Buffer) => void) => {
+      if (event === 'data') dataHandler = cb;
+      return process.stdin;
+    });
+    (process.stdin as any).removeListener = vi.fn(() => process.stdin);
+    (process.stdin as any).pause = vi.fn(() => process.stdin);
+    (process.stdin as any).resume = vi.fn(() => process.stdin);
+    (process.stdin as any).setRawMode = vi.fn(() => process.stdin);
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    vi.spyOn(process.stdout, 'write').mockImplementation(((s: any) => {
+      writes.push(String(s));
+      return true;
+    }) as any);
+    vi.spyOn(process.stdout, 'on').mockImplementation((() => process.stdout as any) as any);
+    vi.spyOn(process.stdout, 'removeListener').mockImplementation((() => process.stdout as any) as any);
+  });
+
+  afterEach(() => {
+    if (tempRoot) {
+      try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* ignore */ }
+      tempRoot = undefined;
+    }
+    vi.restoreAllMocks();
+  });
+
+  function registryWithLocalWChords(): ShortcutRegistry {
+    tempRoot = mkdtempSync(join(tmpdir(), 'herdr-podcast-notice-'));
+    writeFileSync(join(tempRoot, 'shortcuts.json'), JSON.stringify(wChordEntries));
+    return loadShortcutConfig(tempRoot);
+  }
+
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 5));
+  const lastRender = (): string => writes[writes.length - 1] ?? '';
+
+  const scriptItem: WorkItem = {
+    id: 'OSL-EP-1',
+    title: 'Episode with script',
+    status: 'open',
+    stage: 'plan_complete',
+    issueType: 'podcast',
+    description: '## Key Files:\n- Ep10/Ep10.podcast.md\n',
+  };
+
+  const scriptlessItem: WorkItem = {
+    ...scriptItem,
+    id: 'OSL-EP-2',
+    title: 'Episode with no script',
+    description: '# Episode 10 — spec only\n\nSee docs/video-series-outline.md for the outline.\n',
+  };
+
+  async function press(keys: string): Promise<void> {
+    for (const ch of keys) dataHandler?.(Buffer.from(ch));
+    await tick();
+    await tick();
+  }
+
+  it('surfaces a refused w-r dispatch as a persistent notice (and never dispatches)', async () => {
+    const onCommand = vi.fn();
+    const registry = registryWithLocalWChords();
+    const p = runWorklistTui(async () => [scriptlessItem], [scriptlessItem], registry, {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+      onCommand,
+    });
+    await tick();
+    await tick();
+
+    await press('wr');
+
+    const rendered = stripAnsiLocal(lastRender());
+    expect(rendered).toContain('WRITE CHORD — NOT DISPATCHED');
+    expect(rendered).toContain('No podcast script found');
+    expect(onCommand).not.toHaveBeenCalled();
+
+    // The notice is modal: dismiss it before the quit key will be processed.
+    await press('\x1b');
+    dataHandler?.(Buffer.from('q'));
+    await p;
+  });
+
+  it('shows the dispatched notice AND dispatches the resolved command', async () => {
+    const onCommand = vi.fn();
+    const registry = registryWithLocalWChords();
+    const p = runWorklistTui(async () => [scriptItem], [scriptItem], registry, {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+      onCommand,
+    });
+    await tick();
+    await tick();
+
+    await press('wr');
+
+    expect(onCommand).toHaveBeenCalledTimes(1);
+    expect(onCommand.mock.calls[0][0]).toBe('/skill:wiki-podcast-script --review Ep10/Ep10.podcast.md');
+    const rendered = stripAnsiLocal(lastRender());
+    expect(rendered).toContain('WRITE CHORD DISPATCHED');
+    expect(rendered).toContain('--review Ep10/Ep10.podcast.md');
+
+    await press('\x1b');
+    dataHandler?.(Buffer.from('q'));
+    await p;
+  });
+
+  it('the notice is modal until dismissed — other keys are consumed, Esc returns to the list', async () => {
+    const registry = registryWithLocalWChords();
+    const p = runWorklistTui(async () => [scriptlessItem], [scriptlessItem], registry, {
+      autoRefresh: false,
+      autoSync: false,
+      showHelpText: false,
+    });
+    await tick();
+    await tick();
+
+    await press('wr');
+    expect(stripAnsiLocal(lastRender())).toContain('WRITE CHORD — NOT DISPATCHED');
+
+    // A non-dismiss key keeps the notice up (modal — never scrolls away).
+    await press('j');
+    expect(stripAnsiLocal(lastRender())).toContain('WRITE CHORD — NOT DISPATCHED');
+
+    // Esc dismisses; the list renders again (no notice title).
+    await press('\x1b');
+    expect(stripAnsiLocal(lastRender())).not.toContain('WRITE CHORD — NOT DISPATCHED');
+
+    dataHandler?.(Buffer.from('q'));
+    await p;
   });
 });

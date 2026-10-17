@@ -264,11 +264,15 @@ Five alternating iterations of each state were run; the **median** is quoted
 
 > **Isolation note.** `vitest.measure.config.ts` extends `vitest.config.ts`
 > and aliases `@worklog/shared` (and its subpaths) to the worktree's own
-> freshly built `packages/shared/dist`. This was required because concurrent
-> `implement.py` builds in other worktrees repeatedly overwrite the main
-> checkout's `packages/herdr/node_modules/@worklog/shared` copy (via
-> `install-herdr.sh`), causing intermittent `ERR_MODULE_NOT_FOUND` collection
-> failures. The alias does not change any test semantics.
+> freshly built `packages/shared/dist`. This was required while concurrent
+> `implement.py` builds in other worktrees repeatedly overwrote the main
+> checkout's packaged `packages/herdr/node_modules/@worklog/shared` copy
+> (via `install-herdr.sh`), causing intermittent `ERR_MODULE_NOT_FOUND`
+> collection failures. Since WL-0MVAY631M004RZ3Q that dependency is a
+> symlink to the live workspace package (link-shared.mjs) instead of a
+> packaged copy, so builds no longer rewrite it; the alias is retained for
+> measurement isolation (the worktree's own dist) and does not change any
+> test semantics.
 
 ### Results
 
