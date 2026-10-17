@@ -126,8 +126,11 @@ afterEach(() => {
 
 /** Exec mock that reports a visible tab, empty wl results, and NOTHING else. */
 function makeVisibleExecMock(): Mock {
-  return vi.fn(async (bin: string, args: string[]) => {
-    if (bin === 'herdr' && args[0] === 'tab' && args[1] === 'get') {
+  return vi.fn(async (_bin: string, args: string[]) => {
+    // Match on the ARGS, never the exact binary name — the pane/tab checks
+    // resolve the CLI as `process.env.HERDR_BIN_PATH ?? 'herdr'`, so a
+    // `bin === 'herdr'` check misses inside a herdr pane (WL-0MU2FM1L60002URI).
+    if (args[0] === 'tab' && args[1] === 'get') {
       return { stdout: JSON.stringify({ id: 'cli:tab:get', result: { tab: { focused: true } } }), stderr: '' };
     }
     if (args.includes('list') && args.includes('--status')) {

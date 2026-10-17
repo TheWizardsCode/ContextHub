@@ -57,7 +57,11 @@ export function hydratorExecRouter(): HydratorExecHarness {
       options: (options ?? {}) as Record<string, unknown>,
     });
 
-    if (bin === 'herdr' && args.includes('pane') && args.includes('list')) {
+    // Match on the ARGS, never the exact binary name — the hydrator resolves
+    // the CLI as `process.env.HERDR_BIN_PATH ?? 'herdr'`, so a `bin === 'herdr'`
+    // check misses whenever the suite runs inside a herdr pane
+    // (WL-0MU2FM1L60002URI). `bin` is still recorded above for assertions.
+    if (args.includes('pane') && args.includes('list')) {
       return { stdout: JSON.stringify({ result: { panes: [] } }), stderr: '' };
     }
     if (args.includes('dep')) {

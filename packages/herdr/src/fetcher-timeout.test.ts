@@ -109,8 +109,11 @@ afterEach(() => {
  * and resolves the herdr pane/tab visibility checks (focused).
  */
 function makeExecMock(paneFocused = true): Mock {
-  return vi.fn(async (bin: string, args: string[]) => {
-    if (bin === 'herdr' && (args[0] === 'pane' || args[0] === 'tab')) {
+  return vi.fn(async (_bin: string, args: string[]) => {
+    // Match on the ARGS, never the exact binary name — the pane/tab checks
+    // resolve the CLI as `process.env.HERDR_BIN_PATH ?? 'herdr'`, so a
+    // `bin === 'herdr'` check misses inside a herdr pane (WL-0MU2FM1L60002URI).
+    if (args[0] === 'pane' || args[0] === 'tab') {
       return {
         stdout: JSON.stringify({
           id: 'cli:get',
@@ -370,8 +373,11 @@ describe('worklist recovery from timed-out refresh (WL-0MSJNJXX2001NMHS)', () =>
 
     // The pane check resolves; wl spawns hang until their timeout fires
     // (simulating the execFile timeout killing a hung wl process).
-    const execMock = vi.fn(async (bin: string, args: string[], options?: { timeout?: number }) => {
-      if (bin === 'herdr' && (args[0] === 'pane' || args[0] === 'tab')) {
+    const execMock = vi.fn(async (_bin: string, args: string[], options?: { timeout?: number }) => {
+      // Match on the ARGS, never the exact binary name — the pane/tab checks
+      // resolve the CLI as `process.env.HERDR_BIN_PATH ?? 'herdr'`, so a
+      // `bin === 'herdr'` check misses inside a herdr pane (WL-0MU2FM1L60002URI).
+      if (args[0] === 'pane' || args[0] === 'tab') {
         return {
           stdout: JSON.stringify({ id: 'cli:get', result: { pane: { focused: true }, tab: { focused: true } } }),
           stderr: '',
