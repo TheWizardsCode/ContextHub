@@ -16,11 +16,16 @@
  *   - Any failure to read in-process falls back to the `wl` spawn path, and
  *     an audited child (stored fingerprint) falls back so the CLI's
  *     `currentFingerprint` enrichment is preserved.
+ *   - A refresh-scoped connection (WL-0MV6C6SLB005HX7B) shares ONE
+ *     `WorklogDatabase` open across the `fetchActionableCount` +
+ *     `fetchChildrenForItems` reads of a refresh (open count drops 2 → 1),
+ *     and the shared connection is closed when the refresh scope is
+ *     released — never reused across a refresh boundary.
  *
  * Run: npx vitest run packages/herdr/src/fetcher-inprocess.test.ts
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -30,11 +35,39 @@ import {
   fetchActionableCount,
   fetchReviewQueueState,
   fetchChildrenForItems,
+  createInProcessRefreshScope,
   setExecFileAsync,
   resetExecFileAsync,
   setWorklogDir,
   resetWorklogDir,
 } from './fetcher.js';
+
+/**
+ * Instrumented `@worklog/shared` for the open-count assertion (AC-3 of
+ * WL-0MV6C6SLB005HX7B): every `WorklogDatabase` constructed (by seeding AND
+ * by the in-process fast path) increments `opens`; every `close()` increments
+ * `closed`. The mock is scoped to THIS test file only (vitest per-file module
+ * registry), so other suites keep the real module. `vi.hoisted` makes the
+ * counter visible to the hoisted mock factory and to the test bodies.
+ */
+const inProcessState = vi.hoisted(() => ({ opens: 0, closed: 0 }));
+
+vi.mock('@worklog/shared', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@worklog/shared')>();
+  return {
+    ...actual,
+    WorklogDatabase: class extends actual.WorklogDatabase {
+      constructor(...args: any[]) {
+        super(...args);
+        inProcessState.opens += 1;
+      }
+      close(): void {
+        inProcessState.closed += 1;
+        super.close();
+      }
+    },
+  };
+});
 
 interface Seeded {
   rootDir: string;
@@ -135,6 +168,10 @@ let seeded: Seeded;
 beforeEach(() => {
   seeded = seedWorklog();
   installExecMock();
+  // Clear the instrumented counter AFTER seeding: the AC-3 open-count
+  // assertion must measure only the fetcher's own in-process opens.
+  inProcessState.opens = 0;
+  inProcessState.closed = 0;
 });
 
 afterEach(() => {
@@ -274,5 +311,65 @@ describe('in-process default-view reads (WL-0MV5CBQ6L005SPAG)', () => {
     const a1 = (children.get(seeded.parentA) ?? []).find((i) => i.id === seeded.childA1);
     // The CLI-enriched currentFingerprint is preserved on the fallback path.
     expect(a1?.currentFingerprint).toBe('fp-stored');
+  });
+});
+
+describe('refresh-scoped shared in-process connection (WL-0MV6C6SLB005HX7B)', () => {
+  it('opens exactly ONE in-process connection for a refresh sharing children + actionable reads (AC3)', async () => {
+    setWorklogDir(seeded.worklogDir);
+    const depthByParent = new Map([
+      [seeded.parentA, 2],
+      [seeded.parentB, 2],
+    ]);
+
+    // A refresh cycle exercising BOTH in-process readers through the shared
+    // scope must open the connection once (was twice: one per helper).
+    const scope = createInProcessRefreshScope();
+    try {
+      const children = await fetchChildrenForItems(
+        [seeded.parentA, seeded.parentB],
+        depthByParent,
+        scope,
+      );
+      const actionable = await fetchActionableCount(scope);
+
+      expect(actionable).toBe(seeded.actionable);
+      expect(children.get(seeded.parentA)).toHaveLength(2);
+      expect(children.get(seeded.parentB)).toHaveLength(1);
+      expect(inProcessState.opens).toBe(1);
+      // Both reads served in-process — no `wl` spawns on the shared fast path.
+      expect(spawns).toEqual([]);
+    } finally {
+      scope.close();
+    }
+
+    // Releasing the scope closes the shared connection: never reused across
+    // a refresh boundary (no-stale-cache invariant, WL-0MV5CBQ6L005SPAG).
+    expect(inProcessState.closed).toBe(1);
+
+    // A scope-less caller still opens a FRESH connection (unchanged behaviour
+    // for non-refresh callers).
+    const again = await fetchActionableCount();
+    expect(again).toBe(seeded.actionable);
+    expect(inProcessState.opens).toBe(2);
+  });
+
+  it('defers the shared-connection close until a fire-and-forget read settles', async () => {
+    setWorklogDir(seeded.worklogDir);
+
+    const scope = createInProcessRefreshScope();
+    const children = await fetchChildrenForItems([seeded.parentA], undefined, scope);
+    expect(children.get(seeded.parentA)).toHaveLength(2);
+
+    // doRefresh runs the actionable-count read FIRE-AND-FORGET, so close()
+    // can be requested while that read is still pending. The pending read
+    // must still run against the OPEN shared connection, and the release is
+    // deferred until it settles (the scope must never reopen for it).
+    const pending = fetchActionableCount(scope);
+    scope.close();
+
+    expect(await pending).toBe(seeded.actionable);
+    expect(inProcessState.opens).toBe(1);
+    expect(inProcessState.closed).toBe(1);
   });
 });

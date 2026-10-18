@@ -67,10 +67,20 @@ which:
 The default-view refresh now spawns far fewer `wl` processes:
 
 - **In-process SQLite reads** — `fetchActionableCount` and
-  `fetchChildrenForItems` read a **fresh** `WorklogDatabase` in-process when a
-  worklog dir is resolved and `better-sqlite3` is available. The store is
-  loaded lazily (kept out of the plugin import graph until needed); the
-  in-memory query cache is never trusted across a refresh boundary.
+  `fetchChildrenForItems` read in-process from SQLite when a worklog dir is
+  resolved and `better-sqlite3` is available. The store is loaded lazily
+  (kept out of the plugin import graph until needed); the in-memory query
+  cache is never trusted across a refresh boundary.
+- **One shared connection per refresh (WL-0MV6C6SLB005HX7B)** — the two
+  helpers previously opened a FRESH `WorklogDatabase` each, running the
+  synchronous open + pragmas + `initializeSchema`/`initializeFts` DDL on the
+  UI event loop twice per refresh (~46–70 ms apiece on a large `worklog.db`).
+  `doRefresh` now creates one `InProcessRefreshScope`
+  (`createInProcessRefreshScope` in `fetcher.ts`) and both helpers consume
+  the SAME connection, closed in the refresh's `finally` — so the blocking
+  cost is bounded at one open per refresh. Scope-less callers (e.g. the
+  startup actionable-count load) still open a fresh per-call connection, and
+  every in-process read still fails open to the `wl` spawn path unchanged.
 - **Concurrent base + mandatory** — the base `wl next` and the mandatory
   subsets run under `Promise.all`; the review-queue query and the mandatory
   `in_review` subset share an identical argument vector, so the in-flight fetch

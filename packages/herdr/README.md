@@ -1467,6 +1467,16 @@ auto-refresh tick (parent `WL-0MV02VA29009WBEN`).
   the pane's own in-process SQLite reads touch those files, so watching them
   created a self-sustaining refresh loop (producer-rejection fix for
   `WL-0MV02VA29009WBEN`).
+- **One shared in-process connection per refresh (WL-0MV6C6SLB005HX7B)** —
+  the refresh's in-process SQLite reads (`fetchActionableCount` +
+  `fetchChildrenForItems`) previously opened a fresh `WorklogDatabase` each,
+  running the synchronous open + pragmas + schema DDL on the UI event loop
+  twice per refresh. `doRefresh` now opens ONE connection per refresh
+  (`createInProcessRefreshScope` in `fetcher.ts`), shares it across both
+  reads, and closes it in a `finally` — so a refresh coinciding with typing
+  stays within the ≤ 100 ms p95 input-lag budget, and the connection is
+  never reused across a refresh boundary (no-stale-cache invariant). Scope-
+  less callers and all fallback paths are unchanged.
 - **Debounced, single-flight** — a burst of write events is coalesced into at
   most one trailing callback, which feeds the existing gated `doRefresh`
   (typing + visibility gates, then `doRefresh`'s own single-flight + trailing

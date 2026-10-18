@@ -533,6 +533,112 @@ async function withInProcessDb<T>(fn: (db: InProcessDb) => T): Promise<T | undef
 }
 
 /**
+ * Refresh-scoped in-process SQLite read session (WL-0MV6C6SLB005HX7B).
+ *
+ * A default-view refresh opened a FRESH `WorklogDatabase` per
+ * `withInProcessDb` call — twice per refresh (`fetchActionableCount` +
+ * `fetchChildrenForItems`). The synchronous open + pragmas + DDL
+ * (`initializeSchema`/`initializeFts`) ran on the UI event loop, so a
+ * refresh landing mid-typing breached the ≤ 100 ms p95 input-lag budget.
+ * A scope instead opens at most ONE connection per refresh and shares it
+ * across every reader that consumes it, bounding the blocking cost
+ * regardless of how many helpers the refresh fans out to.
+ *
+ * The no-stale-cache invariant (WL-0MV5CBQ6L005SPAG) is preserved: the
+ * connection is created per scope and released by `close()` at the end of
+ * the refresh — it is never reused across a refresh boundary, so the store's
+ * in-memory query cache can never serve data across a refresh.
+ *
+ * Fail-open: every read resolves `undefined` when no in-process read is
+ * possible (no worklog dir, no SQLite file, `@worklog/shared` unavailable,
+ * or an open/read error) so the caller falls back to its `wl` spawn path.
+ */
+export interface InProcessRefreshScope {
+  /**
+   * Run an in-process read against the shared connection, opening it lazily
+   * on first use. Multiple reads in one refresh share the SAME handle.
+   * Resolves `undefined` (fail-open) when no in-process read is possible or
+   * the read throws. A close requested while a read is pending is deferred
+   * until that read settles, so a read never runs against a closed handle.
+   */
+  read<T>(fn: (db: InProcessDb) => T): Promise<T | undefined>;
+  /**
+   * Release the shared connection (idempotent). Call once when the refresh
+   * finishes — typically in a `finally`. When a read is still pending
+   * (fire-and-forget callers), the release is deferred until the last
+   * pending read settles.
+   */
+  close(): void;
+}
+
+/**
+ * Create an {@link InProcessRefreshScope} (WL-0MV6C6SLB005HX7B). The
+ * connection is opened lazily on the scope's first read and closed by
+ * {@link InProcessRefreshScope.close}; the lazy `@worklog/shared` import is
+ * the same module-level `loadInProcessDbCtor` the per-call fast path uses,
+ * so no new dependency or import-time cost is introduced.
+ */
+export function createInProcessRefreshScope(): InProcessRefreshScope {
+  let db: InProcessDb | null = null;
+  let ctorPromise: Promise<InProcessDbCtor | null> | undefined;
+  let pendingReads = 0;
+  let closeRequested = false;
+
+  const release = (): void => {
+    const handle = db;
+    db = null;
+    ctorPromise = undefined;
+    pendingReads = 0;
+    try {
+      handle?.close();
+    } catch {
+      // ignore: closing a broken handle must not mask a read result.
+    }
+  };
+
+  return {
+    async read<T>(fn: (db: InProcessDb) => T): Promise<T | undefined> {
+      const dir = _worklogDir;
+      if (!dir) return undefined;
+      const dbPath = join(dir, 'worklog.db');
+      if (!existsSync(dbPath)) return undefined;
+      if (ctorPromise === undefined) ctorPromise = loadInProcessDbCtor();
+
+      // Hold a read slot BEFORE any await: a close() requested while this
+      // read is pending defers the release until the read settles, so the
+      // read always runs against an open handle (doRefresh's actionable-count
+      // read is fire-and-forget and can outlive the synchronous close call).
+      pendingReads += 1;
+      try {
+        const Ctor = await ctorPromise;
+        if (!Ctor) return undefined;
+        if (!db) {
+          try {
+            db = new Ctor('WI', dbPath, join(dir, 'worklog-data.jsonl'), true, false);
+          } catch {
+            // Fail-open: an open failure degrades to the wl spawn path.
+            return undefined;
+          }
+        }
+        try {
+          return fn(db);
+        } catch {
+          // Fail-open: any read failure degrades to the wl spawn path.
+          return undefined;
+        }
+      } finally {
+        pendingReads -= 1;
+        if (closeRequested && pendingReads === 0) release();
+      }
+    },
+    close(): void {
+      closeRequested = true;
+      if (pendingReads === 0) release();
+    },
+  };
+}
+
+/**
  * Apply the audit enrichment `wl list --json` adds (auditResult, auditedAt and
  * the stored fingerprint) to in-process items. `currentFingerprint` is
  * deliberately NOT set: deriving it requires the canonical git-based
@@ -1001,14 +1107,22 @@ export async function fetchBlockersForItem(id: string): Promise<BlockerRef[]> {
 
 /**
  * Fetch the total count of actionable work items.
+ *
+ * Pass a refresh scope (WL-0MV6C6SLB005HX7B) to read the count via the
+ * refresh's ONE shared in-process connection; omit it to open a fresh
+ * per-call connection (the pre-WL-0MV6C6SLB005HX7B behaviour).
  */
-export async function fetchActionableCount(): Promise<number | undefined> {
+export async function fetchActionableCount(
+  scope?: InProcessRefreshScope,
+): Promise<number | undefined> {
   // Fast path: count in-process against the SQLite store. This removes a
   // whole `wl` process spawn from every refresh and is exact: the CLI's
   // actionable count is the number of non-deleted items in those statuses.
-  const inProcess = await withInProcessDb((db) =>
-    db.list({ status: ['open', 'in-progress', 'blocked'] }).length,
-  );
+  const inProcess = scope
+    ? await scope.read((db) => db.list({ status: ['open', 'in-progress', 'blocked'] }).length)
+    : await withInProcessDb((db) =>
+        db.list({ status: ['open', 'in-progress', 'blocked'] }).length,
+      );
   if (inProcess !== undefined) {
     return inProcess;
   }
@@ -1163,10 +1277,15 @@ export async function fetchChildrenForItem(parentId: string, depth = 1): Promise
  * `depthByParent` overrides the display depth per parent (default 1); the
  * worklist passes each expanded item's hierarchy depth + 1 so nested
  * expansion still renders at the correct depth (WL-0MSQ3FH1K000MMJW).
+ *
+ * Pass a refresh scope (WL-0MV6C6SLB005HX7B) to read via the refresh's ONE
+ * shared in-process connection; omit it to open a fresh per-call connection
+ * exactly as before.
  */
 export async function fetchChildrenForItems(
   parentIds: string[],
   depthByParent?: Map<string, number>,
+  scope?: InProcessRefreshScope,
 ): Promise<Map<string, WorkItem[]>> {
   const uniqueParents = [...new Set(parentIds)];
   const result = new Map<string, WorkItem[]>();
@@ -1174,7 +1293,7 @@ export async function fetchChildrenForItems(
   if (uniqueParents.length === 0) return result;
 
   const wanted = new Set(uniqueParents);
-  const inProcess = await withInProcessDb((db) => {
+  const readChildren = (db: InProcessDb): { byParent: Map<string, WorkItem[]>; needsCli: boolean } => {
     // childCounts is computed over ALL items (deleted included), matching the
     // CLI's `getChildCounts()` enrichment. Children themselves are non-deleted
     // only, matching `wl list --parent`'s default filtering.
@@ -1196,7 +1315,11 @@ export async function fetchChildrenForItems(
       byParent.set(parentId, list);
     }
     return { byParent, needsCli };
-  });
+  };
+  // A refresh scope shares ONE in-process connection with the refresh's other
+  // in-process readers (WL-0MV6C6SLB005HX7B); scope-less callers open a fresh
+  // per-call connection exactly as before.
+  const inProcess = scope ? await scope.read(readChildren) : await withInProcessDb(readChildren);
 
   if (inProcess && !inProcess.needsCli) {
     for (const id of uniqueParents) {

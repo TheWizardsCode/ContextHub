@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, fetchBlockersForItem, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState, type BlockerRef } from './fetcher.js';
+import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, fetchBlockersForItem, getWorklogDir, getExecFileAsync, createInProcessRefreshScope, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState, type BlockerRef } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
@@ -6137,6 +6137,15 @@ export async function runWorklistTui(
       return;
     }
     refreshInFlight = true;
+    // ONE in-process SQLite connection for this whole refresh, shared by the
+    // expanded-children and actionable-count reads and released in the
+    // `finally` below (WL-0MV6C6SLB005HX7B). Opening a fresh WorklogDatabase
+    // per helper ran the synchronous open + pragmas + DDL twice per refresh
+    // on the event loop (~46–70 ms each on a large worklog.db); a scope
+    // bounds the blocking cost at one open. Never reused across a refresh
+    // boundary — the no-stale-cache invariant (WL-0MV5CBQ6L005SPAG) is
+    // preserved by closing per refresh.
+    const refreshScope = createInProcessRefreshScope();
     try {
       try {
         // Fetch the new top-level items and the children of currently
@@ -6162,7 +6171,7 @@ export async function runWorklistTui(
         // identical `wl list` query inside fetchMandatorySubsets deduplicates
         // via the in-flight memo into a single spawn (WL-0MV5CBQ6L005SPAG).
         const reviewStatePromise = fetchReviewQueueState();
-        const childrenPromise = fetchChildrenForItems(expanded, depthByParent)
+        const childrenPromise = fetchChildrenForItems(expanded, depthByParent, refreshScope)
           .then((childrenByParent) => {
             for (const [parentId, children] of childrenByParent) {
               freshChildren.set(parentId, children);
@@ -6245,14 +6254,21 @@ export async function runWorklistTui(
       } catch {
         showToast('Refresh failed');
       }
-      // Also fetch the total actionable count on refresh
-      fetchActionableCount().then((count) => {
+      // Also fetch the total actionable count on refresh — read via the SAME
+      // shared in-process connection as the expanded children, so the whole
+      // refresh pays exactly one open (WL-0MV6C6SLB005HX7B).
+      fetchActionableCount(refreshScope).then((count) => {
         totalActionableCount = count;
       }).catch(() => {
         // ignore
       });
       render();
     } finally {
+      // Release the shared in-process connection. Idempotent; a pending
+      // fire-and-forget actionable-count read defers the actual close until
+      // it settles, so the read never touches a closed handle
+      // (WL-0MV6C6SLB005HX7B).
+      refreshScope.close();
       // Always clear the guard — a successful, failed, or aborted cycle must
       // never block the next refresh tick.
       refreshInFlight = false;

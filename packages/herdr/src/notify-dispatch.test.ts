@@ -19,6 +19,13 @@ vi.mock('./fetcher.js', () => ({
   fetchChildrenForItem: vi.fn().mockResolvedValue([]),
   fetchBlockersForItem: vi.fn().mockResolvedValue([]),
   getWorklogDir: vi.fn().mockReturnValue(undefined),
+  // Refresh-scoped in-process connection (WL-0MV6C6SLB005HX7B): doRefresh
+  // opens one scope per refresh and closes it in a `finally`; a benign
+  // read/close stub is enough since the fetch helpers are mocked here.
+  createInProcessRefreshScope: vi.fn(() => ({
+    read: vi.fn(async () => undefined),
+    close: vi.fn(),
+  })),
 }));
 
 vi.mock('./auto-sync.js', () => ({

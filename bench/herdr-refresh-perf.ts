@@ -52,6 +52,7 @@ import {
   fetchActionableCount,
   fetchReviewQueueState,
   fetchChildrenForItems,
+  createInProcessRefreshScope,
 } from '../packages/herdr/src/fetcher.js';
 
 // ── Configuration ────────────────────────────────────────────────────
@@ -261,12 +262,21 @@ export async function runBenchmark(argv: string[] = process.argv): Promise<Herdr
       // memo dedupe) so a cold refresh spawns only `wl next` plus the three
       // mandatory-subset queries (WL-0MV5CBQ6L005SPAG; the actively-worked
       // in-progress subset was added by WL-0MV6KV22S004NYIU).
-      await Promise.all([
-        fetchNextItems(options.browse),
-        fetchChildrenForItems(expandedParentIds),
-        fetchReviewQueueState(),
-        fetchActionableCount(),
-      ]);
+      //
+      // The children + actionable in-process reads share ONE refresh-scoped
+      // connection (WL-0MV6C6SLB005HX7B) — exactly as doRefresh does — so the
+      // synchronous open cost is paid once per refresh, not once per helper.
+      const scope = createInProcessRefreshScope();
+      try {
+        await Promise.all([
+          fetchNextItems(options.browse),
+          fetchChildrenForItems(expandedParentIds, undefined, scope),
+          fetchReviewQueueState(),
+          fetchActionableCount(scope),
+        ]);
+      } finally {
+        scope.close();
+      }
     };
 
     const resetSpawnFile = (): void => {
