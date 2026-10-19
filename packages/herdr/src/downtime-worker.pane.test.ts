@@ -647,6 +647,7 @@ describe('worker tick: the LLM idle check is the sole concurrency limiter (WL-0M
       vi.useRealTimers();
     }
   });
+});
 
 // ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) — DISABLED ─────────
 //
