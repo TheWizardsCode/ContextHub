@@ -15,12 +15,9 @@
  *    proxy then applies its own `medium` default);
  *  - fail-open: never assume `high`, never throw.
  *
- * RED WITNESS. `request-priority.ts` does not exist yet, so the target specs
- * are committed under vitest's `it.fails(...)` (expected-failure) form — the
- * suite stays GREEN while the assertions are RED, the repo's documented TDD
- * pattern (see `packages/herdr/src/downtime-worker.assignee-claim.test.ts`).
- * The implementation child WL-0MVF3Q2YC003RJPF flips each `it.fails` to `it`
- * once the module lands.
+ * These specs were authored RED (test-first child WL-0MVF3PZNY003413F) and
+ * are real assertions now that the module exists
+ * (WL-0MVF3Q2YC003RJPF).
  *
  * Run: npx vitest run packages/tui/extensions/Worklog/request-priority.test.ts
  */
@@ -73,20 +70,20 @@ afterEach(() => {
 // ── Value validation ─────────────────────────────────────────────────────
 
 describe('resolveRequestPriority (WL-0MVF3PZNY003413F AC1/AC2)', () => {
-  it.fails('accepts the three proxy priorities verbatim', async () => {
+  it('accepts the three proxy priorities verbatim', async () => {
     const { resolveRequestPriority } = await loadModule();
     expect(resolveRequestPriority({ [ENV_VAR]: 'low' })).toBe('low');
     expect(resolveRequestPriority({ [ENV_VAR]: 'medium' })).toBe('medium');
     expect(resolveRequestPriority({ [ENV_VAR]: 'high' })).toBe('high');
   });
 
-  it.fails('returns undefined when the variable is unset or empty', async () => {
+  it('returns undefined when the variable is unset or empty', async () => {
     const { resolveRequestPriority } = await loadModule();
     expect(resolveRequestPriority({})).toBeUndefined();
     expect(resolveRequestPriority({ [ENV_VAR]: '' })).toBeUndefined();
   });
 
-  it.fails('rejects any other value (fail-open, never assumes high)', async () => {
+  it('rejects any other value (fail-open, never assumes high)', async () => {
     const { resolveRequestPriority } = await loadModule();
     for (const invalid of ['fast', 'cheap', 'HIGH', 'High', 'critical', ' high', 'high ', '1']) {
       expect(resolveRequestPriority({ [ENV_VAR]: invalid })).toBeUndefined();
@@ -113,7 +110,7 @@ describe('before_provider_headers injection (WL-0MVF3PZNY003413F AC1/AC2)', () =
     return listeners.before_provider_headers;
   }
 
-  it.fails('sets X-Priority to the valid env value on every request', async () => {
+  it('sets X-Priority to the valid env value on every request', async () => {
     process.env[ENV_VAR] = 'low';
     const hook = await register();
     const h1 = headers();
@@ -127,7 +124,7 @@ describe('before_provider_headers injection (WL-0MVF3PZNY003413F AC1/AC2)', () =
     expect(h2['X-Priority']).toBe('high');
   });
 
-  it.fails('leaves the header map untouched when the variable is unset', async () => {
+  it('leaves the header map untouched when the variable is unset', async () => {
     const hook = await register();
     const h = headers();
     hook({ headers: h });
@@ -135,7 +132,7 @@ describe('before_provider_headers injection (WL-0MVF3PZNY003413F AC1/AC2)', () =
     expect(h).not.toHaveProperty('X-Priority');
   });
 
-  it.fails('leaves the header map untouched for an invalid value', async () => {
+  it('leaves the header map untouched for an invalid value', async () => {
     process.env[ENV_VAR] = 'turbo';
     const hook = await register();
     const h = headers();
@@ -144,7 +141,7 @@ describe('before_provider_headers injection (WL-0MVF3PZNY003413F AC1/AC2)', () =
     expect(h).not.toHaveProperty('X-Priority');
   });
 
-  it.fails('never throws (a broken header hook must not break requests)', async () => {
+  it('never throws (a broken header hook must not break requests)', async () => {
     process.env[ENV_VAR] = 'medium';
     const hook = await register();
     expect(() => hook({ headers: headers() })).not.toThrow();
@@ -154,7 +151,7 @@ describe('before_provider_headers injection (WL-0MVF3PZNY003413F AC1/AC2)', () =
 // ── Registration wiring ──────────────────────────────────────────────────
 
 describe('extension registration (WL-0MVF3PZNY003413F AC3)', () => {
-  it.fails('registers exactly one before_provider_headers listener', async () => {
+  it('registers exactly one before_provider_headers listener', async () => {
     const { registerRequestPriority } = await loadModule();
     const on = vi.fn(() => () => {});
     registerRequestPriority({ on });
