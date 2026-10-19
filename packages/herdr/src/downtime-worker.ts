@@ -140,6 +140,10 @@ import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
 import {
+  REQUEST_PRIORITY_ENV_VAR,
+  mapDowntimeRequestPriority,
+} from './request-priority.js';
+import {
   readCoordinationFile,
   getEntry,
   upsertEntry,
@@ -2043,6 +2047,8 @@ export interface DowntimeWorkerDeps {
       itemTitle?: string;
       itemId?: string;
       anchorId?: string;
+      /** Raw work-item priority of the dispatched candidate (parent AC3). */
+      priority?: string | null;
     },
   ): Promise<DowntimeSpawnResult>;
   /**
@@ -3219,6 +3225,9 @@ async function dispatchClaimedTier(
       // `Downtime triggered <kind> <title> - <id>`.
       itemTitle: candidate.title,
       itemId: candidate.id,
+      // Request priority (parent AC3): the candidate's raw work-item
+      // priority, mapped through the downtime table by the spawn boundary.
+      priority: candidate.priority,
       // Dispatcher anchor (C0): split from the dedicated Dispatcher anchor
       // pane so this pane lands in the Dispatcher workspace regardless of
       // leadership. Only set when the anchor resolved (never a bare
@@ -5246,7 +5255,7 @@ export type DowntimeSpawnResult =
 export type DowntimeSpawn = (
   scriptPath: string,
   args: string[],
-  opts: { cwd: string },
+  opts: { cwd: string; priority?: string | null },
 ) => DowntimeSpawnHandle;
 
 /**
@@ -5263,6 +5272,7 @@ export type DowntimeSpawn = (
  */
 export function buildDowntimeSpawnOptions(
   cwd: string,
+  opts?: { priority?: string | null },
 ): {
   detached: boolean;
   stdio: 'ignore';
@@ -5279,6 +5289,11 @@ export function buildDowntimeSpawnOptions(
       // Phase 2 child deep-analysis is always serial (parent + one child =
       // two local slots).
       AUDIT_PHASE2_PARALLELISM: '1',
+      // Convey the selected candidate's priority to the launched pi session
+      // (the Worklog pi extension turns it into the `X-Priority` header).
+      // Mapped through the downtime table; defaults to `medium` for an
+      // unknown/absent priority (parent WL-0MVE1NZ4J000H5NH AC3).
+      [REQUEST_PRIORITY_ENV_VAR]: mapDowntimeRequestPriority(opts?.priority),
     },
   };
 }
@@ -5323,7 +5338,7 @@ export const defaultDowntimeSpawn: DowntimeSpawn = (
   args,
   opts,
 ) =>
-  spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd));
+  spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd, opts));
 
 /**
  * How long to wait for a spawn-level `error` event or an immediate
@@ -5348,7 +5363,7 @@ export const DOWNTIME_SPAWN_PROBE_MS = 500;
 export async function spawnDowntimePane(
   scriptPath: string,
   args: string[],
-  opts: { cwd: string },
+  opts: { cwd: string; priority?: string | null },
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): Promise<DowntimeSpawnResult> {
   const child = spawnFn(scriptPath, args, opts);

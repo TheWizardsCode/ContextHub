@@ -29,12 +29,10 @@
  *     forwards the selected candidate priority to the injectable spawn
  *     boundary so every downtime tier (audit, pane, implement) carries it.
  *
- * RED WITNESS. The mapping and the serial-Phase-2 contract are not implemented
- * yet, so the specs that pin them are committed under vitest's
- * `it.fails(...)` (expected-failure): the suite stays GREEN while the
- * assertions are RED — the repo's documented TDD pattern (see
- * `packages/herdr/src/downtime-worker.assignee-claim.test.ts`). The
- * implementation children flip each `it.fails` to `it` as the behaviour lands.
+ * These specs were authored RED (test-first child WL-0MVF3Q0QQ0001I2P) and
+ * are real assertions now that the downtime priority env and the serial
+ * Phase 2 contract have landed (WL-0MVF3Q1ZB0038IPA /
+ * WL-0MVF3Q4X5001FOXV).
  *
  * Run: npx vitest run packages/herdr/src/downtime-worker.priority.test.ts
  */
@@ -97,7 +95,7 @@ describe('downtime request-priority env (WL-0MVF3Q0QQ0001I2P AC1)', () => {
   ];
 
   for (const [candidatePriority, expected] of cases) {
-    it.fails(
+    it(
       `maps candidate priority '${candidatePriority}' to request priority '${expected}'`,
       () => {
         const options = buildOptions(candidatePriority);
@@ -106,7 +104,7 @@ describe('downtime request-priority env (WL-0MVF3Q0QQ0001I2P AC1)', () => {
     );
   }
 
-  it.fails('maps an unknown/absent candidate priority to medium (downtime default)', () => {
+  it('maps an unknown/absent candidate priority to medium (downtime default)', () => {
     expect(buildOptions(undefined).env.HERDR_REQUEST_PRIORITY).toBe('medium');
     expect(buildOptions(null).env.HERDR_REQUEST_PRIORITY).toBe('medium');
     expect(buildOptions('').env.HERDR_REQUEST_PRIORITY).toBe('medium');

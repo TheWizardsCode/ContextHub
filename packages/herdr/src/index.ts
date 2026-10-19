@@ -1827,13 +1827,14 @@ export function createDowntimeDeps(
         itemTitle?: string;
         itemId?: string;
         anchorId?: string;
+        priority?: string | null;
       },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
         buildDowntimePaneArgs(kind, prompt, opts),
-        { cwd: opts.cwd },
+        { cwd: opts.cwd, priority: opts.priority },
         spawnFn,
       );
     },
