@@ -82,6 +82,22 @@ downtime-worker docs in `packages/herdr/README.md` for the dispatch
 semantics (freeze gating, fail-closed absent/malformed handling, cooldown
 interaction).
 
+## Retired herdr settings keys (backward compatible)
+
+The herdr plugin retired its fast/cheap mode-switch machinery
+(WL-0MVE1NZ4J000H5NH). The three keys that drove it —
+`modeSwitchEnabled`, `modeSwitchIdleThresholdMs`, `modeSwitchPollIntervalMs`
+in `~/.config/herdr/` settings — are no longer read or written. Existing
+settings files that still contain them keep loading (unknown keys are
+ignored, no migration needed); saving the settings drops the keys.
+
+Per-request priority replaces the global mode: the herdr plugin maps a
+dispatched work item's priority to `low|medium|high` and conveys it as the
+pane-launch environment variable `HERDR_REQUEST_PRIORITY`, which the Worklog
+pi extension sends as the `X-Priority` provider request header (fail-open:
+unset/invalid → no header, the proxy applies its own `medium` default). This
+is an environment variable, not a Worklog config key.
+
 ## Configuration Override System
 
 The system loads configuration in this order:

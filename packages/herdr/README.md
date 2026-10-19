@@ -17,7 +17,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Pi agent pane dispatch** — Agent commands (`/skill:*`, `/intake`, `/plan`) are automatically dispatched to a new pi agent pane opened to the right, where pi receives the command as its initial prompt. Free-form prompts use the `/prompt:` prefix: the routing prefix is stripped so pi receives only the prompt text. The agent pane opens **without stealing focus** from the selection list (see [Design decisions](#design-decisions)). When the command carries a work-item ID, the pane is placed in that item's work-item-ID tab in the current workspace (reused if it already exists) — see [Interactive pane placement](#interactive-pane-placement-work-item-id-tabs).
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
 - **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items, matches each against the panes of the current workspace (the pane title contains the work-item ID), and releases any claim with no matching pane so it re-enters the dispatchable pool: `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
-- **Mode-switch worker (activity-gated proxy mode switching)** — Automatically switches the llama-proxy between fast (cloud) and cheap (local) modes: agent-route commands fire an immediate fast switch (fail-open), while a full operator-idle window plus a proxy-idle check triggers the cheap switch (fail-closed). The proxy URL reuses `downtimeProxyUrl` and the plugin's switches are manual overrides that the proxy's own time schedule reclaims. See [Mode-switch worker](#mode-switch-worker-activity-gated-proxy-mode-switching-wl-0msn3fwv5008kqe9).
+- **Per-request priority (`X-Priority`)** — The proxy's retired fast/cheap operating mode is replaced by a per-request priority. Herdr maps each dispatched work item's priority onto a request priority and conveys it as the pane-launch environment variable `HERDR_REQUEST_PRIORITY`, which the Worklog pi extension turns into the `X-Priority` provider header. See [Request priority](#request-priority-per-request-x-priority).
 - **Work-item pane indicator** — The selection list shows a green circle icon (🟢) in the icon prefix of every item with an open work-item pane in the current workspace: a pane whose title carries the work-item ID (the dispatch pane-title convention preserves the ID as a trailing suffix). The icon appears exactly when such a pane is open and never otherwise (producer's rule, WL-0MV1BWETT005GSUJ) — it is pane existence, not a live agent status. The worklist also records which pi agent pane is attached to each dispatched item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes (used for the hover tooltip). The icon occupies a fixed-width slot so the item-ID column never shifts. See [Green-circle icon (work-item pane open)](#green-circle-icon-work-item-pane-open).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
@@ -670,48 +670,14 @@ makes the item dispatchable again on the next idle poll.
 > the check lives in the audit-tier dispatch path with no new
 > instance-local state, so non-leader instances never dispatch audits).
 
-> **Bounded audit fan-out (WL-0MSORQ1RG005DGUS, WL-0MT50S9JW001DHME):**
-> dispatched panes run with a mode-aware `AUDIT_PHASE2_PARALLELISM` in the
-> pane environment (inherited by the pi process via `send-to-pi.sh`). The
-> audit skill's Phase 2 deep analysis (`audit_runner.py`) honours this env
-> var (legacy fallback, integer ≥ 1):
->
-> - **`AUDIT_PHASE2_PARALLELISM=1`** (safe default): fast mode, cheap mode
->   without a genuinely free second slot, a non-single-flight dispatch budget,
->   or config absent. Children run strictly sequentially — the skill's
->   documented historical mode. A parent audit needs exactly **2 local
->   slots** (parent + at most one child).
-> - **`AUDIT_PHASE2_PARALLELISM=2`**: cheap mode AND a second slot is
->   GENUINELY free at dispatch time AND the dispatch is single-flight. Up to
->   2 Phase 2 children run in parallel. Since the parent already completed
->   Phase 1, the max concurrent streams per audit is 2 — the children —
->   which fits cheap mode's 2-slot pool.
->
-> The operative availability signal is the **free-slot count**, never the
-> total slot budget: a mode can have a 2-slot pool with only one slot free.
-> An unbounded dispatch budget (`concurrentDispatchCap = 0`) or a budget of
-> ≥ 2 keeps `PARALLELISM` at `1` — a second audit could otherwise run and
-> two audits × 2 children would exceed the cheap pool. Only a single-flight
-> budget (`1`, the default pipeline bound) enables `'2'`.
->
-> Production wiring (WL-0MT50S9JW001DHME): the downtime worker passes a
-> `DowntimeSpawnConfig` — the current proxy mode (from the mode-switch
-> worker's last observed mode; unknown until polled, which conservatively
-> keeps `'1'`), the genuine free-slot snapshot, the mode's total slot
-> budget, and the single-flight pipeline cap — through `spawnAgentPane` to
-> `buildDowntimeSpawnOptions`, so dispatched audits no longer fall back to
-> the serial default when a second slot is truly free.
->
-> A parent audit therefore needs at most **2 local slots** (the two
-> parallel children), fitting cheap mode's full capacity (2 × 262144 ctx)
-> where the default fan-out of 2 would need 3 and spill children to remote.
-> Wall-clock tradeoff: sequential child-heavy audits take longer — acceptable
-> for overnight downtime work. Interactive (non-downtime) panes are
-> unaffected. (Scope: this bounds parallelism WITHIN one audit pane; fan-out
-> ACROSS audit dispatches is constrained by both the single-active-audit
-> guarantee — WL-0MT3PHW4I002SNOV — and the concurrent-dispatch cap —
-> WL-0MT50LKAK001EF5Q — so total in-flight streams never exceed cheap mode's
-> 2-slot pool.)
+> **Bounded audit fan-out (WL-0MSORQ1RG005DGUS, fixed serial by
+> WL-0MVE1NZ4J000H5NH AC5):** dispatched panes run with
+> `AUDIT_PHASE2_PARALLELISM=1` in the pane environment (inherited by the pi
+> process via `send-to-pi.sh`). Audit Phase 2 child deep-analysis therefore
+> runs strictly sequentially, so a parent audit needs exactly **2 local
+> slots** (parent + at most one child). The former mode-aware `'2'` selection
+> was retired together with the proxy's fast/cheap operating mode. Interactive
+> (non-downtime) panes are unaffected.
 
 > **Audit-tier error channel (WL-0MSLWJ2KP0002SV0):** the audit lookup
 > resolves through the same `DowntimeNextResult` error channel as the
@@ -972,124 +938,56 @@ scheduled reaper over Herdr panes.
 (`WL-0MUJMXVPO0016DZM`) consumes `classifySession` / `extractFinalAssistantText`
 from this module rather than re-deriving idle state from the session log.
 
-### Mode-switch worker (activity-gated proxy mode switching, WL-0MSN3FWV5008KQE9)
+### Request priority (per-request `X-Priority`)
 
-The mode-switch worker automatically switches the llama-proxy between
-**fast** (cloud) and **cheap** (local) modes based on operator presence and
-proxy idle state:
+The llama-proxy retired its global **fast/cheap** operating mode. Cost and
+urgency are now expressed **per request** through the `X-Priority` request
+header (`low` | `medium` | `high`; absent → the proxy applies its own
+`medium` default and reports the effective value back in
+`X-Priority-Applied`). Herdr has no mode to switch: it maps the dispatched
+work item's priority onto a request priority and hands it to the launched pi
+session as the **pane-launch environment variable**
+`HERDR_REQUEST_PRIORITY`.
 
-- **Fast on command (fire-and-forget, fail-open)** — an operator dispatching
-  an **agent-route** command (`/skill:*`, `/intake`, `/plan`, `/prompt:`)
-  records operator activity and triggers a switch to fast mode via `POST
-  {proxyUrl}/admin/set-mode` when the proxy is not already in fast mode.
-  The POST is fire-and-forget and cannot block command dispatch (fail-open),
-  so a slow or unresponsive proxy never delays the operator. When the cached
-  mode says fast the command path re-reads the proxy's actual mode
-  (`GET /admin/mode`) first, so a schedule-driven flip to cheap while the
-  operator is active can never suppress the explicit fast switch
-  (WL-0MUWIHUL2000JEFR).
-- **Cheap on idle (fail-closed)** — once the operator has been inactive for
-  `modeSwitchIdleThresholdMs` **and** the proxy reports idle (via backend
-  `GET {proxyUrl}/llama/local/status`; no local query, no model switch, no
-  active lease), the worker POSTs `mode=cheap`.
-  **Per-slot operator gate (parent WL-0MT9F67Y3008S0PR, decision 1.a)**: when
-  the proxy serves per-slot identity (`slots[]` valid per `parseLlamaStatus`),
-  the idle gate requires only **≥ 1 free slot** (`evaluateIdle(status,
-  DOWNTIME_PANE_MIN_FREE_SLOTS)` — the spare-capacity semantics shared with
-  the downtime dispatcher), so the other busy slots — downtime panes holding
-  the dispatcher's query/lease — no longer block the switch: a downtime pane
-  is exactly the work the operator wants running while the proxy runs cheap.
-  Accepted tradeoff: a fast-mode downtime request in flight during the mode
-  restart is killed and retried by its client. Under the shared fail-closed
-  contract (WL-0MUXVPXAZ005RESW) `evaluateIdle` returns false when per-slot
-  detail is unusable, so a proxy that cannot serve `slots[]` delays the
-  cheap switch rather than switching on an unverifiable count. Any
-  ambiguity — an
-  unparseable status payload (including malformed/ambiguous per-slot
-  identity), a non-2xx admin response, or a fetch failure —
-  is treated as busy (fail-closed) so the proxy is never switched cheap
-  while real work might be in flight. The single-flight task means a hung
-  tick can never wedge the task; the proxy URL reuses `downtimeProxyUrl`.
-- **Leader-only cheap switching + shared activity (WL-0MU6MXCZZ007ZXT9)** —
-  only the machine-wide downtime leader (`DowntimeWorker.isLeader`, the
-  existing election — no separate election) runs the idle cheap-switch logic;
-  non-leader panes skip it entirely. Every pane broadcasts its latest
-  operator-command timestamp to `mode-activity.json` in the machine
-  coordination directory (`getMachineCoordinationDir()` — the same directory
-  as the downtime leader lease), and the leader evaluates idleness against the
-  **max** of its local clock and that shared timestamp. The proxy therefore
-  stays fast while *any* pane has recent activity, and idle panes can no
-  longer flip the shared proxy to cheap behind an active pane's back (the
-  flip-flop this fixed). Fast switching still fires on whichever pane received
-  the command (fail-open, idempotent); only the cheap idle switch is
-  leader-gated. If the shared file cannot be read or written the worker falls
-  back to its local clock (fail-closed).
-- **Restart resets to active now** — on plugin/pane restart the idle clock
-  starts from the worker's construction time, so a fresh pane begins with a
-  full idle window before any cheap switch is eligible.
-- **Downtime-dispatcher idle trigger (WL-0MU4MKVR4005WPBJ)** — the downtime
-  dispatcher triggers a mode-switch check with the fresh proxy status whenever
-  its own poll observes the proxy idle, *before* it dispatches the next item.
-  This eliminates the up-to-`modeSwitchPollIntervalMs` delay of the
-  independent scheduler task, so an item dispatched during downtime is served
-  by the cheap pool. The scheduler task remains as the fallback when the
-  downtime worker is not polling (disabled, non-leader, or paused).
-- **Model-cooldown gate (WL-0MV5638ZS005I5XQ, WL-0MV5639X70029BOI)** — before
-  the cheap decision the leader reads the machine-wide cooldown signal
-  (`readModelCooldowns` from `@worklog/shared/model-cooldown`, the same
-  coordination directory as `mode-activity.json`). While any entry is active
-  (`cooldownUntil` in the future) the worker holds **fast**: a pane sitting in
-  proxy backoff holds no slot, so the proxy looks idle and the cheap switch
-  would add concurrency (cheap has more slots than fast) during a known
-  provider-exhaustion window. The hold is bounded by `cooldownUntil` (no latch)
-  and machine-wide, so a cooldown recorded in any worklog root suppresses the
-  shared switch.
-  - **Fail-closed, logged:** an unreadable or corrupt signal (`null`) holds
-    fast rather than switching on an unverifiable signal, and logs the
-    condition (`[mode-switch] model-cooldown signal unreadable/corrupt —
-    holding fast (fail-closed)`).
-  - **Absent/empty is not fail-closed:** a missing file or an empty document
-    (`[]`) means "nothing recorded", so the normal cheap decision runs.
-  - **Bounded default (WL-0MV5639X70029BOI):** the marker's `cooldownUntil` is
-    derived from the server `Retry-After` hint when available; when the hint is
-    absent or malformed the TUI recovery loop uses a bounded default
-    (`DEFAULT_RECOVERY_CONFIG.cooldown`, documented in
-    `packages/tui/extensions/Worklog/lib/recovery/error-patterns.ts`) clamped
-    into `[floorMs, ceilingMs]` (`1000 ms` – `6 h`, default `10 min`). The
-    default is never zero (so the gate can never open prematurely) and never
-    unbounded (so the proxy can never be pinned in fast mode).
-  - **Fast path unaffected:** `onOperatorCommand` never reads the cooldown
-    signal, so a cooldown can never suppress the fast-on-command switch.
-  - **Contract of record:** the on-disk format (file `model-cooldowns.json`,
-    `schemaVersion: 1`, entry fields, tolerant/fail-closed read rules) is
-    documented once in the header of
-    `packages/shared/src/model-cooldown.ts`; the recovery-loop code comments and
-    `docs/design/mode-switch-worker.md` cross-reference it rather than restating
-    the field list.
-  - **Must not regress (WL-0MUWIHUL2000JEFR):** this gate is **not** the
-    withdrawn client drain — no client-side slot-count completion gate, no
-    `drainPaused` dispatch pause, no unbounded latch. See
-    `docs/design/mode-switch-worker.md`.
+**Mapping tables** (`packages/herdr/src/request-priority.ts`):
 
-New settings (all optional):
+| Work-item priority | Interactive (`mapInteractiveRequestPriority`) | Downtime (`mapDowntimeRequestPriority`) |
+|---|---|---|
+| `low` | `medium` | `low` |
+| `medium` | `high` | `medium` |
+| `high` | `high` | `high` |
+| `critical` | `high` | `high` |
+| absent / unknown | `high` | `medium` |
 
-- `modeSwitchEnabled` — Enable the mode-switch worker (default: `true`;
-  when `false` the scheduler registers no mode-switch task and the
-  agent-route hook is a no-op)
-- `modeSwitchIdleThresholdMs` — Operator-inactivity window before a cheap
-  switch is considered (default: `900000` = 15 minutes, hard floor `60000`)
-- `modeSwitchPollIntervalMs` — Poll interval for the proxy idle check when
-  evaluating the idle window (default: `10000`, clamped to `[5000, 60000]`)
+- **Interactive dispatches** (agent panes and headless `open_pane: false`
+  runs) resolve the item's priority at dispatch time with a bounded `wl show`
+  lookup and map it through the interactive table. Resolution is **fail-open**:
+  no item id (`/prompt:`, free-form), a lookup failure or a timeout falls back
+  to `high`, and a dispatch is never blocked or aborted by priority
+  resolution.
+- **Downtime dispatches** map the selected candidate's priority through the
+  downtime table so unattended work is polite (`low` stays `low`) while
+  `critical` work is served as `high`.
+- **Transport.** The mapped value is forwarded by `send-to-pi.sh
+  --request-priority <low|medium|high>` and injected into the pane process
+  with `exec env HERDR_REQUEST_PRIORITY=<value> bash run-pi-agent.sh …`
+  (headless runs get it directly through their spawn environment). An absent
+  or invalid value omits the env var entirely — never an assumed `high` on the
+  proxy side; the proxy's own `medium` default then applies.
+- **Header injection.** The globally installed Worklog pi extension
+  (`packages/tui/extensions/Worklog/request-priority.ts`) reads
+  `HERDR_REQUEST_PRIORITY` on every provider request and sets `X-Priority`
+  through the `before_provider_headers` hook. Unset/empty/invalid values leave
+  the headers untouched (fail-open), so a session launched without a priority
+  is unaffected.
+- **Audit Phase 2 is always serial** (`AUDIT_PHASE2_PARALLELISM=1`): there is
+  no mode-aware parallelism any more. Free-slot dispatch gating is unchanged.
 
-The proxy URL is **not** a new setting — it reuses `downtimeProxyUrl`.
-
-**Coexistence with the proxy's built-in time schedule** — the plugin's
-switches are manual overrides (LP-0MSMF25V9002AY1J semantics): they set the
-proxy mode immediately but do not change or disable the proxy's own
-scheduled switching (e.g. cloud hours). The proxy's schedule reclaims control
-at its next boundary — a documented behavior, not a conflict. The worker
-deduplicates by querying the current mode before switching, so it never issues
-redundant `set-mode` calls.
+The former `modeSwitchEnabled`, `modeSwitchIdleThresholdMs` and
+`modeSwitchPollIntervalMs` settings are **retired**: they are no longer read or
+written and are absent from the default settings object. An existing settings
+file that still contains them keeps loading (unknown keys are ignored — no
+migration needed); re-saving the file drops them.
 
 **Scheduled prompts (WL-0MSS1Q5ER007QDKX)** — the FIRST dispatch stage: a
 project-local config file `.worklog/scheduled-prompts.json` (provisioned by
@@ -1623,8 +1521,8 @@ deferred until typing finishes.
 - **No settings toggle** — the typing gate is always on. Manual actions
   (navigation, shortcut chords, `S` sync, the initial data load) are never
   gated.
-- **Downtime / mode-switch workers are not gated (audited)** — the
-  `downtime` and `mode-switch` scheduler tasks only probe idle state and
+- **Downtime worker is not gated (audited)** — the
+  `downtime` scheduler task only probes idle state and
   dispatch/switch inference mode; they never trigger a worklist list
   re-render while a modal is open, so gating them would only delay
   low-urgency background work with no keypress-loss benefit. See the audit

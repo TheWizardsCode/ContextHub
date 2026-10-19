@@ -240,6 +240,23 @@ then the review comments). See [CLI.md](CLI.md#interview-options-id) for the
 
 ---
 
+## Per-request priority (not a global fast/cheap mode)
+
+The proxy's former global **fast/cheap** operating mode is retired. Cost and
+urgency are expressed **per request** through the `X-Priority` provider
+header (`low|medium|high`, absent → `medium`). Herdr maps each dispatched
+work item's priority onto a request priority and launches pi sessions with
+`HERDR_REQUEST_PRIORITY` set (the Worklog pi extension injects the header):
+
+- interactive dispatches: `low`→`medium`, `medium`/`high`/`critical`→`high`,
+  unresolvable→`high`;
+- downtime (idle) dispatches: `low`/`medium`/`high` unchanged,
+  `critical`→`high`, unknown/absent→`medium`.
+
+A `low` downtime request prefers a queued local slot; a `high` interactive
+request may fall back to remote immediately. See
+`packages/herdr/README.md` for details.
+
 ## Task routing guidance (what to run locally vs hosted)
 
 Good local (Ollama) candidates (tasks that are common in software development and usually don’t require large-model capabilities):

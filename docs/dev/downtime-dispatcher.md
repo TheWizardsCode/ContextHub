@@ -681,12 +681,10 @@ the attempt cap. An unreadable/absent cooldown signal is fail-safe — the scan
 simply has no cooldown candidates and the generic path is unchanged.
 
 > **Must not regress — no client drain (WL-0MUWIHUL2000JEFR).** This wake is
-> **not** a resurrection of the withdrawn "drain before switching to cheap"
-> design: there is **no** client-side slot-count completion gate, **no**
-> `drainPaused` dispatch pause and **no** unbounded latch. The scan is bounded
-> by `cooldownUntil`, resumes at most one pane per cycle, and the proxy's own
-> server-side bounded drain remains authoritative. See the "Withdrawn client
-> drain — must not regress" section of `docs/design/mode-switch-worker.md`.
+> **not** a client-side drain design: there is **no** slot-count completion
+> gate, **no** `drainPaused` dispatch pause and **no** unbounded latch. The
+> scan is bounded by `cooldownUntil`, resumes at most one pane per cycle, and
+> the proxy's own server-side bounded drain remains authoritative.
 
 #### Neutral outcome vocabulary and fail-safety (parent AC2/AC6)
 
@@ -998,6 +996,54 @@ root-pane liveness source differ. The automated path checks the running
 the live **tracked pi/shell** panes (step 4).
 
 
+### Request priority (`X-Priority`) on dispatched panes
+
+The llama-proxy retired its global fast/cheap operating mode. Cost and
+urgency are expressed **per request** via the `X-Priority` request header
+(`low` | `medium` | `high`; absent → the proxy applies its own `medium`
+default, reported back in `X-Priority-Applied`). Herdr conveys the dispatched
+item's priority to the launched pi session as the pane-launch environment
+variable `HERDR_REQUEST_PRIORITY`; the Worklog pi extension turns it into the
+header on every provider request (fail-open — unset/invalid leaves headers
+untouched).
+
+Two mapping tables (`packages/herdr/src/request-priority.ts`) are fixed by
+the parent contract (WL-0MVE1NZ4J000H5NH):
+
+| Work-item priority | Interactive | Downtime |
+|---|---|---|
+| `low` | `medium` | `low` |
+| `medium` | `high` | `medium` |
+| `high` | `high` | `high` |
+| `critical` | `high` | `high` |
+| absent / unknown | `high` | `medium` |
+
+- **Downtime** — `dispatchClaimedTier` forwards the selected
+  `DowntimeCandidate.priority` through `spawnAgentPane` to
+  `buildDowntimeSpawnOptions`, which maps it with the downtime table and sets
+  `HERDR_REQUEST_PRIORITY` beside `HERDR_RESOLVED_CWD`. Unattended work is
+  therefore polite (`low` stays `low`) while `critical` work is served as
+  `high`. Scheduled prompts have no work item and get the downtime default
+  (`medium`).
+- **Interactive** — the agent route resolves the dispatched item's priority
+  with a bounded `wl show --json` lookup (2 s budget), maps it with the
+  interactive table and passes it to `buildSendToPiArgs(...,
+  requestPriority)` (`--request-priority <value>`) and to headless
+  `spawnBackgroundPi` runs (direct spawn env). Resolution is fail-open: no
+  id (`/prompt:`), a lookup failure or a timeout yields `high` and never
+  blocks the dispatch.
+- **Transport** — `send-to-pi.sh` accepts `--request-priority
+  low|medium|high` and injects it into the pane process with `exec env
+  HERDR_REQUEST_PRIORITY=<value> bash run-pi-agent.sh …` (a `pane run`
+  environment set on the script itself does not reach pi). Nothing is
+  forwarded when the flag is absent, so the proxy's `medium` default applies.
+  Shell-command panes (`run-in-pane.sh`) intentionally carry no priority:
+  they do not schedule agent work.
+- **Audit Phase 2 is always serial** (`AUDIT_PHASE2_PARALLELISM=1`); the
+  former mode-aware `'2'` selection and its `DowntimeSpawnConfig`
+  (`mode`/`slotBudget`/`freeSlots`/`concurrentDispatchCap`) plumbing are
+  gone. Free-slot dispatch gating is unchanged.
+
 ### No-candidate cooldown & the empty offer file
 
 The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
@@ -1083,7 +1129,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 | **Host-wide marker** (this mechanism) | machine-wide, all projects/instances | an audit dispatched by ANY project on this host | skip audit tier; reason `audit-host-saturated` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
 | **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot ownership) | the Local Proxy | live slot availability, queue depth, live leases | ineligible/skip audit dispatch (per-tier minimum 2 free slots) or `proxy-contention`; unusable per-slot detail → `slots-unavailable` |
-| **`AUDIT_PHASE2_PARALLELISM=1`** | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots |
+| **`AUDIT_PHASE2_PARALLELISM=1`** (always) | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots (fully serial Phase 2) |
 
 **Observability.** The skip is logged to stderr as
 `Downtime audit tier skipped: audit-host-saturated (concurrentAudits=1,
@@ -1679,7 +1725,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
 | `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + `herdr pane process-info` + pi session logs (activity probes: agent status, recent file modifications, spawned child processes) |
 | `packages/herdr/src/process-group.ts` | Session-scoped child-process teardown (SIGTERM → grace → SIGKILL) |
-| `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` |
+| `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` and injects `HERDR_REQUEST_PRIORITY` from `--request-priority` |
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |
 | `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher fallback anchor `{ paneId, workspaceId }` (machine dir; AC4 fallback + scheduled prompts only) |
 | ~~`~/.herdr/downtime/downtime-dispatch-tab-anchors.json`~~ | **Retired** (per-prefix map). Item tabs are discovered via `herdr tab list`; a leftover file is no longer read. |

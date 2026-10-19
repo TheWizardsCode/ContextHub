@@ -153,12 +153,12 @@ while any text-input overlay is open.
   visibility gate. When no input is active, pause-when-hidden, single-flight,
   cross-instance heartbeat dedup, and the DB-change skip all behave exactly as
   before.
-- **Downtime / mode-switch workers are NOT gated (audited)** — the `downtime`
-  and `mode-switch` scheduler tasks only probe idle state and
-  dispatch/switch inference mode; they never re-render the worklist while a
-  modal is open, so gating them would only delay low-urgency background work
-  with no keypress-loss benefit. The audit decision is recorded in code
-  comments next to each task registration in `worklist.ts`.
+- **Downtime worker is NOT gated (audited)** — the `downtime` scheduler task
+  only probes idle state and dispatches background work; it never re-renders
+  the worklist while a modal is open, so gating it would only delay
+  low-urgency background work with no keypress-loss benefit. The audit
+  decision is recorded in a code comment next to the task registration in
+  `worklist.ts`.
 - **No settings toggle** — the typing gate is always on. Manual actions are
   never gated.
 
