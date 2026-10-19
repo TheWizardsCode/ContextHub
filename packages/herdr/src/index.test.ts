@@ -3690,3 +3690,88 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
     expect(defaultStalledPaneRootResolver(pane, '/fallback')).toBe(root);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Request-priority threading (test-first WL-0MVF3PYO3000EVJ3, parent
+// WL-0MVE1NZ4J000H5NH)
+//
+// The proxy retired its global fast/cheap mode in favour of a per-request
+// `X-Priority` header. Herdr maps the dispatched work item's priority onto a
+// request priority and hands it to the launched process as
+// `HERDR_REQUEST_PRIORITY` (parent AC2/AC3).
+//
+// RED WITNESS. Neither the `buildSendToPiArgs` flag nor the `spawnBackgroundPi`
+// env entry exists yet, so the target specs are committed with `it.fails(...)`
+// — the suite stays GREEN while the assertions are RED (the repo's documented
+// TDD pattern). The implementation child WL-0MVF3Q3VL000UNCN flips each
+// `it.fails` to `it` once the threading lands.
+// ---------------------------------------------------------------------------
+
+/** Target signature of `buildSendToPiArgs` once the priority flag lands. */
+const buildSendToPiArgsWithPriority = buildSendToPiArgs as unknown as (
+  command: string,
+  targetCwd: string,
+  model?: string,
+  paneIdFile?: string,
+  paneName?: string,
+  focus?: boolean,
+  anchor?: string,
+  requestPriority?: 'low' | 'medium' | 'high',
+) => string[];
+
+describe('buildSendToPiArgs — request priority (WL-0MVF3PYO3000EVJ3 AC4)', () => {
+  it.fails('forwards --request-priority <mapped value> so the pane process receives it', () => {
+    const args = buildSendToPiArgsWithPriority(
+      '/skill:implement WL-1',
+      '/project',
+      undefined,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      'high',
+    );
+    const flagIndex = args.indexOf('--request-priority');
+    expect(flagIndex).toBeGreaterThanOrEqual(0);
+    expect(args[flagIndex + 1]).toBe('high');
+    // The command must stay the final argv token so send-to-pi.sh parses it.
+    expect(args[args.length - 1]).toBe('/skill:implement WL-1');
+  });
+
+  it('omits --request-priority when no priority is supplied (backward compatible)', () => {
+    expect(buildSendToPiArgs('/skill:implement WL-1', '/project')).not.toContain('--request-priority');
+  });
+});
+
+describe('spawnBackgroundPi — request priority env (WL-0MVF3PYO3000EVJ3 AC3)', () => {
+  /** Build the (future) spawn deps carrying the already-mapped priority. */
+  const piDeps = (
+    spawnFn: ReturnType<typeof vi.fn>,
+    requestPriority?: 'low' | 'medium' | 'high',
+  ): Parameters<typeof spawnBackgroundPi>[4] =>
+    ({ spawn: spawnFn as never, openSync: () => 9, requestPriority }) as Parameters<typeof spawnBackgroundPi>[4];
+
+  it.fails('adds HERDR_REQUEST_PRIORITY (already-mapped value) to the child process env', () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    spawnBackgroundPi('/skill:implement WL-1', '/project', 'code', '/tmp/log', piDeps(spawnFn, 'low'));
+    expect(spawnFn).toHaveBeenCalledWith(
+      'pi',
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.objectContaining({ HERDR_REQUEST_PRIORITY: 'low' }),
+      }),
+    );
+  });
+
+  it.fails('defaults an unmapped/unresolvable dispatch to high', () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    spawnBackgroundPi('/prompt:Review this', '/project', undefined, '/tmp/log', piDeps(spawnFn));
+    expect(spawnFn).toHaveBeenCalledWith(
+      'pi',
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.objectContaining({ HERDR_REQUEST_PRIORITY: 'high' }),
+      }),
+    );
+  });
+});

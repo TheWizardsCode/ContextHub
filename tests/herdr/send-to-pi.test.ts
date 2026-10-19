@@ -291,3 +291,51 @@ print('{"pane_id": "grid-pane-1"}')
     expect(split).toContain('--current');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Request-priority passthrough (test-first WL-0MVF3PYO3000EVJ3, parent
+// WL-0MVE1NZ4J000H5NH)
+//
+// The pane process is launched by herdr's `pane run`, so an environment
+// variable set on send-to-pi.sh itself does NOT reach pi. The script must
+// forward the mapped request priority explicitly, as the `exec env
+// HERDR_REQUEST_PRIORITY=<value> bash run-pi-agent.sh …` form.
+//
+// RED WITNESS. `--request-priority` is not recognised yet, so the target spec
+// is committed with `it.fails(...)` — the suite stays GREEN while the
+// assertion is RED (the repo's documented TDD pattern). The implementation
+// child WL-0MVF3Q3VL000UNCN flips `it.fails` to `it` once the forwarding lands.
+// ---------------------------------------------------------------------------
+
+describe('send-to-pi.sh --request-priority forwarding (WL-0MVF3PYO3000EVJ3 AC4)', () => {
+  it.fails('passes HERDR_REQUEST_PRIORITY into the pane process', () => {
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--request-priority',
+      'high',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    // The implementation chooses the passthrough form (`exec env …` on the
+    // `pane run` command today, `pane split --env`/`grid.py` passthrough on
+    // the resize path). Pin the OBSERVABLE requirement — the pane process is
+    // handed the mapped priority — rather than one mechanism.
+    expect(
+      log.some(
+        (line) =>
+          line.includes('HERDR_REQUEST_PRIORITY=high') ||
+          (line.includes('HERDR_REQUEST_PRIORITY') && line.includes('--env')),
+      ),
+    ).toBe(true);
+  });
+
+  it('omits HERDR_REQUEST_PRIORITY when no priority is supplied (backward compatible)', () => {
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '/skill:implement <id>']);
+    expect(status).toBe(0);
+    const run = log.find((line) => line.includes('pane run'));
+    expect(run).toBeDefined();
+    expect(log.some((line) => line.includes('HERDR_REQUEST_PRIORITY'))).toBe(false);
+  });
+});
