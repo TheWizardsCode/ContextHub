@@ -47,8 +47,16 @@ import {
   DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS,
   DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
+  // Audit-batch setting (WL-0MVFE0T0M009ZCPM — test-first specs for parent
+  // WL-0MVEDM8OT007WDRS AC1/AC5). These symbols do not exist yet: the
+  // implementation child is WL-0MVFE1AB0002PEPN.
+  clampDowntimeAuditBatchMax,
+  DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+  DOWNTIME_AUDIT_BATCH_MAX_MIN,
+  DOWNTIME_AUDIT_BATCH_MAX_MAX,
   type DowntimeCandidate,
 } from './downtime-worker.js';
+import { loadSettings, defaultSettings } from './settings.js';
 import {
   DOWNTIME_DISABLE_MARKER_FILE,
   writeDisableMarker,
@@ -683,6 +691,98 @@ describe('persisted downtime disable marker (.herdr-downtime-disabled)', () => {
       expect(deps.spawnAgentPane).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
+    }
+  });
+});
+
+// ── Audit-batch setting: downtimeAuditBatchMax (WL-0MVFE0T0M009ZCPM) ───
+//
+// Test-first specs for the depth-aware audit-batch setting (parent
+// WL-0MVEDM8OT007WDRS AC1/AC5, constraints). The setting bounds how many
+// SEQUENTIAL audit dispatches one continuous idle window may issue when the
+// audit-eligible backlog depth reaches `browseItemCount`:
+//
+//  - `DOWNTIME_AUDIT_BATCH_MAX` (settings key `downtimeAuditBatchMax`),
+//  - default `2` (batching on, conservative), clamped to `[1, 5]`,
+//    rounded to an integer,
+//  - non-finite input (NaN/±Infinity) falls back to the default `2`,
+//  - `1` disables batching and restores legacy single-dispatch behaviour.
+//
+// RED WITNESS. Neither `clampDowntimeAuditBatchMax` nor the settings key
+// exists yet, so every body below asserts post-implementation behaviour and
+// is committed with `it.fails` (the repo's documented TDD pattern — see
+// `docs/dev/downtime-dispatcher-post-fix-verification.md`). The suite stays
+// GREEN while the assertions are RED. Implementation child
+// WL-0MVFE1AB0002PEPN flips each `it.fails` to `it` once the setting lands.
+describe('downtime audit-batch setting (downtimeAuditBatchMax)', () => {
+  function writeConfig(body: Record<string, unknown>): string {
+    const dir = mkdtempSync(join(tmpdir(), 'herdr-audit-batch-settings-'));
+    const path = join(dir, 'worklog-plugin.json');
+    writeFileSync(path, JSON.stringify(body), 'utf8');
+    return path;
+  }
+
+  it.fails('clamps downtimeAuditBatchMax to the safe [1, 5] integer range', () => {
+    expect(DOWNTIME_AUDIT_BATCH_MAX_MIN).toBe(1);
+    expect(DOWNTIME_AUDIT_BATCH_MAX_MAX).toBe(5);
+    // Below the floor → clamped UP to 1 (legacy/off, never negative).
+    expect(clampDowntimeAuditBatchMax(0)).toBe(1);
+    expect(clampDowntimeAuditBatchMax(-7)).toBe(1);
+    // In range → preserved, rounded to an integer.
+    expect(clampDowntimeAuditBatchMax(1)).toBe(1);
+    expect(clampDowntimeAuditBatchMax(3)).toBe(3);
+    expect(clampDowntimeAuditBatchMax(2.7)).toBe(3);
+    expect(clampDowntimeAuditBatchMax(5)).toBe(5);
+    // Above the ceiling → clamped DOWN to 5 (bounded per-window LLM load).
+    expect(clampDowntimeAuditBatchMax(99)).toBe(5);
+  });
+
+  it.fails('falls back to the default (2) for non-finite values', () => {
+    expect(DEFAULT_DOWNTIME_AUDIT_BATCH_MAX).toBe(2);
+    expect(clampDowntimeAuditBatchMax(Number.NaN)).toBe(DEFAULT_DOWNTIME_AUDIT_BATCH_MAX);
+    expect(clampDowntimeAuditBatchMax(Number.POSITIVE_INFINITY)).toBe(
+      DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+    );
+    expect(clampDowntimeAuditBatchMax(Number.NEGATIVE_INFINITY)).toBe(
+      DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+    );
+  });
+
+  it.fails('defaults to 2 in defaultSettings', () => {
+    expect(defaultSettings.downtimeAuditBatchMax).toBe(DEFAULT_DOWNTIME_AUDIT_BATCH_MAX);
+    expect(defaultSettings.downtimeAuditBatchMax).toBe(2);
+  });
+
+  it.fails('loadSettings parses a valid downtimeAuditBatchMax value', () => {
+    const path = writeConfig({ downtimeAuditBatchMax: 3 });
+    try {
+      expect(loadSettings(path).downtimeAuditBatchMax).toBe(3);
+    } finally {
+      rmSync(join(path, '..'), { recursive: true, force: true });
+    }
+  });
+
+  it.fails('loadSettings clamps an out-of-range downtimeAuditBatchMax (never trusts the file)', () => {
+    const low = writeConfig({ downtimeAuditBatchMax: 0 });
+    const high = writeConfig({ downtimeAuditBatchMax: 42 });
+    try {
+      expect(loadSettings(low).downtimeAuditBatchMax).toBe(1); // 1 = legacy/off
+      expect(loadSettings(high).downtimeAuditBatchMax).toBe(5);
+    } finally {
+      rmSync(join(low, '..'), { recursive: true, force: true });
+      rmSync(join(high, '..'), { recursive: true, force: true });
+    }
+  });
+
+  it.fails('loadSettings falls back to the default when downtimeAuditBatchMax is missing or invalid', () => {
+    const missing = writeConfig({ browseItemCount: 12 });
+    const invalid = writeConfig({ downtimeAuditBatchMax: 'two' });
+    try {
+      expect(loadSettings(missing).downtimeAuditBatchMax).toBe(2);
+      expect(loadSettings(invalid).downtimeAuditBatchMax).toBe(2);
+    } finally {
+      rmSync(join(missing, '..'), { recursive: true, force: true });
+      rmSync(join(invalid, '..'), { recursive: true, force: true });
     }
   });
 });

@@ -39,6 +39,7 @@ import {
   type DowntimeWorkerDeps,
   type AuditCandidate,
   type ImplementCandidate,
+  type DowntimeHerdrItem,
 } from './downtime-worker.js';
 import { createRoundRobinRegistry } from './downtime-round-robin.js';
 import { LEASE_FILE, LEADER_LOCK_FILE, isLeaseValid } from './leader-election.js';
@@ -49,8 +50,10 @@ import {
   perSlotTwoFree,
   perSlotOneProcessing,
   jsonResponseFixture,
+  ago,
   makeDeps,
   createTempDirTracker,
+  writeDowntimeLog,
 } from './downtime-worker.fixtures.js';
 
 // ── Worker orchestrator (AC1/AC5) ─────────────────────────────────────
@@ -1781,5 +1784,209 @@ describe('worker probe jitter (jitterPollIntervalMs)', () => {
     expect(w1.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).toBe(6_000);
     expect(w2.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).toBe(14_000);
     expect(w1.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS)).not.toBe(w2.jitterPollIntervalMs(DEFAULT_DOWNTIME_POLL_INTERVAL_MS));
+  });
+});
+
+// ── Audit-batch worker loop: cap / depth-drop / non-audit reset ──────
+//
+// Test-first specs for the worker-loop half of the depth-aware audit batch
+// (parent WL-0MVEDM8OT007WDRS AC1/AC2/AC6e):
+//
+//  - AC6e: the batch CAP ends the batch and restores single-dispatch
+//    behaviour (a fresh full idle period is required for the next audit);
+//  - AC6e: a DEPTH DROP below `browseItemCount` ends the batch — the next
+//    audit is a normal single dispatch (no continuation token);
+//  - AC5 (regression pin): the conditional idle reset is scoped to AUDIT
+//    dispatches — every non-audit dispatch keeps today's full reset.
+//
+// The worker owns the continuation budget: it passes `auditBatchRemaining`
+// to the dispatcher, records an `audit-batch-continue` decision (with
+// `auditBatchDepth` / `auditBatchCap` / `auditBatchRemaining` metadata) for
+// each continuation, and defers the tracker reset only while the outcome
+// reports `kind: 'audit'` with batch budget remaining.
+//
+// RED WITNESS. See `downtime-worker.audit-tier.test.ts` for the shared
+// `it.fails` convention; implementation child WL-0MVFE1BTB0084T17 flips the
+// `it.fails` bodies to `it`.
+describe('audit-batch worker loop (parent AC6e)', () => {
+  const tmp = createTempDirTracker();
+  afterEach(() => tmp.cleanup());
+
+  /** A root completed/in_review item with no fresh audit (audit-eligible). */
+  const auditItem = (id: string, sortIndex = 0): DowntimeHerdrItem => ({
+    id,
+    title: `Audit ${id}`,
+    status: 'completed',
+    stage: 'in_review',
+    updatedAt: ago(60_000),
+    sortIndex,
+  });
+
+  it.fails('AC6e: the cap ends the batch and restores single-dispatch behaviour', async () => {
+    vi.useFakeTimers();
+    try {
+      const cwd = tmp.make('herdr-audit-batch-cap-');
+      const markers: Array<Record<string, unknown>> = [];
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        getHerdrListHead: vi
+          .fn()
+          .mockResolvedValue({
+            ok: true,
+            items: [auditItem('WL-AUD-1', 0), auditItem('WL-AUD-2', 1), auditItem('WL-AUD-3', 2)],
+          }),
+        // Persist a success marker so the next tick's dispatched-marker
+        // exclusion selects a DISTINCT target (mirrors the real dep).
+        recordDispatch: vi.fn(async (event) => {
+          markers.push(event as unknown as Record<string, unknown>);
+          writeDowntimeLog(cwd, markers);
+          return true;
+        }),
+        recordDecision,
+      });
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller(
+          'http://proxy:8000',
+          vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree)),
+        ),
+        deps,
+        config: () => ({
+          enabled: true,
+          thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd,
+          noCandidateCooldownMs: 3_600_000,
+          browseItemCount: 2,
+          auditBatchMax: 2, // cap = 2 sequential audits per window
+        }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const first = await worker.tick();
+      expect(first.dispatched).toBe(true);
+      // The post-dispatch reset is DEFERRED for a batch continuation.
+      expect(worker.idleSince).not.toBeNull();
+
+      // Continuation #1 inside the SAME continuous idle window.
+      vi.setSystemTime(
+        start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+      );
+      const second = await worker.tick();
+      expect(second.dispatched).toBe(true);
+
+      // Two distinct audits, cap reached -> the batch ends and the reset
+      // is restored (a fresh full idle period is required from now on).
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
+      const prompts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls.map(
+        (call) => call[0] as string,
+      );
+      expect(prompts[0]).toContain('WL-AUD-1');
+      expect(prompts[1]).toContain('WL-AUD-2');
+      expect(worker.idleSince).toBeNull();
+
+      // Continuation decisions are observable in the decision log.
+      const batchDecisions = recordDecision.mock.calls
+        .map((call) => call[0] as Record<string, unknown>)
+        .filter((entry) => entry.reason === 'audit-batch-continue');
+      expect(batchDecisions.length).toBeGreaterThan(0);
+      expect(batchDecisions[0].auditBatchDepth).toBe(3);
+      expect(batchDecisions[0].auditBatchCap).toBe(2);
+      expect(typeof batchDecisions[0].auditBatchRemaining).toBe('number');
+
+      // Cap exhausted: the next tick inside the old window cannot dispatch.
+      vi.setSystemTime(
+        start +
+          DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS +
+          2 * DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+      );
+      const third = await worker.tick();
+      expect(third.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.fails('AC6e: a depth drop below browseItemCount ends the batch (normal single dispatch)', async () => {
+    const getHerdrListHead = vi
+      .fn()
+      // Deep enough to start a batch (depth 2 >= browseItemCount 2).
+      .mockResolvedValueOnce({ ok: true, items: [auditItem('WL-AUD-1'), auditItem('WL-AUD-2', 1)] })
+      // Depth dropped to 1 (< 2): the batch is over; the candidate is a
+      // NORMAL single dispatch again.
+      .mockResolvedValueOnce({ ok: true, items: [auditItem('WL-AUD-2', 1)] });
+    const deps = makeDeps({ getHerdrListHead });
+
+    const first = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 5,
+    });
+    expect(first.dispatched).toBe(true);
+    expect(first.auditBatch?.active).toBe(true);
+    expect(first.auditBatch?.remaining).toBe(4);
+
+    const dropped = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 5,
+      auditBatchRemaining: 4, // a continuation was pending
+    });
+    expect(dropped.dispatched).toBe(true);
+    expect(dropped.candidate?.id).toBe('WL-AUD-2');
+    // The batch ended: this is a normal single dispatch, not a continuation.
+    expect(dropped.auditBatch?.active).toBe(false);
+    expect(dropped.auditBatch?.remaining).toBe(0);
+  });
+
+  it('AC5 regression: a NON-audit dispatch still resets the idle tracker (batch off for other kinds)', async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = makeDeps({
+        getNextItem: vi.fn().mockResolvedValue({
+          ok: true,
+          candidate: { id: 'WL-PLAN', title: 'Plan me', stage: 'intake_complete', status: 'open' },
+        }),
+      });
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller(
+          'http://proxy:8000',
+          vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree)),
+        ),
+        deps,
+        config: () => ({
+          enabled: true,
+          thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd: '/repo',
+          noCandidateCooldownMs: 3_600_000,
+          browseItemCount: 2,
+          auditBatchMax: 3,
+        }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const first = await worker.tick();
+      expect(first.dispatched).toBe(true);
+      // Non-audit kinds never engage the batch: today's full reset stands.
+      expect(worker.idleSince).toBeNull();
+
+      vi.setSystemTime(
+        start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+      );
+      const second = await worker.tick();
+      expect(second.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

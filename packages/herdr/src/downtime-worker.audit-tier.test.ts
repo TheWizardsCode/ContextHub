@@ -18,14 +18,27 @@
  * `downtime-worker.fixtures.ts`; no setup logic is re-implemented here.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
   dispatchDowntimeWork,
+  createDowntimeWorker,
+  createDowntimePoller,
+  DOWNTIME_AUDIT_MIN_FREE_SLOTS,
+  DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   type DowntimeCandidate,
   type DowntimeActiveAuditResult,
   type DowntimeWorkerDeps,
+  type DowntimeHerdrItem,
 } from './downtime-worker.js';
-import { makeDeps } from './downtime-worker.fixtures.js';
+import {
+  ago,
+  createTempDirTracker,
+  idleAllSlotsFree,
+  jsonResponseFixture,
+  makeDeps,
+  writeDowntimeLog,
+} from './downtime-worker.fixtures.js';
 
 // ── Audit-tier dispatch (WL-0MSI8H3HP000K0RG) ─────────────────────────
 
@@ -1247,6 +1260,314 @@ describe('dispatch CAS claim race', () => {
     const spawnOrder = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.invocationCallOrder[0];
     expect(claimOrder).toBeLessThan(markerOrder);
     expect(markerOrder).toBeLessThan(spawnOrder);
+  });
+});
+
+// ── Depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f) ─────────────
+//
+// Test-first specs for the sequential-in-one-window audit batch (parent
+// WL-0MVEDM8OT007WDRS AC2/AC3/AC6). Every continuation must re-check the
+// SAME safety gates as a fresh dispatch — only the post-dispatch idle reset
+// is deferred:
+//
+//  - AC6b: depth >= `browseItemCount` with `DOWNTIME_AUDIT_BATCH_MAX = N`
+//    yields N sequential audit dispatches in ONE idle window, each a
+//    distinct target;
+//  - AC6c: an unsatisfied idle-duration gate and sub-2 free slots block ALL
+//    dispatch including continuations (`DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2`
+//    is never relaxed);
+//  - AC6d: a non-stale host-wide/per-worklog active-audit marker blocks a
+//    concurrent continuation; the continuation proceeds ONLY after the
+//    marker is released;
+//  - AC6f: dispatched-marker exclusion prevents the same item being
+//    selected twice.
+//
+// Pinned continuation contract: `dispatchDowntimeWork` (and
+// `dispatchFromCoordination`) accept `auditBatchMax` and
+// `auditBatchRemaining` (the continuation budget available BEFORE this
+// dispatch, owner = the worker tick). A successful continuation returns
+// `outcome.auditBatch = { active: true, depth, cap, remaining }` with
+// `remaining` decremented by one.
+//
+// RED WITNESS. The batch surface does not exist yet, so each `it.fails` body
+// asserts post-implementation behaviour; the implementation child
+// WL-0MVFE1BTB0084T17 flips them to `it`. Green `it` bodies are regression
+// pins for invariants that must never be relaxed.
+describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
+  const tmp = createTempDirTracker();
+  afterEach(() => tmp.cleanup());
+
+  /** A root completed/in_review item with no fresh audit (audit-eligible). */
+  const auditItem = (id: string, sortIndex = 0): DowntimeHerdrItem => ({
+    id,
+    title: `Audit ${id}`,
+    status: 'completed',
+    stage: 'in_review',
+    updatedAt: ago(60_000),
+    sortIndex,
+  });
+
+  const deepHead = (n = 3): DowntimeHerdrItem[] =>
+    Array.from({ length: n }, (_, i) => auditItem(`WL-AUD-${i + 1}`, i));
+
+  // ── AC6b: deep depth reports an active batch ─────────────────────
+
+  it.fails('AC6b: depth >= browseItemCount with auditBatchMax N reports an active batch', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: deepHead(3) }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.auditBatch?.active).toBe(true);
+    expect(outcome.auditBatch?.depth).toBe(3);
+    expect(outcome.auditBatch?.cap).toBe(3);
+    // cap 3, this is the first dispatch -> two continuations still available.
+    expect(outcome.auditBatch?.remaining).toBe(2);
+  });
+
+  it.fails('AC6b: a continuation dispatches the next audit target with one fewer remaining', async () => {
+    const deps = makeDeps({
+      // Distinct target list for the continuation: the first item was already
+      // dispatched, so only the remaining two are eligible here.
+      getHerdrListHead: vi
+        .fn()
+        .mockResolvedValue({ ok: true, items: [auditItem('WL-AUD-2', 1), auditItem('WL-AUD-3', 2)] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2, // continuation of an active batch
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    expect(outcome.candidate?.id).toBe('WL-AUD-2');
+    expect(outcome.auditBatch?.active).toBe(true);
+    expect(outcome.auditBatch?.remaining).toBe(1);
+  });
+
+  // ── AC6c: the safety gates are never relaxed for continuations ─────
+
+  it('AC6c: the audit free-slot minimum is never relaxed below 2', () => {
+    expect(DOWNTIME_AUDIT_MIN_FREE_SLOTS).toBe(2);
+  });
+
+  it.fails('AC6c: sub-2 free slots block a continuation (no batch engagement)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: deepHead(3) }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      freeSlots: 1, // audit needs >= 2 — the minimum is NEVER relaxed
+      browseItemCount: 2,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+    });
+
+    expect(outcome.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    // A blocked continuation never reports an active batch.
+    expect(outcome.auditBatch?.active).toBe(false);
+  });
+
+  it.fails('AC6c: a worker busy poll mid-window resets the idle run and blocks the continuation', async () => {
+    vi.useFakeTimers();
+    try {
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: deepHead(3) }),
+      });
+      const fetcher = vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree));
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller('http://proxy:8000', fetcher),
+        deps,
+        config: () => ({
+          enabled: true,
+          thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd: '/repo',
+          noCandidateCooldownMs: 3_600_000,
+          browseItemCount: 2,
+          auditBatchMax: 3,
+        }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      await worker.tick();
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      // AC6b deferred the reset: the batch window is still open.
+      expect(worker.idleSince).not.toBeNull();
+
+      // A busy poll is an unsatisfied idle gate -> the whole window ends.
+      fetcher.mockResolvedValueOnce(
+        jsonResponseFixture({ ...idleAllSlotsFree, local_active_query: true }),
+      );
+      vi.setSystemTime(
+        start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+      );
+      const busy = await worker.tick();
+      expect(busy.idle).toBe(false);
+      expect(worker.idleSince).toBeNull();
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1); // no continuation
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // ── AC6d: active-audit markers gate every continuation ─────────────
+
+  it.fails('AC6d: a per-worklog active-audit marker blocks the continuation until released', async () => {
+    const getActiveAudit = vi.fn().mockResolvedValue({ ok: true, active: true, source: 'per-worklog' });
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: deepHead(2) }),
+      getActiveAudit,
+    });
+
+    const blocked = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+    });
+    expect(blocked.dispatched).toBe(false);
+    expect(blocked.reason).toBe('audit-in-flight');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+    // Marker released (the audit pane closed) -> the SAME continuation budget
+    // proceeds without relaxing any gate.
+    (getActiveAudit as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, active: false });
+    const released = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+    });
+    expect(released.dispatched).toBe(true);
+    expect(released.kind).toBe('audit');
+    expect(released.auditBatch?.active).toBe(true);
+    expect(released.auditBatch?.remaining).toBe(1);
+  });
+
+  it.fails('AC6d: a host-wide active-audit marker blocks the continuation until released', async () => {
+    const getActiveAudit = vi
+      .fn()
+      .mockResolvedValue({ ok: true, active: true, source: 'host-wide' });
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: deepHead(2) }),
+      getActiveAudit,
+    });
+
+    const blocked = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+    });
+    expect(blocked.dispatched).toBe(false);
+    expect(blocked.reason).toBe('audit-host-saturated');
+
+    (getActiveAudit as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, active: false });
+    const released = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+    });
+    expect(released.dispatched).toBe(true);
+    expect(released.auditBatch?.remaining).toBe(1);
+  });
+
+  // ── AC3: any non-dispatched outcome ends the batch ────────────────
+
+  it.fails('AC3: a spawn failure ends the batch (no continuation metadata)', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi
+        .fn()
+        .mockResolvedValue({ ok: true, items: [auditItem('WL-AUD-1'), auditItem('WL-AUD-2', 1)] }),
+      spawnAgentPane: vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true })
+        .mockResolvedValueOnce({ ok: false, error: 'ENOENT', exitCode: 1 }),
+    });
+
+    // A successful continuation first, so the batch surface is proven live…
+    const live = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+    });
+    expect(live.dispatched).toBe(true);
+    expect(live.auditBatch?.active).toBe(true);
+    expect(live.auditBatch?.remaining).toBe(1);
+
+    // …then a spawn failure: the item is claimed + marked but the pane never
+    // appeared, so the batch ends and no continuation budget is surfaced.
+    const failed = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 2,
+      auditBatchMax: 3,
+      auditBatchRemaining: 1,
+    });
+    expect(failed.dispatched).toBe(false);
+    expect(failed.reason).toBe('spawn-failed');
+    expect(failed.auditBatch).toBeUndefined();
+    expect(deps.rollbackClaim).toHaveBeenCalledTimes(1);
+  });
+
+  // ── AC6f: dispatched-marker exclusion across a batch ───────────────
+
+  it.fails('AC6f: a dispatched success marker prevents the same item being selected twice', async () => {
+    const cwd = tmp.make('herdr-audit-batch-marker-');
+    // Item 1 was already dispatched in this batch: its success marker is
+    // fresh and the item is still at the dispatched-at stage -> excluded.
+    writeDowntimeLog(cwd, [
+      {
+        itemId: 'WL-AUD-1',
+        kind: 'audit',
+        dispatchedAt: new Date().toISOString(),
+        stage: 'in_review',
+      },
+    ]);
+    const deps = makeDeps({
+      getHerdrListHead: vi
+        .fn()
+        .mockResolvedValue({ ok: true, items: [auditItem('WL-AUD-1'), auditItem('WL-AUD-2', 1)] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd,
+      browseItemCount: 2,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-AUD-2'); // never WL-AUD-1 again
+    expect(outcome.auditBatch?.active).toBe(true);
+    expect(outcome.auditBatch?.remaining).toBe(1);
   });
 });
 

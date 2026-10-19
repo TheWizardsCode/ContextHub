@@ -16,8 +16,22 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { dispatchDowntimeWork, buildDowntimePaneArgs, type DowntimeWorkerDeps } from './downtime-worker.js';
-import { makeDeps } from './downtime-worker.fixtures.js';
+import {
+  dispatchDowntimeWork,
+  buildDowntimePaneArgs,
+  createDowntimeWorker,
+  createDowntimePoller,
+  DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+  type DowntimeWorkerDeps,
+  type DowntimeHerdrItem,
+} from './downtime-worker.js';
+import {
+  ago,
+  idleAllSlotsFree,
+  jsonResponseFixture,
+  makeDeps,
+} from './downtime-worker.fixtures.js';
 import type { StalledPaneCandidate } from './stalled-work.js';
 
 describe('dispatch selection', () => {
@@ -1052,5 +1066,122 @@ describe('bounded model-cooldown wake (WL-0MV5639GG00085Q7)', () => {
     expect(outcome).toEqual({ dispatched: false, reason: 'stalled-resume' });
     expect(resumeStalledPane).toHaveBeenCalledTimes(2);
     expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+});
+
+// ── Audit-batch: shallow depth keeps single-dispatch (parent AC6a) ────
+//
+// Test-first specs for the depth-derived audit batch (parent
+// WL-0MVEDM8OT007WDRS AC6a). When the audit-eligible backlog is SHALLOW
+// (depth < `browseItemCount`) the dispatcher must keep today's behaviour
+// exactly:
+//
+//  - exactly ONE audit dispatch per continuous idle window,
+//  - a full idle-tracker reset after it (`tracker.record(false)` /
+//    `perSlotTracker.record([])`) — a fresh full idle period is required
+//    before the next audit,
+//  - and NO `audit-batch-continue` decision token.
+//
+// Pinned dispatch-outcome contract (shared by all audit-batch specs): a
+// successful AUDIT dispatch carries
+//   `outcome.auditBatch = { active, depth, cap, remaining }`
+// where `active` is true only while batching is engaged (depth >=
+// `browseItemCount` AND clamped `auditBatchMax` > 1), `depth` is the
+// audit-eligible depth measured from the Herdr head, `cap` is the clamped
+// `auditBatchMax`, and `remaining` is the number of continuation audits
+// still available AFTER this dispatch (0 when batching is off or the cap is
+// consumed). Non-audit dispatches never carry `auditBatch`.
+//
+// RED WITNESS. The batch surface does not exist yet, so each body below
+// asserts post-implementation behaviour and is committed with `it.fails`
+// (see `docs/dev/downtime-dispatcher-post-fix-verification.md`). The suite
+// stays GREEN while the assertions are RED. Implementation child
+// WL-0MVFE1BTB0084T17 flips each `it.fails` to `it`.
+describe('audit-batch: shallow depth keeps single-dispatch (parent AC6a)', () => {
+  /** A root completed/in_review item with no fresh audit (audit-eligible). */
+  const auditItem = (id: string, sortIndex = 0): DowntimeHerdrItem => ({
+    id,
+    title: `Audit ${id}`,
+    status: 'completed',
+    stage: 'in_review',
+    updatedAt: ago(60_000),
+    sortIndex,
+  });
+
+  it.fails('reports an inactive batch when depth is below browseItemCount', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditItem('WL-AUD-1')] }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      browseItemCount: 3,
+      auditBatchMax: 3,
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('audit');
+    // Shallow depth (1 < 3): the batch never engages.
+    expect(outcome.auditBatch?.active).toBe(false);
+    expect(outcome.auditBatch?.depth).toBe(1);
+    expect(outcome.auditBatch?.cap).toBe(3);
+    expect(outcome.auditBatch?.remaining).toBe(0);
+  });
+
+  // Regression pin (GREEN before AND after implementation): a shallow-depth
+  // audit dispatch must keep today's full idle-tracker reset and never arm a
+  // continuation. The RED witness for AC6a is the direct-dispatch spec above
+  // (`outcome.auditBatch.active === false` does not exist yet).
+  it('a shallow-depth worker resets the idle tracker and never arms a continuation', async () => {
+    vi.useFakeTimers();
+    try {
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditItem('WL-AUD-1')] }),
+        recordDecision,
+      });
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller(
+          'http://proxy:8000',
+          vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree)),
+        ),
+        deps,
+        config: () => ({
+          enabled: true,
+          thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd: '/repo',
+          noCandidateCooldownMs: 3_600_000,
+          browseItemCount: 3,
+          auditBatchMax: 3,
+        }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick(); // idle run starts
+      vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const first = await worker.tick();
+
+      expect(first.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      // AC6a: today's full idle-tracker reset is preserved (no carried window).
+      expect(worker.idleSince).toBeNull();
+
+      // Still inside what WOULD be a batch window: no continuation fires.
+      vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS);
+      const second = await worker.tick();
+      expect(second.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+
+      // And no `audit-batch-continue` decision token was ever recorded.
+      const batchTokens = recordDecision.mock.calls.filter(
+        ([entry]) => (entry as { reason?: string }).reason === 'audit-batch-continue',
+      );
+      expect(batchTokens).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
