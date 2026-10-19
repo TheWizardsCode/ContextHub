@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -242,6 +242,80 @@ describe('modeSwitchPollIntervalMs', () => {
     const path = tempSettingsPath();
     writeFileSync(path, JSON.stringify({ ...defaultSettings, modeSwitchPollIntervalMs: 'often' }), 'utf-8');
     expect(loadSettings(path).modeSwitchPollIntervalMs).toBe(10_000);
+  });
+});
+
+// ── Retired modeSwitch* keys (WL-0MVF3Q0QQ0001I2P AC3) ─────────────────
+//
+// The fast/cheap mode-switch worker is retired (parent WL-0MVE1NZ4J000H5NH).
+// Settings files written by older herdr versions still carry its three keys;
+// they must keep loading (unknown keys ignored, no migration) and must not
+// resurface on the parsed object or be re-emitted as defaults.
+//
+// The absence specs are RED until the key removal lands (WL-0MVF3Q1ZB0038IPA),
+// so they use vitest's `it.fails(...)` expected-failure form to keep the suite
+// green while the contract is red — the repo's documented TDD pattern (see
+// `packages/herdr/src/downtime-worker.assignee-claim.test.ts`). The removal
+// child flips each `it.fails` to `it` once the keys are gone.
+
+describe('retired modeSwitch* settings keys (WL-0MVF3Q0QQ0001I2P AC3)', () => {
+  const RETIRED_KEYS = [
+    'modeSwitchEnabled',
+    'modeSwitchIdleThresholdMs',
+    'modeSwitchPollIntervalMs',
+  ] as const;
+
+  function writeRetiredSettingsFile(path: string): void {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        browseItemCount: 33,
+        modeSwitchEnabled: false,
+        modeSwitchIdleThresholdMs: 1_234,
+        modeSwitchPollIntervalMs: 4_321,
+      }),
+      'utf-8',
+    );
+  }
+
+  it('still loads a settings file that contains the retired keys (no migration needed)', () => {
+    const path = tempSettingsPath();
+    writeRetiredSettingsFile(path);
+
+    const settings = loadSettings(path);
+
+    // Loading succeeds and live keys keep their persisted values; the retired
+    // keys are simply ignored.
+    expect(settings.browseItemCount).toBe(33);
+  });
+
+  it.fails('does not surface the retired keys on the parsed settings object', () => {
+    const path = tempSettingsPath();
+    writeRetiredSettingsFile(path);
+
+    const settings = loadSettings(path) as unknown as Record<string, unknown>;
+    for (const key of RETIRED_KEYS) {
+      expect(settings).not.toHaveProperty(key);
+    }
+  });
+
+  it.fails('emits no defaults for the retired keys', () => {
+    const settings = defaultSettings as unknown as Record<string, unknown>;
+    for (const key of RETIRED_KEYS) {
+      expect(settings).not.toHaveProperty(key);
+    }
+  });
+
+  it.fails('does not write the retired keys back to disk on save', () => {
+    const path = tempSettingsPath();
+    writeRetiredSettingsFile(path);
+
+    saveSettings(path, loadSettings(path));
+
+    const persisted = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    for (const key of RETIRED_KEYS) {
+      expect(persisted).not.toHaveProperty(key);
+    }
   });
 });
 
