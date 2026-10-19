@@ -18,16 +18,10 @@
  * Fail-open is mandatory: a lookup failure or timeout must never abort a
  * dispatch — it falls back to the interactive default (`high`).
  *
- * RED WITNESS. `request-priority.ts` does not exist yet, so every spec below
- * asserts the post-implementation behaviour and is committed with
- * `it.fails(...)` — the suite stays GREEN while the assertions are RED (the
- * repo's documented TDD pattern, see
- * `packages/herdr/src/downtime-worker.assignee-claim.test.ts`). The
- * implementation child WL-0MVF3Q3VL000UNCN flips each `it.fails` to `it` once
- * `request-priority.ts` lands. The module is imported dynamically (via a
- * non-literal specifier) so the missing module fails the *test body* rather
- * than breaking the whole file at collection time — that is what lets the
- * expected-failure form work before the module exists.
+ * These specs were authored RED (test-first child WL-0MVF3PYO3000EVJ3) and
+ * are real assertions now that `request-priority.ts` lands
+ * (WL-0MVF3Q3VL000UNCN). They pin the fixed tables and the fail-open
+ * resolution contract and must not be relaxed.
  *
  * Run: npx vitest run packages/herdr/src/request-priority.test.ts
  */
@@ -79,20 +73,20 @@ describe('interactive request-priority mapping (WL-0MVF3PYO3000EVJ3 AC1)', () =>
   ];
 
   for (const [workItemPriority, expected] of cases) {
-    it.fails(`maps work-item '${workItemPriority}' to request '${expected}'`, async () => {
+    it(`maps work-item '${workItemPriority}' to request '${expected}'`, async () => {
       const { mapInteractiveRequestPriority } = await loadModule();
       expect(mapInteractiveRequestPriority(workItemPriority)).toBe(expected);
     });
   }
 
-  it.fails('maps an absent work-item priority to high (interactive default)', async () => {
+  it('maps an absent work-item priority to high (interactive default)', async () => {
     const { mapInteractiveRequestPriority } = await loadModule();
     expect(mapInteractiveRequestPriority(undefined)).toBe('high');
     expect(mapInteractiveRequestPriority(null)).toBe('high');
     expect(mapInteractiveRequestPriority('')).toBe('high');
   });
 
-  it.fails('maps an unknown work-item priority to high (fail-safe, not throw)', async () => {
+  it('maps an unknown work-item priority to high (fail-safe, not throw)', async () => {
     const { mapInteractiveRequestPriority } = await loadModule();
     expect(mapInteractiveRequestPriority('unrecognised')).toBe('high');
   });
@@ -109,13 +103,13 @@ describe('downtime request-priority mapping (WL-0MVF3PYO3000EVJ3 AC2)', () => {
   ];
 
   for (const [workItemPriority, expected] of cases) {
-    it.fails(`maps work-item '${workItemPriority}' to request '${expected}'`, async () => {
+    it(`maps work-item '${workItemPriority}' to request '${expected}'`, async () => {
       const { mapDowntimeRequestPriority } = await loadModule();
       expect(mapDowntimeRequestPriority(workItemPriority)).toBe(expected);
     });
   }
 
-  it.fails('maps an unknown/absent priority to medium (downtime default)', async () => {
+  it('maps an unknown/absent priority to medium (downtime default)', async () => {
     const { mapDowntimeRequestPriority } = await loadModule();
     expect(mapDowntimeRequestPriority(undefined)).toBe('medium');
     expect(mapDowntimeRequestPriority(null)).toBe('medium');
@@ -127,7 +121,7 @@ describe('downtime request-priority mapping (WL-0MVF3PYO3000EVJ3 AC2)', () => {
 // ── Fail-open interactive resolution (parent AC2) ────────────────────────
 
 describe('resolveInteractiveRequestPriority — fail-open resolution (WL-0MVF3PYO3000EVJ3 AC1)', () => {
-  it.fails('maps the looked-up work-item priority through the interactive table', async () => {
+  it('maps the looked-up work-item priority through the interactive table', async () => {
     const { resolveInteractiveRequestPriority } = await loadModule();
     const lookup = vi.fn(() => 'low');
     await expect(resolveInteractiveRequestPriority('WL-1', lookup)).resolves.toBe('medium');
@@ -136,7 +130,7 @@ describe('resolveInteractiveRequestPriority — fail-open resolution (WL-0MVF3PY
     await expect(resolveInteractiveRequestPriority('WL-2', lookupCritical)).resolves.toBe('high');
   });
 
-  it.fails('defaults to high and never looks up when there is no work-item id', async () => {
+  it('defaults to high and never looks up when there is no work-item id', async () => {
     const { resolveInteractiveRequestPriority } = await loadModule();
     const lookup = vi.fn(() => 'low');
 
@@ -146,14 +140,14 @@ describe('resolveInteractiveRequestPriority — fail-open resolution (WL-0MVF3PY
     expect(lookup).not.toHaveBeenCalled();
   });
 
-  it.fails('defaults to high when the lookup returns nothing', async () => {
+  it('defaults to high when the lookup returns nothing', async () => {
     const { resolveInteractiveRequestPriority } = await loadModule();
     await expect(
       resolveInteractiveRequestPriority('WL-1', () => undefined),
     ).resolves.toBe('high');
   });
 
-  it.fails('defaults to high when the lookup fails (throws)', async () => {
+  it('defaults to high when the lookup fails (throws)', async () => {
     const { resolveInteractiveRequestPriority } = await loadModule();
     await expect(
       resolveInteractiveRequestPriority('WL-1', () => {
@@ -162,7 +156,7 @@ describe('resolveInteractiveRequestPriority — fail-open resolution (WL-0MVF3PY
     ).resolves.toBe('high');
   });
 
-  it.fails('defaults to high when the lookup times out (dispatch still proceeds)', async () => {
+  it('defaults to high when the lookup times out (dispatch still proceeds)', async () => {
     const { resolveInteractiveRequestPriority } = await loadModule();
     const hangingLookup = () => new Promise<string | undefined>(() => {});
     await expect(

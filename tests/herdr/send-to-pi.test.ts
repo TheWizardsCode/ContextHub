@@ -301,14 +301,13 @@ print('{"pane_id": "grid-pane-1"}')
 // forward the mapped request priority explicitly, as the `exec env
 // HERDR_REQUEST_PRIORITY=<value> bash run-pi-agent.sh …` form.
 //
-// RED WITNESS. `--request-priority` is not recognised yet, so the target spec
-// is committed with `it.fails(...)` — the suite stays GREEN while the
-// assertion is RED (the repo's documented TDD pattern). The implementation
-// child WL-0MVF3Q3VL000UNCN flips `it.fails` to `it` once the forwarding lands.
+// `--request-priority` forwarding implemented by WL-0MVF3Q3VL000UNCN;
+// these are real assertions pinning the `HERDR_REQUEST_PRIORITY` passthrough
+// into the pane process.
 // ---------------------------------------------------------------------------
 
 describe('send-to-pi.sh --request-priority forwarding (WL-0MVF3PYO3000EVJ3 AC4)', () => {
-  it.fails('passes HERDR_REQUEST_PRIORITY into the pane process', () => {
+  it('passes HERDR_REQUEST_PRIORITY into the pane process', () => {
     const { status, log } = runScript([
       '--no-resize',
       '--cwd',

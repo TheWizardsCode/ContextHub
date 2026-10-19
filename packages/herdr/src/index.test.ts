@@ -3677,11 +3677,9 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
 // request priority and hands it to the launched process as
 // `HERDR_REQUEST_PRIORITY` (parent AC2/AC3).
 //
-// RED WITNESS. Neither the `buildSendToPiArgs` flag nor the `spawnBackgroundPi`
-// env entry exists yet, so the target specs are committed with `it.fails(...)`
-// — the suite stays GREEN while the assertions are RED (the repo's documented
-// TDD pattern). The implementation child WL-0MVF3Q3VL000UNCN flips each
-// `it.fails` to `it` once the threading lands.
+// Request-priority threading implemented by WL-0MVF3Q3VL000UNCN: these
+// specs are real assertions pinning the `--request-priority` flag and the
+// `HERDR_REQUEST_PRIORITY` env on the two dispatch paths.
 // ---------------------------------------------------------------------------
 
 /** Target signature of `buildSendToPiArgs` once the priority flag lands. */
@@ -3697,7 +3695,7 @@ const buildSendToPiArgsWithPriority = buildSendToPiArgs as unknown as (
 ) => string[];
 
 describe('buildSendToPiArgs — request priority (WL-0MVF3PYO3000EVJ3 AC4)', () => {
-  it.fails('forwards --request-priority <mapped value> so the pane process receives it', () => {
+  it('forwards --request-priority <mapped value> so the pane process receives it', () => {
     const args = buildSendToPiArgsWithPriority(
       '/skill:implement WL-1',
       '/project',
@@ -3728,7 +3726,7 @@ describe('spawnBackgroundPi — request priority env (WL-0MVF3PYO3000EVJ3 AC3)',
   ): Parameters<typeof spawnBackgroundPi>[4] =>
     ({ spawn: spawnFn as never, openSync: () => 9, requestPriority }) as Parameters<typeof spawnBackgroundPi>[4];
 
-  it.fails('adds HERDR_REQUEST_PRIORITY (already-mapped value) to the child process env', () => {
+  it('adds HERDR_REQUEST_PRIORITY (already-mapped value) to the child process env', () => {
     const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
     spawnBackgroundPi('/skill:implement WL-1', '/project', 'code', '/tmp/log', piDeps(spawnFn, 'low'));
     expect(spawnFn).toHaveBeenCalledWith(
@@ -3740,7 +3738,7 @@ describe('spawnBackgroundPi — request priority env (WL-0MVF3PYO3000EVJ3 AC3)',
     );
   });
 
-  it.fails('defaults an unmapped/unresolvable dispatch to high', () => {
+  it('defaults an unmapped/unresolvable dispatch to high', () => {
     const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
     spawnBackgroundPi('/prompt:Review this', '/project', undefined, '/tmp/log', piDeps(spawnFn));
     expect(spawnFn).toHaveBeenCalledWith(

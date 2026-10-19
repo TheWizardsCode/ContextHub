@@ -41,6 +41,13 @@ import {
   extractJson,
   extractItems,
 } from './fetcher.js';
+import {
+  INTERACTIVE_DEFAULT_REQUEST_PRIORITY,
+  INTERACTIVE_PRIORITY_LOOKUP_TIMEOUT_MS,
+  REQUEST_PRIORITY_ENV_VAR,
+  resolveInteractiveRequestPriority,
+  type RequestPriority,
+} from './request-priority.js';
 import { AgentTracker, AGENT_PANES_FILE } from './agent-tracker.js';
 import {
   isAgentCommand,
@@ -256,6 +263,12 @@ export { stripAgentPromptPrefix };
  * current pane, placing the new pi pane in the work-item-ID tab. An
  * absent/empty anchor omits the flag, keeping the legacy current-pane split
  * (no-ID commands and the fail-open fallback, AC4/AC5).
+ *
+ * Request priority (WL-0MVE1NZ4J000H5NH AC2): when `requestPriority` is
+ * supplied, `--request-priority <low|medium|high>` is forwarded so
+ * send-to-pi.sh injects `HERDR_REQUEST_PRIORITY` into the pane process'
+ * environment. An absent value omits the flag (backward compatible — the
+ * Worklog pi extension then leaves the request headers untouched).
  */
 export function buildSendToPiArgs(
   command: string,
@@ -265,6 +278,7 @@ export function buildSendToPiArgs(
   paneName?: string,
   focus?: boolean,
   anchor?: string,
+  requestPriority?: RequestPriority,
 ): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
   const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
@@ -279,6 +293,12 @@ export function buildSendToPiArgs(
   }
   if (anchor) {
     args.push('--anchor', anchor);
+  }
+  // Request priority: placed before the command, which must stay the final
+  // argv token (send-to-pi.sh treats everything after its options as the
+  // command).
+  if (requestPriority) {
+    args.push('--request-priority', requestPriority);
   }
   args.push(agentPrompt);
   return args;
@@ -447,6 +467,12 @@ export interface BackgroundSpawnDeps {
   openSync?: (path: string, flags: string) => number;
   /** Called when the background child process exits — triggers a TUI refresh. */
   onExit?: (exitCode: number | null, signal: string | null) => void;
+  /**
+   * Already-mapped request priority for the dispatched item
+   * (WL-0MVE1NZ4J000H5NH AC2). Defaults to the interactive default (`high`)
+   * when omitted.
+   */
+  requestPriority?: RequestPriority;
 }
 
 /**
@@ -534,7 +560,12 @@ export function spawnBackgroundPi(
     detached: true,
     stdio: fd >= 0 ? (['ignore', fd, fd] as const) : 'ignore',
     cwd: targetCwd,
-    env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
+    env: {
+      ...process.env,
+      HERDR_RESOLVED_CWD: targetCwd,
+      [REQUEST_PRIORITY_ENV_VAR]:
+        deps.requestPriority ?? INTERACTIVE_DEFAULT_REQUEST_PRIORITY,
+    },
   });
   child.unref(); // Allow the parent to exit independently
 
@@ -671,6 +702,39 @@ export async function claimItemForAgentCommand(command: string): Promise<void> {
       `[worklog-plugin] Failed to set ${itemId} status to in_progress: ${result.error ?? 'unknown error'}\n`,
     );
   }
+}
+
+/**
+ * Look up a work item's raw priority for interactive request-priority
+ * resolution (WL-0MVE1NZ4J000H5NH AC2).
+ *
+ * Bounded and fail-open: any CLI error, timeout or parse failure resolves
+ * `undefined`, which the interactive mapping turns into the default `high`.
+ * Never throws.
+ */
+async function lookupWorkItemPriority(itemId: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await getExecFileAsync()(
+      'wl',
+      buildWlArgs(['show', itemId, '--json']),
+      { encoding: 'utf8', timeout: INTERACTIVE_PRIORITY_LOOKUP_TIMEOUT_MS },
+    );
+    return parseShownWorkItem(stdout)?.priority;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the request priority for an interactive agent dispatch
+ * (WL-0MVE1NZ4J000H5NH AC2): map the dispatched work item's priority through
+ * the interactive table. Fail-open — no item id, a lookup failure or a
+ * timeout yields the interactive default (`high`).
+ */
+export async function resolveInteractiveDispatchPriority(
+  itemId: string | undefined,
+): Promise<RequestPriority> {
+  return resolveInteractiveRequestPriority(itemId, lookupWorkItemPriority);
 }
 
 /**
@@ -2488,6 +2552,14 @@ export async function main(): Promise<void> {
           } catch {
             // Belt-and-suspenders: a claim failure must never block the pane.
           }
+          // Request priority (WL-0MVE1NZ4J000H5NH AC2): resolve the
+          // dispatched work item's priority and map it through the
+          // interactive table. Fail-open — unresolvable (no id / lookup
+          // error / timeout) → `high` — and bounded (2 s max) so a slow wl
+          // call can never stall a dispatch.
+          const requestPriority = await resolveInteractiveDispatchPriority(
+            extractWorkItemId(command),
+          );
           if (!shouldOpenPane) {
             // Background (no-pane) agent dispatch: run pi headless with the
             // entry's model, output captured to a per-run log file. No pane
@@ -2509,6 +2581,7 @@ export async function main(): Promise<void> {
                   notifyBackgroundFailure(command, code, signal, logPath);
                   onRefresh?.();
                 },
+                requestPriority,
               },
             );
             return;
@@ -2533,12 +2606,28 @@ export async function main(): Promise<void> {
           // `--model <pattern>` so the pi CLI opens with the right model.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName, focus, interactiveAnchor?.paneId),
+            buildSendToPiArgs(
+              command,
+              targetCwd,
+              model,
+              paneIdFile,
+              paneName,
+              focus,
+              interactiveAnchor?.paneId,
+              requestPriority,
+            ),
             {
               detached: true,
               stdio: 'ignore',
               cwd: targetCwd,
-              env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
+              // The priority is forwarded via `--request-priority` and
+              // injected by send-to-pi.sh with `exec env …`; setting it on
+              // the script's own env is harmless belt-and-braces.
+              env: {
+                ...process.env,
+                HERDR_RESOLVED_CWD: targetCwd,
+                [REQUEST_PRIORITY_ENV_VAR]: requestPriority,
+              },
             },
           );
           child.unref(); // Allow the parent to exit independently
