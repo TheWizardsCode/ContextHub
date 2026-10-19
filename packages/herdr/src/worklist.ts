@@ -4479,7 +4479,17 @@ export function createListRenderer(getShowIcons?: () => boolean): (
         numHeadings++;
         const arrow = row.collapsed ? '▶' : '▼';
         const indent = (row.depth ?? 0) > 0 ? '  '.repeat(row.depth!) : '';
-        const line = `${indent} ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
+        // The In Review group is the only section with an active
+        // producer-review obligation, so give its heading a grey ANSI 256
+        // background to differentiate it from every other group heading
+        // (WL-0MUYJ8WJG0087VSU). The label is sourced from grouping.ts
+        // (`groupLabel: 'In Review'`), keeping that the single source of
+        // truth. Dark grey 238 keeps sufficient contrast against the
+        // existing yellow-ish heading foreground (stageColor(undefined) =
+        // 220), so the foreground is intentionally left unchanged. All other
+        // headings render exactly as before (no background escape).
+        const headingBg = row.groupLabel === 'In Review' ? ANSI.bg(238) : '';
+        const line = `${indent} ${headingBg}${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
         output.push(isSelected ? reverseWrap(line) : line);
         continue;
       }

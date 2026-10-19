@@ -260,12 +260,11 @@ describe('click-row mapping accounts for heading rows', () => {
   });
 });
 
-// ── In Review heading background (test-first, parent WL-0MUYJ8WJG0087VSU) ──
+// ── In Review heading background (parent WL-0MUYJ8WJG0087VSU) ──
 //
-// Per the test-first design, each spec is committed under `it.fails(...)`
-// so the suite stays green while the contract is red.  The implementation
-// child (WL-0MVD2OFRK000JA2Q) flips `it.fails(` → `it(` once the grey
-// background lands.
+// Authored test-first under `it.fails(...)` while the contract was red; the
+// implementation child (WL-0MVD2OFRK000JA2Q) flipped them to active `it(...)`
+// specs once the grey background landed.
 
 const ANSI_BG_PREFIX = '\x1b[48;5;'; // ANSI 256-colour background escape
 
@@ -283,7 +282,7 @@ const BACKGROUND_TEST_ROWS: (DisplayHeadingRow | WorkItem)[] = [
 describe('In Review heading background escape sequence', () => {
   const renderer = createListRenderer();
 
-  it.fails('In Review heading contains the ANSI 256 background escape prefix', () => {
+  it('In Review heading contains the ANSI 256 background escape prefix', () => {
     // AC1: a heading with label `In Review` contains the background escape
     // sequence (asserted on the `\x1b[48;5;` prefix rather than the exact
     // full-row string).
@@ -332,13 +331,13 @@ describe('In Review heading background escape sequence', () => {
 describe('In Review heading background with selection', () => {
   const renderer = createListRenderer();
 
-  it.fails('selected In Review heading has both reverse-video and grey background', () => {
+  it('selected In Review heading has both reverse-video and grey background', () => {
     // AC3: a selected `In Review` heading renders with the reverse-video
     // selection bar (`\x1b[7m`) in addition to the grey background.
-    // Row index 5 is the In Review heading (h1=0, items=1-3, h2=5).
+    // Row index 4 is the In Review heading (h1=0, items=1-3, h2=4).
     const output = renderer(
       BACKGROUND_TEST_ROWS,
-      5, // selectedIndex = In Review heading
+      4, // selectedIndex = In Review heading
       0,
       TERM_80x24,
       null,

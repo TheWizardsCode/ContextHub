@@ -1897,7 +1897,10 @@ grouping, so podcast episode items group exactly as their frontmatter
 in the canonical order (Critical → Group N → Idea → Other → In Review) as
 **collapsible heading rows** (WL-0MSL5MPSZ003TG94): each heading shows the
 group label plus its item count (`── Group 1 (4) ▼ ──`), and pressing **Tab**
-while a heading is selected collapses/expands that group — collapsed groups
+while a heading is selected collapses/expands that group. The **In Review**
+heading carries a grey background fill (ANSI 256 colour 238) so the
+producer-review queue stands out from the other sections at a glance; every
+other heading keeps the plain bold/stage-coloured style (WL-0MUYJ8WJG0087VSU). — collapsed groups
 hide their items from both the render and navigation (the heading itself
 stays). Counts reflect the top-level items in the group (post stage-filter)
 regardless of collapse state. Stage changes re-group items on the next
