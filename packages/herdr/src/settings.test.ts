@@ -173,78 +173,6 @@ describe('downtimeNonTerminalCooldownMs (WL-0MUKYERLZ006ELL5)', () => {
   });
 });
 
-describe('modeSwitchEnabled', () => {
-  it('defaults to true (activity-gated mode switching is opt-out)', () => {
-    expect(defaultSettings.modeSwitchEnabled).toBe(true);
-    const path = tempSettingsPath();
-    expect(loadSettings(path).modeSwitchEnabled).toBe(true);
-  });
-
-  it('accepts a persisted boolean true', () => {
-    const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, modeSwitchEnabled: true });
-    expect(loadSettings(path).modeSwitchEnabled).toBe(true);
-
-    saveSettings(path, { ...defaultSettings, modeSwitchEnabled: false });
-    expect(loadSettings(path).modeSwitchEnabled).toBe(false);
-  });
-
-  it('falls back to the default when the persisted value is not a boolean', () => {
-    const path = tempSettingsPath();
-    writeFileSync(path, JSON.stringify({ ...defaultSettings, modeSwitchEnabled: 'yes' }), 'utf-8');
-    expect(loadSettings(path).modeSwitchEnabled).toBe(true);
-  });
-});
-
-describe('modeSwitchIdleThresholdMs', () => {
-  it('defaults to 900_000 ms (15 minutes)', () => {
-    expect(defaultSettings.modeSwitchIdleThresholdMs).toBe(900_000);
-    const path = tempSettingsPath();
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(900_000);
-  });
-
-  it('clamps a persisted value below the 60s floor up to the floor', () => {
-    const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, modeSwitchIdleThresholdMs: 1_000 });
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(60_000);
-
-    saveSettings(path, { ...defaultSettings, modeSwitchIdleThresholdMs: 600_000 });
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(600_000);
-  });
-
-  it('falls back to the default when the persisted value is not a number', () => {
-    const path = tempSettingsPath();
-    writeFileSync(path, JSON.stringify({ ...defaultSettings, modeSwitchIdleThresholdMs: 'later' }), 'utf-8');
-    expect(loadSettings(path).modeSwitchIdleThresholdMs).toBe(900_000);
-  });
-});
-
-describe('modeSwitchPollIntervalMs', () => {
-  it('defaults to 10_000 ms', () => {
-    expect(defaultSettings.modeSwitchPollIntervalMs).toBe(10_000);
-    const path = tempSettingsPath();
-    expect(loadSettings(path).modeSwitchPollIntervalMs).toBe(10_000);
-  });
-
-  it('clamps a persisted value below the 5s floor up to the floor', () => {
-    const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, modeSwitchPollIntervalMs: 1_000 });
-    expect(loadSettings(path).modeSwitchPollIntervalMs).toBe(5_000);
-  });
-
-  it('clamps a persisted value above the 60s cap down to the cap', () => {
-    const path = tempSettingsPath();
-    saveSettings(path, { ...defaultSettings, modeSwitchPollIntervalMs: 300_000 });
-    expect(loadSettings(path).modeSwitchPollIntervalMs).toBe(60_000);
-  });
-
-  it('falls back to the default when the persisted value is not a number', () => {
-    const path = tempSettingsPath();
-    writeFileSync(path, JSON.stringify({ ...defaultSettings, modeSwitchPollIntervalMs: 'often' }), 'utf-8');
-    expect(loadSettings(path).modeSwitchPollIntervalMs).toBe(10_000);
-  });
-});
-
 // ── Retired modeSwitch* keys (WL-0MVF3Q0QQ0001I2P AC3) ─────────────────
 //
 // The fast/cheap mode-switch worker is retired (parent WL-0MVE1NZ4J000H5NH).
@@ -252,11 +180,9 @@ describe('modeSwitchPollIntervalMs', () => {
 // they must keep loading (unknown keys ignored, no migration) and must not
 // resurface on the parsed object or be re-emitted as defaults.
 //
-// The absence specs are RED until the key removal lands (WL-0MVF3Q1ZB0038IPA),
-// so they use vitest's `it.fails(...)` expected-failure form to keep the suite
-// green while the contract is red — the repo's documented TDD pattern (see
-// `packages/herdr/src/downtime-worker.assignee-claim.test.ts`). The removal
-// child flips each `it.fails` to `it` once the keys are gone.
+// The absence specs were RED until the key removal landed (WL-0MVF3Q1ZB0038IPA),
+// and the removal child (WL-0MVF3Q1ZB0038IPA) flips each expected-failure
+// spec to a real assertion now that the keys are gone.
 
 describe('retired modeSwitch* settings keys (WL-0MVF3Q0QQ0001I2P AC3)', () => {
   const RETIRED_KEYS = [
@@ -289,7 +215,7 @@ describe('retired modeSwitch* settings keys (WL-0MVF3Q0QQ0001I2P AC3)', () => {
     expect(settings.browseItemCount).toBe(33);
   });
 
-  it.fails('does not surface the retired keys on the parsed settings object', () => {
+  it('does not surface the retired keys on the parsed settings object', () => {
     const path = tempSettingsPath();
     writeRetiredSettingsFile(path);
 
@@ -299,14 +225,14 @@ describe('retired modeSwitch* settings keys (WL-0MVF3Q0QQ0001I2P AC3)', () => {
     }
   });
 
-  it.fails('emits no defaults for the retired keys', () => {
+  it('emits no defaults for the retired keys', () => {
     const settings = defaultSettings as unknown as Record<string, unknown>;
     for (const key of RETIRED_KEYS) {
       expect(settings).not.toHaveProperty(key);
     }
   });
 
-  it.fails('does not write the retired keys back to disk on save', () => {
+  it('does not write the retired keys back to disk on save', () => {
     const path = tempSettingsPath();
     writeRetiredSettingsFile(path);
 
@@ -319,16 +245,14 @@ describe('retired modeSwitch* settings keys (WL-0MVF3Q0QQ0001I2P AC3)', () => {
   });
 });
 
-describe('mode-switch proxy URL reuse', () => {
-  it('reuses downtimeProxyUrl (no separate mode-switch URL key)', () => {
-    // The mode-switch worker does not define its own URL setting; the proxy
-    // URL is shared with the downtime worker.
+describe('downtimeProxyUrl', () => {
+  it('loads a persisted proxy URL', () => {
     const path = tempSettingsPath();
     saveSettings(path, { ...defaultSettings, downtimeProxyUrl: 'http://example.invalid:8000' });
     expect(loadSettings(path).downtimeProxyUrl).toBe('http://example.invalid:8000');
   });
 
-  it('defaults downtimeProxyUrl when absent (shared default)', () => {
+  it('defaults downtimeProxyUrl when absent', () => {
     const path = tempSettingsPath();
     expect(loadSettings(path).downtimeProxyUrl).toBe('http://192.168.0.199:8000');
   });

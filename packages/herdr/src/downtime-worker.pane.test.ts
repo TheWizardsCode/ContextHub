@@ -14,8 +14,7 @@
  *   - `paneLabelItemId / runningDowntimePaneItemIds / evaluateCriticalFirstGuard`
  *     — item-scoped in-flight guard helpers,
  *   - `dispatchDowntimeWork: running-pane / owner / contention gates`,
- *   - `worker tick: the LLM idle check is the sole concurrency limiter` —
- *     including the `onProxyIdle` callback,
+ *   - `worker tick: the LLM idle check is the sole concurrency limiter`,
  *   - `pane-lifecycle monitor (WL-0MU308WSF0002JWN) [disabled behaviour]`, and
  *   - `worker tick pane-lifecycle integration (WL-0MU4US5MP001JFEN) [disabled]`.
  *
@@ -180,7 +179,7 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
   it('buildDowntimeSpawnOptions bounds the dispatched audit fan-out (AUDIT_PHASE2_PARALLELISM=1)', () => {
     const options = buildDowntimeSpawnOptions('/repo');
     // Parent audit + at most one sequential child deep-analysis call fits
-    // cheap mode's 2 local slots (WL-0MSORQ1RG005DGUS).
+    // the 2 local slots (WL-0MSORQ1RG005DGUS).
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
@@ -222,76 +221,17 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     expect(input.GIT_WORK_TREE).toBe('/leak');
   });
 
-  // ── Mode-aware PARALLELISM (WL-0MT50S9JW001DHME) ──────────────────
+  // ── Serial audit Phase 2 (WL-0MVE1NZ4J000H5NH AC5) ────────────────
 
-  it('buildDowntimeSpawnOptions defaults to PARALLELISM=1 when config is absent', () => {
-    // Backward compatibility: no config → '1'
+  it('buildDowntimeSpawnOptions always pins AUDIT_PHASE2_PARALLELISM=1 (serial Phase 2)', () => {
+    // Producer decision Q2b: Phase 2 child deep-analysis is fully serial.
+    // A parent audit needs exactly two local slots (parent + one child);
+    // there is no mode/slot-budget input any more (WL-0MT50S9JW001DHME).
     const options = buildDowntimeSpawnOptions('/repo');
     expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
-
-    const optionsWithEmptyConfig = buildDowntimeSpawnOptions('/repo', { config: undefined });
-    expect(optionsWithEmptyConfig.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
-  it('buildDowntimeSpawnOptions returns PARALLELISM=1 in fast mode even with free slots', () => {
-    const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'fast', slotBudget: 3, freeSlots: 3, concurrentDispatchCap: 1 },
-    });
-    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
-  });
-
-  it('buildDowntimeSpawnOptions returns PARALLELISM=2 for cheap mode with a genuinely free second slot (single-flight)', () => {
-    // Cheap mode, 2 slots, both genuinely free, single dispatch at a time →
-    // 2 children = 2 streams total, fitting the 2-slot pool.
-    const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 1 },
-    });
-    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('2');
-  });
-
-  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when the second slot is NOT genuinely free', () => {
-    // The operative signal is freeSlots, never the total slotBudget: a 2-slot
-    // pool with only 1 free slot cannot run 2 children.
-    const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, freeSlots: 1, concurrentDispatchCap: 1 },
-    });
-    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
-  });
-
-  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when the dispatch budget is unbounded (cap 0)', () => {
-    // 0 = unbounded → a second audit could run → 2 audits × 2 children would
-    // exceed the 2-slot cheap pool. Only cap === 1 is single-flight-safe.
-    const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 0 },
-    });
-    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
-  });
-
-  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when concurrent dispatch budget would exceed slot capacity', () => {
-    // 2+ concurrent dispatches × 2 children each = 4 streams, exceeds 2-slot budget
-    const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 2 },
-    });
-    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
-  });
-
-  it('buildDowntimeSpawnOptions returns PARALLELISM=1 when cheap mode slot budget is insufficient', () => {
-    // Only 1 slot in the pool — cannot run 2 children
-    const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 1, freeSlots: 1, concurrentDispatchCap: 1 },
-    });
-    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
-  });
-
-  it('buildDowntimeSpawnOptions returns PARALLELISM=1 for cheap mode with high dispatch cap', () => {
-    // 3+ concurrent dispatches × 2 children = 6 streams, far exceeds budget
-    const options = buildDowntimeSpawnOptions('/repo', {
-      config: { mode: 'cheap', slotBudget: 2, freeSlots: 2, concurrentDispatchCap: 3 },
-    });
-    expect(options.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
-  });
-
-  it('spawnDowntimePane forwards the spawn config to the spawn boundary (WL-0MT50S9JW001DHME)', async () => {
+  it('spawnDowntimePane forwards the spawn opts to the spawn boundary', async () => {
     const handle = {
       unref: vi.fn(),
       once: vi.fn((event: string, listener: (arg: unknown) => void) => {
@@ -299,17 +239,12 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
       }),
     };
     const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
-    const config = {
-      mode: 'cheap' as const,
-      slotBudget: 2,
-      freeSlots: 2,
-      concurrentDispatchCap: 1,
-    };
 
-    await spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo', config }, spawnFn);
+    await spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo' }, spawnFn);
 
-    // Observable contract: spawnFn injected boundary adapter — config forward is the observable spawn contract
-    expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo', config });
+    // Observable contract: spawnFn injected boundary adapter — the opts
+    // carrier reaches the spawn boundary unchanged.
+    expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo' });
   });
 });
 
@@ -712,213 +647,6 @@ describe('worker tick: the LLM idle check is the sole concurrency limiter (WL-0M
       vi.useRealTimers();
     }
   });
-
-  // ── onProxyIdle callback (WL-0MU4MKVR4005WPBJ) ────────────────────────
-
-  describe('onProxyIdle callback', () => {
-    it('calls the callback with the proxy status when the proxy is idle', async () => {
-      vi.useFakeTimers();
-      try {
-        const callback = vi.fn().mockResolvedValue(undefined);
-        const poller = createDowntimePoller(
-          'http://proxy:8000',
-          async () => ({
-            ok: true,
-            status: 200,
-            json: async () => idleAllSlotsFree,
-          }),
-        );
-        const worker = createDowntimeWorker({
-          poller,
-          deps: makeDeps(),
-          config: () => ({
-            enabled: true,
-            thresholdMs: 0, // instant dispatch
-            requiredFreeSlots: 0,
-            model: 'plan',
-            cwd: '/repo',
-            noCandidateCooldownMs: 3_600_000,
-            browseItemCount: 20,
-          }),
-          onProxyIdle: callback,
-        });
-        vi.setSystemTime(1_000_000);
-        const result = await worker.tick();
-        expect(result.idle).toBe(true);
-        expect(callback).toHaveBeenCalledTimes(1);
-        // Observable contract: onProxyIdle callback injected boundary adapter — status argument is the observable proxy-state contract (producer plan-A)
-        expect(callback).toHaveBeenCalledWith(idleAllSlotsFree);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('does not call the callback when the proxy is busy', async () => {
-      vi.useFakeTimers();
-      try {
-        const callback = vi.fn().mockResolvedValue(undefined);
-        const poller = createDowntimePoller(
-          'http://proxy:8000',
-          async () => ({
-            ok: true,
-            status: 200,
-            json: async () => busyActiveQuery,
-          }),
-        );
-        const worker = createDowntimeWorker({
-          poller,
-          deps: makeDeps(),
-          config: () => ({
-            enabled: true,
-            thresholdMs: 0,
-            requiredFreeSlots: 0,
-            model: 'plan',
-            cwd: '/repo',
-            noCandidateCooldownMs: 3_600_000,
-            browseItemCount: 20,
-          }),
-          onProxyIdle: callback,
-        });
-        vi.setSystemTime(1_000_000);
-        const result = await worker.tick();
-        expect(result.dispatched).toBe(false);
-        expect(result.idle).toBe(false);
-        expect(callback).not.toHaveBeenCalled();
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('calls the callback when the proxy is idle but threshold not met', async () => {
-      vi.useFakeTimers();
-      try {
-        const callback = vi.fn().mockResolvedValue(undefined);
-        const poller = createDowntimePoller(
-          'http://proxy:8000',
-          async () => ({
-            ok: true,
-            status: 200,
-            json: async () => idleAllSlotsFree,
-          }),
-        );
-        const worker = createDowntimeWorker({
-          poller,
-          deps: makeDeps(),
-          config: () => ({
-            enabled: true,
-            thresholdMs: 60_000, // 60 s threshold — not yet met
-            requiredFreeSlots: 0,
-            model: 'plan',
-            cwd: '/repo',
-            noCandidateCooldownMs: 3_600_000,
-            browseItemCount: 20,
-          }),
-          onProxyIdle: callback,
-        });
-        vi.setSystemTime(1_000_000);
-        const result = await worker.tick();
-        expect(result.dispatched).toBe(false);
-        expect(result.idle).toBe(true); // proxy is idle, just threshold not met
-        expect(callback).toHaveBeenCalledTimes(1);
-        // Observable contract: onProxyIdle callback injected boundary adapter — status argument is the observable proxy-state contract (producer plan-A)
-        expect(callback).toHaveBeenCalledWith(idleAllSlotsFree);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('fires the callback BEFORE dispatching the next item (ordering)', async () => {
-      vi.useFakeTimers();
-      try {
-        // The operator requirement (WL-0MU4MKVR4005WPBJ): the mode-switch
-        // check must run before a new item is sent, so the item is served by
-        // the (possibly newly) cheap pool. Record the invocation order.
-        const order: string[] = [];
-        const callback = vi.fn().mockImplementation(async () => {
-          order.push('onProxyIdle');
-        });
-        const deps = makeDeps({
-          getNextItem: vi.fn().mockResolvedValue({
-            ok: true,
-            candidate: { id: 'WL-ABC', title: 'Some task', stage: 'intake_complete' },
-          }),
-          spawnAgentPane: vi.fn().mockImplementation(async () => {
-            order.push('spawn');
-            return { ok: true };
-          }),
-          getRunningDowntimePanes: vi.fn().mockResolvedValue({ ok: true, count: 0 }),
-        });
-        const poller = createDowntimePoller(
-          'http://proxy:8000',
-          vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree)),
-        );
-        const worker = createDowntimeWorker({
-          poller,
-          deps,
-          config: () => ({
-            enabled: true,
-            thresholdMs: 1_000,
-            requiredFreeSlots: 0,
-            model: 'plan',
-            cwd: '/repo',
-            noCandidateCooldownMs: 3_600_000,
-            browseItemCount: 20,
-          }),
-          onProxyIdle: callback,
-        });
-        const start = 1_000_000;
-        vi.setSystemTime(start);
-        await worker.tick(); // starts the idle run
-        vi.setSystemTime(start + 5_000);
-        const outcome = await worker.tick(); // idle + ready → dispatch
-        expect(outcome.dispatched).toBe(true);
-        // The callback fires on EVERY idle poll (the mode-switch worker has
-        // its own operator-idle window), so both ticks trigger it.
-        expect(callback).toHaveBeenCalledTimes(2);
-        // The check fires before the item is dispatched.
-        expect(order).toEqual(['onProxyIdle', 'onProxyIdle', 'spawn']);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-
-    it('does not crash when the callback throws', async () => {
-      vi.useFakeTimers();
-      try {
-        const callback = vi.fn().mockRejectedValue(new Error('callback failed'));
-        const poller = createDowntimePoller(
-          'http://proxy:8000',
-          async () => ({
-            ok: true,
-            status: 200,
-            json: async () => idleAllSlotsFree,
-          }),
-        );
-        const worker = createDowntimeWorker({
-          poller,
-          deps: makeDeps(),
-          config: () => ({
-            enabled: true,
-            thresholdMs: 0,
-            requiredFreeSlots: 0,
-            model: 'plan',
-            cwd: '/repo',
-            noCandidateCooldownMs: 3_600_000,
-            browseItemCount: 20,
-          }),
-          onProxyIdle: callback,
-        });
-        vi.setSystemTime(1_000_000);
-        const result = await worker.tick();
-        // Callback rejected but the worker did not crash or block
-        expect(result.idle).toBe(true);
-        expect(callback).toHaveBeenCalledTimes(1);
-      } finally {
-        vi.useRealTimers();
-      }
-    });
-  });
-});
 
 // ── Pane-lifecycle monitor (WL-0MU308WSF0002JWN) — DISABLED ─────────
 //

@@ -104,7 +104,6 @@ import {
   type DowntimeClaimResult,
   type DowntimeSpawn,
   type DowntimeSpawnResult,
-  type DowntimeSpawnConfig,
   type ScheduledPrompt,
   type DowntimeItemResult,
   parseShowItemOutput,
@@ -120,13 +119,7 @@ import {
   isSafeDowntimePaneToClose,
   type HerdrPaneRecord,
   type RunningPanesResult,
-  type LlamaStatus,
 } from './downtime-worker.js';
-import {
-  createModeSwitchWorker,
-  type ModeSwitchWorker,
-  DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-} from './mode-switch-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
   appendDowntimeLogEntry,
@@ -1770,14 +1763,13 @@ export function createDowntimeDeps(
         itemTitle?: string;
         itemId?: string;
         anchorId?: string;
-        spawnConfig?: DowntimeSpawnConfig;
       },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
         buildDowntimePaneArgs(kind, prompt, opts),
-        { cwd: opts.cwd, config: opts.spawnConfig },
+        { cwd: opts.cwd },
         spawnFn,
       );
     },
@@ -2327,38 +2319,9 @@ export async function main(): Promise<void> {
   const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
 
   // Machine-wide coordination directory shared by the downtime leader
-  // election and the mode-switch shared activity file (WL-0MU6MXCZZ007ZXT9,
-  // AC2). HERDR_COORDINATION_DIR override wins; default ~/.herdr/downtime/.
+  // election (WL-0MU6MXCZZ007ZXT9, AC2). HERDR_COORDINATION_DIR override
+  // wins; default ~/.herdr/downtime/.
   const coordinationDir = getMachineCoordinationDir() ?? join(targetCwd, '.worklog');
-
-  // Mode-switch worker: automatically switches the llama-proxy between fast
-  // (cloud) and cheap (local) modes based on operator activity and proxy
-  // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
-  // key). Created AFTER the downtime worker because it needs
-  // `downtimeWorker.isLeader` for leader-only cheap switching (AC1) and the
-  // coordination directory for shared activity broadcast (AC2). The idle
-  // callback is wired through a holder because createDowntimeWorker needs
-  // `onProxyIdle` before the mode-switch worker exists.
-  const modeSwitchHolder: { worker?: ModeSwitchWorker } = {};
-
-  // Callback: when the downtime dispatcher finds the proxy idle, trigger a
-  // mode-switch tick immediately with the fresh status — avoids the 10 s
-  // poll delay of the independent scheduler task.
-  const onProxyIdle = async (proxyStatus: LlamaStatus): Promise<void> => {
-    const worker = modeSwitchHolder.worker;
-    if (!worker) return; // dispatcher cannot tick before the worker exists
-    try {
-      const s = loadSettings();
-      await worker.tick({
-        enabled: s.modeSwitchEnabled ?? true,
-        idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-        proxyUrl: s.downtimeProxyUrl,
-        proxyStatus,
-      });
-    } catch {
-      // Fail-closed: a broken tick never crashes the downtime dispatcher.
-    }
-  };
 
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),
@@ -2385,19 +2348,6 @@ export async function main(): Promise<void> {
         // the concurrency limiter.
         model: s.downtimeModel,
         cwd: targetCwd,
-        // Mode-aware Phase 2 parallelism (WL-0MT50S9JW001DHME): the last
-        // proxy mode observed by the mode-switch worker (`null` until polled
-        // → `undefined` → the dispatcher conservatively keeps PARALLELISM=1).
-        //
-        // WL-0MUFRFLRQ004KNDG: read through `modeSwitchHolder`, NOT the
-        // `modeSwitchWorker` const below. createDowntimeWorker calls config()
-        // SYNCHRONOUSLY during construction (the durable-disable marker check),
-        // which runs before `modeSwitchWorker` is initialized — referencing it
-        // directly hit the temporal dead zone and crashed the whole plugin at
-        // startup. The holder is declared above; it is empty at construction
-        // (conservative `undefined` → PARALLELISM=1) and populated immediately
-        // after, so later ticks read the real mode.
-        mode: modeSwitchHolder.worker?.getLastKnownMode() ?? undefined,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
         nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,
@@ -2419,17 +2369,7 @@ export async function main(): Promise<void> {
         },
       };
     },
-    onProxyIdle,
   });
-
-  // Mode-switch worker (created AFTER the downtime worker so it can reuse the
-  // leader probe): only the downtime leader runs the idle cheap switch (AC1)
-  // and the shared activity file is read from the same coordination dir.
-  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker({
-    isLeader: () => downtimeWorker.isLeader,
-    coordinationDir,
-  });
-  modeSwitchHolder.worker = modeSwitchWorker;
 
   const selectedItem = await runWorklistTui(
     fetcher,
@@ -2468,9 +2408,6 @@ export async function main(): Promise<void> {
         applyActivePaneMarkers(items, hydratorDeps.listActivePanes, hydratorWorkspaceId),
       subscriber: eventSubscriber,
       agentTracker,
-      modeSwitchWorker,
-      modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
-      modeSwitchEnabled: runSettings.modeSwitchEnabled,
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
       onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
@@ -2542,13 +2479,6 @@ export async function main(): Promise<void> {
               )
             : Promise.resolve();
         if (route === 'agent') {
-          // Agent-route hook: record operator activity and fire fast-switch
-          // (fail-open: never blocks command dispatch). Only runs for agent
-          // commands — /skill:*, /intake, /plan, /prompt:. Shell shortcuts
-          // (!!/!) and plain commands do NOT count as operator activity
-          // (AC2). The worker's onOperatorCommand updates the idle clock
-          // and POSTs mode=fast (when not already fast) fire-and-forget.
-          modeSwitchWorker.onOperatorCommand(runSettings.downtimeProxyUrl);
           // Claim the referenced work-item BEFORE dispatching so it appears
           // in_progress immediately — for both the pane and the headless
           // (no-pane) path. Non-blocking: failures are logged to stderr and

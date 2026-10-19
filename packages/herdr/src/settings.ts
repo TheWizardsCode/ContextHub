@@ -41,12 +41,6 @@ import {
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
 } from './downtime-worker.js';
 import {
-  clampModeSwitchIdleThresholdMs,
-  clampModeSwitchPollIntervalMs,
-  DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-  DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
-} from './mode-switch-worker.js';
-import {
   clampPaneCloseGracePeriodMinutes,
   clampPaneCloseIdleThresholdMinutes,
   DEFAULT_PANE_CLOSE_ENABLED,
@@ -134,21 +128,6 @@ export interface PluginSettings {
    */
   downtimeStallThresholdMs: number;
   /**
-   * Enable activity-gated mode-switching (fast on agent command, cheap on
-   * idle). Default `true` (WL-0MU4MKVR4005WPBJ — was `false`, which silently
-   * disabled the shipped feature); when `false` no scheduler task is
-   * registered and the agent-route hook is a no-op.
-   */
-  modeSwitchEnabled: boolean;
-  /**
-   * Idle window before switching to cheap mode (ms). Default 900_000 (15 min).
-   * A new operator agent-route command resets this timer.
-   */
-  modeSwitchIdleThresholdMs: number;
-  /** Poll interval for the mode-switch worker (ms). Defaults to the same
-   * cadence as the downtime poller; clamped to a sensible range. */
-  modeSwitchPollIntervalMs: number;
-  /**
    * Enable periodic auto-close of settled/abandoned agent panes
    * (WL-0MUJL1NAH0042GOS). Default `true`; disable to turn off the reaper
    * without editing code.
@@ -197,9 +176,6 @@ export const defaultSettings: PluginSettings = {
   downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   downtimeStallScanEnabled: DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
   downtimeStallThresholdMs: DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
-  modeSwitchEnabled: true,
-  modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-  modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
   paneCloseEnabled: DEFAULT_PANE_CLOSE_ENABLED,
   paneCloseIdleThresholdMinutes: DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
   paneCloseGracePeriodMinutes: DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
@@ -304,14 +280,6 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeStallThresholdMs: typeof parsed.downtimeStallThresholdMs === 'number'
         ? clampDowntimeStallThresholdMs(parsed.downtimeStallThresholdMs)
         : defaultSettings.downtimeStallThresholdMs,
-      modeSwitchEnabled: typeof parsed.modeSwitchEnabled === 'boolean'
-        ? parsed.modeSwitchEnabled : defaultSettings.modeSwitchEnabled,
-      modeSwitchIdleThresholdMs: typeof parsed.modeSwitchIdleThresholdMs === 'number'
-        ? clampModeSwitchIdleThresholdMs(parsed.modeSwitchIdleThresholdMs)
-        : defaultSettings.modeSwitchIdleThresholdMs,
-      modeSwitchPollIntervalMs: typeof parsed.modeSwitchPollIntervalMs === 'number'
-        ? clampModeSwitchPollIntervalMs(parsed.modeSwitchPollIntervalMs)
-        : defaultSettings.modeSwitchPollIntervalMs,
       paneCloseEnabled: typeof parsed.paneCloseEnabled === 'boolean'
         ? parsed.paneCloseEnabled : defaultSettings.paneCloseEnabled,
       paneCloseIdleThresholdMinutes: typeof parsed.paneCloseIdleThresholdMinutes === 'number'

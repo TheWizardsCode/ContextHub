@@ -62,7 +62,6 @@ import {
   HYDRATOR_INTERVAL_MS,
   HYDRATOR_RUN_TIMEOUT_MS,
 } from './hydrator.js';
-import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
 import {
@@ -5566,7 +5565,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -5585,9 +5584,6 @@ export async function runWorklistTui(
     subscriber: options?.subscriber ?? null,
     agentTracker: options?.agentTracker ?? null,
     onDowntimeToggle: options?.onDowntimeToggle,
-    modeSwitchWorker: options?.modeSwitchWorker,
-    modeSwitchPollIntervalMs: options?.modeSwitchPollIntervalMs ?? 10_000,
-    modeSwitchEnabled: options?.modeSwitchEnabled ?? true,
     maxSyncStalenessMs: options?.maxSyncStalenessMs ?? 60_000,
     onRefresh: options?.onRefresh,
     cwd: options?.cwd,
@@ -7776,42 +7772,6 @@ export async function runWorklistTui(
       runTimeoutMs: DOWNTIME_RUN_TIMEOUT_MS,
       run: async () => {
         await opts.downtimeWorker?.tick();
-      },
-    });
-  }
-
-  // Mode-switch worker task — polls the llama-proxy for idle state and,
-  // after the configured idle threshold, switches from fast (cloud) to
-  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). WL-0MTV67MZU003H7SH audit —
-  // same as downtime: NOT visibility-gated or typing-gated — the worker only
-  // switches inference mode via the proxy; it never re-renders the list while
-  // a form/ship-it dialog is open. Pattern-matched on the
-  // downtime task: single-flight + runTimeoutMs watchdog (a hung tick can
-  // never wedge the task), visibility-independent (runs while the worklist
-  // pane is open). The task is only registered when the feature is enabled
-  // at startup (modeSwitchEnabled); the run ALSO re-reads settings every
-  // tick so a disable or threshold change applies without a plugin restart.
-  // Probe jitter is intentionally NOT applied: each instance's idle clock
-  // resets at construction, so panes' cheap-switch timings are already
-  // naturally desynchronized (unlike the downtime poller's shared registry).
-  const modeSwitchEnabledAtStartup =
-    loadSettings().modeSwitchEnabled ?? opts.modeSwitchEnabled;
-  if (opts.modeSwitchWorker && modeSwitchEnabledAtStartup) {
-    scheduler.addTask({
-      id: 'mode-switch',
-      intervalMs: opts.modeSwitchPollIntervalMs,
-      singleFlight: true,
-      runTimeoutMs: MODE_SWITCH_RUN_TIMEOUT_MS,
-      run: async () => {
-        // Re-read settings every tick so modeSwitchEnabled / idle threshold
-        // changes apply without a plugin restart (matching downtime config).
-        const s = loadSettings();
-        await opts.modeSwitchWorker?.tick({
-          enabled: s.modeSwitchEnabled ?? opts.modeSwitchEnabled,
-          idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-          proxyUrl: s.downtimeProxyUrl,
-          proxyStatus: null, // worker fetches its own proxy status
-        });
       },
     });
   }

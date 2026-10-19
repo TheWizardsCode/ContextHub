@@ -158,7 +158,7 @@ describe('serial audit Phase 2 (WL-0MVF3Q0QQ0001I2P AC2)', () => {
     expect(buildOptions('critical').env.AUDIT_PHASE2_PARALLELISM).toBe('1');
   });
 
-  it.fails(
+  it(
     'ignores the removed mode-aware plumbing (cheap mode with free slots stays serial)',
     () => {
       // Before AC5 the cheap-mode/free-slot combination selected '2'. The

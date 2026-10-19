@@ -62,8 +62,6 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     cooldownMs?: number;
     status?: unknown;
     deps?: Partial<DowntimeWorkerDeps>;
-    mode?: 'cheap' | 'fast';
-    concurrentDispatchCap?: number;
   } = {}) {
     const cfg = {
       enabled: overrides.enabled ?? true,
@@ -72,11 +70,6 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
       model: 'plan',
       cwd: '/repo',
       noCandidateCooldownMs: overrides.cooldownMs ?? 3_600_000,
-      // Mode-aware spawn config inputs (WL-0MT50S9JW001DHME).
-      ...(overrides.mode !== undefined ? { mode: overrides.mode } : {}),
-      ...(overrides.concurrentDispatchCap !== undefined
-        ? { concurrentDispatchCap: overrides.concurrentDispatchCap }
-        : {}),
     };
     const fetcher = vi
       .fn()
@@ -156,39 +149,6 @@ describe('downtime worker orchestrator (createDowntimeWorker)', () => {
     expect(at.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
     expect(worker.lastDispatchAt).toBe(start + cfg.thresholdMs);
-  });
-
-  it('tick forwards a mode-aware spawnConfig with the genuine free-slot snapshot (WL-0MT50S9JW001DHME)', async () => {
-    const { worker, deps, cfg } = makeWorker({ mode: 'cheap' });
-    const start = 1_000_000;
-    vi.setSystemTime(start);
-    await worker.tick();
-
-    vi.setSystemTime(start + cfg.thresholdMs);
-    await worker.tick();
-
-    // idleAllSlotsFree: 4 of 4 slots free, total 4 → forwarded verbatim so
-    // the spawn boundary never has to reach back into the worker.
-    // Observable contract: spawnAgentPane boundary call
-    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
-      expect.any(String),
-      expect.objectContaining({
-        spawnConfig: { mode: 'cheap', slotBudget: 4, freeSlots: 4, concurrentDispatchCap: 1 },
-      }),
-    );
-  });
-
-  it('tick omits spawnConfig when the proxy mode is unknown (conservative serial default)', async () => {
-    const { worker, deps, cfg } = makeWorker();
-    const start = 1_000_000;
-    vi.setSystemTime(start);
-    await worker.tick();
-
-    vi.setSystemTime(start + cfg.thresholdMs);
-    await worker.tick();
-
-    const call = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(call[1]).not.toHaveProperty('spawnConfig');
   });
 
   it('requires a fresh full idle period after a dispatch (AC5)', async () => {
