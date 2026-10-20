@@ -239,4 +239,58 @@ describe('wl CLI read cache (e2e)', { timeout: 60_000 }, () => {
     expect(workSpawns(spawnFile)).toBe(1);
     expect(hitSpawns(spawnFile)).toBe(1);
   });
+
+  it('serves and hits the cache on the --worklog-dir fast path (split parity)', () => {
+    // Entry-point split contract (F3 — WL-0MVFRRCP7007UWS7): a
+    // `--worklog-dir` override must keep working when the cache-hit fast
+    // path serves the invocation, including from a cwd that resolves to a
+    // *different* worklog. The override, not the cwd, must win.
+    const otherDir = createTempDir();
+    try {
+      writeConfig(otherDir, 'Other Project', 'OTH');
+      writeInitSemaphore(otherDir);
+      createItem(tempDir, env, 'Alpha Override');
+      createItem(otherDir, env, 'Beta Cwd');
+
+      const override = path.join(tempDir, '.worklog');
+      const first = runCli(
+        ['list', '--json', '--worklog-dir', override],
+        otherDir,
+        env
+      );
+      expect(first.status).toBe(0);
+      const titles = (JSON.parse(first.stdout) as { workItems: { title: string }[] }).workItems.map(
+        (item) => item.title
+      );
+      expect(titles, '--worklog-dir must select the overridden worklog, not the cwd').toContain(
+        'Alpha Override'
+      );
+      expect(titles).not.toContain('Beta Cwd');
+
+      // The identical overridden invocation is served from cache…
+      const second = runCli(
+        ['list', '--json', '--worklog-dir', override],
+        otherDir,
+        env
+      );
+      expect(second.status).toBe(0);
+      expect(second.stdout).toBe(first.stdout);
+      expect(workSpawns(spawnFile), 'override miss then override hit').toBe(1);
+      expect(hitSpawns(spawnFile), 'override miss then override hit').toBe(1);
+
+      // …and the `--worklog-dir=<path>` form is a distinct cache key that
+      // still describes the same overridden worklog.
+      const inline = runCli(
+        ['list', '--json', `--worklog-dir=${override}`],
+        otherDir,
+        env
+      );
+      expect(inline.status).toBe(0);
+      expect(inline.stdout).toBe(first.stdout);
+      expect(workSpawns(spawnFile), 'inline form is a separate cache entry').toBe(2);
+      expect(hitSpawns(spawnFile)).toBe(1);
+    } finally {
+      cleanupTempDir(otherDir);
+    }
+  });
 });

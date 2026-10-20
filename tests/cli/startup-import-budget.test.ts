@@ -172,6 +172,69 @@ describe('startup import budget — ratchet', { timeout: 60_000 }, () => {
   });
 });
 
+describe('startup import budget — entry-point split allowlist', () => {
+  // F3 (WL-0MVFRRCP7007UWS7) test-first contract for the split entry point
+  // (F4 — WL-0MVFRRKKN00544PQ): after the split, `src/cli.ts` is the fast
+  // path, so the budget's recorded graph IS the fast-path allowlist.
+
+  /** Heavy modules the fast path must defer to a dynamic import. */
+  const HEAVY_FAST_PATH_MODULES = [
+    'src/cli-utils.ts',
+    'src/plugin-loader.ts',
+    'src/database.ts',
+    'src/lib/runtime.ts',
+  ];
+
+  /** Heavy external packages the fast path must not load at startup. */
+  const HEAVY_FAST_PATH_EXTERNALS = ['commander', 'better-sqlite3'];
+
+  it('records the current fast-path graph as the allowlist', () => {
+    const graph = walkStaticImportGraph({ repoRoot });
+    const budget = readStartupBudget(repoRoot);
+
+    // A shrinking graph is an improvement, but the budget must be tightened
+    // in the same change as the split so the win is frozen and the ratchet
+    // keeps its meaning (plan decision D1).
+    expect(
+      budget.importGraph.modules,
+      'bench/startup-import-budget.json no longer matches the static import graph of ' +
+        `${CLI_ENTRY} — regenerate it with \`npm run benchmark:wl-startup -- --target src ` +
+        '--update-budget\` and include the budget file in the change'
+    ).toEqual(graph.modules);
+    expect(budget.importGraph.moduleCount).toBe(graph.modules.length);
+  });
+
+  // RED-pinned: today `src/cli.ts` eagerly imports the whole heavy graph.
+  // F4 flips `it.fails(` to `it(` when the thin bootstrap lands.
+  it.fails('keeps command modules and the heavy runtime off the fast path', () => {
+    const graph = walkStaticImportGraph({ repoRoot });
+
+    const commandModules = graph.modules.filter((module) => module.startsWith('src/commands/'));
+    expect(
+      commandModules,
+      `command modules still statically reachable from ${CLI_ENTRY} ` +
+        `(must load only through the lazy registry): ${commandModules.join(', ')}`
+    ).toEqual([]);
+
+    const heavyModules = graph.modules.filter((module) =>
+      HEAVY_FAST_PATH_MODULES.includes(module)
+    );
+    expect(
+      heavyModules,
+      `heavy modules still statically reachable from ${CLI_ENTRY} ` +
+        `(must load only through a dynamic import): ${heavyModules.join(', ')}`
+    ).toEqual([]);
+
+    const heavyExternals = graph.external.filter((specifier) =>
+      HEAVY_FAST_PATH_EXTERNALS.includes(specifier)
+    );
+    expect(
+      heavyExternals,
+      `heavy packages still statically imported by the fast path: ${heavyExternals.join(', ')}`
+    ).toEqual([]);
+  });
+});
+
 describe('startup import budget — regression policy', () => {
   it('accepts measurements within the recorded budget plus headroom', () => {
     const evaluation = evaluateStartupBudget(syntheticResult(), syntheticBudget());
