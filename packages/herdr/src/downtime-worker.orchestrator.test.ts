@@ -1822,7 +1822,7 @@ describe('audit-batch worker loop (parent AC6e)', () => {
     sortIndex,
   });
 
-  it.fails('AC6e: the cap ends the batch and restores single-dispatch behaviour', async () => {
+  it('AC6e: the cap ends the batch and restores single-dispatch behaviour', async () => {
     vi.useFakeTimers();
     try {
       const cwd = tmp.make('herdr-audit-batch-cap-');
@@ -1910,7 +1910,7 @@ describe('audit-batch worker loop (parent AC6e)', () => {
     }
   });
 
-  it.fails('AC6e: a depth drop below browseItemCount ends the batch (normal single dispatch)', async () => {
+  it('AC6e: a depth drop below browseItemCount ends the batch (normal single dispatch)', async () => {
     const getHerdrListHead = vi
       .fn()
       // Deep enough to start a batch (depth 2 >= browseItemCount 2).

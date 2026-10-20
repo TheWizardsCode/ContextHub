@@ -2477,6 +2477,35 @@ export interface DowntimeDispatchOutcome {
    * Absent/false on every other outcome.
    */
   ownBacklogDispatch?: boolean;
+
+  /**
+   * Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1/AC2/AC3).
+   * Present on every AUDIT dispatch and on pre-selection gate refusals of an
+   * audit-batch continuation; absent on non-audit dispatches and on hard
+   * dispatch failures (spawn/marker/anchor/claim-rollback), which end the
+   * batch without a continuation surface. The worker loop defers the
+   * post-dispatch idle-tracker reset ONLY when `kind === 'audit'` and this
+   * status reports `active === true` with `remaining > 0`.
+   */
+  auditBatch?: DowntimeAuditBatchStatus;
+}
+
+/**
+ * Depth-aware audit-batch status (parent WL-0MVEDM8OT007WDRS AC1/AC2/AC3).
+ *
+ * `depth` is the audit-eligible depth derived from the ALREADY-FETCHED Herdr
+ * head (no extra `wl` subprocess); `cap` is the clamped
+ * `downtimeAuditBatchMax`; `remaining` is the number of continuation audits
+ * still available AFTER the dispatch that produced this status (0 when the
+ * batch is inactive or its cap is consumed). `active` is true only while
+ * batching is engaged: `depth >= browseItemCount`, `cap > 1` and a
+ * continuation budget was available before the dispatch.
+ */
+export interface DowntimeAuditBatchStatus {
+  active: boolean;
+  depth: number;
+  cap: number;
+  remaining: number;
 }
 
 /**
@@ -2559,6 +2588,120 @@ export async function readReviewQueueGate(
     deep: count === null || count >= browseItemCount,
     count,
     threshold: browseItemCount,
+  };
+}
+
+/**
+ * Audit-eligible depth derived from the ALREADY-FETCHED Herdr head (parent
+ * WL-0MVEDM8OT007WDRS AC1). Root `completed`/`in_review` items (mandatory in
+ * the head) are classified with the SAME eligibility definition as the
+ * dispatch path — `classifyItemForDispatch` — so no second eligibility
+ * definition exists and no extra `wl` subprocess is added to the common
+ * dispatch path. The classifier excludes fresh-audited items, producer-review
+ * holds, assignee-held items and soft-deleted items.
+ *
+ * `now` is injectable for deterministic tests.
+ */
+export function computeAuditEligibleDepth(
+  items: DowntimeHerdrItem[],
+  now: number = Date.now(),
+): number {
+  let depth = 0;
+  for (const item of items) {
+    const info: DowntimeItemInfo = {
+      id: item.id,
+      title: item.title,
+      status: item.status,
+      stage: item.stage,
+      priority: item.priority,
+      risk: item.risk,
+      effort: item.effort,
+      auditedAt: item.auditedAt,
+      updatedAt: item.updatedAt,
+      sortIndex: item.sortIndex,
+      deletedBy: item.deletedBy,
+      assignee: item.assignee,
+      needsProducerReview: item.needsProducerReview,
+    };
+    if (classifyItemForDispatch(info, now) === 'audit') depth += 1;
+  }
+  return depth;
+}
+
+/**
+ * Resolve the depth-aware audit-batch status for a DISPATCHED audit outcome
+ * (parent WL-0MVEDM8OT007WDRS AC1). The batch is engaged only while the
+ * audit-eligible depth is at/over `browseItemCount`, the clamped cap is above
+ * 1 (`1` = legacy/off) and a continuation budget was available BEFORE this
+ * dispatch (absent `auditBatchRemaining` initialises the budget to the cap —
+ * the first dispatch of a batch). `remaining` is the budget AFTER this
+ * dispatch; an inactive batch always reports `remaining: 0`.
+ */
+export function resolveAuditBatchStatus(
+  cap: number,
+  depth: number,
+  threshold: number,
+  remainingBefore: number,
+): DowntimeAuditBatchStatus {
+  const active = cap > 1 && depth >= threshold && remainingBefore > 0;
+  return {
+    active,
+    depth,
+    cap,
+    remaining: active ? Math.max(0, remainingBefore - 1) : 0,
+  };
+}
+
+// Hard post-selection failures that END an audit batch without a continuation
+// surface (parent WL-0MVEDM8OT007WDRS AC3): the item was claimed/marked and
+// the dispatch failed — the caller's strike/skip semantics decide. These
+// outcomes keep the historical shape (no `auditBatch` field at all), the same
+// signal a non-continuation dispatch uses.
+const AUDIT_BATCH_HARD_FAILURE_REASONS = new Set([
+  'spawn-failed',
+  'wl-error',
+  'marker-write-failed',
+  'claim-rolled-back',
+  'anchor-unavailable',
+]);
+
+/**
+ * Attach the audit-batch surface to one dispatch outcome (parent
+ * WL-0MVFE1BTB0084T17):
+ *
+ *  - a dispatched AUDIT outcome gets its resolved status (active only when
+ *    the depth/cap/budget conditions hold);
+ *  - a dispatched NON-audit outcome never carries `auditBatch` (regression
+ *    safety — non-audit dispatch resets the tracker and never arms a batch);
+ *  - a hard failure (spawn-failed / marker-write-failed / claim-rolled-back /
+ *    anchor-unavailable / wl-error) keeps today's shape — no `auditBatch`;
+ *  - every other non-dispatched outcome (a gate refused a continuation)
+ *    reports an explicit INACTIVE status so the worker knows the batch is
+ *    over without relaxing any gate.
+ */
+export function finalizeAuditBatchOutcome(
+  outcome: DowntimeDispatchOutcome,
+  ctx: { depth: number; cap: number; threshold: number; remainingBefore: number },
+): DowntimeDispatchOutcome {
+  if (outcome.dispatched) {
+    if (outcome.kind !== 'audit') return outcome;
+    return {
+      ...outcome,
+      auditBatch: resolveAuditBatchStatus(
+        ctx.cap,
+        ctx.depth,
+        ctx.threshold,
+        ctx.remainingBefore,
+      ),
+    };
+  }
+  if (outcome.auditBatch !== undefined) return outcome;
+  if (outcome.reason !== undefined && AUDIT_BATCH_HARD_FAILURE_REASONS.has(outcome.reason)) {
+    return outcome;
+  }
+  return {
+    ...outcome,
+    auditBatch: { active: false, depth: ctx.depth, cap: ctx.cap, remaining: 0 },
   };
 }
 
@@ -4024,7 +4167,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -4685,10 +4828,19 @@ export async function dispatchDowntimeWork(
      * Depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
      * WL-0MVEDM8OT007WDRS AC1). Optional for backward compat — absent
      * leaves batching off (legacy single-dispatch behaviour). Threaded from
-     * `DowntimeWorkerConfig.config()`; the batch activation logic itself is
-     * implemented by the depth/reset item (WL-0MVFE1BTB0084T17).
+     * `DowntimeWorkerConfig.config()`. Clamped to `[1, 5]`; `1` disables
+     * batching and restores legacy single-dispatch behaviour.
      */
     auditBatchMax?: number;
+    /**
+     * Depth-aware audit-batch continuation budget (parent
+     * WL-0MVEDM8OT007WDRS AC1/AC2): continuation audits still available in
+     * the CURRENT idle window BEFORE this dispatch. Absent = the first
+     * dispatch (the worker owns the budget and initialises it to the cap)
+     * or batching off. A successful audit dispatch reports the decremented
+     * remainder via `outcome.auditBatch.remaining`.
+     */
+    auditBatchRemaining?: number;
     /**
      * True when the polled status reports the target slot is OWNED by a
      * live Local Proxy lease (AC2, WL-0MTYZXSLN008HZOW). Optional — absent
@@ -4792,6 +4944,18 @@ export async function dispatchDowntimeWork(
     // this window is never dispatched.
     const sprintWindow = resolveSprintViewWindow(opts.browseItemCount);
 
+    // Depth-aware audit-batch budget (parent WL-0MVEDM8OT007WDRS AC1): the
+    // clamped cap and the continuation budget available BEFORE this dispatch.
+    // Absent `auditBatchRemaining` initialises the budget to the cap (the
+    // first dispatch of a batch); `1` disables batching entirely.
+    const auditBatchCap = clampDowntimeAuditBatchMax(
+      opts.auditBatchMax ?? DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+    );
+    const auditBatchRemainingBefore =
+      opts.auditBatchRemaining === undefined
+        ? auditBatchCap
+        : Math.max(0, Math.trunc(opts.auditBatchRemaining));
+
     let auditInFlight = false;
     let auditCheckFailed = false;
     let freshnessSkip = false;
@@ -4863,6 +5027,19 @@ export async function dispatchDowntimeWork(
       const head = await deps.getHerdrListHead(opts.cwd, sprintWindow);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
+        // Depth-derived batch activation (parent WL-0MVEDM8OT007WDRS AC1):
+        // derive the audit-eligible depth from the ALREADY-FETCHED head (no
+        // extra `wl` subprocess) and resolve the batch surface on every
+        // outcome of this path. The head path is the production ranking, so
+        // the batch decision never introduces a second eligibility definition.
+        const auditDepth = computeAuditEligibleDepth(head.items, Date.now());
+        const finalize = (outcome: DowntimeDispatchOutcome): DowntimeDispatchOutcome =>
+          finalizeAuditBatchOutcome(outcome, {
+            depth: auditDepth,
+            cap: auditBatchCap,
+            threshold: sprintWindow,
+            remainingBefore: auditBatchRemainingBefore,
+          });
         // Item-scoped in-flight state (WL-0MUBEZ6PE002WLP4 / F3): resolved
         // ONCE per idle cycle (a single `herdr pane list` read shared by both
         // dispatch loops) so the guard never adds a per-candidate process
@@ -4871,7 +5048,7 @@ export async function dispatchDowntimeWork(
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
         const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
-        if (herdrOutcome !== null) return herdrOutcome;
+        if (herdrOutcome !== null) return finalize(herdrOutcome);
 
         // ── Extended dispatch window (WL-0MU6UL3GQ0015AA5) ──
         // The initial head is windowed (mandatory items always included, the
@@ -4888,7 +5065,7 @@ export async function dispatchDowntimeWork(
         const extendedItems = await fetchExtendedHerdrItems(deps, opts.cwd, head.items);
         if (extendedItems.length > 0) {
           const extendedOutcome = await dispatchFromHerdrList(deps, extendedItems, ctx, flags);
-          if (extendedOutcome !== null) return extendedOutcome;
+          if (extendedOutcome !== null) return finalize(extendedOutcome);
         }
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
@@ -4901,8 +5078,8 @@ export async function dispatchDowntimeWork(
         // Herdr list had items but every one was filtered by a safety gate:
         // compose the terminal reason and DO NOT fall through to the legacy
         // chain (AC2 — gates are filters, not a fallback ranking).
-        if (frozen) return { dispatched: false, reason: 'code-freeze' };
-        if (freshnessSkip) return { dispatched: false, reason: 'fresh-audit-skip' };
+        if (frozen) return finalize({ dispatched: false, reason: 'code-freeze' });
+        if (freshnessSkip) return finalize({ dispatched: false, reason: 'fresh-audit-skip' });
         if (auditInFlight) {
           // Host-wide saturation (WL-0MUIVE0YG000UVIA) vs per-worklog:
           // distinct reason strings for observability. 'audit-host-saturated'
@@ -4912,27 +5089,27 @@ export async function dispatchDowntimeWork(
           // auditCheckFailed (a mixed tick still reports the audit skip).
           if (auditHostSaturated) {
             logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth);
-            return { dispatched: false, reason: 'audit-host-saturated' };
+            return finalize({ dispatched: false, reason: 'audit-host-saturated' });
           }
-          return { dispatched: false, reason: 'audit-in-flight' };
+          return finalize({ dispatched: false, reason: 'audit-in-flight' });
         }
-        if (auditCheckFailed) return { dispatched: false, reason: 'wl-error', error: auditCheckError };
+        if (auditCheckFailed) return finalize({ dispatched: false, reason: 'wl-error', error: auditCheckError });
         // Deep review queue held the only remaining (non-critical implement)
         // candidates: neutral 'review-queue-hold', NEVER 'no-candidate' — no
         // cooldown while audits drain the queue (WL-0MTTSWC1X005P4VD AC2).
-        if (reviewHeld) return { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON };
+        if (reviewHeld) return finalize({ dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON });
         // Non-terminal cooldown held the only remaining candidates: neutral
         // 'non-terminal-cooldown', NEVER 'no-candidate' — the backlog is not
         // empty, so the no-candidate cooldown must not fire
         // (WL-0MUKYERLZ006ELL5 AC3/AC6).
-        if (cooldownHeld) return { dispatched: false, reason: 'non-terminal-cooldown' };
+        if (cooldownHeld) return finalize({ dispatched: false, reason: 'non-terminal-cooldown' });
         // Per-item/per-kind attempt budget exhausted (WL-0MUKYEXMK0033MFK
         // AC2/AC5): neutral 'attempt-budget-exhausted', NEVER 'no-candidate'
         // — the backlog is not empty and no strike is recorded; polling
         // continues so other work still dispatches and the flag write is
         // retried if it failed.
-        if (budgetExhausted) return { dispatched: false, reason: 'attempt-budget-exhausted' };
-        return { dispatched: false, reason: 'no-candidate' };
+        if (budgetExhausted) return finalize({ dispatched: false, reason: 'attempt-budget-exhausted' });
+        return finalize({ dispatched: false, reason: 'no-candidate' });
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
       // legacy chain (test-compat path; flags still drive the terminal reason).
@@ -5823,6 +6000,14 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   const perSlotTracker = createPerSlotIdleTracker();
   let dispatching = false;
   let lastDispatchAt: number | null = null;
+  // Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS
+  // AC1/AC2/AC3): continuation audits still available in the CURRENT
+  // continuous idle window. `null` = no batch armed (legacy single-dispatch
+  // behaviour). Armed only by a successful AUDIT dispatch whose outcome
+  // reports an active batch with budget remaining; cleared on the cap, a
+  // depth drop, a non-audit dispatch, ANY non-`dispatched` outcome, a busy or
+  // unavailable poll, a pause/cooldown, leadership loss, or a disabled worker.
+  let auditBatchRemaining: number | null = null;
   // Pane-lifecycle monitor cadence gate (WL-0MU308WSF0002JWN): the timestamp
   // of the last monitor pass. 0 forces a pass on the first tick.
   let lastPaneMonitorAt = 0;
@@ -5976,6 +6161,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       ownerPresent: boolean;
       runningPanes: number | null;
       contentionDepth: number;
+      /** Depth-aware audit-batch metadata (parent WL-0MVEDM8OT007WDRS AC5). */
+      auditBatchDepth?: number;
+      auditBatchCap?: number;
+      auditBatchRemaining?: number;
     },
   ): Promise<void> => {
     blockReason = decisionHeaderToken(reason);
@@ -6077,7 +6266,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // Short-circuit on the EFFECTIVE enabled state (override ?? settings):
       // while toggled off the worker performs no proxy polling, no idle
       // tracking, and no dispatch — exactly the settings-disabled path.
-      if (!(override ?? cfg.enabled)) return { polled: false, dispatched: false, idle: false };
+      if (!(override ?? cfg.enabled)) {
+        auditBatchRemaining = null; // disabled → no carried batch window
+        return { polled: false, dispatched: false, idle: false };
+      }
 
       // ── Live marker gate (MANUAL `d`-toggle semantics only) ──────────
       // WL-0MTTSWC1X005P4VD removed the sprint-complete auto-disable that
@@ -6095,6 +6287,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // construction) so a disable survives a pane/plugin restart and is
       // honoured cross-process.
       if (disableMarkerExists(cfg.cwd) && override === null) {
+        auditBatchRemaining = null; // disabled → no carried batch window
         return { polled: false, dispatched: false, idle: false };
       }
 
@@ -6231,6 +6424,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // tracking, no dispatch — the check-in above is the instance's only
         // coordination activity. (Lease takeover was handled above.)
         if (!leaderState) {
+          auditBatchRemaining = null; // leadership lost → the batch window ends
           return { polled: false, dispatched: false, idle: false };
         }
       }
@@ -6310,6 +6504,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // dispatch (no stale idle credit from before the pause).
       if (cooldownUntil !== null) {
         if (Date.now() < cooldownUntil) {
+          auditBatchRemaining = null; // paused → the idle window is over
           return { polled: false, dispatched: false, idle: false };
         }
         // ── F5 cooldown-exit hook (AC3) ──
@@ -6323,6 +6518,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // the cooldown-exit path can never dispatch on stale leadership.
         cooldownUntil = null; // pause expired — resume normal polling
         errorStrikes = 0; // fresh strike counter after the pause
+        auditBatchRemaining = null; // no stale batch budget across a pause
       }
       if (opts.poller.isPolling()) return { polled: false, dispatched: false, idle: tracker.idleSince !== null };
 
@@ -6331,6 +6527,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (status === null) {
         tracker.record(false); // endpoint failure/ambiguity → busy
         perSlotTracker.record([]); // fail-closed: ambiguous poll resets every slot timer
+        auditBatchRemaining = null; // an ambiguous poll ends the batch window
         return { polled: true, dispatched: false, idle: false };
       }
 
@@ -6401,7 +6598,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         ready = idle && tracker.isThresholdMet(cfg.thresholdMs);
       }
 
-      if (!idle) return { polled: true, dispatched: false, idle: false };
+      if (!idle) {
+        auditBatchRemaining = null; // busy poll ends the continuous idle window
+        return { polled: true, dispatched: false, idle: false };
+      }
       if (!ready) return { polled: true, dispatched: false, idle: true };
       if (dispatching) return { polled: true, dispatched: false, idle: true };
 
@@ -6481,6 +6681,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           runningPanes,
           contentionDepth: contentionQueueDepth,
         });
+        auditBatchRemaining = null; // no owned slot can host a continuation
         return { polled: true, dispatched: false, idle: true };
       }
       if (contentionQueueDepth > 0) {
@@ -6491,6 +6692,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           runningPanes,
           contentionDepth: contentionQueueDepth,
         });
+        auditBatchRemaining = null; // proxy contention ends the batch window
         return { polled: true, dispatched: false, idle: true };
       }
 
@@ -6507,6 +6709,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // per-instance tier chain (`dispatchDowntimeWork`) — pre-refactor
       // behavior, retained as the fail-open fallback.
       dispatching = true;
+      // Depth-aware audit-batch continuation budget BEFORE this dispatch
+      // (parent WL-0MVEDM8OT007WDRS AC1/AC2): `null` = no batch armed. Passed
+      // to the dispatcher so a continuation decrements it; captured here so
+      // the observability decision below can distinguish a continuation from
+      // the first dispatch of a batch.
+      const continuationBudget = auditBatchRemaining;
       try {
         const outcome =
           opts.coordinationDir && typeof opts.deps.fetchItem === 'function'
@@ -6520,6 +6728,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   freeSlots,
                   browseItemCount: cfg.browseItemCount,
                   auditBatchMax: cfg.auditBatchMax,
+                  // Continuation budget (parent WL-0MVEDM8OT007WDRS AC1) —
+                  // consumed by the coordination continuation item.
+                  ...(auditBatchRemaining !== null ? { auditBatchRemaining } : {}),
                   nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   maxAttempts: cfg.maxAttempts,
                   // Dispatched success-marker staleness window
@@ -6540,6 +6751,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 browseItemCount: cfg.browseItemCount,
                 // Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1).
                 auditBatchMax: cfg.auditBatchMax,
+                // Continuation budget for the current idle window; absent on
+                // the first dispatch / when no batch is armed.
+                ...(auditBatchRemaining !== null ? { auditBatchRemaining } : {}),
                 // Owner-lease (AC2) + contention (AC6) gates
                 // (WL-0MTYZXSLN008HZOW). No pane-count cap
                 // (WL-0MU2EP6JL006A1U3).
@@ -6570,14 +6784,55 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             contentionDepth: contentionQueueDepth,
           });
         }
+        // Any non-`dispatched` outcome ends the audit batch (parent
+        // WL-0MVEDM8OT007WDRS AC3): the next audit requires a fresh full idle
+        // period, and a continuation never skips to another target.
+        if (!outcome.dispatched) auditBatchRemaining = null;
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
           errorStrikes = 0; // a successful dispatch proves the CLI is healthy
-          // Belt-and-suspenders: even if the proxy does not immediately
-          // report busy, require a fresh full idle period before the next
-          // dispatch (AC5).
-          tracker.record(false);
-          perSlotTracker.record([]);
+          const batch = outcome.auditBatch;
+          // AC5 observability: a CONTINUATION audit dispatch records its own
+          // decision token (with depth/cap/remaining) at the existing rate
+          // limit. The first dispatch of a batch is a normal dispatch.
+          if (
+            continuationBudget !== null &&
+            continuationBudget > 0 &&
+            outcome.kind === 'audit' &&
+            batch !== undefined
+          ) {
+            void recordDecision(cfg.cwd, 'audit-batch-continue', {
+              freeSlots,
+              totalSlots: status.total_slots,
+              ownerPresent,
+              runningPanes,
+              contentionDepth: contentionQueueDepth,
+              auditBatchDepth: batch.depth,
+              auditBatchCap: batch.cap,
+              auditBatchRemaining: batch.remaining,
+            });
+          }
+          // Conditional idle reset (parent WL-0MVEDM8OT007WDRS AC2): only a
+          // successful AUDIT dispatch in an active batch with budget
+          // remaining defers the reset — every gate (idle-duration, free
+          // slots, slot ownership, contention, freeze, active-audit markers,
+          // single-flight) is still re-checked on the continuation tick.
+          // Every other dispatch keeps today's full reset exactly.
+          const deferIdleReset =
+            outcome.kind === 'audit' &&
+            batch !== undefined &&
+            batch.active &&
+            batch.remaining > 0;
+          if (deferIdleReset) {
+            auditBatchRemaining = batch.remaining;
+          } else {
+            auditBatchRemaining = null;
+            // Belt-and-suspenders: even if the proxy does not immediately
+            // report busy, require a fresh full idle period before the next
+            // dispatch (AC5).
+            tracker.record(false);
+            perSlotTracker.record([]);
+          }
           // Voluntary leadership hand-off after an own-backlog fallback
           // dispatch (parent WL-0MUU4XFU90008E24 AC4/AC5/A3): the fallback
           // reached beyond the sprint-view window into the leader's own

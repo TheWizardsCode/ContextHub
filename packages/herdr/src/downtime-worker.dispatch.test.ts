@@ -1108,7 +1108,7 @@ describe('audit-batch: shallow depth keeps single-dispatch (parent AC6a)', () =>
     sortIndex,
   });
 
-  it.fails('reports an inactive batch when depth is below browseItemCount', async () => {
+  it('reports an inactive batch when depth is below browseItemCount', async () => {
     const deps = makeDeps({
       getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [auditItem('WL-AUD-1')] }),
     });

@@ -67,6 +67,15 @@ export interface CoordinationLogEntry {
   ownerPresent?: boolean;
   runningPanes?: number | null;
   contentionDepth?: number;
+  /**
+   * Depth-aware audit-batch decision metadata (parent WL-0MVEDM8OT007WDRS
+   * AC5): recorded on an `audit-batch-continue` decision so each
+   * continuation is diagnosable (depth, cap and remaining budget). All
+   * optional so every existing entry shape is unchanged (additive schema).
+   */
+  auditBatchDepth?: number;
+  auditBatchCap?: number;
+  auditBatchRemaining?: number;
   at?: string;
 }
 

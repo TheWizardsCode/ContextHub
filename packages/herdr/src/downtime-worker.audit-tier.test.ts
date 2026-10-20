@@ -1312,7 +1312,7 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
 
   // ── AC6b: deep depth reports an active batch ─────────────────────
 
-  it.fails('AC6b: depth >= browseItemCount with auditBatchMax N reports an active batch', async () => {
+  it('AC6b: depth >= browseItemCount with auditBatchMax N reports an active batch', async () => {
     const deps = makeDeps({
       getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: deepHead(3) }),
     });
@@ -1333,7 +1333,7 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
     expect(outcome.auditBatch?.remaining).toBe(2);
   });
 
-  it.fails('AC6b: a continuation dispatches the next audit target with one fewer remaining', async () => {
+  it('AC6b: a continuation dispatches the next audit target with one fewer remaining', async () => {
     const deps = makeDeps({
       // Distinct target list for the continuation: the first item was already
       // dispatched, so only the remaining two are eligible here.
@@ -1363,7 +1363,7 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
     expect(DOWNTIME_AUDIT_MIN_FREE_SLOTS).toBe(2);
   });
 
-  it.fails('AC6c: sub-2 free slots block a continuation (no batch engagement)', async () => {
+  it('AC6c: sub-2 free slots block a continuation (no batch engagement)', async () => {
     const deps = makeDeps({
       getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: deepHead(3) }),
     });
@@ -1383,7 +1383,7 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
     expect(outcome.auditBatch?.active).toBe(false);
   });
 
-  it.fails('AC6c: a worker busy poll mid-window resets the idle run and blocks the continuation', async () => {
+  it('AC6c: a worker busy poll mid-window resets the idle run and blocks the continuation', async () => {
     vi.useFakeTimers();
     try {
       const deps = makeDeps({
@@ -1431,7 +1431,7 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
 
   // ── AC6d: active-audit markers gate every continuation ─────────────
 
-  it.fails('AC6d: a per-worklog active-audit marker blocks the continuation until released', async () => {
+  it('AC6d: a per-worklog active-audit marker blocks the continuation until released', async () => {
     const getActiveAudit = vi.fn().mockResolvedValue({ ok: true, active: true, source: 'per-worklog' });
     const deps = makeDeps({
       getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: deepHead(2) }),
@@ -1465,7 +1465,7 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
     expect(released.auditBatch?.remaining).toBe(1);
   });
 
-  it.fails('AC6d: a host-wide active-audit marker blocks the continuation until released', async () => {
+  it('AC6d: a host-wide active-audit marker blocks the continuation until released', async () => {
     const getActiveAudit = vi
       .fn()
       .mockResolvedValue({ ok: true, active: true, source: 'host-wide' });
@@ -1498,7 +1498,7 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
 
   // ── AC3: any non-dispatched outcome ends the batch ────────────────
 
-  it.fails('AC3: a spawn failure ends the batch (no continuation metadata)', async () => {
+  it('AC3: a spawn failure ends the batch (no continuation metadata)', async () => {
     const deps = makeDeps({
       getHerdrListHead: vi
         .fn()
@@ -1538,7 +1538,7 @@ describe('depth-aware audit batch (parent AC6b/AC6c/AC6d/AC6f)', () => {
 
   // ── AC6f: dispatched-marker exclusion across a batch ───────────────
 
-  it.fails('AC6f: a dispatched success marker prevents the same item being selected twice', async () => {
+  it('AC6f: a dispatched success marker prevents the same item being selected twice', async () => {
     const cwd = tmp.make('herdr-audit-batch-marker-');
     // Item 1 was already dispatched in this batch: its success marker is
     // fresh and the item is still at the dispatched-at stage -> excluded.
