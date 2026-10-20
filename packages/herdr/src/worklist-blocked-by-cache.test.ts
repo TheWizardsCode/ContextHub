@@ -133,6 +133,34 @@ function settle(ms = 15): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/**
+ * Wait until the TUI has stopped writing to stdout.
+ *
+ * `doRefresh` renders at the END of its asynchronous cycle, and a refresh
+ * requested while one is in flight schedules a coalesced trailing refresh — so
+ * a fixed tick is never enough to know a refresh (or a single-flight blocker
+ * re-resolve) has finished, especially under load. Resolving on a full quiet
+ * window instead makes `watchRefresh` and the test boundary deterministic.
+ *
+ * Load-bearing for isolation: the fake stdout spy closes over the module-level
+ * `writes` binding that `beforeEach` reassigns, so a render escaping a test's
+ * teardown is recorded in the NEXT test's capture and corrupts its
+ * "last frame" assertions (WL-0MVFX6404003TE2E). Draining in
+ * `watchRefresh`/`quit` keeps every write inside the test that caused it.
+ */
+async function drainWrites(quietMs = 20, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let seen = writes.length;
+  while (Date.now() < deadline) {
+    await settle(quietMs);
+    if (writes.length === seen) return;
+    seen = writes.length;
+  }
+  throw new Error(
+    `drainWrites: TUI did not stop writing within ${timeoutMs}ms (${writes.length} chunks)`,
+  );
+}
+
 function makeItem(id: string, over: Partial<WorkItem> = {}): WorkItem {
   return { id, title: `Item ${id}`, status: 'open', updatedAt: '2026-01-01T00:00:00.000Z', ...over };
 }
@@ -164,17 +192,28 @@ function startTui(items: WorkItem[]): { tui: Promise<WorkItem | undefined>; feed
   return { tui, feed };
 }
 
-/** Trigger one DB-change-watch refresh (the flicker cadence source). */
+/**
+ * Trigger one DB-change-watch refresh (the flicker cadence source) and wait
+ * for the resulting refresh cycle (plus any coalesced trailing refresh and
+ * blocker re-resolve) to finish rendering.
+ */
 async function watchRefresh(): Promise<void> {
   expect(watchChange).toBeDefined();
   watchChange!();
-  await settle();
+  await drainWrites();
 }
 
-/** Quit the TUI and await its promise (cleans up timers/listeners). */
+/**
+ * Quit the TUI and await its promise (cleans up timers/listeners).
+ *
+ * The final drain is deliberate: a refresh cycle still in flight when the TUI
+ * resolves renders after teardown, and without draining that frame would be
+ * captured by the following test's `writes` array.
+ */
 async function quit(tui: Promise<WorkItem | undefined>): Promise<void> {
   dataHandler?.(Buffer.from('q'));
   await tui.catch(() => undefined);
+  await drainWrites();
 }
 
 function stripAnsi(s: string): string {
@@ -328,6 +367,35 @@ describe('Blocked By flicker fix (WL-0MV8Q5X8U004KKAP)', () => {
     } finally {
       await quit(tui);
     }
+  });
+
+  it('never renders after teardown: a lookup resolving after quit writes no frame', async () => {
+    // Regression witness for the stale-frame bleed (WL-0MVFX6404003TE2E): an
+    // async path that outlives the exit (here the blocker lookup, but the
+    // same applies to a refresh cycle and its coalesced trailing refresh)
+    // used to call `render()` after teardown. The escaping frame repainted a
+    // dead pane and, under the shared stdout capture, landed in the NEXT
+    // test's frame list — which is what made two tests in this file fail
+    // intermittently.
+    let resolveLookup!: (v: { id: string; title: string }[]) => void;
+    blockerMock.mockImplementation(
+      () => new Promise((r) => { resolveLookup = r; }),
+    );
+    const { tui } = startTui([blockedItem(), makeItem('WL-OTHER')]);
+
+    await settle();
+    await vi.waitFor(() => expect(blockerMock).toHaveBeenCalledTimes(1));
+
+    // Quit through the production path while the lookup is still pending.
+    dataHandler?.(Buffer.from('q'));
+    await tui.catch(() => undefined);
+    const writesAtExit = writes.length;
+
+    // Resolving afterwards runs the lookup's `.finally(render())`. It must
+    // write nothing: the pane is torn down.
+    resolveLookup([{ id: 'WL-B1', title: 'First blocker' }]);
+    await settle(40);
+    expect(writes.length).toBe(writesAtExit);
   });
 });
 

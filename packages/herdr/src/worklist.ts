@@ -7185,8 +7185,21 @@ export async function runWorklistTui(
   };
 
   let resolve: (value: WorkItem | undefined) => void;
+  /**
+   * True once exit has been requested and the TUI promise has resolved.
+   * Async work still in flight at exit time (a refresh cycle, its coalesced
+   * trailing refresh, a single-flight blocker re-resolve) resolves afterwards
+   * and calls `render()`. Writing a frame to a terminal whose pane has already
+   * been torn down is a leak: it can corrupt a reused pane and, in tests, the
+   * escaping frame is captured by whoever owns stdout next
+   * (WL-0MVFX6404003TE2E). `render()` therefore becomes a no-op after exit.
+   */
+  let exited = false;
   const promise = new Promise<WorkItem | undefined>((res) => {
-    resolve = res;
+    resolve = (value: WorkItem | undefined) => {
+      exited = true;
+      res(value);
+    };
   });
 
   /**
@@ -7260,6 +7273,10 @@ export async function runWorklistTui(
     }));
 
   const render = (): void => {
+    // Never write a frame after teardown: async work that outlives the exit
+    // (refresh cycle / coalesced trailing refresh / blocker re-resolve) must
+    // not repaint a torn-down pane (WL-0MVFX6404003TE2E).
+    if (exited) return;
     termSize = getTermSize();
     state.termSize = termSize;
 
