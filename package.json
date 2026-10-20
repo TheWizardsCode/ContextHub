@@ -33,7 +33,9 @@
     "install": "npm run install:plugin && npm run install:pi-extension",
     "install:plugin": "bash ./scripts/install-herdr.sh",
     "install:pi-extension": "bash ./scripts/install-pi-extension.sh",
-    "sample:downtime-agreement": "tsx scripts/downtime-agreement-sample.ts"
+    "sample:downtime-agreement": "tsx scripts/downtime-agreement-sample.ts",
+    "benchmark:herdr-refresh": "tsx bench/herdr-refresh-cycle.ts",
+    "benchmark:herdr-refresh:json": "tsx bench/herdr-refresh-cycle.ts --json"
   },
   "keywords": [
     "worklog",
