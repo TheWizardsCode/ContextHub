@@ -2418,6 +2418,10 @@ export async function main(): Promise<void> {
         nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,
         // Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK).
         maxAttempts: s.downtimeMaxAttempts,
+        // Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1):
+        // re-read each tick like browseItemCount/maxAttempts so a settings
+        // change applies without a plugin restart.
+        auditBatchMax: s.downtimeAuditBatchMax,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
         // Stalled-work scan before new-item selection (WL-0MUYMBSA90092QV2).

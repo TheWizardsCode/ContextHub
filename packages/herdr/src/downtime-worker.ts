@@ -116,7 +116,9 @@
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
  *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs` /
- *    `clampDowntimeMarkerStaleWindowMs` (WL-0MU6UL0RJ008IHGT)
+ *    `clampDowntimeMarkerStaleWindowMs` (WL-0MU6UL0RJ008IHGT) /
+ *    `clampDowntimeAuditBatchMax` (parent WL-0MVEDM8OT007WDRS AC1: the
+ *    depth-aware audit-batch cap, default 2, clamped to 1–5, `1` = off)
  *    — settings clamps, wired into `settings.ts`.
  *  - `selectWithRotation` (WL-0MSSRED76008LGB6) — rotation-aware selection:
  *    within each tier, candidates sharing the same priority level are
@@ -325,6 +327,30 @@ export const DOWNTIME_MAX_ATTEMPTS_MIN = 1;
 
 /** Hard ceiling for `maxAttempts` (10): above this the cap is effectively disabled. */
 export const DOWNTIME_MAX_ATTEMPTS_MAX = 10;
+
+/**
+ * Default depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
+ * WL-0MVEDM8OT007WDRS AC1).
+ *
+ * Bounds how many SEQUENTIAL audit dispatches one continuous idle window
+ * may issue when the audit-eligible depth reaches `browseItemCount`. The
+ * default `2` is conservative: batching is on (the queue drains without a
+ * fresh full idle period between audits) but the per-window LLM load stays
+ * small.
+ */
+export const DEFAULT_DOWNTIME_AUDIT_BATCH_MAX = 2;
+
+/**
+ * Hard floor for `downtimeAuditBatchMax` (1): `1` means batching OFF and
+ * restores the legacy single-dispatch-per-idle-window behaviour.
+ */
+export const DOWNTIME_AUDIT_BATCH_MAX_MIN = 1;
+
+/**
+ * Hard ceiling for `downtimeAuditBatchMax` (5): mirrors the audit skill's
+ * `AUDIT_BATCH_MAX_ITEMS` — above this the per-window LLM load is unbounded.
+ */
+export const DOWNTIME_AUDIT_BATCH_MAX_MAX = 5;
 
 /**
  * Per-process dispatch-PIPELINE single-flight bound (WL-0MT50LKAK001EF5Q).
@@ -3998,7 +4024,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
@@ -4655,6 +4681,14 @@ export async function dispatchDowntimeWork(
     cwd: string;
     freeSlots?: number;
     browseItemCount?: number;
+    /**
+     * Depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
+     * WL-0MVEDM8OT007WDRS AC1). Optional for backward compat — absent
+     * leaves batching off (legacy single-dispatch behaviour). Threaded from
+     * `DowntimeWorkerConfig.config()`; the batch activation logic itself is
+     * implemented by the depth/reset item (WL-0MVFE1BTB0084T17).
+     */
+    auditBatchMax?: number;
     /**
      * True when the polled status reports the target slot is OWNED by a
      * live Local Proxy lease (AC2, WL-0MTYZXSLN008HZOW). Optional — absent
@@ -5604,6 +5638,14 @@ export interface DowntimeWorkerConfig {
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
     browseItemCount?: number;
     /**
+     * Depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
+     * WL-0MVEDM8OT007WDRS AC1). Optional for backward compat — defaults to
+     * `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX` (2). `1` = batching off (legacy
+     * single-dispatch behaviour); read live on every tick and threaded into
+     * both dispatch paths.
+     */
+    auditBatchMax?: number;
+    /**
      * Dispatched success-marker staleness window, ms (WL-0MU6UL0RJ008IHGT).
      * Optional for backward compat — defaults to
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h).
@@ -6477,6 +6519,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   coordinationDir: opts.coordinationDir,
                   freeSlots,
                   browseItemCount: cfg.browseItemCount,
+                  auditBatchMax: cfg.auditBatchMax,
                   nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   maxAttempts: cfg.maxAttempts,
                   // Dispatched success-marker staleness window
@@ -6495,6 +6538,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 cwd: cfg.cwd,
                 freeSlots,
                 browseItemCount: cfg.browseItemCount,
+                // Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1).
+                auditBatchMax: cfg.auditBatchMax,
                 // Owner-lease (AC2) + contention (AC6) gates
                 // (WL-0MTYZXSLN008HZOW). No pane-count cap
                 // (WL-0MU2EP6JL006A1U3).
@@ -7698,6 +7743,22 @@ export function clampDowntimeMaxAttempts(value: number): number {
   return Math.min(
     Math.max(Math.round(value), DOWNTIME_MAX_ATTEMPTS_MIN),
     DOWNTIME_MAX_ATTEMPTS_MAX,
+  );
+}
+
+/**
+ * Clamp the depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
+ * WL-0MVEDM8OT007WDRS AC1): non-finite input (NaN/±Infinity) falls back to
+ * the default `2`, and every other value is rounded and clamped to
+ * [DOWNTIME_AUDIT_BATCH_MAX_MIN, DOWNTIME_AUDIT_BATCH_MAX_MAX] (1–5). `1`
+ * is accepted and means batching is off (legacy single-dispatch behaviour);
+ * the ceiling bounds the per-idle-window LLM load.
+ */
+export function clampDowntimeAuditBatchMax(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_AUDIT_BATCH_MAX;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_AUDIT_BATCH_MAX_MIN),
+    DOWNTIME_AUDIT_BATCH_MAX_MAX,
   );
 }
 

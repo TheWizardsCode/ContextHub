@@ -20,6 +20,7 @@ import {
 // (WL-0MUNS8X97007C9H9 AC1).
 export { clampBrowseItemCount, MIN_BROWSE_ITEM_COUNT, MAX_BROWSE_ITEM_COUNT, DEFAULT_BROWSE_ITEM_COUNT };
 import {
+  clampDowntimeAuditBatchMax,
   clampDowntimeIdleThresholdMs,
   clampDowntimeMarkerStaleWindowMs,
   clampDowntimeMaxAttempts,
@@ -28,6 +29,7 @@ import {
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeStallThresholdMs,
+  DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -107,6 +109,14 @@ export interface PluginSettings {
    */
   downtimeMaxAttempts: number;
   /**
+   * Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1): bounds
+   * how many SEQUENTIAL audit dispatches one continuous idle window may
+   * issue when the audit-eligible depth reaches `browseItemCount`. Default
+   * 2; clamped to [1, 5]; `1` disables batching (legacy single-dispatch
+   * behaviour). Non-finite/missing/invalid values fall back to the default.
+   */
+  downtimeAuditBatchMax: number;
+  /**
    * Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT): a
    * SUCCESS dispatch marker whose item is still at the marker's dispatched-at
    * stage is released once its age exceeds this window, so a pane that
@@ -173,6 +183,7 @@ export const defaultSettings: PluginSettings = {
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   downtimeNonTerminalCooldownMs: DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   downtimeMaxAttempts: DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+  downtimeAuditBatchMax: DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   downtimeStallScanEnabled: DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
   downtimeStallThresholdMs: DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
@@ -272,6 +283,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeMaxAttempts: typeof parsed.downtimeMaxAttempts === 'number'
         ? clampDowntimeMaxAttempts(parsed.downtimeMaxAttempts)
         : defaultSettings.downtimeMaxAttempts,
+      downtimeAuditBatchMax: typeof parsed.downtimeAuditBatchMax === 'number'
+        ? clampDowntimeAuditBatchMax(parsed.downtimeAuditBatchMax)
+        : defaultSettings.downtimeAuditBatchMax,
       downtimeMarkerStaleWindowMs: typeof parsed.downtimeMarkerStaleWindowMs === 'number'
         ? clampDowntimeMarkerStaleWindowMs(parsed.downtimeMarkerStaleWindowMs)
         : defaultSettings.downtimeMarkerStaleWindowMs,
