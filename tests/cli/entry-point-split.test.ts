@@ -22,8 +22,10 @@
  *      from any worktree/`--worklog-dir`"). The cache-hit half of the
  *      `--worklog-dir` contract lives in `read-cache-e2e.test.ts`.
  *
- * RED-pinned tests use `it.fails(...)` so the suite stays green while the
- * contract is unmet; F4 flips each `it.fails(` to `it(` as the split lands.
+ * The two plugin-canary contracts below were RED-pinned with `it.fails(...)`
+ * (the suite had to stay green before the split); F4
+ * (WL-0MVFRRKKN00544PQ) flipped them to real assertions when the thin fast
+ * path landed.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -244,7 +246,7 @@ describe('entry-point split — fast path', { timeout: 180_000 }, () => {
     ).toBe(1);
   });
 
-  it.fails('exits a cache hit before plugins are loaded', () => {
+  it('exits a cache hit before plugins are loaded', () => {
     // Prime the cache and clear the marker the priming (heavy) run wrote.
     const prime = runCli(['list', '--json'], tempDir, env);
     expect(prime.status, `priming list failed: ${prime.stderr}`).toBe(0);
@@ -275,7 +277,7 @@ describe('entry-point split — fast path', { timeout: 180_000 }, () => {
     ).toBe(0);
   });
 
-  it.fails('exits --version before plugins are loaded', () => {
+  it('exits --version before plugins are loaded', () => {
     fs.rmSync(canaryMarker, { force: true });
     const res = runCli(['--version'], tempDir, env);
     expect(res.status, `wl --version failed: ${res.stderr}`).toBe(0);

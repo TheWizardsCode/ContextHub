@@ -204,9 +204,9 @@ describe('startup import budget — entry-point split allowlist', () => {
     expect(budget.importGraph.moduleCount).toBe(graph.modules.length);
   });
 
-  // RED-pinned: today `src/cli.ts` eagerly imports the whole heavy graph.
-  // F4 flips `it.fails(` to `it(` when the thin bootstrap lands.
-  it.fails('keeps command modules and the heavy runtime off the fast path', () => {
+  // Was RED-pinned before the split; F4 (WL-0MVFRRKKN00544PQ) flipped it to a
+  // real assertion when `src/cli.ts` became the thin bootstrap.
+  it('keeps command modules and the heavy runtime off the fast path', () => {
     const graph = walkStaticImportGraph({ repoRoot });
 
     const commandModules = graph.modules.filter((module) => module.startsWith('src/commands/'));
