@@ -1292,6 +1292,34 @@ continuations and the gates that block them;
 the continuation, the batch-local exclusion set, the failing-continuation
 batch end and the deferred leadership hand-off.
 
+#### Verification record (WL-0MVFE1IRB0004X1U, 2026-10-20)
+
+The batch feature (parent WL-0MVEDM8OT007WDRS) was verified as one slice at
+`dev` head **4bdc1201**:
+
+| Command | Result |
+| --- | --- |
+| `npm --silent test -- packages/herdr/src` | **107 files / 3510 tests passed** (no failures, no unhandled rejections) |
+| `python3 run_tests.py --scope full` (the configured dev-push gate: `tests/cli` + `tests/unit`) | green |
+| doc-consistency scan for stale "single-dispatch-only" claims | clean — the only `single-dispatch-per-window` mentions are the deliberate `1` = legacy/off descriptions |
+
+**AC traceability.**
+
+| AC | Implementation | Pinned by |
+| --- | --- | --- |
+| AC1 depth-aware batching | `computeAuditEligibleDepth`, `resolveAuditBatchStatus`, `clampDowntimeAuditBatchMax`, worker `activeAuditBatch` budget | `downtime-worker.settings.test.ts`, `downtime-worker.audit-tier.test.ts`, `downtime-worker.orchestrator.test.ts` |
+| AC2 sequential single-audit safety | conditional reset in `tick()` (every gate re-checked); continuation runs through the unchanged filter chain | `downtime-worker.audit-tier.test.ts` (idle gate, ≥ 2 slots, markers), `coordination-dispatch.test.ts` |
+| AC3 no duplicate / re-dispatched items | marker id-guard + `auditBatchDispatchedIds` batch-local exclusion; any non-`dispatched` continuation ends the batch | `coordination-dispatch.test.ts` (AC3, AC6f, batch-local exclusion), `downtime-worker.audit-tier.test.ts` |
+| AC4 coordination-mode compatibility | `dispatchFromOwnHead` audit-only continuation from the leader's own head; deferred `ownBacklogDispatch` step-down | `coordination-dispatch.test.ts` (AC4) |
+| AC5 observability | `audit-batch-continue` / `audit-batch-end` observation tokens with depth/cap/remaining; existing tokens unchanged | `downtime-worker.orchestrator.test.ts` (batch decisions + metadata), `downtime-log.test.ts` |
+| AC6 herdr test coverage | (a)–(f) specs across the four suites named above | `downtime-worker.dispatch.test.ts`, `downtime-worker.audit-tier.test.ts`, `downtime-worker.orchestrator.test.ts`, `coordination-dispatch.test.ts`, `downtime-worker.settings.test.ts` |
+| AC7 documentation | this document, `packages/herdr/README.md`, code comments | this verification record |
+| AC8 full suite | herdr package suite + configured gate | table above |
+
+Known gate gap (discovered, not fixed here): the configured dev-push gate runs
+`tests/cli` + `tests/unit` only, so the herdr package suite is invoked
+explicitly for herdr-touching items — tracked as WL-0MVGJ4WSS005BMSI.
+
 ### Soft-delete exclusion (SA-0MUJBLZC60085DI9)
 
 Every dispatch path excludes soft-deleted items — those with a non-empty
