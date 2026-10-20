@@ -59,7 +59,10 @@ paths.** When the head yields no candidate the dispatcher reports the terminal
 reason derived from the in-view flags (`no-candidate`, `review-queue-hold`,
 `code-freeze`, `fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`,
 `in-flight-hold`, `wl-error`) and does **not** fall back to a second ranking or
-an out-of-view non-critical scan. When every visible item is filtered by a
+an out-of-view non-critical scan. Audit-batch observability adds the decision
+*observation* tokens `audit-batch-continue` / `audit-batch-end` (never terminal
+reasons) — see *Decision-log entries: audit-batch tokens & metadata* under
+*Log schema*. When every visible item is filtered by a
 safety gate (or the view is empty) the outcome is a NOP — **except** on the
 coordination leader path, which has one bounded, own-root escape valve that
 then hands off leadership (see *Own-backlog fallback & leadership hand-off*
@@ -107,7 +110,9 @@ can monopolise leadership by repeatedly reaching into its own hidden backlog.
 i.e. the same terminal-reason set the view can produce (`no-candidate`,
 `review-queue-hold`, `code-freeze`, `fresh-audit-skip`, `audit-in-flight`,
 `audit-host-saturated`, `in-flight-hold`, or a genuinely empty view). It never
-runs when a normal in-view/coordination offer dispatched.
+runs when a normal in-view/coordination offer dispatched. Blocked audit-batch
+continuations reuse these tokens unchanged and add the batch metadata — see
+*Decision-log entries: audit-batch tokens & metadata* under *Log schema*.
 
 **Own root only (AC2).** The fallback reads the leader's **own** worklog root
 (`opts.cwd`) only — never another instance's or another worklog root's hidden
@@ -1792,6 +1797,40 @@ likewise re-read live every tick and clamped on load
   `exitCode` (if available) is the CLI exit code.
 
 ## Log schema
+
+### Decision-log entries: audit-batch tokens & metadata (parent WL-0MVEDM8OT007WDRS AC5)
+
+The decision log (`<cwd>/.worklog/downtime-coordination.log`, entries with
+`kind: 'decision'`) records audit-batch decisions alongside the existing
+refusal reasons. Every entry keeps today's standard fields (`freeSlots`,
+`totalSlots`, `ownerPresent`, `runningPanes`, `contentionDepth`) and the same
+rate limit: an identical reason inside `DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS`
+(10 min) is suppressed, a reason change always writes. The header blocking
+token is still updated on **every refusal** and never on the observation
+tokens below.
+
+| Token | Meaning | Batch metadata |
+|---|---|---|
+| `audit-batch-continue` | An **accepted** audit continuation (never the first dispatch of a batch). | `auditBatchDepth`, `auditBatchCap`, `auditBatchRemaining` — the budget still available **after** this dispatch (`0` on the dispatch that consumes the last continuation). |
+| `audit-batch-end` | An armed batch ended **silently** after a successful audit dispatch (cap reached / depth dropped). Emitted at most once per batch-ending dispatch, never for a refusal. | Same three fields plus `auditBatchEndReason: 'cap' \| 'depth'`. |
+
+**Blocked/held continuations reuse the existing tokens unchanged** —
+`audit-in-flight` and `audit-host-saturated` (marker blocks), `slot-owned`,
+`proxy-contention`, `code-freeze`, `review-queue-hold`, `no-candidate`,
+`slots-unavailable` — and gain `auditBatchDepth` / `auditBatchCap` /
+`auditBatchRemaining` (the budget still available when the continuation was
+held) as **additive** fields whenever a batch was armed. A refusal ends the
+batch, so no separate `audit-batch-end` line is written for it. Decisions
+with no batch armed keep their existing shape: the metadata fields are
+absent.
+
+```json
+{"kind":"decision","operation":"no-dispatch","instanceId":"…",
+ "reason":"audit-batch-continue","freeSlots":2,"totalSlots":4,
+ "ownerPresent":false,"runningPanes":1,"contentionDepth":0,
+ "auditBatchDepth":7,"auditBatchCap":2,"auditBatchRemaining":1,
+ "at":"2026-10-20T02:00:00.000Z"}
+```
 
 ### `DowntimeErrorEvent` fields (per-strike error log entries)
 

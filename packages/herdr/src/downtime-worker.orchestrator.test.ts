@@ -1989,4 +1989,242 @@ describe('audit-batch worker loop (parent AC6e)', () => {
       vi.useRealTimers();
     }
   });
+
+  // ── AC5 observability: blocked continuations, batch end, header ─────
+
+  it('AC5: a HELD continuation reuses the existing token and carries batch metadata', async () => {
+    vi.useFakeTimers();
+    try {
+      const cwd = tmp.make('herdr-audit-batch-held-');
+      const markers: Array<Record<string, unknown>> = [];
+      // The first dispatch sees no active audit; the continuation is blocked
+      // by the HOST-WIDE marker (the previous audit is still running).
+      const getActiveAudit = vi
+        .fn()
+        .mockResolvedValueOnce({ ok: true, active: false })
+        .mockResolvedValue({ ok: true, active: true, source: 'host-wide' });
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [auditItem('WL-AUD-1', 0), auditItem('WL-AUD-2', 1), auditItem('WL-AUD-3', 2)],
+        }),
+        getActiveAudit,
+        recordDispatch: vi.fn(async (event) => {
+          markers.push(event as unknown as Record<string, unknown>);
+          writeDowntimeLog(cwd, markers);
+          return true;
+        }),
+        recordDecision,
+      });
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller(
+          'http://proxy:8000',
+          vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree)),
+        ),
+        deps,
+        config: () => ({
+          enabled: true,
+          thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd,
+          noCandidateCooldownMs: 3_600_000,
+          browseItemCount: 2,
+          auditBatchMax: 3,
+        }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const first = await worker.tick();
+      expect(first.dispatched).toBe(true);
+      // Batch armed: depth 3 >= browseItemCount 2, cap 3 -> remaining 2.
+
+      vi.setSystemTime(
+        start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+      );
+      const held = await worker.tick();
+      expect(held.dispatched).toBe(false);
+
+      const heldDecisions = recordDecision.mock.calls
+        .map((call) => call[0] as Record<string, unknown>)
+        .filter((entry) => entry.reason === 'audit-host-saturated');
+      expect(heldDecisions).toHaveLength(1);
+      // The EXISTING token is unchanged; the batch metadata is additive.
+      expect(heldDecisions[0]).toMatchObject({
+        reason: 'audit-host-saturated',
+        auditBatchDepth: 3,
+        auditBatchCap: 3,
+        auditBatchRemaining: 2,
+      });
+      expect(heldDecisions[0].freeSlots).toBe(4);
+      expect(heldDecisions[0].totalSlots).toBe(4);
+      expect(heldDecisions[0].ownerPresent).toBe(false);
+      // A refusal still drives the header blocking token (unchanged).
+      expect(worker.blockReason).toBe('audit-host-saturated');
+      // A refusal is the signal: no extra `audit-batch-end` line for it.
+      const endDecisions = recordDecision.mock.calls
+        .map((call) => call[0] as Record<string, unknown>)
+        .filter((entry) => entry.reason === 'audit-batch-end');
+      expect(endDecisions).toHaveLength(0);
+
+      // Rate limiting is unchanged: the same refusal inside the window is
+      // suppressed (the batch already ended, so no metadata is re-attached).
+      vi.setSystemTime(
+        start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 2 * DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+      );
+      await worker.tick();
+      const heldAfter = recordDecision.mock.calls
+        .map((call) => call[0] as Record<string, unknown>)
+        .filter((entry) => entry.reason === 'audit-host-saturated');
+      expect(heldAfter).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC5: reaching the cap records audit-batch-continue then one audit-batch-end (cap)', async () => {
+    vi.useFakeTimers();
+    try {
+      const cwd = tmp.make('herdr-audit-batch-end-cap-');
+      const markers: Array<Record<string, unknown>> = [];
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [auditItem('WL-AUD-1', 0), auditItem('WL-AUD-2', 1)],
+        }),
+        recordDispatch: vi.fn(async (event) => {
+          markers.push(event as unknown as Record<string, unknown>);
+          writeDowntimeLog(cwd, markers);
+          return true;
+        }),
+        recordDecision,
+      });
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller(
+          'http://proxy:8000',
+          vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree)),
+        ),
+        deps,
+        config: () => ({
+          enabled: true,
+          thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd,
+          noCandidateCooldownMs: 3_600_000,
+          browseItemCount: 2,
+          auditBatchMax: 2,
+        }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      expect((await worker.tick()).dispatched).toBe(true); // arms: remaining 1
+
+      vi.setSystemTime(
+        start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+      );
+      const second = await worker.tick();
+      expect(second.dispatched).toBe(true); // consumes the last continuation
+
+      const decisions = recordDecision.mock.calls.map(
+        (call) => call[0] as Record<string, unknown>,
+      );
+      const continues = decisions.filter((entry) => entry.reason === 'audit-batch-continue');
+      expect(continues).toHaveLength(1);
+      expect(continues[0]).toMatchObject({
+        auditBatchDepth: 2,
+        auditBatchCap: 2,
+        auditBatchRemaining: 0,
+      });
+      const ends = decisions.filter((entry) => entry.reason === 'audit-batch-end');
+      expect(ends).toHaveLength(1);
+      expect(ends[0]).toMatchObject({
+        auditBatchDepth: 2,
+        auditBatchCap: 2,
+        auditBatchRemaining: 0,
+        auditBatchEndReason: 'cap',
+      });
+      // Batch observability tokens are NOT refusals: the header stays clear.
+      expect(worker.blockReason).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC5: a depth drop ends the batch with audit-batch-end (depth) and no continue token', async () => {
+    vi.useFakeTimers();
+    try {
+      const cwd = tmp.make('herdr-audit-batch-end-depth-');
+      const markers: Array<Record<string, unknown>> = [];
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const deps = makeDeps({
+        getHerdrListHead: vi
+          .fn()
+          // Depth 2 (>= browseItemCount 2) arms the batch…
+          .mockResolvedValueOnce({
+            ok: true,
+            items: [auditItem('WL-AUD-1', 0), auditItem('WL-AUD-2', 1)],
+          })
+          // …depth drops to 1 for the continuation tick.
+          .mockResolvedValue({ ok: true, items: [auditItem('WL-AUD-2', 0)] }),
+        recordDispatch: vi.fn(async (event) => {
+          markers.push(event as unknown as Record<string, unknown>);
+          writeDowntimeLog(cwd, markers);
+          return true;
+        }),
+        recordDecision,
+      });
+      const worker = createDowntimeWorker({
+        poller: createDowntimePoller(
+          'http://proxy:8000',
+          vi.fn().mockResolvedValue(jsonResponseFixture(idleAllSlotsFree)),
+        ),
+        deps,
+        config: () => ({
+          enabled: true,
+          thresholdMs: DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+          requiredFreeSlots: 0,
+          model: 'plan',
+          cwd,
+          noCandidateCooldownMs: 3_600_000,
+          browseItemCount: 2,
+          auditBatchMax: 2,
+        }),
+      });
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      await worker.tick();
+      vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      expect((await worker.tick()).dispatched).toBe(true); // arms
+
+      vi.setSystemTime(
+        start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
+      );
+      // The second item still dispatches, but as a NORMAL single dispatch
+      // (the batch is over: depth < threshold) — never a continuation.
+      expect((await worker.tick()).dispatched).toBe(true);
+
+      const decisions = recordDecision.mock.calls.map(
+        (call) => call[0] as Record<string, unknown>,
+      );
+      expect(decisions.filter((entry) => entry.reason === 'audit-batch-continue')).toHaveLength(0);
+      const ends = decisions.filter((entry) => entry.reason === 'audit-batch-end');
+      expect(ends).toHaveLength(1);
+      expect(ends[0]).toMatchObject({
+        auditBatchDepth: 1,
+        auditBatchCap: 2,
+        auditBatchRemaining: 0,
+        auditBatchEndReason: 'depth',
+      });
+      expect(worker.blockReason).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

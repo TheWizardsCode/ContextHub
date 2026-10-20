@@ -6000,14 +6000,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   const perSlotTracker = createPerSlotIdleTracker();
   let dispatching = false;
   let lastDispatchAt: number | null = null;
-  // Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS
-  // AC1/AC2/AC3): continuation audits still available in the CURRENT
-  // continuous idle window. `null` = no batch armed (legacy single-dispatch
-  // behaviour). Armed only by a successful AUDIT dispatch whose outcome
-  // reports an active batch with budget remaining; cleared on the cap, a
-  // depth drop, a non-audit dispatch, ANY non-`dispatched` outcome, a busy or
-  // unavailable poll, a pause/cooldown, leadership loss, or a disabled worker.
-  let auditBatchRemaining: number | null = null;
+  // Depth-aware audit-batch continuation state (parent WL-0MVEDM8OT007WDRS
+  // AC1/AC2/AC3/AC5): the continuation audits still available in the CURRENT
+  // continuous idle window plus the depth/cap they were measured against.
+  // `null` = no batch armed (legacy single-dispatch behaviour). Armed only by
+  // a successful AUDIT dispatch whose outcome reports an active batch with
+  // budget remaining; cleared on the cap, a depth drop, a non-audit dispatch,
+  // ANY non-`dispatched` outcome, a busy or unavailable poll, a pause/
+  // cooldown, leadership loss, or a disabled worker. Keeping depth/cap here
+  // (not just the budget) lets every blocked/ended batch decision carry the
+  // `auditBatchDepth`/`auditBatchCap`/`auditBatchRemaining` diagnostics.
+  let activeAuditBatch: { depth: number; cap: number; remaining: number } | null = null;
   // Pane-lifecycle monitor cadence gate (WL-0MU308WSF0002JWN): the timestamp
   // of the last monitor pass. 0 forces a pass on the first tick.
   let lastPaneMonitorAt = 0;
@@ -6152,6 +6155,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // header blocking token is updated on EVERY refusal (even a rate-limited
   // one) so the header never goes stale. Fail-closed: a logging failure never
   // affects the dispatch decision.
+  //
+  // Audit-batch observability (parent WL-0MVEDM8OT007WDRS AC5) rides on the
+  // same log and the same rate limit:
+  //  - refusals keep their EXISTING reason tokens; while a batch is armed they
+  //    additionally carry `auditBatchDepth` / `auditBatchCap` /
+  //    `auditBatchRemaining`;
+  //  - `audit-batch-continue` (an accepted continuation) and
+  //    `audit-batch-end` (a silent cap/depth deactivation) are OBSERVATIONS,
+  //    not refusals — they are written with `blocking: false` so the header
+  //    blocking token still reflects refusals only, exactly as today.
   const recordDecision = async (
     cwd: string,
     reason: string,
@@ -6165,9 +6178,22 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       auditBatchDepth?: number;
       auditBatchCap?: number;
       auditBatchRemaining?: number;
+      /** Why an armed batch ended (`cap` reached / `depth` dropped, AC5). */
+      auditBatchEndReason?: string;
     },
+    options: {
+      /**
+       * `false` for a NON-refusal observation (`audit-batch-continue` /
+       * `audit-batch-end`): it is recorded in the decision log but must NOT
+       * set the header blocking token, which reflects refusals only
+       * (parent AC5 "header blocking token updates on every refusal exactly
+       * as today"). Defaults to `true` — every refusal keeps today's
+       * behaviour.
+       */
+      blocking?: boolean;
+    } = {},
   ): Promise<void> => {
-    blockReason = decisionHeaderToken(reason);
+    if (options.blocking !== false) blockReason = decisionHeaderToken(reason);
     const now = Date.now();
     if (
       lastDecisionReason === reason &&
@@ -6195,6 +6221,26 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // fail-closed: decision logging must never crash the worker
     }
   };
+
+  /**
+   * Depth-aware audit-batch diagnostics (parent WL-0MVEDM8OT007WDRS AC5):
+   * metadata attached to a decision while a batch is armed. `depth`/`cap` are
+   * re-measured from the dispatch outcome when it read the Herdr head (a
+   * blocked continuation), otherwise they are the values the active batch was
+   * armed with; `remaining` is the continuation budget still available BEFORE
+   * this decision (`0` once the batch has ended). Absent entirely when no
+   * batch is active, so non-batch decisions keep their existing shape.
+   */
+  const batchMetadata = (
+    live?: { depth: number; cap: number },
+  ): { auditBatchDepth?: number; auditBatchCap?: number; auditBatchRemaining?: number } =>
+    activeAuditBatch === null
+      ? {}
+      : {
+          auditBatchDepth: live?.depth ?? activeAuditBatch.depth,
+          auditBatchCap: live?.cap ?? activeAuditBatch.cap,
+          auditBatchRemaining: activeAuditBatch.remaining,
+        };
 
   return {
     get idleSince(): number | null {
@@ -6267,7 +6313,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // while toggled off the worker performs no proxy polling, no idle
       // tracking, and no dispatch — exactly the settings-disabled path.
       if (!(override ?? cfg.enabled)) {
-        auditBatchRemaining = null; // disabled → no carried batch window
+        activeAuditBatch = null; // disabled → no carried batch window
         return { polled: false, dispatched: false, idle: false };
       }
 
@@ -6287,7 +6333,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // construction) so a disable survives a pane/plugin restart and is
       // honoured cross-process.
       if (disableMarkerExists(cfg.cwd) && override === null) {
-        auditBatchRemaining = null; // disabled → no carried batch window
+        activeAuditBatch = null; // disabled → no carried batch window
         return { polled: false, dispatched: false, idle: false };
       }
 
@@ -6424,7 +6470,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // tracking, no dispatch — the check-in above is the instance's only
         // coordination activity. (Lease takeover was handled above.)
         if (!leaderState) {
-          auditBatchRemaining = null; // leadership lost → the batch window ends
+          activeAuditBatch = null; // leadership lost → the batch window ends
           return { polled: false, dispatched: false, idle: false };
         }
       }
@@ -6504,7 +6550,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // dispatch (no stale idle credit from before the pause).
       if (cooldownUntil !== null) {
         if (Date.now() < cooldownUntil) {
-          auditBatchRemaining = null; // paused → the idle window is over
+          activeAuditBatch = null; // paused → the idle window is over
           return { polled: false, dispatched: false, idle: false };
         }
         // ── F5 cooldown-exit hook (AC3) ──
@@ -6518,7 +6564,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // the cooldown-exit path can never dispatch on stale leadership.
         cooldownUntil = null; // pause expired — resume normal polling
         errorStrikes = 0; // fresh strike counter after the pause
-        auditBatchRemaining = null; // no stale batch budget across a pause
+        activeAuditBatch = null; // no stale batch budget across a pause
       }
       if (opts.poller.isPolling()) return { polled: false, dispatched: false, idle: tracker.idleSince !== null };
 
@@ -6527,7 +6573,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (status === null) {
         tracker.record(false); // endpoint failure/ambiguity → busy
         perSlotTracker.record([]); // fail-closed: ambiguous poll resets every slot timer
-        auditBatchRemaining = null; // an ambiguous poll ends the batch window
+        activeAuditBatch = null; // an ambiguous poll ends the batch window
         return { polled: true, dispatched: false, idle: false };
       }
 
@@ -6559,7 +6605,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             typeof status.contention_queue_depth === 'number'
               ? status.contention_queue_depth
               : 0,
+          // AC5: a batch that was armed is blocked by this fail-closed poll —
+          // attach its metadata, then end it (no batch survives an unusable
+          // availability signal).
+          ...batchMetadata(),
         });
+        activeAuditBatch = null;
         return { polled: true, dispatched: false, idle: false };
       }
       const perSlotMode =
@@ -6599,7 +6650,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       }
 
       if (!idle) {
-        auditBatchRemaining = null; // busy poll ends the continuous idle window
+        activeAuditBatch = null; // busy poll ends the continuous idle window
         return { polled: true, dispatched: false, idle: false };
       }
       if (!ready) return { polled: true, dispatched: false, idle: true };
@@ -6680,8 +6731,11 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           ownerPresent,
           runningPanes,
           contentionDepth: contentionQueueDepth,
+          // AC5: an armed batch blocked by slot ownership keeps the existing
+          // `slot-owned` token, now with its depth/cap/remaining metadata.
+          ...batchMetadata(),
         });
-        auditBatchRemaining = null; // no owned slot can host a continuation
+        activeAuditBatch = null; // no owned slot can host a continuation
         return { polled: true, dispatched: false, idle: true };
       }
       if (contentionQueueDepth > 0) {
@@ -6691,8 +6745,11 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           ownerPresent,
           runningPanes,
           contentionDepth: contentionQueueDepth,
+          // AC5: an armed batch blocked by proxy contention keeps the existing
+          // `proxy-contention` token, now with its metadata.
+          ...batchMetadata(),
         });
-        auditBatchRemaining = null; // proxy contention ends the batch window
+        activeAuditBatch = null; // proxy contention ends the batch window
         return { polled: true, dispatched: false, idle: true };
       }
 
@@ -6710,11 +6767,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // behavior, retained as the fail-open fallback.
       dispatching = true;
       // Depth-aware audit-batch continuation budget BEFORE this dispatch
-      // (parent WL-0MVEDM8OT007WDRS AC1/AC2): `null` = no batch armed. Passed
-      // to the dispatcher so a continuation decrements it; captured here so
-      // the observability decision below can distinguish a continuation from
-      // the first dispatch of a batch.
-      const continuationBudget = auditBatchRemaining;
+      // (parent WL-0MVEDM8OT007WDRS AC1/AC2/AC5): `null` = no batch armed.
+      // Passed to the dispatcher so a continuation decrements it; captured
+      // here so the observability decisions below can distinguish a
+      // continuation from the first dispatch of a batch AND attach the active
+      // batch metadata to a blocked/ended decision.
+      const armedBatch = activeAuditBatch;
+      const continuationBudget = armedBatch !== null ? armedBatch.remaining : null;
       try {
         const outcome =
           opts.coordinationDir && typeof opts.deps.fetchItem === 'function'
@@ -6730,7 +6789,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   auditBatchMax: cfg.auditBatchMax,
                   // Continuation budget (parent WL-0MVEDM8OT007WDRS AC1) —
                   // consumed by the coordination continuation item.
-                  ...(auditBatchRemaining !== null ? { auditBatchRemaining } : {}),
+                  ...(continuationBudget !== null ? { auditBatchRemaining: continuationBudget } : {}),
                   nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   maxAttempts: cfg.maxAttempts,
                   // Dispatched success-marker staleness window
@@ -6753,7 +6812,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 auditBatchMax: cfg.auditBatchMax,
                 // Continuation budget for the current idle window; absent on
                 // the first dispatch / when no batch is armed.
-                ...(auditBatchRemaining !== null ? { auditBatchRemaining } : {}),
+                ...(continuationBudget !== null ? { auditBatchRemaining: continuationBudget } : {}),
                 // Owner-lease (AC2) + contention (AC6) gates
                 // (WL-0MTYZXSLN008HZOW). No pane-count cap
                 // (WL-0MU2EP6JL006A1U3).
@@ -6782,35 +6841,50 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             ownerPresent,
             runningPanes,
             contentionDepth: contentionQueueDepth,
+            // AC5: a held/blocked continuation reuses the EXISTING token
+            // unchanged (`audit-in-flight` / `audit-host-saturated` /
+            // `code-freeze` / `review-queue-hold` / `no-candidate` / ...) and
+            // gains the active batch metadata as an additive field.
+            ...batchMetadata(outcome.auditBatch),
           });
         }
         // Any non-`dispatched` outcome ends the audit batch (parent
         // WL-0MVEDM8OT007WDRS AC3): the next audit requires a fresh full idle
-        // period, and a continuation never skips to another target.
-        if (!outcome.dispatched) auditBatchRemaining = null;
+        // period, and a continuation never skips to another target. The
+        // refusal token above already carries the batch metadata, so no
+        // separate end token is emitted (no duplicate line per refusal).
+        if (!outcome.dispatched) activeAuditBatch = null;
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
           errorStrikes = 0; // a successful dispatch proves the CLI is healthy
           const batch = outcome.auditBatch;
           // AC5 observability: a CONTINUATION audit dispatch records its own
           // decision token (with depth/cap/remaining) at the existing rate
-          // limit. The first dispatch of a batch is a normal dispatch.
+          // limit. The first dispatch of a batch is a normal dispatch. This
+          // is an observation, not a refusal — it must not touch the header
+          // blocking token.
           if (
             continuationBudget !== null &&
             continuationBudget > 0 &&
             outcome.kind === 'audit' &&
-            batch !== undefined
+            batch !== undefined &&
+            batch.active
           ) {
-            void recordDecision(cfg.cwd, 'audit-batch-continue', {
-              freeSlots,
-              totalSlots: status.total_slots,
-              ownerPresent,
-              runningPanes,
-              contentionDepth: contentionQueueDepth,
-              auditBatchDepth: batch.depth,
-              auditBatchCap: batch.cap,
-              auditBatchRemaining: batch.remaining,
-            });
+            void recordDecision(
+              cfg.cwd,
+              'audit-batch-continue',
+              {
+                freeSlots,
+                totalSlots: status.total_slots,
+                ownerPresent,
+                runningPanes,
+                contentionDepth: contentionQueueDepth,
+                auditBatchDepth: batch.depth,
+                auditBatchCap: batch.cap,
+                auditBatchRemaining: batch.remaining,
+              },
+              { blocking: false },
+            );
           }
           // Conditional idle reset (parent WL-0MVEDM8OT007WDRS AC2): only a
           // successful AUDIT dispatch in an active batch with budget
@@ -6824,9 +6898,35 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             batch.active &&
             batch.remaining > 0;
           if (deferIdleReset) {
-            auditBatchRemaining = batch.remaining;
+            activeAuditBatch = { depth: batch.depth, cap: batch.cap, remaining: batch.remaining };
           } else {
-            auditBatchRemaining = null;
+            // Batch-end observability (AC5): the silent deactivation of an
+            // armed batch after a successful audit dispatch (cap reached or
+            // depth dropped below the threshold) gets ONE distinct token so
+            // "why did the batch stop?" is answerable from the log. It is
+            // rate-limited like every other decision and is never emitted on
+            // a refusal (that token already carries the metadata) or when no
+            // batch was armed (nothing ended).
+            if (continuationBudget !== null && outcome.kind === 'audit' && batch !== undefined) {
+              const batchThreshold = resolveSprintViewWindow(cfg.browseItemCount);
+              void recordDecision(
+                cfg.cwd,
+                'audit-batch-end',
+                {
+                  freeSlots,
+                  totalSlots: status.total_slots,
+                  ownerPresent,
+                  runningPanes,
+                  contentionDepth: contentionQueueDepth,
+                  auditBatchDepth: batch.depth,
+                  auditBatchCap: batch.cap,
+                  auditBatchRemaining: batch.remaining,
+                  auditBatchEndReason: batch.depth < batchThreshold ? 'depth' : 'cap',
+                },
+                { blocking: false },
+              );
+            }
+            activeAuditBatch = null;
             // Belt-and-suspenders: even if the proxy does not immediately
             // report busy, require a fresh full idle period before the next
             // dispatch (AC5).

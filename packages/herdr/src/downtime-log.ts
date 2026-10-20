@@ -76,6 +76,13 @@ export interface CoordinationLogEntry {
   auditBatchDepth?: number;
   auditBatchCap?: number;
   auditBatchRemaining?: number;
+  /**
+   * Why an armed batch ended (parent WL-0MVEDM8OT007WDRS AC5): `cap` (the
+   * continuation budget was consumed) or `depth` (the audit-eligible depth
+   * dropped below `browseItemCount`). Present only on `audit-batch-end`
+   * decisions.
+   */
+  auditBatchEndReason?: string;
   at?: string;
 }
 
