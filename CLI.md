@@ -16,13 +16,90 @@ These options apply to any command:
 ### Read cache (environment variables)
 
 The read cache serves repeat JSON read queries (`list`/`next`/`show`/`search`/`status`); see
-`CONFIG.md` for the full model. Runtime knobs:
+`CONFIG.md` for the full model and the cache-maintenance guidance. Runtime knobs:
 
 - `WL_CACHE_DISABLED=1` — bypass the cache entirely (baseline behaviour).
 - `WL_CACHE_DIR=<path>` — override the cache directory (default `$XDG_CACHE_HOME/wl` or `~/.cache/wl`).
 - `WL_CACHE_TTL_MS=<n>` — cache-entry TTL safety net (default 30000).
+- `WL_CACHE_DEBUG=1` — log cache hits, misses and invalidation reasons to stderr.
 - `WL_STATE_MAX_FILES=<n>` — bound on per-worklog-dir state counters (default 1000).
 - `WL_STATE_TTL_MS=<n>` — prune counters untouched for this long (default 604800000, 7 days).
+
+Maintenance: `wl doctor cache` reports the state directory (file count, bytes,
+stale-by-TTL, over-bound) and `wl doctor cache --prune` reclaims it;
+`--max-files`/`--ttl-days` override the bound for one run. See
+[`CONFIG.md`](CONFIG.md#read-cache-state-boundedness-f9--wl-0mvfrrq9w003kefl).
+
+### Startup architecture (fast path vs heavy graph)
+
+Every `wl` invocation starts in a **thin fast path** (`src/cli.ts`) and only
+loads the **heavy graph** (`src/cli-main.ts`: Commander, the command modules,
+the plugin loader and the SQLite runtime) when it has to:
+
+| Invocation | What loads |
+|---|---|
+| `wl --version` / `-V` | `src/version.ts` + the spawn recorder only — the version is printed and the process exits before anything else is imported |
+| warm cache hit (`list`/`next`/`show`/`search`/`status` with `--json`) | the fast path prints the cached JSON and exits — no Commander, no command module, no DB, no plugins |
+| `wl <command> …` (miss, write, help) | the fast path dynamically imports `cli-main.ts`, which registers commands through a lazy registry (`src/command-registry.ts`) |
+
+The lazy registry loads **only the command being run**; `--help`, bare `wl`,
+`wl help <cmd>` and `wl completion <shell>` register the full set because their
+output enumerates commands. If a command module fails to import, the CLI logs
+one warning and falls back to registering every other command, so a broken
+module can never take the whole CLI down.
+
+**Contributor rule — the static import allowlist.** `src/cli.ts` must only
+statically import what every invocation needs (`src/argv-normalize.ts`,
+`src/spawn-counter.ts`, `src/version.ts`). Anything optional is deferred with
+`await import(…)` **and recorded in the budget**. A new module — static or
+dynamic — fails `tests/cli/startup-import-budget.test.ts` until the budget is
+deliberately regenerated:
+
+```sh
+npm run benchmark:wl-startup -- --target src --update-budget
+npm run benchmark:wl-startup -- --target dist --update-budget   # needs `npm run build`
+```
+
+`bench/startup-import-budget.json` records the static boot graph, the fast
+path's dynamic entrypoints and their runtime module union, plus the measured
+`src`/`dist` baselines and regression headroom. Background and re-run
+instructions: [`docs/dev/wl-startup-import-budget.md`](docs/dev/wl-startup-import-budget.md).
+
+### Spawn instrumentation and CPU-seconds per refresh cycle
+
+When `WL_SPAWN_COUNT_FILE=<path>` is set, every `wl` process appends one line
+to that file:
+
+```
+<kind>\t<iso-timestamp>\t<pid>\t<cpuMs>\t<maxRssKb>
+```
+
+- `kind` — `cache-hit` (served from the read cache), `read-work` (a read that
+  did DB work), or `version` (`--version`).
+- `cpuMs` — user + system CPU time from `process.resourceUsage()`.
+- `maxRssKb` — that process's peak RSS.
+
+Set `WL_SPAWN_COUNT=1` to also print the record to stderr. Legacy three-field
+lines still parse (CPU/RSS reported as unknown rather than 0).
+
+**Totalling CPU-seconds per refresh cycle (the AC2 procedure).** The bundled
+harness reproduces the herdr worklist workload — 4 panes sharing one worklog,
+each running the refresh query set (critical / review-queue / in-progress /
+blocked subsets plus `wl next`) once per tick:
+
+```sh
+npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5
+# measure a different build (e.g. a pre-change worktree):
+npx tsx bench/herdr-refresh-cycle.ts --json --cli /path/to/dist/cli.js
+# no-cache baseline variant:
+WL_CACHE_DISABLED=1 npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5
+```
+
+It reports total `cpuSeconds` per cycle, `spawns` by kind, `cpuSecondsPerSpawn`,
+p95 per-spawn wall time and peak RSS. Reference numbers (4 panes, 30 s cycle,
+120 spawns) are recorded on the epic work item — the verdict is that per-spawn
+CPU has hit the process-startup floor, so further gains must come from fewer
+spawns per refresh tick (tracked separately).
 
 ### GitHub throttling (environment variables)
 

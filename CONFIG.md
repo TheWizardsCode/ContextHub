@@ -28,8 +28,15 @@ Configuration (safe defaults for a Raspberry-Pi-class host):
 
 | Env var | Default | Meaning |
 |---|---|---|
+| `WL_CACHE_DIR` | `$XDG_CACHE_HOME/wl` (`~/.cache/wl`) | Cache directory (entries + `state/`) |
+| `WL_CACHE_DISABLED` | unset | `1` bypasses the read cache entirely |
+| `WL_CACHE_TTL_MS` | `30000` | Cache-entry TTL safety net |
 | `WL_STATE_MAX_FILES` | `1000` | Max state-counter files to keep |
 | `WL_STATE_TTL_MS` | `604800000` (7 d) | Counters untouched longer than this are pruned |
+
+See [`CLI.md`](CLI.md#read-cache-environment-variables) for the full read-cache
+environment list and [`CLI.md`](CLI.md#startup-architecture-fast-path-vs-heavy-graph)
+for the fast-path/heavy-graph startup model that the cache serves.
 
 Example for a very small host:
 
