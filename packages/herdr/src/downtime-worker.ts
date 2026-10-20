@@ -6270,6 +6270,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // cooldown, leadership loss, or a disabled worker. Keeping depth/cap here
   // (not just the budget) lets every blocked/ended batch decision carry the
   // `auditBatchDepth`/`auditBatchCap`/`auditBatchRemaining` diagnostics.
+  //
+  // Trade-off (AC2): only this dispatcher's OWN post-dispatch reset is
+  // deferred. The dispatched audit pane's occupancy still makes the proxy
+  // busy, which (a) resets the idle tracker through the normal per-tick
+  // busy path and (b) ends the batch window (a busy poll closes the
+  // continuous idle window, `activeAuditBatch` is cleared below on every
+  // non-idle poll). A continuation therefore only fires while the proxy
+  // stays idle at the next poll; after any busy interlude the worker
+  // requires a fresh full idle period and the next audit dispatch re-arms
+  // a fresh batch while the queue is still deep. Batching is a queue-drain
+  // optimisation, never a relaxation of the idle-duration gate.
   let activeAuditBatch: {
     depth: number;
     cap: number;
