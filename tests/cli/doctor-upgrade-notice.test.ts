@@ -21,6 +21,9 @@ import {
   writeConfig,
   writeInitSemaphore,
 } from './cli-helpers.js';
+import * as os from 'os';
+import * as fs from 'fs';
+import * as path from 'path';
 
 /**
  * Create a legacy database missing the columns/sentinels that current
@@ -119,9 +122,28 @@ describe('wl doctor pending-upgrade notice', () => {
 
   afterEach(() => {
     leaveTempDir(tempState);
+    if (isolatedCacheDir) {
+      fs.rmSync(isolatedCacheDir, { recursive: true, force: true });
+      isolatedCacheDir = null;
+      delete process.env.WL_CACHE_DIR;
+    }
   });
 
+  /**
+   * Point the read cache at an empty temp dir for this test's `wl doctor`
+   * invocations. The tests assert the *upgrade* contract, so the host's real
+   * `~/.cache/wl/state` (thousands of pruneable counters at runtime) must not
+   * inject a read-cache-state finding that changes the output (F9 —
+   * WL-0MVFRRQ9W003KEFL).
+   */
+  let isolatedCacheDir: string | null = null;
+  function isolateReadCache(): void {
+    isolatedCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-doctor-notice-cache-'));
+    process.env.WL_CACHE_DIR = isolatedCacheDir;
+  }
+
   it('reports pending migrations and instructs `wl doctor upgrade`', async () => {
+    isolateReadCache();
     const { stdout } = await execAsync(`tsx ${cliPath} doctor`);
 
     expect(stdout).toContain('Doctor: pending upgrades detected.');
@@ -133,6 +155,7 @@ describe('wl doctor pending-upgrade notice', () => {
   });
 
   it('reports outdated git hooks and instructs `wl doctor upgrade`', async () => {
+    isolateReadCache();
     createOutdatedHook(tempState.tempDir);
     try {
       const { stdout } = await execAsync(`tsx ${cliPath} doctor`);
@@ -147,6 +170,7 @@ describe('wl doctor pending-upgrade notice', () => {
   });
 
   it('reports nothing extra when fully up to date', async () => {
+    isolateReadCache();
     // Apply pending migrations so the database (and hooks) are up to date.
     await execAsync(`tsx ${cliPath} doctor upgrade --confirm`);
 
@@ -158,6 +182,7 @@ describe('wl doctor pending-upgrade notice', () => {
   });
 
   it('emits valid single-document JSON carrying pending-upgrade data', async () => {
+    isolateReadCache();
     const { stdout } = await execAsync(`tsx ${cliPath} --json doctor`);
     const trimmed = stdout.trim();
 

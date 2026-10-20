@@ -13,6 +13,17 @@ These options apply to any command:
 - `-w, --watch [seconds]` — Rerun the command every N seconds (default: 5).
 
 
+### Read cache (environment variables)
+
+The read cache serves repeat JSON read queries (`list`/`next`/`show`/`search`/`status`); see
+`CONFIG.md` for the full model. Runtime knobs:
+
+- `WL_CACHE_DISABLED=1` — bypass the cache entirely (baseline behaviour).
+- `WL_CACHE_DIR=<path>` — override the cache directory (default `$XDG_CACHE_HOME/wl` or `~/.cache/wl`).
+- `WL_CACHE_TTL_MS=<n>` — cache-entry TTL safety net (default 30000).
+- `WL_STATE_MAX_FILES=<n>` — bound on per-worklog-dir state counters (default 1000).
+- `WL_STATE_TTL_MS=<n>` — prune counters untouched for this long (default 604800000, 7 days).
+
 ### GitHub throttling (environment variables)
 
 Worklog includes a central client-side throttler to coordinate outgoing GitHub API
@@ -1086,6 +1097,7 @@ Subcommands:
 - `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
 - `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
 - `audit-gaps [options]` — Read-only report of every `completed`/`in_review` item with **no audit record**, showing root vs `child of <parent-id>`, age (from `activityAt`/`updatedAt`), and coverage/waiver status (`uncovered` / `covered` / `waived`). Omits items with a fresh audit; a child covered by a fresh-audited direct parent is reported as `covered`, not flagged. Options: `--prefix <prefix>`. No `--apply` (read-only).
+- `cache [options]` — Report or prune the bounded read-cache **state directory** (`<cache-dir>/state`, one small counter file per worklog dir ever seen; see `CONFIG.md`). Options: `--prune` (remove stale counters and enforce the file bound; default is report-only), `--dry-run` (report-only; always wins when combined with `--prune`), `--max-files <n>` (counter bound, default 1000), `--ttl-days <n>` (remove counters untouched for this many days, default 7). Works without a worklog (pure cache hygiene).
 
 Examples:
 
@@ -1107,6 +1119,10 @@ wl doctor foreign-items --apply          # Hard-delete foreign items (destructiv
 wl doctor foreign-items --apply --push  # Clean DB and rewrite remote worklog ref
 wl doctor audit-gaps                    # Report completed/in_review items with no audit (read-only)
 wl doctor audit-gaps --json             # Machine-readable audit-gap report
+wl doctor cache                         # Report read-cache state counters (dry run)
+wl doctor cache --json                  # Machine-readable state report
+wl doctor cache --prune                 # Reclaim stale counters and enforce the bound
+wl doctor cache --prune --max-files 500 # Custom bound (Pi-class host example)
 
 Known stale combinations detected by `stage-sync`:
 
@@ -1132,6 +1148,11 @@ shape unchanged). Its `context` carries machine-readable pending-upgrade data:
 `pendingMigrations`, `pendingMigrationCount`, `outdatedHooks`, and
 `outdatedHookCount`. Consumers grouping findings by work item should skip this
 entry (`itemId: null`).
+
+When the read-cache state directory holds pruneable counters, a synthetic
+finding with `checkId: "read-cache.state"` and `type: "maintenance"` is appended
+the same additive way (`itemId: null`); its `message` names the counts and points
+at `wl doctor cache` / `wl doctor cache --prune`.
 
 ### `re-sort` [options]
 

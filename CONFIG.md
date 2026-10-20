@@ -2,6 +2,42 @@
 
 Worklog uses a two-tier configuration system with team defaults and local overrides.
 
+## Read-cache state boundedness (F9 — WL-0MVFRRQ9W003KEFL)
+
+Worklog caches repeat JSON read results in the cache directory (`~/.cache/wl` by
+default). For freshness it keeps one tiny **state counter** per worklog dir ever
+seen at `<cache-dir>/state/<sha256(dir)>.json` (a few dozen bytes each). Without
+maintenance that directory grows without bound — a long-lived host accumulated
+~219,000 files / ~880 MB.
+
+The store is now bounded and prunable:
+
+- **TTL** — counters untouched for 7 days are prunable.
+- **Bound** — the directory is kept at ≤ 1,000 counters (LRU by mtime).
+- **Live-counters protected** — a counter modified within the last 30 seconds is
+  never removed, so a concurrent writer's cache cannot be reset (a pruned
+  counter reads back as 0, which never matches a stored fingerprint — pruning
+  can only cause a recompute, never a stale read).
+- **Opportunistic pruning** — writes (`bumpStateCounter`) run a rate-limited
+  check (every 20th write) and prune the directory back under the bound with no
+  daemon.
+- **Maintenance path** — `wl doctor cache` reports, `wl doctor cache --prune`
+  reclaims; bare `wl doctor` flags pending cache state alongside other findings.
+
+Configuration (safe defaults for a Raspberry-Pi-class host):
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `WL_STATE_MAX_FILES` | `1000` | Max state-counter files to keep |
+| `WL_STATE_TTL_MS` | `604800000` (7 d) | Counters untouched longer than this are pruned |
+
+Example for a very small host:
+
+```sh
+# Smaller bound and a 4-day TTL for a memory/disk constrained host
+WL_STATE_MAX_FILES=500 WL_STATE_TTL_MS=345600000 wl doctor cache --prune
+```
+
 ## First-Time Setup
 
 Initialize your project configuration:

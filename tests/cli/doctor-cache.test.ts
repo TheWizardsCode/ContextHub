@@ -174,4 +174,33 @@ describe('wl doctor cache', () => {
     expect(result.success).toBe(false);
     expect(typeof result.error).toBe('string');
   });
+
+  it('bare wl doctor flags pending cache state and clears it after --prune', () => {
+    // Five counters untouched for 30 days: the default TTL (7 days) makes a
+    // dry-run prune report them, so bare `wl doctor` must surface them.
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) {
+      writeCounter(cacheDir, path.join(tempDir, 'work', `stale-${i}`), i + 1, now - 30 * DAY_MS);
+    }
+
+    const json = runCli(['--json', 'doctor'], tempDir, env);
+    expect(json.status).toBe(0);
+    const findings = JSON.parse(json.stdout) as Array<{ checkId?: string; message?: string }>;
+    const cache = findings.find((f) => f.checkId === 'read-cache.state');
+    expect(cache, `bare doctor JSON must carry a read-cache.state finding, got: ${json.stdout}`).toBeDefined();
+    expect(cache.message).toContain('wl doctor cache');
+
+    const text = runCli(['doctor'], tempDir, env);
+    expect(text.status).toBe(0);
+    expect(text.stdout).toContain('pending read-cache');
+    expect(text.stdout).toContain('wl doctor cache --prune');
+
+    // After the explicit prune the counters are gone and the flag clears.
+    const pruned = runCli(['--json', 'doctor', 'cache', '--prune'], tempDir, env);
+    expect(pruned.status).toBe(0);
+    const after = runCli(['--json', 'doctor'], tempDir, env);
+    expect(after.status).toBe(0);
+    const afterFindings = JSON.parse(after.stdout) as Array<{ checkId?: string }>;
+    expect(afterFindings.find((f) => f.checkId === 'read-cache.state')).toBeUndefined();
+  });
 });
