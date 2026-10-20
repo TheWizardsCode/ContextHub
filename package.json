@@ -26,6 +26,8 @@
     "benchmark:sort-index": "tsx scripts/benchmark-sort-index.ts",
     "benchmark:wl-next": "tsx bench/wl-next-perf.ts",
     "benchmark:wl-next:json": "tsx bench/wl-next-perf.ts --json",
+    "benchmark:wl-startup": "tsx bench/wl-startup-perf.ts",
+    "benchmark:wl-startup:json": "tsx bench/wl-startup-perf.ts --json",
     "benchmark:wal-read-latency": "tsx bench/wal-read-latency.ts",
     "benchmark:wal-read-latency:json": "tsx bench/wal-read-latency.ts --json",
     "install": "npm run install:plugin && npm run install:pi-extension",

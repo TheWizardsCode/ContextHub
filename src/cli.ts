@@ -558,6 +558,13 @@ if (cacheCommand !== null && shouldCacheReadInvocation(cacheCommand, cacheArgv))
 }
 
 // Parse command line arguments (skipped entirely when served from cache).
+// `--version` / `-V` is a startup-only invocation: record it so the startup
+// import-budget harness (F2 — WL-0MVFRRAXD001E7AN) can read its CPU time and
+// peak RSS from the same F1 spawn records as cache hits.
+if (!cacheServed && (cacheArgv.includes('--version') || cacheArgv.includes('-V'))) {
+  recordSpawn('version');
+}
+
 if (!cacheServed) {
   program.parse();
 }
