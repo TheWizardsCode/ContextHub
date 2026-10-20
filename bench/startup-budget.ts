@@ -100,6 +100,11 @@ export interface StartupRegressionPolicy {
   cpuHeadroomPct: number;
   /** Allowed wall-time growth over the recorded p95 before failing (%). */
   wallHeadroomPct: number;
+  /**
+   * Allowed peak-RSS growth over the recorded p95 before failing (%).
+   * Defaults to `cpuHeadroomPct` when absent (older budget files).
+   */
+  rssHeadroomPct?: number;
   /** Absolute wall-time slack (ms) on top of the percentage headroom. */
   wallFloorMs: number;
   note: string;
@@ -115,6 +120,19 @@ export interface StartupBudget {
     modules: string[];
     external: string[];
   };
+  /**
+   * Modules the fast path imports **dynamically** once the `--version` branch
+   * has not exited (F7 — WL-0MVFRROLM002K98B). Recorded so a new dynamic
+   * fast-path import is a deliberate, reviewable change rather than an easy
+   * way around the static ratchet.
+   */
+  fastPathDynamicImports?: string[];
+  /**
+   * Union of `importGraph.modules` and the transitive static graph of every
+   * `fastPathDynamicImports` entrypoint — the modules a warm cache-hit read
+   * can actually load.
+   */
+  fastPathRuntimeModules?: string[];
   ac1Targets: StartupAc1Targets;
   regression: StartupRegressionPolicy;
   baselines: Record<string, StartupBaseline | undefined>;
@@ -131,6 +149,8 @@ export function defaultStartupBudget(): StartupBudget {
       '--update-budget` (removals are improvements and must be recorded the same way).',
     entry: 'src/cli.ts',
     importGraph: { moduleCount: 0, modules: [], external: [] },
+    fastPathDynamicImports: [],
+    fastPathRuntimeModules: [],
     ac1Targets: {
       p95WallMs: 500,
       peakRssMb: 60,
@@ -398,8 +418,9 @@ export function evaluateStartupBudget(
         `+ ${policy.wallFloorMs} ms floor`,
     });
 
+    const rssHeadroomPct = policy.rssHeadroomPct ?? policy.cpuHeadroomPct;
     const rssLimit =
-      recorded.p95RssMb === null ? null : recorded.p95RssMb * (1 + policy.cpuHeadroomPct / 100);
+      recorded.p95RssMb === null ? null : recorded.p95RssMb * (1 + rssHeadroomPct / 100);
     if (rssLimit !== null && scenario.p95RssMb !== null) {
       push({
         scenario: scenario.name,
@@ -407,7 +428,7 @@ export function evaluateStartupBudget(
         measured: scenario.p95RssMb,
         limit: Math.round(rssLimit * 10) / 10,
         ok: scenario.p95RssMb <= rssLimit,
-        detail: `recorded p95 ${recorded.p95RssMb} MiB + ${policy.cpuHeadroomPct}% RSS headroom`,
+        detail: `recorded p95 ${recorded.p95RssMb} MiB + ${rssHeadroomPct}% RSS headroom`,
       });
     }
 
@@ -434,4 +455,79 @@ export function evaluateStartupBudget(
   }
 
   return { ok: violations.length === 0, target: result.target, checks, violations };
+}
+
+export interface FastPathAllowlistResult {
+  ok: boolean;
+  /** Dynamic entrypoints present now but not recorded. */
+  addedDynamic: string[];
+  /** Dynamic entrypoints recorded but no longer imported dynamically. */
+  removedDynamic: string[];
+  /** Runtime modules (static ∪ dynamic graphs) present now but not recorded. */
+  addedRuntime: string[];
+  /** Runtime modules recorded but no longer reachable. */
+  removedRuntime: string[];
+  message: string;
+}
+
+/**
+ * Ratchet over the fast path's *runtime* module set (static boot graph plus the
+ * transitive graphs of its dynamic imports).
+ *
+ * `evaluateImportRatchet` only sees static imports; the fast path defers its
+ * optional modules with `await import(...)`, so without this check a new
+ * dependency could be added without touching the static graph. Adding either a
+ * dynamic entrypoint or a runtime module fails until the budget is regenerated
+ * deliberately.
+ */
+export function evaluateFastPathAllowlist(
+  current: { dynamicEntries: string[]; runtimeModules: string[] },
+  budget: StartupBudget
+): FastPathAllowlistResult {
+  const recordedDynamic = new Set(budget.fastPathDynamicImports ?? []);
+  const recordedRuntime = new Set(budget.fastPathRuntimeModules ?? []);
+  const dynamicNow = new Set(current.dynamicEntries);
+  const runtimeNow = new Set(current.runtimeModules);
+
+  const addedDynamic = [...dynamicNow].filter((m) => !recordedDynamic.has(m)).sort();
+  const removedDynamic = [...recordedDynamic].filter((m) => !dynamicNow.has(m)).sort();
+  const addedRuntime = [...runtimeNow].filter((m) => !recordedRuntime.has(m)).sort();
+  const removedRuntime = [...recordedRuntime].filter((m) => !runtimeNow.has(m)).sort();
+
+  const additions = [
+    ...addedDynamic.map((m) => `  + dynamic import: ${m}`),
+    ...addedRuntime.map((m) => `  + runtime module: ${m}`),
+  ];
+  if (additions.length > 0) {
+    return {
+      ok: false,
+      addedDynamic,
+      removedDynamic,
+      addedRuntime,
+      removedRuntime,
+      message:
+        `${additions.length} addition(s) to the fast path's runtime module set:\n` +
+        additions.join('\n') +
+        `\n\nIf intended, regenerate the budget with:\n` +
+        `  npm run benchmark:wl-startup -- --target src --update-budget`,
+    };
+  }
+
+  const removals = [
+    ...removedDynamic.map((m) => `  - dynamic import: ${m}`),
+    ...removedRuntime.map((m) => `  - runtime module: ${m}`),
+  ];
+  return {
+    ok: true,
+    addedDynamic,
+    removedDynamic,
+    addedRuntime,
+    removedRuntime,
+    message:
+      removals.length > 0
+        ? `${removals.length} module(s) left the fast path's runtime set (an improvement):\n` +
+          removals.join('\n') +
+          `\nLock it in with: npm run benchmark:wl-startup -- --target src --update-budget`
+        : '',
+  };
 }

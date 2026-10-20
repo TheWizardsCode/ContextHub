@@ -69,6 +69,27 @@ not counted). `WL_CACHE_DIR` always points into the throwaway benchmark
 directory, so the run starts from a cold cache and never disturbs the
 operator's `~/.cache/wl`.
 
+## Fast-path runtime allowlist (F7 — WL-0MVFRROLM002K98B)
+
+The fast path defers the read-cache machinery, the worklog resolver and the
+process-lifecycle module behind `await import(...)`, so `wl --version` exits
+before loading any of them. The static ratchet cannot see those modules, so the
+budget also records:
+
+- **`fastPathDynamicImports`** — the fast path's dynamic entrypoints
+  (`src/process-lifecycle.ts`, `src/read-cache-cli.ts`, `src/worklog-paths.ts`).
+- **`fastPathRuntimeModules`** — the union of the static boot graph and the
+  transitive static graphs of those entrypoints (the modules a warm cache-hit
+  read can load).
+
+Adding either fails `tests/cli/startup-import-budget.test.ts`; moving an import
+behind `await import()` is therefore not a way around the budget. Regenerate
+both with the same `--update-budget` command.
+
+Current shape (after F7): **4 static modules** (`src/cli.ts`,
+`src/argv-normalize.ts`, `src/spawn-counter.ts`, `src/version.ts`) and 3 dynamic
+entrypoints, for an 8-module runtime union.
+
 ## Regression policy (host-load tolerant)
 
 Shared hosts (a Raspberry Pi, the herdr server) inflate wall-clock time under
@@ -98,8 +119,12 @@ ratchet check is pure AST/filesystem work (well under a second).
 4. Commit `bench/startup-import-budget.json` with the change, so the
    improvement is locked in.
 
-F7 flips `ac1Targets.enforced` to `true` in the same change that records a
-compliant `dist` baseline (plus the measured evidence in the work item).
+F7 would flip `ac1Targets.enforced` to `true` in the same change that records a
+compliant `dist` baseline. The F7 measurement found the target unreachable by
+import slimming alone (both AC1 numbers sit at or below the bare-node floor on
+the loaded reference host), so `enforced` stays `false`, the measured floor is
+recorded in `ac1Targets.note`, and an OPEN QUESTION was raised on the parent
+(WL-0MVFNMSRW002FI6B).
 
 ## Baseline (F2, 2026-10-20)
 

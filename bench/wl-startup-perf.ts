@@ -49,7 +49,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { readSpawnRecords, type SpawnRecord } from '../src/spawn-counter.js';
-import { walkStaticImportGraph, CLI_ENTRY, type ImportGraph } from './startup-import-graph.js';
+import {
+  walkStaticImportGraph,
+  walkFastPathRuntimeGraph,
+  CLI_ENTRY,
+  type ImportGraph,
+} from './startup-import-graph.js';
 import {
   BUDGET_RELATIVE_PATH,
   budgetFilePath,
@@ -503,6 +508,8 @@ export function applyStartupResultToBudget(
     };
   }
 
+  const fastPath = walkFastPathRuntimeGraph({ repoRoot: result.repoRoot, entry: CLI_ENTRY });
+
   return {
     ...budget,
     entry: result.entry,
@@ -511,6 +518,15 @@ export function applyStartupResultToBudget(
       modules: result.importGraph.modules,
       external: result.importGraph.external,
     },
+    // Fast path only (static boot graph + its dynamic imports); these fields
+    // are refreshed from the same walk so the ratchet cannot be sidestepped by
+    // moving an import behind `await import()` (F7 — WL-0MVFRROLM002K98B).
+    ...(fastPath
+      ? {
+          fastPathDynamicImports: fastPath.dynamicEntries,
+          fastPathRuntimeModules: fastPath.graph.modules,
+        }
+      : {}),
     baselines: {
       ...budget.baselines,
       [result.target]: {

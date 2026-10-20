@@ -17,10 +17,8 @@
  * recorded ratchet is deliberately tightened.
  */
 
-import { normalizeFieldsArgv } from './argv-normalize.js';
-import { detectWorktreeFromCwd, registerCurrentProcess } from './process-lifecycle.js';
-import { applyWorklogDirOverrideFromArgv } from './worklog-paths.js';
-import { ReadCacheCli, shouldCacheReadInvocation, extractCommandFromArgv } from './read-cache-cli.js';
+import { sep as pathSep } from 'node:path';
+import { normalizeFieldsArgv, extractCommandFromArgv } from './argv-normalize.js';
 import { recordSpawn } from './spawn-counter.js';
 import { WORKLOG_VERSION } from './version.js';
 
@@ -165,88 +163,97 @@ process.argv = [
   ...normalizeFieldsArgv(process.argv.slice(2)),
 ];
 
-// Apply the --worklog-dir override from argv BEFORE anything resolves a
-// worklog path (the cache key and `ctx.dataPath` both depend on it). The
-// heavy path's preAction hook re-applies/clears the override from Commander's
-// parsed options. Resolving from the process cwd instead would let
-// `wl sync --worklog-dir <proj>/.worklog` fetch the cwd repo's remote ref
-// while writing to <proj>'s database (WL-0MSAH26DD001XXST).
-applyWorklogDirOverrideFromArgv(process.argv.slice(2));
-
-// If the CLI is running inside a ContextHub-managed worktree, register our
-// PID with the process lifecycle module so it can be cleaned up when the
-// worktree is removed. This runs on both paths (cache hits included).
-const worktreePath = detectWorktreeFromCwd();
-if (worktreePath) {
-  registerCurrentProcess(worktreePath);
-}
-
-// ── Read-cache wiring (F2 — WL-0MSGAEC5N006W5QA) ─────────────────────────
-// Serve repeat JSON read queries (list/next/show/search/status) from the
-// shared on-disk cache so herdr panes / pi-agent polling don't re-query the
-// SQLite DB for byte-identical invocations. Env-gated config:
-//   WL_CACHE_DISABLED=1     — bypass the cache entirely (baseline behaviour)
-//   WL_CACHE_TTL_MS=<n>     — override the TTL safety net (tests/ops)
-//   WL_CACHE_DIR=<path>     — override the cache dir (see read-cache.ts)
-//   WL_SPAWN_COUNT_FILE     — spawn instrumentation (see spawn-counter.ts)
-const readCacheEnabled = process.env.WL_CACHE_DISABLED !== '1';
-const _cacheTtl = parseInt(process.env.WL_CACHE_TTL_MS ?? '', 10);
-const readCacheCli = new ReadCacheCli({
-  ttlMs: Number.isFinite(_cacheTtl) && _cacheTtl > 0 ? _cacheTtl : undefined,
-});
-
-// Read-cache serve: for a cacheable read invocation, try the cache BEFORE the
-// heavy graph loads. On a hit, print the cached payload (byte-identical to
-// output.json formatting) and exit — so no action runs, no DB is opened and no
-// command module, plugin or Commander instance is imported. The write+callback
-// exit guarantees piped stdout is flushed before the process terminates. When
-// the cache is disabled (baseline), cacheable reads still record a work spawn
-// so the spawn-reduction metric has a denominator.
-let cacheServed = false;
-/** Set when the fast path has fully handled the invocation (`--version`). */
-let versionServed = false;
-const cacheArgv = process.argv.slice(2);
-const cacheCommand = extractCommandFromArgv(cacheArgv);
-if (cacheCommand !== null && shouldCacheReadInvocation(cacheCommand, cacheArgv)) {
-  if (readCacheEnabled) {
-    const { served, value } = readCacheCli.lookup(cacheCommand, cacheArgv);
-    if (served) {
-      cacheServed = true;
-      const text = `${JSON.stringify(value, null, 2)}\n`;
-      process.stdout.write(text, () => process.exit(0));
-      // Safety net if the flush callback never fires.
-      setTimeout(() => process.exit(0), 2000).unref();
-    }
-  } else {
-    recordSpawn('read-work'); // baseline: every read does DB work
-  }
-}
-
-// `--version` / `-V` is a startup-only invocation: print the version and exit
-// without importing the heavy graph. The spawn record lets the startup
-// import-budget harness (F2 — WL-0MVFRRAXD001E7AN) read its CPU time and peak
-// RSS from the same F1 spawn records as cache hits. The version comes from the
-// generated `src/version.ts` (plan decision D5), so it no longer depends on the
-// current working directory's package.json.
+// ── `--version` fast path (first thing: nothing else is imported) ─────────
+// A bare `wl --version` / `-V` prints the version from the generated
+// `src/version.ts` (plan decision D5 — no dependency on the current working
+// directory's package.json) and exits without importing the cache machinery,
+// the worklog resolver, the process-lifecycle module or the heavy graph
+// (F7 — WL-0MVFRROLM002K98B). The spawn record lets the startup import-budget
+// harness (F2 — WL-0MVFRRAXD001E7AN) read its CPU time and peak RSS from the
+// same F1 spawn records as cache hits.
 //
 // Only a bare `wl --version` takes this path: when a command token is present
 // (`wl list --version`) Commander's own option handling must decide, exactly as
 // before the split.
-if (
-  !cacheServed &&
-  cacheCommand === null &&
-  (cacheArgv.includes('--version') || cacheArgv.includes('-V'))
-) {
-  versionServed = true;
+const _fastArgv = normalizeFieldsArgv(process.argv.slice(2));
+const _wantsVersion =
+  extractCommandFromArgv(_fastArgv) === null &&
+  (_fastArgv.includes('--version') || _fastArgv.includes('-V'));
+
+if (_wantsVersion) {
   recordSpawn('version');
   process.stdout.write(`${WORKLOG_VERSION}\n`, () => process.exit(0));
+  // Safety net if the flush callback never fires.
   setTimeout(() => process.exit(0), 2000).unref();
-}
+} else {
 
-// Slow path: load the heavy graph (Commander, commands, plugins, DB runtime)
-// only now. `readCacheCli` is injected so the JSON-output backfill and the
-// write-invalidation hook keep working exactly as before.
-if (!cacheServed && !versionServed) {
-  const { main } = await import('./cli-main.js');
-  await main({ cache: readCacheCli, cacheEnabled: readCacheEnabled });
+  // Apply the --worklog-dir override from argv BEFORE anything resolves a
+  // worklog path (the cache key and `ctx.dataPath` both depend on it). The
+  // heavy path's preAction hook re-applies/clears the override from Commander's
+  // parsed options. Resolving from the process cwd instead would let
+  // `wl sync --worklog-dir <proj>/.worklog` fetch the cwd repo's remote ref
+  // while writing to <proj>'s database (WL-0MSAH26DD001XXST).
+  const { applyWorklogDirOverrideFromArgv } = await import('./worklog-paths.js');
+  applyWorklogDirOverrideFromArgv(process.argv.slice(2));
+
+  // If the CLI is running inside a ContextHub-managed worktree, register our
+  // PID so `wl cleanup-worktree` can reap it. The check is a cheap path test, so
+  // normal invocations never import the process-lifecycle module
+  // (F7 — WL-0MVFRROLM002K98B). Behaviour inside a managed worktree is unchanged:
+  // both the fast (cache-hit) and heavy paths still register.
+  if (process.cwd().includes(`${pathSep}.worklog${pathSep}worktrees${pathSep}`)) {
+    const { detectWorktreeFromCwd, registerCurrentProcess } = await import('./process-lifecycle.js');
+    const worktreePath = detectWorktreeFromCwd();
+    if (worktreePath) {
+      registerCurrentProcess(worktreePath);
+    }
+  }
+
+  // ── Read-cache wiring (F2 — WL-0MSGAEC5N006W5QA) ─────────────────────────
+  // Serve repeat JSON read queries (list/next/show/search/status) from the
+  // shared on-disk cache so herdr panes / pi-agent polling don't re-query the
+  // SQLite DB for byte-identical invocations. Env-gated config:
+  //   WL_CACHE_DISABLED=1     — bypass the cache entirely (baseline behaviour)
+  //   WL_CACHE_TTL_MS=<n>     — override the TTL safety net (tests/ops)
+  //   WL_CACHE_DIR=<path>     — override the cache dir (see read-cache.ts)
+  //   WL_SPAWN_COUNT_FILE     — spawn instrumentation (see spawn-counter.ts)
+  const { ReadCacheCli, shouldCacheReadInvocation } = await import('./read-cache-cli.js');
+  const readCacheEnabled = process.env.WL_CACHE_DISABLED !== '1';
+  const _cacheTtl = parseInt(process.env.WL_CACHE_TTL_MS ?? '', 10);
+  const readCacheCli = new ReadCacheCli({
+    ttlMs: Number.isFinite(_cacheTtl) && _cacheTtl > 0 ? _cacheTtl : undefined,
+  });
+
+  // Read-cache serve: for a cacheable read invocation, try the cache BEFORE the
+  // heavy graph loads. On a hit, print the cached payload (byte-identical to
+  // output.json formatting) and exit — so no action runs, no DB is opened and no
+  // command module, plugin or Commander instance is imported. The write+callback
+  // exit guarantees piped stdout is flushed before the process terminates. When
+  // the cache is disabled (baseline), cacheable reads still record a work spawn
+  // so the spawn-reduction metric has a denominator.
+  let cacheServed = false;
+  const cacheArgv = process.argv.slice(2);
+  const cacheCommand = extractCommandFromArgv(cacheArgv);
+  if (cacheCommand !== null && shouldCacheReadInvocation(cacheCommand, cacheArgv)) {
+    if (readCacheEnabled) {
+      const { served, value } = readCacheCli.lookup(cacheCommand, cacheArgv);
+      if (served) {
+        cacheServed = true;
+        const text = `${JSON.stringify(value, null, 2)}\n`;
+        process.stdout.write(text, () => process.exit(0));
+        // Safety net if the flush callback never fires.
+        setTimeout(() => process.exit(0), 2000).unref();
+      }
+    } else {
+      recordSpawn('read-work'); // baseline: every read does DB work
+    }
+  }
+
+  // Slow path: load the heavy graph (Commander, commands, plugins, DB runtime)
+  // only now. `readCacheCli` is injected so the JSON-output backfill and the
+  // write-invalidation hook keep working exactly as before.
+  if (!cacheServed) {
+    const { main } = await import('./cli-main.js');
+    await main({ cache: readCacheCli, cacheEnabled: readCacheEnabled });
+  }
 }

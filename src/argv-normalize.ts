@@ -62,3 +62,37 @@ export function normalizeFieldsArgv(argv: readonly string[]): string[] {
 
   return out;
 }
+
+/** Program-level options that take a value (skipped with their value). */
+const GLOBAL_VALUE_OPTS = new Set(['--worklog-dir', '--format', '-F']);
+
+/**
+ * Extract the subcommand name from raw argv, skipping program-level options
+ * and their values (`--json`, `--verbose`, `-F/--format <v>`, `--worklog-dir
+ * <v>`, help/version flags). Returns null when no command token is found
+ * (bare `wl`, `wl --json`, `wl --version`, …).
+ *
+ * Lives here (rather than in `read-cache-cli.ts`) so the thin fast path can
+ * decide between `--version`, a cache lookup and the heavy graph before
+ * importing the cache machinery (F7 — WL-0MVFRROLM002K98B).
+ */
+export function extractCommandFromArgv(argv: string[]): string | null {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--json' || a === '--verbose' || a === '--version' || a === '-h' || a === '--help' || a === '-w' || a === '--watch') {
+      continue;
+    }
+    if (GLOBAL_VALUE_OPTS.has(a)) {
+      i++; // skip the option's value
+      continue;
+    }
+    if (a.startsWith('--format=') || a.startsWith('--worklog-dir=')) {
+      continue;
+    }
+    if (a.startsWith('-')) {
+      continue; // unknown/other flag — skip
+    }
+    return a;
+  }
+  return null;
+}
