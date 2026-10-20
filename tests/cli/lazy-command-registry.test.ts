@@ -11,16 +11,16 @@
  *   2. PLUGIN FIDELITY — plugins are still discovered and loaded on the heavy
  *      path (`loadPlugins`) and their commands appear under "Plugins".
  *   3. ERROR PARITY — an unknown command keeps the exact error and exit code.
- *   4. LAZY ISOLATION (RED-pinned) — a single-command invocation resolves only
+ *   4. LAZY ISOLATION — a single-command invocation resolves only
  *      that command's module, verified through the registry's `onLoad`
  *      observer rather than by inspecting source.
- *   5. FALLBACK (RED-pinned, parent AC5) — when a registry import rejects the
+ *   5. FALLBACK (parent AC5) — when a registry import rejects the
  *      CLI warns once, eagerly registers the full set and still dispatches, so
  *      lazy loading can never make a command unusable.
  *
- * Specs 4 and 5 are written with `it.fails(...)` while the registry does not
- * exist yet, so the suite stays green; F6 flips them to plain `it(...)` as the
- * registry lands (same pattern as F3 → F4).
+ * Specs 4 and 5 were RED-pinned with `it.fails(...)` while the registry did not
+ * exist yet; F6 (WL-0MVFRRMX3003UPP3) flipped them to plain `it(...)` when
+ * `src/command-registry.ts` landed (same pattern as F3 → F4).
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -223,7 +223,7 @@ describe('lazy command registry — help and registration fidelity', { timeout: 
   });
 });
 
-describe('lazy command registry — isolation and fallback (RED-pinned until F6)', () => {
+describe('lazy command registry — isolation and fallback', () => {
   /** Minimal PluginContext stand-in: only `program` is used by the registry. */
   function fakeContext() {
     const registered: string[] = [];
@@ -238,32 +238,26 @@ describe('lazy command registry — isolation and fallback (RED-pinned until F6)
     };
   }
 
-  it.fails('loads only the requested command module for a single-command invocation', async () => {
-    // F6 provides this module; until then the dynamic import rejects and the
-    // spec stays red-pinned.
+  it('loads only the requested command module for a single-command invocation', async () => {
     const registry = await import('../../src/command-registry.js');
     const { ctx } = fakeContext();
     const loaded: string[] = [];
 
     await registry.registerBuiltInCommands(ctx, ['show', 'WI-1', '--json'], {
-      loaders: registry.createCommandLoaders((name: string) => {
-        loaded.push(name);
-        return Promise.resolve({ default: () => {} } as any);
-      }),
+      loaders: registry.createCommandLoaders(() => Promise.resolve({ default: () => {} } as any)),
       onLoad: (name: string) => loaded.push(name),
     });
 
     expect(loaded, 'a single-command invocation must load only that command module').toEqual(['show']);
   });
 
-  it.fails('falls back to eager full registration when a registry import rejects (parent AC5)', async () => {
+  it('falls back to eager full registration when a registry import rejects (parent AC5)', async () => {
     const registry = await import('../../src/command-registry.js');
     const { ctx } = fakeContext();
     const loaded: string[] = [];
     const warnings: string[] = [];
 
     const baseLoaders = registry.createCommandLoaders((name: string) => {
-      loaded.push(name);
       if (name === 'show') return Promise.reject(new Error('simulated missing module'));
       return Promise.resolve({ default: () => {} } as any);
     });
@@ -277,6 +271,8 @@ describe('lazy command registry — isolation and fallback (RED-pinned until F6)
     // One warning, then every command module is registered so dispatch works.
     expect(warnings.length).toBe(1);
     expect(loaded).toContain('show');
-    expect(loaded.length).toBeGreaterThanOrEqual(registry.BUILT_IN_COMMAND_NAMES.size);
+    // `BUILT_IN_COMMAND_NAMES` is an ordered array (registration order drives
+    // the grouped help), so compare against its length.
+    expect(loaded.length).toBeGreaterThanOrEqual(registry.BUILT_IN_COMMAND_NAMES.length);
   });
 });

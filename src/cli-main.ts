@@ -22,36 +22,10 @@ import { loadConfig } from './config.js';
 import { initializeRuntime } from './lib/runtime.js';
 
 // Import built-in command modules
-import initCommand from './commands/init.js';
-import statusCommand from './commands/status.js';
-import createCommand from './commands/create.js';
-import listCommand from './commands/list.js';
-import showCommand from './commands/show.js';
-import updateCommand from './commands/update.js';
-import deleteCommand from './commands/delete.js';
-import exportCommand from './commands/export.js';
-import importCommand from './commands/import.js';
-import nextCommand from './commands/next.js';
-import inProgressCommand from './commands/in-progress.js';
-import syncCommand from './commands/sync.js';
-import githubCommand from './commands/github.js';
-import commentCommand from './commands/comment.js';
-import closeCommand from './commands/close.js';
-import recentCommand from './commands/recent.js';
-import pluginsCommand from './commands/plugins.js';
-import migrateCommand from './commands/migrate.js';
-import depCommand from './commands/dep.js';
-import reSortCommand from './commands/re-sort.js';
-import doctorCommand from './commands/doctor.js';
-import reviewedCommand from './commands/reviewed.js';
-import interviewCommand from './commands/interview.js';
-import searchCommand from './commands/search.js';
-import unlockCommand from './commands/unlock.js';
-import auditCommand from './commands/audit.js';
-import auditResultCommand from './commands/audit-result.js';
-import auditWaiveCommand from './commands/audit-waive.js';
-import completionCommand from './commands/completion.js';
-import cleanupWorktreeCommand from './commands/cleanup-worktree.js';
+import {
+  registerBuiltInCommands,
+  BUILT_IN_COMMAND_NAMES,
+} from './command-registry.js';
 import { setWorklogDirOverride } from './worklog-paths.js';
 import {
   shouldCacheReadInvocation,
@@ -171,86 +145,15 @@ export async function main({ cache, cacheEnabled }: CliMainOptions): Promise<voi
   // watcher logic is implemented outside of the command registration so
   // normal command code doesn't need to change.
 
-  // Register built-in commands
-  const builtInCommands = [
-    initCommand,
-    statusCommand,
-    createCommand,
-    listCommand,
-    showCommand,
-    updateCommand,
-    deleteCommand,
-    exportCommand,
-    importCommand,
-    nextCommand,
-    inProgressCommand,
-    syncCommand,
-    githubCommand,
-    commentCommand,
-    closeCommand,
-    recentCommand,
-    pluginsCommand,
-    migrateCommand,
-    depCommand,
-    reSortCommand,
-    doctorCommand,
-    reviewedCommand,
-    interviewCommand,
-    searchCommand,
-    unlockCommand,
-    auditCommand,
-    auditResultCommand,
-    auditWaiveCommand,
-    cleanupWorktreeCommand,
-    completionCommand,
-    // onboard command removed
-  ];
+  // Built-in command names drive the help grouping only; the modules load
+  // lazily through the registry (F6 — WL-0MVFRRMX3003UPP3), so a single-command
+  // invocation imports only its own command.
+  const builtInCommandNames = new Set(BUILT_IN_COMMAND_NAMES);
 
-  const builtInCommandNames = new Set([
-    'init',
-    'status',
-    'create',
-    'list',
-    'show',
-    'update',
-    'delete',
-    'export',
-    'import',
-    'next',
-    'in-progress',
-    'sync',
-    'github',
-    'comment',
-    'close',
-    'recent',
-    'plugins',
-    'migrate',
-    'dep',
-    're-sort',
-    'doctor',
-    'reviewed',
-    'interview',
-    'search',
-    'unlock',
-    'audit',
-    'audit-show',
-    'audit-set',
-    'audit-waive',
-    'audit-unwaive',
-    'completion',
-    'cleanup-worktree',
-    // 'onboard' removed
-  ]);
-
-  // Register each built-in command
-  for (const registerFn of builtInCommands) {
-    try {
-      registerFn(ctx);
-    } catch (error) {
-      console.error(`Failed to register built-in command: ${error}`);
-      process.exit(1);
-    }
-  }
+  // Register only the requested command when the invocation names one; help,
+  // bare `wl` and unknown commands register the full set. A failing loader
+  // warns once and falls back to eager registration (parent AC5).
+  await registerBuiltInCommands(ctx, process.argv.slice(2));
 
   // Load external plugins (quietly - verbose will be handled per-command if needed)
   try {
