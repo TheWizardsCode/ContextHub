@@ -5914,18 +5914,32 @@ export async function runWorklistTui(
    * event that opens or closes a work-item pane must refresh the pane list.
    * Single-flight across concurrent events; visibility-gated so a hidden tab
    * spawns no `herdr`; fail-open (see `applyPaneMarkers`).
+   *
+   * The single-flight guard COALESCES (it never drops): an event that lands
+   * while a pass is in flight marks the refresh pending and the pass re-runs
+   * once it settles. A pane can therefore appear during an in-flight pass
+   * (`pane_agent_detected` → status change) and still get its green circle
+   * (WL-0MVFX70SB000YRQH — dropping the trailing event left the cross-instance
+   * late-pane case without a circle).
    */
   let paneMarkerRefreshInFlight: Promise<void> | null = null;
+  let paneMarkerRefreshPending = false;
   const refreshPaneMarkersFromEvent = (): void => {
-    if (paneMarkerRefreshInFlight) return;
+    if (paneMarkerRefreshInFlight) {
+      paneMarkerRefreshPending = true;
+      return;
+    }
     paneMarkerRefreshInFlight = (async () => {
       try {
-        // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and
-        // its open overlay) while a text-input overlay is active.
-        if (inputActive()) return;
-        if (await paneGate.visible()) {
-          await refreshPaneMarkers();
-        }
+        do {
+          paneMarkerRefreshPending = false;
+          // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and
+          // its open overlay) while a text-input overlay is active.
+          if (inputActive()) return;
+          if (await paneGate.visible()) {
+            await refreshPaneMarkers();
+          }
+        } while (paneMarkerRefreshPending);
       } catch {
         // Fail-open: pane-marker failures never crash the TUI.
       } finally {

@@ -58,6 +58,27 @@ export interface MockClient {
   requests: Array<{ id: string | number | null; method: string; params: unknown }>;
 }
 
+/** Poll interval used by the asynchronous mock helpers (ms). */
+const MOCK_POLL_INTERVAL_MS = 10;
+
+/** Sleep helper for polling loops (never a fixed wait for async work). */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Options for a mock herdr socket server.
+ */
+export interface MockHerdrSocketOptions {
+  /**
+   * When `false`, accepted connections never receive a
+   * `subscription_started` reply, so the client's `events.subscribe`
+   * request stays PENDING (simulates a stalled/slow herdr). Defaults to
+   * `true` (reply immediately, as the real server does).
+   */
+  respondToSubscribe?: boolean;
+}
+
 /**
  * Mock herdr socket server. Creates a real socket, handles JSON-RPC framing,
  * and exposes a method for tests to push events to connected clients.
@@ -67,6 +88,11 @@ export class MockHerdrSocket {
   private clients = new Set<MockClient>();
   private port: number | null = null;
   private socketPath: string | null = null;
+  private readonly respondToSubscribe: boolean;
+
+  constructor(options: MockHerdrSocketOptions = {}) {
+    this.respondToSubscribe = options.respondToSubscribe ?? true;
+  }
 
   /**
    * Create and start the mock server.
@@ -191,12 +217,16 @@ export class MockHerdrSocket {
           continue;
         }
 
-        // Accept the subscription and send back subscription_started
-        this.sendToClient(socket, {
-          jsonrpc: '2.0',
-          id: this.extractId(request),
-          result: { type: 'subscription_started' },
-        });
+        // Accept the subscription and send back subscription_started.
+        // With `respondToSubscribe: false` the request is deliberately left
+        // pending (stalled-server simulation).
+        if (this.respondToSubscribe) {
+          this.sendToClient(socket, {
+            jsonrpc: '2.0',
+            id: this.extractId(request),
+            result: { type: 'subscription_started' },
+          });
+        }
       }
     });
 
@@ -250,6 +280,37 @@ export class MockHerdrSocket {
   }
 
   /**
+   * Wait for the connection whose `events.subscribe` request carries a
+   * per-pane subscription for `paneId`, polling until it appears.
+   *
+   * A pane-set change re-establishes the subscription on a FRESH connection
+   * (WL-0MVAS988R008PNH6: herdr accepts one request per connection), while
+   * the server keeps listing the OLD client until its socket `close` is
+   * processed. `getFirstClient()` can therefore still return the pre-restart
+   * handle, and an event pushed there reaches nobody — polling for the
+   * connection that actually carries the new pane removes that race
+   * (WL-0MVFX70SB000YRQH).
+   *
+   * @param paneId Per-pane subscription to look for.
+   * @param timeoutMs Poll deadline in ms (default 5000).
+   * @returns The connection subscribed to `paneId`.
+   */
+  async waitForClientSubscribedTo(paneId: string, timeoutMs = 5_000): Promise<MockClient> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      for (const client of this.clients) {
+        if (clientSubscribesTo(client, paneId)) return client;
+      }
+      if (Date.now() > deadline) {
+        throw new Error(
+          `timed out after ${timeoutMs}ms waiting for a connection subscribed to ${paneId}`,
+        );
+      }
+      await sleep(MOCK_POLL_INTERVAL_MS);
+    }
+  }
+
+  /**
    * Stop the mock server and clean up.
    */
   async stop(): Promise<void> {
@@ -297,8 +358,24 @@ export class MockHerdrSocket {
  *   client.pushEvent({ event: "pane_focused", data: { pane_id: "w1:p1" } });
  *   await mock.stop();
  */
-export async function createMockSocket(): Promise<MockHerdrSocket> {
-  const mock = new MockHerdrSocket();
+export async function createMockSocket(
+  options: MockHerdrSocketOptions = {},
+): Promise<MockHerdrSocket> {
+  const mock = new MockHerdrSocket(options);
   await mock.start();
   return mock;
+}
+
+/**
+ * True when the client's (single) `events.subscribe` request carries a
+ * per-pane `pane.agent_status_changed` subscription for `paneId`.
+ */
+function clientSubscribesTo(client: MockClient, paneId: string): boolean {
+  const subscribe = client.requests.find((r) => r.method === 'events.subscribe');
+  const params = subscribe?.params as
+    | { subscriptions?: Array<{ type?: string; pane_id?: string }> }
+    | undefined;
+  return (params?.subscriptions ?? []).some(
+    (s) => s.type === 'pane.agent_status_changed' && s.pane_id === paneId,
+  );
 }
