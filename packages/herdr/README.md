@@ -991,7 +991,15 @@ session as the **pane-launch environment variable**
   lookup and map it through the interactive table. Resolution is **fail-open**:
   no item id (`/prompt:`, free-form), a lookup failure or a timeout falls back
   to `high`, and a dispatch is never blocked or aborted by priority
-  resolution.
+  resolution. The single seam for this is
+  `resolveInteractiveDispatchPriority(itemId, lookup?, timeoutMs?)` in
+  `packages/herdr/src/index.ts` — the same function the `onCommand` agent
+  route calls with `extractWorkItemId(command)`. Its `lookup` parameter
+  defaults to the production `wl show` lookup and can be injected, which is
+  how the end-to-end specs in `packages/herdr/src/index.test.ts` drive the
+  operator-dispatch chain (work-item priority → resolved request priority →
+  `--request-priority` / `HERDR_REQUEST_PRIORITY`) without a live herdr
+  session (validated by WL-0MVGC6JVP00812DS).
 - **Downtime dispatches** map the selected candidate's priority through the
   downtime table so unattended work is polite (`low` stays `low`) while
   `critical` work is served as `high`.
