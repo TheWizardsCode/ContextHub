@@ -293,6 +293,10 @@ program.hook('preAction', (thisCommand, actionCommand) => {
   if (!readCacheEnabled) return;
   const command = actionCommand.name();
   if (shouldCacheReadInvocation(command, process.argv.slice(2))) return;
+  // `wl doctor cache` maintains the cache directory itself (F8/F9 —
+  // WL-0MVFRRGGC001IQK1): bumping the state counter here would create a
+  // counter for the current worklog dir just so it can be pruned again.
+  if (command === 'cache' && actionCommand.parent?.name() === 'doctor') return;
   try {
     readCacheCli.invalidateOnWrite();
   } catch {
