@@ -12,6 +12,7 @@ each test to avoid side effects between tests or on the real database.
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -140,9 +141,9 @@ class TestHeartbeatIntegration(unittest.TestCase):
     # Sparse queue: check_queue() flags next item via real wl
     # ------------------------------------------------------------------
 
-    def test_sparse_queue_holds_next_item_via_real_wl(self):
-        """With < 10 completed/in_review items, check_queue() holds the
-        next item for the producer using the real wl CLI."""
+    def test_sparse_queue_flags_next_item_via_real_wl(self):
+        """With < 10 completed/in_review items, check_queue() flags the
+        next item for producer review using the real wl CLI."""
         # Create 3 completed/in_review items
         for i in range(3):
             self._create_completed_item(f'Sparse Item {i}')
@@ -154,10 +155,29 @@ class TestHeartbeatIntegration(unittest.TestCase):
         # (because we chdir'd to the temp dir, run_wl subprocess sees our DB)
         result = heartbeat.check_queue()
 
-        self.assertIn('Held', result)
-        self.assertIn('producer', result)
+        self.assertIn('Flagged', result)
+        self.assertIn('producer review', result)
         self.assertIn('3', result)  # 3 completed/in_review items
         self.assertIn('below threshold', result)
+
+        # Identify the flagged item from the heartbeat output and verify the
+        # real database shows the producer-review flag was set, and that no
+        # assignee hold was applied instead.
+        flagged_id = re.search(r'\(([A-Z][A-Z0-9-]+)\)', result)
+        self.assertIsNotNone(
+            flagged_id, f'no work-item id in heartbeat result: {result!r}'
+        )
+        updated = _wl(['show', flagged_id.group(1), '--json'], cwd=self.test_dir)
+        self.assertIs(
+            updated['workItem'].get('needsProducerReview'),
+            True,
+            'Sparse-queue heartbeat must set needsProducerReview=true',
+        )
+        self.assertNotIn(
+            updated['workItem'].get('assignee'),
+            ('Map',),
+            'Sparse-queue heartbeat must not assign the retired producer hold',
+        )
 
     # ------------------------------------------------------------------
     # Full queue: check_queue() audits first non-ready item via real wl

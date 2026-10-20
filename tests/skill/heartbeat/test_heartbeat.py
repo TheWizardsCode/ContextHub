@@ -44,27 +44,34 @@ class TestQueueLengthBranching(unittest.TestCase):
                 'success': True,
                 'workItem': {'id': 'WL-NEXT1', 'title': 'Next Ready Item'}
             },
-            # Third call: wl update --assignee Map
+            # Third call: wl update --needs-producer-review true
             {
                 'success': True,
-                'workItem': {'id': 'WL-NEXT1', 'title': 'Next Ready Item', 'assignee': 'Map'}
+                'workItem': {
+                    'id': 'WL-NEXT1',
+                    'title': 'Next Ready Item',
+                    'needsProducerReview': True,
+                }
             },
         ]
 
         result = heartbeat.check_queue()
 
-        # Should print the holding message
-        self.assertIn('Held', result)
+        # Should print the flagging message
+        self.assertIn('Flagged', result)
         self.assertIn('WL-NEXT1', result)
         self.assertIn('Next Ready Item', result)
         self.assertIn('3', result)
         self.assertIn('below threshold', result)
 
-        # Verify wl update was called with --assignee Map
+        # Verify wl update was called with --needs-producer-review true, and
+        # NOT with the retired assignee-hold convention (--assignee Map).
         update_call = [c for c in mock_run_wl.call_args_list if 'update' in str(c)]
         self.assertEqual(len(update_call), 1)
-        self.assertIn('--assignee', update_call[0].args[0])
-        self.assertIn('Map', update_call[0].args[0])
+        update_args = update_call[0].args[0]
+        self.assertIn('--needs-producer-review', update_args)
+        self.assertIn('true', update_args)
+        self.assertNotIn('--assignee', update_args)
 
     @patch('heartbeat.run_wl')
     @patch('heartbeat.subprocess')
@@ -290,22 +297,22 @@ class TestSparseQueueEdgeCases(unittest.TestCase):
         result = heartbeat.check_queue()
 
         self.assertIn('No next item', result)
-        self.assertIn('hold for the producer', result)
+        self.assertIn('flag for review', result)
 
     @patch('heartbeat.run_wl')
     def test_single_item_queue(self, mock_run_wl):
-        """Single item in queue should still hold the next item."""
+        """Single item in queue should still flag the next item for review."""
         mock_run_wl.side_effect = [
             {'success': True, 'count': 1, 'workItems': [
                 {'id': 'WL-1', 'title': 'Only Item', 'sortIndex': 100, 'auditResult': None}
             ]},
             {'success': True, 'workItem': {'id': 'WL-NEXT', 'title': 'Next Item'}},
-            {'success': True, 'workItem': {'id': 'WL-NEXT', 'assignee': 'Map'}},
+            {'success': True, 'workItem': {'id': 'WL-NEXT', 'needsProducerReview': True}},
         ]
 
         result = heartbeat.check_queue()
 
-        self.assertIn("Held", result)
+        self.assertIn('Flagged', result)
         self.assertIn('WL-NEXT', result)
 
 
@@ -360,6 +367,61 @@ class TestMonkeypatchedEntrypoint(unittest.TestCase):
         self.assertTrue(hasattr(heartbeat, 'run_wl'))
         self.assertTrue(hasattr(heartbeat, 'main'))
         self.assertTrue(hasattr(heartbeat, 'parse_args'))
+
+
+class TestPiSkillCopyParity(unittest.TestCase):
+    """Guards the project-local `.pi` copy of the heartbeat script.
+
+    `.pi/skills/heartbeat/scripts/heartbeat.py` duplicates the canonical
+    `skill/heartbeat/scripts/heartbeat.py`. It has drifted from the canonical
+    producer-review contract twice (d18ea50d removed the flag; f7f826e6
+    restored only the canonical copy), so this test pins the sparse-queue
+    branch to the documented behaviour: flag the next item with
+    ``--needs-producer-review true`` (never the retired ``--assignee Map``
+    producer-hold).
+    """
+
+    PI_COPY_PATH = os.path.join(
+        os.path.dirname(__file__), '..', '..', '..',
+        '.pi', 'skills', 'heartbeat', 'scripts', 'heartbeat.py',
+    )
+
+    def _load_pi_copy(self):
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location(
+            'heartbeat_pi_copy', os.path.abspath(self.PI_COPY_PATH)
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_sparse_queue_flags_via_producer_review_flag(self):
+        """The `.pi` copy must flag (not assign-hold) on a sparse queue."""
+        pi_copy = self._load_pi_copy()
+
+        with patch.object(pi_copy, 'run_wl') as mock_run_wl:
+            mock_run_wl.side_effect = [
+                {'success': True, 'count': 2, 'workItems': [
+                    {'id': 'WL-A', 'title': 'A', 'sortIndex': 100, 'auditResult': True},
+                    {'id': 'WL-B', 'title': 'B', 'sortIndex': 200, 'auditResult': True},
+                ]},
+                {'success': True, 'workItem': {'id': 'WL-NEXT', 'title': 'Next Item'}},
+                {'success': True, 'workItem': {'id': 'WL-NEXT', 'needsProducerReview': True}},
+            ]
+
+            result = pi_copy.check_queue()
+
+            self.assertIn('Flagged', result)
+            self.assertIn('WL-NEXT', result)
+            self.assertIn('producer review', result)
+
+            update_call = [c for c in mock_run_wl.call_args_list if 'update' in str(c)]
+            self.assertEqual(len(update_call), 1)
+            update_args = update_call[0].args[0]
+            self.assertIn('--needs-producer-review', update_args)
+            self.assertIn('true', update_args)
+            self.assertNotIn('--assignee', update_args)
 
 
 if __name__ == '__main__':
