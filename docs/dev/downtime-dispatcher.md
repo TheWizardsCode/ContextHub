@@ -317,6 +317,48 @@ Every no-dispatch decision entry records the observed `capacityHint`,
 `statusSchemaVersion`, `idleLeasedSlots`, `generatingSlots`, `slotPhases`
 and `slotPrefillEtaSeconds` so an operator can see *why* a tick refused.
 
+### Idle-age authority (`local_idle_seconds`, WL-0MVHSZR9C0012NQY)
+
+The proxy publishes the authoritative monotonic local idle age
+(`local_idle_seconds`, LP-0MVGD9Z8Z0055Y5J — updated on dispatch start, every
+forwarded SSE chunk and request finish; baseline is proxy process start).
+When it is present and finite it **owns the idle-duration qualification** in
+the worker's per-tick gate:
+
+| Idle age vs `downtimeIdleThresholdMs` | Effect |
+|---|---|
+| `>=` threshold | the duration requirement is met **on this poll** — a worker that starts polling while the GPU has been idle for hours (plugin/pane restart, resumed session) dispatches on its first poll, no local accumulation needed |
+| `<` threshold | **not qualified** — no dispatch, even when the worker's own tracker already holds an older idle run (the proxy is authoritative) |
+| absent / non-finite / negative | fall back to the local tracker exactly as a pre-feature proxy would (regression-pinned) |
+
+The signal qualifies **duration only** — it never relaxes capacity or
+availability:
+
+- `requiredFreeSlots` / per-slot free-slot budget unchanged; in per-slot mode
+  an elapsed idle age still requires the *current* free-unowned count to meet
+  the budget.
+- The fail-closed contract is unchanged: `slots_stale: true`, `slots: []` or
+  unusable per-slot detail still yields `slots-unavailable` / `no-slots` even
+  when the idle age is large.
+- A poll that reports **live activity** — a slot not available for dispatch, a
+  coarse live lease on a pre-v2 payload, or a live contention/gate waiter —
+  outranks the idle age: the age is ignored (local tracker decides) and a
+  live contention waiter additionally **resets the idle run immediately**, so
+  no idle credit survives onto the next poll. Contradictory payloads are
+  fail-closed, never dispatched.
+- Proxy restart resets the signal to a small value; the worker then waits one
+  threshold via the local tracker (documented trade-off, fail open to today's
+  behaviour).
+
+Observability: every polled decision entry records `localIdleSeconds` and
+`localLastActivitySource` (and `local_last_activity_at` where served) so an
+operator can see *why* a tick was admitted or deferred; a deferred tick with a
+usable idle age logs a rate-limited, non-blocking `idle-age-pending`
+observation, and a tick admitted by the proxy's elapsed idle age logs
+`idle-age-qualified` (both `blocking: false` — the header blocking token still
+reflects refusals only). Pre-feature proxies (`local_idle_seconds` absent)
+log nothing on the deferral path — byte-for-byte today's behaviour.
+
 ### Retired-stage recovery (WL-0MTYL7DX9000MZOH)
 
 The `in_progress` **stage** was removed from the valid stage set

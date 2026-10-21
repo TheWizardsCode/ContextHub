@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import { describe, it, expect, vi } from 'vitest';
 import {
   parseLlamaStatus,
+  reportedIdleSeconds,
   dispatchDowntimeWork,
   createDowntimePoller,
   createDowntimeWorker,
@@ -857,5 +858,83 @@ describe('parseLlamaStatus: truthful capacity schema v2 (LP-0MVGDUVGE0024YAI)', 
     expect(status!.slots![0].phase).toBeUndefined();
     expect(status!.slots![0].context_tokens).toBeUndefined();
     expect(status!.slots![0].prefill_eta_seconds).toBeUndefined();
+  });
+});
+
+// ── Proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY) ──────────
+//
+// The llama-proxy publishes the authoritative monotonic local idle age
+// (`local_idle_seconds`, plus `local_last_activity_at` /
+// `local_last_activity_source`, LP-0MVGD9Z8Z0055Y5J). All three are
+// optional/backward compatible: a pre-feature payload parses exactly as
+// before, and malformed values degrade to `undefined` without throwing —
+// they must never reject an otherwise usable poll.
+
+describe('parseLlamaStatus: proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY)', () => {
+  const base = {
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: false,
+    available_slots: 2,
+    total_slots: 2,
+    slots: [
+      { slot_id: 'slot-1', is_processing: false },
+      { slot_id: 'slot-2', is_processing: false },
+    ],
+  };
+
+  it('AC1: reads local_idle_seconds, local_last_activity_at and local_last_activity_source', () => {
+    const status = parseLlamaStatus({
+      ...base,
+      local_idle_seconds: 7_200,
+      local_last_activity_at: '2026-10-21T10:00:00.000Z',
+      local_last_activity_source: 'finish',
+    });
+    expect(status).not.toBeNull();
+    expect(status!.local_idle_seconds).toBe(7_200);
+    expect(status!.local_last_activity_at).toBe('2026-10-21T10:00:00.000Z');
+    expect(status!.local_last_activity_source).toBe('finish');
+  });
+
+  it('AC1: a fractional idle age is preserved', () => {
+    const status = parseLlamaStatus({ ...base, local_idle_seconds: 12.5 });
+    expect(status!.local_idle_seconds).toBe(12.5);
+  });
+
+  it('AC1: absent idle-age fields preserve a pre-feature payload unchanged', () => {
+    const status = parseLlamaStatus(base);
+    expect(status).not.toBeNull();
+    expect(status!.local_idle_seconds).toBeUndefined();
+    expect(status!.local_last_activity_at).toBeUndefined();
+    expect(status!.local_last_activity_source).toBeUndefined();
+  });
+
+  it('AC1: malformed idle-age values degrade to undefined without throwing', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -5, '60', true, {}, null]) {
+      const status = parseLlamaStatus({ ...base, local_idle_seconds: bad });
+      expect(status).not.toBeNull();
+      expect(status!.local_idle_seconds).toBeUndefined();
+    }
+    // reportedIdleSeconds mirrors the same fail-closed contract at the gate:
+    // a non-finite/negative age reads as "no authoritative signal", never as
+    // "idle forever".
+    expect(reportedIdleSeconds({ ...(parseLlamaStatus(base)!), local_idle_seconds: Number.NaN })).toBeNull();
+    expect(reportedIdleSeconds({ ...(parseLlamaStatus(base)!), local_idle_seconds: -1 })).toBeNull();
+    expect(reportedIdleSeconds(parseLlamaStatus({ ...base, local_idle_seconds: 30 })!)).toBe(30);
+    expect(reportedIdleSeconds(parseLlamaStatus(base)!)).toBeNull();
+  });
+
+  it('AC1: malformed activity evidence degrades to undefined without throwing', () => {
+    for (const at of ['not-a-date', '', 123, null]) {
+      const status = parseLlamaStatus({ ...base, local_last_activity_at: at });
+      expect(status).not.toBeNull();
+      expect(status!.local_last_activity_at).toBeUndefined();
+    }
+    for (const source of ['', 42, null, true]) {
+      const status = parseLlamaStatus({ ...base, local_last_activity_source: source });
+      expect(status).not.toBeNull();
+      expect(status!.local_last_activity_source).toBeUndefined();
+    }
   });
 });

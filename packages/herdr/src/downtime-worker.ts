@@ -298,6 +298,15 @@ interface CapacityEvidence {
   generatingSlots?: number;
   slotPhases?: Record<string, string>;
   slotPrefillEtaSeconds?: Record<string, number>;
+  /**
+   * Authoritative local idle-age evidence (LP-0MVGD9Z8Z0055Y5J,
+   * WL-0MVHSZR9C0012NQY): the proxy's reported idle age in seconds and the
+   * source of the last local activity. Observability only — they let an
+   * operator see WHY a tick was admitted or deferred without reading the
+   * proxy. Absent on pre-feature proxies (and when malformed).
+   */
+  localIdleSeconds?: number;
+  localLastActivitySource?: string;
 }
 
 function capacityEvidence(
@@ -308,6 +317,14 @@ function capacityEvidence(
   if (status.capacity_hint !== undefined) evidence.capacityHint = status.capacity_hint;
   if (status.status_schema_version !== undefined) {
     evidence.statusSchemaVersion = status.status_schema_version;
+  }
+  // Idle-age evidence is attached on EVERY polled decision (even when the
+  // per-slot detail is unusable) so a refused/deferred tick always shows the
+  // proxy's own idle-age answer (WL-0MVHSZR9C0012NQY AC7).
+  const idleSeconds = reportedIdleSeconds(status);
+  if (idleSeconds !== null) evidence.localIdleSeconds = idleSeconds;
+  if (status.local_last_activity_source !== undefined) {
+    evidence.localLastActivitySource = status.local_last_activity_source;
   }
   if (slots === null) return evidence;
   if (slots.some((slot) => slot.lease_state !== undefined)) {
@@ -747,6 +764,49 @@ export interface LlamaStatus {
    * only in this consumer. ABSENT on pre-v2 proxies.
    */
   prefill_budget_seconds?: number | null;
+  /**
+   * PROXY-AUTHORITATIVE local idle age in SECONDS (LP-0MVGD9Z8Z0055Y5J,
+   * WL-0MVHSZR9C0012NQY): the monotonic idle age of the local backend,
+   * updated by the proxy on dispatch start, on every forwarded SSE chunk and
+   * on request finish. Its baseline is the PROXY PROCESS start, so a freshly
+   * restarted proxy reports its true idle age rather than "unknown".
+   *
+   * When present and finite it is the AUTHORITATIVE idle-age signal for
+   * threshold qualification: `>= thresholdSeconds` satisfies the duration
+   * requirement on this poll (no local accumulation needed — the GPU may have
+   * been idle for hours before this worker started polling), and
+   * `< thresholdSeconds` refuses regardless of an older local tracker run.
+   * ABSENT on pre-feature proxies (or malformed/non-finite) → the local
+   * tracker decides exactly as before.
+   */
+  local_idle_seconds?: number;
+  /**
+   * Wall-clock timestamp (ISO string) of the last local activity
+   * (LP-0MVGD9Z8Z0055Y5J): operator-facing evidence recorded in the decision
+   * log. Never a gate. ABSENT on pre-feature proxies; malformed values
+   * degrade to undefined (never reject the poll).
+   */
+  local_last_activity_at?: string;
+  /**
+   * What last touched the local backend (LP-0MVGD9Z8Z0055Y5J): `dispatch` /
+   * `chunk` / `finish` / startup … Operator-facing evidence in the decision
+   * log — it explains WHY the backend is busy/idle. Never a gate. ABSENT on
+   * pre-feature proxies; malformed values degrade to undefined.
+   */
+  local_last_activity_source?: string;
+}
+
+/**
+ * The proxy-reported local idle age in SECONDS when it is usable, else
+ * `null` (WL-0MVHSZR9C0012NQY). Fail-closed/backward compatible: an absent,
+ * non-finite or negative value is never treated as "idle forever" — it
+ * returns `null` so the caller falls back to the local idle tracker exactly
+ * as a pre-feature proxy would.
+ */
+export function reportedIdleSeconds(status: LlamaStatus): number | null {
+  const seconds = status.local_idle_seconds;
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return null;
+  return seconds;
 }
 
 /**
@@ -930,6 +990,32 @@ function usablePerSlotSlots(status: LlamaStatus): LlamaSlot[] | null {
   if (status.slots.length === 0) return null;
   if (status.slots_stale === true) return null;
   return status.slots;
+}
+
+/**
+ * True when the poll itself reports LIVE local activity
+ * (WL-0MVHSZR9C0012NQY AC3): a busy/owned slot, a coarse live lease (only
+ * when the payload carries no truthful per-slot `lease_state`, mirroring
+ * `globalIdleChecks`), or a live contention/gate waiter.
+ *
+ * Activity evidence ALWAYS outranks the proxy's reported
+ * `local_idle_seconds`: a contradictory payload (large idle age + live work)
+ * is refused the idle-age shortcut and falls back to the local tracker
+ * exactly as a pre-feature proxy would (fail closed, never dispatch on
+ * unverifiable signals). Per-slot continuous-free semantics are untouched —
+ * this only decides whether the GLOBAL idle age may satisfy the DURATION
+ * requirement on this poll.
+ */
+function pollShowsLocalActivity(
+  status: LlamaStatus,
+  slots: LlamaSlot[],
+  contentionDepth: number,
+): boolean {
+  if (contentionDepth > 0) return true;
+  // Schema v2: truthful per-slot `lease_state` supersedes the coarse global
+  // flag (an `idle_leased` slot is reserved-but-idle capacity).
+  if (!hasTruthfulLeaseState(status) && status.local_lease_active === true) return true;
+  return slots.some((slot) => !isSlotAvailableForDispatch(slot));
 }
 
 /**
@@ -1205,6 +1291,22 @@ function parseAdvisoryInteger(value: unknown): number | null | undefined {
 }
 
 /**
+ * Parse an optional operator-facing ISO timestamp (last local activity).
+ * Absent, explicit null and malformed values (non-string, empty, unparseable)
+ * all degrade to `undefined` — these fields are evidence only and must never
+ * reject an otherwise usable poll (WL-0MVHSZR9C0012NQY).
+ */
+function parseAdvisoryTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  return Number.isNaN(Date.parse(value)) ? undefined : value;
+}
+
+/** Parse an optional non-empty evidence label (activity source). */
+function parseAdvisoryLabel(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
  * Fail-closed parse of a `GET /llama/local/status` payload. Returns null
  * (treated as busy by the caller) when required fields are missing or
  * malformed. `local_lease_active` is derived from the lease fields the
@@ -1353,6 +1455,20 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
   }
   const prefillBudget = parseAdvisoryNumber(o.prefill_budget_seconds);
 
+  // Proxy-authoritative local idle age (LP-0MVGD9Z8Z0055Y5J,
+  // WL-0MVHSZR9C0012NQY). ABSENT on pre-feature proxies → every field stays
+  // undefined and the worker falls back to its own idle tracker exactly as
+  // before. All three are ADVISORY in the fail-closed sense: a malformed
+  // value degrades to `undefined` (backward-compatible fallback) instead of
+  // rejecting an otherwise usable poll. `reportedIdleSeconds` additionally
+  // rejects non-finite/negative ages, so a bad age can never read as
+  // "idle forever".
+  const parsedIdleSeconds = parseAdvisoryNumber(o.local_idle_seconds);
+  const localIdleSeconds =
+    typeof parsedIdleSeconds === 'number' ? parsedIdleSeconds : undefined;
+  const localLastActivityAt = parseAdvisoryTimestamp(o.local_last_activity_at);
+  const localLastActivitySource = parseAdvisoryLabel(o.local_last_activity_source);
+
   // Optional contention metrics (AC6, WL-0MTYZXSLN008HZOW): ABSENT on
   // pre-feature proxies → undefined (treated as 0, no contention evidence).
   // A malformed (non-finite / negative) value is ambiguous → null (busy,
@@ -1389,6 +1505,9 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     status_schema_version: statusSchemaVersion,
     capacity_hint: capacityHint,
     prefill_budget_seconds: prefillBudget,
+    local_idle_seconds: localIdleSeconds,
+    local_last_activity_at: localLastActivityAt,
+    local_last_activity_source: localLastActivitySource,
   };
 }
 
@@ -6688,6 +6807,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       generatingSlots?: number;
       slotPhases?: Record<string, string>;
       slotPrefillEtaSeconds?: Record<string, number>;
+      /**
+       * Authoritative local idle-age evidence (WL-0MVHSZR9C0012NQY): the
+       * proxy's reported idle age (seconds) and the source of its last local
+       * activity. Observability only, never a gate.
+       */
+      localIdleSeconds?: number;
+      localLastActivitySource?: string;
     },
     options: {
       /**
@@ -7095,6 +7221,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // dispatch, parent WL-0MT32F90V008UAD2). A slot reporting processing
       // resets only its own timer.
       const perSlotSlots = usablePerSlotSlots(status);
+      // LIVE contention/gate-waiter depth (WL-0MU1DWXO600153OI): computed once
+      // per poll for the decision entries, the idle-age activity check below
+      // and the dispatch gate. The CUMULATIVE `contention_queued_count` is
+      // telemetry only and never a gate.
+      const contentionQueueDepth =
+        typeof status.contention_queue_depth === 'number' ? status.contention_queue_depth : 0;
       // Truthful-capacity evidence for every decision entry on this poll
       // (LP-0MVGDUVGE0024YAI). Computed once; purely observational.
       const capacity = capacityEvidence(status, perSlotSlots);
@@ -7103,7 +7235,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // — means there is NO trustworthy availability signal. Refuse to
       // dispatch and record the distinct `slots-unavailable` reason so the
       // stop is observable in the decision log and header (never fall back
-      // to the count-based path).
+      // to the count-based path). NOTE: a large `local_idle_seconds` must
+      // never bypass this contract — the idle age qualifies DURATION only,
+      // never availability (WL-0MVHSZR9C0012NQY AC5).
       if (perSlotSlots === null) {
         tracker.record(false);
         perSlotTracker.record([]); // fail-closed: reset every slot timer
@@ -7112,10 +7246,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           totalSlots: status.total_slots,
           ownerPresent: status.local_lease_active === true,
           runningPanes: null,
-          contentionDepth:
-            typeof status.contention_queue_depth === 'number'
-              ? status.contention_queue_depth
-              : 0,
+          contentionDepth: contentionQueueDepth,
           ...capacity,
           // AC5: a batch that was armed is blocked by this fail-closed poll —
           // attach its metadata, then end it (no batch survives an unusable
@@ -7137,16 +7268,37 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           totalSlots: status.total_slots,
           ownerPresent: status.local_lease_active === true,
           runningPanes: null,
-          contentionDepth:
-            typeof status.contention_queue_depth === 'number'
-              ? status.contention_queue_depth
-              : 0,
+          contentionDepth: contentionQueueDepth,
           ...capacity,
           ...batchMetadata(),
         });
         activeAuditBatch = null;
         return { polled: true, dispatched: false, idle: false };
       }
+
+      // ── Proxy-authoritative idle age (WL-0MVHSZR9C0012NQY) ──
+      // When the proxy reports a usable `local_idle_seconds` it OWNS the
+      // DURATION qualification: the GPU may already have been idle for hours
+      // before this worker started polling (plugin/pane restart, resumed
+      // session), so waiting for the local tracker to accumulate a fresh
+      // threshold would leave the local model idle when it could be working.
+      // Two hard limits keep this surgical and fail-closed:
+      //   - it qualifies DURATION only — the per-slot availability budget,
+      //     the fail-closed `slots-unavailable`/`saturated` paths and
+      //     `requiredFreeSlots` are unchanged;
+      //   - LIVE activity evidence on the same poll (busy/owned slot, coarse
+      //     live lease, or a contention/gate waiter) always outranks it →
+      //     fall back to the local tracker (a contradictory payload never
+      //     admits a dispatch).
+      // Absent/non-finite → `null`, i.e. today's behaviour exactly.
+      const idleAgeSeconds = reportedIdleSeconds(status);
+      const activityOnPoll = pollShowsLocalActivity(
+        status,
+        perSlotSlots,
+        contentionQueueDepth,
+      );
+      const idleAgeAuthority = idleAgeSeconds !== null && !activityOnPoll;
+      const idleAgeQualifies = idleAgeAuthority && idleAgeSeconds * 1000 >= cfg.thresholdMs;
 
       const perSlotMode =
         cfg.requiredFreeSlots > 0 &&
@@ -7169,8 +7321,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         if (globalIdle) {
           perSlotTracker.record(perSlotSlots);
           idle = true;
-          ready =
-            perSlotTracker.thresholdMetCount(cfg.thresholdMs) >= cfg.requiredFreeSlots;
+          if (idleAgeAuthority) {
+            // The proxy's idle age satisfies the duration requirement, so the
+            // CURRENT free/unowned-slot budget is the only remaining check —
+            // `requiredFreeSlots` (capacity) is deliberately NOT relaxed.
+            ready =
+              idleAgeQualifies &&
+              countFreeUnownedSlots(perSlotSlots) >= cfg.requiredFreeSlots;
+          } else {
+            ready =
+              perSlotTracker.thresholdMetCount(cfg.thresholdMs) >= cfg.requiredFreeSlots;
+          }
         } else {
           perSlotTracker.record([]); // global busy → reset every slot timer
           idle = false;
@@ -7181,15 +7342,72 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // unchanged all-slots-free behaviour (parent AC2 parity).
         idle = evaluateIdle(status, cfg.requiredFreeSlots);
         tracker.record(idle);
-        ready = idle && tracker.isThresholdMet(cfg.thresholdMs);
+        ready = idle && (idleAgeAuthority
+          ? idleAgeQualifies
+          : tracker.isThresholdMet(cfg.thresholdMs));
+      }
+
+      // AC3/AC4: an idle-age poll that reports a live contention/gate waiter
+      // resets the run immediately instead of carrying an older idle credit
+      // into the next poll — the backend is already working off that queue.
+      // Runs AFTER the branches so it can never be re-seeded by them. Scoped
+      // to the idle-age signal so a pre-feature proxy keeps today's
+      // contention behaviour byte-for-byte.
+      if (idleAgeSeconds !== null && contentionQueueDepth > 0) {
+        tracker.record(false);
+        perSlotTracker.record([]);
+        activeAuditBatch = null;
       }
 
       if (!idle) {
         activeAuditBatch = null; // busy poll ends the continuous idle window
         return { polled: true, dispatched: false, idle: false };
       }
-      if (!ready) return { polled: true, dispatched: false, idle: true };
+      if (!ready) {
+        // Idle-age observability (WL-0MVHSZR9C0012NQY AC7): an idle tick
+        // deferred by the proxy's authoritative idle age records the evidence
+        // at the existing rate limit (non-blocking — the header blocking
+        // token still reflects refusals only) so "why did it not dispatch?"
+        // is answerable from the decision log. Scoped to the idle-age
+        // authority: a pre-feature proxy OR a poll with live activity keeps
+        // today's silent deferral byte-for-byte.
+        if (idleAgeAuthority && !idleAgeQualifies) {
+          void recordDecision(
+            cfg.cwd,
+            'idle-age-pending',
+            {
+              freeSlots: countFreeUnownedSlots(perSlotSlots),
+              totalSlots: status.total_slots,
+              ownerPresent: status.local_lease_active === true,
+              runningPanes: null,
+              contentionDepth: contentionQueueDepth,
+              ...capacity,
+            },
+            { blocking: false },
+          );
+        }
+        return { polled: true, dispatched: false, idle: true };
+      }
       if (dispatching) return { polled: true, dispatched: false, idle: true };
+      // Idle-age observability (AC7): when the proxy's elapsed idle age is
+      // what admitted this poll, record it (non-blocking) so an admitted
+      // dispatch carries the age/source evidence too. Rate-limited, so a
+      // long idle window logs this at most once per interval.
+      if (idleAgeAuthority && idleAgeQualifies) {
+        void recordDecision(
+          cfg.cwd,
+          'idle-age-qualified',
+          {
+            freeSlots: countFreeUnownedSlots(perSlotSlots),
+            totalSlots: status.total_slots,
+            ownerPresent: status.local_lease_active === true,
+            runningPanes: null,
+            contentionDepth: contentionQueueDepth,
+            ...capacity,
+          },
+          { blocking: false },
+        );
+      }
 
       // ── Dispatch (parent WL-0MST3OJ8S0001ROL AC4, F5 WL-0MTII48OV008P2QU AC4) ──
       // Single machine-wide slot budget: ONE leader poll → ONE freeSlots
@@ -7242,10 +7460,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // for the decision log (derived from `local_lease_active`).
       const ownerPresent = status.local_lease_active === true;
       const slotOwned = countFreeUnownedSlots(perSlotSlots) === 0;
-      // LIVE depth only (WL-0MU1DWXO600153OI): `contention_queued_count` is
+      // `contentionQueueDepth` (LIVE depth only, WL-0MU1DWXO600153OI) is
+      // computed once at the top of the tick: `contention_queued_count` is
       // cumulative telemetry and must never gate dispatch.
-      const contentionQueueDepth =
-        typeof status.contention_queue_depth === 'number' ? status.contention_queue_depth : 0;
 
       // Single machine-wide dispatch gate applied to BOTH coordination and
       // legacy modes: a new pane must never be dispatched while the slot is

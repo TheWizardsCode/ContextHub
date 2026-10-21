@@ -500,7 +500,10 @@ Settings (all re-read each poll, so changes apply without a plugin restart):
 
 - `downtimeEnabled` — Enable the downtime worker (default: `true`)
 - `downtimeIdleThresholdMs` — Minimum continuous idle duration before a
-dispatch (default: `60000` = 60 seconds, floor 1s)
+dispatch (default: `60000` = 60 seconds, floor 1s). When the proxy serves the
+authoritative `local_idle_seconds`, this threshold is compared against that
+idle age rather than the locally accumulated idle run (see
+*Proxy-authoritative idle age* below)
 - `downtimeRequiredFreeSlots` — Required free slots (default: `2` of 3 —
 **spare-capacity dispatch**, parent WL-0MT32F90V008UAD2: at least two
 slots must be free so one slot stays reserved for the operator session).
@@ -574,6 +577,40 @@ global gates.
 Endpoint failures, timeouts, and ambiguous responses are treated as **busy**
 (no dispatch) and never crash the plugin. Each poll is single-flight with a
 per-poll timeout.
+
+**Proxy-authoritative idle age** (LP-0MVGD9Z8Z0055Y5J, WL-0MVHSZR9C0012NQY) —
+when the proxy serves `local_idle_seconds` (the monotonic age of the last
+local activity: updated on dispatch start, on every forwarded SSE chunk and on
+request finish) that value is the **authoritative** idle-age signal, and
+`downtimeIdleThresholdMs` is compared against it directly:
+
+- `local_idle_seconds >= downtimeIdleThresholdMs` → the duration requirement
+  is already satisfied on **this** poll, so a freshly started worker (plugin
+  restart, pane restart, resumed session) dispatches immediately instead of
+  waiting out another full threshold while the GPU has been idle for hours.
+- `local_idle_seconds < downtimeIdleThresholdMs` → **not** qualified, even
+  when the worker's own tracker already holds an older idle run — the proxy
+  is authoritative.
+- Field absent, non-finite or negative (pre-feature proxy, or a malformed
+  value) → today's local-tracker behaviour exactly (accumulate continuous
+  idle polls until the threshold is met).
+
+The signal qualifies the idle **duration only**: the per-slot availability
+budget (`downtimeRequiredFreeSlots`), the `slots-unavailable` /
+`capacity-saturated` fail-closed paths and the per-slot continuous-free
+semantics are unchanged — `slots_stale: true` or `slots: []` still refuses
+even with a large idle age. A poll that shows **live activity** (a processing
+or owned slot, a live pre-v2 lease, or a live contention/gate waiter) always
+outranks the reported idle age: a contradictory payload (large idle age plus
+live work) falls back to the local tracker and never admits a dispatch, and an
+idle-age poll reporting a live contention waiter resets the idle run
+immediately. Because the idle age is proxy-process-relative, a proxy restart
+resets it to a small value; the worker then waits one threshold as before
+(documented trade-off — the local tracker remains the fallback).
+`local_last_activity_at` and `local_last_activity_source` (`dispatch` /
+`chunk` / `finish` / startup …) are operator-facing evidence recorded on every
+polled decision-log entry as `localIdleSeconds` / `localLastActivitySource`, so
+"why was this tick admitted or deferred?" is answerable from the log alone.
 
 **Per-pane toggle** (parent WL-0MSZ4NSOE007AQEF) — pressing `d` in the
 worklist toggles downtime dispatch for the **current pane only**: a

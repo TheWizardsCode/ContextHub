@@ -79,6 +79,17 @@ export interface CoordinationLogEntry {
   slotPhases?: Record<string, string>;
   slotPrefillEtaSeconds?: Record<string, number>;
   /**
+   * Proxy-authoritative local idle-age evidence (LP-0MVGD9Z8Z0055Y5J,
+   * WL-0MVHSZR9C0012NQY): the idle age in seconds the proxy reported for the
+   * backend, and the source of its last activity (`dispatch` / `chunk` /
+   * `finish` / startup …). Recorded on every polled decision so an operator
+   * can see WHY a tick was admitted or deferred. Absent on pre-feature
+   * proxies; never a gate. Additive/optional → earlier entry shapes are
+   * unchanged.
+   */
+  localIdleSeconds?: number;
+  localLastActivitySource?: string;
+  /**
    * Depth-aware audit-batch decision metadata (parent WL-0MVEDM8OT007WDRS
    * AC5): recorded on an `audit-batch-continue` decision so each
    * continuation is diagnosable (depth, cap and remaining budget). All
