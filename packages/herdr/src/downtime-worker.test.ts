@@ -322,6 +322,110 @@ describe('downtime no-dispatch decision log (WL-0MU8808ZY0091JIA)', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('AC4/AC6: capacity_hint=saturated refuses with a distinct reason and capacity evidence', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-saturated-'));
+    try {
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 0,
+        total_slots: 2,
+        status_schema_version: 2,
+        capacity_hint: 'saturated',
+        prefill_budget_seconds: 120,
+        slots: [
+          {
+            slot_id: 'slot-1',
+            is_processing: true,
+            lease_state: 'generating',
+            phase: 'prefill',
+            prefill_eta_seconds: 187.5,
+          },
+          { slot_id: 'slot-2', is_processing: true, lease_state: 'generating', phase: 'decode' },
+        ],
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker } = makeDecisionWorker({ status, root });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('saturated');
+      await vi.waitFor(async () => {
+        const entries = (await readCoordinationLogEntries(root)).filter(
+          (e) => e.kind === 'decision',
+        );
+        expect(entries).toHaveLength(1);
+        expect(entries[0]).toMatchObject({
+          reason: 'capacity-saturated',
+          capacityHint: 'saturated',
+          statusSchemaVersion: 2,
+          generatingSlots: 2,
+          idleLeasedSlots: 0,
+          slotPhases: { 'slot-1': 'prefill', 'slot-2': 'decode' },
+          slotPrefillEtaSeconds: { 'slot-1': 187.5 },
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC2/AC5: idle_leased slots are not refused as slot-owned and are logged as capacity evidence', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-decision-idleleased-'));
+    try {
+      const status: LlamaStatus = {
+        llama_server_running: true,
+        local_active_query: false,
+        model_switch_in_progress: false,
+        local_lease_active: true,
+        available_slots: 0,
+        total_slots: 2,
+        status_schema_version: 2,
+        capacity_hint: 'idle',
+        slots: [
+          {
+            slot_id: 'slot-1',
+            is_processing: false,
+            owner_session_id: 'sess-1',
+            lease_state: 'idle_leased',
+          },
+          {
+            slot_id: 'slot-2',
+            is_processing: false,
+            owner_session_id: 'sess-2',
+            lease_state: 'idle_leased',
+          },
+        ],
+        contention_queue_depth: 0,
+        contention_queued_count: 0,
+      };
+      const { worker } = makeDecisionWorker({ status, root });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      // The idle_leased pool must NOT be gated as slot-owned: the tick
+      // reaches selection (no candidate is configured) instead.
+      expect(outcome.reason).not.toBe('slot-owned');
+      expect(worker.blockReason).not.toBe('slot-owner');
+      await vi.waitFor(async () => {
+        const entries = (await readCoordinationLogEntries(root)).filter(
+          (e) => e.kind === 'decision',
+        );
+        expect(entries.length).toBeGreaterThan(0);
+        expect(entries[0].reason).not.toBe('slot-owned');
+        expect(entries[0]).toMatchObject({
+          capacityHint: 'idle',
+          statusSchemaVersion: 2,
+          idleLeasedSlots: 2,
+          generatingSlots: 0,
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── Local dispatch-lease TTL + own-pane leases (WL-0MU8809SZ0022VZG) ──

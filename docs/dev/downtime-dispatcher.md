@@ -287,6 +287,36 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
    refresh their lease check (a cheap local file read) and their
    coordination entry.
 
+### Truthful local-slot capacity (schema v2, LP-0MVGDUVGE0024YAI)
+
+The llama-proxy publishes `status_schema_version: 2` with additive
+per-slot and top-level capacity fields. When the dispatcher sees version
+`>= 2` with a `lease_state` on every reported slot, **lease state is
+authoritative**:
+
+| Field | Meaning for dispatch |
+|---|---|
+| `slots[].lease_state: "generating"` | busy — never eligible |
+| `slots[].lease_state: "idle_leased"` | reserved-but-idle — **counts as dispatchable capacity** (removes the false-busy denial behind 2,633 of 2,641 measured `local_dispatch_denied` events) |
+| `slots[].lease_state: "free"` | available |
+| `capacity_hint: "saturated"` | defensive no-dispatch (reason `capacity-saturated`, header `saturated`), even if the per-slot detail looks inconsistent |
+| `capacity_hint: "idle"` / `"prefill_bound"` | not by themselves a stop; the per-slot free budget still applies |
+| `slots[].phase`, `slots[].context_tokens`, `slots[].prefill_eta_seconds`, `prefill_budget_seconds` | advisory evidence only — recorded in the decision log, never a gate |
+
+With truthful lease state, the coarse global `local_lease_active` flag no
+longer blocks dispatch (`idle_leased` leases are exactly the case it
+over-reports). Per-slot fail-closed rules are unchanged: `slots: []`,
+`slots_stale: true` or unusable detail still yields `slots-unavailable` /
+`no-slots`. On a pre-v2 payload (fields absent — typically a proxy from
+before the upstream change) the legacy rule applies unchanged: any live
+`owner_session_id` lease makes the slot busy. Malformed
+availability-affecting fields (`lease_state`, `capacity_hint`) reject the
+poll (treated as busy); malformed advisory fields are ignored.
+
+Every no-dispatch decision entry records the observed `capacityHint`,
+`statusSchemaVersion`, `idleLeasedSlots`, `generatingSlots`, `slotPhases`
+and `slotPrefillEtaSeconds` so an operator can see *why* a tick refused.
+
 ### Retired-stage recovery (WL-0MTYL7DX9000MZOH)
 
 The `in_progress` **stage** was removed from the valid stage set
@@ -1137,7 +1167,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 |---|---|---|---|
 | **Host-wide marker** (this mechanism) | machine-wide, all projects/instances | an audit dispatched by ANY project on this host | skip audit tier; reason `audit-host-saturated` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
-| **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot ownership) | the Local Proxy | live slot availability, queue depth, live leases | ineligible/skip audit dispatch (per-tier minimum 2 free slots) or `proxy-contention`; unusable per-slot detail → `slots-unavailable` |
+| **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state`) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint` | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention` or `capacity-saturated`; unusable per-slot detail → `slots-unavailable` |
 | **`AUDIT_PHASE2_PARALLELISM=1`** (always) | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots (fully serial Phase 2) |
 
 **Observability.** The skip is logged to stderr as

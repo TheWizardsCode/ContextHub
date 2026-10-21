@@ -27,6 +27,7 @@ import {
   createPerSlotIdleTracker,
   countFreeUnownedSlots,
   isSlotOwned,
+  isSlotAvailableForDispatch,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
@@ -594,3 +595,120 @@ describe('createPerSlotIdleTracker: owned slot timer resets (AC5)', () => {
   });
 });
 
+
+// ── Truthful lease_state availability (LP-0MVGDUVGE0024YAI) ───────────
+//
+// Schema v2 distinguishes `generating`, `idle_leased` (reserved-but-idle,
+// the upstream false-busy case) and `free`. Only `generating` is busy: an
+// `idle_leased` slot is dispatchable capacity, and the global
+// `local_lease_active` gate is superseded when truthful per-slot lease state
+// is available. Pre-v2 payloads keep the `owner_session_id` behaviour.
+
+describe('truthful lease_state availability (LP-0MVGDUVGE0024YAI)', () => {
+  const v2Pool = (leases: Array<'generating' | 'idle_leased' | 'free'>): LlamaStatus => ({
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    // A live global lease is present in every v2 case: the per-slot
+    // lease_state is the authoritative signal.
+    local_lease_active: true,
+    available_slots: 0,
+    total_slots: leases.length,
+    status_schema_version: 2,
+    capacity_hint: 'idle',
+    slots: leases.map((lease_state, index) => ({
+      slot_id: `slot-${index + 1}`,
+      is_processing: lease_state === 'generating',
+      owner_session_id: lease_state === 'free' ? null : 'sess-1',
+      lease_state,
+    })),
+  });
+
+  it('counts idle_leased slots as dispatchable capacity', () => {
+    expect(
+      countFreeUnownedSlots([
+        { slot_id: 'a', is_processing: false, owner_session_id: 'sess', lease_state: 'idle_leased' },
+        { slot_id: 'b', is_processing: false, lease_state: 'free' },
+        { slot_id: 'c', is_processing: false, owner_session_id: 'sess', lease_state: 'generating' },
+        { slot_id: 'd', is_processing: true, lease_state: 'free' },
+      ]),
+    ).toBe(2);
+  });
+
+  it('isSlotAvailableForDispatch: generating is busy, idle_leased/free are available', () => {
+    expect(
+      isSlotAvailableForDispatch({
+        slot_id: 'a',
+        is_processing: false,
+        lease_state: 'generating',
+      }),
+    ).toBe(false);
+    expect(
+      isSlotAvailableForDispatch({
+        slot_id: 'b',
+        is_processing: false,
+        lease_state: 'idle_leased',
+      }),
+    ).toBe(true);
+    expect(
+      isSlotAvailableForDispatch({ slot_id: 'c', is_processing: false, lease_state: 'free' }),
+    ).toBe(true);
+  });
+
+  it('isSlotAvailableForDispatch: a pre-v2 slot keeps the owner_session_id rule', () => {
+    expect(
+      isSlotAvailableForDispatch({ slot_id: 'a', is_processing: false, owner_session_id: 'live' }),
+    ).toBe(false);
+    expect(isSlotAvailableForDispatch({ slot_id: 'b', is_processing: false })).toBe(true);
+  });
+
+  it('evaluateIdle: an all-idle_leased pool is idle despite a global lease', () => {
+    expect(evaluateIdle(v2Pool(['idle_leased', 'idle_leased']), 0)).toBe(true);
+    expect(evaluateIdle(v2Pool(['idle_leased', 'idle_leased']), 2)).toBe(true);
+  });
+
+  it('evaluateIdle: a generating slot is not available capacity', () => {
+    expect(evaluateIdle(v2Pool(['generating', 'idle_leased']), 0)).toBe(false);
+    expect(evaluateIdle(v2Pool(['generating', 'idle_leased']), 1)).toBe(true);
+  });
+
+  it('evaluateIdle: capacity_hint=saturated is never idle (defensive cross-check)', () => {
+    const inconsistent: LlamaStatus = {
+      ...v2Pool(['free', 'free']),
+      capacity_hint: 'saturated',
+    };
+    expect(evaluateIdle(inconsistent, 0)).toBe(false);
+  });
+
+  it('per-slot tracker: an idle_leased slot accumulates idle time', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+    tracker.record(v2Pool(['idle_leased']).slots!, start);
+    expect(tracker.thresholdMetCount(1_000, start + 5_000)).toBe(1);
+  });
+
+  it('per-slot tracker: a generating slot never accumulates idle time', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+    tracker.record(v2Pool(['generating']).slots!, start);
+    expect(tracker.thresholdMetCount(1_000, start + 5_000)).toBe(0);
+  });
+});
+
+describe('pre-v2 lease regression (LP-0MVGDUVGE0024YAI backward compatibility)', () => {
+  it('a pre-v2 idle-but-owned slot is still busy (owner_session_id rule)', () => {
+    // No status_schema_version / lease_state: the legacy behaviour must be
+    // preserved exactly, so an owned slot is never dispatchable.
+    const preV2: LlamaStatus = {
+      llama_server_running: true,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: true,
+      available_slots: 1,
+      total_slots: 1,
+      slots: [{ slot_id: 'slot-1', is_processing: false, owner_session_id: 'live' }],
+    };
+    expect(countFreeUnownedSlots(preV2.slots!)).toBe(0);
+    expect(evaluateIdle(preV2, 0)).toBe(false);
+  });
+});

@@ -68,6 +68,17 @@ export interface CoordinationLogEntry {
   runningPanes?: number | null;
   contentionDepth?: number;
   /**
+   * Schema-v2 truthful-capacity evidence (LP-0MVGDUVGE0024YAI): the pool
+   * summary, payload version and per-slot lease/phase/ETA detail observed at
+   * the poll. All optional so earlier entry shapes are unchanged.
+   */
+  capacityHint?: string;
+  statusSchemaVersion?: number;
+  idleLeasedSlots?: number;
+  generatingSlots?: number;
+  slotPhases?: Record<string, string>;
+  slotPrefillEtaSeconds?: Record<string, number>;
+  /**
    * Depth-aware audit-batch decision metadata (parent WL-0MVEDM8OT007WDRS
    * AC5): recorded on an `audit-batch-continue` decision so each
    * continuation is diagnosable (depth, cap and remaining budget). All

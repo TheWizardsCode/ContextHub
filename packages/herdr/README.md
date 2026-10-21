@@ -555,7 +555,9 @@ The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (the proxy's
 `local_active_query` is the sole busy signal, so remote-only streams with free
 local slots do not block dispatch; absent on pre-fix proxies it is treated as
-busy), no model switch, no active local lease, and the required free-slot
+busy), no model switch, no active local lease (with schema v2 an
+`idle_leased` slot is reserved-but-idle and does **not** count as a busy
+lease — see *Truthful slot capacity* below), and the required free-slot
 condition met. **Per-slot detail is mandatory (fail-closed contract,
 WL-0MUXVPXAZ005RESW):** the free-slot budget always comes from the per-slot
 `slots` array, never the `available_slots` count. When per-slot detail is
@@ -615,6 +617,21 @@ fails closed** (no dispatch, reason `slots-unavailable` / header token
 `no-slots`) rather than falling back to the `available_slots` count. When N
 is `0` or ≥ `total`, the full global checks (server, local query, model
 switch, lease) apply and the free count still comes from the per-slot array.
+
+**Truthful slot capacity (schema v2, LP-0MVGDUVGE0024YAI)** — when the
+proxy serves `status_schema_version >= 2`, availability follows per-slot
+`lease_state`: `generating` is busy, `idle_leased` is **reserved-but-idle and
+counts as dispatchable capacity**, and `free` is available. This removes the
+false-busy behaviour where a post-stream lease blocked dispatch while the GPU
+was idle (2,633 of 2,641 measured `local_dispatch_denied` events came from
+idle lease holders). `capacity_hint: "saturated"` is a defensive stop — no
+dispatch, reason `capacity-saturated`, header token `saturated` — even if the
+per-slot detail looks inconsistent. `phase`, `context_tokens` and
+`prefill_eta_seconds` are advisory and recorded in the decision log only. On
+a pre-v2 payload (fields absent) the legacy rule applies unchanged: any live
+`owner_session_id` lease makes the slot busy. Malformed
+availability-affecting fields (`lease_state`, `capacity_hint`) fail closed
+(poll treated as busy); malformed advisory fields are ignored.
 
 **Per-tier free-slot minimums** (parent WL-0MT32F90V008UAD2 AC3) — at
 selection time, against the latest polled status, each dispatch tier

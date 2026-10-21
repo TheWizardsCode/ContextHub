@@ -738,3 +738,124 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
     }
   });
 });
+
+// ── Truthful capacity schema v2 (LP-0MVGDUVGE0024YAI) ────────────────
+//
+// The llama-proxy now publishes `status_schema_version: 2` with additive
+// per-slot lease/phase/ETA detail and a top-level `capacity_hint`. The herdr
+// consumer must parse the fields strictly: availability-affecting values are
+// fail-closed when malformed, advisory values degrade to undefined, and a
+// pre-v2 payload keeps today's behaviour exactly.
+
+describe('parseLlamaStatus: truthful capacity schema v2 (LP-0MVGDUVGE0024YAI)', () => {
+  const v2 = {
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: true,
+    available_slots: 0,
+    total_slots: 2,
+    status_schema_version: 2,
+    capacity_hint: 'idle',
+    prefill_budget_seconds: 120,
+    slots: [
+      {
+        slot_id: 0,
+        is_processing: false,
+        owner_session_id: 'sess-1',
+        lease_state: 'idle_leased',
+        phase: null,
+        context_tokens: null,
+        prefill_eta_seconds: null,
+      },
+      {
+        slot_id: 1,
+        is_processing: true,
+        lease_state: 'generating',
+        phase: 'prefill',
+        context_tokens: 102345,
+        prefill_eta_seconds: 187.5,
+      },
+    ],
+  };
+
+  it('parses the additive schema-v2 fields', () => {
+    const status = parseLlamaStatus(v2);
+    expect(status).not.toBeNull();
+    expect(status!.status_schema_version).toBe(2);
+    expect(status!.capacity_hint).toBe('idle');
+    expect(status!.prefill_budget_seconds).toBe(120);
+    expect(status!.slots!).toHaveLength(2);
+    expect(status!.slots![0].lease_state).toBe('idle_leased');
+    expect(status!.slots![0].phase).toBeNull();
+    expect(status!.slots![0].context_tokens).toBeNull();
+    expect(status!.slots![0].prefill_eta_seconds).toBeNull();
+    expect(status!.slots![1].lease_state).toBe('generating');
+    expect(status!.slots![1].phase).toBe('prefill');
+    expect(status!.slots![1].context_tokens).toBe(102345);
+    expect(status!.slots![1].prefill_eta_seconds).toBe(187.5);
+  });
+
+  it('leaves every schema-v2 field undefined on a pre-v2 payload', () => {
+    const status = parseLlamaStatus({
+      llama_server_running: true,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 1,
+      total_slots: 1,
+      slots: [{ slot_id: 'slot-1', is_processing: false }],
+    });
+    expect(status).not.toBeNull();
+    expect(status!.status_schema_version).toBeUndefined();
+    expect(status!.capacity_hint).toBeUndefined();
+    expect(status!.prefill_budget_seconds).toBeUndefined();
+    expect(status!.slots![0].lease_state).toBeUndefined();
+    expect(status!.slots![0].phase).toBeUndefined();
+    expect(status!.slots![0].context_tokens).toBeUndefined();
+    expect(status!.slots![0].prefill_eta_seconds).toBeUndefined();
+  });
+
+  it('treats a malformed or unknown capacity_hint as ambiguous → busy', () => {
+    expect(parseLlamaStatus({ ...v2, capacity_hint: 'hot' })).toBeNull();
+    expect(parseLlamaStatus({ ...v2, capacity_hint: 2 })).toBeNull();
+  });
+
+  it('treats a malformed or unknown lease_state as ambiguous → busy', () => {
+    for (const lease_state of ['busy', '', 1, true]) {
+      const raw = {
+        ...v2,
+        slots: [{ slot_id: 0, is_processing: false, lease_state }],
+      };
+      expect(parseLlamaStatus(raw)).toBeNull();
+    }
+  });
+
+  it('treats a malformed status_schema_version as absent (no v2 behaviour)', () => {
+    expect(parseLlamaStatus({ ...v2, status_schema_version: 'two' })!.status_schema_version).toBeUndefined();
+    expect(parseLlamaStatus({ ...v2, status_schema_version: -1 })!.status_schema_version).toBeUndefined();
+    expect(parseLlamaStatus({ ...v2, status_schema_version: 1.5 })!.status_schema_version).toBeUndefined();
+  });
+
+  it('ignores malformed advisory fields instead of rejecting the poll', () => {
+    const status = parseLlamaStatus({
+      ...v2,
+      prefill_budget_seconds: 'lots',
+      slots: [
+        {
+          slot_id: 0,
+          is_processing: false,
+          lease_state: 'free',
+          phase: 'warming',
+          context_tokens: -5,
+          prefill_eta_seconds: Number.NaN,
+        },
+      ],
+    });
+    expect(status).not.toBeNull();
+    expect(status!.prefill_budget_seconds).toBeUndefined();
+    expect(status!.slots![0].phase).toBeUndefined();
+    expect(status!.slots![0].context_tokens).toBeUndefined();
+    expect(status!.slots![0].prefill_eta_seconds).toBeUndefined();
+  });
+});

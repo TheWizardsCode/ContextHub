@@ -279,9 +279,56 @@ export function decisionHeaderToken(reason: string): string {
       return 'review-queue';
     case 'slots-unavailable':
       return 'no-slots';
+    case 'capacity-saturated':
+      return 'saturated';
     default:
       return reason;
   }
+}
+
+/**
+ * Schema-v2 capacity evidence attached to a no-dispatch decision entry
+ * (LP-0MVGDUVGE0024YAI): the pool summary, payload version and the observed
+ * per-slot lease/phase/ETA detail. Purely observability — no gate reads it.
+ */
+interface CapacityEvidence {
+  capacityHint?: string;
+  statusSchemaVersion?: number;
+  idleLeasedSlots?: number;
+  generatingSlots?: number;
+  slotPhases?: Record<string, string>;
+  slotPrefillEtaSeconds?: Record<string, number>;
+}
+
+function capacityEvidence(
+  status: LlamaStatus,
+  slots: LlamaSlot[] | null,
+): CapacityEvidence {
+  const evidence: CapacityEvidence = {};
+  if (status.capacity_hint !== undefined) evidence.capacityHint = status.capacity_hint;
+  if (status.status_schema_version !== undefined) {
+    evidence.statusSchemaVersion = status.status_schema_version;
+  }
+  if (slots === null) return evidence;
+  if (slots.some((slot) => slot.lease_state !== undefined)) {
+    evidence.idleLeasedSlots = slots.filter(
+      (slot) => slot.lease_state === 'idle_leased',
+    ).length;
+    evidence.generatingSlots = slots.filter(
+      (slot) => slot.lease_state === 'generating',
+    ).length;
+  }
+  const phases: Record<string, string> = {};
+  const etas: Record<string, number> = {};
+  for (const slot of slots) {
+    if (slot.phase !== undefined && slot.phase !== null) phases[slot.slot_id] = slot.phase;
+    if (typeof slot.prefill_eta_seconds === 'number') {
+      etas[slot.slot_id] = slot.prefill_eta_seconds;
+    }
+  }
+  if (Object.keys(phases).length > 0) evidence.slotPhases = phases;
+  if (Object.keys(etas).length > 0) evidence.slotPrefillEtaSeconds = etas;
+  return evidence;
 }
 
 /** Sane floor for the no-candidate cooldown (the pause cannot be disabled or set trivially small). */
@@ -684,6 +731,22 @@ export interface LlamaStatus {
    * dispatch) rather than falling back to the count.
    */
   slots?: LlamaSlot[];
+  /**
+   * Schema-v2 payload version (LP-0MVGDUVGE0024YAI). ABSENT on pre-v2
+   * proxies. Consumers must gate new behaviour on a value >= 2.
+   */
+  status_schema_version?: number;
+  /**
+   * Schema-v2 pool summary (LP-0MVGDUVGE0024YAI). Defensive: `saturated`
+   * never admits a dispatch, even when the per-slot detail looks free
+   * (inconsistent payloads fail closed). ABSENT on pre-v2 proxies.
+   */
+  capacity_hint?: LlamaCapacityHint;
+  /**
+   * Schema-v2 admission-guard wait budget in seconds; advisory/observability
+   * only in this consumer. ABSENT on pre-v2 proxies.
+   */
+  prefill_budget_seconds?: number | null;
 }
 
 /**
@@ -693,6 +756,10 @@ export interface LlamaStatus {
  * and clamps negatives to 0 (WL-0MSVRMAWM007QNR5), so the normalized
  * `slot_id` is always a non-empty string — the per-slot idle tracker keys
  * its timers by it.
+ *
+ * Schema v2 (LP-0MVGDUVGE0024YAI) adds `lease_state`, `phase`,
+ * `context_tokens` and `prefill_eta_seconds`; all are additive, so a pre-v2
+ * payload parses exactly as before.
  */
 export interface LlamaSlot {
   slot_id: string;
@@ -700,12 +767,46 @@ export interface LlamaSlot {
   /**
    * Per-slot Local Proxy owner session id (AC5, parent WL-0MTYZXSLN008HZOW):
    * the pi session currently holding this slot's lease, or undefined/null
-   * when the slot is unowned. ABSENT on pre-feature proxies. A slot with a
-   * non-null owner is NEVER considered free for a new dispatch (the owner
-   * holds the lease until `release-lease-on-exit.mjs` releases it).
+   * when the slot is unowned. ABSENT on pre-feature proxies. On pre-v2
+   * payloads (no `lease_state`) a non-null owner is NEVER considered free
+   * for a new dispatch; with schema-v2 `lease_state` the lease state is
+   * authoritative and `idle_leased` IS dispatchable capacity
+   * (LP-0MVGDUVGE0024YAI).
    */
   owner_session_id?: string | null;
+  /**
+   * Schema-v2 lease state (LP-0MVGDUVGE0024YAI). ABSENT on pre-v2 proxies.
+   * Availability uses this when present: only `generating` is busy.
+   */
+  lease_state?: LlamaSlotLeaseState;
+  /** Schema-v2 phase inference; advisory only (never gates dispatch). */
+  phase?: LlamaSlotPhase | null;
+  /** Schema-v2 prompt progress; advisory only. */
+  context_tokens?: number | null;
+  /** Schema-v2 calibrated prefill cost; advisory only. */
+  prefill_eta_seconds?: number | null;
 }
+
+/**
+ * Per-slot lease state served by schema-v2 proxies (LP-0MVGDUVGE0024YAI):
+ * `generating` while a prefill/decode is in flight, `idle_leased` when the
+ * slot is not processing but a live lease still reserves it (including the
+ * post-stream cooldown), and `free` otherwise. Only `generating` is
+ * genuinely busy; `idle_leased` is the reserved-but-idle case the upstream
+ * change removes from the false-busy set.
+ */
+export type LlamaSlotLeaseState = 'generating' | 'idle_leased' | 'free';
+
+/** Proxy-side per-slot phase inference (schema v2; null when not processing). */
+export type LlamaSlotPhase = 'prefill' | 'decode';
+
+/**
+ * One-field summary of whether the local pool is genuinely working
+ * (schema v2): `idle` = at least one free slot or every occupied slot is
+ * `idle_leased`; `prefill_bound` = no free slot and at least one prefill;
+ * `saturated` = no free slot and every occupied slot is decoding.
+ */
+export type LlamaCapacityHint = 'idle' | 'prefill_bound' | 'saturated';
 
 // ── Idle detection (implemented) ──────────────────────────────────────
 
@@ -719,7 +820,8 @@ export interface LlamaSlot {
  * `local_active_query` is the SOLE busy signal for the query gate:
  * `true` → busy, `false` → not busy from queries. ABSENT on pre-fix proxies
  * → busy (fail-closed), preventing dispatch when the busy signal is
- * unverifiable.
+ * unverifiable. With schema-v2 truthful `lease_state` the coarse global
+ * lease flag is superseded by per-slot availability (LP-0MVGDUVGE0024YAI).
  */
 function globalIdleChecks(status: LlamaStatus): boolean {
   if (!status.llama_server_running) return false;
@@ -727,8 +829,28 @@ function globalIdleChecks(status: LlamaStatus): boolean {
   // true → busy, false → not busy, absent (pre-fix proxy) → busy (fail-closed).
   if (status.local_active_query !== false) return false;
   if (status.model_switch_in_progress) return false;
-  if (status.local_lease_active) return false;
+  // Schema v2 (LP-0MVGDUVGE0024YAI): truthful per-slot lease_state supersedes
+  // the coarse global `local_lease_active` flag — an `idle_leased` slot is
+  // reserved-but-idle and must not block dispatch. Without truthful
+  // per-slot lease state keep the fail-closed global gate.
+  if (!hasTruthfulLeaseState(status) && status.local_lease_active) return false;
   return true;
+}
+
+/**
+ * True when the payload carries schema-v2 truthful per-slot lease state:
+ * version >= 2 AND every reported slot has a `lease_state`. A mixed or
+ * pre-v2 payload returns false, so the legacy `owner_session_id` /
+ * `local_lease_active` rules apply unchanged.
+ */
+function hasTruthfulLeaseState(status: LlamaStatus): boolean {
+  return (
+    typeof status.status_schema_version === 'number' &&
+    status.status_schema_version >= 2 &&
+    Array.isArray(status.slots) &&
+    status.slots.length > 0 &&
+    status.slots.every((slot) => slot.lease_state !== undefined)
+  );
 }
 
 /**
@@ -749,26 +871,45 @@ function perSlotGlobalIdleChecks(status: LlamaStatus): boolean {
 }
 
 /**
- * True when a slot carries a live Local Proxy owner lease (AC5, parent
- * WL-0MTYZXSLN008HZOW): a non-empty `owner_session_id` means the slot is
- * owned by a live pane and must NEVER be considered free for a new
- * dispatch until `release-lease-on-exit.mjs` releases it.
+ * True when a slot reports a live Local Proxy owner (AC5, parent
+ * WL-0MTYZXSLN008HZOW): a non-empty `owner_session_id`. On PRE-v2 payloads
+ * this means the slot must never be considered free for a new dispatch until
+ * `release-lease-on-exit.mjs` releases it. With schema-v2 `lease_state`
+ * (LP-0MVGDUVGE0024YAI) use {@link isSlotAvailableForDispatch} instead — an
+ * `idle_leased` slot is owned but still dispatchable capacity.
  */
 export function isSlotOwned(slot: LlamaSlot): boolean {
   return typeof slot.owner_session_id === 'string' && slot.owner_session_id.length > 0;
 }
 
 /**
- * Count slots that are BOTH not processing AND unowned — the only slots
- * eligible for a new dispatch (AC5). Fail-closed: a slot without an
- * explicit boolean `is_processing` is treated as processing (busy); an
- * owned slot is treated as busy regardless of `is_processing`.
+ * True when a slot is dispatchable capacity.
+ *
+ * Fail-closed: a slot without an explicit boolean `is_processing` is treated
+ * as busy. With schema-v2 `lease_state` (LP-0MVGDUVGE0024YAI) only
+ * `generating` is busy — `idle_leased` is reserved-but-idle and `free` is
+ * available. On pre-v2 payloads the legacy `owner_session_id` rule applies:
+ * any live owner lease makes the slot busy (AC5, WL-0MTYZXSLN008HZOW).
+ */
+export function isSlotAvailableForDispatch(slot: LlamaSlot): boolean {
+  if (typeof slot.is_processing !== 'boolean' || slot.is_processing) return false;
+  if (slot.lease_state !== undefined) return slot.lease_state !== 'generating';
+  return !isSlotOwned(slot);
+}
+
+/**
+ * Count slots eligible for a new dispatch. Fail-closed: a slot without an
+ * explicit boolean `is_processing` is treated as processing (busy).
+ *
+ * Schema v2 (LP-0MVGDUVGE0024YAI): eligibility follows `lease_state`, so an
+ * `idle_leased` slot counts as capacity even though it still carries an
+ * owner. On pre-v2 payloads an owned slot remains busy (legacy behaviour,
+ * AC5).
  */
 export function countFreeUnownedSlots(slots: LlamaSlot[]): number {
   let count = 0;
   for (const slot of slots) {
-    if (typeof slot.is_processing !== 'boolean' || slot.is_processing) continue;
-    if (isSlotOwned(slot)) continue;
+    if (!isSlotAvailableForDispatch(slot)) continue;
     count += 1;
   }
   return count;
@@ -796,7 +937,9 @@ function usablePerSlotSlots(status: LlamaStatus): LlamaSlot[] | null {
  * count:
  *
  *  - llama-server is running,
- *  - no active query, model switch, or local lease,
+ *  - no active query or model switch, and (on pre-v2 payloads) no local
+ *    lease — with schema-v2 truthful `lease_state` the per-slot state
+ *    decides, so `idle_leased` does not block dispatch,
  *  - `requiredFreeSlots <= 0` (default) requires ALL slots free
  *    (`available_slots >= total_slots`) with `total_slots > 0`,
  *  - a positive N requires at least N slots free; N > total_slots can never
@@ -837,6 +980,10 @@ export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): bo
  *    be satisfied.
  */
 export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): boolean {
+  // Schema-v2 defensive cross-check (LP-0MVGDUVGE0024YAI AC4): a saturated
+  // pool is never idle, even if the per-slot detail looks inconsistent.
+  if (status.capacity_hint === 'saturated') return false;
+
   const total = status.total_slots;
   if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
 
@@ -939,8 +1086,9 @@ export function createPerSlotIdleTracker(): PerSlotIdleTracker {
       const reported = new Set<string>();
       for (const slot of slots) {
         reported.add(slot.slot_id);
-        if (slot.is_processing || isSlotOwned(slot)) {
-          idleSince.set(slot.slot_id, null); // processing or owned → own timer reset only
+        if (!isSlotAvailableForDispatch(slot)) {
+          // Processing / generating / pre-v2-owned → this slot's timer resets.
+          idleSince.set(slot.slot_id, null);
         } else {
           idleSince.set(slot.slot_id, idleSince.get(slot.slot_id) ?? now);
         }
@@ -1030,6 +1178,30 @@ function parseOptionalCount(value: unknown): number | undefined | null {
   if (value === undefined) return undefined;
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
   return value;
+}
+
+/** Schema-v2 enum vocabularies (LP-0MVGDUVGE0024YAI). */
+const LEASE_STATES: ReadonlySet<string> = new Set(['generating', 'idle_leased', 'free']);
+const CAPACITY_HINTS: ReadonlySet<string> = new Set(['idle', 'prefill_bound', 'saturated']);
+const SLOT_PHASES: ReadonlySet<string> = new Set(['prefill', 'decode']);
+
+/**
+ * Parse an optional schema-v2 ADVISORY number (ETA / prompt progress).
+ * Absent → undefined; explicit null → null (the proxy's "not computable"
+ * marker); malformed → undefined. Advisory fields must never reject an
+ * otherwise usable poll.
+ */
+function parseAdvisoryNumber(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  return value;
+}
+
+/** As {@link parseAdvisoryNumber} but for integer counters (context tokens). */
+function parseAdvisoryInteger(value: unknown): number | null | undefined {
+  const parsed = parseAdvisoryNumber(value);
+  return typeof parsed === 'number' && !Number.isInteger(parsed) ? undefined : parsed;
 }
 
 /**
@@ -1126,18 +1298,60 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
       if (typeof slot.owner_session_id === 'string' && slot.owner_session_id.length > 0) {
         ownerSessionId = slot.owner_session_id;
       }
-      parsed.push(
-        ownerSessionId !== null
-          ? {
-              slot_id: slotId,
-              is_processing: slot.is_processing,
-              owner_session_id: ownerSessionId,
-            }
-          : { slot_id: slotId, is_processing: slot.is_processing },
-      );
+      // Schema v2 (LP-0MVGDUVGE0024YAI): `lease_state` is AVAILABILITY-
+      // affecting and fail-closed when malformed/unknown (ambiguous →
+      // null/busy). `phase`, `context_tokens` and `prefill_eta_seconds` are
+      // advisory and degrade to undefined instead of rejecting the poll.
+      let leaseState: LlamaSlotLeaseState | undefined;
+      if (slot.lease_state !== undefined) {
+        if (typeof slot.lease_state !== 'string' || !LEASE_STATES.has(slot.lease_state)) {
+          return null;
+        }
+        leaseState = slot.lease_state as LlamaSlotLeaseState;
+      }
+      let phase: LlamaSlotPhase | null | undefined;
+      if (slot.phase === null) {
+        phase = null;
+      } else if (typeof slot.phase === 'string' && SLOT_PHASES.has(slot.phase)) {
+        phase = slot.phase as LlamaSlotPhase;
+      }
+      const contextTokens = parseAdvisoryInteger(slot.context_tokens);
+      const prefillEta = parseAdvisoryNumber(slot.prefill_eta_seconds);
+      const parsedSlot: LlamaSlot = {
+        slot_id: slotId,
+        is_processing: slot.is_processing,
+      };
+      if (ownerSessionId !== null) parsedSlot.owner_session_id = ownerSessionId;
+      if (leaseState !== undefined) parsedSlot.lease_state = leaseState;
+      if (phase !== undefined) parsedSlot.phase = phase;
+      if (contextTokens !== undefined) parsedSlot.context_tokens = contextTokens;
+      if (prefillEta !== undefined) parsedSlot.prefill_eta_seconds = prefillEta;
+      parsed.push(parsedSlot);
     }
     slots = parsed;
   }
+
+  // Schema-v2 truthful capacity (LP-0MVGDUVGE0024YAI): version, pool
+  // summary and admission budget. `capacity_hint` is availability-affecting
+  // (fail-closed when malformed); the version and budget are advisory.
+  let statusSchemaVersion: number | undefined;
+  if (o.status_schema_version !== undefined) {
+    if (
+      typeof o.status_schema_version === 'number' &&
+      Number.isInteger(o.status_schema_version) &&
+      o.status_schema_version >= 0
+    ) {
+      statusSchemaVersion = o.status_schema_version;
+    }
+  }
+  let capacityHint: LlamaCapacityHint | undefined;
+  if (o.capacity_hint !== undefined) {
+    if (typeof o.capacity_hint !== 'string' || !CAPACITY_HINTS.has(o.capacity_hint)) {
+      return null;
+    }
+    capacityHint = o.capacity_hint as LlamaCapacityHint;
+  }
+  const prefillBudget = parseAdvisoryNumber(o.prefill_budget_seconds);
 
   // Optional contention metrics (AC6, WL-0MTYZXSLN008HZOW): ABSENT on
   // pre-feature proxies → undefined (treated as 0, no contention evidence).
@@ -1172,6 +1386,9 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     contention_queued_count: contentionQueuedCount,
     slots,
     slots_stale: slotsStale,
+    status_schema_version: statusSchemaVersion,
+    capacity_hint: capacityHint,
+    prefill_budget_seconds: prefillBudget,
   };
 }
 
@@ -6461,6 +6678,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       auditBatchRemaining?: number;
       /** Why an armed batch ended (`cap` reached / `depth` dropped, AC5). */
       auditBatchEndReason?: string;
+      /**
+       * Schema-v2 truthful-capacity evidence (LP-0MVGDUVGE0024YAI): pool
+       * summary, payload version and per-slot lease/phase/ETA detail.
+       */
+      capacityHint?: string;
+      statusSchemaVersion?: number;
+      idleLeasedSlots?: number;
+      generatingSlots?: number;
+      slotPhases?: Record<string, string>;
+      slotPrefillEtaSeconds?: Record<string, number>;
     },
     options: {
       /**
@@ -6868,6 +7095,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // dispatch, parent WL-0MT32F90V008UAD2). A slot reporting processing
       // resets only its own timer.
       const perSlotSlots = usablePerSlotSlots(status);
+      // Truthful-capacity evidence for every decision entry on this poll
+      // (LP-0MVGDUVGE0024YAI). Computed once; purely observational.
+      const capacity = capacityEvidence(status, perSlotSlots);
       // Fail-closed precondition (WL-0MUXVPXAZ005RESW): unusable per-slot
       // detail — absent, empty (`slots: []`), or stale (`slots_stale: true`)
       // — means there is NO trustworthy availability signal. Refuse to
@@ -6886,6 +7116,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             typeof status.contention_queue_depth === 'number'
               ? status.contention_queue_depth
               : 0,
+          ...capacity,
           // AC5: a batch that was armed is blocked by this fail-closed poll —
           // attach its metadata, then end it (no batch survives an unusable
           // availability signal).
@@ -6894,6 +7125,29 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         activeAuditBatch = null;
         return { polled: true, dispatched: false, idle: false };
       }
+      // Schema-v2 saturated pool (LP-0MVGDUVGE0024YAI AC4): a defensive
+      // cross-check that never admits a dispatch, even when the per-slot
+      // detail looks inconsistent. Distinct reason/token so it is
+      // distinguishable from slot-owner / contention / no-slots.
+      if (status.capacity_hint === 'saturated') {
+        tracker.record(false);
+        perSlotTracker.record([]); // saturated → reset every slot timer
+        void recordDecision(cfg.cwd, 'capacity-saturated', {
+          freeSlots: countFreeUnownedSlots(perSlotSlots),
+          totalSlots: status.total_slots,
+          ownerPresent: status.local_lease_active === true,
+          runningPanes: null,
+          contentionDepth:
+            typeof status.contention_queue_depth === 'number'
+              ? status.contention_queue_depth
+              : 0,
+          ...capacity,
+          ...batchMetadata(),
+        });
+        activeAuditBatch = null;
+        return { polled: true, dispatched: false, idle: false };
+      }
+
       const perSlotMode =
         cfg.requiredFreeSlots > 0 &&
         cfg.requiredFreeSlots < status.total_slots;
@@ -7012,6 +7266,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           ownerPresent,
           runningPanes,
           contentionDepth: contentionQueueDepth,
+          ...capacity,
           // AC5: an armed batch blocked by slot ownership keeps the existing
           // `slot-owned` token, now with its depth/cap/remaining metadata.
           ...batchMetadata(),
@@ -7026,6 +7281,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           ownerPresent,
           runningPanes,
           contentionDepth: contentionQueueDepth,
+          ...capacity,
           // AC5: an armed batch blocked by proxy contention keeps the existing
           // `proxy-contention` token, now with its metadata.
           ...batchMetadata(),
@@ -7127,6 +7383,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             ownerPresent,
             runningPanes,
             contentionDepth: contentionQueueDepth,
+            ...capacity,
             // AC5: a held/blocked continuation reuses the EXISTING token
             // unchanged (`audit-in-flight` / `audit-host-saturated` /
             // `code-freeze` / `review-queue-hold` / `no-candidate` / ...) and
