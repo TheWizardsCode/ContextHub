@@ -6187,9 +6187,22 @@ export async function runWorklistTui(
         const depthByParent = new Map(
           expanded.map((id) => [id, state.getItemDepth(id) + 1]),
         );
-        // Start the review-queue query concurrently with the item fetch so its
-        // identical `wl list` query inside fetchMandatorySubsets deduplicates
-        // via the in-flight memo into a single spawn (WL-0MV5CBQ6L005SPAG).
+        // Start the ITEM fetch first: on the default view it issues the ONE
+        // consolidated `wl worklist` read (WL-0MVI0IT4S0070G78), and the
+        // review-queue state below then derives from that same in-flight
+        // bundle instead of spawning the review query again. Starting the
+        // review state first would leave it with nothing to derive from and
+        // re-introduce a second `wl` spawn per tick.
+        const itemsPromise = fetchItemsForView(
+          state.activeFilter,
+          state.activePriorityFilter,
+          fetcher,
+          state.activeDispatchFilter,
+          opts.cwd,
+        );
+        // The banner state read: derived from the consolidated bundle on the
+        // default view (no extra spawn); filtered/dispatch views keep their
+        // own reads and fall back to the standalone review query.
         const reviewStatePromise = fetchReviewQueueState();
         const childrenPromise = fetchChildrenForItems(expanded, depthByParent, refreshScope)
           .then((childrenByParent) => {
@@ -6201,16 +6214,7 @@ export async function runWorklistTui(
             // Ignore: refreshItems carries over the previously fetched
             // children when the re-fetch fails.
           });
-        const [newItems] = await Promise.all([
-          fetchItemsForView(
-            state.activeFilter,
-            state.activePriorityFilter,
-            fetcher,
-            state.activeDispatchFilter,
-            opts.cwd,
-          ),
-          childrenPromise,
-        ]);
+        const [newItems] = await Promise.all([itemsPromise, childrenPromise]);
         const oldLen = state.items.length;
 
         // Attach freshly fetched children to the new parent objects BEFORE
