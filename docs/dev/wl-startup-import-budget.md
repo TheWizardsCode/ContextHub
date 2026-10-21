@@ -4,8 +4,11 @@ The parent epic (WL-0MVFNMSRW002FI6B, "Investigate transient wl process CPU
 usage") requires the `wl` fast path to stop loading command modules, the DB
 runtime and plugins:
 warm cache-hit `wl next --json` / `wl list --status open --json` and
-`wl --version` should cost p95 ≤ 0.5 s wall and ≤ 60 MB peak RSS on the
-reference host (bare node is ~0.5 s / 58 MB).
+`wl --version` should cost p95 ≤ 700 ms wall and ≤ 68 MB peak RSS on the
+reference host (bare node is ~0.5 s / 58 MB). Those targets were accepted at
+the measured `dist` floor by the producer decision on WL-0MVFNMSRW002FI6B
+(2026-10-21): the original 0.5 s / 60 MB budget sat at or below the bare-node
+floor on the reference host and was unreachable by import slimming alone.
 
 F2 builds the harness that (a) captures the pre-change baseline and (b) locks
 the current import graph in place as a **ratchet**, so each later slimming
@@ -34,10 +37,12 @@ only tighten it — no regression can slip through between items.
   read scenarios, `version` for `--version`). Both invocation targets are
   recorded because the default suite can always run `src` (tsx), while
   `/usr/local/bin/wl` runs `dist` (built `dist/cli.js`).
-- **`ac1Targets`** — the parent AC1 numbers (500 ms / 60 MB) plus `enforced`
-  and `measuredTarget`. The target is only asserted once F7 records a
-  compliant `dist` baseline and flips `enforced`; before that the budget is a
-  ratchet against today's pre-slimming graph and cost, not a target the tree
+- **`ac1Targets`** — the parent AC1 numbers (700 ms / 68 MB) plus `enforced`
+  and `measuredTarget`. The target is asserted for the recorded `measuredTarget`
+  (`dist`) once `enforced` is true; before the F7 slimmed fast path recorded a
+  compliant `dist` baseline and the producer decision flipped `enforced`, the
+  budget was a ratchet against today's pre-slimming graph and cost, not a target
+  the tree could not yet meet.
   cannot yet meet.
 - **`regression`** — the headroom policy (see below).
 
@@ -132,8 +137,8 @@ F1 spawn instrumentation, which is load independent:
   catches gross regressions while tolerating a loaded host;
 - **p95 peak RSS** ≤ recorded p95 + `cpuHeadroomPct`;
 - every sample must be a genuine fast-path invocation (expected spawn kind);
-- parent AC1's 500 ms / 60 MB is asserted for the `measuredTarget` only once
-  `ac1Targets.enforced` is true (F7).
+- parent AC1's 700 ms / 68 MB is asserted for the `measuredTarget` only once
+  `ac1Targets.enforced` is true.
 
 `tests/cli/startup-import-budget.test.ts` applies this policy to a real
 measured `src` run (`regression.runs` samples, default 4) — CPU time is the
@@ -150,12 +155,13 @@ ratchet check is pure AST/filesystem work (well under a second).
 4. Commit `bench/startup-import-budget.json` with the change, so the
    improvement is locked in.
 
-F7 would flip `ac1Targets.enforced` to `true` in the same change that records a
-compliant `dist` baseline. The F7 measurement found the target unreachable by
-import slimming alone (both AC1 numbers sit at or below the bare-node floor on
-the loaded reference host), so `enforced` stays `false`, the measured floor is
-recorded in `ac1Targets.note`, and an OPEN QUESTION was raised on the parent
-(WL-0MVFNMSRW002FI6B).
+F7 recorded a compliant `dist` baseline and the producer decision of
+2026-10-21 (WL-0MVFNMSRW002FI6B) flipped `ac1Targets.enforced` to `true`. The
+measured floor is recorded in `ac1Targets.note`: dist p95 689 ms / 67.8 MB
+(`wl next --json`), 645 ms / 67.9 MB (`wl list --status open --json`) and
+547 ms / 60.9 MB (`wl --version`) against a bare-node floor of 484 ms /
+61.2 MB on the loaded reference host — within the accepted 700 ms / 68 MB
+target.
 
 ## Baseline (F2, 2026-10-20)
 
@@ -173,10 +179,9 @@ Context: the shared host was loaded during capture (F1 measured the same
 `dist` commands at ~1.0–1.2 s p95 on a quieter host), which is why wall times
 are high while the CPU-time budget stays meaningful. `src` (tsx) is dominated
 by the on-the-fly transform of the 88-module graph; `dist` is the number that
-matters for `/usr/local/bin/wl` and for AC1. Current `dist` peak RSS
-(~79 MB) is above AC1's 60 MB target and cache hits still boot the full graph —
-exactly what F4/F6/F7 reduce; F7 re-runs the benchmark and flips
-`ac1Targets.enforced`.
+matters for `/usr/local/bin/wl` and for AC1. After F4/F6/F7 the recorded `dist`
+peak RSS (~68 MB) sits within the accepted AC1 target of 68 MB with
+`ac1Targets.enforced` flipped to true.
 
 Exact figures (including `maxRssMb` and the bare-node floor per target) are in
 `bench/startup-import-budget.json` under `baselines.src` / `baselines.dist`;

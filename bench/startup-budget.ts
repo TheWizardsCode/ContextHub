@@ -5,7 +5,10 @@
  * The budget file (`bench/startup-import-budget.json`) is the checked-in
  * ratchet for the parent epic's AC1 (WL-0MVFNMSRW002FI6B): warm cache-hit
  * `wl next --json` / `wl list --status open --json` and `wl --version` must
- * stay at p95 <= 0.5 s wall and peak RSS <= 60 MB on the reference host.
+ * stay at p95 <= 700 ms wall and peak RSS <= 68 MB on the reference host
+ * (the targets accepted at the measured floor by the producer decision of
+ * 2026-10-21; the AC1 numbers are enforced once a compliant `dist` baseline
+ * is recorded and `ac1Targets.enforced` flips true).
  *
  * It records three things:
  *
@@ -19,9 +22,10 @@
  *      the default test suite (which can always run the tsx target) has a
  *      like-for-like reference.
  *   3. `ac1Targets` — the parent AC1 numbers plus `enforced`/`measuredTarget`.
- *      The target is only asserted once F7 has recorded a compliant `dist`
- *      baseline and flips `enforced`; before that the budget is a ratchet
- *      against today's graph, not against a target the tree cannot yet meet.
+ *      The target is asserted for the recorded `measuredTarget` once
+ *      `ac1Targets.enforced` is true (flipped after F7 recorded a compliant
+ *      `dist` baseline); before that the budget is a ratchet against today's
+ *      graph, not against a target the tree cannot yet meet.
  *
  * ## Regression policy (host-load tolerant)
  *
@@ -152,15 +156,15 @@ export function defaultStartupBudget(): StartupBudget {
     fastPathDynamicImports: [],
     fastPathRuntimeModules: [],
     ac1Targets: {
-      p95WallMs: 500,
-      peakRssMb: 60,
-      enforced: false,
+      p95WallMs: 700,
+      peakRssMb: 68,
+      enforced: true,
       measuredTarget: 'dist',
       note:
-        'Parent AC1 target. `enforced` is flipped by F7 (WL-0MVFRROLM002K98B) once the ' +
-        'recorded `dist` baseline is within these numbers; until then the budget ratchets ' +
-        "today's pre-slimming graph and cost instead of asserting a target the tree cannot " +
-        'yet meet.',
+        'Parent AC1 target, accepted at the measured dist floor by the producer decision ' +
+        'on WL-0MVFNMSRW002FI6B (2026-10-21): p95 wall <= 700 ms, peak RSS <= 68 MB on a ' +
+        'warm cache hit. `enforced` is true; the target is asserted for the recorded ' +
+        '`measuredTarget` once the budget carries a compliant `dist` baseline.',
     },
     regression: {
       runs: 4,

@@ -3,7 +3,8 @@
  *
  * The parent epic (WL-0MVFNMSRW002FI6B, AC1) requires the cache-hit read path
  * and `--version` to stop loading command modules, the DB runtime and plugins:
- * warm p95 wall <= 0.5 s and peak RSS <= 60 MB on the reference host. This
+ * warm p95 wall <= 700 ms and peak RSS <= 68 MB on the reference host (targets
+ * accepted at the measured floor by the producer decision of 2026-10-21). This
  * suite is the ratchet that locks the current import graph and measured cost
  * in, so each subsequent slimming change (F4/F6/F7) can only tighten it:
  *
@@ -104,11 +105,11 @@ function syntheticBudget(overrides: Partial<StartupBudget> = {}): StartupBudget 
     entry: CLI_ENTRY,
     importGraph: { moduleCount: 1, modules: [CLI_ENTRY], external: [] },
     ac1Targets: {
-      p95WallMs: 500,
-      peakRssMb: 60,
+      p95WallMs: 700,
+      peakRssMb: 68,
       enforced: false,
       measuredTarget: 'dist',
-      note: 'flipped by F7',
+      note: 'flipped per the 2026-10-21 producer decision',
     },
     regression: {
       runs: 5,
@@ -342,20 +343,20 @@ describe('startup import budget — regression policy', () => {
     expect(evaluation.violations.join('\n')).toContain('cache-hit');
   });
 
-  it('asserts the parent AC1 target only once F7 records it as enforced', () => {
-    // Measured 1200 ms / 80 MB violates AC1's 500 ms / 60 MB, but the target
+  it('asserts the parent AC1 target only once it is enforced', () => {
+    // Measured 1200 ms / 80 MB violates AC1's 700 ms / 68 MB, but the target
     // is not enforced yet (the baseline is still the pre-slimming graph).
     expect(evaluateStartupBudget(syntheticResult(), syntheticBudget()).violations).toEqual([]);
 
-    // Once F7 records a compliant dist baseline and flips `enforced`, the
-    // same numbers are rejected for the measured target.
+    // Once a compliant dist baseline is recorded and `enforced` flips true,
+    // the same numbers are rejected for the measured target.
     const enforced = syntheticBudget({
       ac1Targets: { ...syntheticBudget().ac1Targets, enforced: true, measuredTarget: 'src' },
     });
     const violations = evaluateStartupBudget(syntheticResult(), enforced).violations.join('\n');
     expect(violations).toContain('AC1');
-    expect(violations).toContain('500');
-    expect(violations).toContain('60');
+    expect(violations).toContain('700');
+    expect(violations).toContain('68');
   });
 
   it('reports a missing baseline instead of silently passing', () => {
