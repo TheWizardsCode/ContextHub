@@ -27,6 +27,7 @@ import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
 import { createTempDir, cleanupTempDir } from '../test-utils.js';
 import { runCliProcess } from './cli-bundle.js';
 import { countSpawnRecords } from '../../src/spawn-counter.js';
+import { LEGACY_WORKLIST_QUERIES } from '../../bench/worklist-query-sets.js';
 
 // The simulation needs a real subprocess per query (spawn accounting is
 // per-process). `runCliProcess` spawns the pre-compiled CLI bundle instead of
@@ -34,20 +35,14 @@ import { countSpawnRecords } from '../../src/spawn-counter.js';
 // than the 2.5–8 s a tsx re-transpile costs (WL-0MVH47YF300087AQ).
 const PANES = 6;
 
-/** The herdr fetcher's query set (see parent epic WL-0MSAZQEQB008O7H3). */
-const QUERIES: string[][] = [
-  ['next', '-n', '5', '--include-in-progress', '--json'],
-  ['list', '--priority', 'critical', '--root-only', '--json'],
-  ['list', '--status', 'completed', '--stage', 'in_review', '--root-only', '--json'],
-  ['list', '--status', 'open,in-progress,blocked', '--json'],
-  ['status', '--json'],
-];
+/** The herdr refresh query set (WL-0MVI0HH740065Z2T): the shared legacy set. */
+const QUERIES = LEGACY_WORKLIST_QUERIES;
 
 // Spawn the real CLI entry point as a subprocess. The bundle contains the same
 // `src/cli.ts` graph (including the read-cache fast path this test measures),
 // so the cross-process cache behaviour is exercised exactly as with tsx.
-function runCli(args: string[], cwd: string, env: Record<string, string>): { status: number | null } {
-  const result = runCliProcess(args, { cwd, env: { ...process.env, ...env } });
+function runCli(args: readonly string[], cwd: string, env: Record<string, string>): { status: number | null } {
+  const result = runCliProcess([...args], { cwd, env: { ...process.env, ...env } });
   return { status: result.status };
 }
 

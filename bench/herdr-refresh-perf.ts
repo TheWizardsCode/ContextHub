@@ -12,6 +12,15 @@
  *   - the number of `wl` child processes spawned per refresh,
  *   - how many of those spawns did real read work vs served a cache hit.
  *
+ * The harness accepts `--query-set legacy|consolidated` (default `legacy`):
+ * `legacy` drives the current per-subset fetcher path; `consolidated` drives
+ * ONE `wl worklist --json` read per refresh (the CLI vector lives in
+ * `bench/worklist-query-sets.ts`). `wl worklist` lands in WL-0MVI0HX58009JJRF,
+ * so in C1 a consolidated run reports the invocation as unavailable with a
+ * clear diagnostic and degrades cleanly (non-zero exit only with
+ * `--fail-if-unavailable`). Spawn counts and latencies are reported for
+ * whichever set is selected.
+ *
  * The ≤ 2 s target is host-dependent, so the benchmark REPORTS `withinTarget`
  * rather than failing the process on it (the paired spawn-count metric is the
  * regression guard).
@@ -19,6 +28,7 @@
  * Usage:
  *   npx tsx bench/herdr-refresh-perf.ts            # text output
  *   npx tsx bench/herdr-refresh-perf.ts --json     # machine-readable output
+ *   npx tsx bench/herdr-refresh-perf.ts --json --query-set consolidated
  *
  * Options:
  *   --items N              root items to create (default 1000)
@@ -26,6 +36,8 @@
  *   --children-per-parent  children created under each parent (default 3)
  *   --browse N             browseItemCount used by `wl next` (default 30)
  *   --iterations N         measured warm/cold pairs (default 2)
+ *   --query-set SET        legacy (default) | consolidated
+ *   --fail-if-unavailable  exit 1 when the selected set is unavailable
  *   --keep                 keep temp artifacts (default false)
  *   --json                 JSON output for agent consumption
  *
@@ -48,12 +60,21 @@ import {
   resetExecFileAsync,
   setWorklogDir,
   resetWorklogDir,
+  getExecFileAsync,
+  buildWlArgs,
   fetchNextItems,
   fetchActionableCount,
   fetchReviewQueueState,
   fetchChildrenForItems,
   createInProcessRefreshScope,
 } from '../packages/herdr/src/fetcher.js';
+import {
+  CONSOLIDATED_WORKLIST_QUERY,
+  parseWorklistQuerySet,
+  worklistQueriesFor,
+  WORKLIST_QUERY_SET_NAMES,
+  type WorklistQuerySet,
+} from './worklist-query-sets.js';
 
 // ── Configuration ────────────────────────────────────────────────────
 
@@ -67,6 +88,9 @@ export interface HerdrRefreshPerfOptions {
   iterations: number;
   keep: boolean;
   json: boolean;
+  querySet: WorklistQuerySet;
+  /** Exit 1 when the selected query set's invocation is unavailable. */
+  failIfUnavailable: boolean;
 }
 
 const DEFAULTS: HerdrRefreshPerfOptions = {
@@ -77,6 +101,8 @@ const DEFAULTS: HerdrRefreshPerfOptions = {
   iterations: 2,
   keep: false,
   json: false,
+  querySet: 'legacy',
+  failIfUnavailable: false,
 };
 
 export interface HerdrRefreshPerfResult {
@@ -97,6 +123,14 @@ export interface HerdrRefreshPerfResult {
   coldReadWorkSpawns: number;
   /** Warm spawns served from the read cache (no DB work). */
   warmCacheHitSpawns: number;
+  /** The query set measured (legacy | consolidated). */
+  querySet: WorklistQuerySet;
+  /** Number of `wl` invocations that make up one refresh of the set. */
+  queriesPerRefresh: number;
+  /** True when the selected set's invocation(s) succeeded. */
+  available: boolean;
+  /** Diagnostic when a selected set's invocation is unavailable (C1 plumbing). */
+  diagnostic: string | null;
   targetMs: number;
   withinTarget: boolean;
   dbPath: string;
@@ -140,6 +174,18 @@ export function parseArgs(argv: string[]): HerdrRefreshPerfOptions {
         if (v) options.iterations = Number(v);
         break;
       }
+      case '--query-set': {
+        const v = readValue(i);
+        if (!v) {
+          throw new Error(`--query-set requires a value: ${WORKLIST_QUERY_SET_NAMES.join(', ')}`);
+        }
+        options.querySet = parseWorklistQuerySet(v);
+        i += 1;
+        break;
+      }
+      case '--fail-if-unavailable':
+        options.failIfUnavailable = true;
+        break;
       case '--keep':
         options.keep = true;
         break;
@@ -235,6 +281,7 @@ export async function runBenchmark(argv: string[] = process.argv): Promise<Herdr
   const savedSpawnFile = process.env.WL_SPAWN_COUNT_FILE;
 
   let spawnCount = 0;
+  let consolidatedFailures = 0;
 
   try {
     const { worklogDir, expandedParentIds } = seedWorklog(rootDir, options);
@@ -255,6 +302,27 @@ export async function runBenchmark(argv: string[] = process.argv): Promise<Herdr
     }) as any);
 
     const refresh = async (): Promise<void> => {
+      if (options.querySet === 'consolidated') {
+        // One `wl worklist --json` read per refresh tick (the vector lives in
+        // bench/worklist-query-sets.ts). The command lands in
+        // WL-0MVI0HX58009JJRF; until then the invocation fails fast and is
+        // reported as "not available yet" instead of aborting the harness
+        // (C1 plumbing). The exec seam counts the spawn exactly as the legacy
+        // path's fetcher spawns are counted.
+        const exec = getExecFileAsync();
+        const args = buildWlArgs([...CONSOLIDATED_WORKLIST_QUERY]);
+        try {
+          await exec('wl', args as any, {
+            maxBuffer: 8 * 1024 * 1024,
+            timeout: 60_000,
+            shell: false,
+          } as any);
+        } catch {
+          consolidatedFailures += 1;
+        }
+        return;
+      }
+
       // Mirror the real default-view data path (worklist.doRefresh): the item
       // fetch, the batched expanded-children read, the review-queue query and
       // the actionable count all run CONCURRENTLY, and the children/review/
@@ -328,6 +396,9 @@ export async function runBenchmark(argv: string[] = process.argv): Promise<Herdr
     const warmMs = median(warmRuns);
     const coldMs = median(coldRuns);
 
+    const available =
+      options.querySet === 'legacy' || consolidatedFailures === 0;
+
     return {
       itemCount: options.items,
       expandedParents: expandedParentIds.length,
@@ -340,6 +411,12 @@ export async function runBenchmark(argv: string[] = process.argv): Promise<Herdr
       warmSpawns,
       coldReadWorkSpawns,
       warmCacheHitSpawns,
+      querySet: options.querySet,
+      queriesPerRefresh: worklistQueriesFor(options.querySet).length,
+      available,
+      diagnostic: available
+        ? null
+        : 'consolidated invocation `wl worklist --json` is not available in this build yet (implemented by WL-0MVI0HX58009JJRF); the single-spawn refresh path could not run. Re-run with --query-set legacy for a comparable measurement.',
       targetMs: TARGET_MS,
       withinTarget: coldMs <= TARGET_MS,
       dbPath: path.join(worklogDir, 'worklog.db'),
@@ -370,6 +447,9 @@ async function main(): Promise<void> {
 
   if (options.json) {
     console.log(JSON.stringify({ ...summary, timestamp: new Date().toISOString() }, null, 2));
+    if (options.querySet === 'consolidated' && !summary.available && options.failIfUnavailable) {
+      process.exitCode = 1;
+    }
     return;
   }
 
@@ -378,13 +458,20 @@ async function main(): Promise<void> {
   console.log('========================================\n');
   console.log(`  dataset:            ${summary.itemCount} items, ${summary.expandedParents} expanded parents x ${summary.childrenPerParent} children`);
   console.log(`  browseItemCount:    ${summary.browseCount}`);
-  console.log(`  iterations:         ${summary.iterations}`);
+  console.log(`  query set:          ${summary.querySet} (${summary.queriesPerRefresh} invocation(s)/refresh)`);
+  if (options.querySet === 'consolidated' && !summary.available) {
+    console.log(`  consolidated read:  UNAVAILABLE — ${summary.diagnostic}`);
+  }
   console.log(`  warm refresh:       ${summary.warmMs.toFixed(1)} ms (${summary.warmSpawns} wl spawns, ${summary.warmCacheHitSpawns} cache hits)`);
   console.log(`  cold refresh:       ${summary.coldMs.toFixed(1)} ms (${summary.coldSpawns} wl spawns, ${summary.coldReadWorkSpawns} read-work)`);
   console.log(`  target:             ${summary.targetMs} ms`);
   console.log(`  within target:      ${summary.withinTarget ? 'yes' : 'no (regression guard: spawn count)'}`);
   console.log(`  db:                 ${summary.dbPath}`);
   console.log('');
+
+  if (options.querySet === 'consolidated' && !summary.available && options.failIfUnavailable) {
+    process.exitCode = 1;
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

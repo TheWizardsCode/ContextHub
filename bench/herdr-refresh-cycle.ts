@@ -16,10 +16,25 @@
  *   - `wl list --status blocked --root-only --json`
  *   - `wl next -n 20 --json` (the browse feed)
  *
+ * Since WL-0MVI0HH740065Z2T the harness accepts `--query-set legacy|consolidated`
+ * (default `legacy`): `legacy` is the five-query set above (byte-identical to
+ * F10, so the recorded numbers remain comparable), while `consolidated` runs
+ * one `wl worklist --json` read per tick. The CLI vector for each set lives in
+ * one place (`bench/worklist-query-sets.ts`) and is shared with the perf
+ * harness and the tests — measured numbers for the two sets can therefore be
+ * compared via `computeReduction(...)` against the F10-style legacy baseline
+ * (parent AC3: ≤ 0.4× CPU, ideally ~5× fewer spawns).
+ *
+ * `wl worklist` itself lands in WL-0MVI0HX58009JJRF, so in C1 the
+ * `consolidated` path is plumbing only: when the invocation is absent the
+ * harness reports a clear "not available yet" diagnostic and exits 0, and
+ * only exits non-zero when `--fail-if-unavailable` is passed explicitly.
+ *
  * Usage (see the F10 work item for the recorded command lines):
  *
  *   npm run benchmark:herdr-refresh -- --json
  *   npm run benchmark:herdr-refresh -- --json --cli /path/to/dist/cli.js
+ *   npm run benchmark:herdr-refresh -- --json --query-set consolidated
  *
  * `--cli` lets the same harness measure a *different* build (e.g. the pre-F4
  * worktree) so the before/after numbers describe the same workload on the same
@@ -31,19 +46,11 @@ import { spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { readSpawnRecords, type SpawnRecord } from '../src/spawn-counter.js';
+import { parseWorklistQuerySet, worklistQueriesFor, WORKLIST_QUERY_SET_NAMES, type WorklistQuerySet } from './worklist-query-sets.js';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-
-/** The herdr refresh query set (see packages/herdr/src/fetcher.ts). */
-const QUERIES: string[][] = [
-  ['list', '--priority', 'critical', '--status', 'open,in-progress,blocked,completed', '--json'],
-  ['list', '--status', 'completed,in-progress', '--stage', 'in_review', '--root-only', '--json'],
-  ['list', '--status', 'in-progress', '--root-only', '--json'],
-  ['list', '--status', 'blocked', '--root-only', '--json'],
-  ['next', '-n', '20', '--json'],
-];
 
 interface Options {
   cli: string;
@@ -53,9 +60,16 @@ interface Options {
   items: number;
   json: boolean;
   keep: boolean;
+  querySet: WorklistQuerySet;
+  /** Fail (exit 1) when the selected query set's invocation is unavailable. */
+  failIfUnavailable: boolean;
 }
 
-function parseOptions(argv: string[]): Options {
+/**
+ * Parse harness options. Exported so the bench tests can pin the `--query-set`
+ * selector plumbing without spawning the (slow) benchmark itself.
+ */
+export function parseOptions(argv: string[]): Options {
   const options: Options = {
     cli: path.join(repoRoot, 'dist', 'cli.js'),
     panes: 4,
@@ -64,6 +78,8 @@ function parseOptions(argv: string[]): Options {
     items: 30,
     json: false,
     keep: false,
+    querySet: 'legacy',
+    failIfUnavailable: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -83,6 +99,16 @@ function parseOptions(argv: string[]): Options {
     } else if (arg === '--items' && next) {
       options.items = Math.max(0, Number(next));
       i++;
+    } else if (arg === '--query-set') {
+      if (!next || next.startsWith('--')) {
+        throw new Error(
+          `--query-set requires a value: ${WORKLIST_QUERY_SET_NAMES.join(', ')}`
+        );
+      }
+      options.querySet = parseWorklistQuerySet(next);
+      i++;
+    } else if (arg === '--fail-if-unavailable') {
+      options.failIfUnavailable = true;
     } else if (arg === '--json') {
       options.json = true;
     } else if (arg === '--keep') {
@@ -134,11 +160,23 @@ interface TickResult {
   code: number | null;
 }
 
-/** Run the query set once (as one pane refresh). */
-async function runTick(cli: string, cwd: string, env: NodeJS.ProcessEnv): Promise<TickResult[]> {
-  const results: TickResult[] = [];
-  await Promise.all(
-    QUERIES.map(
+/**
+ * Run the selected query set once (as one pane refresh) and collect each
+ * invocation's wall time and exit code.
+ *
+ * NOTE (WL-0MVI0HH740065Z2T): the query results MUST be returned — the
+ * pre-existing implementation resolved a local array it never filled, so
+ * `failures` was always 0 and p95 spawn wall time always null, which would
+ * also hide a consolidated invocation that is not available yet.
+ */
+async function runTick(
+  cli: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv,
+  queries: readonly (readonly string[])[]
+): Promise<TickResult[]> {
+  return Promise.all(
+    queries.map(
       (args) =>
         new Promise<TickResult>((resolve) => {
           const started = process.hrtime.bigint();
@@ -156,7 +194,6 @@ async function runTick(cli: string, cwd: string, env: NodeJS.ProcessEnv): Promis
         })
     )
   );
-  return results;
 }
 
 function percentile(values: number[], p: number): number | null {
@@ -170,11 +207,19 @@ function round(value: number | null, digits = 1): number | null {
 }
 
 async function main(): Promise<void> {
-  const options = parseOptions(process.argv.slice(2));
+  let options: Options;
+  try {
+    options = parseOptions(process.argv.slice(2));
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exitCode = 1;
+    return;
+  }
   if (!fs.existsSync(options.cli)) {
     throw new Error(`CLI not found: ${options.cli} (build the tree first: npm run build)`);
   }
 
+  const queries = worklistQueriesFor(options.querySet);
   const { dir, spawnFile, cacheDir } = createFixture(options.cli, options.items);
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -184,7 +229,8 @@ async function main(): Promise<void> {
   };
 
   // Warm the cache with one full cycle before measuring (steady state).
-  for (let i = 0; i < options.panes; i++) await runTick(options.cli, dir, env);
+  for (let i = 0; i < options.panes; i++)
+    await runTick(options.cli, dir, env, queries);
   fs.rmSync(spawnFile, { force: true });
 
   const started = Date.now();
@@ -196,7 +242,7 @@ async function main(): Promise<void> {
       let ticks = 0;
       while (Date.now() < deadline) {
         const tickStarted = Date.now();
-        results.push(...(await runTick(options.cli, dir, env)));
+        results.push(...(await runTick(options.cli, dir, env, queries)));
         ticks++;
         const elapsed = Date.now() - tickStarted;
         const waitMs = Math.max(0, options.tickSeconds * 1000 - elapsed);
@@ -223,6 +269,20 @@ async function main(): Promise<void> {
     .map((r) => (r.maxRssKb ?? 0) / 1024)
     .filter((value) => value > 0);
 
+  const totalTicks = ticksPerPane.reduce((a, b) => a + b, 0);
+
+  // A consolidated run whose only failure is the still-unimplemented `wl
+  // worklist` invocation is NOT a harness failure: it is a clean "not
+  // available yet" diagnostic (C1 plumbing). It only exits non-zero when
+  // --fail-if-unavailable is passed explicitly.
+  const availability = {
+    available: options.querySet === 'legacy' ? true : failures === 0,
+    diagnostic:
+      options.querySet === 'consolidated' && failures > 0
+        ? 'consolidated invocation `wl worklist --json` is not available in this build yet (implemented by WL-0MVI0HX58009JJRF); one invocation per tick was attempted and failed cleanly. Re-run with --query-set legacy for a comparable measurement.'
+        : null,
+  };
+
   const report = {
     cli: options.cli,
     host: os.hostname(),
@@ -232,11 +292,13 @@ async function main(): Promise<void> {
     cycleSeconds: options.cycleSeconds,
     tickSeconds: options.tickSeconds,
     items: options.items,
+    querySet: options.querySet,
     elapsedSeconds: round(elapsedMs / 1000),
     spawns: records.length,
     spawnsByKind: byKind,
     ticksPerPane,
-    queriesPerTick: QUERIES.length,
+    queriesPerTick: queries.length,
+    spawnsPerRefresh: totalTicks > 0 ? round(records.length / totalTicks) : null,
     cpuSeconds: round(cpuMs / 1000, 2),
     cpuSecondsPerSpawn: records.length > 0 ? round(cpuMs / 1000 / records.length, 3) : null,
     cpuSecondsPerPaneCycle:
@@ -251,6 +313,7 @@ async function main(): Promise<void> {
     p50SpawnWallMs: round(percentile(wallSamples, 50)),
     peakRssMb: rss.length > 0 ? round(Math.max(...rss)) : null,
     failures,
+    ...availability,
   };
 
   if (options.json) {
@@ -259,7 +322,12 @@ async function main(): Promise<void> {
     console.log('Herdr refresh-cycle CPU measurement');
     console.log(`  cli:                  ${report.cli}`);
     console.log(`  panes / cycle:        ${report.panes} / ${report.cycleSeconds}s`);
+    console.log(`  query set:            ${report.querySet} (${report.queriesPerTick} invocation(s)/tick)`);
+    if (!report.available) {
+      console.log(`  consolidated read:    UNAVAILABLE — ${report.diagnostic}`);
+    }
     console.log(`  spawns:               ${report.spawns} ${JSON.stringify(report.spawnsByKind)}`);
+    console.log(`  spawns / refresh:     ${report.spawnsPerRefresh ?? 'n/a'}`);
     console.log(`  CPU-seconds (cycle):  ${report.cpuSeconds}`);
     console.log(`  CPU-seconds / spawn:  ${report.cpuSecondsPerSpawn}`);
     console.log(`  CPU-s / pane refresh: ${report.cpuSecondsPerPaneCycle}`);
@@ -271,7 +339,15 @@ async function main(): Promise<void> {
   if (!options.keep) fs.rmSync(dir, { recursive: true, force: true });
   else console.log(`(kept fixture at ${dir})`);
 
-  if (report.failures > 0) process.exitCode = 1;
+  if (report.failures > 0 && report.available) process.exitCode = 1;
+  else if (!report.available && options.failIfUnavailable) process.exitCode = 1;
 }
 
-await main();
+// Only run when executed directly: tests import the module to pin the option
+// parsing without triggering a full (slow) benchmark run.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
+  void main().catch((err) => {
+    console.error('benchmark failed:', err);
+    process.exitCode = 1;
+  });
+}
