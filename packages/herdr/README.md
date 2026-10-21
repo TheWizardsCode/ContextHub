@@ -2302,11 +2302,29 @@ This plugin only **reads** the marker; writing/clearing it is the ship release p
 npx tsx packages/herdr/src/start.ts
 
 # Run tests
+#
+# The herdr package suite is a SEPARATE, opt-in gate — it is not part of the
+# canonical full suite (`tests/cli` + `tests/unit`), by producer decision on
+# WL-0MVFZVIA50062TJ8. Run it through the sanctioned test-skill runner so the
+# run is cache-recorded and visible to the audit; an ad-hoc `npx vitest` run
+# is invisible to the audit.
+python3 <test-skill>/scripts/run_tests.py --type herdr --json    # types.herdr
+python3 <test-skill>/scripts/run_tests.py --group herdr --json   # groups.herdr
+
+# Other plugin/pane tests (not covered by the herdr profile)
 npx vitest run tests/herdr/ tests/unit/start-launcher.test.ts
 
 # Build TypeScript (compiles packages/shared first, then the plugin)
 cd packages/herdr && npm run build
 ```
+
+The `herdr` type is defined in `.pi/skills_extensions/test/extension.json`, and
+the `herdr` group (with `paths: ["packages/herdr/**"]`) in
+`.pi/test-config.json`. Both resolve to
+`npm --silent test -- packages/herdr/src`, and a change under
+`packages/herdr/**` makes `implement.py finish` auto-select the group. See
+[Test gates](../../docs/dev/test-suite-baseline.md#test-gates) for which suites
+each gate runs and why the herdr suite stays out of the canonical full suite.
 
 ## Troubleshooting
 

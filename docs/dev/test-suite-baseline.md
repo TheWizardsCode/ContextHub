@@ -10,6 +10,83 @@ Record the pre-change baseline (test file count and suite runtime) for the
 legacy `test/` vs `tests/` deduplication epic, so the post-change child
 (`WL-0MV4V0IF9008214R`) can report a meaningful delta.
 
+## Test gates
+
+**Canonical gate reference.** Added by WL-0MVGJ4WSS005BMSI (child:
+WL-0MVH75NY3002TTX9). This section states which suites each gate runs and how
+to run the herdr package suite. It is shared with **WL-0MVG4FF9200346NR**
+(root-level `tests/*.test.ts` coverage): extend this section rather than
+adding a second one.
+
+### What each gate runs
+
+| Gate | Where it runs | Scope | Suites |
+|---|---|---|---|
+| Implement finish | `implement.py finish` (development time) | changed | Named group selected from the changed files (`groups` in `.pi/test-config.json`); otherwise the affected test files; falls back to the full canonical suite when nothing narrower is selectable |
+| Dev-push | `pre-push` hook (when installed) | full | The full canonical suite (`suiteCommands`) |
+| Ship release | `dev` → `main` promotion | full | The full canonical suite, re-run on the merged tree |
+| Audit (F3) | audit skill, on a cache miss | full | The full canonical suite, read from the per-repo test cache |
+
+The **canonical full suite** is declared in `.pi/test-config.json`
+(`suiteCommands`) and is unchanged:
+
+```bash
+npm --silent test -- tests/cli
+npm --silent test -- tests/unit
+```
+
+> **This repository's `pre-push` hook does not run the test suite today** — it
+> enforces branch policy, the context budget and `wl sync` only. Until it
+> does, the canonical suite is enforced at development time by
+> `implement.py finish` (which falls back to full scope for `.pi/`-only
+> changes) and by the `ship` release gate at release time. This is a
+> pre-existing gap tracked separately; do not treat a successful push as
+> full-suite evidence.
+
+### The herdr package suite is a separate, opt-in gate
+
+The `packages/herdr/src` suite (107 files / ~3,500 tests) is **not** part of
+the canonical full suite — a producer decision recorded on
+**WL-0MVFZVIA50062TJ8** ("the herdr tests will not be run as part of the
+canonical full suite"). It is a sanctioned, cache-recorded profile instead:
+
+```bash
+# by type — types.herdr in .pi/skills_extensions/test/extension.json
+python3 <test-skill>/scripts/run_tests.py --type herdr --json
+
+# by named group — groups.herdr in .pi/test-config.json
+python3 <test-skill>/scripts/run_tests.py --group herdr --json
+```
+
+Both resolve to `npm --silent test -- packages/herdr/src`. Prefer them over an
+ad-hoc `npx vitest run packages/herdr/src`: only the test skill's runner
+records the run in the per-repo cache, so only runner evidence is visible to
+the audit.
+
+- **`groups.herdr` also drives changed-scope selection.** A change under
+  `packages/herdr/**` makes `implement.py finish` auto-select the `herdr`
+  group (paths spec `packages/herdr/**`).
+- **Runtime (re-measured 2026-10-21):** ~67 s cold on a 16-core shared host
+  at load average 4.8–12.2 (load-dominated). WL-0MVFE1IRB0004X1U measured
+  ~130 s on an idle host. Budget a couple of minutes, not tens of minutes.
+
+### Type-map contract
+
+`.pi/skills_extensions/test/extension.json` defines only `herdr`. A minimum
+type it omits — `--type unit`, `--type smoke` — **fails with a loud
+diagnostic naming the file**; it is never silently substituted with the full
+suite. `--type full` still resolves from `suiteCommands`, so a bare
+`run_tests.py` invocation keeps working.
+
+### Cache evidence scope
+
+Only a `--type full` run at `scope=full` counts as full-suite evidence for the
+audit skill. `--type herdr` and `--group herdr` runs use independent cache
+keys (`herdr`, `group:herdr`): they are recorded and queryable, but they
+**never satisfy a "full test suite passes" AC**. Auditing a herdr-only change
+still needs operator attestation (`--green-run HEAD`) or a herdr-aware audit
+follow-up (not implemented).
+
 ## Test file count (baseline)
 
 Tracked test files matching the vitest include pattern:
