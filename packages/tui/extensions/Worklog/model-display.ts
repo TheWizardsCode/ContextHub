@@ -146,7 +146,8 @@ function resolveSelectedModel(model: { provider?: string; id: string }): string 
  *
  * The resolved provider/model can be read via `getResolvedModel()`.
  * When no response has been received yet but a model is selected,
- * `getSelectedModel()` returns the model alias (for `(pending)` display).
+ * `getSelectedModel()` returns the model alias (rendered as
+ * `{alias} → (resolving)` in the footer).
  * The Pi model alias is not exposed in the resolved model value.
  *
  * @param pi - The ExtensionAPI instance

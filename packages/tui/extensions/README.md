@@ -91,7 +91,7 @@ The footer uses a **three-section layout**: **left** (status + elapsed time sinc
 | **Total session time** | Total wall-clock session duration (e.g., `Total: 5m 42s`) — shown in the center section |
 | **Token usage** | Input/output token counts (e.g., `↑1.2k ↓4.5k`) |
 | **Context usage** | Percentage of context window (e.g., `76.8%/128k`) |
-| **Model ID** | Currently active model (e.g., `gpt-4`). While a model alias is selected but no resolved provider/model has been received yet, shows `{alias} → (resolving)` (e.g., `code → (resolving)`). |
+| **Model ID** | Currently active model (e.g., `gpt-4`). While a model alias is selected but no resolved provider/model has been received yet, shows `{alias} → (resolving)` (e.g., `code → (resolving)`). When a model switch occurs mid-session, the footer shows `<alias> → (resolving)` until a fresh proxy response arrives; for non-proxy providers (e.g. `deepseek`, `opencode`) the footer shows the model's own `provider/id` immediately (e.g. `plan → deepseek/deepseek-v4-pro`). |
 
 ### Colour Coding
 
@@ -133,12 +133,22 @@ dimmed text. The display varies depending on available state:
 | State | Example |
 |-------|---------|
 | Model alias selected, resolved provider/model received | `code → openai/gpt-4` |
-| Model alias selected, waiting for resolution | `code → (resolving)` |
+| Model alias selected, waiting for resolution (initial or after mid-session switch) | `code → (resolving)` |
+| Non-proxy provider selected (no `X-Resolved-Model` header can arrive) | `plan → deepseek/deepseek-v4-pro` |
 | No model alias, resolved provider/model available | `openai/gpt-4` |
 | No model info at all | `—` |
 
 When an initial prompt preview is available, it is shown after the model
 info separated by a vertical bar (e.g., `code → openai/gpt-4  │  Fix the bug`).
+
+When a `model_select` fires mid-session (via `/model` or model cycling) the
+previously resolved provider/model is immediately invalidated, so the footer
+shows `<newAlias> → (resolving)` until a fresh `X-Resolved-Model` header
+arrives from a proxy-routed response. For a **non-proxy** provider (anything
+that is not `Local Proxy` in `~/.pi/agent/models.json`) the header can never
+arrive, so the footer displays the selected model's own `provider/id` right
+away (e.g. `plan → deepseek/deepseek-v4-pro`) instead of remaining in the
+`(resolving)` state indefinitely (WL-0MVGU7H24009G8II).
 
 During **idle** or **tool execution**, the last-chunk timer is not shown.
 
@@ -153,7 +163,7 @@ The extension subscribes to the following Pi lifecycle events to update state:
 | `message_end` (assistant) | Set status to idle, update response time |
 | `tool_execution_start` | Set status to tool with tool name |
 | `tool_execution_end` | Reset status to idle |
-| `model_select` | Refresh footer display |
+| `model_select` | Invalidate the cached resolved provider/model and derive the `provider/id` fallback for non-proxy providers; fires `onModelChange` to re-render the footer. |
 | `session_start` | Reset counters, initialize footer |
 | `session_shutdown` | Clean up ticker interval |
 
