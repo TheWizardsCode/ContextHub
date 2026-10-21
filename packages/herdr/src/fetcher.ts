@@ -812,6 +812,12 @@ function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
 }
 
 // ── Consolidated worklist bundle (WL-0MVI0IT4S0070G78) ────────────────
+//
+// One `wl worklist --json` read replaces the five per-subset spawns a
+// default-view refresh used to issue (four mandatory `wl list` queries + the
+// `wl next` browse feed). See `docs/dev/herdr-event-driven-refresh.md`
+// (§ "Cold-refresh cost") for the design rationale and the measured CPU
+// before/after; the command's payload contract is documented in `CLI.md`.
 
 /**
  * The five subsets returned by `wl worklist --json` (WL-0MVI0HX58009JJRF),

@@ -81,16 +81,79 @@ The default-view refresh now spawns far fewer `wl` processes:
   cost is bounded at one open per refresh. Scope-less callers (e.g. the
   startup actionable-count load) still open a fresh per-call connection, and
   every in-process read still fails open to the `wl` spawn path unchanged.
-- **Concurrent base + mandatory** — the base `wl next` and the mandatory
-  subsets run under `Promise.all`; the review-queue query and the mandatory
-  `in_review` subset share an identical argument vector, so the in-flight fetch
-  memo (`WL-0MSGAEPOJ002824S`) deduplicates them into one spawn.
+- **One consolidated read (WL-0MVGYLU0S004WZUS)** — the default-view tick now
+  issues a single `wl worklist --json` (WL-0MVI0HX58009JJRF) instead of the
+  five separate reads it used to fan out to (four mandatory `wl list` subsets +
+  the `wl next` browse feed). The command opens the database once and returns
+  `critical`, `reviewQueue`, `inProgressRoots`, `blockedRoots` and `browse` in
+  one payload, built from the *same* query and selection code the individual
+  commands use (no forked filters, no forked ordering; the browse feed comes
+  from the shared selection module consumed by `wl next` too).
+  - **One read-cache entry** — `worklist` is a cacheable read
+    (WL-0MVI0IS6Y0028KTO): the payload is keyed by `(worklog-dir, argv)` and
+    invalidated by the same monotonic state counter as the other read commands,
+    so repeat ticks across panes are cache hits rather than DB work.
+  - **Derived review-queue state** — `fetchReviewQueueState()` derives the
+    banner state from the same bundle (in flight or freshly settled) instead of
+    spawning the review query again (`doRefresh` starts the item read first so
+    there is always a bundle to derive from — WL-0MVI0IW8V007DFM6).
+  - **Mandatory guarantees preserved** — critical, review-queue, in-progress
+    root and blocked-root items are always included regardless of the browse
+    window; `selectWorkItems` → `regroupWorkItems` runs unchanged, and items
+    shared with a mandatory subset keep the richer `wl list` audit fields
+    (`auditResult`, `auditedAt`, `fingerprint`, `currentFingerprint`), so the
+    audit-bucket sort classifies them exactly as before.
+  - **Fail-open fallback** — an older `wl` without the command, a non-zero exit,
+    a malformed payload or a missing subset key falls back to the per-subset
+    spawn path with unchanged behaviour. A *hung* `wl` is deliberately NOT
+    retried: the timeout propagates so the refresh stays bounded instead of
+    paying the 60 s bound again per subset.
+  - **Filtered views unchanged** — the stage-filtered, priority-filtered and
+    recent-dispatches views keep their existing reads; only the unfiltered
+    default view is consolidated.
+- **Cross-subset consistency** — the five subsets are read through one
+  connection, so a single refresh reflects one stable view of the worklog.
+  Residual risk: a write landing *between* two of those in-process queries
+  (rather than before/after the read) can still make two subsets disagree for
+  one tick — the same eventual-consistency window the previous five-spawn
+  implementation had, now bounded to one process instead of five.
 - **One read for all expanded parents** — `fetchChildrenForItems()` resolves
   every expanded parent in one in-process query; per-parent CLI calls remain
   only as the fallback.
 
 Measured on the benchmark harness (≥ 1000 items, ≥ 20 expanded parents), the
 cold default-view refresh dropped from **25 → 3** `wl` spawns (~88 %).
+
+#### Measured: five spawns → one (WL-0MVI0IX6E000N6IZ)
+
+Measured on one host (4 panes, 30 s cycle, 5 s tick, 20 seeded items) with the
+same build, comparing the two query sets on the F10 harness
+(`bench/herdr-refresh-cycle.ts`):
+
+| Query set | Spawns / refresh | Spawns / cycle | CPU-s / cycle | p95 spawn wall |
+| --- | --- | --- | --- | --- |
+| `legacy` (four `wl list` subsets + `wl next`) | 5 | 120 | 75.68 | 1227 ms |
+| `consolidated` (`wl worklist --json`) | **1** | **24** | **11.89** | **568 ms** |
+| pre-F4 baseline (recorded on F10) | 5 | 120 | 159.44 | — |
+| F10 target (≤ 0.4× pre-F4) | — | — | ≤ 63.78 | — |
+
+- **0.157×** the same-host legacy CPU cost and **0.075×** the pre-F4 baseline —
+  comfortably below the ≤ 0.4× target.
+- **5 → 1 spawn per refresh tick** (80 % fewer process startups; 120 → 24 per
+  30 s cycle). All measured spawns were cache hits: one write-free read
+  populates the shared cache entry that every pane then reuses.
+- Single refresh (`bench/herdr-refresh-perf.ts --json --query-set consolidated`,
+  1000 items / 20 expanded parents): **1 spawn**, cold **893 ms**, warm
+  **445 ms** (legacy: 5 spawns, cold 1188 ms, warm 629 ms), both within the
+  2 s target.
+
+Reproduce:
+
+```sh
+npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5 --query-set consolidated
+npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5 --query-set legacy
+npx tsx bench/herdr-refresh-perf.ts --json --query-set consolidated
+```
 
 ## Verification
 

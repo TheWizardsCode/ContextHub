@@ -23,6 +23,10 @@
  *     mandatory subsets are unbounded by that count (critical/blocked/review
  *     items are always shown, whatever the browse window).
  *
+ * Design rationale, measured before/after numbers and the reproduction
+ * commands live in `docs/dev/herdr-event-driven-refresh.md` (§ "Cold-refresh
+ * cost"); the CLI reference is in `CLI.md` (§ `worklist`).
+ *
  * Payload contract (stable — the Herdr fetcher caches it verbatim and parses it
  * directly, WL-0MVI0IT4S0070G78):
  *

@@ -99,7 +99,25 @@ It reports total `cpuSeconds` per cycle, `spawns` by kind, `cpuSecondsPerSpawn`,
 p95 per-spawn wall time and peak RSS. Reference numbers (4 panes, 30 s cycle,
 120 spawns) are recorded on the epic work item — the verdict is that per-spawn
 CPU has hit the process-startup floor, so further gains must come from fewer
-spawns per refresh tick (tracked separately).
+spawns per refresh tick.
+
+Since the consolidated read landed (WL-0MVGYLU0S004WZUS) the harness accepts
+`--query-set legacy|consolidated`, so the two workloads can be measured on the
+same host and build:
+
+```sh
+# the five-query workload (byte-identical to the recorded F10 baseline)
+npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5 --query-set legacy
+# the shipped one-read workload: one `wl worklist --json` per tick
+npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5 --query-set consolidated
+```
+
+Measured on one host/build (4 panes, 30 s cycle, 20 items): **5 → 1 spawn per
+refresh** (120 → 24 per cycle), **75.68 → 11.89 CPU-s per cycle** (0.157×), p95
+per-spawn wall time 1228 → 568 ms. See
+[`docs/dev/herdr-event-driven-refresh.md`](docs/dev/herdr-event-driven-refresh.md#3-cold-refresh-cost-fetcherts)
+for the full table and the comparison against the pre-F4 baseline (159.44 CPU-s)
+and the F10 target (≤ 63.78 CPU-s).
 
 ### GitHub throttling (environment variables)
 
@@ -690,6 +708,62 @@ wl show WL-ABC          # tolerant: resolves if unique substring
 wl --json show WL-ABC   # tolerant JSON output
 wl show --exact WL-ABC  # strict: fails if not an exact match
 ```
+
+### `worklist` [options]
+
+One consolidated read of every subset a worklist UI needs — the response a
+Herdr pane otherwise assembles from five separate `wl` processes per refresh
+tick. It opens the database **once** and returns the critical, review-queue,
+in-progress-root, blocked-root and browse-feed subsets in a single JSON
+payload (WL-0MVI0HX58009JJRF, parent WL-0MVGYLU0S004WZUS).
+
+**Pure read.** `worklist` never re-sorts and never writes, so the payload is a
+deterministic function of `(DB state, argv)` and is served from the shared
+read cache as **one** entry (WL-0MVI0IS6Y0028KTO). It is also classified as a
+pure read by the CLI write-invalidation hook, so it never bumps the cache state
+counter.
+
+```sh
+wl worklist --json                 # 20 browse-feed items (default)
+wl worklist --json -n 40           # a wider browse window
+wl --worklog-dir /proj/.worklog worklist --json
+```
+
+Options:
+
+- `-n, --number <n>` — browse-feed window size (default `20`). Bounds **only**
+  the `browse` subset; the four mandatory subsets are always complete.
+- `--prefix <prefix>` — override the default work-item prefix.
+
+Payload (stable — the Herdr fetcher caches it verbatim and parses it directly,
+WL-0MVI0IT4S0070G78):
+
+```jsonc
+{
+  "success": true,
+  "worklogDir": "/abs/path/.worklog",   // resolved worklog dir (honours --worklog-dir)
+  "requestedCount": 20,                 // the -n value that was used
+  "subsets": {
+    // priority critical, status open|in-progress|blocked|completed, ALL parent levels
+    "critical":        [ /* WorkItem[] */ ],
+    // status completed|in-progress, stage in_review, root-only
+    "reviewQueue":     [ /* WorkItem[] */ ],
+    // status in-progress, root-only
+    "inProgressRoots": [ /* WorkItem[] */ ],
+    // status blocked, root-only
+    "blockedRoots":    [ /* WorkItem[] */ ],
+    // identical to `wl next -n <count> --include-in-progress --include-blocked --no-re-sort --json`
+    "browse":          [ /* { workItem, reason, group?, groupLabel? }[] */ ]
+  }
+}
+```
+
+Every subset key is always present — an empty array, never omitted. Items carry
+the same enrichment `wl list --json` emits (`auditResult`, `auditedAt`,
+`fingerprint`, `currentFingerprint`, `childCount`), and the list subsets use the
+same filter expressions and hierarchy ordering as the equivalent `wl list`
+invocations. `browse` is item-for-item and order-for-order identical to
+`wl next` with the same browse window and `--no-re-sort`.
 
 ### `next` [options]
 
