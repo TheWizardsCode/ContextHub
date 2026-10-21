@@ -18,7 +18,7 @@ only tighten it — no regression can slip through between items.
 |---|---|
 | `bench/startup-import-graph.ts` | AST walker for the transitive **static, runtime** import graph of `src/cli.ts` (type-only and dynamic imports excluded; unresolved relative imports are a hard error). |
 | `bench/startup-budget.ts` | Budget schema/read/write, the import ratchet, and the host-load–tolerant regression policy. |
-| `bench/wl-startup-perf.ts` | Benchmark: ≥ 10 warm runs per scenario, p95 wall/CPU/RSS, bare-node floor, `--json`, `--target src\|dist`, `--update-budget`. |
+| `bench/wl-startup-perf.ts` | Benchmark: ≥ 10 warm runs per scenario, p95 wall/CPU/RSS, bare-node floor, `--json`, `--target src\|dist\|auto`, `--update-budget`. |
 | `bench/startup-import-budget.json` | The checked-in budget: import graph, per-target baselines, AC1 targets and headroom policy. |
 | `tests/cli/startup-import-budget.test.ts` | Ratchet (fails on an added module), budget integrity, policy unit tests, and a measured regression test in the default suite. |
 
@@ -61,6 +61,37 @@ Additional options: `--warmup N` (max warmup attempts before sampling),
 `--bare-node-runs N`, `--worklog-root <dir>` (benchmark a real worklog instead
 of the throwaway 3-item fixture), `--keep` (keep the temp fixture/cache),
 `--json`.
+
+### Build-freshness requirement (`--target auto`)
+
+`--target auto` (also used by `tests/cli/entry-point-split.test.ts`) selects
+the built `dist/cli.js` **only when that build is at least as new as every
+file under `src/`**; otherwise it falls back to the tsx `src/cli.ts` entry
+(`resolveStartupTarget` in `bench/wl-startup-perf.ts`).
+
+This guard exists because a stale `dist/` silently makes the suite test *old*
+code: `entry-point-split` asserts the `--version` spawn record added to
+`src/cli.ts`, and a build predating that change emits no `version` record — the
+test then fails with `expected +0 to be 1` depending only on whether the
+checkout happened to be rebuilt (`dist/` is gitignored, and neither `npm test`
+nor `git pull` rebuilds it).
+
+Consequences for operators and CI:
+
+- **Rebuild after pulling source changes** (`npm run build`) before trusting a
+  `dist`-targeted result. A stale build does not fail silently: `auto` switches
+  to `src`, while an explicit `--target dist` still runs the stale build (it is
+  an explicit request) — verify timestamps with `isDistFresh(repoRoot)` when in
+  doubt.
+- **The generated `src/version.ts` is excluded** from the comparison: `npm run
+  build` runs `tsc` and then `scripts/generate-version.cjs` rewrites
+  `src/version.ts`, so counting it would make *every* fresh build look stale and
+  `auto` would stop covering `dist/` entirely.
+- **No build present** (`dist/cli.js` missing) → `auto` uses `src`, which is
+  always correct and always available; `--target dist` throws an actionable
+  "build the CLI first" error.
+
+The contracts are pinned by `tests/unit/startup-target-freshness.test.ts`.
 
 The read scenarios are warmed until the first cache hit and every counted
 sample must report the expected spawn kind, so the numbers describe the served

@@ -169,11 +169,24 @@ export function percentile(values: number[], fraction: number): number | null {
 }
 
 /**
+ * Source files the build regenerates or emits itself, excluded from the
+ * freshness comparison.
+ *
+ * `scripts/generate-version.cjs` rewrites `src/version.ts` *after* tsc, and
+ * declaration files are compiler output — comparing against either would make
+ * a freshly built `dist/cli.js` look stale.
+ */
+function isGeneratedSource(fullPath: string): boolean {
+  return path.basename(fullPath) === 'version.ts' || fullPath.endsWith('.d.ts');
+}
+
+/**
  * Newest modification time under `dir` (recursive), or `null` when absent.
  *
- * Used to decide whether a built `dist/` still reflects the current `src/`.
+ * An optional `filterFn` can exclude files from the comparison
+ * (e.g. generated source files that are rewritten during the build).
  */
-function newestMtimeMs(dir: string): number | null {
+function newestMtimeMs(dir: string, filterFn?: (fullPath: string) => boolean): number | null {
   let newest: number | null = null;
   const walk = (current: string): void => {
     let entries: fs.Dirent[];
@@ -188,6 +201,7 @@ function newestMtimeMs(dir: string): number | null {
         walk(full);
         continue;
       }
+      if (filterFn && !filterFn(full)) continue;
       try {
         const stat = fs.statSync(full);
         if (newest === null || stat.mtimeMs > newest) newest = stat.mtimeMs;
@@ -210,6 +224,10 @@ function newestMtimeMs(dir: string): number | null {
  * staleness lets `auto` fall back to `src` instead of asserting against a
  * build that does not reflect the tree. A checkout with no `src/` (e.g. the
  * resolution fixtures) is treated as fresh.
+ *
+ * Generated sources (`src/version.ts`) are excluded: `generate-version.cjs`
+ * rewrites them after tsc, so including them would make *every* fresh build
+ * look stale and `auto` would silently stop covering the built `dist/`.
  */
 export function isDistFresh(repoRoot: string): boolean {
   const distEntry = path.join(repoRoot, 'dist', 'cli.js');
@@ -219,7 +237,7 @@ export function isDistFresh(repoRoot: string): boolean {
   } catch {
     return false;
   }
-  const srcNewest = newestMtimeMs(path.join(repoRoot, 'src'));
+  const srcNewest = newestMtimeMs(path.join(repoRoot, 'src'), (fullPath) => !isGeneratedSource(fullPath));
   if (srcNewest === null) return true;
   return distStat.mtimeMs >= srcNewest;
 }
