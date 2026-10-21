@@ -1,9 +1,11 @@
 /**
  * wl CLI read-cache wiring (F2 — WL-0MSGAEC5N006W5QA).
  *
- * Routes `list`, `next`, `show`, `search`, `status` (JSON mode only) through
- * the shared on-disk read cache so herdr panes / pi-agent polling don't
- * re-query the SQLite DB for byte-identical invocations.
+ * Routes `list`, `next`, `show`, `search`, `status` and the consolidated
+ * `worklist` bundle (JSON mode only) through the shared on-disk read cache so
+ * herdr panes / pi-agent polling don't re-query the SQLite DB for byte-identical
+ * invocations. `worklist` is the highest-value entry: one cached payload covers
+ * every subset a Herdr refresh tick needs (WL-0MVI0IS6Y0028KTO).
  *
  * Fingerprint model (see read-cache.ts): the SQLite files are rewritten by
  * the app on every open/close (`journal_mode = WAL` + schema init touch the
@@ -40,8 +42,14 @@ import { resolveWorklogDir } from './worklog-paths.js';
 import { recordSpawn } from './spawn-counter.js';
 import * as path from 'path';
 
-/** Commands whose JSON output is a deterministic function of (DB state, argv). */
-export const READ_CACHE_COMMANDS: ReadonlySet<string> = new Set(['list', 'next', 'show', 'search', 'status']);
+/**
+ * Commands whose JSON output is a deterministic function of (DB state, argv).
+ *
+ * `worklist` (WL-0MVI0IS6Y0028KTO) is the consolidated bundle read: it is a
+ * pure read (no re-sort, no cache bump), so it is cacheable exactly like the
+ * per-subset commands it replaces.
+ */
+export const READ_CACHE_COMMANDS: ReadonlySet<string> = new Set(['list', 'next', 'show', 'search', 'status', 'worklist']);
 
 /**
  * Read-command flags that make an invocation non-cacheable:
@@ -57,18 +65,19 @@ export function isCacheableReadCommand(command: string): boolean {
 }
 
 /**
- * Pure-read commands that are not (yet) *served* from the read cache.
+ * Pure-read commands that must never be treated as writes, even when the
+ * invocation is not cacheable (non-JSON output, cache disabled).
  *
  * `worklist` (WL-0MVI0HX58009JJRF) is a strictly read-only bundle: it opens the
  * DB once and never writes. The CLI's `preAction` hook bumps the state counter
- * for every command that is not a cacheable read, which would make this pure
- * read look like a write (and needlessly invalidate every cached entry). The
- * cache wiring for the bundle lands in WL-0MVI0IS6Y0028KTO; until then this set
- * keeps the invocation classified as a read.
+ * for every command that is not a cacheable read, which would make a
+ * human-readable `wl worklist` look like a write and needlessly invalidate every
+ * cached entry. Its JSON form is cacheable (it is in `READ_CACHE_COMMANDS`,
+ * WL-0MVI0IS6Y0028KTO); this set keeps the non-JSON form classified as a read.
  */
 export const PURE_READ_COMMANDS: ReadonlySet<string> = new Set(['worklist']);
 
-/** True when the command is read-only even though it is not cached. */
+/** True when the command is read-only even though the invocation is not cached. */
 export function isPureReadCommand(command: string): boolean {
   return PURE_READ_COMMANDS.has(command);
 }

@@ -210,9 +210,10 @@ if (_wantsVersion) {
   }
 
   // ── Read-cache wiring (F2 — WL-0MSGAEC5N006W5QA) ─────────────────────────
-  // Serve repeat JSON read queries (list/next/show/search/status) from the
-  // shared on-disk cache so herdr panes / pi-agent polling don't re-query the
-  // SQLite DB for byte-identical invocations. Env-gated config:
+  // Serve repeat JSON read queries (list/next/show/search/status and the
+  // consolidated `worklist` bundle) from the shared on-disk cache so herdr
+  // panes / pi-agent polling don't re-query the SQLite DB for byte-identical
+  // invocations. Env-gated config:
   //   WL_CACHE_DISABLED=1     — bypass the cache entirely (baseline behaviour)
   //   WL_CACHE_TTL_MS=<n>     — override the TTL safety net (tests/ops)
   //   WL_CACHE_DIR=<path>     — override the cache dir (see read-cache.ts)
