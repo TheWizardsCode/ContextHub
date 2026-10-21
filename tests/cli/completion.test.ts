@@ -15,7 +15,7 @@ const CLI_PATH = resolve(__dirname, '../../dist/cli.js');
 // Known subcommands that should appear in completion scripts
 const KNOWN_COMMANDS = [
   'init', 'status', 'create', 'list', 'show', 'update', 'delete',
-  'export', 'import', 'next', 'in-progress', 'sync', 'github',
+  'export', 'import', 'next', 'worklist', 'in-progress', 'sync', 'github',
   'comment', 'close', 'recent', 'plugins', 'migrate', 'dep',
   're-sort', 'doctor', 'search', 'unlock', 'audit',
   'completion',

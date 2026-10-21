@@ -8,7 +8,7 @@ import type { WorkItem, WorkItemQuery, WorkItemStatus, WorkItemPriority } from '
 import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
 import { getGitRepoRoot } from '@worklog/shared/worklog-paths';
 import { computeContentFingerprint, createGitRunner } from '../audit-fingerprint.js';
-import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, humanFormatProjected, resolveFormat, sortByPriorityAndDate } from './helpers.js';
+import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, humanFormatProjected, resolveFormat, createHierarchyOrderComparator } from './helpers.js';
 import { compareInReviewItems } from './grouping.js';
 
 export default function register(ctx: PluginContext): void {
@@ -146,10 +146,8 @@ export default function register(ctx: PluginContext): void {
       
       // Sort then apply limit so we return the intended order.
       // For filtered `wl list --stage in_review` apply the 6-bucket predicate
-      // (WL-0MSLPM5ZB003TADT) before other tie-breaks.
-      const allowedIds = new Set(items.map(item => item.id));
-      const orderedItems = db.getAllOrderedByHierarchySortIndex().filter(item => allowedIds.has(item.id));
-      const positions = new Map(orderedItems.map((item, index) => [item.id, index]));
+      // (WL-0MSLPM5ZB003TADT) before the shared hierarchy-order fallback.
+      const hierarchyComparator = createHierarchyOrderComparator(db);
       const stageFilter = (options.stage || '').toLowerCase().trim().replace(/-/g, '_');
       const isInReviewList = stageFilter === 'in_review';
       let auditMapForSort: Map<string, { readyToClose: boolean; auditedAt: string | null; fingerprint: string | null }> | null = null;
@@ -187,45 +185,45 @@ export default function register(ctx: PluginContext): void {
         return computed;
       };
 
-      const sortedAll = items.slice().sort((a, b) => {
-        // In-review lists: use compareInReviewItems for full within-section
-        // sorting (priority → bucket → updatedAt → id).  compareInReviewItems
-        // returns 0 when either item is not in_review, so the caller falls
-        // through to the default ordering.
-        if (isInReviewList && auditMapForSort) {
-          const arA = auditMapForSort.get(a.id);
-          const arB = auditMapForSort.get(b.id);
-          const reviewCmp = compareInReviewItems(
-            { id: a.id, stage: a.stage, priority: a.priority, filePaths: [],
-              needsProducerReview: a.needsProducerReview,
-              auditResult: arA ? arA.readyToClose : null,
-              auditedAt: arA ? arA.auditedAt : null,
-              fingerprint: arA ? arA.fingerprint : null,
-              currentFingerprint: currentFingerprintFor(a, arA?.fingerprint ?? null),
-              updatedAt: a.updatedAt,
-            },
-            { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
-              needsProducerReview: b.needsProducerReview,
-              auditResult: arB ? arB.readyToClose : null,
-              auditedAt: arB ? arB.auditedAt : null,
-              fingerprint: arB ? arB.fingerprint : null,
-              currentFingerprint: currentFingerprintFor(b, arB?.fingerprint ?? null),
-              updatedAt: b.updatedAt,
-            },
-          );
-          if (reviewCmp !== 0) return reviewCmp;
-        }
+      // Prepend the 6-bucket sort for in_review lists; the shared
+      // hierarchy-order comparator supplies the fallback (position then
+      // priority/date) identically for every list, so `wl worklist` subsets
+      // match `wl list` ordering (WL-0MVI0HX58009JJRF).
+      const inReviewComparator =
+        isInReviewList && auditMapForSort
+          ? (a: WorkItem, b: WorkItem): number => {
+              const arA = auditMapForSort!.get(a.id);
+              const arB = auditMapForSort!.get(b.id);
+              return compareInReviewItems(
+                { id: a.id, stage: a.stage, priority: a.priority, filePaths: [],
+                  needsProducerReview: a.needsProducerReview,
+                  auditResult: arA ? arA.readyToClose : null,
+                  auditedAt: arA ? arA.auditedAt : null,
+                  fingerprint: arA ? arA.fingerprint : null,
+                  currentFingerprint: currentFingerprintFor(a, arA?.fingerprint ?? null),
+                  updatedAt: a.updatedAt,
+                },
+                { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
+                  needsProducerReview: b.needsProducerReview,
+                  auditResult: arB ? arB.readyToClose : null,
+                  auditedAt: arB ? arB.auditedAt : null,
+                  fingerprint: arB ? arB.fingerprint : null,
+                  currentFingerprint: currentFingerprintFor(b, arB?.fingerprint ?? null),
+                  updatedAt: b.updatedAt,
+                },
+              );
+            }
+          : null;
 
-        const aPos = positions.get(a.id);
-        const bPos = positions.get(b.id);
-        if (aPos === undefined && bPos === undefined) {
-          return sortByPriorityAndDate(a, b);
-        }
-        if (aPos === undefined) return 1;
-        if (bPos === undefined) return -1;
-        if (aPos !== bPos) return aPos - bPos;
-        return sortByPriorityAndDate(a, b);
-      });
+      const sortedAll = inReviewComparator
+        ? items
+            .slice()
+            .sort((a, b) => {
+              const reviewCmp = inReviewComparator(a, b);
+              if (reviewCmp !== 0) return reviewCmp;
+              return hierarchyComparator(a, b);
+            })
+        : items.slice().sort(hierarchyComparator);
       const limited = limit ? sortedAll.slice(0, limit) : sortedAll;
 
       if (utils.isJsonMode()) {

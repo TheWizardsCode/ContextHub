@@ -29,6 +29,7 @@ import {
 import { setWorklogDirOverride } from './worklog-paths.js';
 import {
   shouldCacheReadInvocation,
+  isPureReadCommand,
   type ReadCacheCli,
 } from './read-cache-cli.js';
 
@@ -128,7 +129,13 @@ export async function main({ cache, cacheEnabled }: CliMainOptions): Promise<voi
   program.hook('preAction', (thisCommand, actionCommand) => {
     if (!cacheEnabled) return;
     const command = actionCommand.name();
-    if (shouldCacheReadInvocation(command, process.argv.slice(2))) return;
+    // Cacheable reads never invalidate; pure reads (the consolidated
+    // `worklist` bundle) must not either — they are not writes
+    // (WL-0MVI0HX58009JJRF).
+    if (
+      shouldCacheReadInvocation(command, process.argv.slice(2)) ||
+      isPureReadCommand(command)
+    ) return;
     // `wl doctor cache` maintains the cache directory itself (F8/F9 —
     // WL-0MVFRRGGC001IQK1): bumping the state counter here would create a
     // counter for the current worklog dir just so it can be pruned again.
@@ -193,7 +200,7 @@ export async function main({ cache, cacheEnabled }: CliMainOptions): Promise<voi
     // Build groups and mapping of command name -> group
     const groupsDef: { name: string; names: string[] }[] = [
       { name: 'Issue Management', names: ['create', 'update', 'comment', 'close', 'delete', 'dep', 'reviewed', 'audit'] },
-      { name: 'Status', names: ['in-progress', 'next', 'recent', 'list', 'show', 'search'] },
+      { name: 'Status', names: ['in-progress', 'next', 'worklist', 'recent', 'list', 'show', 'search'] },
       { name: 'Team', names: ['sync', 'github', 'import', 'export'] },
       { name: 'Maintenance', names: ['migrate', 're-sort', 'doctor', 'unlock'] },
       { name: 'Plugins', names: [] },

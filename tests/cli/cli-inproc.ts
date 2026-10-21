@@ -32,6 +32,7 @@ import deleteCommand from '../../src/commands/delete.js';
 import exportCommand from '../../src/commands/export.js';
 import importCommand from '../../src/commands/import.js';
 import nextCommand from '../../src/commands/next.js';
+import worklistCommand from '../../src/commands/worklist.js';
 import inProgressCommand from '../../src/commands/in-progress.js';
 import syncCommand from '../../src/commands/sync.js';
 import githubCommand from '../../src/commands/github.js';
@@ -61,6 +62,7 @@ const builtInCommands = [
   exportCommand,
   importCommand,
   nextCommand,
+  worklistCommand,
   inProgressCommand,
   syncCommand,
   githubCommand,

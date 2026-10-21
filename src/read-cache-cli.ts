@@ -56,6 +56,23 @@ export function isCacheableReadCommand(command: string): boolean {
   return READ_CACHE_COMMANDS.has(command);
 }
 
+/**
+ * Pure-read commands that are not (yet) *served* from the read cache.
+ *
+ * `worklist` (WL-0MVI0HX58009JJRF) is a strictly read-only bundle: it opens the
+ * DB once and never writes. The CLI's `preAction` hook bumps the state counter
+ * for every command that is not a cacheable read, which would make this pure
+ * read look like a write (and needlessly invalidate every cached entry). The
+ * cache wiring for the bundle lands in WL-0MVI0IS6Y0028KTO; until then this set
+ * keeps the invocation classified as a read.
+ */
+export const PURE_READ_COMMANDS: ReadonlySet<string> = new Set(['worklist']);
+
+/** True when the command is read-only even though it is not cached. */
+export function isPureReadCommand(command: string): boolean {
+  return PURE_READ_COMMANDS.has(command);
+}
+
 /** True when the raw argv requests JSON output. */
 export function argvIsJsonMode(argv: string[]): boolean {
   return argv.includes('--json');
