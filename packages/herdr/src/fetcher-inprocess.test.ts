@@ -11,8 +11,10 @@
  *   - `fetchChildrenForItems` reads all expanded parents' children in one
  *     in-process read (no `wl list --parent` spawn), preserving parentId,
  *     depth, childCount and deleted-item exclusion.
- *   - `fetchReviewQueueState` reuses the identical query already issued by
- *     `fetchMandatorySubsets` (one spawn, not two).
+ *   - the default view is served by ONE consolidated `wl worklist` read
+ *     (WL-0MVI0IT4S0070G78): the browse feed and the four mandatory subsets
+ *     arrive together, and `fetchReviewQueueState` derives from that same
+ *     read instead of spawning the review query a second time.
  *   - Any failure to read in-process falls back to the `wl` spawn path, and
  *     an audited child (stored fingerprint) falls back so the CLI's
  *     `currentFingerprint` enrichment is preserved.
@@ -137,6 +139,25 @@ function installExecMock(): void {
   spawns = [];
   setExecFileAsync((async (_bin: string, args: string[]) => {
     spawns.push(args.join(' '));
+    if (args.includes('worklist')) {
+      // The consolidated read (WL-0MVI0IT4S0070G78): one payload with every
+      // subset the default view needs.
+      return {
+        stdout: JSON.stringify({
+          success: true,
+          worklogDir: seeded.worklogDir,
+          requestedCount: 30,
+          subsets: {
+            critical: [],
+            reviewQueue: [],
+            inProgressRoots: [],
+            blockedRoots: [],
+            browse: [{ workItem: { id: 'WL-NEXT', title: 'Next', status: 'open' }, reason: 'next' }],
+          },
+        }),
+        stderr: '',
+      };
+    }
     if (args.includes('next')) {
       return {
         stdout: JSON.stringify({
@@ -214,7 +235,7 @@ describe('in-process default-view reads (WL-0MV5CBQ6L005SPAG)', () => {
     expect(a.find((i) => i.id === seeded.childA2)?.depth).toBe(2);
   });
 
-  it('deduplicates the review-queue query into a single spawn across a consolidated refresh', async () => {
+  it('serves the whole default view from ONE consolidated worklist read', async () => {
     setWorklogDir(seeded.worklogDir);
 
     const [items, children, review, actionable] = await Promise.all([
@@ -229,22 +250,18 @@ describe('in-process default-view reads (WL-0MV5CBQ6L005SPAG)', () => {
     expect(review).toEqual({ count: 0, auditsOutstanding: false });
     expect(actionable).toBe(seeded.actionable);
 
-    // Only `wl next` + the four mandatory-subset `wl list` queries spawn
-    // (critical, in_review review queue, actively-worked in-progress, and
-    // status=blocked root items — WL-0MV6KV22S004NYIU / WL-0MV71WBHB007D8ZE);
-    // the review query is shared with the banner and the count/children reads
-    // are in-process. Exactly one query carries `--stage` (the review subset;
-    // the critical, active and blocked subsets are stage-agnostic).
-    expect(spawns).toHaveLength(5);
-    expect(spawns.some((s) => s.includes('next'))).toBe(true);
-    expect(spawns.some((s) => s.includes('--priority') && s.includes('critical'))).toBe(true);
-    expect(spawns.filter((s) => s.includes('--stage')).length).toBe(1);
+    // ONE `wl worklist` spawn replaces `wl next` + the four mandatory-subset
+    // `wl list` queries (critical, in_review review queue, actively-worked
+    // in-progress, status=blocked roots — WL-0MV6KV22S004NYIU /
+    // WL-0MV71WBHB007D8ZE). The review-queue banner state and the count /
+    // children reads add no spawn: the banner derives from the same bundle
+    // (in flight or freshly settled) and the rest are in-process.
+    expect(spawns).toHaveLength(1);
+    const commandTokens = spawns.flatMap((s) => s.split(' '));
+    expect(commandTokens).toContain('worklist');
+    expect(commandTokens).not.toContain('next');
+    expect(commandTokens).not.toContain('list');
     expect(spawns.some((s) => s.includes('--parent'))).toBe(false);
-    // The actively-worked in-progress subset is fetched explicitly.
-    expect(spawns.some((s) => s.includes('--status') && s.includes('in-progress'))).toBe(true);
-    // The blocked subset is fetched explicitly so a low-ranked blocked item
-    // is never cut by the -n window (WL-0MV71WBHB007D8ZE).
-    expect(spawns.some((s) => s.includes('--status') && s.includes('blocked'))).toBe(true);
   });
 
   it('falls back to spawning wl when no worklog dir is resolved', async () => {

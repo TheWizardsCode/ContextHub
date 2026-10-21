@@ -400,7 +400,7 @@ const CLI_BINARIES = ['wl', 'worklog'];
  * wl CLI read-cache command set (F2). Writes (update/create/sync/…) are
  * NEVER memoized — a deduped write would drop a mutation.
  */
-const MEMOIZABLE_COMMANDS = new Set(['list', 'next', 'show', 'search', 'status']);
+const MEMOIZABLE_COMMANDS = new Set(['list', 'next', 'worklist', 'show', 'search', 'status']);
 
 /** Cap on in-flight memo entries (bounded: entries are removed on settle, so
  * this caps only concurrent racing fetches, which is the dedupe window). */
@@ -430,6 +430,8 @@ function fetchMemoKey(args: string[], includeJson: boolean, dirOverride?: string
  */
 export function clearFetchMemo(): void {
   inflightFetchMemo.clear();
+  lastWorklistBundle = null;
+  inflightWorklistBundle = null;
 }
 
 /**
@@ -663,6 +665,22 @@ function enrichInProcessItems(db: InProcessDb, items: any[]): WorkItem[] {
   });
 }
 
+/**
+ * True when a `wl` spawn error came from the bounded execFile timeout (the
+ * child was killed because it hung) rather than from the CLI rejecting the
+ * invocation. A hung `wl` must not trigger the consolidated-read fail-open
+ * path: retrying with the per-subset spawns would double the hang instead of
+ * surfacing it (WL-0MSJNJXX2001NMHS).
+ */
+function isWlTimeoutError(error: unknown): boolean {
+  const e = error as { killed?: boolean; signal?: string; code?: string; message?: string } | null;
+  if (!e) return false;
+  if (e.killed === true) return true;
+  if (e.signal === 'SIGTERM' || e.signal === 'SIGKILL') return true;
+  if (e.code === 'ETIMEDOUT') return true;
+  return /timed? ?out/i.test(e.message ?? '');
+}
+
 async function runWlInner(
   args: string[],
   includeJson: boolean,
@@ -703,8 +721,11 @@ async function runWlInner(
       const stdout = typeof error?.stdout === 'string' ? error.stdout.trim() : '';
       const message = stderr || stdout || error?.message || String(error);
 
-      // Re-throw with a clean message
-      throw new Error(message);
+      // Re-throw with a clean message, preserving the timeout classification
+      // so callers can distinguish "hung wl" from "wl rejected the command".
+      const wrapped = new Error(message) as Error & { wlTimeout?: boolean };
+      if (isWlTimeoutError(error)) wrapped.wlTimeout = true;
+      throw wrapped;
     }
   }
 
@@ -723,6 +744,10 @@ async function runWl(
   // any in-flight read memo so a read issued after this write spawns fresh.
   if (!MEMOIZABLE_COMMANDS.has(command)) {
     if (inflightFetchMemo.size > 0) inflightFetchMemo.clear();
+    // A write also invalidates the review-queue snapshot derived from a
+    // previously fetched worklist bundle (WL-0MVI0IT4S0070G78).
+    lastWorklistBundle = null;
+    inflightWorklistBundle = null;
     return runWlInner(args, includeJson, timeoutMs, dirOverride);
   }
 
@@ -784,6 +809,188 @@ function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
     }
   }
   return merged;
+}
+
+// ── Consolidated worklist bundle (WL-0MVI0IT4S0070G78) ────────────────
+
+/**
+ * The five subsets returned by `wl worklist --json` (WL-0MVI0HX58009JJRF),
+ * already normalized into {@link WorkItem}s.
+ */
+interface WorklistBundle {
+  critical: WorkItem[];
+  reviewQueue: WorkItem[];
+  inProgressRoots: WorkItem[];
+  blockedRoots: WorkItem[];
+  browse: WorkItem[];
+}
+
+/**
+ * How long a fetched bundle may satisfy {@link fetchReviewQueueState}. The
+ * banner state is refreshed on every tick, so a short window is invisible to
+ * the operator while guaranteeing the concurrent review-state read in a
+ * refresh derives from the SAME read instead of spawning a second `wl`.
+ * Cleared immediately on any write and on a worklog-dir change.
+ */
+const WORKLIST_BUNDLE_SNAPSHOT_TTL_MS = 10_000;
+
+/** Most recent successful bundle read, used only for review-queue state. */
+let lastWorklistBundle: { dirKey: string; at: number; bundle: WorklistBundle } | null = null;
+
+/**
+ * Bundle read currently in flight for the current worklog dir. The
+ * review-queue state read starts concurrently with the item fetch, so it
+ * awaits this instead of spawning a second `wl` for the same subset.
+ */
+let inflightWorklistBundle: { dirKey: string; promise: Promise<WorklistBundle> } | null = null;
+
+/** Identity of the worklog dir a bundle was read from. */
+function worklogDirKey(): string {
+  return _worklogDir ?? '';
+}
+
+/**
+ * Parse a `wl worklist --json` payload, failing loudly (so the caller can
+ * fail open) when the shape is not the documented one: a missing or
+ * non-array subset means the `wl` on PATH is older than the consolidated
+ * command and the per-subset spawn path must take over.
+ */
+function parseWorklistBundle(payload: unknown): WorklistBundle {
+  const subsets = (payload as { subsets?: Record<string, unknown> } | null)?.subsets;
+  if (!subsets || typeof subsets !== 'object') {
+    throw new Error('wl worklist payload has no "subsets" object');
+  }
+  const listSubset = (key: string): WorkItem[] => {
+    const value = subsets[key];
+    if (!Array.isArray(value)) {
+      throw new Error(`wl worklist payload is missing the "${key}" subset`);
+    }
+    return extractItems(value);
+  };
+  const browseRaw = subsets.browse;
+  if (!Array.isArray(browseRaw)) {
+    throw new Error('wl worklist payload is missing the "browse" subset');
+  }
+  return {
+    critical: listSubset('critical'),
+    reviewQueue: listSubset('reviewQueue'),
+    inProgressRoots: listSubset('inProgressRoots'),
+    blockedRoots: listSubset('blockedRoots'),
+    // Browse entries are `{ workItem, reason, group?, groupLabel? }` — the
+    // same shape `wl next -n <count> --json` emits, so `extractItems` applies
+    // the identical normalization/group propagation.
+    browse: browseRaw.length > 0 ? extractItems({ results: browseRaw }) : [],
+  };
+}
+
+/**
+ * Fetch every subset the default view needs in ONE `wl worklist` read.
+ *
+ * `count` bounds only the browse feed (the mandatory subsets are unbounded by
+ * it), mirroring `wl next -n <count> --include-in-progress --include-blocked`
+ * plus the four mandatory `wl list` queries. The command is a pure read: it
+ * never re-sorts, so this adds no write byproduct and the result is cacheable
+ * by the CLI read cache (WL-0MVI0IS6Y0028KTO).
+ */
+async function fetchWorklistBundle(count?: number, timeoutMs?: number): Promise<WorklistBundle> {
+  const args = ['worklist'];
+  if (count !== undefined) {
+    args.push('-n', String(count));
+  }
+  const dirKey = worklogDirKey();
+  const promise = runWl(args, true, timeoutMs).then((output) => {
+    const bundle = parseWorklistBundle(extractJson(output));
+    lastWorklistBundle = { dirKey, at: Date.now(), bundle };
+    return bundle;
+  });
+  inflightWorklistBundle = { dirKey, promise };
+  try {
+    return await promise;
+  } finally {
+    if (inflightWorklistBundle?.promise === promise) {
+      inflightWorklistBundle = null;
+    }
+  }
+}
+
+/**
+ * The bundle read currently in flight for this worklog dir, if any. The
+ * review-queue state read awaits it so a refresh needs only ONE `wl` spawn.
+ */
+function pendingWorklistBundle(): Promise<WorklistBundle> | null {
+  const inflight = inflightWorklistBundle;
+  if (inflight === null) return null;
+  if (inflight.dirKey !== worklogDirKey()) return null;
+  return inflight.promise;
+}
+
+/**
+ * Assemble the default worklist from a consolidated bundle, applying the same
+ * merge/enrich/select/regroup pipeline as the per-subset path:
+ *
+ *  - mandatory subsets (critical, review queue, in-progress roots, blocked
+ *    roots) are always included, whatever the browse window;
+ *  - items shared with a mandatory subset take the richer `wl list`-style
+ *    audit fields (`auditResult`, `auditedAt`, `fingerprint`,
+ *    `currentFingerprint`) so the audit-bucket sort classifies them exactly as
+ *    `wl list` does (WL-0MUWDW0N6003KF6G);
+ *  - the count limits only the remaining "other" items, and the final set is
+ *    regrouped so no duplicate section headings render (WL-0MSAK8YLB0025EGW).
+ */
+function assembleDefaultWorklist(bundle: WorklistBundle, count?: number): WorkItem[] {
+  const items = bundle.browse;
+  if (count === undefined) {
+    // Count-less callers get the base feed unchanged (historical behaviour).
+    return items;
+  }
+
+  const mandatory = mergeUniqueById(
+    bundle.critical,
+    bundle.reviewQueue,
+    bundle.inProgressRoots,
+    bundle.blockedRoots,
+  );
+  const mandatoryById = new Map(mandatory.map((item) => [item.id, item]));
+  const enrichedItems = items.map((item) => {
+    const rich = mandatoryById.get(item.id);
+    if (!rich) return item;
+    return {
+      ...item,
+      auditResult: rich.auditResult,
+      auditedAt: rich.auditedAt,
+      fingerprint: rich.fingerprint,
+      currentFingerprint: rich.currentFingerprint,
+    };
+  });
+  const merged = mergeUniqueById(enrichedItems, mandatory);
+  return regroupWorkItems(selectWorkItems(merged, count));
+}
+
+/**
+ * Derive the review-queue state from a bundle's `reviewQueue` subset: the
+ * root-only in_review items with status `completed`, plus whether any of them
+ * still lacks a current audit. Kept identical to the standalone-query
+ * derivation so the banner is unchanged.
+ */
+function reviewQueueStateFromItems(items: WorkItem[]): ReviewQueueState {
+  const completed = items.filter((item) => item.status === 'completed');
+  const auditsOutstanding = completed.some((item) =>
+    !isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint),
+  );
+  return { count: completed.length, auditsOutstanding };
+}
+
+/**
+ * Review-queue state from a bundle read earlier in this refresh (same worklog
+ * dir, within {@link WORKLIST_BUNDLE_SNAPSHOT_TTL_MS}), or `undefined` when
+ * there is none — the caller then runs the standalone query.
+ */
+function snapshotReviewQueueState(): ReviewQueueState | undefined {
+  const snapshot = lastWorklistBundle;
+  if (snapshot === null) return undefined;
+  if (snapshot.dirKey !== worklogDirKey()) return undefined;
+  if (Date.now() - snapshot.at > WORKLIST_BUNDLE_SNAPSHOT_TTL_MS) return undefined;
+  return reviewQueueStateFromItems(snapshot.bundle.reviewQueue);
 }
 
 /**
@@ -880,6 +1087,24 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
  * below the `-n` window is still shown.
  */
 export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
+  // ── Consolidated read (WL-0MVI0IT4S0070G78) ───────────────────────
+  // One `wl worklist` spawn returns the browse feed AND the four mandatory
+  // subsets, replacing five spawns per refresh tick. Any failure (older `wl`
+  // without the command, non-zero exit, malformed payload, missing subset)
+  // falls through to the per-subset path below with unchanged behaviour.
+  try {
+    // A count-less call must mirror `wl next`'s default window (1 item).
+    const bundle = await fetchWorklistBundle(count === undefined ? 1 : count);
+    return assembleDefaultWorklist(bundle, count);
+  } catch (error) {
+    // A hung `wl` is not "unavailable": propagating the timeout keeps the
+    // refresh latency bounded instead of paying the timeout again per subset.
+    if ((error as { wlTimeout?: boolean } | null)?.wlTimeout === true) {
+      throw error;
+    }
+    // Fail-open: fall back to today's per-subset spawn path.
+  }
+
   const args = ['next'];
   if (count !== undefined) {
     args.push('-n', String(count));
@@ -1202,17 +1427,25 @@ export interface ReviewQueueState {
  * and is never dispatched for audit independently.
  */
 export async function fetchReviewQueueState(): Promise<ReviewQueueState | undefined> {
+  // Derive from the consolidated bundle when one was already read (or is in
+  // flight) in this refresh (WL-0MVI0IT4S0070G78): the bundle's `reviewQueue`
+  // subset is the same query this function used to issue, so the banner needs
+  // no second `wl` spawn on the default view.
+  const pending = pendingWorklistBundle();
+  if (pending !== null) {
+    const bundle = await pending.catch(() => null);
+    if (bundle) return reviewQueueStateFromItems(bundle.reviewQueue);
+  }
+  const fromBundle = snapshotReviewQueueState();
+  if (fromBundle !== undefined) return fromBundle;
+
   try {
     // Identical args to {@link fetchMandatorySubsets}'s review query so the
     // in-flight memo deduplicates the two into ONE spawn when a refresh
     // schedules both concurrently (WL-0MV5CBQ6L005SPAG).
     const output = await runWl(reviewQueueArgs());
     const payload = extractJson(output);
-    const items = extractItems(payload).filter((item) => item.status === 'completed');
-    const auditsOutstanding = items.some((item) =>
-      !isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint),
-    );
-    return { count: items.length, auditsOutstanding };
+    return reviewQueueStateFromItems(extractItems(payload));
   } catch {
     // Fail-closed: a query failure means we cannot determine queue state
     // — the conservative default is to leave the banner state unchanged (AC1).

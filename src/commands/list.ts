@@ -6,8 +6,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { ListOptions } from '../cli-types.js';
 import type { WorkItem, WorkItemQuery, WorkItemStatus, WorkItemPriority } from '../types.js';
 import { pickFields, VALID_FIELDS } from '@worklog/shared/fields';
-import { getGitRepoRoot } from '@worklog/shared/worklog-paths';
-import { computeContentFingerprint, createGitRunner } from '../audit-fingerprint.js';
+import { createListEnricher } from '../list-enrichment.js';
 import { displayItemTree, displayItemTreeWithFormat, humanFormatWorkItem, humanFormatProjected, resolveFormat, createHierarchyOrderComparator } from './helpers.js';
 import { compareInReviewItems } from './grouping.js';
 
@@ -150,70 +149,33 @@ export default function register(ctx: PluginContext): void {
       const hierarchyComparator = createHierarchyOrderComparator(db);
       const stageFilter = (options.stage || '').toLowerCase().trim().replace(/-/g, '_');
       const isInReviewList = stageFilter === 'in_review';
-      let auditMapForSort: Map<string, { readyToClose: boolean; auditedAt: string | null; fingerprint: string | null }> | null = null;
-      if (isInReviewList) {
-        auditMapForSort = new Map();
-        for (const ar of db.getAllAuditResults()) {
-          auditMapForSort.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null, fingerprint: ar.fingerprint ?? null });
-        }
-      }
-      // Canonical content fingerprints (WL-0MUN7QWFP0010EQC). An item that
-      // carries a stored audit fingerprint gets its *current* fingerprint
-      // computed so the shared `isAuditFresh` predicate can use the primary
-      // content gate instead of the fragile 60 s time gate. Computed lazily
-      // and memoised per item id, and only when a stored fingerprint exists
-      // (the gate requires both sides), so items without an audit pay no git
-      // cost. `null` (unresolvable / git unavailable) fails safe to the time
-      // gate.
-      const gitRepoRoot = getGitRepoRoot() ?? process.cwd();
-      const runGit = createGitRunner(gitRepoRoot);
-      const currentFingerprintCache = new Map<string, string | null>();
-      const currentFingerprintFor = (
-        item: WorkItem,
-        storedFingerprint: string | null | undefined,
-      ): string | null => {
-        if (!storedFingerprint) return null;
-        if (currentFingerprintCache.has(item.id)) {
-          return currentFingerprintCache.get(item.id) ?? null;
-        }
-        const computed = computeContentFingerprint({
-          id: item.id,
-          description: item.description ?? '',
-          runGit,
-        });
-        currentFingerprintCache.set(item.id, computed);
-        return computed;
-      };
+      // Shared with `wl worklist` (WL-0MVI0IT4S0070G78): audit verdict plus the
+      // canonical content fingerprints (WL-0MUN7QWFP0010EQC). A stored
+      // fingerprint gets its *current* fingerprint computed so the shared
+      // `isAuditFresh` predicate can use the primary content gate instead of
+      // the fragile 60 s time gate; items without an audit pay no git cost, and
+      // the per-item computation is memoised.
+      const enricher = createListEnricher(db);
 
       // Prepend the 6-bucket sort for in_review lists; the shared
       // hierarchy-order comparator supplies the fallback (position then
       // priority/date) identically for every list, so `wl worklist` subsets
       // match `wl list` ordering (WL-0MVI0HX58009JJRF).
-      const inReviewComparator =
-        isInReviewList && auditMapForSort
-          ? (a: WorkItem, b: WorkItem): number => {
-              const arA = auditMapForSort!.get(a.id);
-              const arB = auditMapForSort!.get(b.id);
-              return compareInReviewItems(
-                { id: a.id, stage: a.stage, priority: a.priority, filePaths: [],
-                  needsProducerReview: a.needsProducerReview,
-                  auditResult: arA ? arA.readyToClose : null,
-                  auditedAt: arA ? arA.auditedAt : null,
-                  fingerprint: arA ? arA.fingerprint : null,
-                  currentFingerprint: currentFingerprintFor(a, arA?.fingerprint ?? null),
-                  updatedAt: a.updatedAt,
-                },
-                { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
-                  needsProducerReview: b.needsProducerReview,
-                  auditResult: arB ? arB.readyToClose : null,
-                  auditedAt: arB ? arB.auditedAt : null,
-                  fingerprint: arB ? arB.fingerprint : null,
-                  currentFingerprint: currentFingerprintFor(b, arB?.fingerprint ?? null),
-                  updatedAt: b.updatedAt,
-                },
-              );
-            }
-          : null;
+      const inReviewComparator = isInReviewList
+        ? (a: WorkItem, b: WorkItem): number =>
+            compareInReviewItems(
+              { id: a.id, stage: a.stage, priority: a.priority, filePaths: [],
+                needsProducerReview: a.needsProducerReview,
+                ...enricher.auditFields(a),
+                updatedAt: a.updatedAt,
+              },
+              { id: b.id, stage: b.stage, priority: b.priority, filePaths: [],
+                needsProducerReview: b.needsProducerReview,
+                ...enricher.auditFields(b),
+                updatedAt: b.updatedAt,
+              },
+            )
+        : null;
 
       const sortedAll = inReviewComparator
         ? items
@@ -227,31 +189,12 @@ export default function register(ctx: PluginContext): void {
       const limited = limit ? sortedAll.slice(0, limit) : sortedAll;
 
       if (utils.isJsonMode()) {
-        // Pre-compute child counts for the full item set so we can enrich
-        // each work item with the number of direct children in O(1) per item
-        // instead of N+1 queries.
-        const childCounts = db.getChildCounts();
-
-        // Enrich each work item with audit result data from the dedicated table.
-        // This is needed so consumers (e.g. Pi TUI extension) can show the
-        // correct audit icon (✅/❌/❓) without an extra round-trip per item.
-        // Build a lookup map from all audit results for efficiency with large lists.
-        const auditMap = new Map<string, { readyToClose: boolean; auditedAt: string | null; fingerprint: string | null }>();
-        const allAudits = db.getAllAuditResults();
-        for (const ar of allAudits) {
-          auditMap.set(ar.workItemId, { readyToClose: ar.readyToClose, auditedAt: ar.auditedAt ?? null, fingerprint: ar.fingerprint ?? null });
-        }
-        const enrichedItems = limited.map(item => {
-          const audit = auditMap.get(item.id);
-          return {
-            ...item,
-            auditResult: audit ? audit.readyToClose : null,
-            auditedAt: audit ? audit.auditedAt : null,
-            fingerprint: audit ? audit.fingerprint : null,
-            currentFingerprint: currentFingerprintFor(item, audit?.fingerprint ?? null),
-            childCount: childCounts.get(item.id) ?? 0,
-          };
-        });
+        // Enrich each work item with the audit verdict, the canonical content
+        // fingerprints and the child count (one audit read + one child-count
+        // query for the whole list). Consumers (e.g. the Pi TUI extension, the
+        // Herdr worklist) rely on this shape for the audit icon (✅/❌/❓) and
+        // the audit-freshness gate without an extra round-trip per item.
+        const enrichedItems = enricher.enrich(limited);
         // Apply --fields projection when requested (id always included).
         // The projected items drop enrichment fields (auditResult, auditedAt,
         // fingerprint, currentFingerprint, childCount) unless explicitly

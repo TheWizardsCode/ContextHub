@@ -46,6 +46,7 @@ import type { PluginContext } from '../plugin-types.js';
 import type { WorkItem, WorkItemQuery } from '../types.js';
 import { resolveWorklogDir } from '../worklog-paths.js';
 import { createHierarchyOrderComparator } from './helpers.js';
+import { createListEnricher } from '../list-enrichment.js';
 import { selectBrowseFeed, type BrowseFeedEntry } from '../worklist-selection.js';
 
 /** Default number of browse-feed items returned (`-n/--number`). */
@@ -125,10 +126,18 @@ export default function register(ctx: PluginContext): void {
       const hierarchyComparator = createHierarchyOrderComparator(db);
       const order = (items: WorkItem[]): WorkItem[] => items.slice().sort(hierarchyComparator);
 
-      const critical = order(db.list(WORKLIST_LIST_SUBSET_QUERIES.critical));
-      const reviewQueue = order(db.list(WORKLIST_LIST_SUBSET_QUERIES.reviewQueue));
-      const inProgressRoots = order(db.list(WORKLIST_LIST_SUBSET_QUERIES.inProgressRoots));
-      const blockedRoots = order(db.list(WORKLIST_LIST_SUBSET_QUERIES.blockedRoots));
+      // Each subset is enriched exactly as `wl list --json` enriches its
+      // items (audit verdict, canonical fingerprints, child count). The Herdr
+      // default worklist prefers that richer representation for audit-bucket
+      // classification, so the bundle must not degrade it
+      // (WL-0MVI0IT4S0070G78). One audit read + one child-count query serve
+      // all four subsets.
+      const enricher = createListEnricher(db);
+
+      const critical = enricher.enrich(order(db.list(WORKLIST_LIST_SUBSET_QUERIES.critical)));
+      const reviewQueue = enricher.enrich(order(db.list(WORKLIST_LIST_SUBSET_QUERIES.reviewQueue)));
+      const inProgressRoots = enricher.enrich(order(db.list(WORKLIST_LIST_SUBSET_QUERIES.inProgressRoots)));
+      const blockedRoots = enricher.enrich(order(db.list(WORKLIST_LIST_SUBSET_QUERIES.blockedRoots)));
 
       // The browse feed is the *same* selection `wl next -n <count>
       // --include-in-progress --include-blocked --no-re-sort` performs, minus
