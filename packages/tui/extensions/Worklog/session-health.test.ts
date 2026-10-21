@@ -1346,13 +1346,11 @@ describe('session-health', () => {
     });
   });
 
-  // ── Mid-session model switch — end-to-end Line 3 render (WL-0MVGU4S58003IRXV) ──
+  // ── Mid-session model switch — end-to-end Line 3 render (WL-0MVGU4S58003IRXV, WL-0MVGU7H24009G8II) ──
   //
-  // TDD red: authored as `it.fails(...)` (expected failure) so the suite stays
-  // green while the behaviour is unimplemented; the sibling implement item
-  // flips `it.fails(` -> `it(` as it lands (same convention as
-  // WL-0MVFE0T0M009ZCPM). Each body genuinely fails against the current
-  // implementation.
+  // These specs were landed as `it.fails(...)` (TDD red) by WL-0MVGU4S58003IRXV
+  // and flipped to `it(...)` here as the sibling implementation
+  // (WL-0MVGU7H24009G8II) landed (same convention as WL-0MVFE0T0M009ZCPM).
   //
   // These tests are **end-to-end**: they bypass this file's model-display mock
   // and drive the REAL model-display module (also registered on the mock Pi)
@@ -1446,7 +1444,7 @@ describe('session-health', () => {
       };
     }
 
-    it.fails(
+    it(
       're-renders Line 3 as "<newAlias> → (resolving)" immediately after a mid-session switch',
       () => {
         const { fire, renderLine3 } = mountFooter();
@@ -1477,7 +1475,7 @@ describe('session-health', () => {
       },
     );
 
-    it.fails(
+    it(
       'renders the non-proxy provider/id fallback instead of a stale value or endless "(resolving)"',
       () => {
         const { fire, renderLine3 } = mountFooter();
@@ -1495,7 +1493,7 @@ describe('session-health', () => {
       },
     );
 
-    it.fails(
+    it(
       'right-aligns the longer non-proxy label and keeps it within the width budget',
       () => {
         const { fire, renderLine3 } = mountFooter(120);

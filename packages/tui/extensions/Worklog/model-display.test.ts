@@ -356,14 +356,12 @@ describe('model-display', () => {
     expect(changeCb).not.toHaveBeenCalled();
   });
 
-  // ── Mid-session model switch (WL-0MVGU4S58003IRXV) ──────────────────
+  // ── Mid-session model switch (WL-0MVGU4S58003IRXV, WL-0MVGU7H24009G8II) ──
   //
-  // TDD red: these specs are authored as `it.fails(...)` (expected failure)
-  // so the suite stays green while the behaviour is unimplemented; the
-  // sibling implement item flips `it.fails(` -> `it(` as it lands (the same
-  // convention used by WL-0MVFE0T0M009ZCPM / WL-0MT1EE3S7005DJ1F). Every body
-  // genuinely fails against the current implementation (the red evidence is
-  // recorded on the work item), which is the point of landing tests first.
+  // These specs were landed as `it.fails(...)` (TDD red) by WL-0MVGU4S58003IRXV
+  // and flipped to `it(...)` here as the sibling implementation
+  // (WL-0MVGU7H24009G8II) landed (the same convention used by
+  // WL-0MVFE0T0M009ZCPM / WL-0MT1EE3S7005DJ1F).
   //
   // Contract pinned here:
   //   * every mid-session `model_select` (source `set`/`cycle`/`restore`)
@@ -396,7 +394,7 @@ describe('model-display', () => {
     // ── AC1: mid-session invalidation, all sources ────────────────────
 
     for (const source of ['set', 'cycle', 'restore'] as const) {
-      it.fails(
+      it(
         `invalidates the resolved model on a mid-session model_select with source "${source}"`,
         () => {
           const { modelSelect, response } = registerWithHandlers();
@@ -425,7 +423,7 @@ describe('model-display', () => {
 
     // ── AC1/AC5: exactly one notification per invalidation ────────────
 
-    it.fails(
+    it(
       'notifies onModelChange exactly once when a mid-session switch invalidates the resolved model',
       () => {
         const { modelSelect, response } = registerWithHandlers();
@@ -449,7 +447,7 @@ describe('model-display', () => {
 
     // ── AC2: non-proxy provider/id fallback ───────────────────────────
 
-    it.fails(
+    it(
       'adopts the selected model provider/id immediately for a non-proxy provider (deepseek)',
       () => {
         const { modelSelect } = registerWithHandlers();
@@ -466,7 +464,7 @@ describe('model-display', () => {
       },
     );
 
-    it.fails(
+    it(
       'replaces a stale proxy-resolved value when switching to a non-proxy provider (opencode)',
       () => {
         const { modelSelect, response } = registerWithHandlers();
@@ -485,7 +483,7 @@ describe('model-display', () => {
 
     // ── AC3: proxy header remains the source of truth ─────────────────
 
-    it.fails(
+    it(
       'keeps a Local Proxy selection unresolved until its x-resolved-model header arrives',
       () => {
         const { modelSelect, response } = registerWithHandlers();
@@ -504,7 +502,7 @@ describe('model-display', () => {
       },
     );
 
-    it.fails(
+    it(
       'adopts the proxy header after a non-proxy fallback value was displayed',
       () => {
         const { modelSelect, response } = registerWithHandlers();
@@ -522,7 +520,7 @@ describe('model-display', () => {
 
     // ── AC5: last-write-wins across consecutive selections ────────────
 
-    it.fails(
+    it(
       'uses the last selection across consecutive mid-session switches (last-write-wins)',
       () => {
         const { modelSelect } = registerWithHandlers();
@@ -543,7 +541,7 @@ describe('model-display', () => {
 
     // ── AC6: fail-open ────────────────────────────────────────────────
 
-    it.fails(
+    it(
       'does not throw and degrades safely when model_select has no model',
       () => {
         const { modelSelect, response } = registerWithHandlers();
@@ -555,7 +553,7 @@ describe('model-display', () => {
       },
     );
 
-    it.fails(
+    it(
       'does not throw and degrades to (resolving) when the provider is missing',
       () => {
         const { modelSelect, response } = registerWithHandlers();
