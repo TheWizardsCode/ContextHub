@@ -7,6 +7,7 @@ import { cleanupTempDir, createTempDir } from '../test-utils.js';
 import { exportToJsonl } from '../../src/jsonl.js';
 import type { WorkItem, Comment, WorkItemPriority, WorkItemStatus } from '../../src/types.js';
 import { runInProcess } from './cli-inproc.js';
+import { rewriteCliCommandToBundle } from './cli-bundle.js';
 
 // ── Process lifecycle tracking ──────────────────────────────────────────
 // Track spawned child process PIDs so they can be cleaned up on shutdown.
@@ -191,8 +192,16 @@ export async function execAsync(command: string, options?: childProcess.ExecOpti
   const isInitCommand = /(^|\s)init(\s|$)/.test(command.replace(cliPath, ''));
   if (isLocalCli) {
     // Avoid in-process for init to preserve interactive behavior in tests.
+    //
+    // `init` must stay a real subprocess (it prompts on stdin, installs
+    // templates and shells out), but it does not need *tsx*: rewrite the
+    // `tsx <src>/cli.ts` prefix to the pre-compiled bundle from
+    // cli-bundle.ts (identical entry, identical command graph, ~5× cheaper
+    // per spawn). The rest of the command line — including any shell quoting
+    // the caller relies on — is passed through untouched.
     if (isInitCommand) {
-      const result = await _execTracked(command, execOptions as any);
+      const runnable = rewriteCliCommandToBundle(command);
+      const result = await _execTracked(runnable, execOptions as any);
       return result;
     }
     const originalCwd = process.cwd();
@@ -242,7 +251,7 @@ export async function execWithInput(
       // ignore
     }
 
-    const child = childProcess.spawn(command, {
+    const child = childProcess.spawn(rewriteCliCommandToBundle(command), {
       shell: true,
       cwd: options?.cwd,
       env,

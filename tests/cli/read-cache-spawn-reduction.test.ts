@@ -10,19 +10,17 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { spawnSync } from 'child_process';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
-import { createTempDir, cleanupTempDir, resolveTsxBin } from '../test-utils.js';
+import { createTempDir, cleanupTempDir } from '../test-utils.js';
+import { runCliProcess } from './cli-bundle.js';
 import { countSpawnRecords } from '../../src/spawn-counter.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, '..', '..');
-const cliPath = path.join(projectRoot, 'src', 'cli.ts');
-const tsxBin = resolveTsxBin(__dirname);
-
+// The simulation needs a real subprocess per query (spawn accounting is
+// per-process), but tsx re-transpiles the CLI on every spawn (2.5–8 s each at
+// ~150 spawns in the suite). A pre-compiled snapshot of the same source runs
+// the identical command graph ~5× faster, so the 60 spawns in this file no
+// longer dominate the suite's wall clock.
 const PANES = 6;
 
 /** The herdr fetcher's query set (see parent epic WL-0MSAZQEQB008O7H3). */
@@ -35,13 +33,7 @@ const QUERIES: string[][] = [
 ];
 
 function runCli(args: string[], cwd: string, env: Record<string, string>): { status: number | null } {
-  const result = spawnSync(process.execPath, [tsxBin, cliPath, ...args], {
-    cwd,
-    env: { ...process.env, ...env },
-    encoding: 'utf-8',
-    timeout: 60000,
-    maxBuffer: 20 * 1024 * 1024,
-  });
+  const result = runCliProcess(args, { cwd, env: { ...process.env, ...env } });
   return { status: result.status };
 }
 

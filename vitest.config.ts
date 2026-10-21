@@ -6,6 +6,13 @@ export default defineConfig({
     // Tests that spawn tsx subprocesses should set explicit per-test timeouts
     // (45-60s) since subprocess startup is slow under concurrent load.
     testTimeout: 30000,
+    // Hook timeout must match the test budget. Several suites set up real git
+    // remotes and bare repositories in `beforeEach` (sync-concurrent,
+    // sync-vs-mutation, the delta-sync family); on a loaded host those setup
+    // commands alone can exceed vitest's 10 s default and fail as
+    // "Hook timed out" — a load-induced flake with nothing wrong with the
+    // code under test (WL-0MVF9JJUH0077OB8 AC6).
+    hookTimeout: 60000,
     // Run setup to inject mock git into PATH for spawn-based calls
     setupFiles: ['./tests/setup-tests.ts'],
     // Memory guardrails: limit worker count and enable OOM detection.

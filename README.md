@@ -230,6 +230,35 @@ The project uses [Vitest](https://vitest.dev/) with the following settings in `v
 
 See [tests/README.md](tests/README.md) for detailed testing documentation.
 
+### Test Suite Runtime
+
+Test runtime is dominated by **per-spawn TypeScript transpilation**, not by
+assertion work. A test that needs real process isolation spawns the CLI, and
+`tsx src/cli.ts` re-transpiles the whole `src/` import graph on every process
+start: measured **2.5–8 s per spawn** on a loaded host, versus **1.1–1.6 s**
+for a pre-compiled build. That is why the CLI suite used to take 8–12 minutes
+and why its runtime swung by ~50 % with host load.
+
+Two rules keep the suite fast:
+
+1. **Prefer the in-process harness.** `execAsync('tsx <cliPath> …')` from
+   `tests/cli/cli-helpers.ts` runs the CLI *in-process* (`cli-inproc.ts`), so
+   it pays no process start at all. Use it for any command that does not need
+   a fresh process.
+2. **When a real process is unavoidable, spawn the bundle.** Use
+   `runCliProcess()` / `cliInvocation()` from `tests/cli/cli-bundle.ts`
+   instead of spawning `tsx src/cli.ts` directly. It builds `src/cli.ts` once
+   per test process with esbuild — same entry, same command graph, ~5× cheaper
+   per spawn — and transparently falls back to `tsx` if the build fails.
+
+Use a *real* `tsx`/`dist` spawn only when the test must observe the real entry
+point or measure startup cost (`tests/cli/startup-import-budget.test.ts`,
+`tests/cli/entry-point-split.test.ts`).
+
+`npm run test:timings` writes a per-test timing report to `test-timings.json`;
+the current baseline and the latest top-20 slow-test table are recorded in
+[docs/dev/test-suite-baseline.md](docs/dev/test-suite-baseline.md).
+
 ### Test Mock Patterns
 
 Work item tests under `tests/cli/` and `tests/unit/` demonstrate the mock

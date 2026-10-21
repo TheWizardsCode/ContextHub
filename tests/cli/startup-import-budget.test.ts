@@ -405,8 +405,13 @@ describe('startup import budget — measured regression', { timeout: 300_000 }, 
       repoRoot,
       target: 'src',
       runs: budget.regression.runs,
-      warmupRuns: 4,
-      bareNodeRuns: 3,
+      // Warmup only has to reach a served cache hit before sampling starts,
+      // which the first one or two invocations already do. Four warmup runs
+      // per scenario made this ratchet one of the slowest tests in the suite
+      // (each warmup is a full tsx spawn) without changing what it measures;
+      // the sampled `runs` (the gate itself) are unchanged.
+      warmupRuns: 2,
+      bareNodeRuns: 2,
     });
 
     const evaluation = evaluateStartupBudget(result, budget);
