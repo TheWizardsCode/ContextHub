@@ -1,0 +1,5 @@
+{
+  "types": {
+    "herdr": "npm --silent test -- packages/herdr/src"
+  }
+}
