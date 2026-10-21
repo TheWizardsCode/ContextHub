@@ -136,6 +136,11 @@ import {
   ago,
   writeDowntimeLog,
   writeRawDowntimeLog,
+  prefillPacingStatus,
+  prefillCapReached,
+  prefillGateContended,
+  prefillQueueEtaOverBudget,
+  prefillSlotEtaOverBudget,
 } from './downtime-worker.fixtures.js';
 import {
   resumeStalledPane,
@@ -1638,4 +1643,297 @@ describe('own-backlog fallback safety gates (WL-0MUZPBRX3007STFK)', () => {
       expect(deps.claimItem).not.toHaveBeenCalled();
     },
   );
+});
+
+// ── Prefill-gate pacing at the tick (WL-0MVHSZRZQ00482QX) ─────────────
+//
+// The llama-proxy serialises local prefills (LP-0MVGDUUV3001XFRJ); the
+// dispatcher must pace its concurrency to the same gate: a saturated prefill
+// cap (AC2 I/O budget 0), non-zero gate waiters (AC3, contention evidence
+// equivalent to `contention_queue_depth`) and a projected wait above the
+// admission budget (AC4) all defer dispatch with distinct, observable
+// reasons — while a missing cap/gate/ETA restores today's free-slot-only
+// budget exactly (AC5).
+describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
+  const tempDirs = createTempDirTracker();
+
+  afterEach(() => {
+    tempDirs.cleanup();
+  });
+
+  function makePrefillWorker(opts: {
+    status: LlamaStatus;
+    root: string;
+    requiredFreeSlots?: number;
+    thresholdMs?: number;
+    deps?: Partial<DowntimeWorkerDeps>;
+  }): { worker: ReturnType<typeof createDowntimeWorker>; deps: DowntimeWorkerDeps } {
+    const cfg = {
+      enabled: true,
+      thresholdMs: opts.thresholdMs ?? 0,
+      requiredFreeSlots: opts.requiredFreeSlots ?? 1,
+      model: 'plan',
+      cwd: opts.root,
+      noCandidateCooldownMs: 3_600_000,
+      browseItemCount: 20,
+    };
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
+    );
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      getRunningDowntimePanes: vi.fn().mockResolvedValue({
+        ok: true,
+        count: 0,
+        paneIds: [],
+        records: [],
+      }),
+      ...opts.deps,
+    });
+    return { worker: createDowntimeWorker({ poller, deps, config: () => ({ ...cfg }) }), deps };
+  }
+
+  const implementCandidate: DowntimeCandidate = {
+    id: 'WL-IMP',
+    title: 'Implement me',
+    status: 'in_progress',
+    stage: 'plan_complete',
+  };
+
+  /**
+   * The audit tier plus an implement fallback: with the free-slot budget
+   * clamped to the prefill headroom the audit tier (≥ 2 free slots) is
+   * skipped and the implement tier dispatches instead.
+   */
+  function auditTierDeps(): Partial<DowntimeWorkerDeps> {
+    return {
+      getNextAuditCandidate: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-AUD', title: 'Audit me', needsProducerReview: false },
+      }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      hasFreshAudit: vi.fn().mockResolvedValue(false),
+    };
+  }
+
+  it('AC2: a saturated prefill cap blocks the tick and records prefill-cap', async () => {
+    const root = tempDirs.make('dt-prefill-cap-');
+    const { worker, deps } = makePrefillWorker({
+      status: prefillCapReached,
+      root,
+      deps: {
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      },
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('prefill-cap');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        reason: 'prefill-cap',
+        freeSlots: 3,
+        totalSlots: 4,
+        prefillsInFlight: 1,
+        maxConcurrentPrefills: 1,
+        prefillGateWaiters: 0,
+        capacityHint: 'idle',
+        prefillBudgetSeconds: 120,
+      });
+    });
+  });
+
+  it('AC2: the budget recovers once the in-flight prefill count drops below the cap', async () => {
+    const root = tempDirs.make('dt-prefill-recover-');
+    const { worker, deps } = makePrefillWorker({
+      // Not prefilling → headroom (cap 1, inFlight 0) admits the dispatch.
+      status: prefillPacingStatus({ local_prefills_in_flight: 0 }),
+      root,
+      deps: {
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      },
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    expect(worker.blockReason).not.toBe('prefill-cap');
+  });
+
+  it('AC3: prefill_gate_waiters > 0 blocks with a distinct reason/header token', async () => {
+    const root = tempDirs.make('dt-prefill-waiters-');
+    const { worker, deps } = makePrefillWorker({
+      status: prefillGateContended,
+      root,
+      deps: {
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      },
+    });
+    // The header token is distinct from the contention token (AC3).
+    expect(decisionHeaderToken('prefill-gate')).toBe('prefill-gate');
+    expect(decisionHeaderToken('prefill-gate')).not.toBe(
+      decisionHeaderToken('proxy-contention'),
+    );
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('prefill-gate');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      expect(entries[0]).toMatchObject({
+        reason: 'prefill-gate',
+        prefillGateWaiters: 2,
+        prefillsInFlight: 0,
+      });
+    });
+  });
+
+  it('AC4: a queue ETA above the admission budget defers with the ETA evidence', async () => {
+    const root = tempDirs.make('dt-prefill-queueeta-');
+    const { worker, deps } = makePrefillWorker({
+      status: prefillQueueEtaOverBudget,
+      root,
+      deps: {
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      },
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('prefill-eta');
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    await vi.waitFor(async () => {
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      expect(entries[0]).toMatchObject({
+        reason: 'prefill-eta',
+        queueEtaSeconds: 300,
+        prefillBudgetSeconds: 120,
+      });
+    });
+  });
+
+  it('AC4: a per-slot prefill ETA above the budget defers with the per-slot evidence', async () => {
+    const root = tempDirs.make('dt-prefill-sloteta-');
+    const { worker, deps } = makePrefillWorker({
+      status: prefillSlotEtaOverBudget,
+      root,
+      deps: {
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      },
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('prefill-eta');
+    await vi.waitFor(async () => {
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      expect(entries[0]).toMatchObject({
+        reason: 'prefill-eta',
+        queueEtaSeconds: 0,
+        slotPrefillEtaSeconds: { 'slot-1': 300 },
+      });
+    });
+  });
+
+  it('AC4: a missing budget or ETA never blocks dispatch', async () => {
+    const root = tempDirs.make('dt-prefill-noeta-');
+    const { worker, deps } = makePrefillWorker({
+      // queue ETA present but NO admission budget → ETA cannot be judged.
+      status: prefillPacingStatus({ prefill_budget_seconds: undefined, queue_eta_seconds: 300 }),
+      root,
+      deps: {
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      },
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC5: cap absent or 0 restores exactly today’s free-slot-only budget', async () => {
+    for (const cap of [undefined, 0]) {
+      const root = tempDirs.make(`dt-prefill-nocap-${cap ?? 'absent'}-`);
+      const { worker, deps } = makePrefillWorker({
+        // Even with two prefills "in flight" a disabled cap never paces.
+        status: prefillPacingStatus({
+          local_max_concurrent_prefills: cap,
+          local_prefills_in_flight: 2,
+        }),
+        root,
+        deps: {
+          getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+        },
+      });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+      expect(worker.blockReason).not.toBe('prefill-cap');
+    }
+  });
+
+  it('AC2/AC6: the effective budget is clamped to the prefill headroom (audit needs 2 free slots)', async () => {
+    // Headroom 1 (cap 2, one prefill in flight, 3 genuinely free slots):
+    // the effective budget is 1, so the audit tier (needs ≥ 2) is skipped
+    // and the implement tier dispatches instead of the audit.
+    const rootOne = tempDirs.make('dt-prefill-headroom1-');
+    const workerOne = makePrefillWorker({
+      status: prefillPacingStatus({
+        local_max_concurrent_prefills: 2,
+        local_prefills_in_flight: 1,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true, lease_state: 'generating', phase: 'prefill' },
+          { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+          { slot_id: 'slot-3', is_processing: false, lease_state: 'free' },
+          { slot_id: 'slot-4', is_processing: false, lease_state: 'free' },
+        ],
+      }),
+      root: rootOne,
+      deps: auditTierDeps(),
+    });
+    const outcomeOne = await workerOne.worker.tick();
+    expect(outcomeOne.dispatched).toBe(true);
+    // The tick outcome carries no candidate; assert the dispatched TIER via
+    // the claim + spawned prompt (the observable dispatch seams).
+    expect(workerOne.deps.claimItem).toHaveBeenCalledWith(
+      'WL-IMP',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(workerOne.deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement'),
+      expect.anything(),
+    );
+    expect(workerOne.deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+
+    // Headroom 2 (nothing in flight): the effective budget is 2 → the audit
+    // tier (the higher-priority tier) dispatches as before.
+    const rootTwo = tempDirs.make('dt-prefill-headroom2-');
+    const workerTwo = makePrefillWorker({
+      status: prefillPacingStatus({
+        local_max_concurrent_prefills: 2,
+        local_prefills_in_flight: 0,
+      }),
+      root: rootTwo,
+      deps: auditTierDeps(),
+    });
+    const outcomeTwo = await workerTwo.worker.tick();
+    expect(outcomeTwo.dispatched).toBe(true);
+    expect(workerTwo.deps.claimItem).toHaveBeenCalledWith(
+      'WL-AUD',
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(workerTwo.deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit'),
+      expect.anything(),
+    );
+  });
 });

@@ -30,6 +30,7 @@ import {
   countFreeUnownedSlots,
   isSlotOwned,
   isSlotAvailableForDispatch,
+  evaluatePrefillPacing,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
@@ -42,6 +43,7 @@ import {
   singleSlotIdleOwned,
   perSlotIdleOwned,
   perSlotOwnedOneUnowned,
+  prefillPacingStatus,
 } from './downtime-worker.fixtures.js';
 import type { CoordinationLogEntry } from './downtime-log.js';
 
@@ -964,5 +966,101 @@ describe('proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY)', () => {
       localIdleSeconds: 12.5,
       localLastActivitySource: 'chunk',
     });
+  });
+});
+
+// ── Prefill-gate pacing helper (WL-0MVHSZRZQ00482QX) ──────────────────
+//
+// `evaluatePrefillPacing` computes the per-tick prefill pacing decision from
+// the proxy's serialisation-gate fields (LP-0MVGDUUV3001XFRJ): the prefill
+// capacity budget (0 while cap reached, else the headroom, unbounded when
+// the cap is absent or 0) and the deferral reason (gate waiters first, then
+// cap saturation, then a projected wait above the admission budget).
+describe('evaluatePrefillPacing (WL-0MVHSZRZQ00482QX)', () => {
+  it('AC2: cap reached → capacityBudget 0 and deferReason prefill-cap', () => {
+    const pacing = evaluatePrefillPacing(
+      { ...prefillPacingStatus(), local_prefills_in_flight: 1 },
+      null,
+    );
+    expect(pacing.inFlight).toBe(1);
+    expect(pacing.cap).toBe(1);
+    expect(pacing.capacityBudget).toBe(0);
+    expect(pacing.deferReason).toBe('prefill-cap');
+  });
+
+  it('AC2: below the cap the budget is the remaining prefill headroom (at least 1)', () => {
+    const pacing = evaluatePrefillPacing(
+      { ...prefillPacingStatus(), local_max_concurrent_prefills: 2, local_prefills_in_flight: 1 },
+      null,
+    );
+    expect(pacing.capacityBudget).toBe(1);
+    expect(pacing.deferReason).toBeUndefined();
+    const atZero = evaluatePrefillPacing(
+      { ...prefillPacingStatus(), local_max_concurrent_prefills: 1, local_prefills_in_flight: 0 },
+      null,
+    );
+    expect(atZero.capacityBudget).toBe(1);
+  });
+
+  it('AC5: cap absent or 0 → unbounded prefill budget (capacityBudget undefined)', () => {
+    const absent = evaluatePrefillPacing(prefillPacingStatus({ local_max_concurrent_prefills: undefined }), null);
+    expect(absent.cap).toBeUndefined();
+    expect(absent.capacityBudget).toBeUndefined();
+    expect(absent.deferReason).toBeUndefined();
+    const zero = evaluatePrefillPacing(prefillPacingStatus({ local_max_concurrent_prefills: 0 }), null);
+    expect(zero.capacityBudget).toBeUndefined();
+    expect(zero.deferReason).toBeUndefined();
+  });
+
+  it('AC3: prefill_gate_waiters > 0 defers with the distinct prefill-gate reason', () => {
+    const pacing = evaluatePrefillPacing(prefillPacingStatus({ prefill_gate_waiters: 2 }), null);
+    expect(pacing.gateWaiters).toBe(2);
+    expect(pacing.deferReason).toBe('prefill-gate');
+  });
+
+  it('AC3: zero gate waiters is not contention evidence on its own', () => {
+    const pacing = evaluatePrefillPacing(prefillPacingStatus({ prefill_gate_waiters: 0 }), null);
+    expect(pacing.deferReason).toBeUndefined();
+  });
+
+  it('AC4: queue_eta_seconds above the budget defers with prefill-eta', () => {
+    const pacing = evaluatePrefillPacing(prefillPacingStatus({ queue_eta_seconds: 300 }), null);
+    expect(pacing.queueEtaSeconds).toBe(300);
+    expect(pacing.budgetSeconds).toBe(120);
+    expect(pacing.deferReason).toBe('prefill-eta');
+  });
+
+  it('AC4: a per-slot prefill ETA above the budget defers with prefill-eta', () => {
+    const status = prefillPacingStatus({
+      local_max_concurrent_prefills: 2,
+      local_prefills_in_flight: 1,
+      slots: [
+        { slot_id: 'slot-1', is_processing: true, lease_state: 'generating', phase: 'prefill', prefill_eta_seconds: 300 },
+        { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+        { slot_id: 'slot-3', is_processing: false, lease_state: 'free' },
+        { slot_id: 'slot-4', is_processing: false, lease_state: 'free' },
+      ],
+    });
+    const pacing = evaluatePrefillPacing(status, status.slots ?? null);
+    expect(pacing.maxSlotPrefillEtaSeconds).toBe(300);
+    expect(pacing.deferReason).toBe('prefill-eta');
+  });
+
+  it('AC4: a missing budget or ETA never blocks dispatch', () => {
+    const noBudget = evaluatePrefillPacing(
+      prefillPacingStatus({ prefill_budget_seconds: undefined, queue_eta_seconds: 300 }),
+      null,
+    );
+    expect(noBudget.deferReason).toBeUndefined();
+    const noEta = evaluatePrefillPacing(
+      prefillPacingStatus({ queue_eta_seconds: undefined }),
+      null,
+    );
+    expect(noEta.deferReason).toBeUndefined();
+  });
+
+  it('AC4: a queue ETA within the budget does not defer', () => {
+    const pacing = evaluatePrefillPacing(prefillPacingStatus({ queue_eta_seconds: 30 }), null);
+    expect(pacing.deferReason).toBeUndefined();
   });
 });

@@ -511,7 +511,10 @@ slots must be free so one slot stays reserved for the operator session).
 with per-slot identity data the worker requires the **same N slots**
 continuously free (see per-slot idle tracking below) for `0 < N < total`;
 without per-slot data it fails closed to all-slots-free for `0 < N < total`
-(never any-N dispatch); `N > total` never dispatches.
+(never any-N dispatch); `N > total` never dispatches. This is the
+**free-slot** budget; the prefill serialisation gate can reduce the
+*effective* budget below it on a given tick (see *Prefill serialisation
+pacing* below).
 - `downtimePollIntervalMs` — Poll interval for the proxy status endpoint
 (default: `10000`, hard floor `10000`)
 - `downtimeProxyUrl` — Base URL of the llama-proxy (default:
@@ -669,6 +672,49 @@ a pre-v2 payload (fields absent) the legacy rule applies unchanged: any live
 `owner_session_id` lease makes the slot busy. Malformed
 availability-affecting fields (`lease_state`, `capacity_hint`) fail closed
 (poll treated as busy); malformed advisory fields are ignored.
+
+**Prefill serialisation pacing** (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX) —
+the proxy serialises local prefills (`local_max_concurrent_prefills`, default
+`1`) and publishes the gate state. A free slot therefore does **not** by
+itself mean a new pane can prefill: its request would queue behind the
+in-flight prefill and may fall back to a remote provider while the GPU is
+only ever prefilling one request. The worker paces its **effective local
+dispatch budget** to the same gate on every poll:
+
+```
+effectiveBudget = min(freeSlotBudget, prefillCapacityBudget)
+prefillCapacityBudget = 0                        when cap > 0 and inFlight >= cap
+                      = cap - inFlight           otherwise (at least 1)
+                      = unbounded (freeSlotBudget) when the cap is absent or 0
+```
+
+- `local_max_concurrent_prefills > 0` with `local_prefills_in_flight >=`
+  the cap → budget `0` for that tick: no pane is launched (reason
+  `prefill-cap`, header token `prefill-cap`). The budget recovers on the
+  first poll where the in-flight count drops below the cap.
+- `prefill_gate_waiters > 0` → the gate is contended, exactly like a
+  non-empty `contention_queue_depth`: no dispatch, reason `prefill-gate`,
+  header token `prefill-gate` (distinct from `contention`).
+- The prefill-ETA guard's `queue_eta_seconds` (or any per-slot
+  `prefill_eta_seconds`) above `prefill_budget_seconds` → defer, reason
+  `prefill-eta`, header token `prefill-eta`. Both values must be present and
+  finite; a missing ETA or budget never blocks dispatch.
+- The effective budget is what the tier minimums see: with headroom `1` the
+  **audit** tier (≥ 2 free slots) is skipped and the implement tier
+  dispatches instead.
+
+Pacing **only reduces concurrency**: it never raises the free-slot budget and
+never bypasses the fail-closed `slots-unavailable` / `capacity-saturated`
+contracts. All fields are absent on a proxy from before
+`LP-0MVGDUUV3001XFRJ` → exactly today's free-slot-only behaviour (no new
+configuration knob: the pacing follows the proxy's own cap and budget).
+Malformed gate counters (`local_prefills_in_flight`,
+`local_max_concurrent_prefills`, `prefill_gate_waiters`) fail closed (poll
+treated as busy); malformed ETA fields are advisory and ignored. Every
+polled decision entry records `prefillsInFlight`, `maxConcurrentPrefills`,
+`prefillGateWaiters`, `prefillBudgetSeconds`, `queueEtaSeconds` and the
+per-slot `slotPrefillEtaSeconds` so a paced tick is diagnosable from the log
+alone.
 
 **Per-tier free-slot minimums** (parent WL-0MT32F90V008UAD2 AC3) — at
 selection time, against the latest polled status, each dispatch tier

@@ -301,7 +301,8 @@ authoritative**:
 | `slots[].lease_state: "free"` | available |
 | `capacity_hint: "saturated"` | defensive no-dispatch (reason `capacity-saturated`, header `saturated`), even if the per-slot detail looks inconsistent |
 | `capacity_hint: "idle"` / `"prefill_bound"` | not by themselves a stop; the per-slot free budget still applies |
-| `slots[].phase`, `slots[].context_tokens`, `slots[].prefill_eta_seconds`, `prefill_budget_seconds` | advisory evidence only — recorded in the decision log, never a gate |
+| `slots[].phase`, `slots[].context_tokens` | advisory evidence only — recorded in the decision log, never a gate |
+| `slots[].prefill_eta_seconds`, `prefill_budget_seconds` | not availability gates; they feed the prefill-ETA deferral (`prefill-eta`, see *Prefill serialisation pacing* below) |
 
 With truthful lease state, the coarse global `local_lease_active` flag no
 longer blocks dispatch (`idle_leased` leases are exactly the case it
@@ -316,6 +317,82 @@ poll (treated as busy); malformed advisory fields are ignored.
 Every no-dispatch decision entry records the observed `capacityHint`,
 `statusSchemaVersion`, `idleLeasedSlots`, `generatingSlots`, `slotPhases`
 and `slotPrefillEtaSeconds` so an operator can see *why* a tick refused.
+
+### Prefill serialisation pacing (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX)
+
+**Problem:** the proxy serialises local prefills (`local_max_concurrent_prefills`,
+default `1`), but the dispatcher used the free-slot count as its only
+concurrency budget. With two free slots it could launch two downtime panes;
+the second prefill queued behind the first and could fall back to a remote
+provider while the GPU was only ever prefilling one request. Prefill dominates
+hold time (measured p50 61.8 s, p90 269.8 s), so launching during an in-flight
+prefill is the worst moment to start — measured per-request first-byte p50 was
+85.0 s with one overlap vs 23.4 s alone, while aggregate prefill throughput
+stayed flat (concurrency added latency, not capacity).
+
+The proxy publishes the gate state on `GET /llama/local/status`:
+
+| Field | Meaning |
+|---|---|
+| `local_prefills_in_flight` | prefills currently in flight |
+| `local_max_concurrent_prefills` | effective cap; `1` = serialised (default), `0` = gate disabled |
+| `prefill_gate_waiters` | requests waiting for the prefill gate (the live gate queue depth) |
+| `queue_eta_seconds` / `prefill_budget_seconds` | the prefill-ETA guard's projected wait and admission budget (LP-0MVGDUV5E005UWBQ) |
+| `slots[].phase` / `slots[].prefill_eta_seconds` | per-slot prefill phase and calibrated prefill cost |
+
+**Concurrency-budget contract.** On every poll the dispatcher computes an
+**effective local dispatch budget** and passes it to the tier chain (and to
+`dispatchFromCoordination`):
+
+```
+effectiveBudget      = min(freeSlotBudget, prefillCapacityBudget)
+freeSlotBudget       = countFreeUnownedSlots(slots)      # downtimeRequiredFreeSlots gate
+prefillCapacityBudget = 0                                 when cap > 0 and inFlight >= cap
+                      = cap - inFlight                    otherwise (at least 1)
+                      = unbounded (freeSlotBudget)        when cap is absent or 0
+```
+
+- `prefillCapacityBudget = 0` → **no dispatch** that tick (reason
+  `prefill-cap`, header token `prefill-cap`); the budget recovers on the first
+  poll where `local_prefills_in_flight < local_max_concurrent_prefills`.
+- `prefill_gate_waiters > 0` → contention evidence, equivalent to a non-empty
+  `contention_queue_depth`: no dispatch, reason `prefill-gate`, header token
+  `prefill-gate` (deliberately distinct from `contention`).
+- `queue_eta_seconds` (or a per-slot `prefill_eta_seconds`) above
+  `prefill_budget_seconds` → defer, reason `prefill-eta`, header token
+  `prefill-eta`. Both values must be present and finite; a missing ETA **or**
+  budget never blocks dispatch. This mirrors the proxy's own admission guard
+  instead of parking a pane behind a doomed wait.
+- The effective budget is what the dispatch tier sees, so a reduced budget
+  interacts directly with `downtimeRequiredFreeSlots` and the **per-tier
+  free-slot minimums**: with a prefill headroom of `1` the audit tier (≥ 2
+  free slots) is skipped and the implement tier dispatches instead, even
+  though more slots are physically free.
+
+**Pacing only reduces concurrency.** It never raises the free-slot budget,
+never bypasses `slots_stale` / `slots: []` (`slots-unavailable`) or
+`capacity_hint: "saturated"` (`capacity-saturated`), and never bypasses the
+per-slot `lease_state` availability rule. All prefill fields are absent on a
+pre-v2/pre-feature proxy → `capacityBudget` is unbounded and the tick behaves
+exactly as before (no new configuration knob: pacing follows the proxy's own
+cap and budget, avoiding a second source of truth). Malformed gate counters
+(`local_prefills_in_flight`, `local_max_concurrent_prefills`,
+`prefill_gate_waiters`) fail closed (poll treated as busy, like
+`contention_queue_depth`); malformed ETA values are advisory and ignored.
+
+**Observability.** Every polled decision entry records `prefillsInFlight`,
+`maxConcurrentPrefills`, `prefillGateWaiters`, `prefillBudgetSeconds`,
+`queueEtaSeconds` (and the per-slot `slotPrefillEtaSeconds`) alongside the
+existing `capacityHint` / `contentionDepth` evidence, and the paced refusal
+carries its own `reason` (`prefill-gate` / `prefill-cap` / `prefill-eta`).
+
+**Tests.** `downtime-worker.parse.test.ts` pins the parser (gate counters
+fail-closed, ETA advisory, absent fields unchanged);
+`downtime-worker.idle.test.ts` pins `evaluatePrefillPacing` (budget 0 at the
+cap, headroom recovery, gate waiters, ETA deferral, missing budget/ETA
+non-blocking, cap absent/0 unbounded); `downtime-worker.test.ts` pins the tick
+reason/token, decision-log evidence, ETA deferral and the effective-budget
+clamp (audit vs implement tier).
 
 ### Idle-age authority (`local_idle_seconds`, WL-0MVHSZR9C0012NQY)
 
@@ -1209,7 +1286,7 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 |---|---|---|---|
 | **Host-wide marker** (this mechanism) | machine-wide, all projects/instances | an audit dispatched by ANY project on this host | skip audit tier; reason `audit-host-saturated` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
-| **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state`) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint` | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention` or `capacity-saturated`; unusable per-slot detail → `slots-unavailable` |
+| **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state` / prefill gate) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint`, prefill in-flight/cap/waiters and prefill ETAs | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention`, `capacity-saturated`, `prefill-gate` / `prefill-cap` / `prefill-eta`; unusable per-slot detail → `slots-unavailable` |
 | **`AUDIT_PHASE2_PARALLELISM=1`** (always) | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots (fully serial Phase 2) |
 
 **Observability.** The skip is logged to stderr as
@@ -2040,7 +2117,14 @@ The decision log (`<cwd>/.worklog/downtime-coordination.log`, entries with
 refusal reasons. Every entry keeps today's standard fields (`freeSlots`,
 `totalSlots`, `ownerPresent`, `runningPanes`, `contentionDepth`) and the same
 rate limit: an identical reason inside `DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS`
-(10 min) is suppressed, a reason change always writes. The header blocking
+(10 min) is suppressed, a reason change always writes. When the proxy serves
+them, every entry also carries the capacity/prefill evidence
+(`capacityHint`, `statusSchemaVersion`, `prefillsInFlight`,
+`maxConcurrentPrefills`, `prefillGateWaiters`, `prefillBudgetSeconds`,
+`queueEtaSeconds`, `slotPhases`, `slotPrefillEtaSeconds`); prefill pacing
+refusals use the distinct reasons/tokens `prefill-gate`, `prefill-cap` and
+`prefill-eta`.
+The header blocking
 token is still updated on **every refusal** and never on the observation
 tokens below.
 

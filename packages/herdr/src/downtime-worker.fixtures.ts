@@ -219,6 +219,108 @@ export const idleWithCumulativeContention: LlamaStatus = {
   contention_queued_count: 13,
 };
 
+// ── Prefill serialisation gate fixtures (WL-0MVHSZRZQ00482QX) ─────────
+//
+// The llama-proxy serialises local prefills (LP-0MVGDUUV3001XFRJ) and
+// publishes the gate state: `local_prefills_in_flight`,
+// `local_max_concurrent_prefills`, `prefill_gate_waiters`, and the
+// prefill-ETA guard's `queue_eta_seconds` / `prefill_budget_seconds`.
+//
+// `prefillPacingStatus()` builds a schema-v2 pool with the gate fields
+// served; the named fixtures pin the individual pacing transitions so the
+// parser, the pacing helper and the tick-level gates can share one shape.
+
+/**
+ * Schema-v2 status with the prefill-gate fields served. Defaults: four
+ * free/idle_leased slots, cap `1`, nothing in flight, no waiters, a 120 s
+ * admission budget and a 0 s queue ETA — i.e. TODAY's behaviour (dispatch
+ * admitted) with the new fields present. Override one field per fixture.
+ */
+export function prefillPacingStatus(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
+  return {
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: true,
+    available_slots: 0,
+    total_slots: 4,
+    status_schema_version: 2,
+    capacity_hint: 'idle',
+    local_prefills_in_flight: 0,
+    local_max_concurrent_prefills: 1,
+    prefill_gate_waiters: 0,
+    prefill_budget_seconds: 120,
+    queue_eta_seconds: 0,
+    slots: [
+      {
+        slot_id: 'slot-1',
+        is_processing: false,
+        owner_session_id: 'sess-1',
+        lease_state: 'idle_leased',
+      },
+      { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+      { slot_id: 'slot-3', is_processing: false, lease_state: 'free' },
+      { slot_id: 'slot-4', is_processing: false, lease_state: 'free' },
+    ],
+    contention_queue_depth: 0,
+    contention_queued_count: 0,
+    ...overrides,
+  };
+}
+
+/**
+ * The serialisation cap is saturated: ONE prefill is in flight with a cap
+ * of `1`, so the prefill capacity budget is `0` for this tick (three slots
+ * remain genuinely free — the regression this item exists to fix).
+ */
+export const prefillCapReached: LlamaStatus = prefillPacingStatus({
+  local_prefills_in_flight: 1,
+  slots: [
+    {
+      slot_id: 'slot-1',
+      is_processing: true,
+      lease_state: 'generating',
+      phase: 'prefill',
+      prefill_eta_seconds: 45,
+    },
+    { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+    { slot_id: 'slot-3', is_processing: false, lease_state: 'free' },
+    { slot_id: 'slot-4', is_processing: false, lease_state: 'free' },
+  ],
+});
+
+/** Requests waiting on the proxy's prefill gate → contention evidence. */
+export const prefillGateContended: LlamaStatus = prefillPacingStatus({
+  prefill_gate_waiters: 2,
+});
+
+/** `queue_eta_seconds` (300 s) is above the 120 s admission budget. */
+export const prefillQueueEtaOverBudget: LlamaStatus = prefillPacingStatus({
+  queue_eta_seconds: 300,
+});
+
+/**
+ * A per-slot prefill ETA (300 s) is above the 120 s budget while the
+ * capacity headroom is still positive (cap `2`, one prefill in flight), so
+ * only the ETA deferral can explain the paced tick.
+ */
+export const prefillSlotEtaOverBudget: LlamaStatus = prefillPacingStatus({
+  local_max_concurrent_prefills: 2,
+  local_prefills_in_flight: 1,
+  slots: [
+    {
+      slot_id: 'slot-1',
+      is_processing: true,
+      lease_state: 'generating',
+      phase: 'prefill',
+      prefill_eta_seconds: 300,
+    },
+    { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+    { slot_id: 'slot-3', is_processing: false, lease_state: 'free' },
+    { slot_id: 'slot-4', is_processing: false, lease_state: 'free' },
+  ],
+});
+
 /** Raw `herdr pane list` output with two live downtime panes + noise. */
 export const herdrPaneListRaw: string = JSON.stringify({
   id: 'cli:pane:list',

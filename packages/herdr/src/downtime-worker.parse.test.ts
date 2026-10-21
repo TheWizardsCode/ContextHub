@@ -938,3 +938,79 @@ describe('parseLlamaStatus: proxy-authoritative local idle age (WL-0MVHSZR9C0012
     }
   });
 });
+
+// ── Prefill serialisation gate (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX) ─
+//
+// The llama-proxy serialises local prefills and publishes the gate state:
+// `local_prefills_in_flight`, `local_max_concurrent_prefills` and
+// `prefill_gate_waiters` (the live contention-queue depth for the gate) plus
+// the prefill-ETA guard's `queue_eta_seconds` / `prefill_budget_seconds`.
+// The parser contract mirrors the contention fields: the three counters are
+// availability-affecting (a malformed value fails closed → null/busy), while
+// the ETA figures are advisory and degrade to undefined.
+describe('parseLlamaStatus: prefill serialisation gate (WL-0MVHSZRZQ00482QX)', () => {
+  const prefillBase = {
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: false,
+    available_slots: 4,
+    total_slots: 4,
+    slots: [
+      { slot_id: 'slot-1', is_processing: false },
+      { slot_id: 'slot-2', is_processing: false },
+      { slot_id: 'slot-3', is_processing: false },
+      { slot_id: 'slot-4', is_processing: false },
+    ],
+  };
+
+  it('AC1: reads the prefill-gate counters and ETA fields when served', () => {
+    const status = parseLlamaStatus({
+      ...prefillBase,
+      local_prefills_in_flight: 1,
+      local_max_concurrent_prefills: 1,
+      prefill_gate_waiters: 2,
+      queue_eta_seconds: 300,
+      prefill_budget_seconds: 120,
+    });
+    expect(status).not.toBeNull();
+    expect(status!.local_prefills_in_flight).toBe(1);
+    expect(status!.local_max_concurrent_prefills).toBe(1);
+    expect(status!.prefill_gate_waiters).toBe(2);
+    expect(status!.queue_eta_seconds).toBe(300);
+    expect(status!.prefill_budget_seconds).toBe(120);
+  });
+
+  it('AC1: leaves every prefill field undefined on a pre-feature payload', () => {
+    const status = parseLlamaStatus(prefillBase);
+    expect(status).not.toBeNull();
+    expect(status!.local_prefills_in_flight).toBeUndefined();
+    expect(status!.local_max_concurrent_prefills).toBeUndefined();
+    expect(status!.prefill_gate_waiters).toBeUndefined();
+    expect(status!.queue_eta_seconds).toBeUndefined();
+    expect(status!.prefill_budget_seconds).toBeUndefined();
+  });
+
+  it('AC1: malformed prefill-gate counters fail closed → busy (null)', () => {
+    for (const field of [
+      'local_prefills_in_flight',
+      'local_max_concurrent_prefills',
+      'prefill_gate_waiters',
+    ] as const) {
+      for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, '2', true, {}]) {
+        expect(parseLlamaStatus({ ...prefillBase, [field]: bad })).toBeNull();
+      }
+    }
+  });
+
+  it('AC1: queue_eta_seconds is advisory — a malformed value degrades, never rejects', () => {
+    for (const bad of [Number.NaN, -5, '300', true, {}]) {
+      const status = parseLlamaStatus({ ...prefillBase, queue_eta_seconds: bad });
+      expect(status).not.toBeNull();
+      expect(status!.queue_eta_seconds).toBeUndefined();
+    }
+    const nullEta = parseLlamaStatus({ ...prefillBase, queue_eta_seconds: null });
+    expect(nullEta).not.toBeNull();
+    expect(nullEta!.queue_eta_seconds).toBeNull();
+  });
+});

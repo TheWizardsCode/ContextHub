@@ -281,6 +281,13 @@ export function decisionHeaderToken(reason: string): string {
       return 'no-slots';
     case 'capacity-saturated':
       return 'saturated';
+    case 'prefill-gate':
+    case 'prefill-cap':
+    case 'prefill-eta':
+      // Prefill pacing refusals (WL-0MVHSZRZQ00482QX): each keeps its own
+      // distinct header token so a paced stop is distinguishable from
+      // `contention`, `slot-owner` and `no-slots` in the herdr header.
+      return reason;
     default:
       return reason;
   }
@@ -298,6 +305,17 @@ interface CapacityEvidence {
   generatingSlots?: number;
   slotPhases?: Record<string, string>;
   slotPrefillEtaSeconds?: Record<string, number>;
+  /**
+   * Prefill serialisation-gate evidence (LP-0MVGDUUV3001XFRJ,
+   * WL-0MVHSZRZQ00482QX): the in-flight/cap counters, the live gate waiters
+   * and the prefill-ETA guard's queue ETA / admission budget. Attached to
+   * every polled decision so a paced stop is diagnosable from the log alone.
+   */
+  prefillsInFlight?: number;
+  maxConcurrentPrefills?: number;
+  prefillGateWaiters?: number;
+  prefillBudgetSeconds?: number;
+  queueEtaSeconds?: number;
   /**
    * Authoritative local idle-age evidence (LP-0MVGD9Z8Z0055Y5J,
    * WL-0MVHSZR9C0012NQY): the proxy's reported idle age in seconds and the
@@ -317,6 +335,24 @@ function capacityEvidence(
   if (status.capacity_hint !== undefined) evidence.capacityHint = status.capacity_hint;
   if (status.status_schema_version !== undefined) {
     evidence.statusSchemaVersion = status.status_schema_version;
+  }
+  // Prefill serialisation-gate evidence (WL-0MVHSZRZQ00482QX): recorded on
+  // every polled decision (even when the per-slot detail is unusable) so a
+  // paced tick always shows the proxy's own gate state.
+  if (typeof status.local_prefills_in_flight === 'number') {
+    evidence.prefillsInFlight = status.local_prefills_in_flight;
+  }
+  if (typeof status.local_max_concurrent_prefills === 'number') {
+    evidence.maxConcurrentPrefills = status.local_max_concurrent_prefills;
+  }
+  if (typeof status.prefill_gate_waiters === 'number') {
+    evidence.prefillGateWaiters = status.prefill_gate_waiters;
+  }
+  if (typeof status.prefill_budget_seconds === 'number') {
+    evidence.prefillBudgetSeconds = status.prefill_budget_seconds;
+  }
+  if (typeof status.queue_eta_seconds === 'number') {
+    evidence.queueEtaSeconds = status.queue_eta_seconds;
   }
   // Idle-age evidence is attached on EVERY polled decision (even when the
   // per-slot detail is unusable) so a refused/deferred tick always shows the
@@ -765,6 +801,39 @@ export interface LlamaStatus {
    */
   prefill_budget_seconds?: number | null;
   /**
+   * Prefill serialisation gate (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX):
+   * the number of local prefills CURRENTLY in flight. Availability-affecting:
+   * a malformed (non-finite / negative) value rejects the poll (fail-closed),
+   * mirroring `contention_queue_depth`. ABSENT on pre-feature proxies (no
+   * prefill pacing — today's behaviour exactly).
+   */
+  local_prefills_in_flight?: number;
+  /**
+   * The proxy's effective prefill concurrency cap: `1` = serialised (the
+   * default), `0` = gate disabled (the cap becomes the slot pool). When
+   * `> 0` and `local_prefills_in_flight >= local_max_concurrent_prefills`
+   * the prefill capacity budget is 0 for that tick. Availability-affecting
+   * (malformed → poll rejected). ABSENT on pre-feature proxies.
+   */
+  local_max_concurrent_prefills?: number;
+  /**
+   * Requests waiting on the proxy's prefill gate — the live
+   * contention-queue depth for the gate. `> 0` is contention evidence,
+   * equivalent to a non-empty `contention_queue_depth`
+   * (WL-0MVHSZRZQ00482QX AC3). Availability-affecting (malformed → poll
+   * rejected). ABSENT on pre-feature proxies.
+   */
+  prefill_gate_waiters?: number;
+  /**
+   * Prefill-ETA guard's projected queue wait in seconds
+   * (LP-0MVGDUV5E005UWBQ): when present and finite together with
+   * `prefill_budget_seconds` and above it, the dispatcher defers rather than
+   * parking a pane behind a doomed wait. Advisory (a malformed value
+   * degrades to undefined and never blocks dispatch). ABSENT on pre-feature
+   * proxies.
+   */
+  queue_eta_seconds?: number | null;
+  /**
    * PROXY-AUTHORITATIVE local idle age in SECONDS (LP-0MVGD9Z8Z0055Y5J,
    * WL-0MVHSZR9C0012NQY): the monotonic idle age of the local backend,
    * updated by the proxy on dispatch start, on every forwarded SSE chunk and
@@ -1091,6 +1160,107 @@ export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): bo
   // `is_processing` is treated as processing (busy), never free. Owned
   // slots (live lease) are excluded (AC5, WL-0MTYZXSLN008HZOW).
   return countFreeUnownedSlots(perSlotSlots) >= required;
+}
+
+// ── Prefill-gate pacing (WL-0MVHSZRZQ00482QX) ────────────────────────
+
+/**
+ * Per-tick prefill pacing decision derived from the proxy's serialisation
+ * gate (LP-0MVGDUUV3001XFRJ) and prefill-ETA guard (LP-0MVGDUV5E005UWBQ).
+ *
+ * Every field is optional and absent on a pre-feature proxy, so an absent
+ * gate restores today's free-slot-only budget exactly (`capacityBudget`
+ * `undefined`, `deferReason` `undefined`).
+ */
+export interface PrefillPacing {
+  /** `local_prefills_in_flight` when served. */
+  inFlight?: number;
+  /** `local_max_concurrent_prefills` when served (`0` = gate disabled). */
+  cap?: number;
+  /** `prefill_gate_waiters` when served (live gate queue depth). */
+  gateWaiters?: number;
+  /** `prefill_budget_seconds` when served (the admission wait budget). */
+  budgetSeconds?: number;
+  /** `queue_eta_seconds` when served (projected queue wait). */
+  queueEtaSeconds?: number;
+  /** Highest per-slot `prefill_eta_seconds` observed in flight. */
+  maxSlotPrefillEtaSeconds?: number;
+  /**
+   * Remaining prefill concurrency headroom: `0` while the cap is reached,
+   * otherwise `cap - inFlight` (at least 1). `undefined` = unbounded — the
+   * cap is absent or `0`, or the in-flight count is not served, so pacing
+   * must not reduce today's free-slot budget.
+   */
+  capacityBudget?: number;
+  /**
+   * Distinct reason a dispatch is paced this tick, in precedence order:
+   * gate waiters (contention evidence) → cap saturated → projected wait
+   * above the admission budget. `undefined` = no prefill pacing.
+   */
+  deferReason?: 'prefill-gate' | 'prefill-cap' | 'prefill-eta';
+}
+
+/**
+ * Compute the prefill pacing decision for one poll.
+ *
+ * PACING ONLY REDUCES CONCURRENCY: a missing/disabled cap leaves
+ * `capacityBudget` `undefined` (today's free-slot-only budget), and the
+ * caller takes `min(freeSlots, capacityBudget)`. `prefill_gate_waiters > 0`
+ * is contention evidence equivalent to a non-empty `contention_queue_depth`.
+ * A projected wait is deferred only when BOTH the ETA and the admission
+ * budget are present and finite — a missing value never blocks dispatch.
+ */
+export function evaluatePrefillPacing(
+  status: LlamaStatus,
+  slots: LlamaSlot[] | null,
+): PrefillPacing {
+  const pacing: PrefillPacing = {};
+
+  const inFlight = status.local_prefills_in_flight;
+  if (typeof inFlight === 'number') pacing.inFlight = inFlight;
+  const cap = status.local_max_concurrent_prefills;
+  if (typeof cap === 'number') pacing.cap = cap;
+  const gateWaiters = status.prefill_gate_waiters;
+  if (typeof gateWaiters === 'number') pacing.gateWaiters = gateWaiters;
+  const budget = status.prefill_budget_seconds;
+  if (typeof budget === 'number') pacing.budgetSeconds = budget;
+  const queueEta = status.queue_eta_seconds;
+  if (typeof queueEta === 'number') pacing.queueEtaSeconds = queueEta;
+
+  if (slots !== null) {
+    for (const slot of slots) {
+      const eta = slot.prefill_eta_seconds;
+      if (typeof eta !== 'number') continue;
+      if (pacing.maxSlotPrefillEtaSeconds === undefined || eta > pacing.maxSlotPrefillEtaSeconds) {
+        pacing.maxSlotPrefillEtaSeconds = eta;
+      }
+    }
+  }
+
+  // Prefill capacity budget: only a POSITIVE cap with a known in-flight count
+  // can pace. `cap === 0` disables the gate (unbounded); an absent cap or
+  // in-flight count cannot be judged → unbounded (today's behaviour).
+  if (typeof cap === 'number' && cap > 0 && typeof inFlight === 'number') {
+    pacing.capacityBudget = inFlight >= cap ? 0 : cap - inFlight;
+  }
+
+  // Deferral precedence: gate waiters (contention) → cap saturated → ETA.
+  if (typeof gateWaiters === 'number' && gateWaiters > 0) {
+    pacing.deferReason = 'prefill-gate';
+    return pacing;
+  }
+  if (pacing.capacityBudget === 0) {
+    pacing.deferReason = 'prefill-cap';
+    return pacing;
+  }
+  if (typeof budget === 'number') {
+    const queueEtaExceeds = typeof queueEta === 'number' && queueEta > budget;
+    const slotEtaExceeds =
+      pacing.maxSlotPrefillEtaSeconds !== undefined &&
+      pacing.maxSlotPrefillEtaSeconds > budget;
+    if (queueEtaExceeds || slotEtaExceeds) pacing.deferReason = 'prefill-eta';
+  }
+  return pacing;
 }
 
 // ── Idle-duration tracker (implemented — F3) ──────────────────────────
@@ -1482,6 +1652,20 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
   const contentionQueuedCount = parseOptionalCount(o.contention_queued_count);
   if (contentionQueuedCount === null) return null;
 
+  // Prefill serialisation gate (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX):
+  // the three gate counters are AVAILABILITY-affecting — a malformed value is
+  // ambiguous → null (busy, fail-closed), exactly like
+  // `contention_queue_depth`. ABSENT on pre-feature proxies → undefined (no
+  // pacing, today's behaviour). `queue_eta_seconds` is an ETA and therefore
+  // ADVISORY: a malformed value degrades to undefined and never blocks.
+  const localPrefillsInFlight = parseOptionalCount(o.local_prefills_in_flight);
+  if (localPrefillsInFlight === null) return null;
+  const localMaxConcurrentPrefills = parseOptionalCount(o.local_max_concurrent_prefills);
+  if (localMaxConcurrentPrefills === null) return null;
+  const prefillGateWaiters = parseOptionalCount(o.prefill_gate_waiters);
+  if (prefillGateWaiters === null) return null;
+  const queueEtaSeconds = parseAdvisoryNumber(o.queue_eta_seconds);
+
   return {
     llama_server_running: o.llama_server_running,
     local_active_query: localActiveQuery,
@@ -1505,6 +1689,10 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     status_schema_version: statusSchemaVersion,
     capacity_hint: capacityHint,
     prefill_budget_seconds: prefillBudget,
+    local_prefills_in_flight: localPrefillsInFlight,
+    local_max_concurrent_prefills: localMaxConcurrentPrefills,
+    prefill_gate_waiters: prefillGateWaiters,
+    queue_eta_seconds: queueEtaSeconds,
     local_idle_seconds: localIdleSeconds,
     local_last_activity_at: localLastActivityAt,
     local_last_activity_source: localLastActivitySource,
@@ -6808,6 +6996,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       slotPhases?: Record<string, string>;
       slotPrefillEtaSeconds?: Record<string, number>;
       /**
+       * Prefill serialisation-gate evidence (WL-0MVHSZRZQ00482QX): the
+       * in-flight/cap counters, the live gate waiters and the prefill-ETA
+       * guard's queue ETA / admission budget. Attached to paced refusals and
+       * to every other polled decision when the proxy serves them.
+       */
+      prefillsInFlight?: number;
+      maxConcurrentPrefills?: number;
+      prefillGateWaiters?: number;
+      prefillBudgetSeconds?: number;
+      queueEtaSeconds?: number;
+      /**
        * Authoritative local idle-age evidence (WL-0MVHSZR9C0012NQY): the
        * proxy's reported idle age (seconds) and the source of its last local
        * activity. Observability only, never a gate.
@@ -7227,6 +7426,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // telemetry only and never a gate.
       const contentionQueueDepth =
         typeof status.contention_queue_depth === 'number' ? status.contention_queue_depth : 0;
+      // Prefill-gate contention evidence (WL-0MVHSZRZQ00482QX AC3): the
+      // proxy's serialisation-gate queue depth. `> 0` is equivalent to a
+      // non-empty `contention_queue_depth` for the pace/back-off decision
+      // (and it feeds the idle-age activity check and reset below).
+      const prefillGateWaiters =
+        typeof status.prefill_gate_waiters === 'number' ? status.prefill_gate_waiters : 0;
       // Truthful-capacity evidence for every decision entry on this poll
       // (LP-0MVGDUVGE0024YAI). Computed once; purely observational.
       const capacity = capacityEvidence(status, perSlotSlots);
@@ -7295,7 +7500,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       const activityOnPoll = pollShowsLocalActivity(
         status,
         perSlotSlots,
-        contentionQueueDepth,
+        contentionQueueDepth + prefillGateWaiters,
       );
       const idleAgeAuthority = idleAgeSeconds !== null && !activityOnPoll;
       const idleAgeQualifies = idleAgeAuthority && idleAgeSeconds * 1000 >= cfg.thresholdMs;
@@ -7353,7 +7558,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // Runs AFTER the branches so it can never be re-seeded by them. Scoped
       // to the idle-age signal so a pre-feature proxy keeps today's
       // contention behaviour byte-for-byte.
-      if (idleAgeSeconds !== null && contentionQueueDepth > 0) {
+      if (idleAgeSeconds !== null && (contentionQueueDepth > 0 || prefillGateWaiters > 0)) {
         tracker.record(false);
         perSlotTracker.record([]);
         activeAuditBatch = null;
@@ -7507,6 +7712,39 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         return { polled: true, dispatched: false, idle: true };
       }
 
+      // ── Prefill-gate pacing (WL-0MVHSZRZQ00482QX) ──
+      // The proxy serialises local prefills (LP-0MVGDUUV3001XFRJ), so a
+      // free slot alone does not mean a NEW pane can prefill: its request
+      // would queue behind the in-flight prefill and possibly fall back to a
+      // remote provider. Pace to the same gate the proxy enforces. This can
+      // only make the dispatcher MORE conservative — it never raises the
+      // free-slot budget and never bypasses the fail-closed checks above.
+      //   - gate waiters > 0 → contention evidence (reason `prefill-gate`);
+      //   - cap reached → prefill capacity budget 0 (reason `prefill-cap`);
+      //   - projected wait above the admission budget → reason `prefill-eta`.
+      // Every field is absent on a pre-feature proxy → no pacing at all.
+      const prefillPacing = evaluatePrefillPacing(status, perSlotSlots);
+      if (prefillPacing.deferReason !== undefined) {
+        void recordDecision(cfg.cwd, prefillPacing.deferReason, {
+          freeSlots,
+          totalSlots: status.total_slots,
+          ownerPresent,
+          runningPanes,
+          contentionDepth: contentionQueueDepth,
+          ...capacity,
+          ...batchMetadata(),
+        });
+        activeAuditBatch = null; // a paced tick ends the batch window
+        return { polled: true, dispatched: false, idle: true };
+      }
+      // Effective local dispatch budget (AC2): min(free-slot budget, prefill
+      // headroom). `capacityBudget` is undefined when the cap is absent/0 or
+      // the in-flight count is not served — today's free-slot-only budget.
+      const effectiveFreeSlots =
+        prefillPacing.capacityBudget === undefined
+          ? freeSlots
+          : Math.min(freeSlots, prefillPacing.capacityBudget);
+
       // Coordination mode: the elected leader reads the shared coordination
       // list, re-fetches and classifies each entry's item (tier priority:
       // audit → implement → plan → intake) and dispatches the
@@ -7538,7 +7776,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   model: cfg.model,
                   cwd: cfg.cwd,
                   coordinationDir: opts.coordinationDir,
-                  freeSlots,
+                  freeSlots: effectiveFreeSlots,
                   browseItemCount: cfg.browseItemCount,
                   auditBatchMax: cfg.auditBatchMax,
                   // Continuation budget (parent WL-0MVEDM8OT007WDRS AC1) —
@@ -7565,7 +7803,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             : await dispatchDowntimeWork(opts.deps, {
                 model: cfg.model,
                 cwd: cfg.cwd,
-                freeSlots,
+                freeSlots: effectiveFreeSlots,
                 browseItemCount: cfg.browseItemCount,
                 // Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1).
                 auditBatchMax: cfg.auditBatchMax,
