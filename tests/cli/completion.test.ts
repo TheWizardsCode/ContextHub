@@ -6,11 +6,8 @@
  * completion logic for work-item IDs.
  */
 
-import { spawnSync } from 'child_process';
-import { resolve } from 'path';
 import { test, expect, describe } from 'vitest';
-
-const CLI_PATH = resolve(__dirname, '../../dist/cli.js');
+import { runCliProcess } from './cli-bundle.js';
 
 // Known subcommands that should appear in completion scripts
 const KNOWN_COMMANDS = [
@@ -26,14 +23,19 @@ const KNOWN_GLOBAL_OPTIONS = [
   '--json', '--verbose', '--format', '--help', '--version',
 ];
 
+/**
+ * Run `wl completion <shell>` in a real subprocess.
+ *
+ * Spawns through the pre-compiled bundle (`tests/cli/cli-bundle.ts`) rather
+ * than a hard-coded `dist/cli.js`: `dist/` is gitignored and never rebuilt by
+ * `npm test`, so a stale build used to make these assertions fail against old
+ * code (WL-0MVII17N3003FJWT — `worklist` missing from the script).
+ */
 function runCompletion(shell: string): { stdout: string; stderr: string; exitCode: number | null } {
-  const res = spawnSync(process.execPath, [CLI_PATH, 'completion', shell], {
-    encoding: 'utf8',
-    timeout: 10000,
-  });
+  const res = runCliProcess(['completion', shell], { timeout: 10000 });
   return {
-    stdout: res.stdout || '',
-    stderr: res.stderr || '',
+    stdout: res.stdout,
+    stderr: res.stderr,
     exitCode: res.status,
   };
 }
@@ -80,19 +82,13 @@ describe('wl completion bash', () => {
   });
 
   test('errors gracefully for unknown shell', () => {
-    const result = spawnSync(process.execPath, [CLI_PATH, 'completion', 'fish'], {
-      encoding: 'utf8',
-      timeout: 10000,
-    });
+    const result = runCliProcess(['completion', 'fish'], { timeout: 10000 });
     expect(result.status).toBe(1);
-    expect((result.stderr || '') + (result.stdout || '')).toMatch(/fish|unknown|not supported/i);
+    expect(result.stderr + result.stdout).toMatch(/fish|unknown|not supported/i);
   });
 
   test('supports --json output', () => {
-    const res = spawnSync(process.execPath, [CLI_PATH, '--json', 'completion', 'bash'], {
-      encoding: 'utf8',
-      timeout: 10000,
-    });
+    const res = runCliProcess(['--json', 'completion', 'bash'], { timeout: 10000 });
     expect(res.status).toBe(0);
     const parsed = JSON.parse(res.stdout || '{}');
     expect(parsed.success).toBe(true);
@@ -137,10 +133,7 @@ describe('wl completion zsh', () => {
   });
 
   test('supports --json output', () => {
-    const res = spawnSync(process.execPath, [CLI_PATH, '--json', 'completion', 'zsh'], {
-      encoding: 'utf8',
-      timeout: 10000,
-    });
+    const res = runCliProcess(['--json', 'completion', 'zsh'], { timeout: 10000 });
     expect(res.status).toBe(0);
     const parsed = JSON.parse(res.stdout || '{}');
     expect(parsed.success).toBe(true);
@@ -153,12 +146,9 @@ describe('wl completion zsh', () => {
 
 describe('wl completion without arguments', () => {
   test('shows usage when no shell is specified', () => {
-    const res = spawnSync(process.execPath, [CLI_PATH, 'completion'], {
-      encoding: 'utf8',
-      timeout: 10000,
-    });
+    const res = runCliProcess(['completion'], { timeout: 10000 });
     // Should show help or usage text
-    const output = (res.stdout || '') + (res.stderr || '');
+    const output = res.stdout + res.stderr;
     expect(output).toMatch(/usage|available|shell|bash|zsh/i);
     expect(res.status).toBe(0);
   });

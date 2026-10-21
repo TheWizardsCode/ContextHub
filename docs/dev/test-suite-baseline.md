@@ -473,6 +473,37 @@ Also:
   it fails if the bundle cannot be built (`isBundled()`) or if any test file
   outside a documented allowlist spawns the CLI through `tsx` again.
 
+##### Sweep completeness + second guard (WL-0MVII17N3003FJWT)
+
+A later false failure proved the `dist/` idiom had not been fully swept:
+`wl completion bash|zsh > contains all known subcommands` failed with
+`expected completion script to contain "worklist"` purely because the
+checkout's `dist/cli.js` (gitignored, not rebuilt by `npm test`) predated the
+commit that registered the `worklist` command — the source was correct.
+
+- Converted the last hard-coded `dist/cli.js` spanners to the bundle:
+  `completion.test.ts`, `doctor-foreign-items-push.test.ts`, `grouping.test.ts`,
+  `sync-cache-invalidation.test.ts`, `sync-concurrent.test.ts` and
+  `plugin-integration.test.ts` (all now spawn through `runCliProcess()` /
+  `cliInvocation()`, so they always run current `src/`).
+- `tests/unit/no-stale-dist-spawn.test.ts` is a second regression guard (this
+  time for the hard-coded `dist/` idiom): it fails when any test file outside
+  a documented allowlist hard-codes a `dist/cli.js` path, naming the file and
+  the `runCliProcess()` / `cliInvocation()` helpers to use. Its red evidence
+  comes from a temp-dir fixture (the gate rebuilds `dist/` before testing, so
+  the ambient failure is not reproducible), mirroring the fixture pattern of
+  `startup-target-freshness.test.ts`.
+- **Standing rule:** tests must not hard-code `dist/cli.js`. `dist/` is
+  gitignored and `npm test` does not rebuild it, so a hard-coded spawn asserts
+  against a possibly stale build and fails for reasons unrelated to the code
+  under test. Spawn through `runCliProcess()` / `cliInvocation()` from
+  `tests/cli/cli-bundle.ts` (or `resolveStartupTarget` where the built entry
+  itself is the subject — `smoke`, `entry-point-split`,
+  `startup-import-budget`); `npm run build` is only required before a bare
+  checkout's suite for the tests that legitimately exercise the built
+  artefact, and the guard keeps a forgotten rebuild from silently producing
+  false failures.
+
 ### Results — canonical suite (`.pi/test-config.json`)
 
 ```bash

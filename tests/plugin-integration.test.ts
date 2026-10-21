@@ -9,15 +9,19 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { createTempDir, cleanupTempDir } from './test-utils.js';
 import { getPackageVersion } from './cli/cli-helpers.js';
-import { fileURLToPath } from 'url';
+import { cliInvocation } from './cli/cli-bundle.js';
 
 const execAsync = promisify(childProcess.exec);
 
-// Get the project root directory
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, '..');
-const cliPath = path.join(projectRoot, 'dist', 'cli.js');
+/**
+ * The CLI under test, as a shell command prefix: the pre-compiled bundle of
+ * `src/cli.ts` (`tests/cli/cli-bundle.ts`), so these tests always run current
+ * source instead of whatever `dist/` happens to be on disk
+ * (WL-0MVII17N3003FJWT).
+ */
+const cliCmd = cliInvocation()
+  .map((part) => `"${part}"`)
+  .join(' ');
 
 describe('Plugin Integration Tests', () => {
   let tempDir: string;
@@ -121,18 +125,18 @@ export default function register(ctx) {
     fs.writeFileSync(path.join(pluginDir, 'hello.mjs'), pluginContent);
     
     // Verify the plugin command appears in help
-    const { stdout: helpOutput } = await execAsync(`node ${cliPath} --help`, { env: isolatedEnv() });
+    const { stdout: helpOutput } = await execAsync(`${cliCmd} --help`, { env: isolatedEnv() });
     expect(helpOutput).toContain('hello');
     expect(helpOutput).toContain('Say hello');
     
     // Test the plugin command
-    const { stdout } = await execAsync(`node ${cliPath} hello --json`, { env: isolatedEnv() });
+    const { stdout } = await execAsync(`${cliCmd} hello --json`, { env: isolatedEnv() });
     const result = JSON.parse(stdout);
     expect(result.success).toBe(true);
     expect(result.message).toBe('Hello, World!');
     
     // Test with custom name
-    const { stdout: stdout2 } = await execAsync(`node ${cliPath} hello --json --name Copilot`, { env: isolatedEnv() });
+    const { stdout: stdout2 } = await execAsync(`${cliCmd} hello --json --name Copilot`, { env: isolatedEnv() });
     const result2 = JSON.parse(stdout2);
     expect(result2.success).toBe(true);
     expect(result2.message).toBe('Hello, Copilot!');
@@ -163,7 +167,7 @@ export default function register(ctx) {
     fs.writeFileSync(path.join(pluginDir, 'm-second.mjs'), plugin2);
     
     // Verify all commands appear in help
-    const { stdout } = await execAsync(`node ${cliPath} --help`, { env: isolatedEnv() });
+    const { stdout } = await execAsync(`${cliCmd} --help`, { env: isolatedEnv() });
     expect(stdout).toContain('cmd-alpha');
     expect(stdout).toContain('cmd-beta');
     expect(stdout).toContain('cmd-gamma');
@@ -188,7 +192,7 @@ export default function register(ctx) {
     fs.writeFileSync(path.join(pluginDir, 'bad.mjs'), badPlugin);
     
     // The CLI should still work and the good plugin should load
-    const { stdout: helpOut } = await execAsync(`node ${cliPath} --help`, { env: isolatedEnv() });
+    const { stdout: helpOut } = await execAsync(`${cliCmd} --help`, { env: isolatedEnv() });
     expect(helpOut).toContain('good');
     
     // Built-in commands should still work
@@ -201,7 +205,7 @@ export default function register(ctx) {
     fs.writeFileSync(path.join(pluginDir, 'plugin1.mjs'), 'export default function register(ctx) {}');
     fs.writeFileSync(path.join(pluginDir, 'plugin2.js'), 'export default function register(ctx) {}');
     
-    const { stdout } = await execAsync(`node ${cliPath} plugins --json`, { env: isolatedEnv() });
+    const { stdout } = await execAsync(`${cliCmd} plugins --json`, { env: isolatedEnv() });
     const result = JSON.parse(stdout);
     
     expect(result.success).toBe(true);
@@ -213,7 +217,7 @@ export default function register(ctx) {
   });
 
   it('should handle empty plugin directory gracefully', async () => {
-    const { stdout: emptyStdout } = await execAsync(`node ${cliPath} plugins --json`, { env: isolatedEnv() });
+    const { stdout: emptyStdout } = await execAsync(`${cliCmd} plugins --json`, { env: isolatedEnv() });
     const result = JSON.parse(emptyStdout);
     
     expect(result.success).toBe(true);
@@ -226,7 +230,7 @@ export default function register(ctx) {
     // Remove the plugin directory
     fs.rmdirSync(pluginDir);
     
-    const { stdout } = await execAsync(`node ${cliPath} plugins --json`, { env: isolatedEnv() });
+    const { stdout } = await execAsync(`${cliCmd} plugins --json`, { env: isolatedEnv() });
     const result = JSON.parse(stdout);
     
     expect(result.success).toBe(true);
@@ -253,10 +257,10 @@ export default function register(ctx) {
     fs.writeFileSync(path.join(pluginDir, 'db-plugin.mjs'), dbPlugin);
     
     // Create a work item first
-    await execAsync(`node ${cliPath} create --json -t "Test item"`, { env: isolatedEnv() });
+    await execAsync(`${cliCmd} create --json -t "Test item"`, { env: isolatedEnv() });
     
     // Test the plugin command
-    const { stdout } = await execAsync(`node ${cliPath} count-items`, { env: isolatedEnv() });
+    const { stdout } = await execAsync(`${cliCmd} count-items`, { env: isolatedEnv() });
     const result = JSON.parse(stdout);
     
     expect(result.success).toBe(true);
@@ -279,7 +283,7 @@ export default function register(ctx) {
     // Set environment variable
     const env = { ...isolatedEnv(), WORKLOG_PLUGIN_DIR: customPluginDir };
     
-    const { stdout } = await execAsync(`node ${cliPath} --help`, { env });
+    const { stdout } = await execAsync(`${cliCmd} --help`, { env });
     expect(stdout).toContain('custom-cmd');
   });
 
@@ -296,7 +300,7 @@ export default function register(ctx) {
 `;
     fs.writeFileSync(path.join(pluginDir, 'valid.mjs'), validPlugin);
     
-    const { stdout } = await execAsync(`node ${cliPath} plugins --json`, { env: isolatedEnv() });
+    const { stdout } = await execAsync(`${cliCmd} plugins --json`, { env: isolatedEnv() });
     const result = JSON.parse(stdout);
     
     // Should only find the valid plugin
@@ -399,7 +403,7 @@ export default function register(ctx) {
     // Ensure WORKLOG_PLUGIN_DIR is not set (would override multi-dir)
     delete env.WORKLOG_PLUGIN_DIR;
 
-    const { stdout } = await execAsync(`node ${cliPath} --help`, { env, cwd: tempDir });
+    const { stdout } = await execAsync(`${cliCmd} --help`, { env, cwd: tempDir });
     expect(stdout).toContain('global-hello');
   });
 
@@ -420,7 +424,7 @@ export default function register(ctx) {
     const env: Record<string, string> = { ...process.env as Record<string, string>, XDG_CONFIG_HOME: path.join(tempDir, 'xdg-config') };
     delete env.WORKLOG_PLUGIN_DIR;
 
-    const { stdout } = await execAsync(`node ${cliPath} --help`, { env, cwd: tempDir });
+    const { stdout } = await execAsync(`${cliCmd} --help`, { env, cwd: tempDir });
     expect(stdout).toContain('local-cmd');
     expect(stdout).toContain('global-cmd');
   });
@@ -453,7 +457,7 @@ export default function register(ctx) {
     const env: Record<string, string> = { ...process.env as Record<string, string>, XDG_CONFIG_HOME: path.join(tempDir, 'xdg-config') };
     delete env.WORKLOG_PLUGIN_DIR;
 
-    const { stdout } = await execAsync(`node ${cliPath} shared-cmd --json`, { env, cwd: tempDir });
+    const { stdout } = await execAsync(`${cliCmd} shared-cmd --json`, { env, cwd: tempDir });
     const result = JSON.parse(stdout);
     expect(result.success).toBe(true);
     expect(result.source).toBe('local');
@@ -472,7 +476,7 @@ export default function register(ctx) {}
     const env: Record<string, string> = { ...process.env as Record<string, string>, XDG_CONFIG_HOME: path.join(tempDir, 'xdg-config') };
     delete env.WORKLOG_PLUGIN_DIR;
 
-    const { stdout } = await execAsync(`node ${cliPath} plugins --json`, { env, cwd: tempDir });
+    const { stdout } = await execAsync(`${cliCmd} plugins --json`, { env, cwd: tempDir });
     const result = JSON.parse(stdout);
 
     expect(result.success).toBe(true);
@@ -518,7 +522,7 @@ export default function register(ctx) {
       WORKLOG_PLUGIN_DIR: overrideDir
     };
 
-    const { stdout } = await execAsync(`node ${cliPath} --help`, { env, cwd: tempDir });
+    const { stdout } = await execAsync(`${cliCmd} --help`, { env, cwd: tempDir });
     expect(stdout).toContain('override-cmd');
     expect(stdout).not.toContain('local-should-not-load');
   });
