@@ -22,7 +22,7 @@
  * Run: npx vitest run packages/tui/extensions/Worklog/session-health.test.ts
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // ── Mock @earendil-works/pi-coding-agent ──────────────────────────────
 
@@ -1343,6 +1343,189 @@ describe('session-health', () => {
 
       // requestRender should have been called by the after_provider_response handler
       expect(requestRender).toHaveBeenCalled();
+    });
+  });
+
+  // ── Mid-session model switch — end-to-end Line 3 render (WL-0MVGU4S58003IRXV, WL-0MVGU7H24009G8II) ──
+  //
+  // These specs were landed as `it.fails(...)` (TDD red) by WL-0MVGU4S58003IRXV
+  // and flipped to `it(...)` here as the sibling implementation
+  // (WL-0MVGU7H24009G8II) landed (same convention as WL-0MVFE0T0M009ZCPM).
+  //
+  // These tests are **end-to-end**: they bypass this file's model-display mock
+  // and drive the REAL model-display module (also registered on the mock Pi)
+  // through real `model_select` / `after_provider_response` events, then
+  // render footer Line 3. This guarantees the footer never pairs a new alias
+  // with a stale resolved provider/model, and that the non-proxy fallback
+  // label renders (and right-aligns) correctly.
+  describe('mid-session model switch — end-to-end Line 3 render', () => {
+    /** The canonical Local Proxy provider name (`@worklog/shared/lease-release`). */
+    const LOCAL_PROXY_PROVIDER = 'Local Proxy';
+
+    /** The real model-display module, obtained past the file-level mock. */
+    let actualModelDisplay: typeof import('./model-display.js');
+
+    beforeEach(async () => {
+      actualModelDisplay =
+        await vi.importActual<typeof import('./model-display.js')>('./model-display.js');
+      actualModelDisplay._resetModelDisplayState();
+
+      // Delegate this file's model-display mock to the REAL module so the
+      // Line-3 render reads state written by the real event handlers (true
+      // end-to-end, no hand-set mock state).
+      mocks.mockGetResolvedModel.mockImplementation(() =>
+        actualModelDisplay.getResolvedModel(),
+      );
+      mocks.mockGetSelectedModel.mockImplementation(() =>
+        actualModelDisplay.getSelectedModel(),
+      );
+      mocks.mockOnModelChange.mockImplementation(actualModelDisplay.onModelChange);
+    });
+
+    afterEach(() => {
+      // Restore neutral defaults for the other describes in this file.
+      mocks.mockGetResolvedModel.mockReset();
+      mocks.mockGetResolvedModel.mockReturnValue(null);
+      mocks.mockGetSelectedModel.mockReset();
+      mocks.mockGetSelectedModel.mockReturnValue(null);
+      mocks.mockOnModelChange.mockReset();
+      mocks.mockOnModelChange.mockReturnValue(() => {});
+    });
+
+    /** Fire an event through EVERY handler registered for it (in order). */
+    function fireAll(event: string, ...args: any[]): void {
+      for (const handler of registeredListeners[event] ?? []) {
+        handler(...args);
+      }
+    }
+
+    /** Strip ANSI dim/reset codes from a rendered line. */
+    function unstyle(line: string): string {
+      return line.replace(/\x1b\[[0-9;]*m/g, '');
+    }
+
+    /**
+     * Register the real model-display + session-health on the mock Pi, start
+     * a session (installing the footer) and return a render + dispatch pair.
+     */
+    function mountFooter(width: number = 500): {
+      fire: (event: string, ...args: any[]) => void;
+      renderLine3: () => string;
+    } {
+      actualModelDisplay.registerModelDisplay(mockPi);
+      registerSessionHealth(mockPi);
+
+      const ctx = {
+        ...mockCtx,
+        model: undefined,
+        ui: {
+          ...mockCtx.ui,
+          theme: { fg: vi.fn((c: string, t: string) => `\x1b[2m${t}\x1b[0m`) },
+        },
+      };
+
+      fireAll('session_start', {}, ctx);
+
+      expect(footerCalls.length).toBeGreaterThanOrEqual(1);
+      const factory = footerCalls[footerCalls.length - 1].factory;
+      const footerObj = factory(
+        { requestRender: vi.fn() },
+        { fg: (c: string, t: string) => `\x1b[2m${t}\x1b[0m` },
+        {
+          getExtensionStatuses: () => [],
+          onBranchChange: () => () => {},
+          requestRender: vi.fn(),
+        },
+      );
+
+      return {
+        fire: fireAll,
+        renderLine3: () => footerObj.render(width)[1] ?? '',
+      };
+    }
+
+    it(
+      're-renders Line 3 as "<newAlias> → (resolving)" immediately after a mid-session switch',
+      () => {
+        const { fire, renderLine3 } = mountFooter();
+
+        // Pre-switch state: alias "code" served by the Local Proxy as openai/gpt-4.
+        fire(
+          'model_select',
+          { model: { id: 'code', provider: LOCAL_PROXY_PROVIDER }, source: 'set' },
+          {},
+        );
+        fire('after_provider_response', { headers: { 'x-resolved-model': 'openai/gpt-4' } }, {});
+        expect(renderLine3()).toContain('code → openai/gpt-4');
+
+        // Mid-session switch to the proxy-routed "plan" alias.
+        fire(
+          'model_select',
+          { model: { id: 'plan', provider: LOCAL_PROXY_PROVIDER }, source: 'set' },
+          {},
+        );
+
+        // The stale resolved value must be invalidated and the footer must
+        // show the honest `(resolving)` state, not the old provider/model.
+        expect(actualModelDisplay.getResolvedModel()).toBeNull();
+        expect(actualModelDisplay.getSelectedModel()).toBe('plan');
+        const line3 = renderLine3();
+        expect(line3).toContain('plan → (resolving)');
+        expect(line3).not.toContain('openai/gpt-4');
+      },
+    );
+
+    it(
+      'renders the non-proxy provider/id fallback instead of a stale value or endless "(resolving)"',
+      () => {
+        const { fire, renderLine3 } = mountFooter();
+
+        fire(
+          'model_select',
+          { model: { id: 'deepseek-v4-pro', provider: 'deepseek' }, source: 'set' },
+          {},
+        );
+
+        expect(actualModelDisplay.getResolvedModel()).toBe('deepseek/deepseek-v4-pro');
+        const line3 = renderLine3();
+        expect(line3).toContain('deepseek-v4-pro → deepseek/deepseek-v4-pro');
+        expect(line3).not.toContain('(resolving)');
+      },
+    );
+
+    it(
+      'right-aligns the longer non-proxy label and keeps it within the width budget',
+      () => {
+        const { fire, renderLine3 } = mountFooter(120);
+
+        fire(
+          'model_select',
+          { model: { id: 'deepseek-v4-pro', provider: 'deepseek' }, source: 'set' },
+          {},
+        );
+
+        const visible = unstyle(renderLine3());
+        // Right-aligned: the visible content fills the line and the model's
+        // right edge is flush with the terminal width (WL-0MSMDYJ3X00895MP,
+        // WL-0MSHENVKR002HZT5) even with the longer non-proxy fallback label.
+        expect(visible.length).toBe(120);
+        expect(visible.endsWith('deepseek-v4-pro → deepseek/deepseek-v4-pro')).toBe(true);
+      },
+    );
+
+    it('never overflows a narrow terminal with the non-proxy fallback label', () => {
+      const { fire, renderLine3 } = mountFooter(30);
+
+      fire(
+        'model_select',
+        { model: { id: 'deepseek-v4-pro', provider: 'deepseek' }, source: 'set' },
+        {},
+      );
+
+      // Width-budget regression guard: whatever Line 3 renders (short
+      // `(resolving)` today, the longer fallback label after implementation),
+      // it must never exceed the terminal width.
+      expect(unstyle(renderLine3()).length).toBeLessThanOrEqual(30);
     });
   });
 

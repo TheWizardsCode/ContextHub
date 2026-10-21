@@ -9,34 +9,23 @@
  *
  * Note: `execAsync` from cli-helpers runs `tsx src/cli.ts` in-process via
  * cli-inproc.ts, which bypasses src/cli.ts's cache wiring — so these tests
- * spawn the CLI directly instead.
+ * spawn the CLI directly instead. The spawn goes through `runCliProcess`
+ * (cli-bundle.ts): a pre-compiled snapshot of the same `src/cli.ts` entry, so
+ * the cache wiring under test is the real one while each spawn costs ~1 s
+ * instead of tsx's 2.5–8 s.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
-import { createTempDir, cleanupTempDir, resolveTsxBin } from '../test-utils.js';
+import { createTempDir, cleanupTempDir } from '../test-utils.js';
+import { runCliProcess } from './cli-bundle.js';
 import { countSpawnRecords } from '../../src/spawn-counter.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, '..', '..');
-const cliPath = path.join(projectRoot, 'src', 'cli.ts');
-const tsxBin = resolveTsxBin(__dirname);
 
 /** Run the real CLI as a subprocess; returns stdout, stderr, exit status. */
 function runCli(args: string[], cwd: string, env: Record<string, string>): { stdout: string; stderr: string; status: number | null } {
-  const result = spawnSync(process.execPath, [tsxBin, cliPath, ...args], {
-    cwd,
-    env: { ...process.env, ...env },
-    encoding: 'utf-8',
-    timeout: 60000,
-    maxBuffer: 20 * 1024 * 1024,
-  });
-  return { stdout: result.stdout ?? '', stderr: result.stderr ?? '', status: result.status };
+  return runCliProcess(args, { cwd, env: { ...process.env, ...env } });
 }
 
 /** Setup: temp worklog + isolated cache dir + spawn counter file. */
@@ -229,16 +218,12 @@ describe('wl CLI read cache (e2e)', { timeout: 60_000 }, () => {
     }
   });
 
-  it('a fresh cache dir misses once then hits (no cross-test pollution)', () => {
-    // Second test file uses its own temp dirs; this just re-verifies the
-    // miss→hit cycle in a pristine cache dir.
-    createItem(tempDir, env, 'Alpha');
-    const r1 = runCli(['list', '--json'], tempDir, env);
-    const r2 = runCli(['list', '--json'], tempDir, env);
-    expect(r1.stdout).toBe(r2.stdout);
-    expect(workSpawns(spawnFile)).toBe(1);
-    expect(hitSpawns(spawnFile)).toBe(1);
-  });
+  // NOTE (WL-0MVF9JJUH0077OB8): the former
+  // "a fresh cache dir misses once then hits (no cross-test pollution)" case
+  // was removed. It re-asserted exactly the miss→hit cycle of AC1 above in a
+  // pristine cache dir — every other case in this file already starts from a
+  // fresh temp dir (see `setup()`), so it added no coverage while costing two
+  // real CLI spawns.
 
   it('serves and hits the cache on the --worklog-dir fast path (split parity)', () => {
     // Entry-point split contract (F3 — WL-0MVFRRCP7007UWS7): a

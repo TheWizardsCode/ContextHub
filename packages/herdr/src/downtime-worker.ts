@@ -2488,6 +2488,21 @@ export interface DowntimeDispatchOutcome {
    * status reports `active === true` with `remaining > 0`.
    */
   auditBatch?: DowntimeAuditBatchStatus;
+
+  /**
+   * True when this outcome came from an AUDIT-BATCH CONTINUATION — the leader
+   * sourced the target from its own Herdr head while a batch was armed
+   * (parent WL-0MVEDM8OT007WDRS AC4, implementation WL-0MVFE1DD8000D8T2).
+   *
+   * The worker loop uses it to keep the leadership hand-off deferred: the
+   * own-backlog step-down (`releaseLeadership()`) must happen exactly once, at
+   * BATCH END, never mid-batch. `dispatchFromCoordination` therefore raises
+   * `ownBacklogDispatch` for a continuation only when that dispatch ends the
+   * batch (cap reached / depth dropped); every other continuation leaves both
+   * flags false so the leader keeps draining its own head within the same
+   * idle window. Absent on every non-continuation outcome.
+   */
+  auditBatchContinuation?: boolean;
 }
 
 /**
@@ -4167,8 +4182,274 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number; /** Batch-local exclusion set: item ids already dispatched in the current audit batch (WL-0MVFE1DD8000D8T2 AC3/AC4). Never re-selected within one batch. */ auditBatchDispatchedIds?: readonly string[] },
   now: number = Date.now(),
+): Promise<DowntimeDispatchOutcome> {
+  // Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1–AC5):
+  // every outcome of this invocation is finalized against the leader's own
+  // audit-eligible depth so the worker can decide the idle-reset deferral and
+  // the (deferred) leadership hand-off without re-deriving state. Skipped
+  // entirely when the caller supplies no batch surface, keeping direct API
+  // callers byte-for-byte unchanged.
+  const batchSupplied =
+    opts.auditBatchMax !== undefined || opts.auditBatchRemaining !== undefined;
+  const batchRuntime = createCoordinationBatchRuntime(deps, opts, now);
+  const outcome = await dispatchFromCoordinationGated(deps, entries, opts, now, batchRuntime);
+  if (!batchSupplied) return outcome;
+  const cap = clampDowntimeAuditBatchMax(
+    opts.auditBatchMax ?? DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+  );
+  const remainingBefore =
+    opts.auditBatchRemaining === undefined
+      ? cap
+      : Math.max(0, Math.trunc(opts.auditBatchRemaining));
+  const threshold = resolveSprintViewWindow(opts.browseItemCount);
+  const finalized = finalizeAuditBatchOutcome(outcome, {
+    depth: await batchRuntime.readDepth(),
+    cap,
+    threshold,
+    remainingBefore,
+  });
+  if (finalized.auditBatchContinuation !== true) return finalized;
+  // AC4: the own-backlog leadership hand-off is deferred to BATCH END. Raise
+  // the step-down surface only when THIS continuation ended the batch (cap
+  // reached or depth dropped); a failed continuation never hands off (AC3).
+  const status = finalized.auditBatch;
+  const batchEnded = status === undefined || !status.active || status.remaining <= 0;
+  const { auditBatchContinuation: _continuation, ...rest } = finalized;
+  return {
+    ...rest,
+    auditBatchContinuation: true,
+    ownBacklogDispatch: finalized.dispatched && batchEnded,
+  };
+}
+
+/**
+ * Batch runtime shared between the coordination dispatcher and its finalizer
+ * (WL-0MVFE1DD8000D8T2 AC4): memoises the leader's own audit-eligible depth so
+ * one invocation reads the own Herdr head at most once, whether the read came
+ * from the continuation scan or from the outcome finalizer.
+ */
+interface CoordinationBatchRuntime {
+  /** Memoised audit-eligible depth over the leader's own head + window extension. */
+  readDepth(): Promise<number>;
+  /** Record a depth already computed from a window this invocation read. */
+  setDepth(depth: number): void;
+}
+
+function createCoordinationBatchRuntime(
+  deps: DowntimeWorkerDeps,
+  opts: { cwd: string; browseItemCount?: number },
+  now: number,
+): CoordinationBatchRuntime {
+  let depth: number | null = null;
+  let pending: Promise<number> | null = null;
+  return {
+    setDepth(value: number): void {
+      depth = value;
+    },
+    async readDepth(): Promise<number> {
+      if (depth !== null) return depth;
+      pending ??= (async () => {
+        const window = await readOwnHeadWindow(deps, opts.cwd, opts.browseItemCount);
+        return window === null
+          ? 0
+          : computeAuditEligibleDepth([...window.head, ...window.tail], now);
+      })();
+      depth = await pending;
+      return depth;
+    },
+  };
+}
+
+/**
+ * The leader's own dispatch window (WL-0MVFE1DD8000D8T2 AC4): the canonical
+ * ranking head windowed to the live sprint view, plus the bounded window
+ * EXTENSION (`fetchExtendedHerdrItems`, never a second ranking). Fail-open:
+ * a `{ok:false}`/thrown lookup resolves `null` — the caller then falls back to
+ * its unchanged behaviour or to a depth of 0 (no batch armed).
+ */
+async function readOwnHeadWindow(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+  browseItemCount?: number,
+): Promise<{ head: DowntimeHerdrItem[]; tail: DowntimeHerdrItem[] } | null> {
+  const sprintWindow = resolveSprintViewWindow(browseItemCount);
+  let ownHead: DowntimeHerdrListResult | null = null;
+  try {
+    ownHead = await deps.getHerdrListHead(cwd, sprintWindow);
+  } catch {
+    ownHead = null;
+  }
+  if (ownHead === null || !ownHead.ok) return null;
+  const tail = await fetchExtendedHerdrItems(deps, cwd, ownHead.items, {
+    includeNonCritical: true,
+  });
+  return { head: ownHead.items, tail };
+}
+
+/**
+ * Own-head candidate scan shared by the leader's own-backlog fallback
+ * (parent WL-0MUU4XFU90008E24) and the audit-batch continuation (parent
+ * WL-0MVEDM8OT007WDRS AC4).
+ *
+ * Factored out so the continuation applies the EXACT same sequential filter
+ * chain as the fallback — classify → dispatched-marker exclusion (id-guard) →
+ * attempt budget → non-terminal cooldown → code-freeze → audit slot minimum →
+ * critical in-flight guard → review-queue hold — with no duplicated gate
+ * logic. The scan never ranks: `window.head` + `window.tail` is the canonical
+ * order.
+ *
+ * Returns `null` when no candidate was dispatched or attempted (the caller
+ * keeps its original terminal reason), otherwise the dispatch outcome with
+ * `ownBacklogDispatch` deliberately LEFT UNSET — the caller decides the
+ * leadership hand-off semantics (the fallback hands off immediately, the
+ * batch continuation defers it to batch end).
+ */
+async function dispatchFromOwnHead(
+  deps: DowntimeWorkerDeps,
+  opts: { model: string; cwd: string },
+  ctx: {
+    window: { head: DowntimeHerdrItem[]; tail: DowntimeHerdrItem[] };
+    frozen: boolean;
+    auditEligible: boolean;
+    markerStaleWindowMs: number;
+    maxAttempts: number;
+    cooldownMs: number;
+    cooldownEntriesForRoot(root: string): Promise<DowntimeLogEntry[]>;
+    inFlightForRoot(root: string): Promise<InFlightPanes>;
+    reviewGateForRoot(root: string): Promise<ReviewQueueGateResult | null>;
+    /** Kinds this scan may dispatch; `null` = every classified kind. */
+    kinds: readonly DowntimeSkillKind[] | null;
+    /** Batch-local exclusion set (never re-selected within one batch). */
+    excludeIds: ReadonlySet<string>;
+    /** Selection reason recorded on the dispatch pipeline. */
+    selectionReason: string;
+    /** `claim-failed`/`claim-rolled-back` → try the next item (fallback) or end the scan (continuation). */
+    skipOnLostClaim: boolean;
+    /** Holds reported back to the caller's terminal-reason composition. */
+    holds: {
+      budget: boolean;
+      cooldown: boolean;
+      inFlight: boolean;
+      review: boolean;
+    };
+    /** Producer-review flag writes already performed this cycle (deduped). */
+    flaggedForBudget: Set<string>;
+  },
+  now: number,
+): Promise<DowntimeDispatchOutcome | null> {
+  const { head, tail } = ctx.window;
+  const ownTail = tail.filter(item => !ctx.excludeIds.has(item.id));
+  if (ownTail.length === 0) return null;
+  const ownEntries = await ctx.cooldownEntriesForRoot(opts.cwd);
+  const ownMarkerMaps: Record<DowntimeSkillKind, Map<string, DispatchMarker>> = {
+    audit: _dispatchedMarkers(ownEntries, 'audit'),
+    implement: _dispatchedMarkers(ownEntries, 'implement'),
+    plan: _dispatchedMarkers(ownEntries, 'plan'),
+    intake: _dispatchedMarkers(ownEntries, 'intake'),
+    'risk-effort': _dispatchedMarkers(ownEntries, 'risk-effort'),
+  };
+  const ownInFlight = await ctx.inFlightForRoot(opts.cwd);
+  void head; // the extension alone is the supplement; `head` is the ranked prefix
+  for (const item of ownTail) {
+    // Sequential filters — the same contract as the offer path.
+    const kind = classifyItemForDispatch(item, now);
+    if (kind === null) continue;
+    if (ctx.kinds !== null && !ctx.kinds.includes(kind)) continue;
+    const marker = ownMarkerMaps[kind]?.get(item.id);
+    if (
+      marker !== undefined &&
+      _markerStillExcludes(
+        marker,
+        item.stage,
+        now,
+        ctx.markerStaleWindowMs,
+        kind === 'audit' || kind === 'implement' ? 'id-guard' : 'stage-guard',
+      )
+    ) {
+      continue;
+    }
+    if (isAttemptBudgetExhausted(ownEntries, item.id, kind, item.stage, ctx.maxAttempts)) {
+      if (!ctx.flaggedForBudget.has(item.id)) {
+        ctx.flaggedForBudget.add(item.id);
+        await flagBudgetExhausted(deps, item.id, opts.cwd);
+      }
+      ctx.holds.budget = true;
+      continue;
+    }
+    if (_isNonTerminalCooldownActive(ownEntries, item.id, kind, item.stage, ctx.cooldownMs, now)) {
+      ctx.holds.cooldown = true;
+      continue;
+    }
+    if (ctx.frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) continue;
+    if (kind === 'audit' && !ctx.auditEligible) continue;
+    if (item.priority === 'critical') {
+      const guard = evaluateCriticalFirstGuard(
+        item.id,
+        ownInFlight,
+        marker?.dispatchedAt,
+        now,
+        ctx.markerStaleWindowMs,
+      );
+      if (!guard.escalate) {
+        ctx.holds.inFlight = true;
+        continue;
+      }
+    }
+    if (kind === 'implement') {
+      const gate = await ctx.reviewGateForRoot(opts.cwd);
+      if (isImplementHeldByReviewGate(kind, item, gate)) {
+        ctx.holds.review = true;
+        continue;
+      }
+    }
+    const outcome = await dispatchClaimedTier(
+      deps,
+      kind,
+      {
+        id: item.id,
+        title: item.title,
+        stage: kind === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
+        status: item.status,
+        priority: item.priority,
+        sortIndex: item.sortIndex,
+      },
+      {
+        model: opts.model,
+        cwd: opts.cwd,
+        selectionPath: 'own-backlog',
+        selectionReason: ctx.selectionReason,
+      },
+    );
+    if (outcome.dispatched) return outcome;
+    // A lost CAS race / marker-recovery rollback applies to one candidate.
+    if (
+      ctx.skipOnLostClaim &&
+      (outcome.reason === 'claim-failed' || outcome.reason === 'claim-rolled-back')
+    ) {
+      continue;
+    }
+    // Any other terminal outcome (or, for a continuation, ANY non-dispatched
+    // outcome — AC3: a batch never hops to another target) is returned
+    // unchanged so the caller's strike/skip semantics are preserved.
+    return outcome;
+  }
+  return null;
+}
+
+/**
+ * The gate-and-scan half of `dispatchFromCoordination` (unchanged behaviour):
+ * safety gates, scheduled prompts, the coordination offer scan and the
+ * own-backlog fallback. Split out so the audit-batch surface can be applied to
+ * EVERY outcome once, in `dispatchFromCoordination`.
+ */
+async function dispatchFromCoordinationGated(
+  deps: DowntimeWorkerDeps,
+  entries: CoordinationEntry[],
+  opts: Parameters<typeof dispatchFromCoordination>[2],
+  now: number,
+  batchRuntime: CoordinationBatchRuntime,
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
   // never classify an entry — fail closed to a strike (a misconfigured
@@ -4318,6 +4599,24 @@ export async function dispatchFromCoordination(
   // True when at least one non-critical implement offer was held this cycle
   // by the review-queue depth gate (drives the terminal reason).
   let reviewHold = false;
+  const ownHeadHolds = {
+    budget: false,
+    cooldown: false,
+    inFlight: false,
+    review: false,
+  };
+  // Audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1/AC4): the
+  // clamped cap and the continuation budget available BEFORE this dispatch
+  // (absent `auditBatchRemaining` initialises it to the cap — the first
+  // dispatch of a potential batch; `1` disables batching).
+  const batchCap = clampDowntimeAuditBatchMax(
+    opts.auditBatchMax ?? DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+  );
+  const batchRemainingBefore =
+    opts.auditBatchRemaining === undefined
+      ? batchCap
+      : Math.max(0, Math.trunc(opts.auditBatchRemaining));
+
   for (const entry of entries) {
     if (entry.instanceId.length === 0 || entry.workItemId.length === 0) continue;
     fetchAttempts += 1;
@@ -4481,113 +4780,72 @@ export async function dispatchFromCoordination(
   // successful own-backlog dispatch is flagged `ownBacklogDispatch` so the
   // worker loop steps down leadership exactly once (AC4); a normal in-view
   // dispatch never reaches this block.
+  //
+  // WL-0MVFE1DD8000D8T2: the filter chain lives in `dispatchFromOwnHead` so
+  // the audit-batch continuation above applies it byte-for-byte identically
+  // (no duplicated gates, no second ranking).
   {
-    const sprintWindow = resolveSprintViewWindow(opts.browseItemCount);
     // Fail-open (AC9): a thrown own-root lookup must leave the original
     // terminal reason unchanged and never panic.
-    let ownHead: DowntimeHerdrListResult | null = null;
-    try {
-      ownHead = await deps.getHerdrListHead(opts.cwd, sprintWindow);
-    } catch {
-      ownHead = null;
-    }
-    if (ownHead !== null && ownHead.ok) {
-      const ownTail = await fetchExtendedHerdrItems(deps, opts.cwd, ownHead.items, {
-        includeNonCritical: true,
-      });
-      if (ownTail.length > 0) {
-        const ownEntries = await cooldownEntriesForRoot(opts.cwd);
-        const ownMarkerMaps: Record<DowntimeSkillKind, Map<string, DispatchMarker>> = {
-          audit: _dispatchedMarkers(ownEntries, 'audit'),
-          implement: _dispatchedMarkers(ownEntries, 'implement'),
-          plan: _dispatchedMarkers(ownEntries, 'plan'),
-          intake: _dispatchedMarkers(ownEntries, 'intake'),
-          'risk-effort': _dispatchedMarkers(ownEntries, 'risk-effort'),
-        };
-        const ownInFlight = await inFlightForRoot(opts.cwd);
-        const flaggedForOwnBudget = new Set<string>();
-        for (const item of ownTail) {
-          // Sequential filters — the same contract as the offer path.
-          const kind = classifyItemForDispatch(item, now);
-          if (kind === null) continue;
-          const marker = ownMarkerMaps[kind]?.get(item.id);
-          if (
-            marker !== undefined &&
-            _markerStillExcludes(
-              marker,
-              item.stage,
-              now,
-              markerStaleWindowMs,
-              kind === 'audit' || kind === 'implement' ? 'id-guard' : 'stage-guard',
-            )
-          ) {
-            continue;
-          }
-          if (isAttemptBudgetExhausted(ownEntries, item.id, kind, item.stage, maxAttempts)) {
-            if (!flaggedForOwnBudget.has(item.id)) {
-              flaggedForOwnBudget.add(item.id);
-              await flagBudgetExhausted(deps, item.id, opts.cwd);
-            }
-            budgetHold = true;
-            continue;
-          }
-          if (_isNonTerminalCooldownActive(ownEntries, item.id, kind, item.stage, cooldownMs, now)) {
-            cooldownHold = true;
-            continue;
-          }
-          if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) continue;
-          if (kind === 'audit' && !auditEligible) continue;
-          if (item.priority === 'critical') {
-            const guard = evaluateCriticalFirstGuard(
-              item.id,
-              ownInFlight,
-              marker?.dispatchedAt,
-              now,
-              markerStaleWindowMs,
-            );
-            if (!guard.escalate) {
-              inFlightHold = true;
-              continue;
-            }
-          }
-          if (kind === 'implement') {
-            const gate = await reviewGateForRoot(opts.cwd);
-            if (isImplementHeldByReviewGate(kind, item, gate)) {
-              reviewHold = true;
-              continue;
-            }
-          }
-          const ownOutcome = await dispatchClaimedTier(
-            deps,
-            kind,
-            {
-              id: item.id,
-              title: item.title,
-              stage: kind === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
-              status: item.status,
-              priority: item.priority,
-              sortIndex: item.sortIndex,
-            },
-            {
-              model: opts.model,
-              cwd: opts.cwd,
-              selectionPath: 'own-backlog',
-              selectionReason: 'own-backlog-fallback',
-            },
-          );
-          if (ownOutcome.dispatched) {
-            return { ...ownOutcome, ownBacklogDispatch: true };
-          }
-          // A lost CAS race / marker-recovery rollback applies to one
-          // candidate: try the next ranked own-backlog item.
-          if (ownOutcome.reason === 'claim-failed' || ownOutcome.reason === 'claim-rolled-back') {
-            continue;
-          }
-          // Any other terminal outcome (wl-error / spawn-failed /
-          // anchor-unavailable / marker-write-failed) is returned unchanged
-          // so the caller's strike/skip semantics are preserved.
-          return ownOutcome;
-        }
+    const ownWindow = await readOwnHeadWindow(deps, opts.cwd, opts.browseItemCount);
+    if (ownWindow !== null) {
+      batchRuntime.setDepth(computeAuditEligibleDepth([...ownWindow.head, ...ownWindow.tail], now));
+      const sharedScan = {
+        window: ownWindow,
+        frozen,
+        auditEligible,
+        markerStaleWindowMs,
+        maxAttempts,
+        cooldownMs,
+        cooldownEntriesForRoot,
+        inFlightForRoot,
+        reviewGateForRoot,
+        holds: ownHeadHolds,
+        flaggedForBudget,
+      };
+      // ── Audit-batch continuation (parent WL-0MVEDM8OT007WDRS AC4) ──
+      // While a batch is armed the leader continues the audit drain from its
+      // OWN head — the same bounded window EXTENSION and the same sequential
+      // filter chain as the fallback below — instead of waiting for the offer
+      // list to be re-populated. AUDIT-kind only, distinct targets (marker
+      // exclusion + the batch-local exclusion set), exactly one dispatch per
+      // invocation, and any non-`dispatched` outcome ENDS the batch (AC3): a
+      // continuation never hops to another target. Armed only when the worker
+      // passed a live budget (`auditBatchRemaining > 0`) and batching is on
+      // (`cap > 1`); otherwise the unchanged fallback runs.
+      if (batchRemainingBefore > 0 && batchCap > 1) {
+        const continuation = await dispatchFromOwnHead(
+          deps,
+          { model: opts.model, cwd: opts.cwd },
+          {
+            ...sharedScan,
+            kinds: ['audit'],
+            excludeIds: new Set(opts.auditBatchDispatchedIds ?? []),
+            selectionReason: 'own-backlog-audit-batch-continuation',
+            skipOnLostClaim: false,
+          },
+          now,
+        );
+        if (continuation !== null) return { ...continuation, auditBatchContinuation: true };
+      }
+      const ownOutcome = await dispatchFromOwnHead(
+        deps,
+        { model: opts.model, cwd: opts.cwd },
+        {
+          ...sharedScan,
+          kinds: null,
+          excludeIds: new Set<string>(),
+          selectionReason: 'own-backlog-fallback',
+          skipOnLostClaim: true,
+        },
+        now,
+      );
+      if (ownOutcome !== null) {
+        if (ownOutcome.dispatched) return { ...ownOutcome, ownBacklogDispatch: true };
+        // Any other terminal outcome (wl-error / spawn-failed /
+        // anchor-unavailable / marker-write-failed) is returned unchanged so
+        // the caller's strike/skip semantics are preserved.
+        return ownOutcome;
       }
     }
   }
@@ -4600,15 +4858,17 @@ export async function dispatchFromCoordination(
   // empty BACKLOG. A deep-queue hold is reported as the neutral
   // 'review-queue-hold' (never 'no-candidate' — the cooldown must not fire
   // while audits are draining the queue; the gate may lift at any moment).
+  // A hold reported by the own-head scan (fallback or batch continuation) is
+  // folded in here so a filtered own-head backlog keeps its neutral reason.
   return frozen
     ? { dispatched: false, reason: 'code-freeze' }
-    : reviewHold
+    : reviewHold || ownHeadHolds.review
       ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
-      : cooldownHold
+      : cooldownHold || ownHeadHolds.cooldown
         ? { dispatched: false, reason: 'non-terminal-cooldown' }
-        : budgetHold
+        : budgetHold || ownHeadHolds.budget
           ? { dispatched: false, reason: 'attempt-budget-exhausted' }
-          : inFlightHold
+          : inFlightHold || ownHeadHolds.inFlight
           ? { dispatched: false, reason: 'in-flight-pane' }
           : { dispatched: false, reason: 'no-candidate' };
 }
@@ -6010,7 +6270,28 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // cooldown, leadership loss, or a disabled worker. Keeping depth/cap here
   // (not just the budget) lets every blocked/ended batch decision carry the
   // `auditBatchDepth`/`auditBatchCap`/`auditBatchRemaining` diagnostics.
-  let activeAuditBatch: { depth: number; cap: number; remaining: number } | null = null;
+  //
+  // Trade-off (AC2): only this dispatcher's OWN post-dispatch reset is
+  // deferred. The dispatched audit pane's occupancy still makes the proxy
+  // busy, which (a) resets the idle tracker through the normal per-tick
+  // busy path and (b) ends the batch window (a busy poll closes the
+  // continuous idle window, `activeAuditBatch` is cleared below on every
+  // non-idle poll). A continuation therefore only fires while the proxy
+  // stays idle at the next poll; after any busy interlude the worker
+  // requires a fresh full idle period and the next audit dispatch re-arms
+  // a fresh batch while the queue is still deep. Batching is a queue-drain
+  // optimisation, never a relaxation of the idle-duration gate.
+  let activeAuditBatch: {
+    depth: number;
+    cap: number;
+    remaining: number;
+    /**
+     * Batch-local exclusion set (WL-0MVFE1DD8000D8T2 AC3/AC4): every item id
+     * already dispatched in THIS batch window, so a continuation can never
+     * re-select an item even before its dispatched marker is written/read.
+     */
+    dispatchedIds: Set<string>;
+  } | null = null;
   // Pane-lifecycle monitor cadence gate (WL-0MU308WSF0002JWN): the timestamp
   // of the last monitor pass. 0 forces a pass on the first tick.
   let lastPaneMonitorAt = 0;
@@ -6790,6 +7071,11 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   // Continuation budget (parent WL-0MVEDM8OT007WDRS AC1) —
                   // consumed by the coordination continuation item.
                   ...(continuationBudget !== null ? { auditBatchRemaining: continuationBudget } : {}),
+                  // Batch-local exclusion set (WL-0MVFE1DD8000D8T2 AC3/AC4):
+                  // every target already dispatched in this batch window.
+                  ...(armedBatch !== null
+                    ? { auditBatchDispatchedIds: [...armedBatch.dispatchedIds] }
+                    : {}),
                   nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   maxAttempts: cfg.maxAttempts,
                   // Dispatched success-marker staleness window
@@ -6898,7 +7184,19 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             batch.active &&
             batch.remaining > 0;
           if (deferIdleReset) {
-            activeAuditBatch = { depth: batch.depth, cap: batch.cap, remaining: batch.remaining };
+            // The batch-local exclusion set accumulates every target dispatched
+            // in this window (WL-0MVFE1DD8000D8T2 AC3/AC4).
+            const dispatchedId = outcome.candidate?.id;
+            const nextIds = new Set(armedBatch?.dispatchedIds ?? []);
+            if (dispatchedId !== undefined && dispatchedId.length > 0) {
+              nextIds.add(dispatchedId);
+            }
+            activeAuditBatch = {
+              depth: batch.depth,
+              cap: batch.cap,
+              remaining: batch.remaining,
+              dispatchedIds: nextIds,
+            };
           } else {
             // Batch-end observability (AC5): the silent deactivation of an
             // armed batch after a successful audit dispatch (cap reached or

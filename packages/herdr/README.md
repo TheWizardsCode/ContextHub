@@ -532,6 +532,15 @@ without per-slot data it fails closed to all-slots-free for `0 < N < total`
   kind — a neutral skip (reason `attempt-budget-exhausted`, never a strike,
   never a no-candidate) reset by a stage advancement (default: `3`, clamped
   to 1 – 10)
+- `downtimeAuditBatchMax` — Depth-aware audit-batch cap. When the
+  audit-eligible depth (root `completed`/`in_review` items without a fresh
+  audit) is at or above `browseItemCount`, one continuous idle window may
+  issue this many **sequential** audits because the dispatcher's own
+  post-dispatch reset is deferred between them (a busy poll still requires a
+  fresh idle run). At most **one audit is active at a time** host-wide (see
+  *Single-active-audit guarantee* below); the cap only drains a deep queue
+  faster. `1` disables batching and restores the legacy
+  single-dispatch-per-idle-window behaviour (default: `2`, clamped to 1 – 5)
 - `downtimeStallScanEnabled` — Enable the pre-dispatch stalled-work scan
   (default: `true`). When on, the dispatcher prefers resuming an existing
   stalled pane over opening a new one (see the *Stalled-work scan and
@@ -678,6 +687,24 @@ makes the item dispatchable again on the next idle poll.
 > slots** (parent + at most one child). The former mode-aware `'2'` selection
 > was retired together with the proxy's fast/cheap operating mode. Interactive
 > (non-downtime) panes are unaffected.
+
+> **Depth-aware audit batching (parent WL-0MVEDM8OT007WDRS):** by default a
+> deep audit queue is drained in **sequential batches within one idle
+> window** — after a successful audit dispatch, when the audit-eligible depth
+> is at/above `browseItemCount` and `downtimeAuditBatchMax > 1`, the worker
+> defers only its *own* post-dispatch idle reset and re-checks every gate
+> (idle duration, ≥ 2 free slots, slot ownership, contention, code freeze,
+> active-audit markers, single-flight) before the next continuation. Each
+> continuation selects a **distinct** item (dispatched-marker + batch-local
+> exclusion) and any non-`dispatched` outcome ends the batch. A busy poll
+> (including the audit pane's own proxy activity) resets the idle run and ends
+> the batch window, so the batch never relaxes the idle-duration gate. The
+> guarantee above is unchanged: exactly one audit runs at a time, and batching
+> is not concurrency relaxation. In coordination mode the leader continues
+> from its own Herdr head and defers its own-backlog leadership hand-off to
+> batch end. Set `downtimeAuditBatchMax` to `1` to restore
+> single-dispatch-per-window behaviour. See `docs/dev/downtime-dispatcher.md`
+> → *Depth-aware audit batching*.
 
 > **Audit-tier error channel (WL-0MSLWJ2KP0002SV0):** the audit lookup
 > resolves through the same `DowntimeNextResult` error channel as the
@@ -964,7 +991,15 @@ session as the **pane-launch environment variable**
   lookup and map it through the interactive table. Resolution is **fail-open**:
   no item id (`/prompt:`, free-form), a lookup failure or a timeout falls back
   to `high`, and a dispatch is never blocked or aborted by priority
-  resolution.
+  resolution. The single seam for this is
+  `resolveInteractiveDispatchPriority(itemId, lookup?, timeoutMs?)` in
+  `packages/herdr/src/index.ts` — the same function the `onCommand` agent
+  route calls with `extractWorkItemId(command)`. Its `lookup` parameter
+  defaults to the production `wl show` lookup and can be injected, which is
+  how the end-to-end specs in `packages/herdr/src/index.test.ts` drive the
+  operator-dispatch chain (work-item priority → resolved request priority →
+  `--request-priority` / `HERDR_REQUEST_PRIORITY`) without a live herdr
+  session (validated by WL-0MVGC6JVP00812DS).
 - **Downtime dispatches** map the selected candidate's priority through the
   downtime table so unattended work is polite (`low` stays `low`) while
   `critical` work is served as `high`.

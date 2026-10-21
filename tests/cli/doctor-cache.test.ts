@@ -9,32 +9,18 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
-import { createTempDir, cleanupTempDir, resolveTsxBin } from '../test-utils.js';
+import { createTempDir, cleanupTempDir } from '../test-utils.js';
+import { runCliProcess } from './cli-bundle.js';
 import { stateCounterFilePath } from '../../src/read-cache.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, '..', '..');
-const cliPath = path.join(projectRoot, 'src', 'cli.ts');
-const tsxBin = resolveTsxBin(__dirname);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 /** Run the real CLI as a subprocess; returns stdout, stderr, exit status. */
 function runCli(args: string[], cwd: string, env: Record<string, string>): { stdout: string; stderr: string; status: number | null } {
-  const result = spawnSync(process.execPath, [tsxBin, cliPath, ...args], {
-    cwd,
-    env: { ...process.env, ...env },
-    encoding: 'utf-8',
-    timeout: 60000,
-    maxBuffer: 20 * 1024 * 1024,
-  });
-  return { stdout: result.stdout ?? '', stderr: result.stderr ?? '', status: result.status };
+  return runCliProcess(args, { cwd, env: { ...process.env, ...env } });
 }
 
 /** Write a counter file and pin its mtime (seconds granularity per utimes). */
@@ -173,5 +159,34 @@ describe('wl doctor cache', () => {
     const result = JSON.parse(stdout);
     expect(result.success).toBe(false);
     expect(typeof result.error).toBe('string');
+  });
+
+  it('bare wl doctor flags pending cache state and clears it after --prune', () => {
+    // Five counters untouched for 30 days: the default TTL (7 days) makes a
+    // dry-run prune report them, so bare `wl doctor` must surface them.
+    const now = Date.now();
+    for (let i = 0; i < 5; i++) {
+      writeCounter(cacheDir, path.join(tempDir, 'work', `stale-${i}`), i + 1, now - 30 * DAY_MS);
+    }
+
+    const json = runCli(['--json', 'doctor'], tempDir, env);
+    expect(json.status).toBe(0);
+    const findings = JSON.parse(json.stdout) as Array<{ checkId?: string; message?: string }>;
+    const cache = findings.find((f) => f.checkId === 'read-cache.state');
+    expect(cache, `bare doctor JSON must carry a read-cache.state finding, got: ${json.stdout}`).toBeDefined();
+    expect(cache.message).toContain('wl doctor cache');
+
+    const text = runCli(['doctor'], tempDir, env);
+    expect(text.status).toBe(0);
+    expect(text.stdout).toContain('pending read-cache');
+    expect(text.stdout).toContain('wl doctor cache --prune');
+
+    // After the explicit prune the counters are gone and the flag clears.
+    const pruned = runCli(['--json', 'doctor', 'cache', '--prune'], tempDir, env);
+    expect(pruned.status).toBe(0);
+    const after = runCli(['--json', 'doctor'], tempDir, env);
+    expect(after.status).toBe(0);
+    const afterFindings = JSON.parse(after.stdout) as Array<{ checkId?: string }>;
+    expect(afterFindings.find((f) => f.checkId === 'read-cache.state')).toBeUndefined();
   });
 });

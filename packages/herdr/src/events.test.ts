@@ -564,6 +564,47 @@ describe('HerdrEventSubscriber — mock socket', () => {
       // After close, the subscriber should be in a cleaned-up state
       expect(subscriber.health().status).toBe('closed');
     });
+
+    it('closing while a subscribe request is pending raises no unhandled rejection', async () => {
+      // Regression (WL-0MVFX70SB000YRQH): the subscribe-request settlement
+      // handlers dereferenced `this.socket!` AFTER close()/a restart had
+      // already nulled it, so closing (or restarting) while a subscribe was
+      // in flight threw "Cannot read properties of null (reading
+      // 'removeListener')" as an UNHANDLED rejection — enough to fail the
+      // suite, and in production a Node process running with the default
+      // unhandled-rejection policy would crash.
+      const stalled = new MockHerdrSocket({ respondToSubscribe: false });
+      await stalled.start();
+      const rejections: unknown[] = [];
+      const onRejection = (reason: unknown) => {
+        rejections.push(reason);
+      };
+      process.on('unhandledRejection', onRejection);
+      try {
+        const subscriber = new HerdrEventSubscriber({
+          socketPath: stalled.getAddress(),
+          callbacks: {},
+          timeoutMs: 2_000,
+        });
+        void subscriber.connect();
+        // Wait until the subscribe frame reached the stalled server: the
+        // request is now PENDING with no reply in sight.
+        const deadline = Date.now() + 5_000;
+        while ((stalled.getFirstClient()?.requests.length ?? 0) === 0 && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        expect(stalled.getFirstClient()?.requests.length).toBe(1);
+
+        await subscriber.close();
+        // Let the rejected pending callback's settlement handler run (it is
+        // scheduled as a later microtask).
+        await new Promise((r) => setTimeout(r, 50));
+      } finally {
+        process.off('unhandledRejection', onRejection);
+        await stalled.stop();
+      }
+      expect(rejections).toEqual([]);
+    });
   });
 
   // ── F2: Socket error tolerance ─────────────────────────────────────

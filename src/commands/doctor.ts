@@ -149,6 +149,62 @@ function printPendingUpgradeNotice(state: PendingUpgradeState): void {
   console.log('Run `wl doctor upgrade` to preview pending upgrades, or `wl doctor upgrade --confirm` to apply them.');
 }
 
+/**
+ * Read-cache state that `wl doctor` should flag (F9 — WL-0MVFRRQ9W003KEFL):
+ * the per-worklog-dir counter store has grown past what a dry-run prune would
+ * reclaim. Read-only: a dry-run `pruneStateDir` never deletes anything.
+ */
+interface PendingCacheState {
+  pending: boolean;
+  files: number;
+  totalBytes: number;
+  staleByTtl: number;
+  overBound: number;
+  maxFiles: number;
+  ttlDays: number;
+  stateDir: string;
+}
+
+/** Detect pending read-cache state cleanup (best-effort, never throws). */
+function detectPendingCacheState(): PendingCacheState {
+  const none: PendingCacheState = {
+    pending: false,
+    files: 0,
+    totalBytes: 0,
+    staleByTtl: 0,
+    overBound: 0,
+    maxFiles: DEFAULT_STATE_MAX_FILES,
+    ttlDays: DEFAULT_STATE_TTL_MS / DAY_MS,
+    stateDir: '',
+  };
+  try {
+    const result = pruneStateDir(resolveCacheDir(), { dryRun: true });
+    return {
+      pending: result.removed > 0,
+      files: result.filesScanned,
+      totalBytes: result.totalBytes,
+      staleByTtl: result.staleByTtl,
+      overBound: result.overBound,
+      maxFiles: DEFAULT_STATE_MAX_FILES,
+      ttlDays: DEFAULT_STATE_TTL_MS / DAY_MS,
+      stateDir: result.stateDir,
+    };
+  } catch {
+    return none;
+  }
+}
+
+/** Print the pending read-cache notice in human-readable mode. */
+function printPendingCacheNotice(state: PendingCacheState): void {
+  console.log('');
+  console.log('Doctor: pending read-cache state cleanup detected.');
+  console.log(
+    `Read-cache state counters: ${state.files} file(s) — ${state.staleByTtl} stale by TTL, ` +
+      `${state.overBound} over the ${state.maxFiles}-file bound (${formatCacheBytes(state.totalBytes)} total).`
+  );
+  console.log('Run `wl doctor cache --prune` to reclaim the space, or `wl doctor cache` for details.');
+}
+
 export default function register(ctx: PluginContext): void {
   const { program, output, utils } = ctx;
 
@@ -1480,25 +1536,41 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
       // Pending-upgrade detection (WL-0MUTVB271007YKJZ): read-only scan for
       // schema migrations and outdated git hooks that `wl doctor upgrade`
       // would apply. Computed after --fix so the notice reflects the final
-      // findings set.
+      // findings set. Pending read-cache state (F9 — WL-0MVFRRQ9W003KEFL) is
+      // detected alongside.
       const pendingUpgrade = detectPendingUpgrades();
+      const pendingCache = detectPendingCacheState();
 
       if (utils.isJsonMode()) {
-        const jsonFindings = pendingUpgrade.hasPendingUpgrades
-          ? [...findings, buildPendingUpgradeFinding(pendingUpgrade)]
-          : findings;
+        const jsonFindings = [...findings];
+        if (pendingUpgrade.hasPendingUpgrades) jsonFindings.push(buildPendingUpgradeFinding(pendingUpgrade));
+        if (pendingCache.pending) {
+          jsonFindings.push({
+            checkId: 'read-cache.state',
+            type: 'maintenance',
+            severity: 'info',
+            itemId: null,
+            message:
+              `Read-cache state: ${pendingCache.files} counter(s) (${pendingCache.staleByTtl} stale by TTL, ` +
+              `${pendingCache.overBound} over the ${pendingCache.maxFiles}-file bound). Run ` +
+              '`wl doctor cache` to review or `wl doctor cache --prune` to reclaim.',
+            proposedFix: null,
+            safe: false,
+          });
+        }
         output.json(jsonFindings);
         return;
       }
 
       if (findings.length === 0) {
-        if (!pendingUpgrade.hasPendingUpgrades) {
+        if (!pendingUpgrade.hasPendingUpgrades && !pendingCache.pending) {
           console.log('Doctor: no issues found.');
           return;
         }
-        // Pending upgrades exist but validation is clean: emit the advisory
-        // notice instead of a misleading bare "no issues found" (AC2).
-        printPendingUpgradeNotice(pendingUpgrade);
+        // Pending upgrades / cache state exist but validation is clean: emit
+        // the advisory notice instead of a misleading bare "no issues found".
+        if (pendingUpgrade.hasPendingUpgrades) printPendingUpgradeNotice(pendingUpgrade);
+        if (pendingCache.pending) printPendingCacheNotice(pendingCache);
         return;
       }
 
@@ -1573,10 +1645,13 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
         }
       }
 
-      // Pending-upgrade notice is appended after the existing per-item
-      // findings/manual-fix output, without altering it (AC3).
+      // Pending-upgrade / read-cache notices are appended after the existing
+      // per-item findings/manual-fix output, without altering it.
       if (pendingUpgrade.hasPendingUpgrades) {
         printPendingUpgradeNotice(pendingUpgrade);
+      }
+      if (pendingCache.pending) {
+        printPendingCacheNotice(pendingCache);
       }
     });
 }

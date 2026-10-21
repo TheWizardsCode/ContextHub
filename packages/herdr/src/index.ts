@@ -730,11 +730,25 @@ async function lookupWorkItemPriority(itemId: string): Promise<string | undefine
  * (WL-0MVE1NZ4J000H5NH AC2): map the dispatched work item's priority through
  * the interactive table. Fail-open — no item id, a lookup failure or a
  * timeout yields the interactive default (`high`).
+ *
+ * `lookup` is the priority-resolution seam (validation WL-0MVGC6JVP00812DS
+ * AC1): it defaults to the production `wl show` lookup and may be injected
+ * by tests to drive the resolution deterministically (absent id, lookup
+ * failure, timeout). The `timeoutMs` budget is forwarded to the underlying
+ * resolution when supplied.
  */
 export async function resolveInteractiveDispatchPriority(
   itemId: string | undefined,
+  lookup: (
+    id: string,
+  ) =>
+    | string
+    | null
+    | undefined
+    | Promise<string | null | undefined> = lookupWorkItemPriority,
+  timeoutMs: number = INTERACTIVE_PRIORITY_LOOKUP_TIMEOUT_MS,
 ): Promise<RequestPriority> {
-  return resolveInteractiveRequestPriority(itemId, lookupWorkItemPriority);
+  return resolveInteractiveRequestPriority(itemId, lookup, timeoutMs);
 }
 
 /**

@@ -28,10 +28,15 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
-import { walkStaticImportGraph, CLI_ENTRY } from '../../bench/startup-import-graph.js';
+import {
+  walkStaticImportGraph,
+  walkFastPathRuntimeGraph,
+  CLI_ENTRY,
+} from '../../bench/startup-import-graph.js';
 import {
   readStartupBudget,
   evaluateImportRatchet,
+  evaluateFastPathAllowlist,
   evaluateStartupBudget,
   type StartupBudget,
   type StartupBudgetScenario,
@@ -204,9 +209,9 @@ describe('startup import budget — entry-point split allowlist', () => {
     expect(budget.importGraph.moduleCount).toBe(graph.modules.length);
   });
 
-  // RED-pinned: today `src/cli.ts` eagerly imports the whole heavy graph.
-  // F4 flips `it.fails(` to `it(` when the thin bootstrap lands.
-  it.fails('keeps command modules and the heavy runtime off the fast path', () => {
+  // Was RED-pinned before the split; F4 (WL-0MVFRRKKN00544PQ) flipped it to a
+  // real assertion when `src/cli.ts` became the thin bootstrap.
+  it('keeps command modules and the heavy runtime off the fast path', () => {
     const graph = walkStaticImportGraph({ repoRoot });
 
     const commandModules = graph.modules.filter((module) => module.startsWith('src/commands/'));
@@ -232,6 +237,63 @@ describe('startup import budget — entry-point split allowlist', () => {
       heavyExternals,
       `heavy packages still statically imported by the fast path: ${heavyExternals.join(', ')}`
     ).toEqual([]);
+  });
+});
+
+describe('startup import budget — fast-path runtime allowlist', () => {
+  // F7 (WL-0MVFRROLM002K98B): the fast path defers the read-cache machinery,
+  // the worklog resolver and the process-lifecycle module behind `await
+  // import()`, so `--version` exits without loading them. The static ratchet
+  // cannot see those modules, so the budget records the dynamic entrypoints and
+  // the *runtime* module union they pull in — adding either fails here.
+
+  it('records the fast path\'s dynamic entrypoints and runtime module union', () => {
+    const budget = readStartupBudget(repoRoot);
+    const fastPath = walkFastPathRuntimeGraph({ repoRoot, entry: CLI_ENTRY });
+
+    expect(
+      budget.fastPathDynamicImports,
+      'bench/startup-import-budget.json has no fastPathDynamicImports — regenerate it with ' +
+        '`npm run benchmark:wl-startup -- --target src --update-budget`'
+    ).toBeDefined();
+    expect(budget.fastPathDynamicImports).toEqual(fastPath.dynamicEntries);
+    expect(budget.fastPathRuntimeModules).toEqual(fastPath.graph.modules);
+  });
+
+  it('fails when a module is added to the fast path\'s runtime set', () => {
+    const budget = readStartupBudget(repoRoot);
+    const fastPath = walkFastPathRuntimeGraph({ repoRoot, entry: CLI_ENTRY });
+
+    // Baseline passes.
+    const baseline = evaluateFastPathAllowlist(fastPath, budget);
+    expect(baseline.addedRuntime, baseline.message).toEqual([]);
+    expect(baseline.ok).toBe(true);
+
+    // A new dynamic entrypoint (or a module it drags in) is a regression until
+    // the budget is deliberately regenerated.
+    const injected = evaluateFastPathAllowlist(
+      {
+        dynamicEntries: [...fastPath.dynamicEntries, 'src/commands/show.ts'],
+        runtimeModules: [...fastPath.graph.modules, 'src/commands/show.ts'],
+      },
+      budget
+    );
+    expect(injected.ok).toBe(false);
+    expect(injected.addedDynamic).toEqual(['src/commands/show.ts']);
+    expect(injected.addedRuntime).toEqual(['src/commands/show.ts']);
+    expect(injected.message).toContain('--update-budget');
+  });
+
+  it('keeps the shared argv helpers out of the heavy graph', () => {
+    // `--version` must not import the cache machinery: the argv helpers it
+    // needs live in the dependency-free `src/argv-normalize.ts`, which is part
+    // of the static boot graph.
+    const staticGraph = walkStaticImportGraph({ repoRoot, entry: CLI_ENTRY });
+    expect(staticGraph.modules).toContain('src/argv-normalize.ts');
+    expect(staticGraph.modules).toContain('src/version.ts');
+    expect(staticGraph.modules).toContain('src/spawn-counter.ts');
+    expect(staticGraph.modules).not.toContain('src/read-cache-cli.ts');
+    expect(staticGraph.modules).not.toContain('src/process-lifecycle.ts');
   });
 });
 
@@ -343,8 +405,13 @@ describe('startup import budget — measured regression', { timeout: 300_000 }, 
       repoRoot,
       target: 'src',
       runs: budget.regression.runs,
-      warmupRuns: 4,
-      bareNodeRuns: 3,
+      // Warmup only has to reach a served cache hit before sampling starts,
+      // which the first one or two invocations already do. Four warmup runs
+      // per scenario made this ratchet one of the slowest tests in the suite
+      // (each warmup is a full tsx spawn) without changing what it measures;
+      // the sampled `runs` (the gate itself) are unchanged.
+      warmupRuns: 2,
+      bareNodeRuns: 2,
     });
 
     const evaluation = evaluateStartupBudget(result, budget);

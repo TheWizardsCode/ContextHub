@@ -334,6 +334,217 @@ Post-split test counts per file:
 - Vitest's `transform`/`import`/`setup` totals are aggregates across all test
   files in the run.
 
+## Test-suite runtime reduction (WL-0MVF9JJUH0077OB8)
+
+**Work item:** WL-0MVF9JJUH0077OB8 — Reduce time to run tests
+**Measured:** 2026-10-20, worktree from dev `bec96e2b` with `dist/` built
+(`npx tsc`), so the dist-spawning sync tests are exercised faithfully.
+**Host:** 16 cores, shared dev host. Load average 10.8–14.0 during every run
+(several unrelated agent suites active). Load is quoted per run because it
+dominates absolute wall-clock on this host — see *Confounders*.
+
+### Root cause
+
+Per-spawn TypeScript transpilation, not test logic. Tests that need real
+process isolation spawned `tsx src/cli.ts`, which re-transpiles the whole
+`src/` import graph on **every** process start:
+
+| Invocation | Time per spawn |
+|---|---|
+| `node node_modules/.bin/tsx src/cli.ts --version` (idle host) | 2.81 s |
+| `node node_modules/.bin/tsx src/cli.ts --version` (load avg 10) | 7.1–10.0 s |
+| `node dist/cli.js --version` | 1.43 s |
+| `node <esbuild bundle of src/cli.ts> --version` | 1.14–1.58 s |
+
+The canonical suite performed ~150 such spawns, so it paid a 5× tax per spawn
+on the majority of its wall clock — and that tax scales with host load, which
+is exactly the 486 → 730 s swing previously observed.
+
+### Change (test code + test config only)
+
+`tests/cli/cli-bundle.ts` builds `src/cli.ts` **once per test process** with
+esbuild (the transpiler tsx already uses) and tests spawn that bundle instead
+of tsx. Same entry file, same command graph — only pre-compiled. npm and
+workspace packages stay external, and the bundle directory mirrors the repo
+layout (`<dir>/app/src/cli.mjs` with symlinked `templates/`, `examples/`,
+`package.json`) because `src/` derives its package root from
+`import.meta.url`/`../..`. Falls back to `tsx` automatically if the build
+fails.
+
+Converted: `read-cache-spawn-reduction`, `read-cache-e2e`, `init` (via
+`execAsync`), `search-fts-freshness`, `doctor-cache`, `update-if-assignee`,
+`sync-author-gate` and `sync-assignee-clear` (via `execWithInput`), and the
+`dist/cli.js`-spawning sync integration tests (`sync-vs-mutation`,
+`sync-integration-convergence`, `sync-delta-{pull,push,delete,fallback}`) —
+which as a side effect now run against current `src/` instead of whatever
+build happened to be on disk.
+
+Also:
+
+- `isDistFresh()` in `bench/wl-startup-perf.ts` makes
+  `resolveStartupTarget('auto')` ignore a `dist/` older than `src/` (a stale
+  build made `entry-point-split` assert against code that no longer exists —
+  a real intermittent failure).
+- `startup-import-budget` warmup runs dropped 4 → 2 (the gated samples are
+  unchanged).
+- `vitest.config.ts` gained `hookTimeout: 60000` (vitest's default is 10 s).
+  Several suites create real git remotes and bare repositories in
+  `beforeEach`; at load ~20 that setup alone exceeded 10 s and failed as
+  `Hook timed out` in `sync-concurrent.test.ts` — a load-induced flake with
+  nothing wrong with the code under test.
+- `tests/unit/no-tsx-cli-spawn.test.ts` is the regression guard AC6 asks for:
+  it fails if the bundle cannot be built (`isBundled()`) or if any test file
+  outside a documented allowlist spawns the CLI through `tsx` again.
+
+### Results — canonical suite (`.pi/test-config.json`)
+
+```bash
+npm --silent test -- tests/cli
+npm --silent test -- tests/unit
+```
+
+Wall clock on this host is **not a reliable instrument**: two post-change runs
+of identical code measured 462 s and 928 s depending on what else was running.
+Three measurements are therefore reported — an adjacent A/B pair (most
+trustworthy), a mid-load pair, and the per-test aggregates.
+
+#### A/B pair — back-to-back, matched load (primary evidence)
+
+Baseline and post-change trees measured **back-to-back** on the same host so
+both see the same conditions (load average **27–30** — deliberately lumpy, so
+this is the pessimistic case). CPU time is the load-independent metric.
+
+| Metric | Baseline (pre-change) | Post-change | Δ |
+|---|---|---|---|
+| Wall clock (`/usr/bin/time`) | 1189.5 s | 774.5 s | **−415.0 s (−34.9 %)** |
+| CPU (user+system) | 3160.8 s | 2445.5 s | **−715.3 s (−22.6 %)** |
+| Result | green (`node` suite rc 0) | green (`node` suite rc 0) | — |
+
+#### Mid-load pair (load ~11–14)
+
+| Suite | Baseline (pre-change) | Post-change | Δ |
+|---|---|---|---|
+| `tests/cli` | 104 files, 868 passed + 4 skipped, **624.03 s** | 104 files, 868 passed + 4 skipped, **426.78 s** | **−197.25 s (−31.6 %)** |
+| `tests/unit` | 43 files, 624 passed, **27.44 s** | 43 files, 624 passed, **29.04 s** | +1.60 s (noise) |
+| **Canonical total** | **147 files, 1492 passed, 651.47 s** | **147 files, 1492 passed, 455.82 s** | **−195.65 s (−30.0 %)** |
+
+Per-test aggregates from that pair (`tests/cli`): `tests`
+**2319.05 s → 1528.78 s** (−34.1 %); `import` 79.83 s → 77.87 s; `transform`
+20.67 s → 17.73 s.
+
+Test counts are unchanged apart from one removed duplicate (see below):
+868 passed + 4 skipped in both runs.
+
+#### Same-code variance (why one run proves nothing)
+
+Six post-change canonical runs of identical code measured: 462.3 s, 533.8 s,
+549.3 s, 621.6 s, 919.1 s, 928.4 s — a 2× spread driven purely by host load
+(≈4 → 24 load average). Two pre-change runs measured 624.0 s and 877.9 s. Any
+single-run comparison on this host can therefore be made to show anything from
+−35 % to +10 %; the A/B pair above and the load-independent CPU figure are the
+honest evidence, and all six post-change runs were **green** (no timeouts,
+no flakes).
+
+### Post-change top-20 slow tests
+
+Measured from the canonical `tests/cli` run above (per-test durations as
+reported by vitest). Baseline column is the same table from the pre-change
+canonical run, so the comparison is like-for-like.
+
+| # | Test | Baseline | Post-change |
+|---|---|---|---|
+| 1 | `sync-vs-mutation` — AC1/AC2 cross-command mutations survive (whole file) | 162.9 s | 151.3 s |
+| 2 | `close-recursive` (whole file, 46 tests) | 128.4 s | 120.7 s |
+| 3 | `issue-management` (whole file, 49 tests) | 95.7 s | 87.6 s |
+| 4 | `read-cache-spawn-reduction` — 6-pane simulation | 203.2 s | 83.8 s |
+| 5 | `startup-import-budget` — warm cache-hit within budget | 69.0 s | 59.4 s |
+| 6 | `issue-status` (whole file, 43 tests) | 74.7 s | 57.9 s |
+| 7 | `valid-json-output` (whole file, 38 tests) | 68.8 s | 56.7 s |
+| 8 | `init` (whole file, 20 tests) | 109.4 s | 55.6 s |
+| 9 | `entry-point-split` — dispatch parity (all built-ins) | 47.4 s | 35.4 s |
+| 10 | `read-cache-e2e` (whole file, 9 tests) | 146.2 s | 51.8 s |
+| 11 | `json-output-shape` (whole file, 18 tests) | 63.1 s | 51.4 s |
+| 12 | `sync-integration-convergence` — AC7 interleaved 4 rounds | 41.8 s | 31.4 s |
+| 13 | `update-batch` (whole file, 25 tests) | 33.6 s | 31.0 s |
+| 14 | `sync-delta-delete` (whole file, 3 tests) | 29.0 s | 24.2 s |
+| 15 | `audit-results-cli` (whole file, 24 tests) | 25.8 s | 23.7 s |
+| 16 | `sync-delta-fallback` (whole file, 3 tests) | 29.0 s | 23.6 s |
+| 17 | `update-audit-revert` (whole file, 14 tests) | 22.8 s | 23.1 s |
+| 18 | `stats-by-type` (whole file, 5 tests) | 46.7 s | 22.7 s |
+| 19 | `sync-delta-pull` (whole file, 3 tests) | 23.3 s | 22.3 s |
+| 20 | `create-update-demote-parent` (whole file, 14 tests) | 21.7 s | 22.2 s |
+
+Remaining slow tests are **intentional**: real-git sync integration (~25
+tests) cannot have `git` mocked without removing the behaviour under test;
+`startup-import-budget` and `entry-point-split` must observe the real
+`tsx`/`dist` entry points; the in-process CLI contract tests
+(`close-recursive`, `issue-management`, `issue-status`, `valid-json-output`,
+`json-output-shape`) pay real CLI startup (~200 ms/call), which is production
+behaviour rather than test overhead.
+
+### What was removed
+
+One duplicate in `tests/cli/read-cache-e2e.test.ts` — *"a fresh cache dir
+misses once then hits (no cross-test pollution)"* — which re-asserted the
+miss→hit cycle already covered by *"serves repeat identical reads from cache
+(AC1)"* (every case in that file already uses a fresh temp dir). A
+duplicate-title audit over the canonical suite found no other duplicated
+tests.
+
+### Full-suite per-test timings (`npm run test:timings`)
+
+`npm run test:timings` (full `vitest run`, all packages) reported
+**4095.4 s across 8284 tests** during this session, versus **2434.4 s across
+8281 tests** for the pre-change report of 2026-10-20T06:04Z. Those two
+full-suite figures are **not** comparable: the post-change report ran while
+the host was markedly more loaded (wall clock 1440 s for a suite whose
+canonical subset is 456 s). The canonical-suite tables above are the
+like-for-like measurement; treat `test-timings.json` absolute values as
+host-load-sensitive and compare only reports taken in the same conditions.
+
+### pytest
+
+`pytest -q -r a --disable-warnings` (via `run_tests.py --suite pytest`):
+**167 tests, 162 passed / 5 failed, 101–103 s**. The 5 failures are
+pre-existing skill-behaviour drift (`tests/skill/heartbeat/`,
+`skill/pane-triage/tests/`), confirmed identical on a clean tree with these
+changes stashed, and are tracked in WL-0MVH2T0ZV006KIOU. No Python test is
+≥5 s, so no optimisation was needed and pytest is unchanged.
+
+### Reproduce
+
+```bash
+# from the worktree, with dist built so the entry-point tests are faithful
+npx tsc
+
+# canonical suite (pre-change baseline was the same command on dev bec96e2b)
+python3 <test-skill>/scripts/run_tests.py --scope full --suite all --force --json
+
+# per-test timings (full suite; load-sensitive)
+npm run test:timings
+
+# pytest
+python3 <test-skill>/scripts/run_tests.py --suite pytest --force --json
+```
+
+### Confounders
+
+- **Host load is the dominant variable.** Sessions ran at load average 3–30
+  on a shared 16-core host with unrelated agent suites active, which moves
+  absolute wall clock by up to 2× for identical code. This is why the A/B
+  pair (back-to-back, matched load) and the CPU-time figure are the primary
+  evidence, and why single-run comparisons are not quoted as authoritative.
+- **Load makes the pre-change suite *fail*, not just slow.** The second
+  pre-change run at load ~20 hit `Test timed out in 60000ms` in
+  `read-cache-e2e > arg variants produce separate cache entries (AC3)` —
+  eight `tsx` spawns each taking ~8 s exceeds the 60 s test timeout. The
+  post-change suite stayed green in all six runs, including at load 24–30,
+  because a spawn now costs ~1.1 s instead of ~8 s.
+- **Relative gain grows with load.** `tsx` spawn cost rises steeply with CPU
+  contention (2.8 s idle → 8 s loaded) while the pre-compiled spawn barely
+  moves, so an idle CI host will show a smaller proportional win than the
+  loaded measurements here — but a strictly faster suite in absolute terms.
+
 ## Related
 
 - Parent epic: WL-0MV28X3BT0079JM3 — Deduplicate legacy `test/` vs `tests/`
@@ -344,3 +555,6 @@ Post-split test counts per file:
 - Model-cooldown epic: WL-0MV54ZP3Y00514Y9 — Resume model-exhausted jobs
   instead of switching to cheap
 - Regression guard + full-suite verification: WL-0MV563AU2007FM56
+- Test-suite runtime reduction: WL-0MVF9JJUH0077OB8 — Reduce time to run tests
+  (bundle-based CLI spawning; see the section above)
+- Pre-existing pytest failures: WL-0MVH2T0ZV006KIOU

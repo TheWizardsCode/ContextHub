@@ -30,9 +30,11 @@ import {
   readStateCounter,
   stateCounterFilePath,
   pruneStateDir,
+  maybePruneStateDir,
   counterFingerprint,
   DEFAULT_STATE_MAX_FILES,
   DEFAULT_STATE_TTL_MS,
+  STATE_MAX_FILES_ENV,
 } from '../../src/read-cache.js';
 import { createTempDir, cleanupTempDir, resolveTsxBin } from '../test-utils.js';
 
@@ -264,6 +266,56 @@ describe('pruneStateDir', () => {
       });
       fs.mkdirSync(path.join(cacheDir, 'state'), { recursive: true });
       expect(pruneStateDir(cacheDir)).toMatchObject({ filesScanned: 0, removed: 0 });
+    });
+  });
+
+  describe('opportunistic pruning (F9)', () => {
+    it('maybePruneStateDir pulls an over-bound state dir back under the bound', () => {
+      const now = Date.now();
+      for (let i = 0; i < 8; i++) {
+        writeCounter(cacheDir, worklogDirFor(`mp-${i}`), i + 1, now - 1_000 - i * 1_000);
+      }
+
+      maybePruneStateDir(cacheDir, { maxFiles: 3, ttlMs: DAY_MS, liveWindowMs: 0 });
+
+      expect(listCounterFiles(cacheDir).length).toBe(3);
+    });
+
+    it('bumpStateCounter opportunistically prunes the state store beyond the bound', () => {
+      const previous = process.env[STATE_MAX_FILES_ENV];
+      process.env[STATE_MAX_FILES_ENV] = '5';
+      try {
+        // The opportunistic hook clocks against real time, so seed with
+        // real-relative mtimes: 10 stale counters (30 days old) plus a live
+        // dir that gets bumped.
+        const now = Date.now();
+        for (let i = 0; i < 10; i++) {
+          writeCounter(cacheDir, worklogDirFor(`auto-stale-${i}`), i + 1, now - 30 * DAY_MS);
+        }
+        const live = worklogDirFor('auto-live');
+        writeCounter(cacheDir, live, 1, now - 1_000);
+
+        // The first bump performs a count check and prunes the stale set; the
+        // remaining bumps are served by the rate-limit countdown.
+        for (let i = 0; i < 21; i++) bumpStateCounter(cacheDir, live);
+
+        const files = listCounterFiles(cacheDir);
+        expect(files.length).toBeLessThanOrEqual(5);
+        // The live counter survived the opportunistic prune.
+        expect(readStateCounter(cacheDir, live)).toBeGreaterThan(0);
+      } finally {
+        if (previous === undefined) delete process.env[STATE_MAX_FILES_ENV];
+        else process.env[STATE_MAX_FILES_ENV] = previous;
+      }
+    });
+
+    it('a healthy (under-bound) state dir is untouched by an opportunistic check', () => {
+      const now = 1_800_000_000_000;
+      for (let i = 0; i < 4; i++) {
+        writeCounter(cacheDir, worklogDirFor(`healthy-${i}`), i + 1, now - 60_000);
+      }
+      maybePruneStateDir(cacheDir, { maxFiles: 100 }); // default ttl/live window
+      expect(listCounterFiles(cacheDir).length).toBe(4);
     });
   });
 

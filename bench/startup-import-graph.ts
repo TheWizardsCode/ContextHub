@@ -30,6 +30,13 @@ import * as ts from 'typescript';
 /** The entry module whose static imports define the startup graph. */
 export const CLI_ENTRY = 'src/cli.ts';
 
+/**
+ * The heavy CLI graph, loaded on a cache miss. It is a dynamic import of the
+ * fast path but is *not* part of the fast-path budget (it is the thing the fast
+ * path exists to avoid), so `walkFastPathRuntimeGraph` skips it.
+ */
+export const HEAVY_GRAPH_ENTRY = 'src/cli-main.ts';
+
 /** Repository-relative module list plus the external packages it imports. */
 export interface ImportGraph {
   /** Entry module, repository-relative (`src/cli.ts`). */
@@ -202,5 +209,92 @@ export function walkStaticImportGraph(options: ImportGraphOptions = {}): ImportG
     entry: relativeTo(repoRoot, entryAbsolute),
     modules,
     external: [...external].sort(),
+  };
+}
+
+/**
+ * Dynamic `import('...')` specifiers in a module, in source order.
+ *
+ * The fast path (`src/cli.ts`) imports the read-cache machinery, the worklog
+ * resolver and the process-lifecycle module dynamically, after the `--version`
+ * branch. Those modules are not part of the static boot graph, so the budget
+ * records them separately (`fastPathDynamicImports`) and their transitive
+ * static graphs count towards the fast-path allowlist (F7 —
+ * WL-0MVFRROLM002K98B).
+ */
+export function dynamicImportSpecifiers(file: string, source?: string): string[] {
+  const text = source ?? fs.readFileSync(file, 'utf-8');
+  const sourceFile = ts.createSourceFile(
+    file,
+    text,
+    ts.ScriptTarget.Latest,
+    true,
+    scriptKindFor(file)
+  );
+  const specifiers: string[] = [];
+
+  const visit = (node: ts.Node): void => {
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.kind === ts.SyntaxKind.ImportKeyword &&
+      node.arguments.length === 1 &&
+      ts.isStringLiteralLike(node.arguments[0])
+    ) {
+      specifiers.push((node.arguments[0] as ts.StringLiteralLike).text);
+    }
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return specifiers;
+}
+
+/**
+ * Union of the static graph of `entry` with the transitive static graphs of
+ * every dynamic import target reachable from it (one level of dynamism, which
+ * is how the fast path defers its optional modules).
+ */
+export function walkFastPathRuntimeGraph(options: ImportGraphOptions = {}): {
+  graph: ImportGraph;
+  dynamicEntries: string[];
+} {
+  const repoRoot = path.resolve(
+    options.repoRoot ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+  );
+  const entry = options.entry ?? CLI_ENTRY;
+  const entryAbsolute = path.resolve(repoRoot, entry);
+
+  const staticGraph = walkStaticImportGraph({ repoRoot, entry });
+  const dynamicSpecifiers = dynamicImportSpecifiers(entryAbsolute);
+  const modules = new Set(staticGraph.modules);
+  const external = new Set(staticGraph.external);
+  const dynamicEntries: string[] = [];
+
+  for (const specifier of dynamicSpecifiers) {
+    if (!specifier.startsWith('.')) {
+      external.add(specifier);
+      continue;
+    }
+    const resolved = resolveRelativeImport(entryAbsolute, specifier);
+    if (resolved === null) {
+      throw new Error(
+        `startup import graph: unresolved dynamic import '${specifier}' in ${entry}`
+      );
+    }
+    const resolvedRelative = relativeTo(repoRoot, resolved);
+    if (resolvedRelative === HEAVY_GRAPH_ENTRY) continue; // the heavy graph, by design
+    dynamicEntries.push(resolvedRelative);
+    const sub = walkStaticImportGraph({ repoRoot, entry: resolvedRelative });
+    for (const m of sub.modules) modules.add(m);
+    for (const e of sub.external) external.add(e);
+  }
+
+  return {
+    graph: {
+      entry,
+      modules: [...modules].sort(),
+      external: [...external].sort(),
+    },
+    dynamicEntries: [...new Set(dynamicEntries)].sort(),
   };
 }

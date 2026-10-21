@@ -2274,10 +2274,9 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
 //  - AC3: any non-`dispatched` outcome ends the batch — no continuation
 //    metadata and no leadership hand-off.
 //
-// RED WITNESS. The batch surface does not exist yet, so each body asserts
-// post-implementation behaviour and is committed with `it.fails` (see
-// `docs/dev/downtime-dispatcher-post-fix-verification.md`). Implementation
-// child WL-0MVFE1DD8000D8T2 flips each `it.fails` to `it`. The
+// These bodies were committed RED under `it.fails` by WL-0MVFE0T0M009ZCPM and
+// flipped to `it` by the implementation child WL-0MVFE1DD8000D8T2 (see
+// `docs/dev/downtime-dispatcher-post-fix-verification.md`). The
 // `ownBacklogDispatch` field is read through a narrow structural cast (the
 // same pattern as the step-down surface tests above).
 describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
@@ -2319,7 +2318,7 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
       ...(auditBatchRemaining !== undefined ? { auditBatchRemaining } : {}),
     });
 
-  it.fails('AC4: a continuation comes from the leader own head and does NOT hand off leadership mid-batch', async () => {
+  it('AC4: a continuation comes from the leader own head and does NOT hand off leadership mid-batch', async () => {
     // Continuation targets live beyond the sprint view (the own-backlog
     // window extension); a mutation lets each continuation see the next
     // distinct target.
@@ -2342,7 +2341,9 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
     expect(ownBacklogFlag(first)).toBe(false);
 
     // Continuation #1 — sourced from the leader's OWN head extension.
-    tail.shift(); // WL-AUD-2 was the next target
+    // The dispatched target leaves the head, so the next read sees the next
+    // distinct item (the shift models the work item leaving the sprint view
+    // once it is claimed by the dispatched pane).
     const second = await dispatchBatch(deps, [], 2);
     expect(second.dispatched).toBe(true);
     expect(second.candidate?.id).toBe('WL-AUD-2');
@@ -2351,7 +2352,7 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
     expect(ownBacklogFlag(second)).toBe(false);
 
     // Continuation #2 consumes the cap -> batch ends -> hand off ONCE.
-    tail.shift(); // WL-AUD-3
+    tail.shift(); // WL-AUD-2 was just dispatched
     const third = await dispatchBatch(deps, [], 1);
     expect(third.dispatched).toBe(true);
     expect(third.candidate?.id).toBe('WL-AUD-3');
@@ -2359,7 +2360,7 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
     expect(ownBacklogFlag(third)).toBe(true);
   });
 
-  it.fails('AC6f: a dispatched marker in the leader own head prevents a duplicate continuation target', async () => {
+  it('AC6f: a dispatched marker in the leader own head prevents a duplicate continuation target', async () => {
     // The leader root is a REAL temp dir so the dispatch log marker is read.
     const leaderRoot = testDir;
     writeDowntimeLog(leaderRoot, [
@@ -2390,7 +2391,7 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
     expect(outcome.auditBatch?.remaining).toBe(1);
   });
 
-  it.fails('AC3: a failed CAS claim ends the batch (no continuation metadata, no hand-off)', async () => {
+  it('AC3: a failed CAS claim ends the batch (no continuation metadata, no hand-off)', async () => {
     const getHerdrListHead = vi.fn(async (_cwd: string, limit = BATCH_SPRINT) => ({
       ok: true as const,
       items: limit <= BATCH_SPRINT ? [] : [auditHead('WL-AUD-CLAIM', 1)],
@@ -2406,5 +2407,33 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
     expect(ownBacklogFlag(outcome)).toBe(false);
     // The batch is over after any non-dispatched outcome.
     expect(outcome.auditBatch?.active).toBe(false);
+  });
+
+  it('AC3/AC4: the batch-local exclusion set prevents re-selecting an item dispatched in this batch', async () => {
+    // No dispatched marker exists for WL-AUD-DONE: the batch-local set alone
+    // must exclude it, so a continuation can never re-seed the same item even
+    // before its marker round-trips through the downtime log.
+    const getHerdrListHead = vi.fn(async (_cwd: string, limit = BATCH_SPRINT) => ({
+      ok: true as const,
+      items: limit <= BATCH_SPRINT ? [] : [auditHead('WL-AUD-DONE', 1), auditHead('WL-AUD-FRESH', 2)],
+    }));
+    const deps = makeCoordinationDeps({ getHerdrListHead });
+
+    const outcome = await dispatchFromCoordination(deps, [], {
+      model: 'plan',
+      cwd: '/leader-root',
+      coordinationDir: testDir,
+      browseItemCount: BATCH_SPRINT,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+      auditBatchDispatchedIds: ['WL-AUD-DONE'],
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-AUD-FRESH');
+    expect(outcome.auditBatchContinuation).toBe(true);
+    expect(outcome.auditBatch?.remaining).toBe(1);
+    // Mid-batch continuation -> leadership is NOT handed off yet (AC4).
+    expect(ownBacklogFlag(outcome)).toBe(false);
   });
 });

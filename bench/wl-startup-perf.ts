@@ -49,7 +49,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { fileURLToPath, pathToFileURL } from 'url';
 import { readSpawnRecords, type SpawnRecord } from '../src/spawn-counter.js';
-import { walkStaticImportGraph, CLI_ENTRY, type ImportGraph } from './startup-import-graph.js';
+import {
+  walkStaticImportGraph,
+  walkFastPathRuntimeGraph,
+  CLI_ENTRY,
+  type ImportGraph,
+} from './startup-import-graph.js';
 import {
   BUDGET_RELATIVE_PATH,
   budgetFilePath,
@@ -164,9 +169,65 @@ export function percentile(values: number[], fraction: number): number | null {
 }
 
 /**
+ * Newest modification time under `dir` (recursive), or `null` when absent.
+ *
+ * Used to decide whether a built `dist/` still reflects the current `src/`.
+ */
+function newestMtimeMs(dir: string): number | null {
+  let newest: number | null = null;
+  const walk = (current: string): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        walk(full);
+        continue;
+      }
+      try {
+        const stat = fs.statSync(full);
+        if (newest === null || stat.mtimeMs > newest) newest = stat.mtimeMs;
+      } catch {
+        // Ignore unreadable entries.
+      }
+    }
+  };
+  walk(dir);
+  return newest;
+}
+
+/**
+ * Is the built `dist/cli.js` at least as new as every file under `src/`?
+ *
+ * A stale build silently makes the suite test *old* code: `entry-point-split`
+ * asserts the `--version` spawn record added to `src/cli.ts`, which a build
+ * predating that change does not emit — the test then fails intermittently
+ * depending on whether the checkout happens to have been rebuilt. Detecting
+ * staleness lets `auto` fall back to `src` instead of asserting against a
+ * build that does not reflect the tree. A checkout with no `src/` (e.g. the
+ * resolution fixtures) is treated as fresh.
+ */
+export function isDistFresh(repoRoot: string): boolean {
+  const distEntry = path.join(repoRoot, 'dist', 'cli.js');
+  let distStat: fs.Stats;
+  try {
+    distStat = fs.statSync(distEntry);
+  } catch {
+    return false;
+  }
+  const srcNewest = newestMtimeMs(path.join(repoRoot, 'src'));
+  if (srcNewest === null) return true;
+  return distStat.mtimeMs >= srcNewest;
+}
+
+/**
  * Resolve the invocation target: `dist` requires a build (that is what
- * `/usr/local/bin/wl` executes); `auto` prefers a built tree and otherwise
- * falls back to `src`.
+ * `/usr/local/bin/wl` executes); `auto` prefers a *fresh* built tree and
+ * otherwise falls back to `src`.
  */
 export function resolveStartupTarget(
   target: 'auto' | 'src' | 'dist',
@@ -183,7 +244,9 @@ export function resolveStartupTarget(
     return 'dist';
   }
   if (target === 'auto') {
-    return fs.existsSync(distEntry) ? 'dist' : 'src';
+    // Only use the build when it is newer than every source file — otherwise
+    // the suite would assert against code that no longer exists in `src/`.
+    return isDistFresh(repoRoot) ? 'dist' : 'src';
   }
   return 'src';
 }
@@ -503,6 +566,8 @@ export function applyStartupResultToBudget(
     };
   }
 
+  const fastPath = walkFastPathRuntimeGraph({ repoRoot: result.repoRoot, entry: CLI_ENTRY });
+
   return {
     ...budget,
     entry: result.entry,
@@ -511,6 +576,15 @@ export function applyStartupResultToBudget(
       modules: result.importGraph.modules,
       external: result.importGraph.external,
     },
+    // Fast path only (static boot graph + its dynamic imports); these fields
+    // are refreshed from the same walk so the ratchet cannot be sidestepped by
+    // moving an import behind `await import()` (F7 — WL-0MVFRROLM002K98B).
+    ...(fastPath
+      ? {
+          fastPathDynamicImports: fastPath.dynamicEntries,
+          fastPathRuntimeModules: fastPath.graph.modules,
+        }
+      : {}),
     baselines: {
       ...budget.baselines,
       [result.target]: {

@@ -5914,18 +5914,32 @@ export async function runWorklistTui(
    * event that opens or closes a work-item pane must refresh the pane list.
    * Single-flight across concurrent events; visibility-gated so a hidden tab
    * spawns no `herdr`; fail-open (see `applyPaneMarkers`).
+   *
+   * The single-flight guard COALESCES (it never drops): an event that lands
+   * while a pass is in flight marks the refresh pending and the pass re-runs
+   * once it settles. A pane can therefore appear during an in-flight pass
+   * (`pane_agent_detected` → status change) and still get its green circle
+   * (WL-0MVFX70SB000YRQH — dropping the trailing event left the cross-instance
+   * late-pane case without a circle).
    */
   let paneMarkerRefreshInFlight: Promise<void> | null = null;
+  let paneMarkerRefreshPending = false;
   const refreshPaneMarkersFromEvent = (): void => {
-    if (paneMarkerRefreshInFlight) return;
+    if (paneMarkerRefreshInFlight) {
+      paneMarkerRefreshPending = true;
+      return;
+    }
     paneMarkerRefreshInFlight = (async () => {
       try {
-        // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and
-        // its open overlay) while a text-input overlay is active.
-        if (inputActive()) return;
-        if (await paneGate.visible()) {
-          await refreshPaneMarkers();
-        }
+        do {
+          paneMarkerRefreshPending = false;
+          // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and
+          // its open overlay) while a text-input overlay is active.
+          if (inputActive()) return;
+          if (await paneGate.visible()) {
+            await refreshPaneMarkers();
+          }
+        } while (paneMarkerRefreshPending);
       } catch {
         // Fail-open: pane-marker failures never crash the TUI.
       } finally {
@@ -7171,8 +7185,21 @@ export async function runWorklistTui(
   };
 
   let resolve: (value: WorkItem | undefined) => void;
+  /**
+   * True once exit has been requested and the TUI promise has resolved.
+   * Async work still in flight at exit time (a refresh cycle, its coalesced
+   * trailing refresh, a single-flight blocker re-resolve) resolves afterwards
+   * and calls `render()`. Writing a frame to a terminal whose pane has already
+   * been torn down is a leak: it can corrupt a reused pane and, in tests, the
+   * escaping frame is captured by whoever owns stdout next
+   * (WL-0MVFX6404003TE2E). `render()` therefore becomes a no-op after exit.
+   */
+  let exited = false;
   const promise = new Promise<WorkItem | undefined>((res) => {
-    resolve = res;
+    resolve = (value: WorkItem | undefined) => {
+      exited = true;
+      res(value);
+    };
   });
 
   /**
@@ -7246,6 +7273,10 @@ export async function runWorklistTui(
     }));
 
   const render = (): void => {
+    // Never write a frame after teardown: async work that outlives the exit
+    // (refresh cycle / coalesced trailing refresh / blocker re-resolve) must
+    // not repaint a torn-down pane (WL-0MVFX6404003TE2E).
+    if (exited) return;
     termSize = getTermSize();
     state.termSize = termSize;
 

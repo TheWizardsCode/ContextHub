@@ -38,12 +38,11 @@ import {
   writeConfig,
   writeInitSemaphore,
 } from './cli-helpers.js';
-import { resolveTsxBin } from '../test-utils.js';
+import { cliInvocation } from './cli-bundle.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '..', '..');
-const tsxBin = resolveTsxBin(__dirname);
 
 /** Parse the JSON worklog output from a run (stdout for success, stderr for stale). */
 function parseCliJson(run: { stdout: string; stderr: string }): any {
@@ -63,7 +62,8 @@ function runCliSubprocess(
   args: string[],
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [tsxBin, cliPath, ...args], {
+    const [executable, ...rest] = cliInvocation();
+    const child = spawn(executable, [...rest, ...args], {
       cwd,
       env: { ...(process.env as Record<string, string>) },
       stdio: ['ignore', 'pipe', 'pipe'],

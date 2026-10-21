@@ -171,6 +171,10 @@ export function readStateCounter(cacheDir: string, worklogDir: string): number {
  * Atomically increment the per-worklog-dir write counter. Returns the new
  * value. Concurrent increments may coalesce (both write N+1) but can never
  * regress the counter, which is all freshness checking needs.
+ *
+ * Every bump is a cache write, so a bounded, rate-limited opportunistic prune
+ * runs here (F9 — WL-0MVFRRQ9W003KEFL): once the state dir exceeds the bound,
+ * the directory is pulled back under it without a daemon.
  */
 export function bumpStateCounter(cacheDir: string, worklogDir: string): number {
   const file = stateCounterFilePath(cacheDir, worklogDir);
@@ -183,7 +187,94 @@ export function bumpStateCounter(cacheDir: string, worklogDir: string): number {
   } catch (err) {
     debugLog(`failed to bump state counter: ${(err as Error).message}`);
   }
+  if (statePruneDue()) maybePruneStateDir(cacheDir);
   return next;
+}
+
+// -----------------------------------------------------------------------
+// Opportunistic pruning (F9 — WL-0MVFRRQ9W003KEFL)
+// -----------------------------------------------------------------------
+
+/**
+ * Environment override for the state-dir file bound
+ * (default `DEFAULT_STATE_MAX_FILES`, 1,000).
+ */
+export const STATE_MAX_FILES_ENV = 'WL_STATE_MAX_FILES';
+/**
+ * Environment override for the prune TTL in milliseconds
+ * (default `DEFAULT_STATE_TTL_MS`, 7 days).
+ */
+export const STATE_TTL_MS_ENV = 'WL_STATE_TTL_MS';
+
+/**
+ * Bumps between count checks. Counting is a `readdir` of the state dir, so on
+ * a healthy (bounded) cache the check is amortised to roughly zero cost.
+ */
+const STATE_PRUNE_CHECK_EVERY = 20;
+
+/** Bumps remaining until the next state-dir count check. */
+let statePruneCountdown = 0;
+
+/**
+ * Rate limiter for opportunistic pruning: true at most once per
+ * `STATE_PRUNE_CHECK_EVERY` bumps. Counting is a `readdir` of the state dir,
+ * so a healthy (bounded) cache pays for one directory scan per 20 writes at
+ * most. Explicit `maybePruneStateDir` / `wl doctor cache` calls are never
+ * rate-limited.
+ */
+function statePruneDue(): boolean {
+  if (statePruneCountdown > 0) {
+    statePruneCountdown--;
+    return false;
+  }
+  statePruneCountdown = STATE_PRUNE_CHECK_EVERY;
+  return true;
+}
+
+function envStateBound(): number {
+  const parsed = Number(process.env[STATE_MAX_FILES_ENV]);
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : DEFAULT_STATE_MAX_FILES;
+}
+
+function envStateTtl(): number {
+  const parsed = Number(process.env[STATE_TTL_MS_ENV]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_STATE_TTL_MS;
+}
+
+/**
+ * Opportunistic prune of the state directory: checks the file count and, when
+ * it exceeds the bound, prunes it back under (`pruneStateDir`).
+ *
+ * Each call is one `readdir`; a directory still under the bound costs nothing
+ * beyond that. `bumpStateCounter` rate-limits these checks (see
+ * `statePruneDue`), while explicit callers (`wl doctor cache`, tests) always
+ * get a real check. Failures are swallowed — the cache must never break the
+ * CLI — and the explicit `wl doctor cache` path remains the operator's
+ * deterministic maintenance tool.
+ */
+export function maybePruneStateDir(cacheDir: string, options: PruneStateOptions = {}): void {
+  const stateDir = path.join(path.resolve(cacheDir), 'state');
+  let count: number;
+  try {
+    count = fs.readdirSync(stateDir).length;
+  } catch {
+    return; // No state dir yet.
+  }
+  const maxFiles =
+    options.maxFiles ?? envStateBound();
+  if (count <= maxFiles) return;
+  try {
+    pruneStateDir(cacheDir, {
+      maxFiles,
+      ttlMs: options.ttlMs ?? envStateTtl(),
+      ...(options.liveWindowMs !== undefined ? { liveWindowMs: options.liveWindowMs } : {}),
+      ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
+      ...(options.now !== undefined ? { now: options.now } : {}),
+      ...(options.invalidateEntries !== undefined ? { invalidateEntries: options.invalidateEntries } : {}),
+    });
+  } catch {
+    // Best-effort only.
+  }
 }
 
 // ---------------------------------------------------------------------------
