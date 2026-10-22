@@ -308,6 +308,79 @@ single consolidated read and the zero-spawn-when-idle guarantees already hold.
 That is exactly the gap F3–F6 close, so `acTargets.enforced` stays `false`
 until F7 records a compliant full-scale baseline.
 
+## Stage profile: which driver costs what (F2 — WL-0MVJV2NNG00771C6)
+
+F1 measures the refresh **aggregate**. F2 needs the opposite: each driver on
+its own, so the epic can decide what is fixed in scope (F3–F6) and what becomes
+a separate work item. `runStageProfile()` in the same harness measures every
+stage of one default-view refresh in isolation at the requested scale:
+
+```sh
+# Full-scale stage table (text, then machine-readable)
+npm run test:perf:large -- --stages
+npm run test:perf:large -- --stages --json
+
+# Built CLI (what /usr/local/bin/wl runs), more samples
+npm run build && npm run test:perf:large -- --stages --samples 5 --target dist
+```
+
+What it measures, and through which seam:
+
+| Stage | Seam | What it attributes |
+|---|---|---|
+| `cli-startup` | spawn record (`--version`, kind `version`) | Node + CLI module graph: the floor every spawn pays |
+| `worklist-cold` | `wl worklist -n <browse>` after clearing the read cache (kind `read-work`) | The consolidated data-load spawn: DB open + subset queries + browse selection + JSON serialisation |
+| `worklist-warm` | the same spawn immediately after (kind `cache-hit`) | What the read cache already saves |
+| `json-parse` | `JSON.parse` + `extractItems` of the captured payload | Primary-side payload load (mirrors `parseWorklistBundle`) |
+| `sqlite-open` | `createInProcessRefreshScope()` first read | Pragmas + schema + FTS DDL on the TUI event loop |
+| `sqlite-full-read` | `db.list({})` in that scope | Materialising the whole item table |
+| `subset-queries` | the four default-view subset queries | Query/filter cost once the table is resident |
+| `children-inprocess-cold` | `fetchChildrenForItems(expanded, …, scope)` on a fresh scope | The expanded-children read when it wins the refresh race (pays open + table read) |
+| `children-inprocess-warm` | the same call on the same scope | What the shared refresh connection saves |
+| `children-cli-per-parent` | `wl list --parent <id>` spawn | The per-parent CLI fallback the in-process batch read replaced |
+| `actionable-count` | `fetchActionableCount(scope)` | In-process count |
+| `hydrator-dep-list` | `wl dep list <id>` spawn (GNU `time` metric; the CLI does not record this non-cacheable read) | One hydrator spawn per pending-claim candidate per tick |
+| `render` | `WorkItemListState.getDisplayRows()` + `formatItemLine` | Row build + line formatting for the visible window |
+
+Notes on reading the numbers:
+
+- **Rank by CPU, not wall.** A loaded shared host inflates wall time (the F1
+  ratchet uses CPU for the same reason); GNU `time` supplies the child's own
+  CPU and peak RSS for spawns the CLI's `WL_SPAWN_COUNT_FILE` instrumentation
+  does not cover. Where GNU `time` is unavailable, spawn-record CPU/RSS is used
+  as the fallback (recorded as `null` when neither exists).
+- **The stages are measured serially**, while the live refresh runs them
+  concurrently (`Promise.all` in `doRefresh`). The `refreshAttribution`
+  baseline is therefore an upper bound used to rank the drivers.
+- **`payload build` is derived** (`worklist-cold` minus `cli-startup`) so the
+  fixed Node start-up floor is not attributed to the payload.
+- **RSS breakdown** compares the peak RSS of `wl --version` (module graph),
+  `wl show <id>` (open + one item), the cold `wl worklist` spawn (full data
+  load) and the in-process heap deltas for table materialisation, payload
+  stringification and parsing.
+
+The full-scale F2 results (cost table, `wl sync` breakdown, RSS decomposition
+and the fix/defer decision per driver) are recorded on the work item
+`WL-0MVJV2NNG00771C6`; the harness is the re-runnable evidence behind them.
+
+### `wl sync` persist phases
+
+`wl sync` is not on the Herdr refresh path, but F2 measured it because the
+operator reports it taking ~36 s. `packages/herdr/test/perf/wl-sync-phase-probe.ts`
+replays `performSync`'s persist pipeline on a **disposable copy** of a store and
+times each phase:
+
+```sh
+npx tsx packages/herdr/test/perf/wl-sync-phase-probe.ts --worklog-dir <dir>/.worklog --json
+```
+
+On the F1 full-scale fixture (2,600 items / 26,000 comments / 123.7 MB DB) the
+persist phases take ~97 % of the pipeline, and 78–90 % of that CPU is
+`upsertFtsEntry` — every item's FTS row is rebuilt even when nothing changed,
+so a no-change sync pays the whole cost. The fix is a separate work item
+(`WL-0MVK3WRY9009KV6P`, blocked by F2) per the epic's scope guardrail; the
+probe is the before/after measurement tool for it.
+
 ## References
 
 - Sibling Pi-TUI precedents: `WL-0MKXN75CZ0QNBUJJ`, `WL-0MQ3LYSPS006V60H`.

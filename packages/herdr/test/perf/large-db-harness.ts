@@ -83,6 +83,7 @@ import { resolveStartupTarget } from '../../../../bench/wl-startup-perf.js';
 import {
   buildWlArgs,
   createInProcessRefreshScope,
+  extractItems,
   fetchActionableCount,
   fetchChildrenForItems,
   fetchNextItems,
@@ -91,8 +92,10 @@ import {
   resetWorklogDir,
   setExecFileAsync,
   setWorklogDir,
+  type WorkItem,
 } from '../../src/fetcher.js';
 import { DbChangeTracker, stateCounterFilePath, watchDbChanges } from '../../src/db-change.js';
+import { WorkItemListState, formatItemLine } from '../../src/worklist.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1499,16 +1502,916 @@ export function withinAcTargets(
   };
 }
 
+// ── Stage profile (F2 — WL-0MVJV2NNG00771C6) ─────────────────────────
+//
+// F1 measures the refresh AGGREGATE. F2 needs to know WHICH driver the wall
+// time and CPU belong to, so the parent epic can decide what is fixed in
+// scope (F3–F6) versus deferred to a separate work item. This profile runs
+// each stage of one default-view refresh on its own at full scale, using the
+// same instrumentation F1 already relies on:
+//
+//   - spawned `wl` processes are measured through the existing spawn records
+//     (`WL_SPAWN_COUNT_FILE`, WL-0MVFRR98A008MM19): wall time, the child's own
+//     CPU and its peak RSS;
+//   - in-process stages go through the REAL refresh scope
+//     (`createInProcessRefreshScope`) and the real fetcher helpers, so the
+//     numbers describe the plugin's code path rather than a reimplementation;
+//   - render is measured on the real row model (`WorkItemListState` +
+//     `formatItemLine`), i.e. the work the TUI does for the visible window.
+//
+// No production instrumentation is added: every probe point already exists.
+//
+// Run it with:
+//
+//     npm run test:perf:large -- --stages --json
+//     npx tsx packages/herdr/test/perf/large-db-harness.ts --profile full --stages
+
+/** One measured refresh stage. */
+export type StageName =
+  | 'cli-startup'
+  | 'worklist-cold'
+  | 'worklist-warm'
+  | 'json-parse'
+  | 'sqlite-open'
+  | 'sqlite-full-read'
+  | 'subset-queries'
+  | 'children-inprocess-cold'
+  | 'children-inprocess-warm'
+  | 'children-cli-per-parent'
+  | 'actionable-count'
+  | 'hydrator-dep-list'
+  | 'render';
+
+/** Where a measured cost should be fixed. */
+export type StageAction = 'fix-in-scope' | 'separate-item' | 'no-op';
+
+/** A single measured stage (median of its samples unless noted). */
+export interface StageSample {
+  stage: StageName;
+  /** Human-readable description of what was measured. */
+  label: string;
+  /** Samples taken (median reported). */
+  samples: number;
+  /** Median wall time (ms). */
+  wallMs: number;
+  /** Median CPU time (ms) — parent CPU plus the spawned child's own CPU. */
+  cpuMs: number;
+  /** `wl` processes spawned per sample. */
+  spawns: number;
+  /** Peak RSS of the spawned process (MB), when a spawn was involved. */
+  peakRssMb: number | null;
+  /** Bytes of CLI stdout, when the stage produced a payload. */
+  payloadBytes: number | null;
+  /** Spawn-record kind observed (`read-work` / `cache-hit` / `version`). */
+  spawnKind: string | null;
+  /** Recommended action for this driver. */
+  action: StageAction;
+  /** Why the action was chosen / what bounds this cost. */
+  note: string;
+}
+
+/** A cost row of the one-refresh attribution table. */
+export interface StageAttribution {
+  row: string;
+  wallMs: number;
+  cpuMs: number;
+  /** Share of the serialised one-refresh baseline (%). */
+  pct: number;
+  action: StageAction;
+  note: string;
+}
+
+/** RSS breakdown of a `wl worklist` spawn. */
+export interface RssBreakdownRow {
+  component: string;
+  peakRssMb: number;
+  deltaMb: number | null;
+  note: string;
+}
+
+/** Whole stage-profile report. */
+export interface StageProfileReport {
+  profile: LargeDbProfileName;
+  target: LargeDbTarget;
+  invocation: string;
+  node: string;
+  host: string;
+  capturedAt: string;
+  dataset: LargeDbReport['dataset'];
+  stages: StageSample[];
+  /** Serialised-sum attribution across the stages of one cold refresh. */
+  refreshAttribution: {
+    /** Serialised sum of the component stages (upper bound; live is concurrent). */
+    serialisedBaselineMs: number;
+    rows: StageAttribution[];
+  };
+  /** Whether the `wl worklist` payload can be trimmed without a contract change. */
+  payload: {
+    bytes: number;
+    items: number;
+    /** Documented `wl worklist` payload contract: full `WorkItem[]` per subset. */
+    contract: string;
+    trimmableWithoutContractChange: boolean;
+    note: string;
+  };
+  rss: {
+    rows: RssBreakdownRow[];
+    worklistSpawnPeakMb: number | null;
+    startupPeakMb: number | null;
+    singleItemReadPeakMb: number | null;
+    payloadBytes: number;
+  };
+}
+
+/** Options accepted by {@link runStageProfile}. */
+export interface StageProfileOptions {
+  profile?: LargeDbProfileName;
+  scale?: Partial<LargeDbScale>;
+  /** Samples per stage (default 3 for spawns, 5 for in-process probes). */
+  samples?: number;
+  target?: 'auto' | LargeDbTarget;
+  repoRoot?: string;
+  /** Pre-generated fixture (skips generation; the caller owns cleanup). */
+  fixture?: LargeDbFixture;
+  /** Keep the generated fixture on disk for inspection. */
+  keep?: boolean;
+}
+
+/** Median of a numeric sample list (`0` for an empty list). */
+export function medianOf(values: number[]): number {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? round1((sorted[middle - 1] + sorted[middle]) / 2)
+    : sorted[middle];
+}
+
+/** One spawned CLI run, measured with the F1 spawn instrumentation. */
+interface SpawnMeasurement {
+  wallMs: number;
+  cpuMs: number;
+  spawns: number;
+  peakRssMb: number | null;
+  payloadBytes: number;
+  spawnKind: string | null;
+  stdout: string;
+}
+
+/**
+ * GNU `time` binary, used only when it is available.
+ *
+ * The F1 spawn records are written by the CLI itself and only exist for the
+ * cacheable reads (`list`/`next`/`show`/`search`/`status`/`worklist`), spawn
+ * cache hits and `--version`. Other spawns the refresh pays for — notably the
+ * hydrator's `wl dep list <id>` — are invisible to that instrumentation, so
+ * their CPU and peak RSS are read from GNU `time` instead (which `exec`s the
+ * CLI, so no extra process is introduced). When the binary is absent
+ * (macOS/BSD `time` has a different interface) those fields stay `null` and
+ * only wall time is reported.
+ */
+const GNU_TIME_BIN = ((): string | null => {
+  if (process.platform !== 'linux') return null;
+  for (const candidate of ['/usr/bin/time', '/bin/time']) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch {
+      // ignore: fall through to the next candidate
+    }
+  }
+  return null;
+})();
+
+/** Marker line GNU `time` writes to stderr (parsed out of the child's stderr). */
+const GNU_TIME_MARKER = '__WL_SPAWN_METRICS__';
+
+/**
+ * Run one `wl` invocation and measure it exactly like F1 measures a refresh
+ * spawn: wall time from the parent, CPU/peak RSS from the child's own
+ * `WL_SPAWN_COUNT_FILE` record (GNU `time` supplies them for spawns the CLI
+ * does not instrument). The spawn file is cleared first so only this
+ * invocation's record is read.
+ */
+async function measureSpawn(
+  invocation: LargeDbCliInvocation,
+  argv: string[],
+  spawnFile: string,
+): Promise<SpawnMeasurement> {
+  fs.rmSync(spawnFile, { force: true });
+  const fullArgs = buildWlArgs(argv);
+  const command = GNU_TIME_BIN
+    ? [
+        GNU_TIME_BIN,
+        '-f',
+        `${GNU_TIME_MARKER} wall=%e user=%U sys=%S maxrss=%M`,
+        ...invocation.command,
+      ]
+    : invocation.command;
+
+  const cpuStart = process.cpuUsage();
+  const startedAt = performance.now();
+  const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>(
+    (resolve, reject) => {
+      execFile(
+        command[0],
+        [...command.slice(1), ...fullArgs],
+        { maxBuffer: 256 * 1024 * 1024, timeout: 300_000 },
+        (error, childStdout, childStderr) => {
+          if (error) {
+            reject(error);
+            return;
+          }
+          resolve({ stdout: childStdout, stderr: childStderr });
+        },
+      );
+    },
+  );
+  const wallMs = performance.now() - startedAt;
+  const cpu = process.cpuUsage(cpuStart);
+
+  // `time` reports seconds; maxrss is KiB (the same unit as a spawn record).
+  let externalCpuMs: number | null = null;
+  let externalPeakRssKb: number | null = null;
+  for (const line of stderr.split('\n')) {
+    const index = line.indexOf(GNU_TIME_MARKER);
+    if (index === -1) continue;
+    const fields = new Map(
+      line
+        .slice(index + GNU_TIME_MARKER.length)
+        .trim()
+        .split(/\s+/)
+        .map((pair) => pair.split('=') as [string, string]),
+    );
+    const user = Number(fields.get('user'));
+    const sys = Number(fields.get('sys'));
+    const maxrss = Number(fields.get('maxrss'));
+    if (Number.isFinite(user) && Number.isFinite(sys)) externalCpuMs = (user + sys) * 1000;
+    if (Number.isFinite(maxrss) && maxrss > 0) externalPeakRssKb = maxrss;
+  }
+
+  const records = readSpawnRecords(spawnFile);
+  const recordedCpuMs = records.reduce((total, record) => total + (record.cpuMs ?? 0), 0);
+  const recordedPeakRssKb = records.reduce<number>(
+    (peak, record) => (record.maxRssKb === null ? peak : Math.max(peak, record.maxRssKb)),
+    0,
+  );
+  // Prefer GNU `time` (the FULL process: module load + DB work + serialisation)
+  // over the spawn record, which the CLI writes at the cache lookup point —
+  // BEFORE the work a `read-work` record exists to measure. The record remains
+  // the fallback for platforms without GNU `time`, and always supplies the
+  // spawn kind.
+  const childCpuMs = externalCpuMs ?? recordedCpuMs;
+  const peakRssKb = externalPeakRssKb ?? recordedPeakRssKb;
+
+  return {
+    wallMs: round1(wallMs),
+    cpuMs: round1((cpu.user + cpu.system) / 1000 + childCpuMs),
+    // Exactly one CLI process runs per measurement, even when the CLI does not
+    // record itself (e.g. a non-cacheable read such as `dep list`).
+    spawns: 1,
+    peakRssMb: peakRssKb > 0 ? round1(peakRssKb / 1024) : null,
+    payloadBytes: Buffer.byteLength(stdout),
+    spawnKind: records[0]?.kind ?? null,
+    stdout,
+  };
+}
+
+/** Accumulate repeated measurements of one stage into a {@link StageSample}. */
+class StageCollector {
+  private readonly wall: number[] = [];
+  private readonly cpu: number[] = [];
+  private spawns = 0;
+  private peakRssMb: number | null = null;
+  private payloadBytes: number | null = null;
+  private spawnKind: string | null = null;
+
+  constructor(
+    private readonly stage: StageName,
+    private readonly label: string,
+    private readonly action: StageAction,
+    private readonly note: string,
+  ) {}
+
+  pushSpawn(measurement: SpawnMeasurement): void {
+    this.wall.push(measurement.wallMs);
+    this.cpu.push(measurement.cpuMs);
+    this.spawns = Math.max(this.spawns, measurement.spawns);
+    if (measurement.peakRssMb !== null) {
+      this.peakRssMb = Math.max(this.peakRssMb ?? 0, measurement.peakRssMb);
+    }
+    this.payloadBytes = Math.max(this.payloadBytes ?? 0, measurement.payloadBytes);
+    this.spawnKind = measurement.spawnKind ?? this.spawnKind;
+  }
+
+  pushTiming(timing: { wallMs: number; cpuMs: number }, payloadBytes?: number): void {
+    this.wall.push(timing.wallMs);
+    this.cpu.push(timing.cpuMs);
+    if (payloadBytes !== undefined) {
+      this.payloadBytes = Math.max(this.payloadBytes ?? 0, payloadBytes);
+    }
+  }
+
+  sample(): StageSample {
+    return {
+      stage: this.stage,
+      label: this.label,
+      samples: this.wall.length,
+      wallMs: medianOf(this.wall),
+      cpuMs: medianOf(this.cpu),
+      spawns: this.spawns,
+      peakRssMb: this.peakRssMb,
+      payloadBytes: this.payloadBytes,
+      spawnKind: this.spawnKind,
+      action: this.action,
+      note: this.note,
+    };
+  }
+}
+
+/** Time an async in-process call (parent CPU only). */
+async function timeAsync<T>(
+  fn: () => Promise<T>,
+): Promise<{ wallMs: number; cpuMs: number; value: T }> {
+  const cpuStart = process.cpuUsage();
+  const startedAt = performance.now();
+  const value = await fn();
+  const wallMs = performance.now() - startedAt;
+  const cpu = process.cpuUsage(cpuStart);
+  return { wallMs: round1(wallMs), cpuMs: round1((cpu.user + cpu.system) / 1000), value };
+}
+
+/** Time a synchronous in-process call. */
+function timeSync<T>(fn: () => T): { wallMs: number; cpuMs: number; value: T } {
+  const cpuStart = process.cpuUsage();
+  const startedAt = performance.now();
+  const value = fn();
+  const wallMs = performance.now() - startedAt;
+  const cpu = process.cpuUsage(cpuStart);
+  return { wallMs: round1(wallMs), cpuMs: round1((cpu.user + cpu.system) / 1000), value };
+}
+
+/**
+ * Build the serialised one-refresh attribution table from measured stages.
+ *
+ * The live refresh runs its stages CONCURRENTLY (`Promise.all` in
+ * `doRefresh`), so the serialised sum is an upper bound used only to rank the
+ * drivers — the wall time of each stage is the number to compare with.
+ */
+export function attributeStages(stages: StageSample[]): {
+  serialisedBaselineMs: number;
+  rows: StageAttribution[];
+} {
+  const byStage = new Map(stages.map((stage) => [stage.stage, stage]));
+  const rows: StageAttribution[] = [];
+
+  // Derived: everything `wl worklist` does after Node start-up — DB open, the
+  // five subset queries, selection, serialisation and stdout write.
+  const cold = byStage.get('worklist-cold');
+  const startup = byStage.get('cli-startup');
+  if (cold && startup) {
+    rows.push({
+      row: 'worklist payload build (cold spawn minus CLI startup)',
+      wallMs: round1(Math.max(0, cold.wallMs - startup.wallMs)),
+      cpuMs: round1(Math.max(0, cold.cpuMs - startup.cpuMs)),
+      pct: 0,
+      action: 'fix-in-scope',
+      note: 'DB open + subset queries + browse selection + JSON serialisation inside one `wl worklist` spawn',
+    });
+  }
+
+  const refreshStages: StageName[] = [
+    'worklist-cold',
+    'json-parse',
+    'children-inprocess-cold',
+    'actionable-count',
+    'render',
+  ];
+  const baseline = refreshStages.reduce(
+    (total, name) => total + (byStage.get(name)?.wallMs ?? 0),
+    0,
+  );
+
+  const order: StageName[] = [
+    'cli-startup',
+    'worklist-cold',
+    'worklist-warm',
+    'json-parse',
+    'sqlite-open',
+    'sqlite-full-read',
+    'subset-queries',
+    'children-inprocess-cold',
+    'children-inprocess-warm',
+    'children-cli-per-parent',
+    'actionable-count',
+    'hydrator-dep-list',
+    'render',
+  ];
+  for (const name of order) {
+    const stage = byStage.get(name);
+    if (!stage) continue;
+    rows.push({
+      row: stage.label,
+      wallMs: stage.wallMs,
+      cpuMs: stage.cpuMs,
+      pct: baseline > 0 ? Math.round((stage.wallMs / baseline) * 1000) / 10 : 0,
+      action: stage.action,
+      note: stage.note,
+    });
+  }
+  const derivedRow = rows.find((row) => row.row.startsWith('worklist payload build'));
+  if (derivedRow && baseline > 0) {
+    derivedRow.pct = Math.round((derivedRow.wallMs / baseline) * 1000) / 10;
+  }
+  return { serialisedBaselineMs: round1(baseline), rows };
+}
+
+/**
+ * Run the per-stage profile at the requested fixture scale.
+ *
+ * Every stage is measured on its own so the parent epic can attribute a
+ * refresh's cost; the concurrency the live refresh benefits from is therefore
+ * deliberately absent here (the F1 harness measures that aggregate).
+ */
+export async function runStageProfile(
+  options: StageProfileOptions = {},
+): Promise<StageProfileReport> {
+  const repoRoot = options.repoRoot ?? REPO_ROOT;
+  const profileName: LargeDbProfileName = options.profile ?? 'default';
+  const scale: LargeDbScale = { ...LARGE_DB_PROFILES[profileName], ...options.scale };
+  const spawnSamples = Math.max(1, options.samples ?? 3);
+  const inProcessSamples = Math.max(1, options.samples ?? 5);
+  const invocation = resolveCliInvocation(options.target ?? 'auto', repoRoot);
+  const fixture = options.fixture ?? generateLargeWorklog(scale);
+  const cacheDir = path.join(fixture.rootDir, 'cache');
+  const spawnFile = path.join(fixture.rootDir, 'spawns.log');
+
+  const savedCacheDir = process.env.WL_CACHE_DIR;
+  const savedSpawnFile = process.env.WL_SPAWN_COUNT_FILE;
+
+  const stages: StageSample[] = [];
+
+  const startup = new StageCollector(
+    'cli-startup',
+    'Node + CLI module load (`wl --version`)',
+    'no-op',
+    'Fixed per-spawn start-up cost: only fewer spawns (F3/F5) reduce the refresh bill.',
+  );
+  const worklistCold = new StageCollector(
+    'worklist-cold',
+    '`wl worklist -n 30 --json` cold (read-cache miss)',
+    'fix-in-scope',
+    'Dominant data-load spawn: DB open + full-table read + serialisation of every mandatory subset.',
+  );
+  const worklistWarm = new StageCollector(
+    'worklist-warm',
+    '`wl worklist -n 30 --json` warm (read-cache hit)',
+    'no-op',
+    'Cache-hit path already skips all DB work; the remaining cost is CLI start-up.',
+  );
+  const jsonParse = new StageCollector(
+    'json-parse',
+    'Primary-side payload parse (`JSON.parse` + `extractItems`)',
+    'fix-in-scope',
+    'Grows with payload size — trimming the payload (F5) removes this too.',
+  );
+  const sqliteOpen = new StageCollector(
+    'sqlite-open',
+    'In-process SQLite open (pragma + schema + FTS DDL)',
+    'fix-in-scope',
+    'Blocking work on the TUI event loop; one open per refresh bounds it (F6).',
+  );
+  const sqliteFullRead = new StageCollector(
+    'sqlite-full-read',
+    'In-process full-table read (`db.list({})`, all items materialised)',
+    'fix-in-scope',
+    'Every in-process reader starts from the whole item table; SQL-side subset queries avoid it (F5/F6).',
+  );
+  const subsetQueries = new StageCollector(
+    'subset-queries',
+    'Four default-view subset queries (in-memory cache warm)',
+    'no-op',
+    'Cheap once the table is materialised; not a driver on its own.',
+  );
+  const childrenCold = new StageCollector(
+    'children-inprocess-cold',
+    'Expanded-children read, first use in a fresh refresh scope',
+    'fix-in-scope',
+    'Pays one open plus the full-table read; the shared refresh scope already amortises it (F4/F6).',
+  );
+  const childrenWarm = new StageCollector(
+    'children-inprocess-warm',
+    'Expanded-children read, same scope (in-memory cache)',
+    'no-op',
+    'Confirms the shared scope turns repeat reads into in-memory work.',
+  );
+  const childrenCli = new StageCollector(
+    'children-cli-per-parent',
+    '`wl list --parent <id>` spawn (per expanded parent, fallback path)',
+    'fix-in-scope',
+    'Per-parent spawns are what the in-process batch read replaced; multiply by expanded parents (F4).',
+  );
+  const actionableCount = new StageCollector(
+    'actionable-count',
+    'Actionable count (in-process, same refresh scope)',
+    'no-op',
+    'Cheap in-process count; not a driver.',
+  );
+  const hydratorDepList = new StageCollector(
+    'hydrator-dep-list',
+    '`wl dep list <id>` spawn (hydrator, per candidate)',
+    'fix-in-scope',
+    'One spawn per pending-claim candidate per hydrate tick; a batched in-process outbound-dep read removes it (F4).',
+  );
+  const render = new StageCollector(
+    'render',
+    'Default-view row build + line formatting',
+    'no-op',
+    'Bounded by the visible window, not by DB size.',
+  );
+
+  try {
+    process.env.WL_CACHE_DIR = cacheDir;
+    process.env.WL_SPAWN_COUNT_FILE = spawnFile;
+    setWorklogDir(fixture.worklogDir);
+    setExecFileAsync((async (file: unknown, args: unknown, execOptions: unknown) => {
+      const argv = (args as string[]) ?? [];
+      void file;
+      return runCliTarget(invocation, argv, execOptions);
+    }) as Parameters<typeof setExecFileAsync>[0]);
+
+    // ── Spawned stages ────────────────────────────────────────────
+    for (let index = 0; index < spawnSamples; index += 1) {
+      startup.pushSpawn(await measureSpawn(invocation, ['--version'], spawnFile));
+    }
+
+    // Cold: drop the read cache so `wl worklist` performs the real DB work.
+    // Warm: the immediately following run is a cache hit — the split shows
+    // what the read cache already saves and what it cannot.
+    let payloadStdout = '';
+    for (let index = 0; index < spawnSamples; index += 1) {
+      fs.rmSync(cacheDir, { recursive: true, force: true });
+      const cold = await measureSpawn(
+        invocation,
+        ['worklist', '-n', String(scale.browseCount), '--json'],
+        spawnFile,
+      );
+      worklistCold.pushSpawn(cold);
+      payloadStdout = cold.stdout;
+      worklistWarm.pushSpawn(
+        await measureSpawn(
+          invocation,
+          ['worklist', '-n', String(scale.browseCount), '--json'],
+          spawnFile,
+        ),
+      );
+    }
+
+    // ── Primary-side payload parse ────────────────────────────────
+    // `extractItems` is the fetcher's own normalisation, so this mirrors the
+    // exact work `parseWorklistBundle` does with the payload after
+    // `JSON.parse` (each subset is normalised, browse entries unwrapped).
+    const parsePayload = (): {
+      browse: WorkItem[];
+      critical: WorkItem[];
+      reviewQueue: WorkItem[];
+      inProgressRoots: WorkItem[];
+      blockedRoots: WorkItem[];
+    } => {
+      const payload = JSON.parse(payloadStdout) as {
+        subsets?: Record<string, unknown>;
+      };
+      const subsets = payload.subsets ?? {};
+      const list = (key: string): WorkItem[] =>
+        Array.isArray(subsets[key]) ? extractItems(subsets[key]) : [];
+      const browseRaw = Array.isArray(subsets.browse) ? (subsets.browse as unknown[]) : [];
+      return {
+        browse: browseRaw.length > 0 ? extractItems({ results: browseRaw }) : [],
+        critical: list('critical'),
+        reviewQueue: list('reviewQueue'),
+        inProgressRoots: list('inProgressRoots'),
+        blockedRoots: list('blockedRoots'),
+      };
+    };
+    for (let index = 0; index < inProcessSamples; index += 1) {
+      const timing = timeSync(parsePayload);
+      jsonParse.pushTiming(timing, Buffer.byteLength(payloadStdout));
+    }
+
+    // ── In-process SQLite stages ──────────────────────────────────
+    const expandedParentIds = fixture.expandedParentIds.slice(0, scale.expandedParents);
+    let childrenByParent = new Map<string, WorkItem[]>();
+    for (let index = 0; index < inProcessSamples; index += 1) {
+      // Scope A: the open + query costs on their own.
+      const queryScope = createInProcessRefreshScope();
+      try {
+        sqliteOpen.pushTiming(await timeAsync(() => queryScope.read(() => 0)));
+        sqliteFullRead.pushTiming(
+          await timeAsync(() => queryScope.read((db) => db.list({}).length)),
+        );
+        subsetQueries.pushTiming(
+          await timeAsync(() =>
+            queryScope.read((db) => [
+              db.list({ priority: 'critical', status: ['open', 'in-progress', 'blocked', 'completed'] })
+                .length,
+              db.list({ status: ['completed', 'in-progress'], stage: 'in_review', rootOnly: true })
+                .length,
+              db.list({ status: ['in-progress'], rootOnly: true }).length,
+              db.list({ status: ['blocked'], rootOnly: true }).length,
+            ]),
+          ),
+        );
+      } finally {
+        queryScope.close();
+      }
+
+      // Scope B: a real refresh scope — the expanded-children read runs FIRST
+      // (as it does when the children read wins the concurrent refresh race),
+      // so it pays the open and the table read; the repeats on the same scope
+      // show what the shared connection saves.
+      const refreshScope = createInProcessRefreshScope();
+      try {
+        childrenCold.pushTiming(
+          await timeAsync(async () => {
+            const result = await fetchChildrenForItems(expandedParentIds, undefined, refreshScope);
+            childrenByParent = result;
+            return result;
+          }),
+        );
+        childrenWarm.pushTiming(
+          await timeAsync(() => fetchChildrenForItems(expandedParentIds, undefined, refreshScope)),
+        );
+        actionableCount.pushTiming(await timeAsync(() => fetchActionableCount(refreshScope)));
+      } finally {
+        refreshScope.close();
+      }
+    }
+
+    // ── Per-parent CLI fallback and hydrator spawns ───────────────
+    const sampleParent = expandedParentIds[0] ?? fixture.parentIds[0];
+    if (sampleParent) {
+      for (let index = 0; index < spawnSamples; index += 1) {
+        // Clear the read cache first: the per-parent `wl list` fallback runs
+        // when the in-process path is unavailable, and a cold read is the
+        // worst case it can pay.
+        fs.rmSync(cacheDir, { recursive: true, force: true });
+        childrenCli.pushSpawn(
+          await measureSpawn(invocation, ['list', '--parent', sampleParent, '--json'], spawnFile),
+        );
+        hydratorDepList.pushSpawn(
+          await measureSpawn(invocation, ['dep', 'list', sampleParent, '--json'], spawnFile),
+        );
+      }
+    }
+
+    // ── Render ────────────────────────────────────────────────────
+    const parsedPayload = parsePayload();
+    const payloadItems =
+      parsedPayload.browse.length +
+      parsedPayload.critical.length +
+      parsedPayload.reviewQueue.length +
+      parsedPayload.inProgressRoots.length +
+      parsedPayload.blockedRoots.length;
+    // The default view shows the browse window plus the mandatory subsets, in
+    // the display shape `formatItemLine` consumes.
+    const displayItems = parsedPayload.browse.slice(0, Math.max(scale.browseCount, 1));
+    for (let index = 0; index < inProcessSamples; index += 1) {
+      render.pushTiming(
+        timeSync(() => {
+          const state = new WorkItemListState(displayItems, { rows: 45, cols: 160 });
+          for (const [parentId, children] of childrenByParent) {
+            state.attachChildren(parentId, children);
+            state.toggleExpand(parentId);
+          }
+          const rows = state.getDisplayRows();
+          let collected = 0;
+          for (const row of rows) {
+            if (row.kind !== 'item') continue;
+            collected += formatItemLine(row.item, 160, false, false).length;
+          }
+          return { rows: rows.length, chars: collected };
+        }),
+      );
+    }
+
+    stages.push(
+      startup.sample(),
+      worklistCold.sample(),
+      worklistWarm.sample(),
+      jsonParse.sample(),
+      sqliteOpen.sample(),
+      sqliteFullRead.sample(),
+      subsetQueries.sample(),
+      childrenCold.sample(),
+      childrenWarm.sample(),
+      childrenCli.sample(),
+      actionableCount.sample(),
+      hydratorDepList.sample(),
+      render.sample(),
+    );
+
+    // ── RSS breakdown of the `wl worklist` spawn ──────────────────
+    // Peak RSS of the full worklist spawn decomposed by what each stage has
+    // to hold in memory: Node + CLI modules (`--version`), one item read
+    // (`show`), and the full materialisation + payload. The in-process heap
+    // deltas attribute the materialisation term to the plugin's own reads.
+    const startupRss = startup.sample().peakRssMb;
+    const worklistRss = worklistCold.sample().peakRssMb;
+    let singleItemRss: number | null = null;
+    let heapBaselineMb = 0;
+    let heapAfterFullReadMb = 0;
+    let heapAfterParseMb = 0;
+    if (sampleParent) {
+      const showSample = await measureSpawn(
+        invocation,
+        ['show', sampleParent, '--json'],
+        spawnFile,
+      );
+      singleItemRss = showSample.peakRssMb;
+    }
+    {
+      const heapMb = (): number => Math.round((process.memoryUsage().heapUsed / 1048576) * 10) / 10;
+      heapBaselineMb = heapMb();
+      const scope = createInProcessRefreshScope();
+      try {
+        await scope.read((db) => {
+          db.list({});
+          heapAfterFullReadMb = heapMb();
+          return 0;
+        });
+      } finally {
+        scope.close();
+      }
+      // The parent pays the payload twice: the 3.1 MB stdout buffer from
+      // `execFile` and the parsed object graph. Measured on the REAL captured
+      // payload so the term is not a synthetic slice.
+      const parsed = JSON.parse(payloadStdout);
+      heapAfterParseMb = heapMb();
+      void parsed;
+    }
+
+    const heapMaterialisationMb = Math.round((heapAfterFullReadMb - heapBaselineMb) * 10) / 10;
+    const heapParseMb = Math.round((heapAfterParseMb - heapAfterFullReadMb) * 10) / 10;
+    const payloadBytesForRss = worklistCold.sample().payloadBytes ?? 0;
+    const payloadMb = Math.round((payloadBytesForRss / 1048576) * 10) / 10;
+
+    const rssRows: RssBreakdownRow[] = [
+      {
+        component: 'Node + CLI module graph (`wl --version`)',
+        peakRssMb: startupRss ?? 0,
+        deltaMb: null,
+        note: 'Fixed start-up floor every spawn pays before any worklog data is touched.',
+      },
+      {
+        component: 'SQLite open + single-item read (`wl show <id>`)',
+        peakRssMb: singleItemRss ?? 0,
+        deltaMb:
+          startupRss !== null && singleItemRss !== null
+            ? round1(singleItemRss - startupRss)
+            : null,
+        note: 'Store open, pragmas, schema/FTS DDL and one item (small payload).',
+      },
+      {
+        component: 'Whole-item-table materialisation (in-process `db.list({})`)',
+        peakRssMb: worklistRss ?? 0,
+        deltaMb: heapMaterialisationMb,
+        note:
+          `v8 heap for every item (+${heapMaterialisationMb} MB). The rest of the ` +
+          `+${singleItemRss !== null && worklistRss !== null ? round1(worklistRss - singleItemRss) : 0} MB ` +
+          'growth from the single-item read to the full worklist spawn is SQLite page cache, the ' +
+          'serialised payload string and V8 heap growth.',
+      },
+      {
+        component: `Serialised payload string (${payloadMb} MB stdout)`,
+        peakRssMb: worklistRss ?? 0,
+        deltaMb: payloadMb,
+        note:
+          'Held by the CLI while serialising and by the parent as the `execFile` stdout buffer ' +
+          `(the fetcher caps it at 5 MB, so a ${payloadMb} MB payload is close to that ceiling).`,
+      },
+      {
+        component: 'Parsed payload object graph (parent side)',
+        peakRssMb: worklistRss ?? 0,
+        deltaMb: heapParseMb,
+        note: `What the plugin holds after parsing the real payload (+${heapParseMb} MB heap).`,
+      },
+    ];
+
+    const payloadBytes = payloadBytesForRss;
+
+    return {
+      profile: profileName,
+      target: invocation.target,
+      invocation: invocation.method,
+      node: process.version,
+      host: os.hostname(),
+      capturedAt: new Date().toISOString(),
+      dataset: {
+        items: fixture.itemCount,
+        descriptionChars: scale.descriptionChars,
+        parentGroups: fixture.parentIds.length,
+        expandedParents: expandedParentIds.length,
+        dependencyEdges: fixture.dependencyEdges,
+        dbSizeMb: fixture.dbSizeMb,
+        diskSizeMb: fixture.diskSizeMb,
+        generationMs: fixture.generationMs,
+      },
+      stages,
+      refreshAttribution: attributeStages(stages),
+      payload: {
+        bytes: payloadBytes,
+        items: payloadItems,
+        contract:
+          '`wl worklist --json` returns full `WorkItem[]` per subset (see the payload contract in ' +
+          '`src/commands/worklist.ts` and `CLI.md`).',
+        trimmableWithoutContractChange: false,
+        note:
+          'The payload cannot be trimmed inside the documented contract: every subset is a full ' +
+          'WorkItem[] including `description`. The cheaper levers are not materialising the whole ' +
+          'item table (F6) and a documented opt-in field selection (F5 decision, contract change).',
+      },
+      rss: {
+        rows: rssRows,
+        worklistSpawnPeakMb: worklistRss,
+        startupPeakMb: startupRss,
+        singleItemReadPeakMb: singleItemRss,
+        payloadBytes,
+      },
+    };
+  } finally {
+    resetExecFileAsync();
+    resetWorklogDir();
+    if (savedCacheDir === undefined) delete process.env.WL_CACHE_DIR;
+    else process.env.WL_CACHE_DIR = savedCacheDir;
+    if (savedSpawnFile === undefined) delete process.env.WL_SPAWN_COUNT_FILE;
+    else process.env.WL_SPAWN_COUNT_FILE = savedSpawnFile;
+    if (!options.keep) fixture.cleanup();
+  }
+}
+
+/** Render a {@link StageProfileReport} as a human-readable table. */
+export function formatStageProfile(report: StageProfileReport): string {
+  const mb = (value: number | null): string => (value === null ? 'n/a' : `${value} MB`);
+  const lines = [
+    '',
+    '================================================',
+    '  Herdr large-DB refresh STAGE profile (F2)',
+    '================================================',
+    '',
+    `  profile:   ${report.profile} (${report.target} CLI target)`,
+    `  dataset:   ${report.dataset.items} items, ${report.dataset.dbSizeMb} MB db, ` +
+      `${report.dataset.expandedParents} expanded parents`,
+    `  captured:  ${report.capturedAt} on ${report.host} (${report.node})`,
+    '',
+    '  stage                                        wall      cpu  spawns    peak RSS  payload',
+    '  -------------------------------------------  ------  ------  ------  ----------  --------',
+  ];
+  for (const stage of report.stages) {
+    lines.push(
+      `  ${stage.stage.padEnd(28)} ${String(stage.wallMs).padStart(8)} ms ` +
+        `${String(stage.cpuMs).padStart(6)} ms ${String(stage.spawns).padStart(6)}  ` +
+        `${mb(stage.peakRssMb).padStart(10)}  ${stage.payloadBytes === null ? '-' : `${Math.round(stage.payloadBytes / 1024)} KB`}`,
+    );
+  }
+  lines.push(
+    '',
+    `  one-refresh serialised baseline: ${report.refreshAttribution.serialisedBaselineMs} ms ` +
+      '(upper bound — the live refresh runs these concurrently)',
+    '',
+  );
+  for (const row of report.refreshAttribution.rows) {
+    lines.push(
+      `  ${String(row.pct).padStart(5)}%  ${row.row} — ${row.action}`,
+    );
+  }
+  lines.push('', '  RSS breakdown (wl worklist spawn):', '');
+  for (const row of report.rss.rows) {
+    lines.push(
+      `  - ${row.component}: ${row.peakRssMb} MB` +
+        (row.deltaMb === null ? '' : ` (delta ${row.deltaMb} MB)`),
+    );
+  }
+  lines.push(
+    '',
+    `  payload: ${Math.round(report.payload.bytes / 1024)} KB / ${report.payload.items} items — ` +
+      (report.payload.trimmableWithoutContractChange
+        ? 'trimmable within the documented contract'
+        : 'NOT trimmable within the documented contract'),
+    '',
+  );
+  return lines.join('\n');
+}
+
 // ── CLI ──────────────────────────────────────────────────────────────
 
 interface CliOptions extends LargeDbHarnessOptions {
   json: boolean;
   updateBudget: boolean;
+  stages: boolean;
 }
 
 /** Parse CLI arguments (exported for the contract tests). */
 export function parseCliArgs(argv: string[]): CliOptions {
-  const options: CliOptions = { json: false, updateBudget: false };
+  const options: CliOptions = { json: false, updateBudget: false, stages: false };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = argv[index + 1];
@@ -1552,6 +2455,9 @@ export function parseCliArgs(argv: string[]): CliOptions {
       }
       case '--keep':
         options.keep = true;
+        break;
+      case '--stages':
+        options.stages = true;
         break;
       case '--json':
         options.json = true;
@@ -1617,6 +2523,24 @@ async function main(): Promise<void> {
   const options = parseCliArgs(process.argv.slice(2));
   const budget = readLargeDbBudget(REPO_ROOT);
   const profile = options.profile ?? 'default';
+
+  // `--stages` measures each refresh driver on its own (F2) instead of the
+  // aggregate refresh budget F1 records.
+  if (options.stages) {
+    const stageReport = await runStageProfile({
+      profile,
+      scale: options.scale,
+      samples: options.samples,
+      target: options.target,
+      keep: options.keep,
+    });
+    process.stdout.write(
+      options.json
+        ? `${JSON.stringify(stageReport, null, 2)}\n`
+        : `${formatStageProfile(stageReport)}\n`,
+    );
+    return;
+  }
 
   const report = await runLargeDbHarness({
     ...options,
