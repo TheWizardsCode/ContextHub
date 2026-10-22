@@ -185,6 +185,129 @@ debounce plus machine load). The integration test
 `worklist-watch.test.ts` asserts the same < 2 s bound deterministically with an
 emulated write.
 
+## Large-DB refresh budget harness (F1 — WL-0MVJV2N3A001LE5G)
+
+The parent epic (`WL-0MVJC1EQX001QR9W`, "Herdr extension is unresponsive,
+especially on larger worklog databases") has measurable acceptance criteria
+at the operator's real scale — a default-view refresh ≤ ~1.5 s p95 wall, ≤ ~200
+ms aggregate TUI event-loop blocking, a documented per-spawn RSS budget with
+≤ ~300 MB aggregate for a pane, write → reflect ≤ ~2 s p95, one consolidated
+`wl worklist` read per refresh and zero spawns when idle. Before this harness
+those numbers were only quoted ad hoc in the epic's intake, so a regression
+between the fix items (F3–F6) could not be caught.
+
+`packages/herdr/test/perf/large-db-harness.ts` is the verification foundation:
+
+| Piece | What it does |
+|---|---|
+| `generateLargeWorklog(scale)` | Deterministic fixture: nested parent/child/grandchild subtrees, dependency edges, comments (and the FTS volume they add), realistic status/priority mix — written as a JSONL snapshot and bulk-imported into a throwaway **temp** `.worklog`, then the snapshot is deleted (ephemeral-JSONL pattern). The repository's own worklog is never touched. |
+| `runLargeDbHarness({ profile })` | Measures the default-view refresh data path exactly as `doRefresh` drives it (concurrent `fetchNextItems` + `fetchChildrenForItems` + `fetchReviewQueueState` + `fetchActionableCount`, one shared in-process SQLite scope), plus the idle tick and the real `watchDbChanges` write → reflect path. |
+| `evaluateLargeDbBudget(report, budget)` | The ratchet/policy: CPU-time gate with documented headroom, spawn/idle invariants, RSS and event-loop headroom, and the parent AC targets once `acTargets.enforced`. |
+| `packages/herdr/test/perf/large-db-budget.json` | The checked-in baseline: recorded metrics per profile + CLI target (`src` = tsx, `dist` = built), the parent AC numbers, the tolerance policy and the exact measurement commands. |
+| `packages/herdr/src/large-db-refresh-budget.test.ts` | The default-suite ratchet: generator contract, policy unit tests and one measured `default`-profile run. |
+
+### Metrics
+
+- **refresh wall / CPU** — p50/p95 end-to-end refresh (event → data load).
+  CPU time is `process.resourceUsage()` for the harness plus the per-spawn CPU
+  from the `WL_SPAWN_COUNT_FILE` instrumentation: it is **load independent**,
+  so the ratchet is the CPU budget (a shared/loaded host inflates wall time but
+  not process CPU; the same approach as `docs/dev/wl-startup-import-budget.md`).
+- **aggregate event-loop blocking** — a 1 ms heartbeat probe sums the delays
+  attributable to a blocked loop during a refresh (the perceived lag the parent
+  AC bounds), plus the longest single stall.
+- **spawn accounting** — counted through the fetcher's injectable exec seam
+  (`setExecFileAsync`), with the argument vectors recorded so the consolidated
+  `wl worklist` read is asserted, not inferred.
+- **peak RSS per spawn / aggregate per pane** — per-spawn peaks come from the
+  spawn records; the pane aggregate is the refresh's own RSS delta plus its
+  largest concurrent `wl` child.
+- **write → reflect** — the state counter is bumped exactly as a `wl` write
+  does while the REAL `watchDbChanges` handle is armed; detection (debounced
+  watch callback) and reflection (watch + refresh data path) are both reported.
+
+### Profiles and commands
+
+`default` is small enough for the default test suite; `full` is the parent's
+real scale (~2,600 items / ~100 MB on disk) and is run on demand:
+
+```sh
+# Default-suite ratchet (also runs inside the herdr test group)
+npx tsx packages/herdr/test/perf/large-db-harness.ts --profile default --json
+
+# Full-scale run: text output, then machine-readable
+npm run test:perf:large
+npm run test:perf:large -- --json
+
+# Measure the built CLI (what /usr/local/bin/wl runs) instead of tsx
+npm run build && npm run test:perf:large -- --json --target dist
+
+# Re-baseline deliberately (rewrites the recorded numbers for that profile/target)
+npm run test:perf:large -- --json --target dist --update-budget
+```
+
+`--target auto` (the default) prefers a **fresh** `dist/cli.js` and falls back
+to `tsx src/cli.ts` when there is no build (or a stale one), so the numbers
+never describe code that no longer exists in `src/`. Both targets are recorded
+in the budget because the default suite cannot assume a build is present.
+Other options: `--samples N`, `--write-samples N`, `--keep` (keep the fixture
+for inspection).
+
+### Re-baselining
+
+1. Make the change (F3–F6) and re-run the profile **without**
+   `--update-budget`; confirm the policy passes.
+2. Re-run with `--update-budget` for each affected profile/target.
+3. Commit the regenerated `packages/herdr/test/perf/large-db-budget.json` with
+   the change, so the improvement is locked in (a shrinking refresh is an
+   improvement and must be recorded the same way).
+4. Flip `acTargets.enforced` to `true` only once the `full` profile records
+   numbers inside the parent AC targets (F7 re-verification), then re-run both
+   profiles to confirm.
+
+### Baseline (F1, pre-change)
+
+Recorded on the reference host (`rgardler-AI-Laptop`, node v22.22.1, quiet
+host) with 5 measured refreshes and 5 write → reflect samples per profile and
+CLI target. The exact figures — dataset shape, measurement command and every
+metric — live in `packages/herdr/test/perf/large-db-budget.json` under
+`profiles.<name>.baselines.<target>`; these are the numbers to quote in
+work-item comments.
+
+`full` profile — 2,600 items, nested parent/child/grandchild subtrees, 259
+dependency edges, 10 comments per item, **~124 MB on disk** (the operator's
+own worklog is ~109 MB, so this is the same order of scale):
+
+| Metric | `dist` (what `wl` runs) | `src` (tsx) |
+|---|---|---|
+| refresh wall p50 / p95 | 509 ms / 569 ms | 1,795 ms / 1,836 ms |
+| refresh CPU p95 | 688 ms | 1,980 ms |
+| aggregate event-loop blocking p95 | 142 ms | 174 ms |
+| spawns per refresh | 1 (`wl worklist`) | 1 (`wl worklist`) |
+| peak RSS per spawn | 144 MB | 125 MB |
+| pane aggregate RSS | 433 MB | 343 MB |
+| write → reflect p95 (watch) | 1,500 ms | 2,592 ms |
+| idle tick spawns | 0 | 0 |
+
+`default` profile — 300 items / 1.7 MB, the default-suite ratchet:
+
+| Metric | `dist` | `src` |
+|---|---|---|
+| refresh wall p95 | 613 ms | 1,889 ms |
+| refresh CPU p95 | 720 ms | 1,961 ms |
+| event-loop blocking p95 | 47 ms | 37 ms |
+| peak RSS per spawn | 69 MB | 109 MB |
+| pane aggregate RSS | 72 MB | 113 MB |
+| write → reflect p95 | 1,139 ms | 2,131 ms |
+
+Against the parent AC targets, the pre-change `full`-scale baseline **misses**
+the per-pane memory ceiling (433 MB / 343 MB vs ≤ ~300 MB), the refresh
+wall-time target on the `src` target (1,836 ms vs ≤ ~1,500 ms) and the
+write → reflect target on the `src` target (2,592 ms vs ≤ ~2,000 ms); the
+single consolidated read and the zero-spawn-when-idle guarantees already hold.
+That is exactly the gap F3–F6 close, so `acTargets.enforced` stays `false`
+until F7 records a compliant full-scale baseline.
+
 ## References
 
 - Sibling Pi-TUI precedents: `WL-0MKXN75CZ0QNBUJJ`, `WL-0MQ3LYSPS006V60H`.

@@ -35,7 +35,8 @@
     "install:pi-extension": "bash ./scripts/install-pi-extension.sh",
     "sample:downtime-agreement": "tsx scripts/downtime-agreement-sample.ts",
     "benchmark:herdr-refresh": "tsx bench/herdr-refresh-cycle.ts",
-    "benchmark:herdr-refresh:json": "tsx bench/herdr-refresh-cycle.ts --json"
+    "benchmark:herdr-refresh:json": "tsx bench/herdr-refresh-cycle.ts --json",
+    "test:perf:large": "tsx packages/herdr/test/perf/large-db-harness.ts --profile full"
   },
   "keywords": [
     "worklog",
