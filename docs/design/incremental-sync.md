@@ -138,7 +138,34 @@ can never advance the baseline past data that was never published.
 > hasn't changed since the last export should not be re-emitted. If a future
 > change allows editing comments, the predicate would switch to `updatedAt`.
 
-### 4.3 Deletion propagation (soft deletes)
+### 4.3 Audit merge semantics (SA-0MUJNFF3K009BF03)
+
+Audit results are merged **last-write-wins by `auditedAt`** (`mergeAuditResults`
+in `src/sync.ts`): the newest audit for a work item wins, whichever side it
+came from, and an exact timestamp tie keeps the local copy. Audits with a
+missing/unparseable timestamp fall back to local precedence.
+
+This is deliberately different from the local-precedence rule used before:
+local precedence made the merge order-dependent and let a stale side shadow a
+newer audit indefinitely. Last-write-wins makes sync monotonic in audit time —
+it can converge in either direction, but it can never downgrade a newer audit
+to an older one.
+
+As a second line of defence, the **bulk** audit persist
+(`SqlitePersistentStore.saveAuditResults`, used by every sync import path —
+pull merge, JSONL refresh, doctor/import bulk loads) is monotonic: an incoming
+audit whose `auditedAt` is strictly older than the stored row is skipped
+instead of overwriting it. Only the explicit single-item write path
+(`saveAuditResult`, i.e. `wl audit-set`) can replace a newer audit with an
+older timestamp.
+
+**Decision (AC2/AC3):** audit text is carried by full snapshots, and by deltas
+when `auditedAt > watermark.audit_results`. When a remote export cannot
+represent an audit (no `audit_result` record, or an older one), the two guards
+above leave the newer local audit untouched — a sync never clears or reverts
+audit text it cannot represent.
+
+### 4.4 Deletion propagation (soft deletes)
 
 Deletions are **soft** (`status: 'deleted'`), so a deleted item is a record
 whose `updatedAt` was bumped. It is therefore captured by the same dirty
@@ -332,7 +359,7 @@ that was never published. **(AC: no regression to concurrency protections)**
 | AC1 no full rewrite on small changes | §5.2 delta export, proportional payload |
 | AC2 ≤3 s typical incremental sync | §10 performance expectations |
 | AC3 correctness/convergence | §3 merge backbone, §8 convergence tests |
-| AC4 deletion propagation | §4.3 soft-delete dirty capture |
+| AC4 deletion propagation | §4.4 soft-delete dirty capture |
 | AC5 full-snapshot fallback | §6.2 fallback triggers, §7 no data loss |
 | AC6 backward compatibility | §7 header scheme + full-pull fallback |
 | AC7 tests + suite passes | §8 tests, follow-up tasks 8 |

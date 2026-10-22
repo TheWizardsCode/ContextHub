@@ -653,6 +653,46 @@ export class WorklogDatabase {
   }
 
   /**
+   * Fold a stored audit set and an incoming audit set into one entry per work
+   * item, keeping the newest audit by `auditedAt` (stored wins exact ties).
+   *
+   * Used by the destructive {@link import} path so a stale snapshot can never
+   * downgrade a newer stored audit (SA-0MUJNFF3K009BF03). Delegates to the
+   * injected sync merge when present, so this path shares the exact
+   * last-write-wins semantics as `wl sync`; otherwise the same rule is applied
+   * inline.
+   */
+  private mergeAuditsNewestWins(stored: AuditResult[], incoming: AuditResult[]): AuditResult[] {
+    const syncSvc = this.services.sync;
+    if (syncSvc?.mergeAuditResults) {
+      return syncSvc.mergeAuditResults(stored, incoming).merged as AuditResult[];
+    }
+
+    const byId = new Map<string, AuditResult>();
+    for (const audit of stored) byId.set(audit.workItemId, audit);
+
+    const timeOf = (audit: AuditResult): number | null => {
+      const ms = typeof audit.auditedAt === 'string' ? Date.parse(audit.auditedAt) : NaN;
+      return Number.isFinite(ms) ? ms : null;
+    };
+
+    for (const audit of incoming) {
+      const current = byId.get(audit.workItemId);
+      if (!current) {
+        byId.set(audit.workItemId, audit);
+        continue;
+      }
+      const incomingMs = timeOf(audit);
+      const currentMs = timeOf(current);
+      if (incomingMs !== null && currentMs !== null && incomingMs > currentMs) {
+        byId.set(audit.workItemId, audit);
+      }
+    }
+
+    return Array.from(byId.values());
+  }
+
+  /**
    * Ordering-tier gate (WL-0MTH7G2O1004BHN5): only an audit that exists,
    * is not ready to close (`readyToClose === false`), and is fresh per the
    * shared `isAuditFresh` predicate qualifies for the audit-not-ready boost.
@@ -3166,7 +3206,9 @@ export class WorklogDatabase {
    * @param dependencyEdges - Optional full set of dependency edges. When
    *   provided, existing edges are cleared and replaced with these.
    * @param auditResults - Optional full set of audit results. When provided,
-   *   existing audit results are replaced with these.
+   *   existing audit results are replaced with these — but never with an
+   *   OLDER row than a stored one for the same item (monotonic,
+   *   SA-0MUJNFF3K009BF03).
    */
   import(items: WorkItem[], dependencyEdges?: DependencyEdge[], auditResults?: AuditResult[]): void {
     // Snapshot existing items before clearing so we can detect unchanged items
@@ -3175,6 +3217,15 @@ export class WorklogDatabase {
     for (const existing of this.store.getAllWorkItems()) {
       existingItems.set(existing.id, existing);
     }
+
+    // clearWorkItems() cascades to audit_results (FK), so snapshot the stored
+    // audits first. They are folded back after the re-insert with the same
+    // newest-wins rule as the merge: a newer stored audit can never be
+    // downgraded by this destructive replace, and when auditResults is absent
+    // the surviving items keep their audits instead of losing them
+    // (SA-0MUJNFF3K009BF03 AC3).
+    const storedAudits = this.store.getAllAuditResults();
+    const importedIdSet = new Set(items.map(item => item.id));
 
     // Wrap the clear-and-re-insert in a transaction so that concurrent
     // readers never see an empty or partially-populated database during sync.
@@ -3211,8 +3262,14 @@ export class WorklogDatabase {
           }
         }
       }
+      const survivingAudits = storedAudits.filter(audit => importedIdSet.has(audit.workItemId));
       if (auditResults) {
-        this.store.saveAuditResults(auditResults);
+        // Newest-wins: the incoming set replaces the stored set except where an
+        // incoming row is strictly older than a stored row for the same item.
+        this.store.saveAuditResults(this.mergeAuditsNewestWins(survivingAudits, auditResults));
+      } else if (survivingAudits.length > 0) {
+        // No audit set supplied — keep the stored audits for surviving items.
+        this.store.saveAuditResults(survivingAudits);
       }
     });
 

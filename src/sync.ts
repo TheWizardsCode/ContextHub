@@ -1187,26 +1187,49 @@ export function mergeComments(
 
 /**
  * Merge audit results by unique work item id.
- * Local audits take precedence over remote ones.
+ *
+ * Last-write-wins by `auditedAt`: the newest audit wins, whichever side it
+ * came from, and exact ties break in favour of the local copy. This makes the
+ * merge monotonic in audit time, so a sync can never downgrade a newer audit
+ * to an older one — a stale local copy (restored snapshot, old process) cannot
+ * shadow a newer remote audit, and a stale remote export cannot clobber a
+ * newer local audit (SA-0MUJNFF3K009BF03).
+ *
+ * Audits whose `auditedAt` is missing or unparseable fall back to the previous
+ * local-precedence behaviour, since freshness cannot be compared.
  */
 export function mergeAuditResults(
   localAudits: AuditResult[],
   remoteAudits: AuditResult[]
 ): { merged: AuditResult[] } {
   const mergedMap = new Map<string, AuditResult>();
-  
-  // Add all local audit results to the map
+
+  const timestampOf = (audit: AuditResult): number | null => {
+    if (!audit || typeof audit.auditedAt !== 'string') return null;
+    const ms = Date.parse(audit.auditedAt);
+    return Number.isFinite(ms) ? ms : null;
+  };
+
+  const isStrictlyNewer = (candidate: AuditResult, current: AuditResult): boolean => {
+    const candidateMs = timestampOf(candidate);
+    const currentMs = timestampOf(current);
+    if (candidateMs === null || currentMs === null) return false;
+    return candidateMs > currentMs;
+  };
+
+  // Start with the local audits — local wins exact ties.
   localAudits.forEach(audit => {
     mergedMap.set(audit.workItemId, audit);
   });
-  
-  // Add remote audit results (deduplicate by workItemId, local wins)
+
+  // Fold in remote audits: keep the newest audit per work item.
   remoteAudits.forEach(remoteAudit => {
-    if (!mergedMap.has(remoteAudit.workItemId)) {
+    const existing = mergedMap.get(remoteAudit.workItemId);
+    if (!existing || isStrictlyNewer(remoteAudit, existing)) {
       mergedMap.set(remoteAudit.workItemId, remoteAudit);
     }
   });
-  
+
   return {
     merged: Array.from(mergedMap.values()),
   };

@@ -79,6 +79,27 @@ What is deliberately unchanged:
 
 Regression coverage: `tests/cli/sync-vs-mutation.test.ts` parks a `wl sync` inside `git fetch` and asserts that a concurrent terminal-state update and comment both survive.
 
+### Audit Results: Newest Wins, Never Downgraded
+
+Audit text has its own guards on top of the lock, because an audit is a single
+latest-only row per work item and a revert is silent (the item's status/stage
+and comments survive, so only the audit text shows the damage):
+
+- **Merge is last-write-wins by `auditedAt`.** `mergeAuditResults` keeps the
+  newest audit whichever side it came from (local wins exact ties). A stale
+  local copy can no longer shadow a newer remote audit, and a stale remote
+  snapshot can no longer shadow a newer local audit (SA-0MUJNFF3K009BF03).
+- **Bulk persist is monotonic.** Every sync import path persists audits through
+  `saveAuditResults`, which skips an incoming audit that is strictly older than
+  the stored row. A snapshot that cannot represent the current audit (no
+  `audit_result` record, or an older one) leaves the local audit unchanged.
+- Only the explicit single-item write (`wl audit-set` → `saveAuditResult`) can
+  replace a row with an older `auditedAt`.
+
+Regression coverage: `tests/cli/sync-audit-newest-wins.test.ts` (real git,
+two audits with distinct `auditedAt`) and
+`tests/unit/audit-sync-monotonic.test.ts` (merge + persist guards).
+
 ### Config Options
 
 Set in `.worklog/config.yaml` (local) or `.worklog/config.defaults.yaml` (team defaults):

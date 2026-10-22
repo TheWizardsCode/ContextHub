@@ -1352,6 +1352,11 @@ export class SqlitePersistentStore {
   /**
    * Save or update an audit result for a work item (upsert).
    * Only the latest audit per work item is kept.
+   *
+   * This is the explicit single-item write path (backed by `wl audit-set`) and
+   * is deliberately **not** monotonic: an explicit write may replace a row
+   * with an older `auditedAt` (e.g. replaying a known-good report). The bulk
+   * path used by sync imports (`saveAuditResults`) is monotonic — see there.
    */
   saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }): void {
     const stmt = this.db.prepare(`
@@ -1504,6 +1509,16 @@ export class SqlitePersistentStore {
 
   /**
    * Save or update audit results (upsert, bulk).
+   *
+   * Monotonic guard (SA-0MUJNFF3K009BF03): an incoming audit whose
+   * `auditedAt` is strictly older than the stored audit for the same work item
+   * is silently skipped rather than overwriting it with a downgrade. Every
+   * sync import path (pull merge, JSONL refresh, doctor/import bulk loads)
+   * funnels through this method, so a stale snapshot can never revert a newer
+   * audit — even when the merge layer above it was bypassed. Only strictly
+   * older incoming audits are skipped: equal timestamps and newer audits apply
+   * as before. Explicit single-item writes (`saveAuditResult`, backed by
+   * `wl audit-set`) remain unrestricted.
    */
   saveAuditResults(audits: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }[]): void {
     const stmt = this.db.prepare(`
@@ -1517,6 +1532,7 @@ export class SqlitePersistentStore {
         author = excluded.author,
         fingerprint = excluded.fingerprint
     `);
+    const existingStmt = this.db.prepare('SELECT audited_at FROM audit_results WHERE work_item_id = ?');
     const normalized = audits.map(audit => {
       const values: unknown[] = [
         audit.workItemId,
@@ -1532,6 +1548,16 @@ export class SqlitePersistentStore {
     const failed: string[] = [];
     this.db.transaction(() => {
       for (const values of normalized) {
+        // Monotonic guard: never overwrite a newer stored audit with an
+        // older incoming one (column order: workItemId=0, auditedAt=2).
+        const existingRow = existingStmt.get(values[0]) as { audited_at: string } | undefined;
+        if (existingRow) {
+          const existingMs = Date.parse(existingRow.audited_at);
+          const incomingMs = Date.parse(String(values[2]));
+          if (Number.isFinite(existingMs) && Number.isFinite(incomingMs) && existingMs > incomingMs) {
+            continue; // stale snapshot — keep the newer stored audit
+          }
+        }
         const result = stmt.run(...values);
         if (result.changes === 0) {
           failed.push(values[0] as string);

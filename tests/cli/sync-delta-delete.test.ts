@@ -1,6 +1,6 @@
 /**
  * E2E tests for deletion propagation through delta sync (WL-0MT2KZH0I005XUWE,
- * parent WL-0MSAKUBKW006FN8Q §4.3).
+ * parent WL-0MSAKUBKW006FN8Q §4.4).
  *
  * Uses REAL git + a real bare remote (mock-bin stripped from PATH) against
  * the compiled CLI (dist/cli.js).
