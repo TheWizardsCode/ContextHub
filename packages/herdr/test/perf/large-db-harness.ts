@@ -85,8 +85,10 @@ import {
   createInProcessRefreshScope,
   extractItems,
   fetchActionableCount,
+  fetchChildrenForItem,
   fetchChildrenForItems,
   fetchNextItems,
+  fetchOutboundDepsForItems,
   fetchReviewQueueState,
   resetExecFileAsync,
   resetWorklogDir,
@@ -95,6 +97,7 @@ import {
   type WorkItem,
 } from '../../src/fetcher.js';
 import { DbChangeTracker, stateCounterFilePath, watchDbChanges } from '../../src/db-change.js';
+import { regroupWorkItems } from '../../src/grouping.js';
 import { WorkItemListState, formatItemLine } from '../../src/worklist.js';
 import {
   formatSyncNotice,
@@ -1495,6 +1498,226 @@ export async function runLargeDbHarness(
   }
 }
 
+// ── Expand / hydrator-dep read profile (F4 — WL-0MVJV2ORY002MNFF) ────
+//
+// F1's measured refresh covers the batched expanded-children read
+// (`fetchChildrenForItems`) and its spawn invariants. F4 extends the
+// harness to the two remaining per-node reads AC1/AC2 eliminate on the
+// in-process path:
+//
+//   1. the SINGLE-parent expand read (`fetchChildrenForItem`) — the
+//      per-expand keypress path used to spawn `wl list --parent <id>`;
+//   2. the hydrator OUTBOUND-dependency read (`fetchOutboundDepsForItems`)
+//      — the batched in-process dep seam the hydrator now prefers over one
+//      `wl dep list <id>` spawn per candidate (plus a `wl show` per edge).
+//
+// Both are measured on the SAME fixture logic as the refresh (default for
+// the default suite, `full` via `--profile full` for the operator-scale
+// ~2,600-item case), and both assert zero spawns when the in-process path
+// is available plus exact parity with the CLI spawn path (the correctness
+// half of AC1: ordering, fields, depth and enrichment semantics).
+
+export interface ExpandReadProfileOptions {
+  /** Fixture profile (default `default`). */
+  profile?: LargeDbProfileName;
+  /** CLI target to drive (default `auto`). */
+  target?: 'auto' | LargeDbTarget;
+  /** Repository root (defaults to this checkout). */
+  repoRoot?: string;
+}
+
+/** Measured F4 expand/dep-read profile (one fixture run). */
+export interface ExpandReadMetrics {
+  profile: LargeDbProfileName;
+  target: LargeDbTarget;
+  /** Items in the fixture (the ~2,600-item case via the `full` profile). */
+  datasetItems: number;
+  /** Spawns the single-parent expand issued (0 on the in-process path). */
+  expandSpawns: number;
+  expandWallMs: number;
+  /** Children returned for the sampled expanded parent. */
+  expandChildren: number;
+  /** True when the in-process expand rows equal the `wl list --parent` spawn rows. */
+  childrenMatchCli: boolean;
+  /** Spawns the batched hydrator dep read issued (0 on the in-process path). */
+  hydratorDepSpawns: number;
+  hydratorDepWallMs: number;
+  /** Items the batched hydrator dep read covered. */
+  hydratorDepItems: number;
+  /** True when the batched dep rows match the `wl dep list` spawn rows (ids + status). */
+  dependencyRowsMatchCli: boolean;
+}
+
+/** Project the rows AC1 pins (ordering, fields, depth, childCount, status). */
+function projectChildRows(items: WorkItem[]): unknown[] {
+  return items.map((item) => ({
+    id: item.id,
+    parentId: item.parentId ?? null,
+    depth: item.depth ?? null,
+    childCount: item.childCount ?? 0,
+    status: item.status ?? null,
+    stage: item.stage ?? null,
+  }));
+}
+
+/**
+ * Run the F4 expand / hydrator-dep read profile (WL-0MVJV2ORY002MNFF).
+ *
+ * Restores every piece of global state it touches (env, fetcher worklog dir
+ * / exec seam) and deletes the generated fixture unless the caller asks to
+ * keep it. Spawn accounting goes through the fetcher's injectable exec seam
+ * (arguments are recorded and the real resolved CLI runs), so a zero-spawn
+ * assertion is exact regardless of whether the CLI records itself.
+ */
+export async function runExpandReadProfile(
+  options: ExpandReadProfileOptions = {},
+): Promise<ExpandReadMetrics> {
+  const repoRoot = options.repoRoot ?? REPO_ROOT;
+  const profileName: LargeDbProfileName = options.profile ?? 'default';
+  const scale: LargeDbScale = { ...LARGE_DB_PROFILES[profileName] };
+  const fixture = generateLargeWorklog(scale);
+  const cacheDir = path.join(fixture.rootDir, 'cache');
+  const invocation = resolveCliInvocation(options.target ?? 'auto', repoRoot);
+  const spawnArgs: string[][] = [];
+
+  const savedCacheDir = process.env.WL_CACHE_DIR;
+  try {
+    process.env.WL_CACHE_DIR = cacheDir;
+    setWorklogDir(fixture.worklogDir);
+    setExecFileAsync((async (file: unknown, args: unknown, execOptions: unknown) => {
+      const argv = (args as string[]) ?? [];
+      spawnArgs.push([...argv]);
+      void file;
+      return runCliTarget(invocation, argv, execOptions);
+    }) as Parameters<typeof setExecFileAsync>[0]);
+
+    // Preflight: the in-process read path must be available, else the zero-
+    // spawn assertions would describe a degraded run (missing build step).
+    const preflightScope = createInProcessRefreshScope();
+    let inProcessItems: number | undefined;
+    try {
+      inProcessItems = await preflightScope.read((db) => db.list({}).length);
+    } finally {
+      preflightScope.close();
+    }
+    if (inProcessItems === undefined) {
+      throw new Error(
+        'large-db harness: the in-process SQLite read path is unavailable, so the expand/dep ' +
+          'read profile would fall back to per-node `wl` spawns. Build the shared package first ' +
+          '(`npm run build:shared`).',
+      );
+    }
+
+    const sampleParent = fixture.expandedParentIds[0];
+
+    // ── Single-parent expand, in-process ────────────────────────────
+    spawnArgs.length = 0;
+    const expandStart = performance.now();
+    const viaDb = await fetchChildrenForItem(sampleParent, 2);
+    const expandWallMs = round1(performance.now() - expandStart);
+    const expandSpawns = spawnArgs.length;
+
+    // The CLI spawn path for the SAME parent: run the resolved CLI directly
+    // and apply the EXACT production fallback pipeline the fetcher uses
+    // (`extractItems` → depth → `regroupWorkItems`) so the comparison is
+    // against the real CLI semantics the in-process read replaces.
+    const cliOut = await runCliTarget(
+      invocation,
+      buildWlArgs(['list', '--parent', sampleParent, '--json']),
+      undefined,
+    );
+    const viaCli = regroupWorkItems(
+      extractItems(JSON.parse(cliOut.stdout)).map((item) => ({ ...item, depth: 2 })),
+    );
+    // The parity probe must not be vacuously green: the CLI returned rows
+    // for the sampled expanded parent (a populated subtree on every profile).
+    if (viaCli.length === 0) {
+      throw new Error('expand profile: the CLI parity probe returned no parent children');
+    }
+    const childrenMatchCli =
+      JSON.stringify(projectChildRows(viaDb)) === JSON.stringify(projectChildRows(viaCli));
+
+    // ── Hydrator batched dependency read, in-process ────────────────
+    // Candidates: the expanded parents plus a slice of their children, so the
+    // batched seam is exercised over real dependency edges (the generator
+    // writes one every `dependencyEvery` items).
+    spawnArgs.length = 0;
+    const depStart = performance.now();
+    const depCandidates = [
+      ...fixture.expandedParentIds,
+      ...viaDb.slice(0, 5).map((child) => child.id),
+    ];
+    const byItem = await fetchOutboundDepsForItems(depCandidates);
+    const hydratorDepWallMs = round1(performance.now() - depStart);
+    const hydratorDepSpawns = spawnArgs.length;
+    const hydratorDepItems = depCandidates.length;
+
+    // Parity probe: pick the first candidate with an outbound edge and
+    // compare ids + status to the real `wl dep list` spawn output (run
+    // through the SAME resolved CLI the harness measures, so the comparison
+    // is against the exact CLI semantics the in-process read replaces).
+    let dependencyRowsMatchCli = true;
+    const depSample = depCandidates.find((id) => (byItem?.get(id) ?? []).length > 0);
+    if (depSample !== undefined) {
+      spawnArgs.length = 0;
+      const output = await runCliTarget(
+        invocation,
+        buildWlArgs(['dep', 'list', depSample, '--json']),
+        undefined,
+      );
+      const payload = JSON.parse(output.stdout) as { outbound?: unknown[] } | null;
+      const cliRows = new Map<string, string | undefined>();
+      for (const raw of payload?.outbound ?? []) {
+        const row = raw as { id?: unknown; status?: unknown };
+        if (typeof row.id !== 'string') continue;
+        cliRows.set(row.id, typeof row.status === 'string' ? row.status : undefined);
+      }
+      const dbRows = (byItem?.get(depSample) ?? []).map((target) => [
+        target.id,
+        typeof target.status === 'string' ? target.status : undefined,
+      ] as const);
+      if (dbRows.length !== cliRows.size) {
+        dependencyRowsMatchCli = false;
+      } else {
+        for (const [id, status] of dbRows) {
+          if (cliRows.get(id) !== status) {
+            dependencyRowsMatchCli = false;
+            break;
+          }
+        }
+      }
+    }
+
+    // Sanity guard: the dep parity probe really came from the CLI (the
+    // sample had at least one outbound edge, so a vacuous empty-vs-empty
+    // match would fail the non-vacuous guard below instead).
+    const depSampleCount = depSample !== undefined ? (byItem?.get(depSample) ?? []).length : 0;
+    if (depSample === undefined || depSampleCount < 1) {
+      throw new Error('expand profile: no fixture item had an outbound dependency edge');
+    }
+
+    return {
+      profile: profileName,
+      target: invocation.target,
+      datasetItems: fixture.itemCount,
+      expandSpawns,
+      expandWallMs,
+      expandChildren: viaDb.length,
+      childrenMatchCli,
+      hydratorDepSpawns,
+      hydratorDepWallMs,
+      hydratorDepItems,
+      dependencyRowsMatchCli,
+    };
+  } finally {
+    resetExecFileAsync();
+    resetWorklogDir();
+    if (savedCacheDir === undefined) delete process.env.WL_CACHE_DIR;
+    else process.env.WL_CACHE_DIR = savedCacheDir;
+    fixture.cleanup();
+  }
+}
+
 // ── Auto-sync isolation scenarios (F3 — WL-0MVJV2O7H003HY9N) ─────────
 //
 // F1/F2 measure the refresh. F3 has to prove the OPPOSITE direction: a long
@@ -2768,6 +2991,8 @@ interface CliOptions extends LargeDbHarnessOptions {
   json: boolean;
   updateBudget: boolean;
   stages: boolean;
+  /** F4: measure the single-parent expand + batched hydrator dep reads. */
+  expand: boolean;
   /** F3: measure a concurrent refresh while a long sync is in flight. */
   syncInFlight: boolean;
   /** F3: measure a concurrent refresh while the sync holds its locks. */
@@ -2782,6 +3007,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     json: false,
     updateBudget: false,
     stages: false,
+    expand: false,
     syncInFlight: false,
     lockContention: false,
   };
@@ -2831,6 +3057,9 @@ export function parseCliArgs(argv: string[]): CliOptions {
         break;
       case '--stages':
         options.stages = true;
+        break;
+      case '--expand':
+        options.expand = true;
         break;
       case '--sync-in-flight':
         options.syncInFlight = true;
@@ -3008,6 +3237,35 @@ async function main(): Promise<void> {
         ? `${JSON.stringify(stageReport, null, 2)}\n`
         : `${formatStageProfile(stageReport)}\n`,
     );
+    return;
+  }
+
+  // `--expand` (F4) measures the single-parent expand read and the batched
+  // hydrator dependency read: zero spawns on the in-process path plus exact
+  // parity with the CLI rows. Run at operator scale with:
+  //   npx tsx packages/herdr/test/perf/large-db-harness.ts --profile full --expand
+  if (options.expand) {
+    const metrics = await runExpandReadProfile({ profile, target: options.target });
+    const ok =
+      metrics.expandSpawns === 0 &&
+      metrics.hydratorDepSpawns === 0 &&
+      metrics.childrenMatchCli &&
+      metrics.dependencyRowsMatchCli;
+    process.stdout.write(
+      options.json
+        ? `${JSON.stringify({ metrics, ok }, null, 2)}\n`
+        : [
+            '',
+            `  expand / hydrator-dep read profile (${metrics.profile}, ${metrics.datasetItems} items)`,
+            `  - single-parent expand: ${metrics.expandSpawns} spawn(s), ${metrics.expandWallMs} ms, ` +
+              `${metrics.expandChildren} children, CLI parity: ${metrics.childrenMatchCli ? 'PASS' : 'FAIL'}`,
+            `  - hydrator dep read: ${metrics.hydratorDepSpawns} spawn(s), ${metrics.hydratorDepWallMs} ms, ` +
+              `${metrics.hydratorDepItems} items, CLI parity: ${metrics.dependencyRowsMatchCli ? 'PASS' : 'FAIL'}`,
+            `  zero-spawn + parity: ${ok ? 'PASS' : 'FAIL'}`,
+            '',
+          ].join('\n'),
+    );
+    if (!ok) process.exitCode = 1;
     return;
   }
 

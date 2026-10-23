@@ -36,7 +36,10 @@ import {
   fetchNextItems,
   fetchActionableCount,
   fetchReviewQueueState,
+  fetchChildrenForItem,
   fetchChildrenForItems,
+  fetchOutboundDepsForItems,
+  fetchBlockersForItem,
   createInProcessRefreshScope,
   setExecFileAsync,
   resetExecFileAsync,
@@ -79,6 +82,7 @@ interface Seeded {
   childA1: string;
   childA2: string;
   grandchild: string;
+  reviewRoot: string;
   actionable: number;
 }
 
@@ -106,7 +110,7 @@ function seedWorklog(): Seeded {
   open('Critical root', { priority: 'critical' });
   open('Blocked root', { status: 'blocked' });
   // Not actionable (completed) and not actionable (deleted).
-  db.create({ title: 'Review root', status: 'completed', stage: 'in_review' });
+  const reviewRoot = db.create({ title: 'Review root', status: 'completed', stage: 'in_review' });
   db.create({ title: 'Deleted root', status: 'deleted' });
 
   const parentA = open('Parent A');
@@ -116,6 +120,12 @@ function seedWorklog(): Seeded {
   const grandchild = open('Grandchild A.1.a', { parentId: childA1.id });
   open('Child B.1', { parentId: parentB.id });
   db.create({ title: 'Deleted child A', parentId: parentA.id, status: 'deleted' });
+
+  // Outbound dependency edges for the in-process dep-read tests (F4): one
+  // active blocker (open) and one terminal target (completed/in_review, not
+  // an active blocker once enriched with its stage).
+  db.addDependencyEdge(childA1.id, childA2.id);
+  db.addDependencyEdge(childA1.id, reviewRoot.id);
 
   db.close();
 
@@ -127,6 +137,7 @@ function seedWorklog(): Seeded {
     childA1: childA1.id,
     childA2: childA2.id,
     grandchild: grandchild.id,
+    reviewRoot: reviewRoot.id,
     actionable,
   };
 }
@@ -328,6 +339,186 @@ describe('in-process default-view reads (WL-0MV5CBQ6L005SPAG)', () => {
     const a1 = (children.get(seeded.parentA) ?? []).find((i) => i.id === seeded.childA1);
     // The CLI-enriched currentFingerprint is preserved on the fallback path.
     expect(a1?.currentFingerprint).toBe('fp-stored');
+  });
+});
+
+describe('single-parent expand read (F4 — WL-0MVJV2ORY002MNFF)', () => {
+  it('expands one parent in-process with zero wl list --parent spawns', async () => {
+    setWorklogDir(seeded.worklogDir);
+
+    const children = await fetchChildrenForItem(seeded.parentA, 2);
+
+    expect(spawns).toEqual([]);
+    // Same rows the batched refresh read would return for that parent
+    // (identical reader, identical ordering/fields/depth semantics).
+    const batched = await fetchChildrenForItems([seeded.parentA], new Map([[seeded.parentA, 2]]));
+    expect(children).toEqual(batched.get(seeded.parentA));
+    expect(children.map((i) => i.id).sort()).toEqual([seeded.childA1, seeded.childA2].sort());
+    // Deleted child A is excluded, matching `wl list --parent`.
+    // Depth + childCount enrichment match the batched read.
+    for (const child of children) {
+      expect(child.depth).toBe(2);
+      expect(child.parentId).toBe(seeded.parentA);
+    }
+    const a1 = children.find((i) => i.id === seeded.childA1);
+    expect(a1?.childCount).toBe(1); // grandchild A.1.a
+  });
+
+  it('shares the refresh scope: expand + actionable count open ONE connection (AC4)', async () => {
+    setWorklogDir(seeded.worklogDir);
+
+    const scope = createInProcessRefreshScope();
+    try {
+      const children = await fetchChildrenForItem(seeded.parentA, 2, scope);
+      const actionable = await fetchActionableCount(scope);
+
+      expect(children).toHaveLength(2);
+      expect(actionable).toBe(seeded.actionable);
+      expect(inProcessState.opens).toBe(1);
+      expect(spawns).toEqual([]);
+    } finally {
+      scope.close();
+    }
+    expect(inProcessState.closed).toBe(1);
+  });
+
+  it('falls back to spawning wl for an audited child, preserving currentFingerprint', async () => {
+    const db = new WorklogDatabase(
+      'WL',
+      join(seeded.worklogDir, 'worklog.db'),
+      join(seeded.worklogDir, 'worklog-data.jsonl'),
+      true,
+      false,
+    );
+    db.importAuditResults([
+      {
+        workItemId: seeded.childA1,
+        readyToClose: true,
+        auditedAt: '2026-10-01T00:00:00.000Z',
+        summary: null,
+        rawOutput: null,
+        author: 'audit',
+        fingerprint: 'fp-stored',
+      },
+    ]);
+    db.close();
+
+    spawns = [];
+    setExecFileAsync((async (_bin: string, args: string[]) => {
+      spawns.push(args.join(' '));
+      if (args.includes('list') && args.includes('--parent')) {
+        return {
+          stdout: JSON.stringify({
+            success: true,
+            count: 1,
+            workItems: [
+              {
+                id: seeded.childA1,
+                title: 'Child A.1',
+                status: 'open',
+                parentId: seeded.parentA,
+                auditedAt: '2026-10-01T00:00:00.000Z',
+                auditResult: true,
+                fingerprint: 'fp-stored',
+                currentFingerprint: 'fp-stored',
+              },
+            ],
+          }),
+          stderr: '',
+        };
+      }
+      return { stdout: JSON.stringify({ success: true, count: 0, workItems: [] }), stderr: '' };
+    }) as never);
+
+    setWorklogDir(seeded.worklogDir);
+    const children = await fetchChildrenForItem(seeded.parentA, 2);
+
+    expect(spawns.some((s) => s.includes('--parent'))).toBe(true);
+    const a1 = children.find((i) => i.id === seeded.childA1);
+    expect(a1?.currentFingerprint).toBe('fp-stored');
+  });
+});
+
+describe('in-process dependency reads (F4 — WL-0MVJV2ORY002MNFF)', () => {
+  it('reads outbound deps for multiple items in one in-process pass, no spawns', async () => {
+    setWorklogDir(seeded.worklogDir);
+
+    const byItem = await fetchOutboundDepsForItems([seeded.childA1, seeded.parentB]);
+
+    expect(spawns).toEqual([]);
+    const a1 = byItem?.get(seeded.childA1) ?? [];
+    const b1 = byItem?.get(seeded.parentB) ?? [];
+    // Two outbound edges for child A.1: an open target and a completed/
+    // in_review target — the CLI `wl dep list` shape (id/status) plus the
+    // stage enrichment the spawn path pays a `wl show` for.
+    expect(a1.map((t) => t.id).sort()).toEqual([seeded.childA2, seeded.reviewRoot].sort());
+    const active = a1.find((t) => t.id === seeded.childA2);
+    expect(active?.status).toBe('open');
+    const done = a1.find((t) => t.id === seeded.reviewRoot);
+    expect(done?.status).toBe('completed');
+    expect(done?.stage).toBe('in_review');
+    // The empty edge list resolves to an empty array, preserving order.
+    expect(byItem?.get(seeded.parentB)).toEqual([]);
+  });
+
+  it('maps a deleted dependency target to status deleted, matching wl dep list', async () => {
+    const db = new WorklogDatabase(
+      'WL',
+      join(seeded.worklogDir, 'worklog.db'),
+      join(seeded.worklogDir, 'worklog-data.jsonl'),
+      true,
+      false,
+    );
+    // An edge to a deleted item: the CLI keeps the edge and reports
+    // `status: 'deleted'` with the target's title (src/commands/dep.ts —
+    // only a truly absent item falls back to title `(missing)`).
+    const gone = db.create({ title: 'Gone target', status: 'deleted' });
+    db.addDependencyEdge(seeded.childA1, gone.id);
+    db.close();
+
+    setWorklogDir(seeded.worklogDir);
+    const byItem = await fetchOutboundDepsForItems([seeded.childA1]);
+
+    const goneTarget = (byItem?.get(seeded.childA1) ?? []).find((t) => t.id === gone.id);
+    expect(goneTarget?.status).toBe('deleted');
+    expect(goneTarget?.title).toBe('Gone target');
+  });
+
+  it('fetchBlockersForItem reads in-process: only active blockers, no spawns', async () => {
+    setWorklogDir(seeded.worklogDir);
+
+    const blockers = await fetchBlockersForItem(seeded.childA1);
+
+    expect(spawns).toEqual([]);
+    // childA2 (open) is an active blocker; reviewRoot (completed/in_review)
+    // is terminal by stage and must NOT be returned.
+    expect(blockers).toEqual([{ id: seeded.childA2, title: 'Child A.2', status: 'open' }]);
+  });
+
+  it('fetchBlockersForItem falls back to the wl dep list spawn path when in-process is unavailable', async () => {
+    resetWorklogDir();
+    spawns = [];
+    setExecFileAsync((async (_bin: string, args: string[]) => {
+      spawns.push(args.join(' '));
+      if (args.includes('dep') && args.includes('list')) {
+        return {
+          stdout: JSON.stringify({
+            success: true,
+            outbound: [{ id: 'WL-X', title: 'X', status: 'open', direction: 'depends-on' }],
+          }),
+          stderr: '',
+        };
+      }
+      if (args.includes('show')) {
+        return { stdout: JSON.stringify({ workItem: { id: args[1], stage: 'plan_complete' } }), stderr: '' };
+      }
+      return { stdout: JSON.stringify({}), stderr: '' };
+    }) as never);
+
+    const blockers = await fetchBlockersForItem('WL-ANY');
+
+    expect(spawns.some((s) => s.includes('dep'))).toBe(true);
+    expect(blockers).toEqual([{ id: 'WL-X', title: 'X', status: 'open' }]);
   });
 });
 

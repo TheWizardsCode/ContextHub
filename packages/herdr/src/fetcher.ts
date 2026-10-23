@@ -460,6 +460,8 @@ interface InProcessDb {
     rootOnly?: boolean;
     stage?: string;
   }): any[];
+  /** Single item by ID (used to enrich dependency edges, matching `wl dep list`). */
+  get(id: string): any | null;
   getAllAuditResults(): {
     workItemId: string;
     readyToClose: boolean;
@@ -467,6 +469,8 @@ interface InProcessDb {
     fingerprint?: string | null;
   }[];
   getChildCounts(items?: any[]): Map<string, number>;
+  /** Outbound dependency edges (`fromId` depends on `toId`) — the `wl dep list` source. */
+  listDependencyEdgesFrom(fromId: string): { fromId: string; toId: string }[];
   close(): void;
 }
 
@@ -1292,6 +1296,67 @@ export interface BlockerRef {
 }
 
 /**
+ * A dependency target as the in-process dep read yields it — the fields of
+ * a `wl dep list --json` edge (id/status) plus the target `stage` the CLI
+ * enrichment path pays a `wl show` for (F4 — WL-0MVJV2ORY002MNFF). A
+ * missing target maps to status `deleted`, matching the CLI.
+ */
+export interface DependencyTargetRef {
+  id: string;
+  /** The target's status (`deleted` when the target no longer exists). */
+  status?: string;
+  /** The target's stage, when known (the CLI-enrichment `wl show` result). */
+  stage?: string;
+  /** The target's title (`(missing)` when the target no longer exists). */
+  title?: string;
+}
+
+/**
+ * Outbound dependency targets for MULTIPLE items in ONE in-process pass
+ * (F4 — WL-0MVJV2ORY002MNFF). The hydrator used to spawn `wl dep list <id>`
+ * (plus `wl show` per non-terminal edge) once per candidate per tick; this
+ * reads every candidate's outbound edges from the SQLite store in one pass,
+ * matching the CLI's field semantics (missing target → status `deleted`,
+ * title `(missing)`) and adding the target `stage` directly (the lookup the
+ * spawn path pays a `wl show` for).
+ *
+ * Fail-open: resolves `undefined` when no in-process read is possible (no
+ * worklog dir, no SQLite file, `@worklog/shared` unavailable, or any read
+ * throws) so the caller falls back to its `wl dep list` spawn path exactly
+ * as today. A refresh scope shares the refresh's ONE connection; scope-less
+ * callers open one fresh connection per call (bounded, batched — never one
+ * per item).
+ */
+export async function fetchOutboundDepsForItems(
+  itemIds: string[],
+  scope?: InProcessRefreshScope,
+): Promise<Map<string, DependencyTargetRef[]> | undefined> {
+  const unique = [...new Set(itemIds)];
+  if (unique.length === 0) return new Map();
+  const read = (db: InProcessDb): Map<string, DependencyTargetRef[]> => {
+    const byItem = new Map<string, DependencyTargetRef[]>();
+    for (const id of unique) {
+      const targets: DependencyTargetRef[] = [];
+      for (const edge of db.listDependencyEdgesFrom(id)) {
+        const target = db.get(edge.toId);
+        const ref: DependencyTargetRef = {
+          id: edge.toId,
+          status: typeof target?.status === 'string' ? target.status : 'deleted',
+          title: typeof target?.title === 'string' ? target.title : '(missing)',
+        };
+        if (typeof target?.stage === 'string' && target.stage.length > 0) {
+          ref.stage = target.stage;
+        }
+        targets.push(ref);
+      }
+      byItem.set(id, targets);
+    }
+    return byItem;
+  };
+  return scope ? await scope.read(read) : await withInProcessDb(read);
+}
+
+/**
  * Fetch the ACTIVE dependency blockers of a work item — the outbound
  * `depends-on` edges that still block it (WL-0MV8EZRDJ001TDA8).
  *
@@ -1310,6 +1375,25 @@ export interface BlockerRef {
  */
 export async function fetchBlockersForItem(id: string): Promise<BlockerRef[]> {
   try {
+    // F4 in-process fast path (WL-0MVJV2ORY002MNFF): the active-blocker read
+    // runs against the SQLite store (no `wl dep list` or per-edge `wl show`
+    // spawn). The targets carry the stage directly, so the per-edge stage
+    // lookup the spawn path pays for is free here. Fail-open: an undefined
+    // in-process read (no dir/SQLite file/shared package) falls through to
+    // the spawn path below exactly as today.
+    const inProcess = await fetchOutboundDepsForItems([id]);
+    if (inProcess !== undefined) {
+      const blockers: BlockerRef[] = [];
+      for (const target of inProcess.get(id) ?? []) {
+        if (!isActiveBlocker({ id: target.id, status: target.status, stage: target.stage })) {
+          continue;
+        }
+        const edgeStatus = target.status;
+        blockers.push({ id: target.id, title: target.title ?? '(missing)', ...(edgeStatus ? { status: edgeStatus } : {}) });
+      }
+      return blockers;
+    }
+
     const output = await runWl(['dep', 'list', id]);
     const edges = parseDepListBlockersOutput(output);
     if (edges === null) return [];
@@ -1471,6 +1555,42 @@ export async function fetchCompletedItemCount(): Promise<number | undefined> {
 }
 
 /**
+ * In-process read of the direct children of `parentIds`, shared by the
+ * single-parent expand read ({@link fetchChildrenForItem}) and the batched
+ * refresh read ({@link fetchChildrenForItems}) so BOTH apply the identical
+ * ordering, fields, depth-neutral enrichment and needs-CLI-fingerprint
+ * fallback rule (WL-0MVJV2ORY002MNFF).
+ *
+ * childCounts is computed over ALL items (deleted included), matching the
+ * CLI's `getChildCounts()` enrichment. Children themselves are non-deleted
+ * only, matching `wl list --parent`'s default filtering.
+ */
+function readChildrenInProcess(
+  db: InProcessDb,
+  parentIds: string[],
+): { byParent: Map<string, WorkItem[]>; needsCli: boolean } {
+  const wanted = new Set(parentIds);
+  const allRaw = db.list({});
+  const childCounts = db.getChildCounts(allRaw);
+  const matched = allRaw.filter(
+    (item) => item.parentId && wanted.has(String(item.parentId)) && item.status !== 'deleted',
+  );
+  const enriched = enrichInProcessItems(db, matched);
+  // A stored fingerprint needs the CLI's currentFingerprint enrichment, so
+  // the fast path must not serve the batch in that case.
+  const needsCli = enriched.some((item) => Boolean(item.fingerprint));
+  const byParent = new Map<string, WorkItem[]>();
+  for (const item of enriched) {
+    const parentId = item.parentId;
+    if (!parentId || !wanted.has(parentId)) continue;
+    const list = byParent.get(parentId) ?? [];
+    list.push({ ...item, childCount: childCounts.get(item.id) ?? 0 });
+    byParent.set(parentId, list);
+  }
+  return { byParent, needsCli };
+}
+
+/**
  * Fetch child work items for a given parent ID (via `wl list --parent`).
  *
  * Child items are returned with the given hierarchy `depth` for display
@@ -1487,8 +1607,31 @@ export async function fetchCompletedItemCount(): Promise<number | undefined> {
  * worklist render layer does that at read time (withParentAudit) when it
  * nests a child under its parent, so derived coverage
  * (WL-0MUBVH8QG0020H9L) never leaks into the fetch/model layer.
+ *
+ * F4 in-process fast path (WL-0MVJV2ORY002MNFF): expanding a node no
+ * longer spawns `wl list --parent <id>`. The read runs in-process against
+ * the SQLite store — the same reader the batched refresh path uses, so
+ * ordering/fields/fallback semantics match exactly — and falls back to the
+ * `wl` spawn when no in-process read is possible or a child carries a
+ * stored audit fingerprint (CLI `currentFingerprint` enrichment). Pass a
+ * refresh scope to reuse the refresh's ONE connection; scope-less callers
+ * (the per-expand keypress path) open one fresh connection per expand — a
+ * single bounded open replacing a whole `wl` spawn, never a per-helper open
+ * inside a refresh.
  */
-export async function fetchChildrenForItem(parentId: string, depth = 1): Promise<WorkItem[]> {
+export async function fetchChildrenForItem(
+  parentId: string,
+  depth = 1,
+  scope?: InProcessRefreshScope,
+): Promise<WorkItem[]> {
+  const inProcess = scope
+    ? await scope.read((db) => readChildrenInProcess(db, [parentId]))
+    : await withInProcessDb((db) => readChildrenInProcess(db, [parentId]));
+  if (inProcess && !inProcess.needsCli) {
+    const children = (inProcess.byParent.get(parentId) ?? []).map((item) => ({ ...item, depth }));
+    return regroupWorkItems(children);
+  }
+
   const output = await runWl(['list', '--parent', parentId]);
   const payload = extractJson(output);
   const items = extractItems(payload);
@@ -1531,34 +1674,12 @@ export async function fetchChildrenForItems(
   for (const id of uniqueParents) result.set(id, []);
   if (uniqueParents.length === 0) return result;
 
-  const wanted = new Set(uniqueParents);
-  const readChildren = (db: InProcessDb): { byParent: Map<string, WorkItem[]>; needsCli: boolean } => {
-    // childCounts is computed over ALL items (deleted included), matching the
-    // CLI's `getChildCounts()` enrichment. Children themselves are non-deleted
-    // only, matching `wl list --parent`'s default filtering.
-    const allRaw = db.list({});
-    const childCounts = db.getChildCounts(allRaw);
-    const matched = allRaw.filter(
-      (item) => item.parentId && wanted.has(String(item.parentId)) && item.status !== 'deleted',
-    );
-    const enriched = enrichInProcessItems(db, matched);
-    // A stored fingerprint needs the CLI's currentFingerprint enrichment, so
-    // the fast path must not serve the batch in that case.
-    const needsCli = enriched.some((item) => Boolean(item.fingerprint));
-    const byParent = new Map<string, WorkItem[]>();
-    for (const item of enriched) {
-      const parentId = item.parentId;
-      if (!parentId || !wanted.has(parentId)) continue;
-      const list = byParent.get(parentId) ?? [];
-      list.push({ ...item, childCount: childCounts.get(item.id) ?? 0 });
-      byParent.set(parentId, list);
-    }
-    return { byParent, needsCli };
-  };
   // A refresh scope shares ONE in-process connection with the refresh's other
   // in-process readers (WL-0MV6C6SLB005HX7B); scope-less callers open a fresh
   // per-call connection exactly as before.
-  const inProcess = scope ? await scope.read(readChildren) : await withInProcessDb(readChildren);
+  const inProcess = scope
+    ? await scope.read((db) => readChildrenInProcess(db, uniqueParents))
+    : await withInProcessDb((db) => readChildrenInProcess(db, uniqueParents));
 
   if (inProcess && !inProcess.needsCli) {
     for (const id of uniqueParents) {

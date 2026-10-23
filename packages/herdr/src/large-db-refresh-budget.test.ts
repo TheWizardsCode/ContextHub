@@ -39,6 +39,7 @@ import {
   parseCliArgs,
   percentile,
   readLargeDbBudget,
+  runExpandReadProfile,
   runLargeDbHarness,
   withinAcTargets,
   type LargeDbBaseline,
@@ -490,6 +491,12 @@ describe('large-DB budget policy', () => {
       target: 'dist',
       samples: 3,
     });
+    // F4 expand profile (WL-0MVJV2ORY002MNFF): the on-demand full-scale run.
+    expect(parseCliArgs(['--profile', 'full', '--expand', '--json'])).toMatchObject({
+      profile: 'full',
+      expand: true,
+      json: true,
+    });
     expect(() => parseCliArgs(['--profile', 'huge'])).toThrow(/default.*full/);
     expect(() => parseCliArgs(['--target', 'nope'])).toThrow(/auto.*src.*dist/);
     expect(() => parseCliArgs(['--unknown'])).toThrow(/unknown option/);
@@ -533,5 +540,31 @@ describe('large-DB refresh budget — measured ratchet', { timeout: 300_000 }, (
     const evaluation = evaluateLargeDbBudget(report, budget);
     expect(evaluation.violations, evaluation.violations.join('\n')).toEqual([]);
     expect(evaluation.ok).toBe(true);
+  });
+
+  it('expands a node and reads hydrator deps with zero spawns, matching the CLI rows (F4)', async () => {
+    // F4 (WL-0MVJV2ORY002MNFF): the single-parent expand read and the
+    // hydrator's batched dependency read must issue ZERO `wl` spawns on the
+    // in-process path, and their rows must match the CLI spawn path's
+    // ordering / fields / depth / enrichment semantics exactly. The `full`
+    // profile (the operator-scale ~2,600-item fixture) is run on demand via
+    // `npm run test:perf:large`; this default-profile run pins the no-spawn
+    // + parity invariants in the default suite.
+    const metrics = await runExpandReadProfile();
+
+    // AC1: zero `wl list --parent` / `wl dep list` spawns while expanding.
+    expect(metrics.expandSpawns).toBe(0);
+    expect(metrics.hydratorDepSpawns).toBe(0);
+    // The expand returned real children (the sampled expanded parent has a
+    // populated subtree on every profile).
+    expect(metrics.expandChildren).toBeGreaterThan(0);
+    // AC1 correctness half: identical rows to the CLI spawn path.
+    expect(metrics.childrenMatchCli).toBe(true);
+    expect(metrics.dependencyRowsMatchCli).toBe(true);
+    // The batched dep read handled all candidates in one pass.
+    expect(metrics.hydratorDepItems).toBeGreaterThan(0);
+    // Same fixture logic as the refresh ratchet, so the semantics comparison
+    // runs on a real (nested + dependency-edged) worklog.
+    expect(metrics.datasetItems).toBe(LARGE_DB_PROFILES.default.items);
   });
 });

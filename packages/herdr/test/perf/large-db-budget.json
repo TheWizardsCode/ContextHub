@@ -5,6 +5,7 @@
     "defaultProfile": "npx tsx packages/herdr/test/perf/large-db-harness.ts --profile default --json",
     "fullScale": "npm run test:perf:large -- --json",
     "fullScaleDist": "npm run build && npm run test:perf:large -- --json --target dist",
+    "expandProfile": "npx tsx packages/herdr/test/perf/large-db-harness.ts --profile full --expand --json",
     "rebaseline": "npm run test:perf:large -- --json --update-budget  (add --target src|dist to pick the invocation)"
   },
   "acTargets": {
