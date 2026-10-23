@@ -82,17 +82,21 @@ import { readSpawnRecords, summariseSpawnRecords } from '../../../../src/spawn-c
 import { resolveStartupTarget } from '../../../../bench/wl-startup-perf.js';
 import {
   buildWlArgs,
+  DEFAULT_WL_SPAWN_CAP,
   createInProcessRefreshScope,
   extractItems,
   fetchActionableCount,
   fetchChildrenForItem,
   fetchChildrenForItems,
+  fetchItemDetails,
   fetchNextItems,
   fetchOutboundDepsForItems,
   fetchReviewQueueState,
   resetExecFileAsync,
+  resetWlSpawnCap,
   resetWorklogDir,
   setExecFileAsync,
+  setWlSpawnCap,
   setWorklogDir,
   type WorkItem,
 } from '../../src/fetcher.js';
@@ -113,6 +117,9 @@ import { acquireFileLock, releaseFileLock } from '../../../../src/file-lock.js';
 import Database from 'better-sqlite3';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
+
+/** Re-export the documented per-pane spawn cap for policy tests + docs. */
+export { DEFAULT_WL_SPAWN_CAP };
 
 /** Repository root of this checkout (or worktree). */
 export const REPO_ROOT = path.resolve(here, '..', '..', '..', '..');
@@ -656,6 +663,8 @@ export interface LargeDbAcTargets {
   spawnsPerRefresh: number;
   /** Parent AC6: zero spawns when nothing changed. */
   idleSpawns: number;
+  /** F5: documented max concurrent `wl` read spawns per pane (fetcher semaphore). */
+  wlSpawnCap?: number;
   /** True once a full-scale baseline within target has been recorded. */
   enforced: boolean;
   note: string;
@@ -753,14 +762,18 @@ export function defaultLargeDbBudget(): LargeDbBudget {
       writeToReflectP95Ms: 2000,
       spawnsPerRefresh: 1,
       idleSpawns: 0,
+      wlSpawnCap: DEFAULT_WL_SPAWN_CAP,
       enforced: false,
       note:
         'Parent epic acceptance criteria at ~2,600 items / ~100 MB (WL-0MVJC1EQX001QR9W): a ' +
         'default-view refresh ≤ ~1.5 s p95 wall, ≤ ~200 ms aggregate event-loop blocking, a ' +
         'documented per-spawn peak-RSS budget below the ~130–145 MB/spawn pre-change baseline ' +
         'and ≤ ~300 MB aggregate for a single pane, write → reflect ≤ ~2 s p95, one consolidated ' +
-        '`wl worklist` read per refresh and zero spawns when idle. `enforced` flips true once a ' +
-        'full-scale baseline within target is recorded (F7 re-verification).',
+        '`wl worklist` read per refresh and zero spawns when idle. F5 (WL-0MVJV2PC2008PY64) adds ' +
+        '`wlSpawnCap` — the documented max concurrent `wl` read spawns per pane (enforced by the ' +
+        'fetcher semaphore; the pane aggregate spawn RSS is bounded by cap × per-spawn peak, ' +
+        'asserted by the spawn-burst scenario). `enforced` flips true once a full-scale baseline ' +
+        'within target is recorded (F7 re-verification).',
     },
     regression: {
       refreshSamples: 5,
@@ -1892,6 +1905,284 @@ async function openIsolationContext(
 }
 
 /**
+ * F5 (WL-0MVJV2PC2008PY64) — bounded `wl` spawn concurrency scenario.
+ *
+ * The parent AC 5 per-pane RSS ceiling (≤ ~300 MB) cannot be guaranteed by
+ * documented intent alone: a spawn-heavy fan-out (fallback per-subset reads,
+ * per-edge `wl show`/`wl dep list` probes) could keep a dozen `wl` processes
+ * alive at once. This scenario drives a burst of DISTINCT single-item reads
+ * through the real fetcher exec seam on the same fixture the refresh ratchet
+ * uses, and asserts the three F5 invariants for each phase:
+ *
+ *   1. the observed peak SIMULTANEOUS child-process count never exceeds the
+ *      documented cap (`DEFAULT_WL_SPAWN_CAP`);
+ *   2. the derived aggregate spawn-RSS bound `cap × per-spawn peak` stays at
+ *      or below the documented ceiling (parent AC 5 ≈ 300 MB);
+ *   3. queued/deferred reads never block the TUI event loop (the thaw release
+ *      is a microtask, and children run off-loop) — aggregate loop blocking
+ *      stays within the parent AC 1 ≤ ~200 ms bound.
+ *
+ * Every burst read (`wl show <id>`) spawns unconditionally (no in-process
+ * SQLite shortcut) and is cacheable, so each recorded spawn carries its own
+ * peak RSS (the `wl show` procedure — open + one item — is also the
+ * documented lower bound a per-spawn budget must not regress).
+ */
+export interface SpawnCapScenarioOptions {
+  /** Fixture profile (default `default`). */
+  profile?: LargeDbProfileName;
+  /** CLI target to drive (default `auto`). */
+  target?: 'auto' | LargeDbTarget;
+  /** Repository root (defaults to this checkout). */
+  repoRoot?: string;
+  /** Distinct reads to fan out concurrently (default 8). */
+  burst?: number;
+  /** Repeat samples per phase for a stable p95 (default 1 at `default`). */
+  samples?: number;
+  /** Keep the generated fixture for inspection. */
+  keep?: boolean;
+}
+
+/** One phase of the spawn-cap scenaario (`capped` vs `uncapped` reference). */
+export interface SpawnCapPhaseReport {
+  /** The spawn-concurrency cap in effect for this phase. */
+  cap: number;
+  /** Reads issued (each is one distinct `wl show` reading a real item). */
+  burst: number;
+  /** Peak simultaneous child `wl` processes observed (via the exec seam). */
+  peakConcurrentSpawns: number;
+  /** Total child spawns issued (must equal `burst`: nothing may drop). */
+  spawns: number;
+  /** Per-spawn peak RSS recorded by the CLI's own spawn instrumentation (MiB). */
+  peakRssPerSpawnMb: number | null;
+  /** Documented aggregate spawn-RSS bound: `cap × per-spawn peak` (MiB). */
+  aggregateRssBoundMb: number | null;
+  /** Aggregate TUI event-loop blocking during the phase (ms). */
+  eventLoopBlockedMs: number;
+  /** Longest single event-loop stall during the phase (ms). */
+  maxEventLoopBlockedMs: number;
+  /** Wall time of the phase (ms). */
+  wallMs: number;
+}
+
+/** Combined result of the F5 spawn-concurrency scenario. */
+export interface SpawnCapScenarioReport {
+  profile: LargeDbProfileName;
+  target: LargeDbTarget;
+  datasetItems: number;
+  capped: SpawnCapPhaseReport;
+  /** Same burst with the cap widened to the burst size (the fan-out picture). */
+  uncapped: SpawnCapPhaseReport;
+  ok: boolean;
+  violations: string[];
+}
+
+/**
+ * Run the F5 spawn-concurrency scenario (both phases on one fixture).
+ *
+ * Restores every piece of global state it touches (env, fetcher worklog dir,
+ * exec seam, spawn cap) and deletes the fixture unless the caller asks to
+ * keep it. The `uncapped` reference phase widens the cap to the burst size,
+ * so the two measured `peakConcurrentSpawns` numbers are the before/after
+ * evidence for the documented budget.
+ */
+export async function runSpawnConcurrencyScenario(
+  options: SpawnCapScenarioOptions = {},
+): Promise<SpawnCapScenarioReport> {
+  const repoRoot = options.repoRoot ?? REPO_ROOT;
+  const profileName: LargeDbProfileName = options.profile ?? 'default';
+  const scale: LargeDbScale = { ...LARGE_DB_PROFILES[profileName] };
+  const burst = Math.min(Math.max(2, options.burst ?? 8), scale.expandedParents);
+  const samples = Math.max(1, options.samples ?? 1);
+  const fixture = generateLargeWorklog(scale);
+  const cacheDir = path.join(fixture.rootDir, 'cache');
+  const spawnFile = path.join(fixture.rootDir, 'spawns.log');
+  const invocation = resolveCliInvocation(options.target ?? 'auto', repoRoot);
+
+  const savedCacheDir = process.env.WL_CACHE_DIR;
+  const savedSpawnFile = process.env.WL_SPAWN_COUNT_FILE;
+
+  try {
+    process.env.WL_CACHE_DIR = cacheDir;
+    process.env.WL_SPAWN_COUNT_FILE = spawnFile;
+    setWorklogDir(fixture.worklogDir);
+
+    // The distinct single-item reads driving the burst. Each `wl show <id>`
+    // spawns unconditionally through the fetcher's injectable exec seam and
+    // is a cacheable read, so the CLI records per-spawn peak RSS that the
+    // spawn-count instrumentation picks up.
+    const sampleIds = fixture.parentIds.slice(0, burst);
+    const reads = (): Array<Promise<unknown>> => sampleIds.map((id) => fetchItemDetails(id));
+
+    const runPhase = async (cap: number): Promise<SpawnCapPhaseReport> => {
+      setWlSpawnCap(cap);
+      const wallSamples: number[] = [];
+      const blockedSamples: number[] = [];
+      const maxStalls: number[] = [];
+      let peakConcurrentSpawns = 0;
+      let spawns = 0;
+      for (let index = 0; index < samples; index += 1) {
+        fs.rmSync(spawnFile, { force: true });
+        // Clear the CLI read cache so every burst read is a COLD (`read-work`)
+        // spawn — the worst case for per-spawn RSS and the case a memory
+        // budget must bound. A warm (`cache-hit`) burst would under-report.
+        fs.rmSync(cacheDir, { recursive: true, force: true });
+        let active = 0;
+        setExecFileAsync((async (file: unknown, args: unknown, execOptions: unknown) => {
+          const argv = (args as string[]) ?? [];
+          void file;
+          active += 1;
+          if (active > peakConcurrentSpawns) peakConcurrentSpawns = active;
+          try {
+            return await runCliTarget(invocation, argv, execOptions);
+          } finally {
+            active -= 1;
+          }
+        }) as Parameters<typeof setExecFileAsync>[0]);
+
+        const probe = startEventLoopProbe();
+        const startedAt = performance.now();
+        const results = await Promise.allSettled(reads());
+        const wallMs = performance.now() - startedAt;
+        const blocking = probe.stop();
+        void results;
+
+        wallSamples.push(wallMs);
+        blockedSamples.push(blocking.totalBlockedMs);
+        maxStalls.push(blocking.maxBlockedMs);
+        spawns += summariseSpawnRecords(spawnFile).total;
+      }
+
+      const summary = summariseSpawnRecords(spawnFile);
+      const peakRssPerSpawnMb =
+        summary.maxRssKb === null ? null : round1(summary.maxRssKb / 1024);
+      return {
+        cap,
+        burst,
+        peakConcurrentSpawns: Math.max(peakConcurrentSpawns, 0),
+        spawns,
+        peakRssPerSpawnMb,
+        aggregateRssBoundMb:
+          peakRssPerSpawnMb === null ? null : round1(cap * peakRssPerSpawnMb),
+        eventLoopBlockedMs: round1(Math.max(...blockedSamples, 0)),
+        maxEventLoopBlockedMs: round1(Math.max(...maxStalls, 0)),
+        wallMs: round1(Math.max(...wallSamples)),
+      };
+    };
+
+    // Phase 1 — the capped production path: the documented cap in effect.
+    const capped = await runPhase(DEFAULT_WL_SPAWN_CAP);
+    // Phase 2 — uncapped reference: same burst, cap widened to the burst
+    // size so the fan-out the cap bounds is measured, not assumed.
+    const uncapped = await runPhase(burst);
+
+    const report: SpawnCapScenarioReport = {
+      profile: profileName,
+      target: invocation.target,
+      datasetItems: fixture.itemCount,
+      capped,
+      uncapped,
+      ok: false,
+      violations: [],
+    };
+
+    const evaluation = evaluateSpawnCapReport(report, readLargeDbBudget(REPO_ROOT));
+    report.ok = evaluation.ok;
+    report.violations = evaluation.violations;
+    return report;
+  } finally {
+    resetExecFileAsync();
+    resetWlSpawnCap();
+    resetWorklogDir();
+    if (savedCacheDir === undefined) delete process.env.WL_CACHE_DIR;
+    else process.env.WL_CACHE_DIR = savedCacheDir;
+    if (savedSpawnFile === undefined) delete process.env.WL_SPAWN_COUNT_FILE;
+    else process.env.WL_SPAWN_COUNT_FILE = savedSpawnFile;
+    if (!options.keep) fixture.cleanup();
+  }
+}
+
+/**
+ * Pure policy for the F5 spawn-concurrency scenario (deterministic, so the
+ * default suite can exercise every violation without a real run).
+ */
+export function evaluateSpawnCapReport(
+  report: SpawnCapScenarioReport,
+  budget: LargeDbBudget = readLargeDbBudget(REPO_ROOT),
+): { ok: boolean; violations: string[] } {
+  const violations: string[] = [];
+  const phase = report.capped;
+
+  // 1. The observed concurrent child count must never exceed the cap.
+  if (phase.peakConcurrentSpawns > phase.cap) {
+    violations.push(
+      `spawn cap exceeded: peak ${phase.peakConcurrentSpawns} concurrent ` +
+        `spawns > documented cap ${phase.cap}`,
+    );
+  }
+
+  // 2. Nothing may be dropped: every burst read settles to a spawn record.
+  if (phase.spawns !== phase.burst) {
+    violations.push(
+      `spawn accounting: expected ${phase.burst} spawns for ${phase.burst} reads, ` +
+        `recorded ${phase.spawns}`,
+    );
+  }
+
+  // 3. The documented aggregate spawn-RSS bound (cap × per-spawn peak) must
+  //    stay at or below the parent ceiling the budget records.
+  const ceiling = budget.acTargets?.paneAggregateRssMb ?? 300;
+  if (phase.aggregateRssBoundMb !== null && phase.aggregateRssBoundMb > ceiling) {
+    violations.push(
+      `aggregate spawn-RSS bound ${phase.aggregateRssBoundMb} MB ` +
+        `(cap ${phase.cap} × peak ${phase.peakRssPerSpawnMb ?? 'n/a'} MB) exceeds the ` +
+        `documented ${ceiling} MB ceiling`,
+    );
+  }
+
+  // 4. Queued/deferred reads must never block input: the event loop stays
+  //    within the parent AC 1 ≤ ~200 ms total-blocking budget.
+  if (phase.eventLoopBlockedMs > 200) {
+    violations.push(
+      `event loop blocked ${phase.eventLoopBlockedMs} ms during the burst ` +
+        `(documented ≤ 200 ms) — queued reads blocked input`,
+    );
+  }
+  return { ok: violations.length === 0, violations };
+}
+
+/**
+ * Render the F5 spawn-cap scenario report as human-readable text.
+ */
+export function formatSpawnCapReport(report: SpawnCapScenarioReport): string {
+  const rows = (phase: SpawnCapPhaseReport): string =>
+    [
+      `    cap:                    ${phase.cap} concurrent spawns`,
+      `    reads issued:           ${phase.burst}`,
+      `    spawns recorded:        ${phase.spawns} (${phase.spawns === phase.burst ? 'none dropped' : 'DROPPED'})`,
+      `    peak concurrent wl:     ${phase.peakConcurrentSpawns} child processes`,
+      `    per-spawn peak RSS:     ${phase.peakRssPerSpawnMb ?? 'n/a'} MB`,
+      `    aggregate bound:        ${phase.aggregateRssBoundMb ?? 'n/a'} MB (cap × per-spawn peak)`,
+      `    event-loop blocked:     ${phase.eventLoopBlockedMs} ms (max stall ${phase.maxEventLoopBlockedMs} ms)`,
+      `    wall:                   ${phase.wallMs} ms`,
+    ].join('\n');
+  return [
+    '',
+    '================================================',
+    '  Bounded wl spawn concurrency (F5)',
+    '================================================',
+    '',
+    `  profile:         ${report.profile} (${report.target} CLI target, ` +
+      `${report.datasetItems} items)`,
+    `  capped phase:`,
+    rows(report.capped),
+    `  uncapped reference:`,
+    rows(report.uncapped),
+    `  result:          ${report.ok ? 'PASS' : 'FAIL'}`,
+    '',
+  ].join('\n');
+}
+
+/**
  * F3 AC1/AC2/AC3 — a concurrent default-view refresh while a long `wl sync`
  * is in flight.
  *
@@ -2999,6 +3290,8 @@ interface CliOptions extends LargeDbHarnessOptions {
   lockContention: boolean;
   /** F3: simulated sync duration for `--sync-in-flight` (ms). */
   syncDurationMs?: number;
+  /** F5: run the bounded-spawn burst scenario with this many concurrent reads. */
+  spawnBurst?: number;
 }
 
 /** Parse CLI arguments (exported for the contract tests). */
@@ -3067,6 +3360,17 @@ export function parseCliArgs(argv: string[]): CliOptions {
       case '--lock-contention':
         options.lockContention = true;
         break;
+      case '--spawn-burst': {
+        const value = readValue();
+        if (value === undefined) {
+          throw new Error('--spawn-burst requires a number of concurrent reads (e.g. --spawn-burst 12)');
+        }
+        if (!Number.isFinite(Number(value)) || Number(value) < 2) {
+          throw new Error('--spawn-burst requires an integer ≥ 2');
+        }
+        options.spawnBurst = Number(value);
+        break;
+      }
       case '--sync-duration': {
         const value = readValue();
         if (!value || !Number.isFinite(Number(value)) || Number(value) <= 0) {
@@ -3219,6 +3523,27 @@ async function main(): Promise<void> {
         ? `${JSON.stringify(report, null, 2)}\n`
         : `${formatSyncIsolationReport(report)}\n`,
     );
+    return;
+  }
+
+  // `--spawn-burst` (F5) measures the bounded `wl` spawn concurrency: a burst
+  // of distinct cold single-item reads with the documented cap in effect and
+  // an uncapped reference of the same burst. Run at operator scale with:
+  //   npx tsx packages/herdr/test/perf/large-db-harness.ts --profile full --spawn-burst 12
+  if (options.spawnBurst !== undefined) {
+    const report = await runSpawnConcurrencyScenario({
+      profile,
+      target: options.target,
+      burst: options.spawnBurst,
+      samples: options.samples,
+      keep: options.keep,
+    });
+    process.stdout.write(
+      options.json
+        ? `${JSON.stringify(report, null, 2)}\n`
+        : `${formatSpawnCapReport(report)}\n`,
+    );
+    if (!report.ok) process.exitCode = 1;
     return;
   }
 

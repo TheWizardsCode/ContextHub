@@ -149,6 +149,113 @@ export function resetExecFileAsync(): void {
   execFileAsync = promisify(execFile);
 }
 
+// ── Bounded `wl` spawn concurrency (F5 — WL-0MVJV2PC2008PY64) ────────
+
+/**
+ * Maximum number of concurrent `wl` READ spawns one pane may keep in flight.
+ *
+ * Without a bound, a spawn-heavy refresh (fallback per-subset/per-parent
+ * reads, per-edge `wl show` / `wl dep list` probes) can fan out to a dozen
+ * `wl` processes at once — each peaking at ~120–145 MB on a large DB — and
+ * blow past the parent epic's ≤ ~300 MB aggregate per-pane RSS ceiling
+ * before concurrency ever thins out naturally. Capping concurrent reads at
+ * {@link DEFAULT_WL_SPAWN_CAP} bounds the pane's aggregate spawn RSS at
+ * `cap × per-spawn peak` (per-spawn peaks measured per profile/target by the
+ * F1 harness and recorded in `large-db-budget.json`; the bound is documented
+ * in `docs/dev/herdr-event-driven-refresh.md` § "Bounded `wl` spawn
+ * concurrency (F5 — WL-0MVJV2PC2008PY64)").
+ *
+ * Only READ commands are capped. Writes (claims, `wl comment add`, chord
+ * commands, `wl sync`) spawn immediately: they are user-driven, rare, and
+ * already serialised by the CLI's own mutation lock, so queueing them behind
+ * reads would add latency without bounding a real memory fan-out. `wl sync`
+ * additionally keeps its own F3 isolation path (auto-sync.ts) untouched.
+ *
+ * The queue is promise-based and strictly FIFO: a waiter is released on a
+ * microtask when a slot frees, so queued reads NEVER block the TUI event
+ * loop (asserted by the F1 harness spawn-burst scenario).
+ */
+export const DEFAULT_WL_SPAWN_CAP = 2;
+
+let wlSpawnCap = DEFAULT_WL_SPAWN_CAP;
+let activeWlSpawns = 0;
+let peakActiveWlSpawns = 0;
+const wlSpawnWaiters: Array<() => void> = [];
+
+/**
+ * The current spawn-concurrency cap (concurrent `wl` read spawns allowed).
+ * Exported so the harness/tests assert the documented bound.
+ */
+export function getWlSpawnCap(): number {
+  return wlSpawnCap;
+}
+
+/**
+ * Override the cap (a positive integer). The harness uses this to prove the
+ * enforcement is the documented constant even when a test changes it. Values
+ * below 1 are rejected — the documented bound must stay meaningful.
+ */
+export function setWlSpawnCap(cap: number): void {
+  if (!Number.isInteger(cap) || cap < 1) {
+    throw new Error(`wl spawn cap must be a positive integer (got ${String(cap)})`);
+  }
+  wlSpawnCap = cap;
+}
+
+/** Restore the documented default cap (test teardown / harness reset). */
+export function resetWlSpawnCap(): void {
+  wlSpawnCap = DEFAULT_WL_SPAWN_CAP;
+}
+
+/** Test helper: current semaphore state (cap, active, peak, queued waiters). */
+export function _wlSpawnStats(): {
+  cap: number;
+  active: number;
+  peak: number;
+  queued: number;
+} {
+  return {
+    cap: wlSpawnCap,
+    active: activeWlSpawns,
+    peak: peakActiveWlSpawns,
+    queued: wlSpawnWaiters.length,
+  };
+}
+
+/** Test helper: clear the semaphore counters (per-test isolation). */
+export function _resetWlSpawnStats(): void {
+  activeWlSpawns = 0;
+  peakActiveWlSpawns = 0;
+  wlSpawnWaiters.length = 0;
+}
+
+/** Reserve a spawn slot, waiting FIFO when the cap is reached. Never blocks. */
+async function acquireWlSpawnSlot(): Promise<void> {
+  const grab = (): void => {
+    activeWlSpawns += 1;
+    if (activeWlSpawns > peakActiveWlSpawns) peakActiveWlSpawns = activeWlSpawns;
+  };
+  if (activeWlSpawns < wlSpawnCap) {
+    grab();
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    wlSpawnWaiters.push(() => {
+      grab();
+      resolve();
+    });
+  });
+}
+
+/** Free a slot and hand it to the oldest waiter (FIFO, on a microtask). */
+function releaseWlSpawnSlot(): void {
+  activeWlSpawns -= 1;
+  const next = wlSpawnWaiters.shift();
+  if (next !== undefined) {
+    queueMicrotask(next);
+  }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 export interface WorkItem {
@@ -405,6 +512,16 @@ const MEMOIZABLE_COMMANDS = new Set(['list', 'next', 'worklist', 'show', 'search
 /** Cap on in-flight memo entries (bounded: entries are removed on settle, so
  * this caps only concurrent racing fetches, which is the dedupe window). */
 const MEMO_MAX_ENTRIES = 64;
+
+/**
+ * Read commands subject to the spawn-concurrency cap (F5). These are the
+ * per-pane data-load reads the parent AC targets; writes (update/create/
+ * comment/…/sync) are deliberately left uncapped (see the cap comment). `dep`
+ * is explicitly included though not memoizable: the metadata-panel dep-probe
+ * fallback fans out one `wl dep list <id>` / `wl show <id>` per edge and must
+ * never spawn unbounded.
+ */
+const WL_SPAWN_CAPPED_COMMANDS: ReadonlySet<string> = new Set([...MEMOIZABLE_COMMANDS, 'dep']);
 
 /**
  * In-flight promise memo: key → shared promise for an identical read that is
@@ -686,6 +803,26 @@ function isWlTimeoutError(error: unknown): boolean {
 }
 
 async function runWlInner(
+  args: string[],
+  includeJson: boolean,
+  timeoutMs?: number,
+  dirOverride?: string,
+): Promise<string> {
+  // F5 spawn cap: reads acquire a bounded-concurrency slot; a queued read
+  // releases on a microtask when a slot frees, so it never blocks the TUI
+  // event loop. Writes bypass the cap entirely (rare, user-driven).
+  const capped = WL_SPAWN_CAPPED_COMMANDS.has(args[0]);
+  if (capped) {
+    await acquireWlSpawnSlot();
+  }
+  try {
+    return await runWlInnerUncapped(args, includeJson, timeoutMs, dirOverride);
+  } finally {
+    if (capped) releaseWlSpawnSlot();
+  }
+}
+
+async function runWlInnerUncapped(
   args: string[],
   includeJson: boolean,
   timeoutMs?: number,

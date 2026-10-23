@@ -16,8 +16,9 @@
     "writeToReflectP95Ms": 2000,
     "spawnsPerRefresh": 1,
     "idleSpawns": 0,
+    "wlSpawnCap": 2,
     "enforced": false,
-    "note": "Parent epic acceptance criteria at ~2,600 items / ~100 MB (WL-0MVJC1EQX001QR9W): a default-view refresh ≤ ~1.5 s p95 wall, ≤ ~200 ms aggregate event-loop blocking, a documented per-spawn peak-RSS budget below the ~130–145 MB/spawn pre-change baseline and ≤ ~300 MB aggregate for a single pane, write → reflect ≤ ~2 s p95, one consolidated `wl worklist` read per refresh and zero spawns when idle. `enforced` flips true once a full-scale baseline within target is recorded (F7 re-verification)."
+    "note": "Parent epic acceptance criteria at ~2,600 items / ~100 MB (WL-0MVJC1EQX001QR9W): a default-view refresh ≤ ~1.5 s p95 wall, ≤ ~200 ms aggregate event-loop blocking, a documented per-spawn peak-RSS budget below the ~130–145 MB/spawn pre-change baseline and ≤ ~300 MB aggregate for a single pane, write → reflect ≤ ~2 s p95, one consolidated `wl worklist` read per refresh and zero spawns when idle. F5 (WL-0MVJV2PC2008PY64) adds `wlSpawnCap` — the documented max concurrent `wl` read spawns per pane (enforced by the fetcher semaphore; the pane's aggregate spawn RSS is bounded by cap × per-spawn peak, asserted by the spawn-burst scenario). `enforced` flips true once a full-scale baseline within target is recorded (F7 re-verification)."
   },
   "regression": {
     "refreshSamples": 5,

@@ -363,6 +363,94 @@ The full-scale F2 results (cost table, `wl sync` breakdown, RSS decomposition
 and the fix/defer decision per driver) are recorded on the work item
 `WL-0MVJV2NNG00771C6`; the harness is the re-runnable evidence behind them.
 
+## Bounded `wl` spawn concurrency (F5 — WL-0MVJV2PC2008PY64)
+
+### The memory problem
+
+Every surviving `wl` spawn on a large store peaks at ~120–145 MB RSS (F2
+measured `wl worklist` at 164.4 MB cold and the F1 full-scale baseline records
+144.9 MB per spawn on the built CLI). A default-view refresh uses exactly one
+consolidated spawn, so a *quiet* pane is fine — but the pane's fan-out paths
+can each multiply that peak: the fallback per-subset reads (an older `wl`
+without the `worklist` command), the per-edge `wl show`/`wl dep list`
+metadata probes (F4 reduced, did not eliminate them), and the per-parent
+`wl list --parent` fallback (F4's in-process batch read replaces it, but any
+in-process failure degrades to it). Ten concurrent reads at 145 MB each is a
+1.4 GB aggregate — far over the parent AC 5 ≤ ~300 MB per-pane ceiling.
+
+### The budget (documented, enforced, asserted)
+
+| Budget item | Value | Enforcement |
+|---|---|---|
+| Per-spawn peak RSS | measured per profile/target in `large-db-budget.json` (`peakRssPerSpawnMb`; full-scale: ≤ ~130–145 MB baseline) | F1 refresh ratchet (`large-db-refresh-budget.test.ts`) |
+| **Concurrent `wl` read spawns per pane** | **`DEFAULT_WL_SPAWN_CAP = 2`** (`fetcher.ts` semaphore, FIFO, microtask handover) | **fetcher production code** + spawn-burst ratchet (`large-db-spawn-cap.test.ts`) |
+| **Aggregate spawn-RSS bound** | **cap × per-spawn peak ≤ ~290 MB ≤ 300 MB ceiling** | spawn-burst policy (`evaluateSpawnCapReport`) |
+| Event-loop blocking with a spawn-heavy burst | ≤ ~200 ms (parent AC 1) | spawn-burst measured event-loop probe |
+
+The cap applies to READ spawns (`list`, `next`, `worklist`, `show`, `search`,
+`status`, `dep`). Writes (claims, `wl comment add`, chord commands, `wl sync`)
+are deliberately uncapped: they are user-driven, rare and already serialised
+by the CLI's own mutation lock, and `wl sync` keeps its F3 isolation path —
+queueing them behind reads would add latency without bounding a real memory
+fan-out. Queued reads are released on a microtask (never under the TUI event
+loop) in strict FIFO order, so a spawn-heavy refresh degrades to a bounded
+pipeline instead of an unbounded process fan-out; input handling is never
+blocked by the queue.
+
+### Harness evidence (`runSpawnConcurrencyScenario` / `--spawn-burst N`)
+
+A burst of distinct cold single-item reads (`wl show <id>`, which always
+spawns and is cacheable so each spawn records its own peak RSS) is driven
+through the real fetcher exec seam in two phases: capped (the production cap)
+and uncapped (cap widened to the burst size — the fan-out the budget bounds).
+
+```sh
+# Default profile (default suite):
+npx vitest run packages/herdr/src/large-db-spawn-cap.test.ts
+# Current default-profile numbers (300 items / 1.7 MB, tsx target, burst 6):
+npx tsx packages/herdr/test/perf/large-db-harness.ts --spawn-burst 6
+# Full scale (2,600 items / ~100 MB), on demand:
+npm run test:perf:large -- --spawn-burst 8
+```
+
+Measured (this worktree, `rgardler-AI-Laptop`, burst = 6 at the default profile; burst = 8 at full scale):
+
+| Profile | Phase | Peak concurrent `wl` | Aggregate RSS bound (cap × peak) | Event-loop blocked | Wall |
+|---|---|---|---|---|---|
+| default (300 items, tsx) | capped (cap 2) | **2** | **226.6 MB** | 49.9 ms | 3.0 s |
+| default (300 items, tsx) | uncapped (cap 6) | 6 | 660.6 MB | 99.6 ms | 2.0 s |
+| **full** (2,600 items, tsx) | capped (cap 2) | **2** | **220.2 MB** | **126.5 ms** | 3.9 s |
+| full (2,600 items, tsx) | uncapped (cap 8) | 8 | 870.4 MB | **254.3 ms (breaches ≤ 200 ms)** | 2.5 s |
+
+Before/after: the SAME burst that would reach 6–8 concurrent processes (660
+→ 870 MB aggregate, ~1.4 GB at the full-scale 145 MB worklist peak) is held
+by the documented cap to 2 concurrent processes and a ~220–227 MB aggregate
+bound — inside parent AC 5's ≤ ~300 MB ceiling. The full-scale uncapped phase
+also breaches the parent AC 1 ≤ ~200 ms input-lag budget (254 ms — the loop
+pays for eight simultaneous 100 MB children), while the capped phase stays at
+126.5 ms: bound the concurrency and you bound the input lag too.
+
+### AC coverage
+
+- AC1 (per-spawn or aggregate budget confirmed): the aggregate budget is the
+  documented `cap × per-spawn peak` and is asserted per run; per-spawn peaks
+  are recorded per profile/target in `large-db-budget.json` (the F1 ratchet).
+- AC2 (documented spawn cap whose aggregate RSS is asserted by an automated
+  test): `DEFAULT_WL_SPAWN_CAP = 2`, enforced by the fetcher semaphore and
+  asserted by `large-db-spawn-cap.test.ts` (policy + measured).
+- AC3 (budget + enforcement documented): this section + `large-db-budget.json`.
+- AC4 (no regression): the default-view refresh still reads through ONE
+  consolidated `wl worklist` spawn (the F1 ratchet); the cap only engages
+  when more than two reads race; zero-spawn-when-idle is untouched (the idle
+  tick never calls the fetch path).
+- AC5 (spawns off the event loop; queued reads never block input): the queue
+  is promise-based with microtask handover; the spawn-burst measured phase
+  asserts total event-loop blocking ≤ 200 ms. F3's sync isolation is
+  unaffected (`wl sync` is not in the capped command set).
+- AC6 (no new heavy dependency): the cap is a promise FIFO — no library,
+  no new import in the Pane graph, and reads keep preferring the in-process
+  SQLite path (F6) over new spawns.
+
 ## Auto-sync isolation: the pane never stalls on `wl sync` (F3 — WL-0MVJV2O7H003HY9N)
 
 The epic's Auto-sync acceptance criteria: while a long ~36 s `wl sync` is in
