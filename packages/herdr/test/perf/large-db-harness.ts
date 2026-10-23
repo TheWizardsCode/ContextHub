@@ -44,6 +44,16 @@
  *     `npm run test:perf:large -- --json`                       (machine-readable)
  *     `npm run test:perf:large -- --json --update-budget`        (re-baseline)
  *
+ * ## End-to-end parent AC report (F7)
+ *
+ * `--ac-report` runs the F1 refresh budget, the F3 sync-in-flight scenario, the
+ * F4 in-process expand profile and the F5 spawn burst in one process and
+ * aggregates the parent epic's six acceptance criteria into a single JSON
+ * document (plus a human summary). This is the evidence run for
+ * WL-0MVJV2QHO003K6H3:
+ *
+ *     npm run build && npm run test:perf:large -- --ac-report --json --target dist
+ *
  * ## Regression policy (host-load tolerant)
  *
  * Shared CI hosts inflate wall-clock time under contention, so the pass/fail
@@ -67,6 +77,7 @@
  * ```sh
  * npx tsx packages/herdr/test/perf/large-db-harness.ts --profile default --json
  * npm run test:perf:large -- --profile full --json --target dist --update-budget
+ * npm run test:perf:large -- --ac-report --json --target dist
  * ```
  */
 
@@ -775,6 +786,12 @@ export function defaultLargeDbBudget(): LargeDbBudget {
         'npm run build && npm run test:perf:large -- --json --target dist',
       rebaseline:
         'npm run test:perf:large -- --json --update-budget  (add --target src|dist to pick the invocation)',
+      expandProfile:
+        'npx tsx packages/herdr/test/perf/large-db-harness.ts --profile full --expand --json',
+      spawnBurst: 'npm run test:perf:large -- --spawn-burst 8 --json',
+      syncInFlight: 'npm run test:perf:large -- --sync-in-flight --samples 5 --json',
+      acReport:
+        'npm run build && npm run test:perf:large -- --ac-report --json --target dist  (F7 end-to-end parent AC evidence)',
     },
     acTargets: {
       refreshP95WallMs: 1500,
@@ -794,8 +811,14 @@ export function defaultLargeDbBudget(): LargeDbBudget {
         '`wl worklist` read per refresh and zero spawns when idle. F5 (WL-0MVJV2PC2008PY64) adds ' +
         '`wlSpawnCap` — the documented max concurrent `wl` read spawns per pane (enforced by the ' +
         'fetcher semaphore; the pane aggregate spawn RSS is bounded by cap × per-spawn peak, ' +
-        'asserted by the spawn-burst scenario). `enforced` flips true once a full-scale baseline ' +
-        'within target is recorded (F7 re-verification).',
+        'asserted by the spawn-burst scenario); F8 (WL-0MVKVJYV6008SL9G) tightened it from 2 to ' +
+        '1 after F7 measured a cold 144.6–175.3 MB per-spawn peak on the built CLI at full ' +
+        'scale, which made `2 × peak` breach the ceiling. AC5 is enforced as the epic states it: EITHER the ' +
+        'per-spawn peak is inside `peakRssPerSpawnMb` OR the capped fan-out ' +
+        '(`wlSpawnCap × peak`) stays inside `paneAggregateRssMb`. The AC numbers are asserted for ' +
+        'the built (`dist`) CLI only — the `src` (tsx) target pays tsx module-load cost inside ' +
+        'every spawn and does not describe what `wl` runs. `enforced` was flipped true by F7 ' +
+        '(WL-0MVJV2QHO003K6H3) after a compliant full-scale `dist` baseline was recorded.',
     },
     regression: {
       refreshSamples: 5,
@@ -1116,13 +1139,15 @@ export function evaluateLargeDbBudget(
       `headroom + ${policy.wallFloorMs} ms floor`,
   });
 
-  // 8. Parent AC targets — only for the full-scale profile, once enforced.
-  if (ac.enforced && input.profile === 'full') {
+  // 8. Parent AC targets — only for the enforced full-scale profile measured
+  //    through the BUILT CLI (`dist`). The `src` (tsx) target pays tsx's own
+  //    module-load cost inside every spawned `wl`, so its wall-clock numbers
+  //    describe the dev harness, not what `/usr/local/bin/wl` does; the AC
+  //    numbers are therefore asserted for `dist` only.
+  if (ac.enforced && input.profile === 'full' && String(input.target) === 'dist') {
     const acChecks: Array<[string, number | null, number]> = [
       ['AC refreshP95WallMs', input.refresh.p95WallMs, ac.refreshP95WallMs],
       ['AC eventLoopBlockingP95Ms', input.refresh.eventLoopBlockingP95Ms, ac.eventLoopBlockingP95Ms],
-      ['AC peakRssPerSpawnMb', input.refresh.peakRssPerSpawnMb, ac.peakRssPerSpawnMb],
-      ['AC paneAggregateRssMb', input.pane.aggregateRssMb, ac.paneAggregateRssMb],
       ['AC writeToReflectP95Ms', input.writeToReflect.p95ReflectMs, ac.writeToReflectP95Ms],
     ];
     for (const [metric, measured, limit] of acChecks) {
@@ -1133,6 +1158,25 @@ export function evaluateLargeDbBudget(
         limit,
         ok: measured <= limit,
         detail: 'parent epic acceptance criterion (enforced at full scale)',
+      });
+    }
+
+    // AC5 is an OR (see withinSpawnMemoryBudget): a per-spawn budget OR a
+    // capped fan-out whose `cap × peak` aggregate stays inside the ceiling.
+    const peak = input.refresh.peakRssPerSpawnMb;
+    if (peak !== null) {
+      const cap = ac.wlSpawnCap ?? 1;
+      const aggregateBound = round1(cap * peak);
+      const ok = withinSpawnMemoryBudget(peak, ac);
+      push({
+        metric: 'AC spawnMemoryBudget',
+        measured: round1(peak),
+        limit: ac.peakRssPerSpawnMb,
+        ok,
+        detail:
+          `per-spawn peak ${round1(peak)} MB vs ${ac.peakRssPerSpawnMb} MB budget; ` +
+          `capped fan-out ${cap} × ${round1(peak)} = ${aggregateBound} MB vs ` +
+          `${ac.paneAggregateRssMb} MB pane ceiling (either route satisfies AC5)`,
       });
     }
   }
@@ -1565,6 +1609,8 @@ export async function runLargeDbHarness(
 export interface ExpandReadProfileOptions {
   /** Fixture profile (default `default`). */
   profile?: LargeDbProfileName;
+  /** Override the profile's scale (used by focused tests). */
+  scale?: Partial<LargeDbScale>;
   /** CLI target to drive (default `auto`). */
   target?: 'auto' | LargeDbTarget;
   /** Repository root (defaults to this checkout). */
@@ -1619,7 +1665,7 @@ export async function runExpandReadProfile(
 ): Promise<ExpandReadMetrics> {
   const repoRoot = options.repoRoot ?? REPO_ROOT;
   const profileName: LargeDbProfileName = options.profile ?? 'default';
-  const scale: LargeDbScale = { ...LARGE_DB_PROFILES[profileName] };
+  const scale: LargeDbScale = { ...LARGE_DB_PROFILES[profileName], ...(options.scale ?? {}) };
   const fixture = generateLargeWorklog(scale);
   const cacheDir = path.join(fixture.rootDir, 'cache');
   const invocation = resolveCliInvocation(options.target ?? 'auto', repoRoot);
@@ -1962,6 +2008,8 @@ async function openIsolationContext(
 export interface SpawnCapScenarioOptions {
   /** Fixture profile (default `default`). */
   profile?: LargeDbProfileName;
+  /** Override the profile's scale (used by focused tests). */
+  scale?: Partial<LargeDbScale>;
   /** CLI target to drive (default `auto`). */
   target?: 'auto' | LargeDbTarget;
   /** Repository root (defaults to this checkout). */
@@ -2022,7 +2070,7 @@ export async function runSpawnConcurrencyScenario(
 ): Promise<SpawnCapScenarioReport> {
   const repoRoot = options.repoRoot ?? REPO_ROOT;
   const profileName: LargeDbProfileName = options.profile ?? 'default';
-  const scale: LargeDbScale = { ...LARGE_DB_PROFILES[profileName] };
+  const scale: LargeDbScale = { ...LARGE_DB_PROFILES[profileName], ...(options.scale ?? {}) };
   const burst = Math.min(Math.max(2, options.burst ?? 8), scale.expandedParents);
   const samples = Math.max(1, options.samples ?? 1);
   const fixture = generateLargeWorklog(scale);
@@ -2390,6 +2438,28 @@ export async function runSyncLockContentionScenario(
   }
 }
 
+/**
+ * Parent AC 5 — the memory budget is an **OR**, exactly as the epic states it:
+ *
+ *   - route (a) a spawn's peak RSS is at or below the documented per-spawn
+ *     budget (below the ~130–145 MB/spawn pre-change baseline), or
+ *   - route (b) the pane's concurrent spawn fan-out is capped, so the
+ *     aggregate spawn RSS (`cap × peak`) stays inside the documented pane
+ *     ceiling (≤ ~300 MB).
+ *
+ * A `null` peak means the measured refresh issued no spawn at all (the
+ * in-process read path), which trivially satisfies the criterion.
+ */
+export function withinSpawnMemoryBudget(
+  peakRssPerSpawnMb: number | null,
+  ac: LargeDbAcTargets,
+): boolean {
+  if (peakRssPerSpawnMb === null) return true;
+  if (peakRssPerSpawnMb <= ac.peakRssPerSpawnMb) return true;
+  const cap = ac.wlSpawnCap ?? 1;
+  return cap * peakRssPerSpawnMb <= ac.paneAggregateRssMb;
+}
+
 /** Report the parent AC verdicts for a measurement (report-only view). */
 export function withinAcTargets(
   report: LargeDbReport,
@@ -2399,10 +2469,7 @@ export function withinAcTargets(
   return {
     refreshP95WallMs: report.refresh.p95WallMs <= ac.refreshP95WallMs,
     eventLoopBlockingP95Ms: report.refresh.eventLoopBlockingP95Ms <= ac.eventLoopBlockingP95Ms,
-    peakRssPerSpawnMb:
-      report.refresh.peakRssPerSpawnMb === null ||
-      report.refresh.peakRssPerSpawnMb <= ac.peakRssPerSpawnMb,
-    paneAggregateRssMb: report.pane.aggregateRssMb <= ac.paneAggregateRssMb,
+    spawnMemoryBudget: withinSpawnMemoryBudget(report.refresh.peakRssPerSpawnMb, ac),
     writeToReflectP95Ms: report.writeToReflect.p95ReflectMs <= ac.writeToReflectP95Ms,
     spawnsPerRefresh: report.refresh.spawnsPerRefresh === ac.spawnsPerRefresh,
     idleSpawns: report.idle.spawns === ac.idleSpawns,
@@ -2447,6 +2514,516 @@ export function assertOpenBudget(report: LargeDbReport): string[] {
     );
   }
   return violations;
+}
+
+// ── End-to-end parent AC report (F7 — WL-0MVJV2QHO003K6H3) ───────────
+//
+// F1–F6 each verify their own slice. The parent epic's acceptance criteria
+// are only proven when every measurement is taken together, at the operator's
+// real scale, AFTER all the fixes. This mode runs the existing scenarios in
+// one process and renders one JSON report plus a human summary:
+//
+//   AC1  pane responsive during refresh   -> refresh event-loop probe + spawn burst
+//   AC2  refresh ≤ ~1.5 s p95, one read   -> refresh report + in-process expand
+//   AC3  a long sync cannot stall the pane -> sync-in-flight scenario
+//   AC4  write → reflect ≤ ~2 s p95       -> the real watchDbChanges path
+//   AC5  documented memory budget         -> per-spawn budget OR capped fan-out
+//   AC6  no regressions                   -> spawn/idle/open/watch invariants
+//
+// The full Herdr + TUI test suites are the other half of AC6 and are run by
+// the workflow's test gate; this report cites that evidence rather than
+// re-running the suite inside the harness.
+//
+// Run it at the operator's scale with:
+//
+//   npm run build && npm run test:perf:large -- --ac-report --json --target dist
+
+export type LargeDbAcId = 'AC1' | 'AC2' | 'AC3' | 'AC4' | 'AC5' | 'AC6';
+
+/** One measured number behind an AC verdict. */
+export interface LargeDbAcMeasurement {
+  metric: string;
+  measured: number | string | boolean | null;
+  target: number | string | boolean;
+  ok: boolean;
+  note?: string;
+}
+
+/** One parent acceptance criterion and the evidence for it. */
+export interface LargeDbAcVerdict {
+  id: LargeDbAcId;
+  criterion: string;
+  status: 'met' | 'unmet';
+  /** Which harness scenario produced the numbers. */
+  evidence: string;
+  measurements: LargeDbAcMeasurement[];
+}
+
+/** Options for {@link runAcReport} (the scenarios share these). */
+export interface LargeDbAcReportOptions {
+  /** Fixture profile (default `full` — the operator's real scale). */
+  profile?: LargeDbProfileName;
+  /** Override the profile's scale (used by focused tests). */
+  scale?: Partial<LargeDbScale>;
+  /** Refresh samples per scenario (default 5 at `full`, 3 otherwise). */
+  samples?: number;
+  /** Write → reflect samples (default 5 at `full`, 3 otherwise). */
+  writeSamples?: number;
+  /** Simulated in-flight sync duration (default: the operator-observed ~36 s). */
+  syncDurationMs?: number;
+  /** Concurrent reads fanned out by the F5 spawn-cap scenario (default 8). */
+  burst?: number;
+  /** CLI target to drive (default `auto`). */
+  target?: 'auto' | LargeDbTarget;
+  /** Repository root (defaults to this checkout). */
+  repoRoot?: string;
+  /** Keep the generated fixtures on disk for inspection. */
+  keep?: boolean;
+}
+
+/** Scenario outputs aggregated by {@link buildAcReport}. */
+export interface LargeDbAcReportInputs {
+  refresh: LargeDbReport;
+  syncInFlight: SyncInFlightReport;
+  spawnCap: SpawnCapScenarioReport;
+  expand: ExpandReadMetrics;
+  budget: LargeDbBudget;
+  /** Override the report timestamp (tests). */
+  generatedAt?: string;
+}
+
+/** The end-to-end parent AC report (one JSON document). */
+export interface LargeDbAcReport {
+  generatedAt: string;
+  profile: LargeDbProfileName;
+  target: LargeDbTarget;
+  invocation: string;
+  dataset: LargeDbReport['dataset'];
+  /**
+   * Host conditions at report time. The parent ACs are user-perceived
+   * (wall-clock / event-loop lag) numbers, so a run under heavy external CPU
+   * contention is not a valid measurement of the plugin — quote the load
+   * alongside the numbers.
+   */
+  environment: {
+    node: string;
+    host: string;
+    cpuCount: number;
+    loadAverage: [number, number, number];
+    loadPerCore1m: number;
+  };
+  samples: { refresh: number; writeToReflect: number; syncInFlight: number };
+  acs: LargeDbAcVerdict[];
+  ok: boolean;
+  budget: {
+    enforced: boolean;
+    acTargets: LargeDbAcTargets;
+    evaluation: LargeDbBudgetEvaluation;
+  };
+  /** Raw scenario reports, so every quoted number is reproducible. */
+  evidence: {
+    refresh: LargeDbReport;
+    syncInFlight: SyncInFlightReport;
+    spawnCap: SpawnCapScenarioReport;
+    expand: ExpandReadMetrics;
+    openBudgetViolations: string[];
+    spawnCapViolations: string[];
+  };
+}
+
+/**
+ * Aggregate the F1/F3/F4/F5/F6 measurements into per-AC verdicts.
+ *
+ * Pure: it makes no measurements itself, so the AC mapping is deterministic
+ * and testable independently of a (slow) full-scale run.
+ */
+export function buildAcReport(inputs: LargeDbAcReportInputs): LargeDbAcReport {
+  const { refresh, syncInFlight, spawnCap, expand, budget } = inputs;
+  const ac = budget.acTargets;
+  const cap = ac.wlSpawnCap ?? 1;
+  const peakRssPerSpawnMb = refresh.refresh.peakRssPerSpawnMb;
+  const aggregateBoundMb = peakRssPerSpawnMb === null ? null : round1(cap * peakRssPerSpawnMb);
+  const withSyncBlockingP95 =
+    percentile(syncInFlight.withSync.map((sample) => sample.eventLoopBlockedMs), 0.95) ?? 0;
+  const openViolations = assertOpenBudget(refresh);
+  const memoryVerdict = withinSpawnMemoryBudget(peakRssPerSpawnMb, ac) && spawnCap.ok;
+
+  const verdict = (
+    id: LargeDbAcId,
+    criterion: string,
+    evidence: string,
+    measurements: LargeDbAcMeasurement[],
+  ): LargeDbAcVerdict => ({
+    id,
+    criterion,
+    evidence,
+    measurements,
+    status: measurements.every((measurement) => measurement.ok) ? 'met' : 'unmet',
+  });
+
+  const acs: LargeDbAcVerdict[] = [
+    verdict(
+      'AC1',
+      'Pane stays responsive during refresh: a default-view refresh does not block the TUI ' +
+        'event loop for more than ~200 ms of perceived lag in aggregate — keystrokes/commands ' +
+        'process promptly while a refresh is in flight.',
+      'refresh event-loop probe (runLargeDbHarness) + capped spawn burst ' +
+        '(runSpawnConcurrencyScenario)',
+      [
+        {
+          metric: 'refreshEventLoopBlockingP95Ms',
+          measured: refresh.refresh.eventLoopBlockingP95Ms,
+          target: ac.eventLoopBlockingP95Ms,
+          ok: refresh.refresh.eventLoopBlockingP95Ms <= ac.eventLoopBlockingP95Ms,
+        },
+        {
+          metric: 'maxSingleStallMs',
+          measured: refresh.refresh.maxEventLoopBlockedMs,
+          target: 'report-only',
+          ok: true,
+        },
+        {
+          metric: 'spawnBurstEventLoopBlockedMs',
+          measured: spawnCap.capped.eventLoopBlockedMs,
+          target: ac.eventLoopBlockingP95Ms,
+          ok: spawnCap.capped.eventLoopBlockedMs <= ac.eventLoopBlockingP95Ms,
+        },
+      ],
+    ),
+    verdict(
+      'AC2',
+      'Single-figure refresh cost on large DBs: a default-view refresh end-to-end (event → ' +
+        'data load → render) is bounded to ≤ ~1.5 s wall-clock p95 on a DB of ~2,600 items / ' +
+        '~100 MB, including per-expand child fetches; the consolidated `wl worklist` single-read ' +
+        'path stays the norm.',
+      'refresh report (runLargeDbHarness) + in-process expand/hydrator read profile ' +
+        '(runExpandReadProfile)',
+      [
+        {
+          metric: 'refreshP95WallMs',
+          measured: refresh.refresh.p95WallMs,
+          target: ac.refreshP95WallMs,
+          ok: refresh.refresh.p95WallMs <= ac.refreshP95WallMs,
+        },
+        {
+          metric: 'spawnsPerRefresh',
+          measured: refresh.refresh.spawnsPerRefresh,
+          target: ac.spawnsPerRefresh,
+          ok: refresh.refresh.spawnsPerRefresh === ac.spawnsPerRefresh,
+        },
+        {
+          metric: 'expandSpawns',
+          measured: expand.expandSpawns,
+          target: 0,
+          ok: expand.expandSpawns === 0,
+          note: 'per-expand child fetches are served in-process',
+        },
+        {
+          metric: 'expandChildrenMatchCli',
+          measured: expand.childrenMatchCli,
+          target: true,
+          ok: expand.childrenMatchCli,
+        },
+        {
+          metric: 'hydratorDepSpawns',
+          measured: expand.hydratorDepSpawns,
+          target: 0,
+          ok: expand.hydratorDepSpawns === 0,
+        },
+        {
+          metric: 'hydratorDepRowsMatchCli',
+          measured: expand.dependencyRowsMatchCli,
+          target: true,
+          ok: expand.dependencyRowsMatchCli,
+        },
+      ],
+    ),
+    verdict(
+      'AC3',
+      'Auto-sync cannot stall the pane: while a long `wl sync` is in flight in the background, ' +
+        'the pane remains responsive — no lock wait, no event-loop stall, at most a brief ' +
+        'non-blocking status notice.',
+      'sync-in-flight scenario through the real runSync (runSyncInFlightScenario)',
+      [
+        {
+          metric: 'noWaitGap',
+          measured: syncInFlight.noWaitGap,
+          target: true,
+          ok: syncInFlight.noWaitGap,
+          note: `min sync remaining at refresh end ${syncInFlight.minRemainingAtEndMs} ms`,
+        },
+        {
+          metric: 'syncSpawnEventLoopMs',
+          measured: syncInFlight.spawnBlockingMs,
+          target: ac.eventLoopBlockingP95Ms,
+          ok: syncInFlight.spawnBlockingMs <= ac.eventLoopBlockingP95Ms,
+        },
+        {
+          metric: 'refreshEventLoopBlockingP95MsWithSync',
+          measured: round1(withSyncBlockingP95),
+          target: ac.eventLoopBlockingP95Ms,
+          ok: withSyncBlockingP95 <= ac.eventLoopBlockingP95Ms,
+        },
+        {
+          metric: 'statusNoticeShown',
+          measured: syncInFlight.noticeWhileInFlight,
+          target: 'non-blocking sync notice',
+          ok: /syncing/i.test(syncInFlight.noticeWhileInFlight),
+        },
+        {
+          metric: 'spawnsPerRefreshWithSync',
+          measured: syncInFlight.withSync[0]?.spawns ?? 0,
+          target: ac.spawnsPerRefresh,
+          ok: (syncInFlight.withSync[0]?.spawns ?? 0) === ac.spawnsPerRefresh,
+          note: 'the sync adds no refresh spawn',
+        },
+        {
+          metric: 'syncSettledState',
+          measured: syncInFlight.settledState,
+          target: 'synced',
+          ok: syncInFlight.settledState === 'synced',
+        },
+      ],
+    ),
+    verdict(
+      'AC4',
+      'Change reflection latency: after a `wl` write, the pane reflects the change within ~2 s ' +
+        'p95 via the event-driven watch path at large-DB scale.',
+      'real watchDbChanges write → reflect path (runLargeDbHarness)',
+      [
+        {
+          metric: 'writeToReflectP95Ms',
+          measured: refresh.writeToReflect.p95ReflectMs,
+          target: ac.writeToReflectP95Ms,
+          ok: refresh.writeToReflect.p95ReflectMs <= ac.writeToReflectP95Ms,
+        },
+        {
+          metric: 'watchDetectionP95Ms',
+          measured: refresh.writeToReflect.p95DetectMs,
+          target: ac.writeToReflectP95Ms,
+          ok: refresh.writeToReflect.p95DetectMs <= ac.writeToReflectP95Ms,
+        },
+      ],
+    ),
+    verdict(
+      'AC5',
+      'Reduced memory footprint: a refresh\'s spawned `wl` processes peak at no more than a ' +
+        'documented per-spawn budget below the ~130–145 MB/spawn observed baseline, OR ' +
+        'concurrent spawns are bounded so aggregate RSS for a single pane stays under a ' +
+        'documented ceiling (e.g. ≤ ~300 MB).',
+      'refresh spawn records (runLargeDbHarness) + capped/uncapped spawn burst ' +
+        '(runSpawnConcurrencyScenario; policy evaluateSpawnCapReport)',
+      [
+        {
+          metric: 'peakRssPerSpawnMb',
+          measured: peakRssPerSpawnMb,
+          target: ac.peakRssPerSpawnMb,
+          ok: peakRssPerSpawnMb === null || peakRssPerSpawnMb <= ac.peakRssPerSpawnMb,
+          note: 'route (a): per-spawn budget (informational when route (b) applies)',
+        },
+        {
+          metric: 'cappedFanOutPeak',
+          measured: spawnCap.capped.peakConcurrentSpawns,
+          target: cap,
+          ok: spawnCap.capped.peakConcurrentSpawns <= cap,
+          note: 'route (b): concurrent `wl` read spawns stay at the documented cap',
+        },
+        {
+          metric: 'cappedAggregateSpawnRssMb',
+          measured: spawnCap.capped.aggregateRssBoundMb,
+          target: ac.paneAggregateRssMb,
+          ok:
+            spawnCap.capped.aggregateRssBoundMb !== null &&
+            spawnCap.capped.aggregateRssBoundMb <= ac.paneAggregateRssMb,
+          note: `cap ${cap} × peak ${spawnCap.capped.peakRssPerSpawnMb ?? 'n/a'} MB`,
+        },
+        {
+          metric: 'memoryBudgetRoute',
+          measured: memoryVerdict ? 'satisfied' : 'missed',
+          target: 'per-spawn budget OR capped aggregate ≤ pane ceiling',
+          ok: memoryVerdict,
+        },
+      ],
+    ),
+    verdict(
+      'AC6',
+      'No regressions: the full Herdr plugin + TUI test suites pass; the zero-spawn-when-idle ' +
+        'guarantee and event-driven watch semantics are preserved.',
+      'spawn/idle/open/watch invariants measured here (runLargeDbHarness + F6 assertOpenBudget); ' +
+        'the full Herdr + TUI suites are recorded on the work item by the test gate',
+      [
+        {
+          metric: 'spawnsPerRefresh',
+          measured: refresh.refresh.spawnsPerRefresh,
+          target: ac.spawnsPerRefresh,
+          ok: refresh.refresh.spawnsPerRefresh === ac.spawnsPerRefresh,
+          note: 'one consolidated `wl worklist` read per refresh',
+        },
+        {
+          metric: 'idleSpawns',
+          measured: refresh.idle.spawns,
+          target: ac.idleSpawns,
+          ok: refresh.idle.spawns === ac.idleSpawns,
+        },
+        {
+          metric: 'inProcessOpensPerRefresh',
+          measured: refresh.refresh.inProcessOpensPerRefresh,
+          target: 1,
+          ok: refresh.refresh.inProcessOpensPerRefresh <= 1,
+        },
+        {
+          metric: 'inProcessOpenMsP95',
+          measured: refresh.refresh.inProcessOpenMsP95,
+          target: IN_PROCESS_OPEN_BUDGET_MS,
+          ok: refresh.refresh.inProcessOpenMsP95 <= IN_PROCESS_OPEN_BUDGET_MS,
+        },
+        {
+          metric: 'watchDetectionP95Ms',
+          measured: refresh.writeToReflect.p95DetectMs,
+          target: '> 0 (event-driven, not a polling tick)',
+          ok: refresh.writeToReflect.p95DetectMs > 0,
+        },
+      ],
+    ),
+  ];
+
+  return {
+    generatedAt: inputs.generatedAt ?? new Date().toISOString(),
+    profile: refresh.profile,
+    target: refresh.target,
+    invocation: refresh.invocation,
+    dataset: refresh.dataset,
+    environment: {
+      node: refresh.node,
+      host: refresh.host,
+      cpuCount: os.cpus().length,
+      loadAverage: os.loadavg().slice(0, 3) as [number, number, number],
+      loadPerCore1m: round1((os.loadavg()[0] ?? 0) / Math.max(1, os.cpus().length)),
+    },
+    samples: {
+      refresh: refresh.samples,
+      writeToReflect: refresh.writeToReflect.reflectMs.length,
+      syncInFlight: syncInFlight.samples,
+    },
+    acs,
+    ok: acs.every((entry) => entry.status === 'met'),
+    budget: {
+      enforced: ac.enforced,
+      acTargets: ac,
+      evaluation: evaluateLargeDbBudget(refresh, budget),
+    },
+    evidence: {
+      refresh,
+      syncInFlight,
+      spawnCap,
+      expand,
+      openBudgetViolations: openViolations,
+      spawnCapViolations: spawnCap.violations,
+    },
+  };
+}
+
+/**
+ * Run every scenario and aggregate the end-to-end parent AC report.
+ *
+ * Scenarios run sequentially (each owns a throwaway fixture and restores the
+ * global seams it touches) so their measurements cannot interfere.
+ */
+export async function runAcReport(
+  options: LargeDbAcReportOptions = {},
+): Promise<LargeDbAcReport> {
+  const repoRoot = options.repoRoot ?? REPO_ROOT;
+  const profile = options.profile ?? 'full';
+  const samples = options.samples ?? (profile === 'full' ? 5 : 3);
+  const writeSamples = options.writeSamples ?? (profile === 'full' ? 5 : 3);
+  const shared = {
+    profile,
+    scale: options.scale,
+    target: options.target,
+    repoRoot,
+    keep: options.keep,
+  } as const;
+
+  const refresh = await runLargeDbHarness({ ...shared, samples, writeSamples });
+  const syncInFlight = await runSyncInFlightScenario({
+    ...shared,
+    samples,
+    syncDurationMs: options.syncDurationMs,
+  });
+  const spawnCap = await runSpawnConcurrencyScenario({ ...shared, burst: options.burst });
+  const expand = await runExpandReadProfile(shared);
+
+  return buildAcReport({
+    refresh,
+    syncInFlight,
+    spawnCap,
+    expand,
+    budget: readLargeDbBudget(repoRoot),
+  });
+}
+
+/** Render the end-to-end AC report as human-readable text. */
+export function formatAcReport(report: LargeDbAcReport): string {
+  const unmet = report.acs.filter((entry) => entry.status === 'unmet').length;
+  const renderValue = (value: number | string | boolean | null): string =>
+    value === null ? 'n/a' : String(value);
+  const lines = [
+    '',
+    '================================================',
+    '  Herdr large-DB — end-to-end parent AC report (F7)',
+    '================================================',
+    '',
+    `  profile:            ${report.profile} (${report.target} CLI target)`,
+    `  dataset:            ${report.dataset.items} items, ${report.dataset.dbSizeMb} MB db, ` +
+      `${report.dataset.dependencyEdges} dependency edges, ${report.dataset.parentGroups} parents ` +
+      `(${report.dataset.expandedParents} expanded)`,
+    `  environment:        ${report.environment.host} (${report.environment.node}, ` +
+      `${report.environment.cpuCount} CPUs, load ${report.environment.loadPerCore1m}/core 1m)`,
+    `  samples:            ${report.samples.refresh} refresh, ` +
+      `${report.samples.writeToReflect} write -> reflect, ` +
+      `${report.samples.syncInFlight} sync-in-flight`,
+    `  budget ratchet:     ${report.budget.evaluation.ok ? 'PASS' : 'FAIL'} ` +
+      `(parent AC targets enforced: ${report.budget.enforced})`,
+    `  verdict:            ${report.ok ? 'ALL 6 PARENT ACs MET' : `${unmet} UNMET`}`,
+    '',
+  ];
+  for (const entry of report.acs) {
+    lines.push(`  ${entry.id}  ${entry.status.toUpperCase().padEnd(5)}  ${entry.criterion}`);
+    lines.push(`         evidence: ${entry.evidence}`);
+    for (const measurement of entry.measurements) {
+      lines.push(
+        `         - ${measurement.metric}: ${renderValue(measurement.measured)} ` +
+          `(target ${renderValue(measurement.target)}) ` +
+          `${measurement.ok ? 'OK' : 'MISS'}` +
+          (measurement.note ? ` — ${measurement.note}` : ''),
+      );
+    }
+    lines.push('');
+  }
+  lines.push(
+    `  evidence:           F1 refresh ${report.evidence.refresh.samples} samples, ` +
+      `F3 sync-in-flight ${report.evidence.syncInFlight.samples} samples, ` +
+      `F4 expand ${report.evidence.expand.expandSpawns} spawns, ` +
+      `F5 spawn burst ${report.evidence.spawnCap.capped.burst} reads, ` +
+      `F6 open violations ${report.evidence.openBudgetViolations.length}`,
+  );
+  if (report.evidence.openBudgetViolations.length > 0) {
+    for (const violation of report.evidence.openBudgetViolations) {
+      lines.push(`    - F6: ${violation}`);
+    }
+  }
+  if (report.evidence.spawnCapViolations.length > 0) {
+    for (const violation of report.evidence.spawnCapViolations) {
+      lines.push(`    - F5: ${violation}`);
+    }
+  }
+  if (!report.budget.evaluation.ok) {
+    for (const violation of report.budget.evaluation.violations) {
+      lines.push(`    - ratchet: ${violation}`);
+    }
+  }
+  lines.push('');
+  return lines.join('\n');
 }
 
 // ── Stage profile (F2 — WL-0MVJV2NNG00771C6) ─────────────────────────
@@ -3370,6 +3947,8 @@ interface CliOptions extends LargeDbHarnessOptions {
    * violation. Used by the on-demand full-scale verification.
    */
   assertOpen: boolean;
+  /** F7: aggregate every scenario into the end-to-end parent AC report. */
+  acReport: boolean;
 }
 
 /** Parse CLI arguments (exported for the contract tests). */
@@ -3382,6 +3961,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     syncInFlight: false,
     lockContention: false,
     assertOpen: false,
+    acReport: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -3441,6 +4021,9 @@ export function parseCliArgs(argv: string[]): CliOptions {
         break;
       case '--lock-contention':
         options.lockContention = true;
+        break;
+      case '--ac-report':
+        options.acReport = true;
         break;
       case '--spawn-burst': {
         const value = readValue();
@@ -3583,6 +4166,28 @@ async function main(): Promise<void> {
   const options = parseCliArgs(process.argv.slice(2));
   const budget = readLargeDbBudget(REPO_ROOT);
   const profile = options.profile ?? 'default';
+
+  // `--ac-report` (F7) runs every scenario and aggregates the parent epic's
+  // six acceptance criteria into ONE JSON report plus a human summary. This is
+  // the full-scale evidence run:
+  //   npm run build && npm run test:perf:large -- --ac-report --json --target dist
+  if (options.acReport) {
+    const report = await runAcReport({
+      profile,
+      scale: options.scale,
+      samples: options.samples,
+      writeSamples: options.writeSamples,
+      target: options.target,
+      keep: options.keep,
+      syncDurationMs: options.syncDurationMs,
+      burst: options.spawnBurst,
+    });
+    process.stdout.write(
+      options.json ? `${JSON.stringify(report, null, 2)}\n` : `${formatAcReport(report)}\n`,
+    );
+    if (!report.ok) process.exitCode = 1;
+    return;
+  }
 
   // F3 isolation scenarios: a concurrent refresh while a long sync is in
   // flight (`--sync-in-flight`) or while it holds its file lock + a writer

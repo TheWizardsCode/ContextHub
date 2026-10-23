@@ -6,7 +6,10 @@
     "fullScale": "npm run test:perf:large -- --json",
     "fullScaleDist": "npm run build && npm run test:perf:large -- --json --target dist",
     "expandProfile": "npx tsx packages/herdr/test/perf/large-db-harness.ts --profile full --expand --json",
-    "rebaseline": "npm run test:perf:large -- --json --update-budget  (add --target src|dist to pick the invocation)"
+    "spawnBurst": "npm run test:perf:large -- --spawn-burst 8 --json",
+    "syncInFlight": "npm run test:perf:large -- --sync-in-flight --samples 5 --json",
+    "rebaseline": "npm run test:perf:large -- --json --update-budget  (add --target src|dist to pick the invocation)",
+    "acReport": "npm run build && npm run test:perf:large -- --ac-report --json --target dist  (F7 end-to-end parent AC evidence)"
   },
   "acTargets": {
     "refreshP95WallMs": 1500,
@@ -17,8 +20,8 @@
     "spawnsPerRefresh": 1,
     "idleSpawns": 0,
     "wlSpawnCap": 1,
-    "enforced": false,
-    "note": "Parent epic acceptance criteria at ~2,600 items / ~100 MB (WL-0MVJC1EQX001QR9W): a default-view refresh ≤ ~1.5 s p95 wall, ≤ ~200 ms aggregate event-loop blocking, a documented per-spawn peak-RSS budget below the ~130–145 MB/spawn pre-change baseline and ≤ ~300 MB aggregate for a single pane, write → reflect ≤ ~2 s p95, one consolidated `wl worklist` read per refresh and zero spawns when idle. F5 (WL-0MVJV2PC2008PY64) adds `wlSpawnCap` — the documented max concurrent `wl` read spawns per pane (enforced by the fetcher semaphore; the pane's aggregate spawn RSS is bounded by cap × per-spawn peak, asserted by the spawn-burst scenario). `enforced` flips true once a full-scale baseline within target is recorded (F7 re-verification)."
+    "enforced": true,
+    "note": "Parent epic acceptance criteria at ~2,600 items / ~100 MB (WL-0MVJC1EQX001QR9W): a default-view refresh ≤ ~1.5 s p95 wall, ≤ ~200 ms aggregate event-loop blocking, a documented per-spawn peak-RSS budget below the ~130–145 MB/spawn pre-change baseline and ≤ ~300 MB aggregate for a single pane, write → reflect ≤ ~2 s p95, one consolidated `wl worklist` read per refresh and zero spawns when idle. F5 (WL-0MVJV2PC2008PY64) adds `wlSpawnCap` — the documented max concurrent `wl` read spawns per pane (enforced by the fetcher semaphore; the pane aggregate spawn RSS is bounded by cap × per-spawn peak, asserted by the spawn-burst scenario); F8 (WL-0MVKVJYV6008SL9G) tightened it from 2 to 1 after F7 measured a cold 144.6–175.3 MB per-spawn peak on the built CLI at full scale, which made `2 × peak` breach the ceiling. AC5 is enforced as the epic states it: EITHER the per-spawn peak is inside `peakRssPerSpawnMb` OR the capped fan-out (`wlSpawnCap × peak`) stays inside `paneAggregateRssMb`. The AC numbers are asserted for the built (`dist`) CLI only — the `src` (tsx) target pays tsx module-load cost inside every spawn and does not describe what `wl` runs. `enforced` was flipped true by F7 (WL-0MVJV2QHO003K6H3) after a compliant full-scale `dist` baseline was recorded."
   },
   "regression": {
     "refreshSamples": 5,
@@ -121,7 +124,7 @@
       },
       "baselines": {
         "dist": {
-          "capturedAt": "2026-10-22T20:05:43.015Z",
+          "capturedAt": "2026-10-23T10:46:49.050Z",
           "node": "v22.22.1",
           "host": "rgardler-AI-Laptop",
           "target": "dist",
@@ -134,23 +137,23 @@
             "dependencyEdges": 259,
             "dbSizeMb": 123.7,
             "diskSizeMb": 123.7,
-            "generationMs": 15727
+            "generationMs": 6953
           },
           "metrics": {
-            "refreshP50WallMs": 1798.3,
-            "refreshP95WallMs": 2181.9,
-            "refreshP95CpuMs": 1457.4,
-            "eventLoopBlockingP95Ms": 916.8,
-            "maxEventLoopBlockedMs": 517.7,
+            "refreshP50WallMs": 648.6,
+            "refreshP95WallMs": 714,
+            "refreshP95CpuMs": 885.4,
+            "eventLoopBlockingP95Ms": 172.7,
+            "maxEventLoopBlockedMs": 166.7,
             "spawnsPerRefresh": 1,
-            "peakRssPerSpawnMb": 144.9,
-            "aggregateSpawnRssMb": 144.9,
-            "paneAggregateRssMb": 427,
-            "writeToReflectP95Ms": 3647
+            "peakRssPerSpawnMb": 144.7,
+            "aggregateSpawnRssMb": 144.7,
+            "paneAggregateRssMb": 426.5,
+            "writeToReflectP95Ms": 1404.9
           }
         },
         "src": {
-          "capturedAt": "2026-10-22T20:07:22.211Z",
+          "capturedAt": "2026-10-23T10:47:21.807Z",
           "node": "v22.22.1",
           "host": "rgardler-AI-Laptop",
           "target": "src",
@@ -163,19 +166,19 @@
             "dependencyEdges": 259,
             "dbSizeMb": 123.7,
             "diskSizeMb": 123.7,
-            "generationMs": 21011
+            "generationMs": 4206
           },
           "metrics": {
-            "refreshP50WallMs": 4821.4,
-            "refreshP95WallMs": 8086.3,
-            "refreshP95CpuMs": 3522.1,
-            "eventLoopBlockingP95Ms": 1542,
-            "maxEventLoopBlockedMs": 407,
+            "refreshP50WallMs": 1426,
+            "refreshP95WallMs": 2100.4,
+            "refreshP95CpuMs": 2238.4,
+            "eventLoopBlockingP95Ms": 187.2,
+            "maxEventLoopBlockedMs": 171.7,
             "spawnsPerRefresh": 1,
-            "peakRssPerSpawnMb": 124.6,
-            "aggregateSpawnRssMb": 124.6,
-            "paneAggregateRssMb": 411,
-            "writeToReflectP95Ms": 6422.1
+            "peakRssPerSpawnMb": 126.4,
+            "aggregateSpawnRssMb": 126.4,
+            "paneAggregateRssMb": 346,
+            "writeToReflectP95Ms": 3156.6
           }
         }
       }

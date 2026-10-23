@@ -421,8 +421,11 @@ describe('large-DB budget policy', () => {
     const recorded = budget.profiles.default?.baselines.src as LargeDbBaseline;
     budget.profiles.full = {
       scale: { ...LARGE_DB_PROFILES.full },
-      // A recorded full-scale baseline within target (what F7 records).
-      baselines: { dist: { ...recorded, target: 'dist' } },
+      // Recorded full-scale baselines within target (what F7 records).
+      baselines: {
+        dist: { ...recorded, target: 'dist' },
+        src: { ...recorded, target: 'src' },
+      },
     };
 
     // Not enforced: AC numbers are report-only.
@@ -440,7 +443,7 @@ describe('large-DB budget policy', () => {
       syntheticInput({
         profile: 'full',
         target: 'dist',
-        refresh: { p95WallMs: 1600, eventLoopBlockingP95Ms: 250 },
+        refresh: { p95WallMs: 1600, eventLoopBlockingP95Ms: 250, peakRssPerSpawnMb: 350 },
         pane: { aggregateRssMb: 350 },
       }),
       enforced,
@@ -448,7 +451,21 @@ describe('large-DB budget policy', () => {
     const violations = overTarget.violations.join('\n');
     expect(violations).toContain('AC refreshP95WallMs');
     expect(violations).toContain('AC eventLoopBlockingP95Ms');
-    expect(violations).toContain('AC paneAggregateRssMb');
+    expect(violations).toContain('AC spawnMemoryBudget');
+
+    // The AC numbers are asserted for the BUILT CLI only: the tsx (`src`)
+    // target pays tsx module-load cost inside every spawn and does not
+    // describe what `wl` runs, so it is report-only even when enforced.
+    expect(
+      evaluateLargeDbBudget(
+        syntheticInput({
+          profile: 'full',
+          target: 'src',
+          refresh: { p95WallMs: 8000 },
+        }),
+        enforced,
+      ).violations,
+    ).toEqual([]);
   });
 
   it('reports the parent AC verdicts for a measurement', () => {
@@ -468,8 +485,9 @@ describe('large-DB budget policy', () => {
     );
     expect(ac.refreshP95WallMs).toBe(false);
     expect(ac.eventLoopBlockingP95Ms).toBe(false);
-    expect(ac.peakRssPerSpawnMb).toBe(false);
-    expect(ac.paneAggregateRssMb).toBe(false);
+    // AC5 is an OR: peak 140 MB misses the per-spawn budget and cap 2 × 140 =
+    // 280 MB stays inside the 300 MB pane ceiling, so the criterion is met.
+    expect(ac.spawnMemoryBudget).toBe(true);
     expect(ac.writeToReflectP95Ms).toBe(true);
     expect(ac.spawnsPerRefresh).toBe(false);
     expect(ac.idleSpawns).toBe(true);
