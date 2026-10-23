@@ -13,7 +13,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve as resolvePath } from 'node:path';
 
-import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, fetchBlockersForItem, getWorklogDir, getExecFileAsync, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState, type BlockerRef } from './fetcher.js';
+import { fetchChildrenForItem, fetchChildrenForItems, fetchActionableCount, fetchReviewQueueState, fetchItemsByStage, fetchItemsByPriority, fetchItemDetails, fetchBlockersForItem, getWorklogDir, getExecFileAsync, createInProcessRefreshScope, buildWlArgs, buildWlArgsForRoot, DEFAULT_WL_TIMEOUT_MS, type WorkItem, type ReviewQueueState, type BlockerRef } from './fetcher.js';
 import { isPaneVisible, PollGate, DEFAULT_POLL_GATE_TTL_MS } from './visibility.js';
 import { isAgentCommand } from './pane-title.js';
 import { HerdrEventSubscriber } from './events.js';
@@ -43,6 +43,9 @@ import {
   runSync,
   heartbeatTtlForInterval,
   isSyncHeartbeatFresh,
+  onSyncStatusChange,
+  getSyncStatus,
+  formatSyncNotice,
 } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
@@ -62,7 +65,6 @@ import {
   HYDRATOR_INTERVAL_MS,
   HYDRATOR_RUN_TIMEOUT_MS,
 } from './hydrator.js';
-import { type ModeSwitchWorker, DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS, MODE_SWITCH_RUN_TIMEOUT_MS } from './mode-switch-worker.js';
 import { showToast } from './notify.js';
 import { recordCommand, getLastCommand } from './command-log.js';
 import {
@@ -4279,6 +4281,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   metaBlockedBy?: BlockerRef[] | null,
   /** Active dependency blockers of the detail item, rendered as `Blocked By` rows (WL-0MVBMLY2Z0032CYR). */
   detailBlockedBy?: BlockerRef[] | null,
+  /** Non-blocking background-sync status notice appended to the header (F3 — WL-0MVJV2O7H003HY9N). */
+  syncNotice?: string,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -4322,6 +4326,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     metaBlockedBy?: BlockerRef[] | null,
     /** Active dependency blockers of the detail item, rendered as `Blocked By` rows (WL-0MVBMLY2Z0032CYR). */
     detailBlockedBy?: BlockerRef[] | null,
+    /** Non-blocking background-sync status notice appended to the header (F3 — WL-0MVJV2O7H003HY9N). */
+    syncNotice?: string,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -4385,6 +4391,16 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     }
     if (downtimeStatus) {
       header += downtimeStatus;
+    }
+    // ── Non-blocking sync notice (F3 — WL-0MVJV2O7H003HY9N) ─────
+    // A tiny, render-only status notice ("⟳ syncing… Ns") while a background
+    // `wl sync` is in flight. It NEVER blocks input: it is a pure string read
+    // of the auto-sync status snapshot, appended to the header and clamped by
+    // the same truncation guard as every other header segment. The notice is
+    // the only "hanging" indication the operator sees — no spinner, no modal,
+    // no lock wait.
+    if (syncNotice) {
+      header += ` ${ANSI.fg(45)}${syncNotice}${ANSI.reset}`;
     }
     // ── Header truncation guard (WL-0MSNI6TQ5003JY1Z) ────────────
     // In narrow panes the concatenated header can exceed `cols`,
@@ -4479,7 +4495,17 @@ export function createListRenderer(getShowIcons?: () => boolean): (
         numHeadings++;
         const arrow = row.collapsed ? '▶' : '▼';
         const indent = (row.depth ?? 0) > 0 ? '  '.repeat(row.depth!) : '';
-        const line = `${indent} ${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
+        // The In Review group is the only section with an active
+        // producer-review obligation, so give its heading a grey ANSI 256
+        // background to differentiate it from every other group heading
+        // (WL-0MUYJ8WJG0087VSU). The label is sourced from grouping.ts
+        // (`groupLabel: 'In Review'`), keeping that the single source of
+        // truth. Dark grey 238 keeps sufficient contrast against the
+        // existing yellow-ish heading foreground (stageColor(undefined) =
+        // 220), so the foreground is intentionally left unchanged. All other
+        // headings render exactly as before (no background escape).
+        const headingBg = row.groupLabel === 'In Review' ? ANSI.bg(238) : '';
+        const line = `${indent} ${headingBg}${ANSI.fg(stageColor(undefined))}${ANSI.bold}── ${row.groupLabel} (${row.count}) ${arrow} ──${ANSI.reset}`;
         output.push(isSelected ? reverseWrap(line) : line);
         continue;
       }
@@ -5556,7 +5582,7 @@ export async function runWorklistTui(
   fetcher: () => Promise<WorkItem[]>,
   initialItems?: WorkItem[],
   shortcutRegistry?: { lookupChord: Function; getChordByLeader: Function; getChordByPrefix: Function; getChordEntries: Function } | ShortcutRegistry | undefined,
-  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; modeSwitchWorker?: ModeSwitchWorker; modeSwitchPollIntervalMs?: number; modeSwitchEnabled?: boolean; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
+  options?: { autoRefresh?: boolean; refreshIntervalMs?: number; autoSync?: boolean; syncIntervalMs?: number; browseItemCount?: number; showHelpText?: boolean; getShowHelpText?: () => boolean; showIcons?: boolean; getShowIcons?: () => boolean; onCommand?: (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string) => void; downtimeWorker?: DowntimeWorker; downtimePollIntervalMs?: number; applyActivePaneMarkers?: (items: WorkItem[]) => Promise<void>; subscriber?: HerdrEventSubscriber | null; agentTracker?: AgentTracker | null; onDowntimeToggle?: () => void; maxSyncStalenessMs?: number; onRefresh?: () => Promise<void>; cwd?: string; shipGuardQuery?: () => Promise<{ worklogOutput: string | null; paneOutput: string | null }>; dbWatch?: typeof watchDbChanges; dbWatchOptions?: WatchDbChangesOptions },
 ): Promise<WorkItem | undefined> {
   const opts = {
     autoRefresh: options?.autoRefresh ?? true,
@@ -5575,9 +5601,6 @@ export async function runWorklistTui(
     subscriber: options?.subscriber ?? null,
     agentTracker: options?.agentTracker ?? null,
     onDowntimeToggle: options?.onDowntimeToggle,
-    modeSwitchWorker: options?.modeSwitchWorker,
-    modeSwitchPollIntervalMs: options?.modeSwitchPollIntervalMs ?? 10_000,
-    modeSwitchEnabled: options?.modeSwitchEnabled ?? true,
     maxSyncStalenessMs: options?.maxSyncStalenessMs ?? 60_000,
     onRefresh: options?.onRefresh,
     cwd: options?.cwd,
@@ -5908,18 +5931,32 @@ export async function runWorklistTui(
    * event that opens or closes a work-item pane must refresh the pane list.
    * Single-flight across concurrent events; visibility-gated so a hidden tab
    * spawns no `herdr`; fail-open (see `applyPaneMarkers`).
+   *
+   * The single-flight guard COALESCES (it never drops): an event that lands
+   * while a pass is in flight marks the refresh pending and the pass re-runs
+   * once it settles. A pane can therefore appear during an in-flight pass
+   * (`pane_agent_detected` → status change) and still get its green circle
+   * (WL-0MVFX70SB000YRQH — dropping the trailing event left the cross-instance
+   * late-pane case without a circle).
    */
   let paneMarkerRefreshInFlight: Promise<void> | null = null;
+  let paneMarkerRefreshPending = false;
   const refreshPaneMarkersFromEvent = (): void => {
-    if (paneMarkerRefreshInFlight) return;
+    if (paneMarkerRefreshInFlight) {
+      paneMarkerRefreshPending = true;
+      return;
+    }
     paneMarkerRefreshInFlight = (async () => {
       try {
-        // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and
-        // its open overlay) while a text-input overlay is active.
-        if (inputActive()) return;
-        if (await paneGate.visible()) {
-          await refreshPaneMarkers();
-        }
+        do {
+          paneMarkerRefreshPending = false;
+          // Typing gate (WL-0MTV67MZU003H7SH): do not re-render the TUI (and
+          // its open overlay) while a text-input overlay is active.
+          if (inputActive()) return;
+          if (await paneGate.visible()) {
+            await refreshPaneMarkers();
+          }
+        } while (paneMarkerRefreshPending);
       } catch {
         // Fail-open: pane-marker failures never crash the TUI.
       } finally {
@@ -6060,6 +6097,39 @@ export async function runWorklistTui(
     }
   }
 
+  // ── Non-blocking sync status notice (F3 — WL-0MVJV2O7H003HY9N) ────
+  // The pane renders a tiny `⟳ syncing… Ns` notice in the header while a
+  // background `wl sync` is in flight (auto-sync.ts's status model). The
+  // notice is a pure string read of that snapshot: it never awaits, locks or
+  // touches the DB, so input handling and refreshes stay fully responsive
+  // while a long (~36 s) sync runs. `syncNoticeText` is recomputed on every
+  // status transition and, while in flight, on a 1 s unref'd ticker so the
+  // elapsed counter keeps moving (the operator sees progress, not a hang).
+  let syncNoticeText = '';
+  let syncNoticeTicker: ReturnType<typeof setInterval> | null = null;
+  let unsubscribeSyncStatus: (() => void) | null = null;
+
+  const stopSyncNoticeTicker = (): void => {
+    if (syncNoticeTicker !== null) {
+      clearInterval(syncNoticeTicker);
+      syncNoticeTicker = null;
+    }
+  };
+
+  const refreshSyncNotice = (): void => {
+    syncNoticeText = formatSyncNotice();
+  };
+
+  const startSyncNoticeTicker = (): void => {
+    if (syncNoticeTicker !== null) return;
+    syncNoticeTicker = setInterval(() => {
+      refreshSyncNotice();
+      render();
+    }, 1000);
+    // Never keep the pane process alive just for the status notice.
+    if (syncNoticeTicker.unref) syncNoticeTicker.unref();
+  };
+
   // Setup cleanup
   const cleanup = (): void => {
     // Clear form mode on cleanup
@@ -6078,6 +6148,11 @@ export async function runWorklistTui(
     process.stdin.pause();
     process.stdout.write(ANSI.showCursor);
     process.stdout.write(ANSI.reset);
+    // Sync-notice teardown: stop the in-flight elapsed ticker and drop the
+    // status subscription so an exiting pane cannot leak a timer or receive
+    // status callbacks after teardown (F3 — WL-0MVJV2O7H003HY9N).
+    stopSyncNoticeTicker();
+    if (unsubscribeSyncStatus) unsubscribeSyncStatus();
   };
 
   // Event-subscriber teardown on TUI exit (WL-0MSHB7DHO004RHBJ F6): close
@@ -6137,6 +6212,15 @@ export async function runWorklistTui(
       return;
     }
     refreshInFlight = true;
+    // ONE in-process SQLite connection for this whole refresh, shared by the
+    // expanded-children and actionable-count reads and released in the
+    // `finally` below (WL-0MV6C6SLB005HX7B). Opening a fresh WorklogDatabase
+    // per helper ran the synchronous open + pragmas + DDL twice per refresh
+    // on the event loop (~46–70 ms each on a large worklog.db); a scope
+    // bounds the blocking cost at one open. Never reused across a refresh
+    // boundary — the no-stale-cache invariant (WL-0MV5CBQ6L005SPAG) is
+    // preserved by closing per refresh.
+    const refreshScope = createInProcessRefreshScope();
     try {
       try {
         // Fetch the new top-level items and the children of currently
@@ -6158,11 +6242,24 @@ export async function runWorklistTui(
         const depthByParent = new Map(
           expanded.map((id) => [id, state.getItemDepth(id) + 1]),
         );
-        // Start the review-queue query concurrently with the item fetch so its
-        // identical `wl list` query inside fetchMandatorySubsets deduplicates
-        // via the in-flight memo into a single spawn (WL-0MV5CBQ6L005SPAG).
+        // Start the ITEM fetch first: on the default view it issues the ONE
+        // consolidated `wl worklist` read (WL-0MVI0IT4S0070G78), and the
+        // review-queue state below then derives from that same in-flight
+        // bundle instead of spawning the review query again. Starting the
+        // review state first would leave it with nothing to derive from and
+        // re-introduce a second `wl` spawn per tick.
+        const itemsPromise = fetchItemsForView(
+          state.activeFilter,
+          state.activePriorityFilter,
+          fetcher,
+          state.activeDispatchFilter,
+          opts.cwd,
+        );
+        // The banner state read: derived from the consolidated bundle on the
+        // default view (no extra spawn); filtered/dispatch views keep their
+        // own reads and fall back to the standalone review query.
         const reviewStatePromise = fetchReviewQueueState();
-        const childrenPromise = fetchChildrenForItems(expanded, depthByParent)
+        const childrenPromise = fetchChildrenForItems(expanded, depthByParent, refreshScope)
           .then((childrenByParent) => {
             for (const [parentId, children] of childrenByParent) {
               freshChildren.set(parentId, children);
@@ -6172,16 +6269,7 @@ export async function runWorklistTui(
             // Ignore: refreshItems carries over the previously fetched
             // children when the re-fetch fails.
           });
-        const [newItems] = await Promise.all([
-          fetchItemsForView(
-            state.activeFilter,
-            state.activePriorityFilter,
-            fetcher,
-            state.activeDispatchFilter,
-            opts.cwd,
-          ),
-          childrenPromise,
-        ]);
+        const [newItems] = await Promise.all([itemsPromise, childrenPromise]);
         const oldLen = state.items.length;
 
         // Attach freshly fetched children to the new parent objects BEFORE
@@ -6245,14 +6333,21 @@ export async function runWorklistTui(
       } catch {
         showToast('Refresh failed');
       }
-      // Also fetch the total actionable count on refresh
-      fetchActionableCount().then((count) => {
+      // Also fetch the total actionable count on refresh — read via the SAME
+      // shared in-process connection as the expanded children, so the whole
+      // refresh pays exactly one open (WL-0MV6C6SLB005HX7B).
+      fetchActionableCount(refreshScope).then((count) => {
         totalActionableCount = count;
       }).catch(() => {
         // ignore
       });
       render();
     } finally {
+      // Release the shared in-process connection. Idempotent; a pending
+      // fire-and-forget actionable-count read defers the actual close until
+      // it settles, so the read never touches a closed handle
+      // (WL-0MV6C6SLB005HX7B).
+      refreshScope.close();
       // Always clear the guard — a successful, failed, or aborted cycle must
       // never block the next refresh tick.
       refreshInFlight = false;
@@ -7149,8 +7244,21 @@ export async function runWorklistTui(
   };
 
   let resolve: (value: WorkItem | undefined) => void;
+  /**
+   * True once exit has been requested and the TUI promise has resolved.
+   * Async work still in flight at exit time (a refresh cycle, its coalesced
+   * trailing refresh, a single-flight blocker re-resolve) resolves afterwards
+   * and calls `render()`. Writing a frame to a terminal whose pane has already
+   * been torn down is a leak: it can corrupt a reused pane and, in tests, the
+   * escaping frame is captured by whoever owns stdout next
+   * (WL-0MVFX6404003TE2E). `render()` therefore becomes a no-op after exit.
+   */
+  let exited = false;
   const promise = new Promise<WorkItem | undefined>((res) => {
-    resolve = res;
+    resolve = (value: WorkItem | undefined) => {
+      exited = true;
+      res(value);
+    };
   });
 
   /**
@@ -7224,6 +7332,10 @@ export async function runWorklistTui(
     }));
 
   const render = (): void => {
+    // Never write a frame after teardown: async work that outlives the exit
+    // (refresh cycle / coalesced trailing refresh / blocker re-resolve) must
+    // not repaint a torn-down pane (WL-0MVFX6404003TE2E).
+    if (exited) return;
     termSize = getTermSize();
     state.termSize = termSize;
 
@@ -7423,6 +7535,7 @@ export async function runWorklistTui(
       sprintAuditsOutstanding,
       metaBlockers,
       detailBlockers,
+      syncNoticeText,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
@@ -7641,6 +7754,22 @@ export async function runWorklistTui(
     });
   }
 
+  // Subscribe to background-sync status transitions so the header notice
+  // appears the instant a sync spawns and clears the instant it settles —
+  // both via asynchronous libuv events, never on the refresh path. The
+  // subscription also adopts a sync already in flight in this process
+  // (F3 — WL-0MVJV2O7H003HY9N).
+  if (opts.autoSync) {
+    unsubscribeSyncStatus = onSyncStatusChange(() => {
+      refreshSyncNotice();
+      if (getSyncStatus().inFlight) startSyncNoticeTicker();
+      else stopSyncNoticeTicker();
+      render();
+    });
+    refreshSyncNotice();
+    if (getSyncStatus().inFlight) startSyncNoticeTicker();
+  }
+
   // Visibility resume-poll — runs only while the pane's tab is hidden. Polls
   // tab visibility on a short interval so the hidden → visible transition
   // triggers an immediate doRefresh instead of waiting for the next
@@ -7750,42 +7879,6 @@ export async function runWorklistTui(
       runTimeoutMs: DOWNTIME_RUN_TIMEOUT_MS,
       run: async () => {
         await opts.downtimeWorker?.tick();
-      },
-    });
-  }
-
-  // Mode-switch worker task — polls the llama-proxy for idle state and,
-  // after the configured idle threshold, switches from fast (cloud) to
-  // cheap (local) mode (parent WL-0MSN3FWV5008KQE9). WL-0MTV67MZU003H7SH audit —
-  // same as downtime: NOT visibility-gated or typing-gated — the worker only
-  // switches inference mode via the proxy; it never re-renders the list while
-  // a form/ship-it dialog is open. Pattern-matched on the
-  // downtime task: single-flight + runTimeoutMs watchdog (a hung tick can
-  // never wedge the task), visibility-independent (runs while the worklist
-  // pane is open). The task is only registered when the feature is enabled
-  // at startup (modeSwitchEnabled); the run ALSO re-reads settings every
-  // tick so a disable or threshold change applies without a plugin restart.
-  // Probe jitter is intentionally NOT applied: each instance's idle clock
-  // resets at construction, so panes' cheap-switch timings are already
-  // naturally desynchronized (unlike the downtime poller's shared registry).
-  const modeSwitchEnabledAtStartup =
-    loadSettings().modeSwitchEnabled ?? opts.modeSwitchEnabled;
-  if (opts.modeSwitchWorker && modeSwitchEnabledAtStartup) {
-    scheduler.addTask({
-      id: 'mode-switch',
-      intervalMs: opts.modeSwitchPollIntervalMs,
-      singleFlight: true,
-      runTimeoutMs: MODE_SWITCH_RUN_TIMEOUT_MS,
-      run: async () => {
-        // Re-read settings every tick so modeSwitchEnabled / idle threshold
-        // changes apply without a plugin restart (matching downtime config).
-        const s = loadSettings();
-        await opts.modeSwitchWorker?.tick({
-          enabled: s.modeSwitchEnabled ?? opts.modeSwitchEnabled,
-          idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-          proxyUrl: s.downtimeProxyUrl,
-          proxyStatus: null, // worker fetches its own proxy status
-        });
       },
     });
   }

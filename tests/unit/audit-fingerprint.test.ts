@@ -1,16 +1,17 @@
 /**
  * Canonical audit content fingerprint (TypeScript port) — unit tests
- * (WL-0MUN7QWFP0010EQC).
+ * (WL-0MUN7QWFP0010EQC, schema 2 in WL-0MVK5SWZE00254Y7).
  *
- * These tests pin the pure pieces (Python-compatible canonical JSON, Key Files
- * extraction, path normalisation, touched-file resolution, path states) and
- * the failure modes (git unavailable → `null`, fail-safe). Byte-for-byte
- * equivalence with the canonical Python implementation is covered separately
- * in `audit-fingerprint-parity.test.ts`.
+ * These tests pin the pure pieces (Python-compatible canonical JSON, the
+ * schema-2 digest over the item's OWN title/description, and the retained
+ * path helpers) and the failure modes. Byte-for-byte equivalence with the
+ * canonical Python implementation is covered separately in
+ * `audit-fingerprint-parity.test.ts`.
  */
 
 import { describe, it, expect } from 'vitest';
 import {
+  AUDIT_CONTENT_FINGERPRINT_SCHEMA,
   canonicalJson,
   computeContentFingerprint,
   computePathFingerprints,
@@ -18,6 +19,7 @@ import {
   normaliseRepoPath,
   parsePorcelainPath,
   resolveTouchedFiles,
+  sha256Hex,
   type GitResult,
   type GitRunner,
 } from '../../src/audit-fingerprint.js';
@@ -186,82 +188,51 @@ describe('computePathFingerprints', () => {
 });
 
 describe('computeContentFingerprint', () => {
-  const baseRunner = () =>
-    fixtureRunner({
-      allLog: '__WL_COMMIT__abc\nsrc/a.ts\n',
-      heads: { 'src/a.ts': 'blobhash' },
-      status: '',
-      diff: '',
-    });
-
   it('produces a deterministic 64-hex digest', () => {
     const first = computeContentFingerprint({
-      id: 'CFP-1',
+      title: 'Item title',
       description: '## Key Files\n- `src/a.ts`',
-      runGit: baseRunner(),
     });
     const second = computeContentFingerprint({
-      id: 'CFP-1',
+      title: 'Item title',
       description: '## Key Files\n- `src/a.ts`',
-      runGit: baseRunner(),
     });
     expect(first).toMatch(/^[0-9a-f]{64}$/);
     expect(first).toBe(second);
   });
 
-  it('changes when a touched path blob changes', () => {
-    const before = computeContentFingerprint({
-      id: 'CFP-1',
-      description: '## Key Files\n- `src/a.ts`',
-      runGit: baseRunner(),
-    });
-    const after = computeContentFingerprint({
-      id: 'CFP-1',
-      description: '## Key Files\n- `src/a.ts`',
-      runGit: fixtureRunner({
-        allLog: '__WL_COMMIT__abc\nsrc/a.ts\n',
-        heads: { 'src/a.ts': 'differentblob' },
+  it('hashes exactly the schema-2 payload (title and description hashes only)', () => {
+    const title = 'A work item';
+    const description = 'Body text';
+    const expected = sha256Hex(
+      canonicalJson({
+        schema: AUDIT_CONTENT_FINGERPRINT_SCHEMA,
+        title_hash: sha256Hex(title),
+        description_hash: sha256Hex(description),
       }),
-    });
-    expect(before).not.toBe(after);
+    );
+    expect(computeContentFingerprint({ title, description })).toBe(expected);
   });
 
-  it('changes when the working tree is dirty for a touched path', () => {
-    const before = computeContentFingerprint({
-      id: 'CFP-1',
-      description: '## Key Files\n- `src/a.ts`',
-      runGit: baseRunner(),
-    });
-    const after = computeContentFingerprint({
-      id: 'CFP-1',
-      description: '## Key Files\n- `src/a.ts`',
-      runGit: fixtureRunner({
-        allLog: '__WL_COMMIT__abc\nsrc/a.ts\n',
-        heads: { 'src/a.ts': 'blobhash' },
-        status: ' M src/a.ts',
-      }),
-    });
-    expect(before).not.toBe(after);
+  it('changes when the title changes and when the description changes', () => {
+    const base = computeContentFingerprint({ title: 'title', description: 'desc' });
+    expect(computeContentFingerprint({ title: 'title!', description: 'desc' })).not.toBe(base);
+    expect(computeContentFingerprint({ title: 'title', description: 'desc!' })).not.toBe(base);
   });
 
-  it('changes when the description changes', () => {
-    const before = computeContentFingerprint({
-      id: 'CFP-1',
-      description: '## Key Files\n- `src/a.ts`',
-      runGit: baseRunner(),
-    });
-    const after = computeContentFingerprint({
-      id: 'CFP-1',
-      description: '## Key Files\n- `src/a.ts`\n\nedited',
-      runGit: baseRunner(),
-    });
-    expect(before).not.toBe(after);
-  });
-
-  it('returns null (fail-safe) when git is unavailable', () => {
-    const runner: GitRunner = () => ({ ok: false, stdout: '' });
+  it('is unaffected by repository state — it takes no git runner at all', () => {
+    // The schema-2 call signature carries no `runGit` seam: there is no git
+    // state to hash and therefore no way for a commit or a dirty working tree
+    // to invalidate an audit (SA-0MVIDI8E00063OOP).
+    const input = { title: 'title', description: 'desc' } as Record<string, unknown>;
     expect(
-      computeContentFingerprint({ id: 'CFP-1', description: 'x', runGit: runner }),
-    ).toBeNull();
+      computeContentFingerprint(input as { title: string; description: string }),
+    ).toBe(computeContentFingerprint({ title: 'title', description: 'desc' }));
+  });
+
+  it('treats missing title/description as empty strings (deterministic)', () => {
+    const expected = computeContentFingerprint({ title: '', description: '' });
+    expect(computeContentFingerprint({})).toBe(expected);
+    expect(computeContentFingerprint({ title: null, description: null })).toBe(expected);
   });
 });

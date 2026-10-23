@@ -18,9 +18,31 @@ import { withFileLock, getLockPathForJsonl } from '../file-lock.js';
 import { withStoreMutationLock } from '../mutation-lock.js';
 import { buildForeignItemReport, applyForeignItemCleanup } from '../doctor/foreign-items-check.js';
 import { buildAuditGapReport } from '../doctor/audit-gaps-check.js';
+import {
+  pruneStateDir,
+  resolveCacheDir,
+  DEFAULT_STATE_MAX_FILES,
+  DEFAULT_STATE_TTL_MS,
+} from '../read-cache.js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { normalizePriority, isValidPriority, isMappablePriority, PRIORITY_MAP, CANONICAL_PRIORITIES } from '../validators/priority.js';
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** Compact human-readable byte formatting for cache reports. */
+function formatCacheBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) bytes = 0;
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KiB', 'MiB', 'GiB'];
+  let value = bytes / 1024;
+  let unit = units[0];
+  for (let i = 1; i < units.length && value >= 1024; i++) {
+    value /= 1024;
+    unit = units[i];
+  }
+  return `${value.toFixed(1)} ${unit}`;
+}
 
 interface DoctorOptions {
   prefix?: string;
@@ -125,6 +147,62 @@ function printPendingUpgradeNotice(state: PendingUpgradeState): void {
     }
   }
   console.log('Run `wl doctor upgrade` to preview pending upgrades, or `wl doctor upgrade --confirm` to apply them.');
+}
+
+/**
+ * Read-cache state that `wl doctor` should flag (F9 — WL-0MVFRRQ9W003KEFL):
+ * the per-worklog-dir counter store has grown past what a dry-run prune would
+ * reclaim. Read-only: a dry-run `pruneStateDir` never deletes anything.
+ */
+interface PendingCacheState {
+  pending: boolean;
+  files: number;
+  totalBytes: number;
+  staleByTtl: number;
+  overBound: number;
+  maxFiles: number;
+  ttlDays: number;
+  stateDir: string;
+}
+
+/** Detect pending read-cache state cleanup (best-effort, never throws). */
+function detectPendingCacheState(): PendingCacheState {
+  const none: PendingCacheState = {
+    pending: false,
+    files: 0,
+    totalBytes: 0,
+    staleByTtl: 0,
+    overBound: 0,
+    maxFiles: DEFAULT_STATE_MAX_FILES,
+    ttlDays: DEFAULT_STATE_TTL_MS / DAY_MS,
+    stateDir: '',
+  };
+  try {
+    const result = pruneStateDir(resolveCacheDir(), { dryRun: true });
+    return {
+      pending: result.removed > 0,
+      files: result.filesScanned,
+      totalBytes: result.totalBytes,
+      staleByTtl: result.staleByTtl,
+      overBound: result.overBound,
+      maxFiles: DEFAULT_STATE_MAX_FILES,
+      ttlDays: DEFAULT_STATE_TTL_MS / DAY_MS,
+      stateDir: result.stateDir,
+    };
+  } catch {
+    return none;
+  }
+}
+
+/** Print the pending read-cache notice in human-readable mode. */
+function printPendingCacheNotice(state: PendingCacheState): void {
+  console.log('');
+  console.log('Doctor: pending read-cache state cleanup detected.');
+  console.log(
+    `Read-cache state counters: ${state.files} file(s) — ${state.staleByTtl} stale by TTL, ` +
+      `${state.overBound} over the ${state.maxFiles}-file bound (${formatCacheBytes(state.totalBytes)} total).`
+  );
+  console.log('Run `wl doctor cache --prune` to reclaim the space, or `wl doctor cache` for details.');
 }
 
 export default function register(ctx: PluginContext): void {
@@ -566,6 +644,72 @@ export default function register(ctx: PluginContext): void {
         const message = err instanceof Error ? err.message : String(err);
         if (utils.isJsonMode()) output.json({ success: false, error: message });
         else console.error(`Doctor prune failed: ${message}`);
+      }
+    });
+
+  doctor
+    .command('cache')
+    .description('Report and prune the bounded read-cache state directory (<cache-dir>/state)')
+    .option('--prune', 'Remove stale counters and enforce the file bound (default: report only)')
+    .option('--dry-run', 'Report only — never delete anything (default)')
+    .option('--max-files <n>', `Max per-worklog-dir counters to keep (default ${DEFAULT_STATE_MAX_FILES})`)
+    .option('--ttl-days <n>', `Remove counters untouched for this many days (default ${DEFAULT_STATE_TTL_MS / 86_400_000})`)
+    .action((opts: { prune?: boolean; dryRun?: boolean; maxFiles?: string; ttlDays?: string }) => {
+      // Cache maintenance is worklog-independent: no `requireInitialized()`,
+      // so a stale cache can be reclaimed from anywhere.
+      const fail = (message: string): void => {
+        if (utils.isJsonMode()) output.json({ success: false, error: message });
+        else console.error(`Doctor cache failed: ${message}`);
+        process.exitCode = 1;
+      };
+
+      const maxFiles = Number(String(opts.maxFiles ?? DEFAULT_STATE_MAX_FILES));
+      const ttlDays = Number(String(opts.ttlDays ?? DEFAULT_STATE_TTL_MS / DAY_MS));
+      if (!Number.isInteger(maxFiles) || maxFiles < 0) {
+        fail(`--max-files must be a non-negative integer (got "${opts.maxFiles ?? ''}")`);
+        return;
+      }
+      if (!Number.isFinite(ttlDays) || ttlDays < 0) {
+        fail(`--ttl-days must be a non-negative number (got "${opts.ttlDays ?? ''}")`);
+        return;
+      }
+
+      try {
+        // `--prune` applies; `--dry-run` always wins when both are given.
+        const dryRun = opts.prune !== true || opts.dryRun === true;
+        const ttlMs = Math.floor(ttlDays * DAY_MS);
+        const result = pruneStateDir(resolveCacheDir(), {
+          maxFiles,
+          ttlMs,
+          dryRun,
+          invalidateEntries: !dryRun,
+        });
+
+        if (utils.isJsonMode()) {
+          output.json({ success: true, ...result, maxFiles, ttlMs });
+          return;
+        }
+
+        console.log(`Read-cache state: ${result.stateDir}`);
+        console.log(` - counters: ${result.filesScanned} (${formatCacheBytes(result.totalBytes)})`);
+        console.log(` - stale by TTL: ${result.staleByTtl}`);
+        console.log(` - over bound: ${result.overBound}`);
+        console.log(` - bound: ${maxFiles} file(s), TTL ${ttlDays} day(s)`);
+        if (result.dryRun) {
+          console.log(
+            `Dry run: would remove ${result.removed} counter(s), reclaiming ${formatCacheBytes(result.bytesReclaimed)}.`
+          );
+          if (result.removed > 0) console.log('Run `wl doctor cache --prune` to reclaim the space.');
+        } else {
+          console.log(
+            `Removed ${result.removed} counter(s), reclaimed ${formatCacheBytes(result.bytesReclaimed)} (remaining: ${result.remaining}).`
+          );
+          if (result.invalidatedEntries > 0) {
+            console.log(`Dropped ${result.invalidatedEntries} cache entr(y/ies) belonging to pruned counters.`);
+          }
+        }
+      } catch (err) {
+        fail(err instanceof Error ? err.message : String(err));
       }
     });
 
@@ -1392,25 +1536,41 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
       // Pending-upgrade detection (WL-0MUTVB271007YKJZ): read-only scan for
       // schema migrations and outdated git hooks that `wl doctor upgrade`
       // would apply. Computed after --fix so the notice reflects the final
-      // findings set.
+      // findings set. Pending read-cache state (F9 — WL-0MVFRRQ9W003KEFL) is
+      // detected alongside.
       const pendingUpgrade = detectPendingUpgrades();
+      const pendingCache = detectPendingCacheState();
 
       if (utils.isJsonMode()) {
-        const jsonFindings = pendingUpgrade.hasPendingUpgrades
-          ? [...findings, buildPendingUpgradeFinding(pendingUpgrade)]
-          : findings;
+        const jsonFindings = [...findings];
+        if (pendingUpgrade.hasPendingUpgrades) jsonFindings.push(buildPendingUpgradeFinding(pendingUpgrade));
+        if (pendingCache.pending) {
+          jsonFindings.push({
+            checkId: 'read-cache.state',
+            type: 'maintenance',
+            severity: 'info',
+            itemId: null,
+            message:
+              `Read-cache state: ${pendingCache.files} counter(s) (${pendingCache.staleByTtl} stale by TTL, ` +
+              `${pendingCache.overBound} over the ${pendingCache.maxFiles}-file bound). Run ` +
+              '`wl doctor cache` to review or `wl doctor cache --prune` to reclaim.',
+            proposedFix: null,
+            safe: false,
+          });
+        }
         output.json(jsonFindings);
         return;
       }
 
       if (findings.length === 0) {
-        if (!pendingUpgrade.hasPendingUpgrades) {
+        if (!pendingUpgrade.hasPendingUpgrades && !pendingCache.pending) {
           console.log('Doctor: no issues found.');
           return;
         }
-        // Pending upgrades exist but validation is clean: emit the advisory
-        // notice instead of a misleading bare "no issues found" (AC2).
-        printPendingUpgradeNotice(pendingUpgrade);
+        // Pending upgrades / cache state exist but validation is clean: emit
+        // the advisory notice instead of a misleading bare "no issues found".
+        if (pendingUpgrade.hasPendingUpgrades) printPendingUpgradeNotice(pendingUpgrade);
+        if (pendingCache.pending) printPendingCacheNotice(pendingCache);
         return;
       }
 
@@ -1485,10 +1645,13 @@ ${withIncorrect.length} item(s) with incorrect **Key Files:** sections:`);
         }
       }
 
-      // Pending-upgrade notice is appended after the existing per-item
-      // findings/manual-fix output, without altering it (AC3).
+      // Pending-upgrade / read-cache notices are appended after the existing
+      // per-item findings/manual-fix output, without altering it.
       if (pendingUpgrade.hasPendingUpgrades) {
         printPendingUpgradeNotice(pendingUpgrade);
+      }
+      if (pendingCache.pending) {
+        printPendingCacheNotice(pendingCache);
       }
     });
 }

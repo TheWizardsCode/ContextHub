@@ -45,6 +45,37 @@ export function sortByPriorityAndDate(a: WorkItem, b: WorkItem): number {
   return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
 }
 
+export interface HierarchyOrderHost {
+  getAllOrderedByHierarchySortIndex: () => WorkItem[];
+}
+
+/**
+ * Build a comparator that orders `WorkItem`s by the canonical hierarchy
+ * sort-index order (see `orderByHierarchySortIndex`).
+ *
+ * Extracted from `wl list` (WL-0MVI0HX58009JJRF) so the consolidated
+ * `wl worklist` read can order its `db.list()` subsets identically without
+ * forking the ordering logic. Items absent from the hierarchy ordering
+ * (should not happen in practice) fall back to {@link sortByPriorityAndDate}.
+ */
+export function createHierarchyOrderComparator(
+  db: HierarchyOrderHost,
+): (a: WorkItem, b: WorkItem) => number {
+  const ordered = db.getAllOrderedByHierarchySortIndex();
+  const positions = new Map(ordered.map((item, index) => [item.id, index]));
+  return (a, b) => {
+    const aPos = positions.get(a.id);
+    const bPos = positions.get(b.id);
+    if (aPos === undefined && bPos === undefined) {
+      return sortByPriorityAndDate(a, b);
+    }
+    if (aPos === undefined) return 1;
+    if (bPos === undefined) return -1;
+    if (aPos !== bPos) return aPos - bPos;
+    return sortByPriorityAndDate(a, b);
+  };
+}
+
 export function sortByPriorityDateAndId(a: WorkItem, b: WorkItem): number {
   const byPriorityAndDate = sortByPriorityAndDate(a, b);
   if (byPriorityAndDate !== 0) return byPriorityAndDate;

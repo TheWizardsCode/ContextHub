@@ -41,6 +41,13 @@ import {
   extractJson,
   extractItems,
 } from './fetcher.js';
+import {
+  INTERACTIVE_DEFAULT_REQUEST_PRIORITY,
+  INTERACTIVE_PRIORITY_LOOKUP_TIMEOUT_MS,
+  REQUEST_PRIORITY_ENV_VAR,
+  resolveInteractiveRequestPriority,
+  type RequestPriority,
+} from './request-priority.js';
 import { AgentTracker, AGENT_PANES_FILE } from './agent-tracker.js';
 import {
   isAgentCommand,
@@ -104,7 +111,6 @@ import {
   type DowntimeClaimResult,
   type DowntimeSpawn,
   type DowntimeSpawnResult,
-  type DowntimeSpawnConfig,
   type ScheduledPrompt,
   type DowntimeItemResult,
   parseShowItemOutput,
@@ -120,13 +126,7 @@ import {
   isSafeDowntimePaneToClose,
   type HerdrPaneRecord,
   type RunningPanesResult,
-  type LlamaStatus,
 } from './downtime-worker.js';
-import {
-  createModeSwitchWorker,
-  type ModeSwitchWorker,
-  DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-} from './mode-switch-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
   appendDowntimeLogEntry,
@@ -149,6 +149,11 @@ import {
   type StalledResumeStartOptions,
   type StalledScanOptions,
 } from './stalled-work.js';
+import {
+  scanLongRunningPanes,
+  type LongRunningPaneObservation,
+  type LongRunningScanOptions,
+} from './long-running-panes.js';
 import {
   getDueScheduledPrompt as getFirstDuePrompt,
   loadScheduledPrompts,
@@ -263,6 +268,12 @@ export { stripAgentPromptPrefix };
  * current pane, placing the new pi pane in the work-item-ID tab. An
  * absent/empty anchor omits the flag, keeping the legacy current-pane split
  * (no-ID commands and the fail-open fallback, AC4/AC5).
+ *
+ * Request priority (WL-0MVE1NZ4J000H5NH AC2): when `requestPriority` is
+ * supplied, `--request-priority <low|medium|high>` is forwarded so
+ * send-to-pi.sh injects `HERDR_REQUEST_PRIORITY` into the pane process'
+ * environment. An absent value omits the flag (backward compatible — the
+ * Worklog pi extension then leaves the request headers untouched).
  */
 export function buildSendToPiArgs(
   command: string,
@@ -272,6 +283,7 @@ export function buildSendToPiArgs(
   paneName?: string,
   focus?: boolean,
   anchor?: string,
+  requestPriority?: RequestPriority,
 ): string[] {
   const agentPrompt = stripAgentPromptPrefix(command);
   const args = [focus ? '--focus' : '--no-focus', '--cwd', targetCwd];
@@ -286,6 +298,12 @@ export function buildSendToPiArgs(
   }
   if (anchor) {
     args.push('--anchor', anchor);
+  }
+  // Request priority: placed before the command, which must stay the final
+  // argv token (send-to-pi.sh treats everything after its options as the
+  // command).
+  if (requestPriority) {
+    args.push('--request-priority', requestPriority);
   }
   args.push(agentPrompt);
   return args;
@@ -454,6 +472,12 @@ export interface BackgroundSpawnDeps {
   openSync?: (path: string, flags: string) => number;
   /** Called when the background child process exits — triggers a TUI refresh. */
   onExit?: (exitCode: number | null, signal: string | null) => void;
+  /**
+   * Already-mapped request priority for the dispatched item
+   * (WL-0MVE1NZ4J000H5NH AC2). Defaults to the interactive default (`high`)
+   * when omitted.
+   */
+  requestPriority?: RequestPriority;
 }
 
 /**
@@ -541,7 +565,12 @@ export function spawnBackgroundPi(
     detached: true,
     stdio: fd >= 0 ? (['ignore', fd, fd] as const) : 'ignore',
     cwd: targetCwd,
-    env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
+    env: {
+      ...process.env,
+      HERDR_RESOLVED_CWD: targetCwd,
+      [REQUEST_PRIORITY_ENV_VAR]:
+        deps.requestPriority ?? INTERACTIVE_DEFAULT_REQUEST_PRIORITY,
+    },
   });
   child.unref(); // Allow the parent to exit independently
 
@@ -678,6 +707,53 @@ export async function claimItemForAgentCommand(command: string): Promise<void> {
       `[worklog-plugin] Failed to set ${itemId} status to in_progress: ${result.error ?? 'unknown error'}\n`,
     );
   }
+}
+
+/**
+ * Look up a work item's raw priority for interactive request-priority
+ * resolution (WL-0MVE1NZ4J000H5NH AC2).
+ *
+ * Bounded and fail-open: any CLI error, timeout or parse failure resolves
+ * `undefined`, which the interactive mapping turns into the default `high`.
+ * Never throws.
+ */
+async function lookupWorkItemPriority(itemId: string): Promise<string | undefined> {
+  try {
+    const { stdout } = await getExecFileAsync()(
+      'wl',
+      buildWlArgs(['show', itemId, '--json']),
+      { encoding: 'utf8', timeout: INTERACTIVE_PRIORITY_LOOKUP_TIMEOUT_MS },
+    );
+    return parseShownWorkItem(stdout)?.priority;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve the request priority for an interactive agent dispatch
+ * (WL-0MVE1NZ4J000H5NH AC2): map the dispatched work item's priority through
+ * the interactive table. Fail-open — no item id, a lookup failure or a
+ * timeout yields the interactive default (`high`).
+ *
+ * `lookup` is the priority-resolution seam (validation WL-0MVGC6JVP00812DS
+ * AC1): it defaults to the production `wl show` lookup and may be injected
+ * by tests to drive the resolution deterministically (absent id, lookup
+ * failure, timeout). The `timeoutMs` budget is forwarded to the underlying
+ * resolution when supplied.
+ */
+export async function resolveInteractiveDispatchPriority(
+  itemId: string | undefined,
+  lookup: (
+    id: string,
+  ) =>
+    | string
+    | null
+    | undefined
+    | Promise<string | null | undefined> = lookupWorkItemPriority,
+  timeoutMs: number = INTERACTIVE_PRIORITY_LOOKUP_TIMEOUT_MS,
+): Promise<RequestPriority> {
+  return resolveInteractiveRequestPriority(itemId, lookup, timeoutMs);
 }
 
 /**
@@ -1770,14 +1846,14 @@ export function createDowntimeDeps(
         itemTitle?: string;
         itemId?: string;
         anchorId?: string;
-        spawnConfig?: DowntimeSpawnConfig;
+        priority?: string | null;
       },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
         buildDowntimePaneArgs(kind, prompt, opts),
-        { cwd: opts.cwd, config: opts.spawnConfig },
+        { cwd: opts.cwd, priority: opts.priority },
         spawnFn,
       );
     },
@@ -2141,6 +2217,26 @@ export function createDowntimeDeps(
         opts,
       );
     },
+    // Long-running pane detection (WL-0MVKNC2N50025HXE AC2): reuses the same
+    // machine-wide seams as the stalled scan (pane list, wl show, rolling
+    // log, root resolver). Used ONLY to annotate a capacity-starvation signal
+    // with the panes holding the local model — observation only, never a
+    // resume/close. Fail-safe: the scan resolves [] on any failure.
+    async scanLongRunningPanes(
+      cwd: string,
+      opts: LongRunningScanOptions,
+    ): Promise<LongRunningPaneObservation[]> {
+      return scanLongRunningPanes(
+        {
+          listPanes: defaultStalledPanesLister,
+          fetchItem: fetchAuditItemById,
+          readEntries: readDowntimeLogEntries,
+          resolveRoot: defaultStalledPaneRootResolver,
+        },
+        cwd,
+        opts,
+      );
+    },
     async resumeStalledPane(candidate: StalledPaneCandidate, opts: StalledScanOptions) {
       return resumeStalledPane(
         {
@@ -2327,38 +2423,9 @@ export async function main(): Promise<void> {
   const targetCwd = wlRoot ?? resolvedCwd ?? process.cwd();
 
   // Machine-wide coordination directory shared by the downtime leader
-  // election and the mode-switch shared activity file (WL-0MU6MXCZZ007ZXT9,
-  // AC2). HERDR_COORDINATION_DIR override wins; default ~/.herdr/downtime/.
+  // election (WL-0MU6MXCZZ007ZXT9, AC2). HERDR_COORDINATION_DIR override
+  // wins; default ~/.herdr/downtime/.
   const coordinationDir = getMachineCoordinationDir() ?? join(targetCwd, '.worklog');
-
-  // Mode-switch worker: automatically switches the llama-proxy between fast
-  // (cloud) and cheap (local) modes based on operator activity and proxy
-  // idle state. Created with settings.downtimeProxyUrl (reuse, no new URL
-  // key). Created AFTER the downtime worker because it needs
-  // `downtimeWorker.isLeader` for leader-only cheap switching (AC1) and the
-  // coordination directory for shared activity broadcast (AC2). The idle
-  // callback is wired through a holder because createDowntimeWorker needs
-  // `onProxyIdle` before the mode-switch worker exists.
-  const modeSwitchHolder: { worker?: ModeSwitchWorker } = {};
-
-  // Callback: when the downtime dispatcher finds the proxy idle, trigger a
-  // mode-switch tick immediately with the fresh status — avoids the 10 s
-  // poll delay of the independent scheduler task.
-  const onProxyIdle = async (proxyStatus: LlamaStatus): Promise<void> => {
-    const worker = modeSwitchHolder.worker;
-    if (!worker) return; // dispatcher cannot tick before the worker exists
-    try {
-      const s = loadSettings();
-      await worker.tick({
-        enabled: s.modeSwitchEnabled ?? true,
-        idleThresholdMs: s.modeSwitchIdleThresholdMs ?? DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-        proxyUrl: s.downtimeProxyUrl,
-        proxyStatus,
-      });
-    } catch {
-      // Fail-closed: a broken tick never crashes the downtime dispatcher.
-    }
-  };
 
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),
@@ -2385,29 +2452,26 @@ export async function main(): Promise<void> {
         // the concurrency limiter.
         model: s.downtimeModel,
         cwd: targetCwd,
-        // Mode-aware Phase 2 parallelism (WL-0MT50S9JW001DHME): the last
-        // proxy mode observed by the mode-switch worker (`null` until polled
-        // → `undefined` → the dispatcher conservatively keeps PARALLELISM=1).
-        //
-        // WL-0MUFRFLRQ004KNDG: read through `modeSwitchHolder`, NOT the
-        // `modeSwitchWorker` const below. createDowntimeWorker calls config()
-        // SYNCHRONOUSLY during construction (the durable-disable marker check),
-        // which runs before `modeSwitchWorker` is initialized — referencing it
-        // directly hit the temporal dead zone and crashed the whole plugin at
-        // startup. The holder is declared above; it is empty at construction
-        // (conservative `undefined` → PARALLELISM=1) and populated immediately
-        // after, so later ticks read the real mode.
-        mode: modeSwitchHolder.worker?.getLastKnownMode() ?? undefined,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
         nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,
         // Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK).
         maxAttempts: s.downtimeMaxAttempts,
+        // Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1):
+        // re-read each tick like browseItemCount/maxAttempts so a settings
+        // change applies without a plugin restart.
+        auditBatchMax: s.downtimeAuditBatchMax,
         // Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT).
         markerStaleWindowMs: s.downtimeMarkerStaleWindowMs,
         // Stalled-work scan before new-item selection (WL-0MUYMBSA90092QV2).
         stallScanEnabled: s.downtimeStallScanEnabled,
         stallScanThresholdMs: s.downtimeStallThresholdMs,
+        // Capacity-starvation observability (WL-0MVKNC2N50025HXE): the window
+        // of continuous capacity refusal before a `capacity-starved` signal is
+        // written, and the progress window used to name the panes holding the
+        // model. Both are re-read each tick (live).
+        capacityStarvationAlertMs: s.downtimeCapacityStarvationAlertMs,
+        longRunningThresholdMs: s.downtimeLongRunningThresholdMs,
         browseItemCount: s.browseItemCount,
         // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
         // `paneCloseEnabled` setting (default on) with a configurable
@@ -2419,17 +2483,7 @@ export async function main(): Promise<void> {
         },
       };
     },
-    onProxyIdle,
   });
-
-  // Mode-switch worker (created AFTER the downtime worker so it can reuse the
-  // leader probe): only the downtime leader runs the idle cheap switch (AC1)
-  // and the shared activity file is read from the same coordination dir.
-  const modeSwitchWorker: ModeSwitchWorker = createModeSwitchWorker({
-    isLeader: () => downtimeWorker.isLeader,
-    coordinationDir,
-  });
-  modeSwitchHolder.worker = modeSwitchWorker;
 
   const selectedItem = await runWorklistTui(
     fetcher,
@@ -2468,9 +2522,6 @@ export async function main(): Promise<void> {
         applyActivePaneMarkers(items, hydratorDeps.listActivePanes, hydratorWorkspaceId),
       subscriber: eventSubscriber,
       agentTracker,
-      modeSwitchWorker,
-      modeSwitchPollIntervalMs: runSettings.modeSwitchPollIntervalMs,
-      modeSwitchEnabled: runSettings.modeSwitchEnabled,
       maxSyncStalenessMs: runSettings.maxSyncStalenessMs,
       onCommand: async (command: string, model?: string, openPane?: boolean, onRefresh?: () => Promise<void>, paneTitle?: string, focus?: boolean) => {
         // Agent commands (/skill:*, /intake, /plan) are routed to a new pi agent
@@ -2542,13 +2593,6 @@ export async function main(): Promise<void> {
               )
             : Promise.resolve();
         if (route === 'agent') {
-          // Agent-route hook: record operator activity and fire fast-switch
-          // (fail-open: never blocks command dispatch). Only runs for agent
-          // commands — /skill:*, /intake, /plan, /prompt:. Shell shortcuts
-          // (!!/!) and plain commands do NOT count as operator activity
-          // (AC2). The worker's onOperatorCommand updates the idle clock
-          // and POSTs mode=fast (when not already fast) fire-and-forget.
-          modeSwitchWorker.onOperatorCommand(runSettings.downtimeProxyUrl);
           // Claim the referenced work-item BEFORE dispatching so it appears
           // in_progress immediately — for both the pane and the headless
           // (no-pane) path. Non-blocking: failures are logged to stderr and
@@ -2558,6 +2602,14 @@ export async function main(): Promise<void> {
           } catch {
             // Belt-and-suspenders: a claim failure must never block the pane.
           }
+          // Request priority (WL-0MVE1NZ4J000H5NH AC2): resolve the
+          // dispatched work item's priority and map it through the
+          // interactive table. Fail-open — unresolvable (no id / lookup
+          // error / timeout) → `high` — and bounded (2 s max) so a slow wl
+          // call can never stall a dispatch.
+          const requestPriority = await resolveInteractiveDispatchPriority(
+            extractWorkItemId(command),
+          );
           if (!shouldOpenPane) {
             // Background (no-pane) agent dispatch: run pi headless with the
             // entry's model, output captured to a per-run log file. No pane
@@ -2579,6 +2631,7 @@ export async function main(): Promise<void> {
                   notifyBackgroundFailure(command, code, signal, logPath);
                   onRefresh?.();
                 },
+                requestPriority,
               },
             );
             return;
@@ -2603,12 +2656,28 @@ export async function main(): Promise<void> {
           // `--model <pattern>` so the pi CLI opens with the right model.
           const child = spawn(
             SEND_TO_PI_SCRIPT,
-            buildSendToPiArgs(command, targetCwd, model, paneIdFile, paneName, focus, interactiveAnchor?.paneId),
+            buildSendToPiArgs(
+              command,
+              targetCwd,
+              model,
+              paneIdFile,
+              paneName,
+              focus,
+              interactiveAnchor?.paneId,
+              requestPriority,
+            ),
             {
               detached: true,
               stdio: 'ignore',
               cwd: targetCwd,
-              env: { ...process.env, HERDR_RESOLVED_CWD: targetCwd },
+              // The priority is forwarded via `--request-priority` and
+              // injected by send-to-pi.sh with `exec env …`; setting it on
+              // the script's own env is harmless belt-and-braces.
+              env: {
+                ...process.env,
+                HERDR_RESOLVED_CWD: targetCwd,
+                [REQUEST_PRIORITY_ENV_VAR]: requestPriority,
+              },
             },
           );
           child.unref(); // Allow the parent to exit independently

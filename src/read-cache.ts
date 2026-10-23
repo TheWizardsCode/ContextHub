@@ -171,6 +171,10 @@ export function readStateCounter(cacheDir: string, worklogDir: string): number {
  * Atomically increment the per-worklog-dir write counter. Returns the new
  * value. Concurrent increments may coalesce (both write N+1) but can never
  * regress the counter, which is all freshness checking needs.
+ *
+ * Every bump is a cache write, so a bounded, rate-limited opportunistic prune
+ * runs here (F9 — WL-0MVFRRQ9W003KEFL): once the state dir exceeds the bound,
+ * the directory is pulled back under it without a daemon.
  */
 export function bumpStateCounter(cacheDir: string, worklogDir: string): number {
   const file = stateCounterFilePath(cacheDir, worklogDir);
@@ -183,7 +187,339 @@ export function bumpStateCounter(cacheDir: string, worklogDir: string): number {
   } catch (err) {
     debugLog(`failed to bump state counter: ${(err as Error).message}`);
   }
+  if (statePruneDue()) maybePruneStateDir(cacheDir);
   return next;
+}
+
+// -----------------------------------------------------------------------
+// Opportunistic pruning (F9 — WL-0MVFRRQ9W003KEFL)
+// -----------------------------------------------------------------------
+
+/**
+ * Environment override for the state-dir file bound
+ * (default `DEFAULT_STATE_MAX_FILES`, 1,000).
+ */
+export const STATE_MAX_FILES_ENV = 'WL_STATE_MAX_FILES';
+/**
+ * Environment override for the prune TTL in milliseconds
+ * (default `DEFAULT_STATE_TTL_MS`, 7 days).
+ */
+export const STATE_TTL_MS_ENV = 'WL_STATE_TTL_MS';
+
+/**
+ * Bumps between count checks. Counting is a `readdir` of the state dir, so on
+ * a healthy (bounded) cache the check is amortised to roughly zero cost.
+ */
+const STATE_PRUNE_CHECK_EVERY = 20;
+
+/** Bumps remaining until the next state-dir count check. */
+let statePruneCountdown = 0;
+
+/**
+ * Rate limiter for opportunistic pruning: true at most once per
+ * `STATE_PRUNE_CHECK_EVERY` bumps. Counting is a `readdir` of the state dir,
+ * so a healthy (bounded) cache pays for one directory scan per 20 writes at
+ * most. Explicit `maybePruneStateDir` / `wl doctor cache` calls are never
+ * rate-limited.
+ */
+function statePruneDue(): boolean {
+  if (statePruneCountdown > 0) {
+    statePruneCountdown--;
+    return false;
+  }
+  statePruneCountdown = STATE_PRUNE_CHECK_EVERY;
+  return true;
+}
+
+function envStateBound(): number {
+  const parsed = Number(process.env[STATE_MAX_FILES_ENV]);
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : DEFAULT_STATE_MAX_FILES;
+}
+
+function envStateTtl(): number {
+  const parsed = Number(process.env[STATE_TTL_MS_ENV]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_STATE_TTL_MS;
+}
+
+/**
+ * Opportunistic prune of the state directory: checks the file count and, when
+ * it exceeds the bound, prunes it back under (`pruneStateDir`).
+ *
+ * Each call is one `readdir`; a directory still under the bound costs nothing
+ * beyond that. `bumpStateCounter` rate-limits these checks (see
+ * `statePruneDue`), while explicit callers (`wl doctor cache`, tests) always
+ * get a real check. Failures are swallowed — the cache must never break the
+ * CLI — and the explicit `wl doctor cache` path remains the operator's
+ * deterministic maintenance tool.
+ */
+export function maybePruneStateDir(cacheDir: string, options: PruneStateOptions = {}): void {
+  const stateDir = path.join(path.resolve(cacheDir), 'state');
+  let count: number;
+  try {
+    count = fs.readdirSync(stateDir).length;
+  } catch {
+    return; // No state dir yet.
+  }
+  const maxFiles =
+    options.maxFiles ?? envStateBound();
+  if (count <= maxFiles) return;
+  try {
+    pruneStateDir(cacheDir, {
+      maxFiles,
+      ttlMs: options.ttlMs ?? envStateTtl(),
+      ...(options.liveWindowMs !== undefined ? { liveWindowMs: options.liveWindowMs } : {}),
+      ...(options.dryRun !== undefined ? { dryRun: options.dryRun } : {}),
+      ...(options.now !== undefined ? { now: options.now } : {}),
+      ...(options.invalidateEntries !== undefined ? { invalidateEntries: options.invalidateEntries } : {}),
+    });
+  } catch {
+    // Best-effort only.
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Bounded / prunable state directory (F8/F9 — WL-0MVFRRGGC001IQK1)
+// ---------------------------------------------------------------------------
+
+/**
+ * Bound on the number of per-worklog-dir state counter files.
+ *
+ * One counter exists per worklog dir ever seen (216k files / ~890 MB on the
+ * reference host). ~1,000 is safe for a Raspberry-Pi-class host while keeping
+ * every directory a user still works in.
+ */
+export const DEFAULT_STATE_MAX_FILES = 1_000;
+
+/**
+ * Counters untouched for this long are prunable. A worklog dir that has not
+ * been read or written for a week is almost certainly a one-off checkout.
+ */
+export const DEFAULT_STATE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * A counter modified inside this window is considered live and is never
+ * evicted (neither by the TTL pass nor by the count bound): its entries may
+ * be read by a running process right now, and resetting it to 0 would let a
+ * stale entry match again.
+ */
+export const DEFAULT_STATE_LIVE_WINDOW_MS = DEFAULT_TTL_MS;
+
+/** State counter files are `<64-hex-sha256>.json` in `<cache-dir>/state/`. */
+const STATE_FILE_RE = /^[0-9a-f]{64}\.json$/;
+
+export interface PruneStateOptions {
+  /** Max counter files to keep (default: `DEFAULT_STATE_MAX_FILES`). */
+  maxFiles?: number;
+  /** Remove counters untouched for longer than this (default: 7 days). */
+  ttlMs?: number;
+  /** Never evict counters modified within this window (default: 30 s). */
+  liveWindowMs?: number;
+  /** Report what would be removed without deleting anything (default: false). */
+  dryRun?: boolean;
+  /** Injectable clock (default `Date.now`). */
+  now?: () => number;
+  /**
+   * Also drop cache entries belonging to a pruned counter's worklog dir
+   * (default: false — a pruned counter already reads as `0`, which never
+   * matches a stored `stateCounter`, so entries are invalidated either way;
+   * enabling this reclaims the space as well).
+   */
+  invalidateEntries?: boolean;
+}
+
+export interface PruneStateResult {
+  cacheDir: string;
+  stateDir: string;
+  /** Counter files found (excluding foreign files). */
+  filesScanned: number;
+  /** Bytes occupied by those counters. */
+  totalBytes: number;
+  /** Counters selected by the TTL pass. */
+  staleByTtl: number;
+  /** Counters selected by the count-bound pass (LRU, live ones excluded). */
+  overBound: number;
+  /** Counters removed (or that would be removed in dry-run mode). */
+  removed: number;
+  /** Bytes freed by those removals. */
+  bytesReclaimed: number;
+  /** Counter files left on disk after the run (dry runs change nothing). */
+  remaining: number;
+  /** Cache entries dropped because their counter was pruned. */
+  invalidatedEntries: number;
+  dryRun: boolean;
+}
+
+/**
+ * Prune the per-worklog-dir state counter store so it stays bounded.
+ *
+ * Two independent passes, cheapest first:
+ *
+ *   1. **TTL** — counters whose mtime is older than `ttlMs` are removed.
+ *   2. **Bound** — while more than `maxFiles` counters remain, evict the
+ *      least-recently-written ones.
+ *
+ * Neither pass ever removes a counter modified inside `liveWindowMs`: that
+ * keeps the bound soft while counters are live rather than resetting one a
+ * running process may be using (and matches the "fresh and recently written
+ * counters are never removed" invariant).
+ *
+ * Safety properties:
+ *
+ *   - Counters are written atomically (`temp` + `rename`), so a file at its
+ *     final path is always complete; a partially written temp file has a
+ *     non-counter name and is ignored.
+ *   - Each unlink re-stats its target first: a counter a concurrent
+ *     `bumpStateCounter` rewrote after the scan is left alone.
+ *   - Pruning never deletes anything outside `<cache-dir>/state/`, and only
+ *     `<64-hex>.json` files there. Foreign files are untouched.
+ *   - A clock-skewed mtime in the future is never stale.
+ *
+ * Best-effort by contract: never throws; failures leave counters in place.
+ */
+export function pruneStateDir(cacheDir: string, options: PruneStateOptions = {}): PruneStateResult {
+  const root = path.resolve(cacheDir);
+  const stateDir = path.join(root, 'state');
+  const maxFiles = Math.max(0, Math.floor(options.maxFiles ?? DEFAULT_STATE_MAX_FILES));
+  const ttlMs = Math.max(0, options.ttlMs ?? DEFAULT_STATE_TTL_MS);
+  const liveWindowMs = Math.max(0, options.liveWindowMs ?? DEFAULT_STATE_LIVE_WINDOW_MS);
+  const dryRun = options.dryRun === true;
+  const now = (options.now ?? (() => Date.now()))();
+
+  const result: PruneStateResult = {
+    cacheDir: root,
+    stateDir,
+    filesScanned: 0,
+    totalBytes: 0,
+    staleByTtl: 0,
+    overBound: 0,
+    removed: 0,
+    bytesReclaimed: 0,
+    remaining: 0,
+    invalidatedEntries: 0,
+    dryRun,
+  };
+
+  let names: string[];
+  try {
+    names = fs.readdirSync(stateDir);
+  } catch {
+    return result; // No state dir yet — nothing to do.
+  }
+
+  interface Candidate {
+    file: string;
+    hash: string;
+    size: number;
+    mtimeMs: number;
+  }
+
+  const candidates: Candidate[] = [];
+  for (const name of names) {
+    if (!STATE_FILE_RE.test(name)) continue;
+    const file = path.join(stateDir, name);
+    let st: fs.Stats;
+    try {
+      st = fs.statSync(file);
+    } catch {
+      continue; // Vanished between readdir and stat.
+    }
+    if (!st.isFile()) continue;
+    candidates.push({
+      file,
+      hash: name.replace(/\.json$/, ''),
+      size: st.size,
+      // Clamp a future (clock-skewed) mtime to `now` so it is never stale.
+      mtimeMs: Math.min(st.mtimeMs, now),
+    });
+    result.filesScanned++;
+    result.totalBytes += st.size;
+  }
+
+  // Oldest first: deterministic eviction order for equal mtimes.
+  const ordered = [...candidates].sort((a, b) => a.mtimeMs - b.mtimeMs || a.hash.localeCompare(b.hash));
+
+  const doomed = new Set<string>();
+
+  // Pass 1 — TTL. A counter rewritten inside the live window is never stale:
+  // a running process may be reading entries fingerprinted with it.
+  for (const c of ordered) {
+    if (now - c.mtimeMs < liveWindowMs) continue; // live — never evict
+    if (now - c.mtimeMs > ttlMs) {
+      doomed.add(c.file);
+      result.staleByTtl++;
+    }
+  }
+
+  // Pass 2 — count bound (LRU by mtime), skipping live counters.
+  const alive = ordered.filter((c) => !doomed.has(c.file));
+  let excess = alive.length - maxFiles;
+  for (const c of alive) {
+    if (excess <= 0) break;
+    if (now - c.mtimeMs < liveWindowMs) continue; // live — never evict
+    doomed.add(c.file);
+    result.overBound++;
+    excess--;
+  }
+
+  const prunedHashes = new Set<string>();
+  for (const c of ordered) {
+    if (!doomed.has(c.file)) continue;
+    if (!dryRun) {
+      // Re-stat immediately before unlinking: a counter rewritten by a
+      // concurrent bump (atomic temp + rename) after our scan must survive.
+      try {
+        const st = fs.statSync(c.file);
+        if (st.mtimeMs !== c.mtimeMs) continue;
+      } catch {
+        continue; // Already gone (another prune / cleanup).
+      }
+      try {
+        fs.unlinkSync(c.file);
+      } catch {
+        continue;
+      }
+    }
+    result.removed++;
+    result.bytesReclaimed += c.size;
+    prunedHashes.add(c.hash);
+  }
+
+  result.remaining = dryRun ? candidates.length : candidates.length - result.removed;
+
+  if (!dryRun && options.invalidateEntries === true && prunedHashes.size > 0) {
+    result.invalidatedEntries = dropEntriesForCounterHashes(root, prunedHashes);
+  }
+
+  return result;
+}
+
+/**
+ * Remove cache entry files whose worklog dir hashes to one of the pruned
+ * counter file names. Returns the number of entries removed (best-effort).
+ */
+function dropEntriesForCounterHashes(cacheDir: string, hashes: Set<string>): number {
+  let names: string[];
+  try {
+    names = fs.readdirSync(cacheDir);
+  } catch {
+    return 0;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!ENTRY_FILE_RE.test(name)) continue;
+    const file = path.join(cacheDir, name);
+    try {
+      const entry = JSON.parse(fs.readFileSync(file, 'utf-8')) as { worklogDir?: unknown };
+      if (typeof entry.worklogDir !== 'string') continue;
+      const hash = createHash('sha256').update(path.resolve(entry.worklogDir)).digest('hex');
+      if (!hashes.has(hash)) continue;
+      fs.unlinkSync(file);
+      removed++;
+    } catch {
+      // Unparseable / already removed: leave it to get()/purgeIfNeeded.
+    }
+  }
+  return removed;
 }
 
 /**

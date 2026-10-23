@@ -15,7 +15,7 @@ Coverage maps to the work-item acceptance criteria
 
 - AC1  workspace resolution (env → ``herdr pane current`` fallback)
 - AC2  idle classification via shared classifier (bridge output)
-- AC3  Idle/Active tables with work-item id + ``producerHold``
+- AC3  Idle/Active tables with work-item id + ``needsProducerReview``
 - AC4  last-20-lines log tail per idle pane
 - AC5  "Recommended to close" excludes invoking pane and review-pending
 - AC6  approval gating: no approval → zero close calls
@@ -78,7 +78,7 @@ def _pane(
         "reasonCode": reason_code,
         "reasonSnapshot": {
             "kind": kind,
-            "producerHold": needs_producer_review,
+            "needsProducerReview": needs_producer_review,
             "isInvokingPane": is_invoking,
         },
         "sessionTail": session_tail or [],

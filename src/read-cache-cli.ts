@@ -1,9 +1,11 @@
 /**
  * wl CLI read-cache wiring (F2 — WL-0MSGAEC5N006W5QA).
  *
- * Routes `list`, `next`, `show`, `search`, `status` (JSON mode only) through
- * the shared on-disk read cache so herdr panes / pi-agent polling don't
- * re-query the SQLite DB for byte-identical invocations.
+ * Routes `list`, `next`, `show`, `search`, `status` and the consolidated
+ * `worklist` bundle (JSON mode only) through the shared on-disk read cache so
+ * herdr panes / pi-agent polling don't re-query the SQLite DB for byte-identical
+ * invocations. `worklist` is the highest-value entry: one cached payload covers
+ * every subset a Herdr refresh tick needs (WL-0MVI0IS6Y0028KTO).
  *
  * Fingerprint model (see read-cache.ts): the SQLite files are rewritten by
  * the app on every open/close (`journal_mode = WAL` + schema init touch the
@@ -40,8 +42,14 @@ import { resolveWorklogDir } from './worklog-paths.js';
 import { recordSpawn } from './spawn-counter.js';
 import * as path from 'path';
 
-/** Commands whose JSON output is a deterministic function of (DB state, argv). */
-export const READ_CACHE_COMMANDS: ReadonlySet<string> = new Set(['list', 'next', 'show', 'search', 'status']);
+/**
+ * Commands whose JSON output is a deterministic function of (DB state, argv).
+ *
+ * `worklist` (WL-0MVI0IS6Y0028KTO) is the consolidated bundle read: it is a
+ * pure read (no re-sort, no cache bump), so it is cacheable exactly like the
+ * per-subset commands it replaces.
+ */
+export const READ_CACHE_COMMANDS: ReadonlySet<string> = new Set(['list', 'next', 'show', 'search', 'status', 'worklist']);
 
 /**
  * Read-command flags that make an invocation non-cacheable:
@@ -54,6 +62,24 @@ const NON_CACHEABLE_READ_FLAGS: ReadonlySet<string> = new Set(['--rebuild-index'
 /** True when the command is one of the read commands covered by the cache. */
 export function isCacheableReadCommand(command: string): boolean {
   return READ_CACHE_COMMANDS.has(command);
+}
+
+/**
+ * Pure-read commands that must never be treated as writes, even when the
+ * invocation is not cacheable (non-JSON output, cache disabled).
+ *
+ * `worklist` (WL-0MVI0HX58009JJRF) is a strictly read-only bundle: it opens the
+ * DB once and never writes. The CLI's `preAction` hook bumps the state counter
+ * for every command that is not a cacheable read, which would make a
+ * human-readable `wl worklist` look like a write and needlessly invalidate every
+ * cached entry. Its JSON form is cacheable (it is in `READ_CACHE_COMMANDS`,
+ * WL-0MVI0IS6Y0028KTO); this set keeps the non-JSON form classified as a read.
+ */
+export const PURE_READ_COMMANDS: ReadonlySet<string> = new Set(['worklist']);
+
+/** True when the command is read-only even though the invocation is not cached. */
+export function isPureReadCommand(command: string): boolean {
+  return PURE_READ_COMMANDS.has(command);
 }
 
 /** True when the raw argv requests JSON output. */
@@ -83,35 +109,8 @@ export function cacheKeyArgv(): string[] {
   return process.argv.slice(2);
 }
 
-/** Program-level options that take a value (skipped with their value). */
-const GLOBAL_VALUE_OPTS = new Set(['--worklog-dir', '--format', '-F']);
-
-/**
- * Extract the subcommand name from raw argv, skipping program-level options
- * and their values (`--json`, `--verbose`, `-F/--format <v>`, `--worklog-dir
- * <v>`, help/version flags). Returns null when no command token is found
- * (bare `wl`, `wl --json`, etc.).
- */
-export function extractCommandFromArgv(argv: string[]): string | null {
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === '--json' || a === '--verbose' || a === '--version' || a === '-h' || a === '--help' || a === '-w' || a === '--watch') {
-      continue;
-    }
-    if (GLOBAL_VALUE_OPTS.has(a)) {
-      i++; // skip the option's value
-      continue;
-    }
-    if (a.startsWith('--format=') || a.startsWith('--worklog-dir=')) {
-      continue;
-    }
-    if (a.startsWith('-')) {
-      continue; // unknown/other flag — skip
-    }
-    return a;
-  }
-  return null;
-}
+/** Re-exported from the dependency-free argv module (F7 — WL-0MVFRROLM002K98B). */
+export { extractCommandFromArgv } from './argv-normalize.js';
 
 /** State captured when a read lookup arms a backfill. */
 interface BackfillInfo {

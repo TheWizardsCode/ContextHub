@@ -7,6 +7,87 @@ import * as path from 'path';
 import { resolveWorklogRoot, getGitRepoRoot } from '@worklog/shared/worklog-paths';
 
 /**
+ * Files whose presence marks a `.worklog/` directory as a *genuine store*
+ * rather than a stub materialised from tracked configuration.
+ *
+ * `.worklog/config.yaml` is tracked in git, so every implement/audit worktree
+ * (`git worktree add`) checks it out and therefore has a `.worklog/` directory
+ * that looks "valid" to the shared resolver while holding no data at all. The
+ * genuine markers are the ones `wl init`/runtime create locally and never
+ * commit:
+ *
+ *   - `initialized` — the init semaphore written by `wl init`;
+ *   - `worklog.db` — the SQLite store itself.
+ */
+export function isGenuineWorklogStore(worklogDir: string): boolean {
+  return (
+    fs.existsSync(path.join(worklogDir, 'initialized')) ||
+    fs.existsSync(path.join(worklogDir, 'worklog.db'))
+  );
+}
+
+/**
+ * Split a path inside a managed worktree (`.worklog/worktrees/<name>/…`) into
+ * the worktree root and the project root that owns it.
+ *
+ * Returns `undefined` for paths that are not inside a managed worktree.
+ */
+export function splitManagedWorktreePath(
+  target: string,
+): { projectRoot: string; worktreeRoot: string } | undefined {
+  const marker = `${path.sep}${path.join('.worklog', 'worktrees')}${path.sep}`;
+  const idx = target.indexOf(marker);
+  if (idx < 0) return undefined;
+  const projectRoot = target.slice(0, idx) || path.sep;
+  const remainder = target.slice(idx + marker.length);
+  const name = remainder.split(path.sep)[0];
+  if (!name) return undefined;
+  return { projectRoot, worktreeRoot: path.join(projectRoot, '.worklog', 'worktrees', name) };
+}
+
+/** True when *target* is inside a managed worktree. */
+export function isInsideWorktreeRoot(target: string): boolean {
+  return splitManagedWorktreePath(path.resolve(target)) !== undefined;
+}
+
+/** Store identity reported by a sync (`--json` `sync.store`, sync log). */
+export interface StoreIdentity {
+  /** Resolved `.worklog` directory the command is operating on. */
+  worklogDir: string;
+  /** SQLite database path backing it. */
+  databasePath: string;
+  /** True when the store sits inside a managed worktree (a second store). */
+  secondStore: boolean;
+  /** The worktree root, when `secondStore` is true. */
+  worktreeRoot?: string;
+  /** The main checkout's store, when `secondStore` is true and it exists. */
+  mainWorklogDir?: string;
+}
+
+/**
+ * Describe the store a command is operating on and detect the *second store*
+ * condition (SA-0MVE34D9B005TUYJ AC2/AC4).
+ *
+ * @param dataFilePath - The store's JSONL data-file path.
+ */
+export function detectSecondStore(dataFilePath: string): StoreIdentity {
+  const worklogDir = path.dirname(path.resolve(dataFilePath));
+  const databasePath = path.join(worklogDir, 'worklog.db');
+  const split = splitManagedWorktreePath(path.resolve(dataFilePath));
+  if (!split) {
+    return { worklogDir, databasePath, secondStore: false };
+  }
+  const mainWorklogDir = path.join(split.projectRoot, '.worklog');
+  return {
+    worklogDir,
+    databasePath,
+    secondStore: true,
+    worktreeRoot: split.worktreeRoot,
+    mainWorklogDir: fs.existsSync(mainWorklogDir) ? mainWorklogDir : undefined,
+  };
+}
+
+/**
  * Module-level override for --worklog-dir CLI option.
  * When set, resolveWorklogDir() returns this path directly,
  * bypassing all filesystem-walking and git-based resolution.
@@ -126,9 +207,47 @@ export function resolveWorklogDir(): string {
     return _worklogDirOverride;
   }
 
+  const cwd = process.cwd();
   const root = resolveWorklogRoot();
+
+  // ── One store per repo (SA-0MVE34D9B005TUYJ AC4) ──────────────────────
+  // Inside a managed worktree (`.worklog/worktrees/<name>`) the checked-out
+  // `.worklog/config.yaml` makes the *worktree* look like a valid store root,
+  // so `resolveWorklogRoot()` returns it. Binding there would create a second
+  // store for the same project prefix — its own DB, its own mutation lock and
+  // its own `last-synced-ref` watermark (all derived from the data path), so
+  // it silently clobbers the main checkout's store instead of serialising
+  // against it.
+  //
+  // Rule: a worktree `.worklog/` is only used when it is a *genuine* store
+  // (created by `wl init`: `initialized` marker and/or `worklog.db`). A stub
+  // left by `git worktree add` is skipped in favour of the main checkout's
+  // store; when that does not exist either, fail loudly with remediation
+  // instead of creating a second store.
+  const split = splitManagedWorktreePath(path.resolve(cwd));
+  if (split) {
+    const candidate = root ? path.join(root, '.worklog') : undefined;
+    if (candidate && isGenuineWorklogStore(candidate)) {
+      return candidate; // deliberately initialised worktree store
+    }
+    const mainWorklogDir = path.join(split.projectRoot, '.worklog');
+    if (isGenuineWorklogStore(mainWorklogDir)) {
+      return mainWorklogDir;
+    }
+    throw new Error(
+      `No worklog store found for this worktree.\n` +
+        `  Worktree: ${split.worktreeRoot}\n` +
+        `  Checked: ${mainWorklogDir} (no 'initialized' marker or worklog.db)\n` +
+        `  Refusing to create a second store for this project prefix — two stores ` +
+        `hold independent mutation locks and sync watermarks and can clobber ` +
+        `each other.\n` +
+        `  Fix: run 'wl init' in the main checkout (${split.projectRoot}), or pass ` +
+        `--worklog-dir ${mainWorklogDir} explicitly.`,
+    );
+  }
+
   if (root) {
     return path.join(root, '.worklog');
   }
-  return path.join(process.cwd(), '.worklog');
+  return path.join(cwd, '.worklog');
 }

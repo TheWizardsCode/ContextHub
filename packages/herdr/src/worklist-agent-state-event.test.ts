@@ -126,8 +126,11 @@ afterEach(() => {
 
 /** Exec mock that reports a visible tab, empty wl results, and NOTHING else. */
 function makeVisibleExecMock(): Mock {
-  return vi.fn(async (bin: string, args: string[]) => {
-    if (bin === 'herdr' && args[0] === 'tab' && args[1] === 'get') {
+  return vi.fn(async (_bin: string, args: string[]) => {
+    // Match on the ARGS, never the exact binary name — the pane/tab checks
+    // resolve the CLI as `process.env.HERDR_BIN_PATH ?? 'herdr'`, so a
+    // `bin === 'herdr'` check misses inside a herdr pane (WL-0MU2FM1L60002URI).
+    if (args[0] === 'tab' && args[1] === 'get') {
       return { stdout: JSON.stringify({ id: 'cli:tab:get', result: { tab: { focused: true } } }), stderr: '' };
     }
     if (args.includes('list') && args.includes('--status')) {
@@ -409,17 +412,109 @@ describe('worklist — event paths under pane-existence green circles (WL-0MV1BW
     // Poll, never fixed-sleep: the re-read is async (event → tracker).
     await waitFor(() => tracker.getPaneId('WL-0MV25EE4E0028KDI') === 'w5:p55', 5_000, 'late association re-read');
     expect(tracker.getPaneId('WL-0MV25EE4E0028KDI')).toBe('w5:p55');
+    // The re-read alone does not paint the icon: the pane list is still empty,
+    // so the green circle must NOT appear until the late pane enters it.
+    expect(writes.join('')).not.toContain(GREEN_CIRCLE);
 
     // With the late pane now in the pane list, the green circle appears for
     // the item (regardless of the agent's status value).
     holder.panes = [{ pane_id: 'w5:p55', label: titleFor('WL-0MV25EE4E0028KDI'), workspace_id: 'w1' }];
-    const liveClient = mockServer.getFirstClient();
-    expect(liveClient).toBeDefined();
-    liveClient!.pushEvent({
+    // Subscribing the late pane re-establishes the subscription on a FRESH
+    // connection, and the mock server keeps listing the OLD client until its
+    // socket `close` is processed — `getFirstClient()` can therefore hand
+    // back the pre-restart handle, and an event pushed there reaches nobody
+    // (WL-0MVFX70SB000YRQH: this race made the test time out waiting for the
+    // green circle). Push on the connection that actually carries the pane.
+    const liveClient = await mockServer.waitForClientSubscribedTo('w5:p55');
+    liveClient.pushEvent({
       event: 'pane_agent_status_changed',
       data: { pane_id: 'w5:p55', agent_status: 'done' },
     });
     await waitForWrites((w) => w.join('').includes(GREEN_CIRCLE), 5_000, 'GREEN_CIRCLE after late pane appears');
+    expect(writes.join('')).not.toContain(RED_CIRCLE);
+
+    await subscriber.close();
+    await mockServer.stop();
+    await quit(p);
+    sf.cleanup();
+  });
+
+  it('a pane lifecycle event landing while a pane-marker refresh is in flight is not coalesced away', async () => {
+    // Regression (WL-0MVFX70SB000YRQH): the event-driven pane-marker refresh
+    // is single-flight. A lifecycle event that arrived while a pass was in
+    // flight used to be DROPPED instead of re-running the pass once it
+    // settled, so a pane that appeared during that window never produced a
+    // green circle. The trailing event must trigger one more pass.
+    const sf = makeStateFile();
+    seedStateFile(sf.path, [{ workItemId: 'WL-0MV25EE4E0028KDI', paneId: 'w3:p99' }]);
+
+    const tracker = new AgentTracker({ stateFile: sf.path, ttlMs: 60_000 });
+    const mockServer = await createMockSocket();
+    const subscriber = makeSubscriber(mockServer, tracker);
+    setExecFileAsync(makeVisibleExecMock() as any);
+
+    const fetcher = vi.fn(async (): Promise<WorkItem[]> => [
+      { id: 'WL-0MV25EE4E0028KDI', title: 'Late task', status: 'open', stage: 'idea' },
+    ]);
+    const holder: PaneSetHolder = { panes: [] };
+
+    // Controllable seam: the startup pass resolves `startupPassDone`; later
+    // passes that are armed read the pane list and then HOLD — exactly the
+    // in-flight window in which the old single-flight guard swallowed a
+    // trailing event.
+    let startupPassDone: () => void = () => {};
+    const startupPass = new Promise<void>((resolve) => {
+      startupPassDone = resolve;
+    });
+    let armHold = false;
+    let releaseHeld: (() => void) | null = null;
+    let passes = 0;
+
+    const p = runWorklistTui(fetcher, undefined, undefined, {
+      ...markerOptions(holder, subscriber, tracker),
+      applyActivePaneMarkers: async (items) => {
+        passes += 1;
+        const passNumber = passes;
+        const panesAtCall = [...holder.panes];
+        if (armHold) {
+          armHold = false;
+          await new Promise<void>((resolve) => {
+            releaseHeld = resolve;
+          });
+        }
+        await applyPaneMarkersToItems(items, async () => panesAtCall, 'w1');
+        if (passNumber === 1) startupPassDone();
+      },
+    });
+
+    const client = await waitForClient(mockServer);
+    // Let the startup marker pass finish before arming the seam.
+    await startupPass;
+
+    armHold = true;
+    client!.pushEvent({
+      event: 'pane_agent_status_changed',
+      data: { pane_id: 'w3:p99', agent_status: 'working' },
+    });
+    await waitFor(() => releaseHeld !== null, 5_000, 'event-triggered pane-marker pass to be in flight');
+
+    // The pane appears and another lifecycle event arrives while the pass is
+    // still in flight (the window the old guard dropped).
+    holder.panes = [{ pane_id: 'w3:p99', label: titleFor('WL-0MV25EE4E0028KDI'), workspace_id: 'w1' }];
+    client!.pushEvent({
+      event: 'pane_agent_status_changed',
+      data: { pane_id: 'w3:p99', agent_status: 'done' },
+    });
+    // Let the trailing event be handled while the pass is still held.
+    await sleep(100);
+    releaseHeld!();
+
+    await waitForWrites(
+      (w) => w.join('').includes(GREEN_CIRCLE),
+      5_000,
+      'GREEN_CIRCLE after a trailing event during an in-flight refresh',
+    );
+    expect(writes.join('')).not.toContain(RED_CIRCLE);
 
     await subscriber.close();
     await mockServer.stop();

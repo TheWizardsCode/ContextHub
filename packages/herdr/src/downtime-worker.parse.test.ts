@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import { describe, it, expect, vi } from 'vitest';
 import {
   parseLlamaStatus,
+  reportedIdleSeconds,
   dispatchDowntimeWork,
   createDowntimePoller,
   createDowntimeWorker,
@@ -736,5 +737,280 @@ describe('tick(): owner-lease gate must be per-slot (WL-0MU8807BI008C9ME)', () =
       vi.useRealTimers();
       rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+// ── Truthful capacity schema v2 (LP-0MVGDUVGE0024YAI) ────────────────
+//
+// The llama-proxy now publishes `status_schema_version: 2` with additive
+// per-slot lease/phase/ETA detail and a top-level `capacity_hint`. The herdr
+// consumer must parse the fields strictly: availability-affecting values are
+// fail-closed when malformed, advisory values degrade to undefined, and a
+// pre-v2 payload keeps today's behaviour exactly.
+
+describe('parseLlamaStatus: truthful capacity schema v2 (LP-0MVGDUVGE0024YAI)', () => {
+  const v2 = {
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: true,
+    available_slots: 0,
+    total_slots: 2,
+    status_schema_version: 2,
+    capacity_hint: 'idle',
+    prefill_budget_seconds: 120,
+    slots: [
+      {
+        slot_id: 0,
+        is_processing: false,
+        owner_session_id: 'sess-1',
+        lease_state: 'idle_leased',
+        phase: null,
+        context_tokens: null,
+        prefill_eta_seconds: null,
+      },
+      {
+        slot_id: 1,
+        is_processing: true,
+        lease_state: 'generating',
+        phase: 'prefill',
+        context_tokens: 102345,
+        prefill_eta_seconds: 187.5,
+      },
+    ],
+  };
+
+  it('parses the additive schema-v2 fields', () => {
+    const status = parseLlamaStatus(v2);
+    expect(status).not.toBeNull();
+    expect(status!.status_schema_version).toBe(2);
+    expect(status!.capacity_hint).toBe('idle');
+    expect(status!.prefill_budget_seconds).toBe(120);
+    expect(status!.slots!).toHaveLength(2);
+    expect(status!.slots![0].lease_state).toBe('idle_leased');
+    expect(status!.slots![0].phase).toBeNull();
+    expect(status!.slots![0].context_tokens).toBeNull();
+    expect(status!.slots![0].prefill_eta_seconds).toBeNull();
+    expect(status!.slots![1].lease_state).toBe('generating');
+    expect(status!.slots![1].phase).toBe('prefill');
+    expect(status!.slots![1].context_tokens).toBe(102345);
+    expect(status!.slots![1].prefill_eta_seconds).toBe(187.5);
+  });
+
+  it('leaves every schema-v2 field undefined on a pre-v2 payload', () => {
+    const status = parseLlamaStatus({
+      llama_server_running: true,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 1,
+      total_slots: 1,
+      slots: [{ slot_id: 'slot-1', is_processing: false }],
+    });
+    expect(status).not.toBeNull();
+    expect(status!.status_schema_version).toBeUndefined();
+    expect(status!.capacity_hint).toBeUndefined();
+    expect(status!.prefill_budget_seconds).toBeUndefined();
+    expect(status!.slots![0].lease_state).toBeUndefined();
+    expect(status!.slots![0].phase).toBeUndefined();
+    expect(status!.slots![0].context_tokens).toBeUndefined();
+    expect(status!.slots![0].prefill_eta_seconds).toBeUndefined();
+  });
+
+  it('treats a malformed or unknown capacity_hint as ambiguous → busy', () => {
+    expect(parseLlamaStatus({ ...v2, capacity_hint: 'hot' })).toBeNull();
+    expect(parseLlamaStatus({ ...v2, capacity_hint: 2 })).toBeNull();
+  });
+
+  it('treats a malformed or unknown lease_state as ambiguous → busy', () => {
+    for (const lease_state of ['busy', '', 1, true]) {
+      const raw = {
+        ...v2,
+        slots: [{ slot_id: 0, is_processing: false, lease_state }],
+      };
+      expect(parseLlamaStatus(raw)).toBeNull();
+    }
+  });
+
+  it('treats a malformed status_schema_version as absent (no v2 behaviour)', () => {
+    expect(parseLlamaStatus({ ...v2, status_schema_version: 'two' })!.status_schema_version).toBeUndefined();
+    expect(parseLlamaStatus({ ...v2, status_schema_version: -1 })!.status_schema_version).toBeUndefined();
+    expect(parseLlamaStatus({ ...v2, status_schema_version: 1.5 })!.status_schema_version).toBeUndefined();
+  });
+
+  it('ignores malformed advisory fields instead of rejecting the poll', () => {
+    const status = parseLlamaStatus({
+      ...v2,
+      prefill_budget_seconds: 'lots',
+      slots: [
+        {
+          slot_id: 0,
+          is_processing: false,
+          lease_state: 'free',
+          phase: 'warming',
+          context_tokens: -5,
+          prefill_eta_seconds: Number.NaN,
+        },
+      ],
+    });
+    expect(status).not.toBeNull();
+    expect(status!.prefill_budget_seconds).toBeUndefined();
+    expect(status!.slots![0].phase).toBeUndefined();
+    expect(status!.slots![0].context_tokens).toBeUndefined();
+    expect(status!.slots![0].prefill_eta_seconds).toBeUndefined();
+  });
+});
+
+// ── Proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY) ──────────
+//
+// The llama-proxy publishes the authoritative monotonic local idle age
+// (`local_idle_seconds`, plus `local_last_activity_at` /
+// `local_last_activity_source`, LP-0MVGD9Z8Z0055Y5J). All three are
+// optional/backward compatible: a pre-feature payload parses exactly as
+// before, and malformed values degrade to `undefined` without throwing —
+// they must never reject an otherwise usable poll.
+
+describe('parseLlamaStatus: proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY)', () => {
+  const base = {
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: false,
+    available_slots: 2,
+    total_slots: 2,
+    slots: [
+      { slot_id: 'slot-1', is_processing: false },
+      { slot_id: 'slot-2', is_processing: false },
+    ],
+  };
+
+  it('AC1: reads local_idle_seconds, local_last_activity_at and local_last_activity_source', () => {
+    const status = parseLlamaStatus({
+      ...base,
+      local_idle_seconds: 7_200,
+      local_last_activity_at: '2026-10-21T10:00:00.000Z',
+      local_last_activity_source: 'finish',
+    });
+    expect(status).not.toBeNull();
+    expect(status!.local_idle_seconds).toBe(7_200);
+    expect(status!.local_last_activity_at).toBe('2026-10-21T10:00:00.000Z');
+    expect(status!.local_last_activity_source).toBe('finish');
+  });
+
+  it('AC1: a fractional idle age is preserved', () => {
+    const status = parseLlamaStatus({ ...base, local_idle_seconds: 12.5 });
+    expect(status!.local_idle_seconds).toBe(12.5);
+  });
+
+  it('AC1: absent idle-age fields preserve a pre-feature payload unchanged', () => {
+    const status = parseLlamaStatus(base);
+    expect(status).not.toBeNull();
+    expect(status!.local_idle_seconds).toBeUndefined();
+    expect(status!.local_last_activity_at).toBeUndefined();
+    expect(status!.local_last_activity_source).toBeUndefined();
+  });
+
+  it('AC1: malformed idle-age values degrade to undefined without throwing', () => {
+    for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -5, '60', true, {}, null]) {
+      const status = parseLlamaStatus({ ...base, local_idle_seconds: bad });
+      expect(status).not.toBeNull();
+      expect(status!.local_idle_seconds).toBeUndefined();
+    }
+    // reportedIdleSeconds mirrors the same fail-closed contract at the gate:
+    // a non-finite/negative age reads as "no authoritative signal", never as
+    // "idle forever".
+    expect(reportedIdleSeconds({ ...(parseLlamaStatus(base)!), local_idle_seconds: Number.NaN })).toBeNull();
+    expect(reportedIdleSeconds({ ...(parseLlamaStatus(base)!), local_idle_seconds: -1 })).toBeNull();
+    expect(reportedIdleSeconds(parseLlamaStatus({ ...base, local_idle_seconds: 30 })!)).toBe(30);
+    expect(reportedIdleSeconds(parseLlamaStatus(base)!)).toBeNull();
+  });
+
+  it('AC1: malformed activity evidence degrades to undefined without throwing', () => {
+    for (const at of ['not-a-date', '', 123, null]) {
+      const status = parseLlamaStatus({ ...base, local_last_activity_at: at });
+      expect(status).not.toBeNull();
+      expect(status!.local_last_activity_at).toBeUndefined();
+    }
+    for (const source of ['', 42, null, true]) {
+      const status = parseLlamaStatus({ ...base, local_last_activity_source: source });
+      expect(status).not.toBeNull();
+      expect(status!.local_last_activity_source).toBeUndefined();
+    }
+  });
+});
+
+// ── Prefill serialisation gate (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX) ─
+//
+// The llama-proxy serialises local prefills and publishes the gate state:
+// `local_prefills_in_flight`, `local_max_concurrent_prefills` and
+// `prefill_gate_waiters` (the live contention-queue depth for the gate) plus
+// the prefill-ETA guard's `queue_eta_seconds` / `prefill_budget_seconds`.
+// The parser contract mirrors the contention fields: the three counters are
+// availability-affecting (a malformed value fails closed → null/busy), while
+// the ETA figures are advisory and degrade to undefined.
+describe('parseLlamaStatus: prefill serialisation gate (WL-0MVHSZRZQ00482QX)', () => {
+  const prefillBase = {
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: false,
+    available_slots: 4,
+    total_slots: 4,
+    slots: [
+      { slot_id: 'slot-1', is_processing: false },
+      { slot_id: 'slot-2', is_processing: false },
+      { slot_id: 'slot-3', is_processing: false },
+      { slot_id: 'slot-4', is_processing: false },
+    ],
+  };
+
+  it('AC1: reads the prefill-gate counters and ETA fields when served', () => {
+    const status = parseLlamaStatus({
+      ...prefillBase,
+      local_prefills_in_flight: 1,
+      local_max_concurrent_prefills: 1,
+      prefill_gate_waiters: 2,
+      queue_eta_seconds: 300,
+      prefill_budget_seconds: 120,
+    });
+    expect(status).not.toBeNull();
+    expect(status!.local_prefills_in_flight).toBe(1);
+    expect(status!.local_max_concurrent_prefills).toBe(1);
+    expect(status!.prefill_gate_waiters).toBe(2);
+    expect(status!.queue_eta_seconds).toBe(300);
+    expect(status!.prefill_budget_seconds).toBe(120);
+  });
+
+  it('AC1: leaves every prefill field undefined on a pre-feature payload', () => {
+    const status = parseLlamaStatus(prefillBase);
+    expect(status).not.toBeNull();
+    expect(status!.local_prefills_in_flight).toBeUndefined();
+    expect(status!.local_max_concurrent_prefills).toBeUndefined();
+    expect(status!.prefill_gate_waiters).toBeUndefined();
+    expect(status!.queue_eta_seconds).toBeUndefined();
+    expect(status!.prefill_budget_seconds).toBeUndefined();
+  });
+
+  it('AC1: malformed prefill-gate counters fail closed → busy (null)', () => {
+    for (const field of [
+      'local_prefills_in_flight',
+      'local_max_concurrent_prefills',
+      'prefill_gate_waiters',
+    ] as const) {
+      for (const bad of [-1, Number.NaN, Number.POSITIVE_INFINITY, '2', true, {}]) {
+        expect(parseLlamaStatus({ ...prefillBase, [field]: bad })).toBeNull();
+      }
+    }
+  });
+
+  it('AC1: queue_eta_seconds is advisory — a malformed value degrades, never rejects', () => {
+    for (const bad of [Number.NaN, -5, '300', true, {}]) {
+      const status = parseLlamaStatus({ ...prefillBase, queue_eta_seconds: bad });
+      expect(status).not.toBeNull();
+      expect(status!.queue_eta_seconds).toBeUndefined();
+    }
+    const nullEta = parseLlamaStatus({ ...prefillBase, queue_eta_seconds: null });
+    expect(nullEta).not.toBeNull();
+    expect(nullEta!.queue_eta_seconds).toBeNull();
   });
 });

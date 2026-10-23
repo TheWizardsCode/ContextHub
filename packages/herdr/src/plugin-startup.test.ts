@@ -1,16 +1,14 @@
 /**
- * Plugin startup regression test (WL-0MUFRFLRQ004KNDG).
+ * Plugin startup end-to-end regression test (WL-0MUFRFLRQ004KNDG,
+ * kept current under WL-0MVE1NZ4J000H5NH).
  *
- * The worklist plugin crashed on initialization with a temporal-dead-zone
- * ReferenceError: `createDowntimeWorker` calls its `config()` callback
- * SYNCHRONOUSLY during construction, and index.ts's callback referenced the
- * `modeSwitchWorker` const that is declared AFTER the downtime worker — so
- * the whole plugin died before the TUI ever rendered.
- *
- * This is an end-to-end guard: it runs the real entry point (the command
- * herdr's pane manifest uses — `npx tsx src/start.ts`, the resilient
- * launcher that wraps `src/index.ts`) and asserts it reaches the TUI
- * instead of crashing during wiring.
+ * Runs the real plugin entry point (the command herdr's pane manifest uses
+ * — `npx tsx src/start.ts`, the resilient launcher that wraps
+ * `src/index.ts`) and asserts it reaches the TUI instead of crashing during
+ * wiring. Originally pinned the mode-switch-worker temporal-dead-zone fix;
+ * that worker was removed with the fast/cheap mode switch, and this guard
+ * now covers startup wiring generally (no `before initialization`
+ * ReferenceError, no init error, TUI renders).
  */
 
 import { describe, it, expect } from 'vitest';
@@ -62,7 +60,7 @@ function runPluginStartup(cwd: string, timeoutMs: number): Promise<StartupResult
 
 describe('worklist plugin startup (WL-0MUFRFLRQ004KNDG)', () => {
   it(
-    'initializes past worker wiring without the modeSwitchWorker TDZ crash',
+    'initializes past worker wiring and reaches the TUI',
     async () => {
       const pluginRoot = fileURLToPath(new URL('..', import.meta.url));
       const { output } = await runPluginStartup(pluginRoot, 30_000);

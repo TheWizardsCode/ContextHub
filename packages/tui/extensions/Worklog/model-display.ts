@@ -14,8 +14,11 @@
  *
  * - Listens to `after_provider_response` to read the `X-Resolved-Model` header
  *   that the llama-proxy adds to every proxy-routed request.
- * - Listens to `model_select` to track whether a model is selected (for the
- *   `(pending)` fallback state), but does not display the model alias.
+ * - Listens to `model_select` to track the selected alias and to invalidate
+ *   the previously resolved provider/model on a mid-session switch. A
+ *   non-proxy provider (anything that is not `Local Proxy`) is displayed
+ *   immediately as `${provider}/${id}` because its `X-Resolved-Model` header
+ *   can never arrive; a `Local Proxy` selection waits for the real header.
  * - Exports `getResolvedModel()` and `getSelectedModel()` so the footer renderer
  *   can display the model on its own dedicated line.
  * - Exports `onModelChange()` so consumers can be notified when state changes.
@@ -25,6 +28,21 @@
  */
 
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
+
+// ── Constants ─────────────────────────────────────────────────────────────
+
+/**
+ * The name of the Local Proxy provider in Pi's models.json.
+ *
+ * Canonical convention centralised as the private `LOCAL_PROVIDER_NAME` in
+ * `@worklog/shared/lease-release` (packages/shared/src/lease-release.ts).
+ * Kept here as a documented local equivalent so this change stays confined to
+ * `packages/tui/extensions/` (parent WL-0MVGEB3IP002V8IB constraint); the
+ * shared constant is not exported and `@worklog/shared/lease-release` resolves
+ * to the main checkout's built `dist/`, which is not rebuilt inside worktrees.
+ * Decision recorded on WL-0MVGU7H24009G8II (see item comment).
+ */
+const LOCAL_PROVIDER_NAME = 'Local Proxy';
 
 // ── Module-level state ────────────────────────────────────────────────────
 
@@ -95,6 +113,29 @@ export function onModelChange(cb: () => void): () => void {
 }
 
 /**
+ * Resolve the provider/model to display immediately after a `model_select`.
+ *
+ * - A `Local Proxy` selection (or a missing/unknown provider) returns `null`
+ *   so the footer shows the honest `(resolving)` state until the proxy's
+ *   `x-resolved-model` header arrives — the header remains the source of
+ *   truth for proxy-routed models.
+ * - Any other provider can never emit that header, so adopt the *selected*
+ *   model's own `${provider}/${id}` immediately (`modelOverrides` is never
+ *   consulted) rather than leaving an unbounded `(resolving)` state.
+ *
+ * Fail-open: never throws; an unknown provider degrades to `null`.
+ *
+ * @param model - The selected model (`{ provider, id }` from the event).
+ * @returns The resolved display value, or `null` for `(resolving)`.
+ */
+function resolveSelectedModel(model: { provider?: string; id: string }): string | null {
+  if (model.provider !== undefined && model.provider !== LOCAL_PROVIDER_NAME) {
+    return `${model.provider}/${model.id}`;
+  }
+  return null;
+}
+
+/**
  * Register model-display event handlers with a Pi extension instance.
  *
  * Sets up listeners for:
@@ -105,7 +146,8 @@ export function onModelChange(cb: () => void): () => void {
  *
  * The resolved provider/model can be read via `getResolvedModel()`.
  * When no response has been received yet but a model is selected,
- * `getSelectedModel()` returns the model alias (for `(pending)` display).
+ * `getSelectedModel()` returns the model alias (rendered as
+ * `{alias} → (resolving)` in the footer).
  * The Pi model alias is not exposed in the resolved model value.
  *
  * @param pi - The ExtensionAPI instance
@@ -130,16 +172,30 @@ export function registerModelDisplay(pi: ExtensionAPI): void {
     }
   });
 
-  // Track model selection changes
+  // Track model selection changes.
+  //
+  // A mid-session model switch immediately invalidates the previously resolved
+  // provider/model so the footer never pairs the new alias with a stale value
+  // (WL-0MVGU7H24009G8II). For a non-proxy provider no `x-resolved-model`
+  // header can ever arrive, so fall back to the selected model's own
+  // `${provider}/${id}` right away; a Local Proxy selection (or an unknown
+  // provider) keeps `null` until the proxy header arrives — the proxy header
+  // remains the source of truth. Fail-open: a missing model/provider never
+  // throws and degrades to `(resolving)` exactly as today.
   pi.on('model_select', (_event, _ctx) => {
     // event.model has provider and id fields
     const model = _event.model;
     if (model && model.id) {
       _selectedModel = model.id;
+      _resolvedModel = resolveSelectedModel(model);
       _onModelChange?.();
-    } else if (_selectedModel !== null) {
+    } else {
+      // No model information — unknown selection. Invalidate both so a stale
+      // resolved value is never displayed (fail-open, no crash).
+      const changed = _selectedModel !== null || _resolvedModel !== null;
       _selectedModel = null;
-      _onModelChange?.();
+      _resolvedModel = null;
+      if (changed) _onModelChange?.();
     }
   });
 

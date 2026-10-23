@@ -1,5 +1,5 @@
 /**
- * Canonical audit content fingerprint — TypeScript port.
+ * Canonical audit content fingerprint — TypeScript port (schema 2).
  *
  * Mirrors the audit skill's `audit_runner._compute_content_fingerprint`
  * (SorraAgents) so a stored audit `fingerprint` can be compared against the
@@ -8,15 +8,25 @@
  * `currentFingerprint` and freshness always degrades to the fragile 60 s time
  * gate (WL-0MUN7QWFP0010EQC).
  *
- * The canonical fingerprint is:
+ * The canonical fingerprint is **schema 2** — the work item's OWN data only:
  *
  * ```text
  * sha256( json.dumps({
- *   "path_states":      { <touched path>: {"head": ..., "worktree": ...} },
+ *   "schema":           2,
+ *   "title_hash":       sha256(title),
  *   "description_hash": sha256(description),
- *   "key_files":        [ ...Key Files parsed from the description... ],
  * }, sort_keys=True) )
  * ```
+ *
+ * The description carries the acceptance criteria AND the Key Files section,
+ * so both are already covered by `description_hash`. No comment-derived input
+ * and no repository state are hashed: the computation performs **zero git
+ * invocations** (SA-0MVIDI8E00063OOP), so only a change to this work item's
+ * own title/description invalidates a stored audit — unrelated commits,
+ * working-tree changes, touched-file edits, comments and lifecycle-field
+ * changes never do. On a large worklog that also removes a per-item git
+ * subprocess cost from the `wl list` / `wl worklist` read path
+ * (WL-0MVK5SWZE00254Y7).
  *
  * The payload is serialised with Python's `json.dumps(..., sort_keys=True)`
  * canonical form (`, ` / `: ` separators, recursively sorted keys,
@@ -24,9 +34,10 @@
  * identical to the Python implementation. `json.dumps` semantics are covered
  * by tests; the arrangement of the payload mirrors the Python source.
  *
- * Comment-recorded commit hashes are deliberately NOT resolved here: the
- * canonical read path (`audit_runner.py check-freshness` →
- * `_check_audit_freshness`) also omits them, so the two computations agree.
+ * The git/path helpers below (`resolveTouchedFiles`, `computePathFingerprints`,
+ * `extractKeyFiles`, `normaliseRepoPath`) are no longer part of the fingerprint;
+ * they are retained because they are exported utilities with their own tests
+ * (removal is tracked separately rather than widening this contract change).
  */
 
 import { createHash } from 'crypto';
@@ -336,30 +347,56 @@ export function computePathFingerprints(
   return states;
 }
 
+/** Schema version of the canonical content fingerprint (mirrors
+ * `audit_runner._AUDIT_CONTENT_FINGERPRINT_SCHEMA`). */
+export const AUDIT_CONTENT_FINGERPRINT_SCHEMA = 2;
+
 /**
- * Compute the canonical content fingerprint for a work item at the current
- * repository state.
+ * Coerce a work-item field to the deterministic string the Python side hashes.
  *
- * Returns a SHA-256 hex digest, or `null` when the fingerprint cannot be
- * determined (touched set unresolved, git unavailable, or a required git call
- * failed) — callers treat `null` as "cannot prove freshness" and fall back to
- * the time gate (fail-safe).
+ * Mirrors `audit_runner._fingerprint_text`: strings pass through, `null` /
+ * `undefined` become the empty string, and anything else (a garbage value from
+ * a hand-edited store) is canonicalised as JSON — the same canonical form the
+ * Python `json.dumps(..., sort_keys=True)` fallback produces — so both sides
+ * still agree.
+ */
+function fingerprintText(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (value === null || value === undefined) return '';
+  if (typeof value === 'number' || typeof value === 'boolean') return canonicalJson(value);
+  if (typeof value === 'object') {
+    try {
+      return canonicalJson(value);
+    } catch {
+      return typeof value;
+    }
+  }
+  return typeof value;
+}
+
+/**
+ * Compute the canonical (schema 2) content fingerprint for a work item.
+ *
+ * Hashes only the item's own `title` and `description` — never git state,
+ * comments or lifecycle fields — and performs no I/O, so it is safe to call
+ * for every item in a list read.
+ *
+ * Returns the SHA-256 hex digest, or `null` only when the payload cannot be
+ * built (non-JSON-able field value); callers treat `null` as "cannot prove
+ * freshness" and fall back to the time gate (fail-safe).
  */
 export function computeContentFingerprint(input: {
-  id: string;
-  description: string;
-  runGit: GitRunner;
+  title?: string | null;
+  description?: string | null;
 }): string | null {
-  const { id, description, runGit } = input;
-  const keyFiles = extractKeyFiles(description);
-  const touched = resolveTouchedFiles(id, description, runGit);
-  if (touched === null) return null;
-  const pathStates = computePathFingerprints(touched, runGit);
-  if (pathStates === null) return null;
-  const payload = canonicalJson({
-    path_states: pathStates,
-    description_hash: sha256Hex(description),
-    key_files: keyFiles,
-  });
-  return sha256Hex(payload);
+  try {
+    const payload = canonicalJson({
+      schema: AUDIT_CONTENT_FINGERPRINT_SCHEMA,
+      title_hash: sha256Hex(fingerprintText(input.title)),
+      description_hash: sha256Hex(fingerprintText(input.description)),
+    });
+    return sha256Hex(payload);
+  } catch {
+    return null;
+  }
 }

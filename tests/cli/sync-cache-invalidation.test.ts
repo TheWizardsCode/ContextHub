@@ -3,7 +3,9 @@
  *
  * Uses REAL git + a real bare remote (mock-bin stripped from PATH, mirroring
  * tests/cli/sync-concurrent.test.ts) so the pull/merge/push path actually
- * runs against the compiled CLI (dist/cli.js).
+ * runs against the CLI under test, spawned through the pre-compiled bundle
+ * (`tests/cli/cli-bundle.ts`) so it always reflects current `src/` rather than
+ * a possibly stale `dist/` build (WL-0MVII17N3003FJWT).
  *
  * AC1: after a successful `wl sync`, identical reads return post-pull data
  * (no stale cache served). The sync command bumps the read-cache state
@@ -17,10 +19,11 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createTempDir, cleanupTempDir } from '../test-utils.js';
 import { readStateCounter } from '../../src/read-cache.js';
+import { cliInvocation } from './cli-bundle.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const projectRoot = path.resolve(__dirname, '..', '..');
-const cliPath = path.join(projectRoot, 'dist', 'cli.js');
+const [cliCommand, cliEntry] = cliInvocation();
 const mockBinDir = path.join(__dirname, 'mock-bin');
 
 /** PATH without the test mock-bin so we run the real git binary. */
@@ -44,8 +47,8 @@ interface CliResult {
 function runCli(cwd: string, args: string[], env: Record<string, string>): Promise<CliResult> {
   return new Promise((resolve, reject) => {
     const child = execFile(
-      process.execPath,
-      [cliPath, ...args],
+      cliCommand,
+      [cliEntry, ...args],
       {
         cwd,
         env: { ...process.env, ...env },

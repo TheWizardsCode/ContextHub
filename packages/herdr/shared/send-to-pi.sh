@@ -33,6 +33,12 @@
 #   --pane-id-file <path> Write the new pane ID as JSON ({"pane_id": "<id>"}) to
 #                        <path> immediately after the split succeeds. Backward
 #                        compatible: absent flag = current behavior (no file).
+#   --request-priority <p> Request priority for the launched pi session
+#                        (`low|medium|high`). Forwarded into the pane process
+#                        as HERDR_REQUEST_PRIORITY, which the Worklog pi
+#                        extension turns into the `X-Priority` provider
+#                        request header. Absent/invalid = no env var (the
+#                        proxy applies its own `medium` default).
 #   -h, --help           Show this help message
 #
 # Environment variables:
@@ -69,6 +75,7 @@ check_cli=false
 cwd_arg=""
 model_arg=""
 pane_id_file=""
+request_priority=""
 anchor_arg=""
 resize=true
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
@@ -121,6 +128,14 @@ while [[ $# -gt 0 ]]; do
       anchor_arg="${1#*=}"
       shift
       ;;
+    --request-priority)
+      request_priority="${2:-}"
+      shift 2
+      ;;
+    --request-priority=*)
+      request_priority="${1#*=}"
+      shift
+      ;;
     --model)
       model_arg="$2"
       shift 2
@@ -164,6 +179,20 @@ if [ $# -eq 0 ]; then
 fi
 
 COMMAND="$*"
+
+# ── Validate the request priority (fail-open) ─────────────────────────
+# Only the proxy's three priorities are forwarded; anything else is ignored
+# so the proxy applies its own `medium` default. Never fails the launch.
+case "$request_priority" in
+  low|medium|high)
+    ;;
+  "")
+    ;;
+  *)
+    echo "Warning: ignoring invalid --request-priority '$request_priority' (expected low|medium|high)" >&2
+    request_priority=""
+    ;;
+esac
 
 # ── Check CLI availability ────────────────────────────────────────────
 if [ "$check_cli" = true ] && ! command -v "$herdr_bin" &>/dev/null; then
@@ -250,7 +279,19 @@ lease_session_id="herdr-$(date +%s)-$$-$RANDOM"
 quoted_wrapper="$(printf '%q' "$wrapper_script")"
 quoted_lease_id="$(printf '%q' "$lease_session_id")"
 quoted_cmd="$(printf '%q' "$COMMAND")"
-if [ -n "$model_arg" ]; then
+# The pane process is launched by herdr's `pane run`, so an env var set on
+# this script does NOT reach pi. When a request priority was supplied it is
+# injected explicitly with `exec env HERDR_REQUEST_PRIORITY=<value>` so the
+# launched pi session (and the Worklog extension inside it) sees it.
+if [ -n "$request_priority" ]; then
+  quoted_priority="$(printf '%q' "$request_priority")"
+  if [ -n "$model_arg" ]; then
+    quoted_model="$(printf '%q' "$model_arg")"
+    "$herdr_bin" pane run "$np" exec env HERDR_REQUEST_PRIORITY="$quoted_priority" bash "$quoted_wrapper" "$quoted_lease_id" --model "$quoted_model" "$quoted_cmd"
+  else
+    "$herdr_bin" pane run "$np" exec env HERDR_REQUEST_PRIORITY="$quoted_priority" bash "$quoted_wrapper" "$quoted_lease_id" "$quoted_cmd"
+  fi
+elif [ -n "$model_arg" ]; then
   quoted_model="$(printf '%q' "$model_arg")"
   "$herdr_bin" pane run "$np" exec bash "$quoted_wrapper" "$quoted_lease_id" --model "$quoted_model" "$quoted_cmd"
 else

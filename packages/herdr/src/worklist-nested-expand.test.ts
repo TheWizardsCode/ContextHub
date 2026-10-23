@@ -124,8 +124,11 @@ function makeItem(id: string, depth: number | undefined, childCount: number, chi
  */
 function makeNestedExecMock(): { mock: Mock; parentFetches: Array<{ parentId: string }> } {
   const parentFetches: Array<{ parentId: string }> = [];
-  const mock = vi.fn(async (bin: string, args: string[]) => {
-    if (bin === 'herdr' && args[0] === 'pane' && args[1] === 'get') {
+  const mock = vi.fn(async (_bin: string, args: string[]) => {
+    // Match on the ARGS, never the exact binary name — the pane checks
+    // resolve the CLI as `process.env.HERDR_BIN_PATH ?? 'herdr'`, so a
+    // `bin === 'herdr'` check misses inside a herdr pane (WL-0MU2FM1L60002URI).
+    if (args[0] === 'pane' && args[1] === 'get') {
       return {
         stdout: JSON.stringify({
           id: 'cli:pane:get',

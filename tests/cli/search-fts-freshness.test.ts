@@ -10,34 +10,17 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath } from 'url';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
-import { createTempDir, cleanupTempDir, resolveTsxBin } from '../test-utils.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, '..', '..');
-const cliPath = path.join(projectRoot, 'src', 'cli.ts');
-const tsxBin = resolveTsxBin(__dirname);
+import { createTempDir, cleanupTempDir } from '../test-utils.js';
+import { runCliProcess } from './cli-bundle.js';
 
 function runCli(
   args: string[],
   cwd: string,
 ): { stdout: string; stderr: string; status: number | null } {
-  const result = spawnSync(process.execPath, [tsxBin, cliPath, ...args], {
-    cwd,
-    encoding: 'utf-8',
-    timeout: 60000,
-    maxBuffer: 20 * 1024 * 1024,
-  });
-  return {
-    stdout: result.stdout ?? '',
-    stderr: result.stderr ?? '',
-    status: result.status,
-  };
+  return runCliProcess(args, { cwd });
 }
 
 function setup(): string {

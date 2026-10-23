@@ -8,8 +8,10 @@
  *  - local tracking ref matches the new remote ref
  *  - a subsequent `wl sync` does not re-import foreign items
  *
- * These tests spawn the built CLI (dist/cli.js) as a subprocess with a PATH
- * that excludes the test mock-bin so the real git binary is used.
+ * These tests spawn the CLI as a subprocess (through the pre-compiled bundle
+ * from `tests/cli/cli-bundle.ts`, so they always run current `src/` rather
+ * than whatever `dist/` happens to be on disk — WL-0MVII17N3003FJWT) with a
+ * PATH that excludes the test mock-bin so the real git binary is used.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -18,10 +20,10 @@ import * as path from 'path';
 import * as os from 'os';
 import { spawnSync } from 'child_process';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
+import { cliInvocation } from './cli-bundle.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const projectRoot = path.resolve(__dirname, '..', '..');
-const cliPath = path.join(projectRoot, 'dist', 'cli.js');
 const mockBinDir = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
 
 /** PATH without the test mock-bin so subprocesses run the real git binary. */
@@ -42,7 +44,8 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 function runCli(cwd: string, ...args: string[]): { stdout: string; status: number } {
-  const res = spawnSync('node', [cliPath, ...args], { cwd, encoding: 'utf-8', env: realGitEnv() });
+  const [command, entry] = cliInvocation();
+  const res = spawnSync(command, [entry, ...args], { cwd, encoding: 'utf-8', env: realGitEnv() });
   return { stdout: res.stdout || '', status: res.status ?? -1 };
 }
 

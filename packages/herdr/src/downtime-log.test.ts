@@ -33,6 +33,7 @@ import {
   dispatchedItemMarkers,
   markerStillExcludes,
   readDowntimeLogEntries,
+  readCoordinationLogEntries,
   recentDispatchedItems,
   groupRecentDispatchesByTimeBlock,
   dispatchTimeBlockLabel,
@@ -89,6 +90,70 @@ describe('coordination log (WL-0MSXHAE290067VAL)', () => {
   it('never throws when the worklog dir is unwritable (fail-closed)', async () => {
     const cwd = '/nonexistent/path/' + Math.random().toString(36).slice(2);
     await expect(appendCoordinationLogEntry(cwd, { kind: 'coordination', operation: 'election', at: 'x' })).resolves.toBeUndefined();
+  });
+
+  // Parent WL-0MVEDM8OT007WDRS AC5: the decision entry shape is extended
+  // ADDITIVELY — every existing field is unchanged and the audit-batch
+  // metadata (depth/cap/remaining + the batch-end reason) round-trips through
+  // the JSONL log so a continuation or a batch end is diagnosable from the
+  // log alone.
+  it('round-trips audit-batch decision metadata through the coordination log (AC5)', async () => {
+    const cwd = makeTempCwd();
+    await appendCoordinationLogEntry(cwd, {
+      kind: 'decision',
+      operation: 'no-dispatch',
+      instanceId: 'inst-1',
+      reason: 'audit-batch-continue',
+      freeSlots: 2,
+      totalSlots: 4,
+      ownerPresent: false,
+      runningPanes: 1,
+      contentionDepth: 0,
+      auditBatchDepth: 3,
+      auditBatchCap: 2,
+      auditBatchRemaining: 1,
+      at: '2026-01-01T00:00:00.000Z',
+    });
+    await appendCoordinationLogEntry(cwd, {
+      kind: 'decision',
+      operation: 'no-dispatch',
+      reason: 'audit-batch-end',
+      freeSlots: 2,
+      totalSlots: 4,
+      ownerPresent: false,
+      runningPanes: 1,
+      contentionDepth: 0,
+      auditBatchDepth: 3,
+      auditBatchCap: 2,
+      auditBatchRemaining: 0,
+      auditBatchEndReason: 'depth',
+      at: '2026-01-01T00:00:01.000Z',
+    });
+
+    const decisions = (await readCoordinationLogEntries(cwd)).filter(
+      (entry) => entry.kind === 'decision',
+    );
+    expect(decisions).toHaveLength(2);
+    // The continuation keeps ALL standard fields and carries its metadata.
+    expect(decisions[0]).toMatchObject({
+      reason: 'audit-batch-continue',
+      freeSlots: 2,
+      totalSlots: 4,
+      ownerPresent: false,
+      runningPanes: 1,
+      contentionDepth: 0,
+      auditBatchDepth: 3,
+      auditBatchCap: 2,
+      auditBatchRemaining: 1,
+    });
+    // The batch-end entry explains why the batch ended (depth dropped).
+    expect(decisions[1]).toMatchObject({
+      reason: 'audit-batch-end',
+      auditBatchDepth: 3,
+      auditBatchCap: 2,
+      auditBatchRemaining: 0,
+      auditBatchEndReason: 'depth',
+    });
   });
 });
 

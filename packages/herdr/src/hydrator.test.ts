@@ -8,7 +8,7 @@
  * to what status/stage), plus the fail-open paths.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { resetExecFileAsync, setExecFileAsync } from './fetcher.js';
+import { resetExecFileAsync, setExecFileAsync, resetWorklogDir, setWorklogDir } from './fetcher.js';
 import {
   hydratorExecRouter,
   makeWorstCaseItems,
@@ -35,9 +35,10 @@ import {
   type HydratorItem,
   type HydratorPane,
 } from './hydrator.js';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { WorklogDatabase } from '@worklog/shared';
 
 // ── Test helpers ──────────────────────────────────────────────────────
 
@@ -610,6 +611,190 @@ describe('createProductionHydratorDeps', () => {
     expect(typeof deps.listActivePanes).toBe('function');
     expect(typeof deps.listOutboundDeps).toBe('function');
     expect(typeof deps.applyDemotion).toBe('function');
+  });
+});
+
+// ── F4 batched in-process dep read (WL-0MVJV2ORY002MNFF) ─────────────
+//
+// The hydrator used to spawn `wl dep list <id>` (plus `wl show` per
+// non-terminal edge) once per candidate per tick. F4 adds the batched
+// in-process seam: runHydrationOnce prefers it when present (production
+// wiring reads the SQLite store in one connection per tick), the per-item
+// spawn seam stays as the fallback, and every bounded-timeout / cap /
+// fail-open rule is preserved.
+
+describe('batched dependency reads (F4)', () => {
+  /** Seed a throwaway worklog with one candidate + one active + one done blocker. */
+  function seedWorklog(): { rootDir: string; worklogDir: string; item: string; active: string; done: string } {
+    const rootDir = mkdtempSync(join(tmpdir(), 'herdr-hydrator-inproc-'));
+    const worklogDir = join(rootDir, '.worklog');
+    mkdirSync(worklogDir, { recursive: true });
+    const db = new WorklogDatabase(
+      'WL',
+      join(worklogDir, 'worklog.db'),
+      join(worklogDir, 'worklog-data.jsonl'),
+      true,
+      false,
+    );
+    const item = db.create({ title: 'Candidate', status: 'in-progress', stage: 'plan_complete' });
+    const active = db.create({ title: 'Active blocker', status: 'open' });
+    const done = db.create({ title: 'Done blocker', status: 'completed', stage: 'in_review' });
+    db.addDependencyEdge(item.id, active.id);
+    db.addDependencyEdge(item.id, done.id);
+    db.close();
+    return { rootDir, worklogDir, item: item.id, active: active.id, done: done.id };
+  }
+
+  it('production listOutboundDepsBatch reads deps in-process with zero wl spawns', async () => {
+    const seeded = seedWorklog();
+    try {
+      const spawns: string[] = [];
+      setExecFileAsync((async (_bin: string, args: string[]) => {
+        spawns.push(args.join(' '));
+        return { stdout: '{}', stderr: '' };
+      }) as never);
+      setWorklogDir(seeded.worklogDir);
+
+      const deps = createProductionHydratorDeps({ log: () => {} });
+      const byItem = await deps.listOutboundDepsBatch!([seeded.item, 'WL-NONE']);
+
+      expect(spawns).toEqual([]);
+      const targets = byItem?.get(seeded.item) ?? [];
+      const active = targets.find((t) => t.id === seeded.active);
+      expect(active?.status).toBe('open');
+      const done = targets.find((t) => t.id === seeded.done);
+      expect(done?.status).toBe('completed');
+      // Stage enrichment (the `wl show` the spawn path pays for) is free here.
+      expect(done?.stage).toBe('in_review');
+      expect(byItem?.get('WL-NONE')).toEqual([]);
+    } finally {
+      resetWorklogDir();
+      rmSync(seeded.rootDir, { recursive: true, force: true });
+    }
+  });
+
+  it('production listOutboundDepsBatch fails open (undefined) without an in-process read', async () => {
+    resetWorklogDir();
+    const deps = createProductionHydratorDeps({ log: () => {} });
+    const result = await deps.listOutboundDepsBatch!([WL]);
+    expect(result).toBeUndefined();
+  });
+
+  it('prefers the batched seam: one call for every candidate, per-item seam untouched', async () => {
+    const items = makeWorstCaseItems(10);
+    const perItem = vi.fn(async () => []) as unknown as HydratorDeps['listOutboundDeps'];
+    const batch = vi.fn(
+      async (ids: string[]) => {
+        const map = new Map<string, HydratorDepTarget[] | undefined>();
+        for (const id of ids) map.set(id, []);
+        return map;
+      },
+    ) as unknown as HydratorDeps['listOutboundDepsBatch'];
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => items,
+      listActivePanes: async () => [] as HydratorPane[],
+      listOutboundDeps: perItem,
+      listOutboundDepsBatch: batch,
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    expect(batch).toHaveBeenCalledTimes(1);
+    expect(batch.mock.calls[0][0]).toHaveLength(10);
+    expect(perItem).not.toHaveBeenCalled();
+    expect(result.demoted).toBe(10);
+    expect(applied).toHaveLength(10);
+  });
+
+  it('keeps an item blocked when the batched read finds an active blocker', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'in_progress' },
+      ],
+      listActivePanes: async () => [],
+      listOutboundDepsBatch: async () =>
+        new Map([[WL, [{ id: 'WL-OTHER', status: 'open', stage: 'plan_complete' }]]]),
+    });
+
+    await runHydrationOnce(deps);
+
+    expect(applied).toEqual([{ id: WL, status: 'blocked', stage: 'plan_complete' }]);
+  });
+
+  it('releases an item whose batched dep entry is missing (fail-open)', async () => {
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      listActivePanes: async () => [],
+      listOutboundDepsBatch: async () => new Map(), // no entry for WL
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    expect(result.demoted).toBe(1);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
+  });
+
+  it('aborts the run when the batched dep read exceeds its budget', async () => {
+    const { deps } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      listActivePanes: async () => [],
+      listOutboundDepsBatch: () =>
+        new Promise<Map<string, HydratorDepTarget[] | undefined>>(() => {}),
+      stepTimeoutMs: 50,
+      log: () => {},
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    expect(result.ok).toBe(false);
+    expect(result.reason ?? '').toContain('dep-list');
+    expect(result.reason ?? '').toContain('timeout');
+    expect(result.demoted).toBe(0);
+  });
+
+  it('falls back to the per-item dep seam when the batched read is unavailable', async () => {
+    const perItem = vi.fn(async () => []) as unknown as HydratorDeps['listOutboundDeps'];
+    const { deps, applied } = makeDeps({
+      listInProgressItems: async () => [
+        { id: WL, status: 'in-progress', stage: 'plan_complete' },
+      ],
+      listActivePanes: async () => [],
+      listOutboundDeps: perItem,
+      listOutboundDepsBatch: async () => undefined,
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    expect(perItem).toHaveBeenCalledTimes(1);
+    expect(result.demoted).toBe(1);
+    expect(applied).toEqual([{ id: WL, status: 'open', stage: 'intake_complete' }]);
+  });
+
+  it('batches deps only within the per-tick cap', async () => {
+    const items = makeWorstCaseItems(25);
+    const batch = vi.fn(
+      async (ids: string[]) => {
+        const map = new Map<string, HydratorDepTarget[] | undefined>();
+        for (const id of ids) map.set(id, []);
+        return map;
+      },
+    ) as unknown as HydratorDeps['listOutboundDepsBatch'];
+    const { deps } = makeDeps({
+      listInProgressItems: async () => items,
+      listActivePanes: async () => [] as HydratorPane[],
+      listOutboundDepsBatch: batch,
+      maxItemsPerTick: 10,
+    });
+
+    const result = await runHydrationOnce(deps);
+
+    expect(batch).toHaveBeenCalledTimes(1);
+    expect(batch.mock.calls[0][0]).toHaveLength(10);
+    expect(result.demoted).toBe(10);
   });
 });
 

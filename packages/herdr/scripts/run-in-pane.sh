@@ -17,6 +17,11 @@
 # single-quoted arguments (e.g. `--summary 'Approved by manual review'`),
 # and shell constructs all work.
 #
+# Request priority: intentionally NOT accepted. Shell-command panes only run
+# `wl`/git commands and never schedule agent work, so there is no LLM request
+# to prioritise (parent WL-0MVE1NZ4J000H5NH). Agent panes get the priority
+# through send-to-pi.sh's `--request-priority` instead.
+#
 # Options (parsed only at the head of argv):
 #   --cwd <path>       Working directory for the new pane
 #                      (default: $HERDR_RESOLVED_CWD, then $PWD)

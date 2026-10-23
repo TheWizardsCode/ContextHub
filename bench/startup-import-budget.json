@@ -1,0 +1,128 @@
+{
+  "version": 1,
+  "$comment": "Startup import budget (parent AC1, WL-0MVFNMSRW002FI6B). Ratchet: a module added to the static import graph of src/cli.ts (or to the fast path's dynamic-import set, or its runtime module union) fails tests/cli/startup-import-budget.test.ts; regenerate deliberately with `npm run benchmark:wl-startup -- --target <src|dist> --update-budget` (removals are improvements and must be recorded the same way).",
+  "entry": "src/cli.ts",
+  "importGraph": {
+    "moduleCount": 4,
+    "modules": [
+      "src/argv-normalize.ts",
+      "src/cli.ts",
+      "src/spawn-counter.ts",
+      "src/version.ts"
+    ],
+    "external": [
+      "fs",
+      "node:path"
+    ]
+  },
+  "ac1Targets": {
+    "p95WallMs": 700,
+    "peakRssMb": 68,
+    "enforced": true,
+    "measuredTarget": "dist",
+    "note": "Parent AC1 target (p95 wall <= 700 ms, peak RSS <= 68 MB on a warm cache hit), accepted at the measured dist floor on the reference host per the producer decision on WL-0MVFNMSRW002FI6B (2026-10-21): the F7 slimmed fast path (4 static modules, 3 dynamic entries gated behind the --version branch) measured dist p95 689 ms wall / 630 ms CPU / 67.8 MB RSS for `wl next --json`, 645 / 607 / 67.9 MB for `wl list --status open --json`, and 547 / 492 / 60.9 MB for `wl --version`, against a bare-node floor of 484 ms / 458 ms CPU / 61.2 MB on the same (loaded) host. `enforced` is true per that decision: the measured floors are within the accepted target (the original 500 ms / 60 MB budget sat at or below the bare-node floor and was unreachable by import slimming alone)."
+  },
+  "regression": {
+    "runs": 4,
+    "cpuHeadroomPct": 100,
+    "wallHeadroomPct": 200,
+    "wallFloorMs": 250,
+    "note": "CPU time (process.resourceUsage user+system, from the F1 spawn records) is the load-independent regression gate, with 100 % headroom because the `src` (tsx) target's CPU time varies ~50 % run-to-run on a shared host (transpile + frequency/cache effects: an F7 gate run measured 3226 ms against a 2149 ms baseline's 50 % limit of 3224 ms). Wall time gets 200 % + a 250 ms floor; peak RSS keeps a tighter 25 % headroom (`rssHeadroomPct`) so memory regressions still fail promptly. A genuine CPU regression (doubling) still fails; the AC1 target is asserted separately once `ac1Targets.enforced`.",
+    "rssHeadroomPct": 25
+  },
+  "baselines": {
+    "src": {
+      "capturedAt": "2026-10-20T16:23:56.920Z",
+      "node": "v22.22.1",
+      "host": "rgardler-AI-Laptop",
+      "runs": 12,
+      "target": "src",
+      "method": "/usr/bin/node node_modules/.bin/tsx src/cli.ts <scenario argv> — warm runs after a cold-start warmup; CPU/RSS from the F1 spawn records (WL_SPAWN_COUNT_FILE)",
+      "scenarios": {
+        "next-json": {
+          "expectedKind": "cache-hit",
+          "p50WallMs": 2909.1,
+          "p95WallMs": 3177.9,
+          "p95CpuMs": 2149,
+          "p95RssMb": 105.9,
+          "maxRssMb": 105.9
+        },
+        "list-open-json": {
+          "expectedKind": "cache-hit",
+          "p50WallMs": 2725,
+          "p95WallMs": 2967,
+          "p95CpuMs": 2152,
+          "p95RssMb": 106.4,
+          "maxRssMb": 106.4
+        },
+        "version": {
+          "expectedKind": "version",
+          "p50WallMs": 2108.4,
+          "p95WallMs": 2217.8,
+          "p95CpuMs": 1883,
+          "p95RssMb": 104.6,
+          "maxRssMb": 104.6
+        }
+      },
+      "bareNode": {
+        "p95WallMs": 453.5,
+        "p95CpuMs": 428.6,
+        "p95RssMb": 57.6
+      }
+    },
+    "dist": {
+      "capturedAt": "2026-10-20T16:24:36.980Z",
+      "node": "v22.22.1",
+      "host": "rgardler-AI-Laptop",
+      "runs": 12,
+      "target": "dist",
+      "method": "/usr/bin/node dist/cli.js <scenario argv> — warm runs after a cold-start warmup; CPU/RSS from the F1 spawn records (WL_SPAWN_COUNT_FILE)",
+      "scenarios": {
+        "next-json": {
+          "expectedKind": "cache-hit",
+          "p50WallMs": 631.9,
+          "p95WallMs": 689.1,
+          "p95CpuMs": 630,
+          "p95RssMb": 67.8,
+          "maxRssMb": 67.8
+        },
+        "list-open-json": {
+          "expectedKind": "cache-hit",
+          "p50WallMs": 582.9,
+          "p95WallMs": 644.7,
+          "p95CpuMs": 607,
+          "p95RssMb": 67.9,
+          "maxRssMb": 67.9
+        },
+        "version": {
+          "expectedKind": "version",
+          "p50WallMs": 478.7,
+          "p95WallMs": 546.9,
+          "p95CpuMs": 492,
+          "p95RssMb": 60.9,
+          "maxRssMb": 60.9
+        }
+      },
+      "bareNode": {
+        "p95WallMs": 484,
+        "p95CpuMs": 458.1,
+        "p95RssMb": 61.2
+      }
+    }
+  },
+  "fastPathDynamicImports": [
+    "src/process-lifecycle.ts",
+    "src/read-cache-cli.ts",
+    "src/worklog-paths.ts"
+  ],
+  "fastPathRuntimeModules": [
+    "src/argv-normalize.ts",
+    "src/cli.ts",
+    "src/process-lifecycle.ts",
+    "src/read-cache-cli.ts",
+    "src/read-cache.ts",
+    "src/spawn-counter.ts",
+    "src/version.ts",
+    "src/worklog-paths.ts"
+  ]
+}

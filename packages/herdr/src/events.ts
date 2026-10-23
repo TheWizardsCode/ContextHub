@@ -346,8 +346,14 @@ export class HerdrEventSubscriber {
       });
 
       this.socket.once('connect', () => {
+        // Capture the connected socket locally: a `close()`/`restartSubscription()`
+        // may null `this.socket` before the subscribe request settles, and the
+        // settlement handlers below must never dereference it (WL-0MVFX70SB000YRQH:
+        // closing while a subscribe was pending threw an unhandled rejection
+        // from `this.socket!.removeListener`).
+        const socket = this.socket!;
         // Connected successfully — clear timeout
-        this.socket!.setTimeout(0);
+        socket.setTimeout(0);
 
         // Send the subscribe request and wait for response.
         // CRITICAL (WL-0MSZXB3OF009V5IQ): the `error` listener MUST stay
@@ -361,11 +367,11 @@ export class HerdrEventSubscriber {
         // Only the timeout listener is removed once the connection settles.
         this.sendSubscribeRequest()
           .then(() => {
-            this.socket!.removeListener('timeout', onTimeout);
+            socket.removeListener('timeout', onTimeout);
             resolve({ type: 'subscribed', subscriptions: this.getSubscriptionCount() });
           })
           .catch((err) => {
-            this.socket!.removeListener('timeout', onTimeout);
+            socket.removeListener('timeout', onTimeout);
             resolve({ type: 'error', error: err.message });
           });
       });

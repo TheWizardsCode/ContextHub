@@ -179,7 +179,7 @@ describe('sync audit results preservation', () => {
 });
 
 describe('mergeAuditResults', () => {
-  it('merges local and remote audit results with local precedence', async () => {
+  it('merges local and remote audit results, newest audit wins (last-write-wins by auditedAt)', async () => {
     const { mergeAuditResults } = await import('../src/sync.js');
     
     const localAudits = [
@@ -234,10 +234,21 @@ describe('mergeAuditResults', () => {
     // WL-002: remote only
     expect(map.get('WL-002')!.author).toBe('remote-reviewer');
     
-    // WL-003: local wins (local precedence)
-    expect(map.get('WL-003')!.author).toBe('local-reviewer');
-    expect(map.get('WL-003')!.summary).toBe('Local audit for item 3');
-    expect(map.get('WL-003')!.readyToClose).toBe(false);
+    // WL-003: both sides have an audit — the newer (later auditedAt) wins
+    // regardless of side (SA-0MUJNFF3K009BF03 last-write-wins semantics).
+    expect(map.get('WL-003')!.author).toBe('remote-reviewer');
+    expect(map.get('WL-003')!.summary).toBe('Remote says ready too');
+    expect(map.get('WL-003')!.readyToClose).toBe(true);
+    expect(map.get('WL-003')!.auditedAt).toBe('2026-06-05T11:00:00.000Z');
+  });
+
+  it('keeps the newer local audit when the remote copy is older', async () => {
+    const { mergeAuditResults } = await import('../src/sync.js');
+    const merged = mergeAuditResults(
+      [{ workItemId: 'WL-001', readyToClose: false, auditedAt: '2026-06-05T12:00:00.000Z', summary: 'Newer local', rawOutput: null, author: 'local' }],
+      [{ workItemId: 'WL-001', readyToClose: true, auditedAt: '2026-06-05T08:00:00.000Z', summary: 'Older remote', rawOutput: null, author: 'remote' }],
+    ).merged;
+    expect(merged.find(a => a.workItemId === 'WL-001')!.summary).toBe('Newer local');
   });
 
   it('handles empty audit arrays', async () => {

@@ -11,6 +11,9 @@ import { DEFAULT_GIT_REMOTE, DEFAULT_GIT_BRANCH } from '../sync-defaults.js';
 import { importFromJsonlContent } from '../jsonl.js';
 import { mergeAuditResults } from '../sync.js';
 import { loadConfig } from '../config.js';
+import { applyClaimHold, resolveClaimHoldTtlHours, type ClaimHoldDecision } from '../claim-hold.js';
+import { readCurrentClaimRows } from '../claim-hold-read.js';
+import { detectSecondStore, isInsideWorktreeRoot } from '../worklog-paths.js';
 import { displayConflictDetails } from './helpers.js';
 import { createLogFileWriter, getWorklogLogPath, logConflictDetails } from '../logging.js';
 import { withFileLock, getLockPathForJsonl, LockBusyError } from '../file-lock.js';
@@ -84,11 +87,44 @@ export async function performSync(
   // worklog ref into the target project's database and push the pollution.
   await assertDataFileInCwdRepo(options.file);
 
+  // Freshness for the whole sync (SA-0MVE34D9B005TUYJ AC2): the claim-hold
+  // guard must see claims written by another process during this sync, and
+  // `import()`/`upsertItems()` compare the incoming rows against the store's
+  // *current* rows when deciding whether to re-stamp `updatedAt`. A cached
+  // snapshot (5 s TTL by default) on either read would re-introduce exactly
+  // the stale view the claim guard exists to reject, so the sync process runs
+  // with the store's in-memory query cache disabled. A sync is a single bulk
+  // read→merge→write, so the cache buys nothing here.
+  process.env.WL_CACHE_TTL_MS = '0';
+
   const logPath = getWorklogLogPath('sync.log');
   const logLine = createLogFileWriter(logPath);
   logLine(`--- sync start ${new Date().toISOString()} file=${options.file} ---`);
   logLine(`Options json=${isJsonMode} verbose=${isVerbose} dryRun=${options.dryRun} push=${options.push}`);
   logLine(`Starting sync for ${options.file}...`);
+
+  // Store identity + second-store detection (SA-0MVE34D9B005TUYJ AC2/AC4):
+  // record which store this sync is operating on, and shout when that store
+  // sits inside an implement/audit worktree (a second store for the same
+  // project prefix — its own DB, mutation lock and last-synced-ref watermark).
+  const storeInfo = detectSecondStore(options.file);
+  logLine(
+    `Store: root=${storeInfo.worklogDir} db=${storeInfo.databasePath} ` +
+      `secondStore=${storeInfo.secondStore}` +
+      (storeInfo.secondStore ? ` (worktree=${storeInfo.worktreeRoot ?? 'unknown'})` : '')
+  );
+  if (storeInfo.secondStore) {
+    const warning =
+      `Second worklog store detected: this sync is operating on ${storeInfo.worklogDir} ` +
+      `(inside the managed worktree ${storeInfo.worktreeRoot ?? 'unknown'}) instead of the ` +
+      `main checkout's store. Two stores for one project prefix hold independent mutation ` +
+      `locks and last-synced-ref watermarks and can clobber each other — pass ` +
+      `--worklog-dir <main-checkout>/.worklog.`;
+    logLine(warning);
+    if (!isJsonMode && !isSilent) {
+      console.log(`\n⚠ ${warning}`);
+    }
+  }
   
   const db = getDatabase(options.prefix);
   const localItems = db.getAll();
@@ -285,6 +321,7 @@ export async function performSync(
         dryRun: true,
         sync: {
           file: options.file,
+          store: storeInfo,
           localState: {
             workItems: localItems.length,
             comments: localComments.length
@@ -335,6 +372,39 @@ export async function performSync(
   if (autoSyncEnabled) {
     db.setAutoSync(false);
   }
+
+  // ── Claim-hold guard (SA-0MVE34D9B005TUYJ → SA-0MVKWV2V2006JC8E) ──────
+  //
+  // The merge above works from the local snapshot taken at the *start* of the
+  // sync (before the fetch). A claim that landed during the read→write window
+  // (the window the mutation lock is supposed to close — it can still open
+  // when a long sync's lock is treated as age-expired) is not in that
+  // snapshot, so the merged set can carry the pre-claim row. Persisting it
+  // would revert the claim, and `import()`/`upsertItems()` would then re-stamp
+  // the losing row as the newest row, making the revert permanent.
+  //
+  // Re-read the *current* rows (cache-bypassing: they may have been written by
+  // another process seconds ago) and refuse any downgrade of a held claim,
+  // preserving its status/stage pair and its own timestamps.
+  const claimHoldPolicy = {
+    ttlHours: resolveClaimHoldTtlHours(config),
+  };
+  const currentClaimRows = readCurrentClaimRows(options.file) ?? db.getAll();
+  const claimHold = applyClaimHold(currentClaimRows, itemMergeResult.merged, claimHoldPolicy);
+  const claimHoldDecisions: ClaimHoldDecision[] = claimHold.decisions;
+  const itemsToPersist = claimHold.items;
+  result.claimHolds = claimHoldDecisions;
+  for (const decision of claimHoldDecisions) {
+    const line =
+      `Claim hold: refused downgrade for ${decision.workItemId} ` +
+      `(${decision.fields.join('+')}) ${decision.keptStatus}/${decision.keptStage} ← ` +
+      `${decision.attemptedStatus}/${decision.attemptedStage} ` +
+      `(claim age ${decision.claimAgeHours}h, TTL ${decision.ttlHours}h)`;
+    logLine(line);
+    if (!isJsonMode && !isSilent) {
+      console.log(`\n${line}`);
+    }
+  }
   // Persist the merged pull result. Delta remotes are merged onto the local
   // base non-destructively (upsert by ID — local records absent from the
   // delta are untouched, AC2/AC5); full snapshots (and legacy headerless
@@ -345,11 +415,11 @@ export async function performSync(
   }
   logLine(`Remote sync kind: ${remoteSyncKind ?? 'full (legacy headerless)'}`);
   if (remoteSyncKind === 'delta') {
-    db.upsertItems(itemMergeResult.merged, edgeMergeResult.merged);
+    db.upsertItems(itemsToPersist, edgeMergeResult.merged);
     db.upsertComments(commentMergeResult.merged);
     db.importAuditResults(auditMergeResult.merged);
   } else {
-    db.import(itemMergeResult.merged, edgeMergeResult.merged, auditMergeResult.merged);
+    db.import(itemsToPersist, edgeMergeResult.merged, auditMergeResult.merged);
     db.importComments(commentMergeResult.merged);
   }
   if (autoSyncEnabled) {
@@ -555,7 +625,9 @@ export async function performSync(
       message: 'Sync completed successfully',
       sync: {
         file: options.file,
+        store: storeInfo,
         summary: result,
+        claimHolds: claimHoldDecisions,
         pushed: options.push
       }
     }, null, 2));

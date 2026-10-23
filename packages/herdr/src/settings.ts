@@ -20,7 +20,9 @@ import {
 // (WL-0MUNS8X97007C9H9 AC1).
 export { clampBrowseItemCount, MIN_BROWSE_ITEM_COUNT, MAX_BROWSE_ITEM_COUNT, DEFAULT_BROWSE_ITEM_COUNT };
 import {
+  clampDowntimeAuditBatchMax,
   clampDowntimeIdleThresholdMs,
+  clampDowntimeLongRunningThresholdMs,
   clampDowntimeMarkerStaleWindowMs,
   clampDowntimeMaxAttempts,
   clampDowntimeNoCandidateCooldownMs,
@@ -28,7 +30,9 @@ import {
   clampDowntimePollInterval,
   clampDowntimeRequiredFreeSlots,
   clampDowntimeStallThresholdMs,
+  DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   DEFAULT_DOWNTIME_MODEL,
@@ -41,18 +45,16 @@ import {
   DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
 } from './downtime-worker.js';
 import {
-  clampModeSwitchIdleThresholdMs,
-  clampModeSwitchPollIntervalMs,
-  DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-  DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
-} from './mode-switch-worker.js';
-import {
   clampPaneCloseGracePeriodMinutes,
   clampPaneCloseIdleThresholdMinutes,
   DEFAULT_PANE_CLOSE_ENABLED,
   DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
   DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
 } from './pane-close-scheduler.js';
+import {
+  clampDowntimeCapacityStarvationAlertMs,
+  DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
+} from './capacity-starvation.js';
 import { dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -113,6 +115,14 @@ export interface PluginSettings {
    */
   downtimeMaxAttempts: number;
   /**
+   * Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1): bounds
+   * how many SEQUENTIAL audit dispatches one continuous idle window may
+   * issue when the audit-eligible depth reaches `browseItemCount`. Default
+   * 2; clamped to [1, 5]; `1` disables batching (legacy single-dispatch
+   * behaviour). Non-finite/missing/invalid values fall back to the default.
+   */
+  downtimeAuditBatchMax: number;
+  /**
    * Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT): a
    * SUCCESS dispatch marker whose item is still at the marker's dispatched-at
    * stage is released once its age exceeds this window, so a pane that
@@ -134,20 +144,20 @@ export interface PluginSettings {
    */
   downtimeStallThresholdMs: number;
   /**
-   * Enable activity-gated mode-switching (fast on agent command, cheap on
-   * idle). Default `true` (WL-0MU4MKVR4005WPBJ — was `false`, which silently
-   * disabled the shipped feature); when `false` no scheduler task is
-   * registered and the agent-route hook is a no-op.
+   * Continuous capacity-refusal window (WL-0MVKNC2N50025HXE AC3) before the
+   * dispatcher writes a `capacity-starved` observation naming the panes that
+   * hold the local model. Observation only — it never gates dispatch. Default
+   * **2 h**; clamped to [5 min, 24 h]; invalid/missing values fall back to the
+   * default.
    */
-  modeSwitchEnabled: boolean;
+  downtimeCapacityStarvationAlertMs: number;
   /**
-   * Idle window before switching to cheap mode (ms). Default 900_000 (15 min).
-   * A new operator agent-route command resets this timer.
+   * Progress window (WL-0MVKNC2N50025HXE AC2) before a live-agent pane whose
+   * item has not advanced is reported as long-running on a starvation signal.
+   * Panes are never resumed/closed from this signal. Default **3 h**; clamped
+   * to [1 h, 48 h]; invalid/missing values fall back to the default.
    */
-  modeSwitchIdleThresholdMs: number;
-  /** Poll interval for the mode-switch worker (ms). Defaults to the same
-   * cadence as the downtime poller; clamped to a sensible range. */
-  modeSwitchPollIntervalMs: number;
+  downtimeLongRunningThresholdMs: number;
   /**
    * Enable periodic auto-close of settled/abandoned agent panes
    * (WL-0MUJL1NAH0042GOS). Default `true`; disable to turn off the reaper
@@ -194,12 +204,12 @@ export const defaultSettings: PluginSettings = {
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   downtimeNonTerminalCooldownMs: DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   downtimeMaxAttempts: DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+  downtimeAuditBatchMax: DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   downtimeMarkerStaleWindowMs: DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
   downtimeStallScanEnabled: DEFAULT_DOWNTIME_STALL_SCAN_ENABLED,
   downtimeStallThresholdMs: DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
-  modeSwitchEnabled: true,
-  modeSwitchIdleThresholdMs: DEFAULT_MODE_SWITCH_IDLE_THRESHOLD_MS,
-  modeSwitchPollIntervalMs: DEFAULT_MODE_SWITCH_POLL_INTERVAL_MS,
+  downtimeCapacityStarvationAlertMs: DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
+  downtimeLongRunningThresholdMs: DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
   paneCloseEnabled: DEFAULT_PANE_CLOSE_ENABLED,
   paneCloseIdleThresholdMinutes: DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
   paneCloseGracePeriodMinutes: DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
@@ -296,6 +306,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeMaxAttempts: typeof parsed.downtimeMaxAttempts === 'number'
         ? clampDowntimeMaxAttempts(parsed.downtimeMaxAttempts)
         : defaultSettings.downtimeMaxAttempts,
+      downtimeAuditBatchMax: typeof parsed.downtimeAuditBatchMax === 'number'
+        ? clampDowntimeAuditBatchMax(parsed.downtimeAuditBatchMax)
+        : defaultSettings.downtimeAuditBatchMax,
       downtimeMarkerStaleWindowMs: typeof parsed.downtimeMarkerStaleWindowMs === 'number'
         ? clampDowntimeMarkerStaleWindowMs(parsed.downtimeMarkerStaleWindowMs)
         : defaultSettings.downtimeMarkerStaleWindowMs,
@@ -304,14 +317,14 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeStallThresholdMs: typeof parsed.downtimeStallThresholdMs === 'number'
         ? clampDowntimeStallThresholdMs(parsed.downtimeStallThresholdMs)
         : defaultSettings.downtimeStallThresholdMs,
-      modeSwitchEnabled: typeof parsed.modeSwitchEnabled === 'boolean'
-        ? parsed.modeSwitchEnabled : defaultSettings.modeSwitchEnabled,
-      modeSwitchIdleThresholdMs: typeof parsed.modeSwitchIdleThresholdMs === 'number'
-        ? clampModeSwitchIdleThresholdMs(parsed.modeSwitchIdleThresholdMs)
-        : defaultSettings.modeSwitchIdleThresholdMs,
-      modeSwitchPollIntervalMs: typeof parsed.modeSwitchPollIntervalMs === 'number'
-        ? clampModeSwitchPollIntervalMs(parsed.modeSwitchPollIntervalMs)
-        : defaultSettings.modeSwitchPollIntervalMs,
+      downtimeCapacityStarvationAlertMs:
+        typeof parsed.downtimeCapacityStarvationAlertMs === 'number'
+          ? clampDowntimeCapacityStarvationAlertMs(parsed.downtimeCapacityStarvationAlertMs)
+          : defaultSettings.downtimeCapacityStarvationAlertMs,
+      downtimeLongRunningThresholdMs:
+        typeof parsed.downtimeLongRunningThresholdMs === 'number'
+          ? clampDowntimeLongRunningThresholdMs(parsed.downtimeLongRunningThresholdMs)
+          : defaultSettings.downtimeLongRunningThresholdMs,
       paneCloseEnabled: typeof parsed.paneCloseEnabled === 'boolean'
         ? parsed.paneCloseEnabled : defaultSettings.paneCloseEnabled,
       paneCloseIdleThresholdMinutes: typeof parsed.paneCloseIdleThresholdMinutes === 'number'

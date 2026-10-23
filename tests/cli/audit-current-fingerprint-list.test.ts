@@ -2,15 +2,17 @@
  * `wl list --json` emits `currentFingerprint` and it drives audit freshness —
  * end-to-end integration test (WL-0MUN7QWFP0010EQC).
  *
- * Exercises the real CLI command path in-process against a temporary worklog
- * while keeping the process cwd inside this (git) repository, so the canonical
- * fingerprint can be computed from the item's Key Files. Verifies:
+ * The canonical fingerprint is schema 2 (item data only — WL-0MVK5SWZE00254Y7):
+ * it hashes the item's own title/description and needs no git state, so this
+ * test needs no commit history. Verifies:
  *
  *   - `currentFingerprint` is present in the JSON output;
  *   - it equals the stored audit `fingerprint` for unchanged content, so
  *     `isAuditFresh` takes the primary content gate (fresh despite a stale
  *     `updatedAt`), fixing the "audit immediately invalidated" bug;
- *   - it survives `--fields` projection.
+ *   - it survives `--fields` projection;
+ *   - a comment (non-content change) does not invalidate it, while a title
+ *     change does.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -19,8 +21,7 @@ import * as path from 'path';
 import { runInProcess } from './cli-inproc.js';
 import { writeConfig, writeInitSemaphore, cliPath } from './cli-helpers.js';
 import { createTempDir, cleanupTempDir } from '../test-utils.js';
-import { computeContentFingerprint, createGitRunner } from '../../src/audit-fingerprint.js';
-import { getGitRepoRoot } from '@worklog/shared/worklog-paths';
+import { computeContentFingerprint } from '../../src/audit-fingerprint.js';
 import { isAuditFresh } from '@worklog/shared/icons';
 
 describe('wl list --json currentFingerprint (WL-0MUN7QWFP0010EQC)', () => {
@@ -41,27 +42,29 @@ describe('wl list --json currentFingerprint (WL-0MUN7QWFP0010EQC)', () => {
     cleanupTempDir(tempDir);
   });
 
-  async function createItem(description: string): Promise<{ id: string; description: string }> {
+  async function createItem(
+    description: string,
+    title = 'Fingerprint item',
+  ): Promise<{ id: string; title: string; description: string }> {
     const descFile = path.join(tempDir, 'description.md');
     fs.writeFileSync(descFile, description);
     const res = await runInProcess(
-      `tsx ${cliPath} --json --worklog-dir ${wlDir} create -t "Fingerprint item" --description-file ${descFile}`,
+      `tsx ${cliPath} --json --worklog-dir ${wlDir} create -t "${title}" --description-file ${descFile}`,
     );
     const created = JSON.parse(res.stdout);
     expect(created.success).toBe(true);
-    return { id: created.workItem.id, description: created.workItem.description };
+    return {
+      id: created.workItem.id,
+      title: created.workItem.title,
+      description: created.workItem.description,
+    };
   }
 
   it('emits a currentFingerprint matching the stored fingerprint for unchanged content', async () => {
-    const repoRoot = getGitRepoRoot() ?? process.cwd();
-    const { id, description } = await createItem(
+    const { id, title, description } = await createItem(
       ['## Summary', 'Fingerprint integration fixture.', '## Key Files', '- `package.json`'].join('\n'),
     );
-    const expected = computeContentFingerprint({
-      id,
-      description,
-      runGit: createGitRunner(repoRoot),
-    });
+    const expected = computeContentFingerprint({ title, description });
     expect(expected).toMatch(/^[0-9a-f]{64}$/);
 
     const auditRes = await runInProcess(
@@ -82,16 +85,53 @@ describe('wl list --json currentFingerprint (WL-0MUN7QWFP0010EQC)', () => {
     ).toBe(true);
   });
 
+  it('ignores non-content changes (a comment) and invalidates on a title change', async () => {
+    const { id, title, description } = await createItem(
+      ['## Summary', 'Comment/title fixture.', '## Key Files', '- `package.json`'].join('\n'),
+    );
+    const expected = computeContentFingerprint({ title, description });
+    await runInProcess(
+      `tsx ${cliPath} --json --worklog-dir ${wlDir} audit-set ${id} --ready-to-close yes --fingerprint ${expected} --summary "Ready to close: Yes"`,
+    );
+
+    // A comment is not content: the schema-2 fingerprint is unchanged.
+    await runInProcess(`tsx ${cliPath} --json --worklog-dir ${wlDir} comment add ${id} --comment "note"`);
+    const afterComment = JSON.parse(
+      (await runInProcess(`tsx ${cliPath} --json --worklog-dir ${wlDir} list`)).stdout,
+    ).workItems.find((w: { id: string }) => w.id === id);
+    expect(afterComment.currentFingerprint).toBe(expected);
+    expect(
+      isAuditFresh(
+        afterComment.auditedAt,
+        afterComment.updatedAt,
+        afterComment.fingerprint,
+        afterComment.currentFingerprint,
+      ),
+    ).toBe(true);
+
+    // The title IS content: the fingerprint moves and the audit is stale.
+    await runInProcess(
+      `tsx ${cliPath} --json --worklog-dir ${wlDir} update ${id} --title "Renamed fingerprint item"`,
+    );
+    const afterTitle = JSON.parse(
+      (await runInProcess(`tsx ${cliPath} --json --worklog-dir ${wlDir} list`)).stdout,
+    ).workItems.find((w: { id: string }) => w.id === id);
+    expect(afterTitle.currentFingerprint).not.toBe(expected);
+    expect(
+      isAuditFresh(
+        afterTitle.auditedAt,
+        afterTitle.updatedAt,
+        afterTitle.fingerprint,
+        afterTitle.currentFingerprint,
+      ),
+    ).toBe(false);
+  });
+
   it('keeps a strict --fields projection (enrichment fields, including currentFingerprint, are dropped)', async () => {
-    const repoRoot = getGitRepoRoot() ?? process.cwd();
-    const { id, description } = await createItem(
+    const { id, title, description } = await createItem(
       ['## Work', 'Projection fixture.', '## Key Files', '- `package.json`'].join('\n'),
     );
-    const expected = computeContentFingerprint({
-      id,
-      description,
-      runGit: createGitRunner(repoRoot),
-    });
+    const expected = computeContentFingerprint({ title, description });
     await runInProcess(
       `tsx ${cliPath} --json --worklog-dir ${wlDir} audit-set ${id} --ready-to-close yes --fingerprint ${expected} --summary "ok"`,
     );

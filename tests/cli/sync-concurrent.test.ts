@@ -21,10 +21,13 @@ import { execFileSync, spawn, execFile } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { createTempDir, cleanupTempDir } from '../test-utils.js';
+import { cliInvocation } from './cli-bundle.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const projectRoot = path.resolve(__dirname, '..', '..');
-const cliPath = path.join(projectRoot, 'dist', 'cli.js');
+/** The CLI under test: the pre-compiled bundle of `src/cli.ts`, so these
+ * tests never depend on a possibly stale `dist/` build (WL-0MVII17N3003FJWT). */
+const [cliCommand, cliEntry] = cliInvocation();
 const mockBinDir = path.join(__dirname, 'mock-bin');
 
 /** PATH without the test mock-bin so we run the real git binary. */
@@ -92,8 +95,8 @@ function lockPath(): string {
 function runSyncViaSpawn(): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn(
-      'node',
-      [cliPath, '--json', 'sync', '--if-idle'],
+      cliCommand,
+      [cliEntry, '--json', 'sync', '--if-idle'],
       {
         cwd: tempDir,
         env: { ...process.env, PATH: realGitPath() },

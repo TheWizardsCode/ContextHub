@@ -19,14 +19,29 @@ vi.mock('./fetcher.js', () => ({
   fetchChildrenForItem: vi.fn().mockResolvedValue([]),
   fetchBlockersForItem: vi.fn().mockResolvedValue([]),
   getWorklogDir: vi.fn().mockReturnValue(undefined),
+  // Refresh-scoped in-process connection (WL-0MV6C6SLB005HX7B): doRefresh
+  // opens one scope per refresh and closes it in a `finally`; a benign
+  // read/close stub is enough since the fetch helpers are mocked here.
+  createInProcessRefreshScope: vi.fn(() => ({
+    read: vi.fn(async () => undefined),
+    close: vi.fn(),
+  })),
 }));
 
-vi.mock('./auto-sync.js', () => ({
-  runSync: vi.fn().mockResolvedValue({ success: true }),
-  createSyncTimer: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })),
-  clampSyncInterval: vi.fn((v: number) => v),
-  heartbeatTtlForInterval: vi.fn(() => 45_000),
-}));
+// Partial mock: keep every real export (the pane subscribes to the sync
+// status model via `onSyncStatusChange`, reads `getSyncStatus` and formats
+// the notice), overriding only the spawn-driving surface so no test in this
+// file ever spawns a real `wl sync` (F3 — WL-0MVJV2O7H003HY9N).
+vi.mock('./auto-sync.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./auto-sync.js')>();
+  return {
+    ...actual,
+    runSync: vi.fn().mockResolvedValue({ success: true }),
+    createSyncTimer: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })),
+    clampSyncInterval: vi.fn((v: number) => v),
+    heartbeatTtlForInterval: vi.fn(() => 45_000),
+  };
+});
 
 vi.mock('./notify.js', () => ({
   showToast: vi.fn(),

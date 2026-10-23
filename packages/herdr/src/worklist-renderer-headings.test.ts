@@ -259,3 +259,94 @@ describe('click-row mapping accounts for heading rows', () => {
     expect(mapMouseToAction(state, press(5, 4), TERM_80x24)).toEqual({ type: 'select-row', index: 2 });
   });
 });
+
+// ── In Review heading background (parent WL-0MUYJ8WJG0087VSU) ──
+//
+// Authored test-first under `it.fails(...)` while the contract was red; the
+// implementation child (WL-0MVD2OFRK000JA2Q) flipped them to active `it(...)`
+// specs once the grey background landed.
+
+const ANSI_BG_PREFIX = '\x1b[48;5;'; // ANSI 256-colour background escape
+
+/** Rows that produce both a normal heading ("Group 1") and the target heading ("In Review"). */
+const BACKGROUND_TEST_ROWS: (DisplayHeadingRow | WorkItem)[] = [
+  makeHeading(1, 'Group 1', 3),
+  makeItem('A', 1),
+  makeItem('B', 1),
+  makeItem('C', 1),
+  makeHeading(2, 'In Review', 2),
+  makeItem('D', 2),
+  makeItem('E', 2),
+];
+
+describe('In Review heading background escape sequence', () => {
+  const renderer = createListRenderer();
+
+  it('In Review heading contains the ANSI 256 background escape prefix', () => {
+    // AC1: a heading with label `In Review` contains the background escape
+    // sequence (asserted on the `\x1b[48;5;` prefix rather than the exact
+    // full-row string).
+    const output = renderer(
+      BACKGROUND_TEST_ROWS,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+    );
+    const inReviewLine = output.split('\n').find((l) => l.includes('In Review'));
+    expect(inReviewLine).toBeDefined();
+    expect(inReviewLine!).toContain(ANSI_BG_PREFIX);
+  });
+
+  it('other headings do NOT contain a background escape sequence', () => {
+    // AC2 (already-true contract): headings with labels other than
+    // `In Review` render without any `\x1b[48;5;` background sequence.
+    const output = renderer(
+      BACKGROUND_TEST_ROWS,
+      0,
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+    );
+    const lines = output.split('\n');
+    // Collect all heading lines (they start with the ── pattern after stripping ANSI).
+    const headingLines = lines.filter((l) => {
+      const stripped = l.replace(/\x1b\[[0-9;]*m/g, '');
+      return stripped.match(/^\s*──\s+\S/);
+    });
+    for (const hLine of headingLines) {
+      // Skip the In Review heading — it is the one with the background.
+      if (hLine.includes('In Review')) {
+        continue;
+      }
+      expect(hLine).not.toContain(ANSI_BG_PREFIX);
+    }
+  });
+});
+
+describe('In Review heading background with selection', () => {
+  const renderer = createListRenderer();
+
+  it('selected In Review heading has both reverse-video and grey background', () => {
+    // AC3: a selected `In Review` heading renders with the reverse-video
+    // selection bar (`\x1b[7m`) in addition to the grey background.
+    // Row index 4 is the In Review heading (h1=0, items=1-3, h2=4).
+    const output = renderer(
+      BACKGROUND_TEST_ROWS,
+      4, // selectedIndex = In Review heading
+      0,
+      TERM_80x24,
+      null,
+      'list',
+      null,
+    );
+    const inReviewLine = output.split('\n').find((l) => l.includes('In Review'));
+    expect(inReviewLine).toBeDefined();
+    expect(inReviewLine!).toContain(ANSI_REVERSE); // reverse-video selection
+    expect(inReviewLine!).toContain(ANSI_BG_PREFIX); // grey background
+  });
+});
