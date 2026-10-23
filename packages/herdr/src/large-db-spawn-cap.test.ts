@@ -23,6 +23,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import * as os from 'node:os';
 import {
   DEFAULT_WL_SPAWN_CAP,
   LARGE_DB_PROFILES,
@@ -126,7 +127,20 @@ describe(
   'F5 spawn-cap measured ratchet',
   { timeout: 300_000 },
   () => {
-    it('keeps a real read burst inside the documented cap, loop and RSS bounds', async () => {
+    /**
+     * The measured half is skipped on an overloaded host: the 1 ms event-loop
+     * probe counts OS descheduling as "blocked", so under external CPU
+     * contention an absolute timing reading describes the host, not the
+     * plugin (the documented F1 policy gates regressions on CPU time for the
+     * same reason). The absolute AC1/AC5 numbers are measured at full scale
+     * by F7's `--ac-report` on a quiet reference host; the deterministic
+     * cap/RSS/no-drop policy is covered by the synthetic tests above
+     * regardless.
+     */
+    const hostLoadPerCore = os.loadavg()[0] / Math.max(1, os.cpus().length);
+    it.skipIf(hostLoadPerCore > 1)(
+      'keeps a real read burst inside the documented cap, loop and RSS bounds',
+      async () => {
       const report = await runSpawnConcurrencyScenario({
         profile: 'default',
         // A modest default-suite burst; the on-demand full-scale run uses
