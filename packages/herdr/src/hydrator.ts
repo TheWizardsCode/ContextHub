@@ -91,6 +91,7 @@ import {
   buildWlArgs,
   extractJson,
   getWorklogDir,
+  fetchOutboundDepsForItems,
 } from './fetcher.js';
 import { parseMachinePaneListOutput } from './dispatcher-anchor.js';
 
@@ -229,6 +230,18 @@ export interface HydratorDeps {
   listActivePanes: (workspaceId?: string) => Promise<HydratorPane[] | null>;
   /** `wl dep list <id>` → outbound targets, or null when unavailable. */
   listOutboundDeps: (itemId: string) => Promise<HydratorDepTarget[] | null>;
+  /**
+   * F4 batched dep read (WL-0MVJV2ORY002MNFF): outbound targets for ALL
+   * candidates in ONE in-process pass (production wiring reads the SQLite
+   * store, no `wl dep list` spawn). Resolves `itemId → targets` for every
+   * requested id, or `undefined` when the batched read is unavailable — the
+   * caller then falls back to the per-item {@link listOutboundDeps} spawn
+   * seam exactly as before. Absent (test fakes / pre-F4 shapes) → per-item
+   * lookups, unchanged.
+   */
+  listOutboundDepsBatch?: (
+    itemIds: string[],
+  ) => Promise<Map<string, HydratorDepTarget[] | undefined> | undefined>;
   /** Apply a demotion via `wl update`; true when it was persisted. */
   applyDemotion: (itemId: string, status: string, stage: string) => Promise<boolean>;
   /** Optional diagnostic log sink. */
@@ -653,6 +666,52 @@ export async function runHydrationOnce(
   }
   const panes = tabStep.value;
 
+  // F4 (WL-0MVJV2ORY002MNFF): resolve every pane match once — the loop used
+  // to recompute `collectPaneWorkItemIds` per item (O(panes) per item).
+  const paneIds = collectPaneWorkItemIds(panes, workspaceId);
+
+  // F4 batched dependency read: when the seam exists, ONE `dep-list` step
+  // reads every candidate's outbound edges (production wiring: in-process,
+  // one SQLite connection per tick) instead of one `wl dep list` spawn per
+  // candidate. The candidate list mirrors the per-item loop's ordering and
+  // per-tick cap exactly (valid ids, pane-matched items consume a cap slot),
+  // so the batched lookup fetches precisely the deps the loop consumes.
+  const depCandidateIds: string[] = [];
+  {
+    let capSlots = 0;
+    for (const item of items) {
+      if (capSlots >= maxItemsPerTick) break;
+      if (!item || typeof item.id !== 'string' || item.id.length === 0) continue;
+      capSlots += 1;
+      if (paneIds.has(item.id)) continue;
+      depCandidateIds.push(item.id);
+    }
+  }
+  // `null` → the batched read was unavailable and the loop falls back to the
+  // per-item spawn seam; a Map → per-item decisions come from the batch.
+  let depByItem: Map<string, HydratorDepTarget[] | undefined> | null = null;
+  if (deps.listOutboundDepsBatch && depCandidateIds.length > 0) {
+    const batchStep = await runStep('dep-list', stepTimeoutMs, now, log, () =>
+      deps.listOutboundDepsBatch!(depCandidateIds),
+    );
+    if (batchStep.status === 'timeout') {
+      // Abort like the per-item dep-list timeout: a hung dependency check is
+      // ambiguous evidence, so no candidate is released on an incomplete read.
+      return {
+        ok: false,
+        considered,
+        demoted: 0,
+        skipped: 0,
+        reason: 'dep-list step timeout (batched dependency read)',
+      };
+    }
+    if (batchStep.status === 'ok' && batchStep.value !== undefined) {
+      depByItem = batchStep.value;
+    }
+    // status === 'error' / undefined value → fall through to the per-item
+    // spawn seam (fail-open, exactly as before the batched seam existed).
+  }
+
   let demoted = 0;
   let skipped = 0;
   let processed = 0;
@@ -664,34 +723,42 @@ export async function runHydrationOnce(
     // Pane title is the active signal: a pane in the current workspace whose
     // title contains the item ID means the item is being worked on; otherwise
     // it is released (WL-0MV1BWETT005GSUJ).
-    const hasActivePane = isActivePaneMatch(item.id, panes, workspaceId);
+    const hasActivePane = paneIds.has(item.id);
     let blocked = false;
     if (!hasActivePane) {
-      const depStep = await runStep(
-        'dep-list',
-        stepTimeoutMs,
-        now,
-        log,
-        () => deps.listOutboundDeps(item.id),
-      );
-      if (depStep.status === 'timeout') {
-        // Abort the run: a hung dependency check is ambiguous evidence, so
-        // the remaining candidates (and their demotions) are deferred to the
-        // next tick rather than releasing on an incomplete check.
-        return {
-          ok: false,
-          considered: processed,
-          demoted,
-          skipped,
-          reason: `dep-list step timeout for ${item.id}`,
-        };
+      if (depByItem !== null) {
+        // F4 batched decision: a missing/undefined entry means the dep lookup
+        // was unavailable for this item — fail-open toward release, the same
+        // rule as an unavailable per-item lookup.
+        const targets = depByItem.get(item.id);
+        blocked = Array.isArray(targets) && targets.some(isActiveBlocker);
+      } else {
+        const depStep = await runStep(
+          'dep-list',
+          stepTimeoutMs,
+          now,
+          log,
+          () => deps.listOutboundDeps(item.id),
+        );
+        if (depStep.status === 'timeout') {
+          // Abort the run: a hung dependency check is ambiguous evidence, so
+          // the remaining candidates (and their demotions) are deferred to the
+          // next tick rather than releasing on an incomplete check.
+          return {
+            ok: false,
+            considered: processed,
+            demoted,
+            skipped,
+            reason: `dep-list step timeout for ${item.id}`,
+          };
+        }
+        // A seam failure stays fail-open toward release (pre-existing
+        // behaviour): an unavailable dep lookup never blocks a demotion.
+        blocked =
+          depStep.status === 'ok' &&
+          Array.isArray(depStep.value) &&
+          depStep.value.some(isActiveBlocker);
       }
-      // A seam failure stays fail-open toward release (pre-existing
-      // behaviour): an unavailable dep lookup never blocks a demotion.
-      blocked =
-        depStep.status === 'ok' &&
-        Array.isArray(depStep.value) &&
-        depStep.value.some(isActiveBlocker);
     }
 
     const decision = decideDemotion(item, { hasActivePane: hasActivePane, blocked });
@@ -937,6 +1004,27 @@ export function createProductionHydratorDeps(
         }
       }
       return enriched;
+    },
+
+    // F4 (WL-0MVJV2ORY002MNFF): the batched dep seam reads every candidate's
+    // outbound deps in ONE in-process pass (one SQLite connection per tick)
+    // instead of one `wl dep list` spawn per candidate — runHydrationOnce
+    // prefers this seam when present. Targets carry the stage directly, so
+    // the per-edge `wl show` of the spawn path is free here. Fail-open:
+    // `undefined` when no in-process read is possible, in which case the
+    // orchestrator falls back to the per-item {@link listOutboundDeps} spawn
+    // seam exactly as today.
+    listOutboundDepsBatch: async (itemIds: string[]) => {
+      const read = await fetchOutboundDepsForItems(itemIds);
+      if (read === undefined) return undefined;
+      const result = new Map<string, HydratorDepTarget[] | undefined>();
+      for (const [id, targets] of read) {
+        result.set(
+          id,
+          targets.map((target) => ({ id: target.id, status: target.status, stage: target.stage })),
+        );
+      }
+      return result;
     },
 
     applyDemotion: async (itemId: string, status: string, stage: string) => {

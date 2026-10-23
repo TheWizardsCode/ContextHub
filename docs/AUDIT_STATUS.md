@@ -187,10 +187,13 @@ the TUI icon path (`stageDisplayIcon`), the `in_review` ordering predicate
    freshness content-based: a metadata-only write that moves `updatedAt` — a
    post-audit comment, a sync-merge re-timestamp, or a `sortIndex` re-sort —
    leaves a fingerprinted audit fresh. A change to the auditable content
-   (description/ACs, Key Files, git HEAD sha, or working-tree state) changes the
-   fingerprint and marks the audit stale. The fingerprint is the canonical
-   algorithm from the audit skill (`HEAD sha + description hash + Key Files +
-   working-tree state`).
+   (title/description, and therefore its acceptance criteria and Key Files)
+   changes the fingerprint and marks the audit stale. The fingerprint is the
+   audit skill's canonical **schema 2** algorithm
+   (`sha256` over `{schema: 2, title_hash, description_hash}`): the work item's
+   OWN data only, with no git state (`SA-0MVIDI8E00063OOP`,
+   `WL-0MVK5SWZE00254Y7`). Unrelated commits and working-tree changes therefore
+   never invalidate an audit.
 2. **Time gate (legacy fallback).** When no stored fingerprint is present
    (legacy audits) or the caller cannot supply a current fingerprint (e.g. a TUI
    render), the audit is fresh iff `auditedAt > updatedAt -
@@ -239,16 +242,20 @@ line. An explicit `--fingerprint`/`--audit-fingerprint` flag wins over an
 embedded line.
 
 **Current fingerprint at read time.** `wl list --json` emits
-`currentFingerprint` for every item: the canonical fingerprint recomputed from
-the item's current content (per-touched-path git state + description hash + Key
-Files) via a TypeScript port of the audit skill's algorithm. It is computed for
-items that carry a stored `fingerprint` and is `null` otherwise (or when git
-cannot determine it). Consumers that only have `wl list` output — the herdr
+`currentFingerprint` for every item: the schema-2 canonical fingerprint
+recomputed from the item's own `title` + `description` via a TypeScript port of
+the audit skill's algorithm (`src/audit-fingerprint.ts`). The computation does
+**no git work and no I/O**, so it is safe to run for every listed item on a
+large worklog. It is computed for items that carry a stored `fingerprint` and
+is `null` otherwise. Consumers that only have `wl list` output — the herdr
 selection list, the TUI extension, the review-queue banner — can therefore take
 the primary content gate instead of the 60 s time gate
-(WL-0MUN7QWFP0010EQC). The port is parity-tested against
-`audit_runner._compute_content_fingerprint` (skipped when the audit skill is not
-installed).
+(`WL-0MUN7QWFP0010EQC`). The port is parity-tested against
+`audit_runner._compute_content_fingerprint`; when the installed audit skill
+implements a different schema (or cannot accept the documented call) the parity
+test reports an explicit, actionable skip naming the installed schema/path
+rather than failing the suite, while a digest mismatch at the same schema still
+fails. Contract and remediation: `docs/dev/audit-fingerprint.md`.
 
 Flag-only flips of `needsProducerReview` do not bump `updatedAt`
 (WL-0MSN6ZCTN0027U2R), and neither do comment writes (WL-0MUBVH6JM0093KVM):

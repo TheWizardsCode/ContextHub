@@ -24,6 +24,7 @@ import {
   defaultStalledPaneRootResolver,
   defaultStalledPanesLister,
   worklogRootFromPiSessionPath,
+  resolveInteractiveDispatchPriority,
 } from './index.js';
 import { appendDowntimeLogEntry, DOWNTIME_LOG_FILE, readDowntimeLogEntries } from './downtime-log.js';
 import {
@@ -2443,29 +2444,6 @@ describe('createDowntimeDeps', () => {
     );
   });
 
-  it('spawnAgentPane forwards the mode-aware spawnConfig to the spawn boundary (WL-0MT50S9JW001DHME)', async () => {
-    const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
-    const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
-    const spawnConfig = {
-      mode: 'cheap' as const,
-      slotBudget: 2,
-      freeSlots: 2,
-      concurrentDispatchCap: 1,
-    };
-
-    await deps.spawnAgentPane('Run /skill:audit WL-AUD — Audit me.', {
-      model: 'plan',
-      cwd: '/repo',
-      spawnConfig,
-    });
-
-    expect(spawnFn).toHaveBeenCalledWith(
-      '/path/to/send-to-pi.sh',
-      expect.arrayContaining(['--pane-name', 'Downtime audit']),
-      { cwd: '/repo', config: spawnConfig },
-    );
-  });
-
   it('spawnAgentPane honours an explicit paneName (scheduled prompts run as Downtime <id>)', async () => {
     const spawnFn = vi.fn(() => ({ unref: vi.fn(), once: vi.fn() }));
     const deps = createDowntimeDeps('/path/to/send-to-pi.sh', 'Map', spawnFn);
@@ -3688,5 +3666,312 @@ describe('stalled-work production wiring (WL-0MUYMBSA90092QV2)', () => {
     const sessionPath = `/home/pi/.pi/agent/sessions/--${encoded}--/log.jsonl`;
     const pane: HerdrPaneRecord = { paneId: 'p', agentSession: { value: sessionPath } as never };
     expect(defaultStalledPaneRootResolver(pane, '/fallback')).toBe(root);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Request-priority threading (test-first WL-0MVF3PYO3000EVJ3, parent
+// WL-0MVE1NZ4J000H5NH)
+//
+// The proxy retired its global fast/cheap mode in favour of a per-request
+// `X-Priority` header. Herdr maps the dispatched work item's priority onto a
+// request priority and hands it to the launched process as
+// `HERDR_REQUEST_PRIORITY` (parent AC2/AC3).
+//
+// Request-priority threading implemented by WL-0MVF3Q3VL000UNCN: these
+// specs are real assertions pinning the `--request-priority` flag and the
+// `HERDR_REQUEST_PRIORITY` env on the two dispatch paths.
+// ---------------------------------------------------------------------------
+
+/** Target signature of `buildSendToPiArgs` once the priority flag lands. */
+const buildSendToPiArgsWithPriority = buildSendToPiArgs as unknown as (
+  command: string,
+  targetCwd: string,
+  model?: string,
+  paneIdFile?: string,
+  paneName?: string,
+  focus?: boolean,
+  anchor?: string,
+  requestPriority?: 'low' | 'medium' | 'high',
+) => string[];
+
+describe('buildSendToPiArgs — request priority (WL-0MVF3PYO3000EVJ3 AC4)', () => {
+  it('forwards --request-priority <mapped value> so the pane process receives it', () => {
+    const args = buildSendToPiArgsWithPriority(
+      '/skill:implement WL-1',
+      '/project',
+      undefined,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      'high',
+    );
+    const flagIndex = args.indexOf('--request-priority');
+    expect(flagIndex).toBeGreaterThanOrEqual(0);
+    expect(args[flagIndex + 1]).toBe('high');
+    // The command must stay the final argv token so send-to-pi.sh parses it.
+    expect(args[args.length - 1]).toBe('/skill:implement WL-1');
+  });
+
+  it('omits --request-priority when no priority is supplied (backward compatible)', () => {
+    expect(buildSendToPiArgs('/skill:implement WL-1', '/project')).not.toContain('--request-priority');
+  });
+});
+
+describe('spawnBackgroundPi — request priority env (WL-0MVF3PYO3000EVJ3 AC3)', () => {
+  /** Build the (future) spawn deps carrying the already-mapped priority. */
+  const piDeps = (
+    spawnFn: ReturnType<typeof vi.fn>,
+    requestPriority?: 'low' | 'medium' | 'high',
+  ): Parameters<typeof spawnBackgroundPi>[4] =>
+    ({ spawn: spawnFn as never, openSync: () => 9, requestPriority }) as Parameters<typeof spawnBackgroundPi>[4];
+
+  it('adds HERDR_REQUEST_PRIORITY (already-mapped value) to the child process env', () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    spawnBackgroundPi('/skill:implement WL-1', '/project', 'code', '/tmp/log', piDeps(spawnFn, 'low'));
+    expect(spawnFn).toHaveBeenCalledWith(
+      'pi',
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.objectContaining({ HERDR_REQUEST_PRIORITY: 'low' }),
+      }),
+    );
+  });
+
+  it('defaults an unmapped/unresolvable dispatch to high', () => {
+    const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+    spawnBackgroundPi('/prompt:Review this', '/project', undefined, '/tmp/log', piDeps(spawnFn));
+    expect(spawnFn).toHaveBeenCalledWith(
+      'pi',
+      expect.any(Array),
+      expect.objectContaining({
+        env: expect.objectContaining({ HERDR_REQUEST_PRIORITY: 'high' }),
+      }),
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end validation of the interactive (operator) dispatch priority chain
+// (WL-0MVGC6JVP00812DS, parent WL-0MVE1NZ4J000H5NH)
+//
+// The interactive dispatch path was built (WL-0MVF3Q3VL000UNCN) to send an
+// operator-dispatched work item's priority to the proxy as a per-request
+// `X-Priority` header so it outranks unattended background work. The mapping
+// functions, the argument builder and the Pi extension are unit-tested, but
+// the seam `resolveInteractiveDispatchPriority` — as wired in `onCommand`:
+// `extractWorkItemId(command)` → `wl show` lookup → interactive mapping —
+// had no direct test. These specs validate the whole chain end to end:
+//
+//   work item priority → resolveInteractiveDispatchPriority →
+//     --request-priority (buildSendToPiArgs, pane path) /
+//     HERDR_REQUEST_PRIORITY (spawnBackgroundPi, headless path)
+//
+// The parent AC2 mapping table and the fail-open contract are FIXED: the
+// assertions below pin that they hold for a real operator dispatch, and are
+// characterisation-style where the code already behaves. The injected-lookup
+// form of `resolveInteractiveDispatchPriority` (itemId, lookup) is the seam
+// AC1 names; it was missing from the production signature and is added by
+// this item's minimal wiring fix.
+// ---------------------------------------------------------------------------
+
+/**
+ * Target signature of `resolveInteractiveDispatchPriority` once the
+ * injectable lookup seam lands (AC1: `resolveInteractiveDispatchPriority(
+ * commandId, lookup)`). Declared here so the injected-lookup specs fail RED
+ * before the production signature is widened.
+ */
+const resolveInteractiveDispatchPriorityWithLookup = resolveInteractiveDispatchPriority as unknown as (
+  itemId: string | undefined,
+  lookup?: (
+    id: string,
+  ) =>
+    | string
+    | null
+    | undefined
+    | Promise<string | null | undefined>,
+  timeoutMs?: number,
+) => Promise<'low' | 'medium' | 'high'>;
+
+/** RESOLVE then pipe the mapped request priority into the pane-spawn args. */
+const paneDispatchPriority = (args: string[]): 'low' | 'medium' | 'high' | undefined => {
+  const flagIndex = args.indexOf('--request-priority');
+  if (flagIndex < 0) return undefined;
+  return args[flagIndex + 1] as 'low' | 'medium' | 'high';
+};
+
+describe('resolveInteractiveDispatchPriority — interactive operator dispatch seam (WL-0MVGC6JVP00812DS AC1)', () => {
+  afterEach(() => {
+    resetExecFileAsync();
+  });
+
+  it('maps each operator-dispatched work item priority through the interactive table', async () => {
+    const cases: Array<[string, 'medium' | 'high']> = [
+      ['low', 'medium'],
+      ['medium', 'high'],
+      ['high', 'high'],
+      ['critical', 'high'],
+    ];
+    for (const [workItemPriority, expected] of cases) {
+      await expect(
+        resolveInteractiveDispatchPriorityWithLookup('WL-1', () => workItemPriority),
+      ).resolves.toBe(expected);
+    }
+  });
+
+  it('uses the injected lookup only when an id resolves (driveable seam)', async () => {
+    const lookup = vi.fn(() => 'low');
+    const resolved = await resolveInteractiveDispatchPriorityWithLookup('WL-1', lookup);
+    expect(resolved).toBe('medium');
+    expect(lookup).toHaveBeenCalledWith('WL-1');
+
+    // Without an id the lookup is never consulted (fail-open default).
+    await expect(
+      resolveInteractiveDispatchPriorityWithLookup(undefined, lookup),
+    ).resolves.toBe('high');
+    expect(lookup).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails open to high when the lookup returns nothing', async () => {
+    await expect(
+      resolveInteractiveDispatchPriorityWithLookup('WL-1', () => undefined),
+    ).resolves.toBe('high');
+    await expect(
+      resolveInteractiveDispatchPriorityWithLookup('WL-1', () => null),
+    ).resolves.toBe('high');
+  });
+
+  it('fails open to high when the lookup throws (dispatch never blocked)', async () => {
+    await expect(
+      resolveInteractiveDispatchPriorityWithLookup('WL-1', () => {
+        throw new Error('wl show failed');
+      }),
+    ).resolves.toBe('high');
+  });
+
+  it('fails open to high when the lookup times out (dispatch never blocked)', async () => {
+    const hangingLookup = () => new Promise<string | undefined>(() => {});
+    await expect(
+      resolveInteractiveDispatchPriorityWithLookup('WL-1', hangingLookup, 10),
+    ).resolves.toBe('high');
+  });
+
+  it('drives the production wl show lookup: extractWorkItemId → wl show → interactive mapping', async () => {
+    // Real wiring: the command's work-item id is extracted by
+    // extractWorkItemId and resolved through the same seam `onCommand` uses.
+    const command = '/skill:implement WL-0MVGC6JVP00812DS';
+    const mockExec = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        success: true,
+        workItem: {
+          id: 'WL-0MVGC6JVP00812DS',
+          title: 'A dispatchable item',
+          status: 'open',
+          priority: 'critical',
+        },
+      }),
+      stderr: '',
+    });
+    setExecFileAsync(mockExec as never);
+
+    const itemId = extractWorkItemId(command);
+    await expect(resolveInteractiveDispatchPriority(itemId)).resolves.toBe('high');
+
+    // The lookup ran the real `wl show <id> --json` under the hood.
+    expect(mockExec).toHaveBeenCalledWith(
+      'wl',
+      ['show', 'WL-0MVGC6JVP00812DS', '--json'],
+      expect.anything(),
+    );
+  });
+});
+
+describe('Interactive operator dispatch — work-item priority survives the whole chain (WL-0MVGC6JVP00812DS AC2)', () => {
+  afterEach(() => {
+    resetExecFileAsync();
+  });
+
+  it.each([
+    ['low', 'medium'],
+    ['medium', 'high'],
+    ['high', 'high'],
+    ['critical', 'high'],
+  ] as Array<[string, 'low' | 'medium' | 'high']>)(
+    'a %s work item is dispatched at request priority %s on both the pane and headless paths',
+    async (workItemPriority, expected) => {
+      const command = `/skill:implement WL-${workItemPriority}`;
+
+      // 1. Sort → resolve (the production `wl show` lookup).
+      const mockExec = vi.fn().mockResolvedValue({
+        stdout: JSON.stringify({
+          success: true,
+          workItem: { id: `WL-${workItemPriority}`, title: 'Item', status: 'open', priority: workItemPriority },
+        }),
+        stderr: '',
+      });
+      setExecFileAsync(mockExec as never);
+      const requestPriority = await resolveInteractiveDispatchPriority(
+        extractWorkItemId(command),
+      );
+      expect(requestPriority).toBe(expected);
+
+      // 2. Pane path: buildSendToPiArgs forwards --request-priority AND the
+      //    command stays the final argv token so send-to-pi.sh parses it.
+      const args = buildSendToPiArgsWithPriority(
+        command,
+        '/project',
+        undefined,
+        undefined,
+        undefined,
+        false,
+        undefined,
+        requestPriority,
+      );
+      expect(paneDispatchPriority(args)).toBe(expected);
+      expect(args[args.length - 1]).toBe(command);
+
+      // 3. Headless path: spawnBackgroundPi puts the mapped value in the
+      //    launched process env for the Worklog pi extension.
+      const spawnFn = vi.fn(() => ({ unref: vi.fn() }));
+      spawnBackgroundPi(command, '/project', undefined, '/tmp/log', {
+        spawn: spawnFn as never,
+        openSync: () => 9,
+        requestPriority,
+      });
+      expect(spawnFn).toHaveBeenCalledWith(
+        'pi',
+        expect.any(Array),
+        expect.objectContaining({
+          env: expect.objectContaining({ HERDR_REQUEST_PRIORITY: expected }),
+        }),
+      );
+    },
+  );
+
+  it('a dispatch with no resolvable work-item id still proceeds at the interactive default high', async () => {
+    // Free-form `/prompt:` — no id, so no `wl show` round-trip happens and
+    // the pane + headless paths still carry `high` (fail-open).
+    const command = '/prompt:Review this design';
+    const mockExec = vi.fn();
+    setExecFileAsync(mockExec as never);
+
+    const requestPriority = await resolveInteractiveDispatchPriority(
+      extractWorkItemId(command),
+    );
+    expect(requestPriority).toBe('high');
+    expect(mockExec).not.toHaveBeenCalled();
+
+    const args = buildSendToPiArgsWithPriority(
+      command,
+      '/project',
+      undefined,
+      undefined,
+      undefined,
+      false,
+      undefined,
+      requestPriority,
+    );
+    expect(paneDispatchPriority(args)).toBe('high');
   });
 });

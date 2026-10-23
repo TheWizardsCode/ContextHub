@@ -58,6 +58,30 @@ interface DbMetadata {
  * delta (incremental) export. An absent/missing type timestamp means "no
  * baseline" → treat all records of that type as dirty (full export).
  */
+/**
+ * How the SQLite file is opened.
+ *
+ * `readOnly` is the cheapest safe open for a reader that must never mutate the
+ * store (the Herdr refresh scope, F6 — WL-0MVJV2PX4005JH8D):
+ *
+ *  - the file is opened with SQLite's READONLY flag and `fileMustExist`, so a
+ *    missing store fails instead of being created;
+ *  - the write-only pragmas (`journal_mode`, `foreign_keys`) are skipped;
+ *  - when the store is already initialised (a `schemaVersion` metadata row
+ *    exists — every store written by this code has one) ALL schema and FTS
+ *    DDL is skipped, which removes the ~46–70 ms cold open cost (schema
+ *    DDL + additive-column `PRAGMA table_info` probes + the FTS5 probe's
+ *    virtual-table create/drop) from the refresh path. The FTS availability
+ *    flag is derived from `sqlite_master` instead of a write probe.
+ *
+ * An uninitialised store cannot be served read-only (initialising it is a
+ * write), so the constructor throws and the caller fails open.
+ */
+export interface PersistentStoreOpenOptions {
+  /** Open the store read-only and skip DDL when already initialised. */
+  readOnly?: boolean;
+}
+
 export interface LastExportTimestamps {
   workitems?: string; // ISO 8601 — items changed after this are dirty
   comments?: string;  // ISO 8601 — comments created after this are dirty
@@ -236,6 +260,8 @@ export class SqlitePersistentStore {
   private db: Database.Database;
   private dbPath: string;
   private verbose: boolean;
+  /** True when this handle was opened with SQLite's READONLY flag (F6). */
+  private _readOnly: boolean = false;
   private _ftsAvailable: boolean = false;
   private _listPendingMigrations?: (dbPath: string) => MigrationInfo[];
 
@@ -245,10 +271,18 @@ export class SqlitePersistentStore {
   private _cacheMaxEntries: number;
   private _cache = new Map<string, CacheEntry>();
 
-  constructor(dbPath: string, verbose: boolean = false, services?: PersistentStoreServices, cacheOptions?: PersistentStoreCacheOptions) {
+  constructor(
+    dbPath: string,
+    verbose: boolean = false,
+    services?: PersistentStoreServices,
+    cacheOptions?: PersistentStoreCacheOptions,
+    openOptions: PersistentStoreOpenOptions = {},
+  ) {
     this._listPendingMigrations = services?.listPendingMigrations;
     this.dbPath = dbPath;
     this.verbose = verbose;
+    const readOnly = openOptions.readOnly === true;
+    this._readOnly = readOnly;
 
     // Initialize cache settings (Phase 5)
     const envCache = process.env.WL_CACHE_ENABLED !== '0';
@@ -269,9 +303,16 @@ export class SqlitePersistentStore {
 
     // Open/create database
     try {
-      this.db = new Database(dbPath);
-      this.db.pragma('journal_mode = WAL'); // Better concurrency
-      this.db.pragma('foreign_keys = ON');
+      this.db = readOnly
+        ? new Database(dbPath, { readonly: true, fileMustExist: true })
+        : new Database(dbPath);
+      // `journal_mode`/`foreign_keys` are write-path pragmas: they are
+      // meaningless on a read-only handle (and `journal_mode = WAL` can fail
+      // on one), so the read-only open skips them entirely.
+      if (!readOnly) {
+        this.db.pragma('journal_mode = WAL'); // Better concurrency
+        this.db.pragma('foreign_keys = ON');
+      }
       // Keep TUI reads responsive under write contention by using a shorter
       // busy timeout in TUI mode. Override via WL_SQLITE_BUSY_TIMEOUT_MS.
       const configuredBusyTimeout = Number(process.env.WL_SQLITE_BUSY_TIMEOUT_MS);
@@ -282,16 +323,27 @@ export class SqlitePersistentStore {
     } catch (error) {
       throw new Error(`Failed to open database ${dbPath}: ${(error as Error).message}`);
     }
-    
-    // Initialize schema
-    try {
-      this.initializeSchema();
-    } catch (error) {
-      throw new Error(`Failed to initialize database schema: ${(error as Error).message}`);
+
+    // A read-only reader never initialises or repairs a store: that would be a
+    // write. It is only usable against an already-initialised store (a
+    // `schemaVersion` metadata row exists); otherwise the DDL below throws and
+    // the constructor rejects, so callers fail open.
+    const skipDdl = readOnly && this.isSchemaInitialised();
+
+    if (!skipDdl) {
+      // Initialize schema
+      try {
+        this.initializeSchema();
+      } catch (error) {
+        throw new Error(`Failed to initialize database schema: ${(error as Error).message}`);
+      }
     }
 
-    // Initialize FTS5 index (best-effort; falls back to app-level search if unavailable)
-    this._ftsAvailable = this.initializeFts();
+    // Initialize FTS5 index (best-effort; falls back to app-level search if
+    // unavailable). An already-initialised read-only store detects the
+    // existing `worklog_fts` table instead of the FTS probe's create/drop,
+    // which would be a schema write on the read-only path.
+    this._ftsAvailable = skipDdl ? this.detectFtsAvailable() : this.initializeFts();
   }
 
   /**
@@ -299,6 +351,43 @@ export class SqlitePersistentStore {
    */
   get ftsAvailable(): boolean {
     return this._ftsAvailable;
+  }
+
+  /**
+   * Whether this handle is read-only (no writes, no DDL — F6).
+   */
+  get readOnly(): boolean {
+    return this._readOnly;
+  }
+
+  /**
+   * True when the store has already been initialised: a `schemaVersion`
+   * metadata row exists. `initializeSchema` writes that row, so its presence
+   * implies every table/index the current code queries exists. A missing
+   * `metadata` table (a brand-new or corrupt file) reads as uninitialised.
+   */
+  private isSchemaInitialised(): boolean {
+    try {
+      return this.getMetadata('schemaVersion') !== null;
+    } catch (_err) {
+      return false;
+    }
+  }
+
+  /**
+   * Read-only FTS availability probe: the index table already exists when the
+   * store is initialised, so this is a pure `sqlite_master` read (no virtual
+   * table create/drop, unlike {@link initializeFts}).
+   */
+  private detectFtsAvailable(): boolean {
+    try {
+      const row = this.db
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'worklog_fts'")
+        .get() as { name?: string } | undefined;
+      return row !== undefined && row.name === 'worklog_fts';
+    } catch (_err) {
+      return false;
+    }
   }
 
   /**
@@ -1352,6 +1441,11 @@ export class SqlitePersistentStore {
   /**
    * Save or update an audit result for a work item (upsert).
    * Only the latest audit per work item is kept.
+   *
+   * This is the explicit single-item write path (backed by `wl audit-set`) and
+   * is deliberately **not** monotonic: an explicit write may replace a row
+   * with an older `auditedAt` (e.g. replaying a known-good report). The bulk
+   * path used by sync imports (`saveAuditResults`) is monotonic — see there.
    */
   saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }): void {
     const stmt = this.db.prepare(`
@@ -1504,6 +1598,16 @@ export class SqlitePersistentStore {
 
   /**
    * Save or update audit results (upsert, bulk).
+   *
+   * Monotonic guard (SA-0MUJNFF3K009BF03): an incoming audit whose
+   * `auditedAt` is strictly older than the stored audit for the same work item
+   * is silently skipped rather than overwriting it with a downgrade. Every
+   * sync import path (pull merge, JSONL refresh, doctor/import bulk loads)
+   * funnels through this method, so a stale snapshot can never revert a newer
+   * audit — even when the merge layer above it was bypassed. Only strictly
+   * older incoming audits are skipped: equal timestamps and newer audits apply
+   * as before. Explicit single-item writes (`saveAuditResult`, backed by
+   * `wl audit-set`) remain unrestricted.
    */
   saveAuditResults(audits: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }[]): void {
     const stmt = this.db.prepare(`
@@ -1517,6 +1621,7 @@ export class SqlitePersistentStore {
         author = excluded.author,
         fingerprint = excluded.fingerprint
     `);
+    const existingStmt = this.db.prepare('SELECT audited_at FROM audit_results WHERE work_item_id = ?');
     const normalized = audits.map(audit => {
       const values: unknown[] = [
         audit.workItemId,
@@ -1532,6 +1637,16 @@ export class SqlitePersistentStore {
     const failed: string[] = [];
     this.db.transaction(() => {
       for (const values of normalized) {
+        // Monotonic guard: never overwrite a newer stored audit with an
+        // older incoming one (column order: workItemId=0, auditedAt=2).
+        const existingRow = existingStmt.get(values[0]) as { audited_at: string } | undefined;
+        if (existingRow) {
+          const existingMs = Date.parse(existingRow.audited_at);
+          const incomingMs = Date.parse(String(values[2]));
+          if (Number.isFinite(existingMs) && Number.isFinite(incomingMs) && existingMs > incomingMs) {
+            continue; // stale snapshot — keep the newer stored audit
+          }
+        }
         const result = stmt.run(...values);
         if (result.changes === 0) {
           failed.push(values[0] as string);

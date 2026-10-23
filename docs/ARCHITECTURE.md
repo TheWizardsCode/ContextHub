@@ -391,12 +391,33 @@ and cleared on `setWorklogDir`/`resetWorklogDir`.
 ### Spawn instrumentation (spawn-reduction measurement)
 
 Env-gated counters (`src/spawn-counter.ts`): `WL_SPAWN_COUNT_FILE=<path>`
-appends one `<kind>\t<ts>\t<pid>` line per recorded spawn;
-`WL_SPAWN_COUNT=1` (no file) logs `[wl:spawn]` lines to stderr. A cache
-miss records `read-work`; a cache hit records `cache-hit`. With the cache
-disabled (`WL_CACHE_DISABLED=1`), cacheable reads record `read-work` too, so
-the baseline is measurable. `tests/cli/read-cache-spawn-reduction.test.ts`
-simulates a 6-pane refresh and asserts ≥60% fewer work spawns.
+appends one `<kind>\t<ts>\t<pid>\t<cpuMs>\t<maxRssKb>` line per recorded
+spawn; `WL_SPAWN_COUNT=1` (no file) logs `[wl:spawn]` lines (including
+`cpuMs=`/`maxRssKb=`) to stderr. A cache miss records `read-work`; a cache
+hit records `cache-hit`. With the cache disabled (`WL_CACHE_DISABLED=1`),
+cacheable reads record `read-work` too, so the baseline is measurable.
+`tests/cli/read-cache-spawn-reduction.test.ts` simulates a 6-pane refresh and
+asserts ≥60% fewer work spawns. Because spawn accounting is per-process, each
+pane × query is a real CLI subprocess; those spawns go through
+`runCliProcess()` (`tests/cli/cli-bundle.ts`), a pre-compiled snapshot of the
+same `src/cli.ts` entry (~1.3 s per spawn vs 2.5–8 s for `tsx src/cli.ts`).
+The simulation keeps all 6 panes and the full 5-query herdr set, so the
+measurement is unchanged while its wall clock drops ~5×; the 300 s test budget
+is intentionally not raised again (WL-0MVH47YF300087AQ).
+
+`cpuMs` (user+system, from `process.resourceUsage()`) and `maxRssKb` (peak
+RSS) are sampled at record time, so they cover process start up to the
+instrumentation point — identical for baseline and cache-enabled runs, making
+them comparable. Legacy three-field lines still parse, with `cpuMs` and
+`maxRssKb` reported as `null` (never `0`, so aggregation cannot silently
+under-report). `summariseSpawnRecords(file)` totals records, per-kind counts,
+CPU-seconds and peak RSS (plus `missingCpu`/`missingRss` counters for legacy
+lines), e.g. from a small script:
+
+```ts
+import { summariseSpawnRecords } from './dist/spawn-counter.js';
+console.log(summariseSpawnRecords(process.env.WL_SPAWN_COUNT_FILE!));
+```
 
 ### Concurrency & bounding
 

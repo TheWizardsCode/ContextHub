@@ -59,7 +59,10 @@ paths.** When the head yields no candidate the dispatcher reports the terminal
 reason derived from the in-view flags (`no-candidate`, `review-queue-hold`,
 `code-freeze`, `fresh-audit-skip`, `audit-in-flight`, `audit-host-saturated`,
 `in-flight-hold`, `wl-error`) and does **not** fall back to a second ranking or
-an out-of-view non-critical scan. When every visible item is filtered by a
+an out-of-view non-critical scan. Audit-batch observability adds the decision
+*observation* tokens `audit-batch-continue` / `audit-batch-end` (never terminal
+reasons) — see *Decision-log entries: audit-batch tokens & metadata* under
+*Log schema*. When every visible item is filtered by a
 safety gate (or the view is empty) the outcome is a NOP — **except** on the
 coordination leader path, which has one bounded, own-root escape valve that
 then hands off leadership (see *Own-backlog fallback & leadership hand-off*
@@ -107,7 +110,9 @@ can monopolise leadership by repeatedly reaching into its own hidden backlog.
 i.e. the same terminal-reason set the view can produce (`no-candidate`,
 `review-queue-hold`, `code-freeze`, `fresh-audit-skip`, `audit-in-flight`,
 `audit-host-saturated`, `in-flight-hold`, or a genuinely empty view). It never
-runs when a normal in-view/coordination offer dispatched.
+runs when a normal in-view/coordination offer dispatched. Blocked audit-batch
+continuations reuse these tokens unchanged and add the batch metadata — see
+*Decision-log entries: audit-batch tokens & metadata* under *Log schema*.
 
 **Own root only (AC2).** The fallback reads the leader's **own** worklog root
 (`opts.cwd`) only — never another instance's or another worklog root's hidden
@@ -138,7 +143,11 @@ pane spawn have completed, the worker loop calls the existing
 step-down never rolls back the pending dispatch and never orphans the spawned
 pane. It is **not** called after a normal in-view dispatch, and **not** called
 when the fallback finds nothing — in that case leadership is retained and the
-pre-existing terminal reason is reported unchanged. Because there is no
+pre-existing terminal reason is reported unchanged. **Exception — audit
+batching:** while an audit batch is armed a continuation audit sourced from the
+leader's own head does **not** step down mid-batch; the hand-off is deferred to
+batch end and fires once, on the batch-ending dispatch (see *Depth-aware audit
+batching* above; parent WL-0MVEDM8OT007WDRS AC4). Because there is no
 reliable peer-eligibility predicate (coordination entries are removed on
 dispatch), the step-down is unconditional after a successful fallback dispatch;
 with no peer the same instance simply re-wins the normal election on a later
@@ -277,6 +286,155 @@ Lifecycle (`packages/herdr/src/coordination.ts`, WL-0MTMPIQBE001J41P non-expirin
 5. **Non-leaders** skip proxy polling and dispatch entirely — they only
    refresh their lease check (a cheap local file read) and their
    coordination entry.
+
+### Truthful local-slot capacity (schema v2, LP-0MVGDUVGE0024YAI)
+
+The llama-proxy publishes `status_schema_version: 2` with additive
+per-slot and top-level capacity fields. When the dispatcher sees version
+`>= 2` with a `lease_state` on every reported slot, **lease state is
+authoritative**:
+
+| Field | Meaning for dispatch |
+|---|---|
+| `slots[].lease_state: "generating"` | busy — never eligible |
+| `slots[].lease_state: "idle_leased"` | reserved-but-idle — **counts as dispatchable capacity** (removes the false-busy denial behind 2,633 of 2,641 measured `local_dispatch_denied` events) |
+| `slots[].lease_state: "free"` | available |
+| `capacity_hint: "saturated"` | defensive no-dispatch (reason `capacity-saturated`, header `saturated`), even if the per-slot detail looks inconsistent |
+| `capacity_hint: "idle"` / `"prefill_bound"` | not by themselves a stop; the per-slot free budget still applies |
+| `slots[].phase`, `slots[].context_tokens` | advisory evidence only — recorded in the decision log, never a gate |
+| `slots[].prefill_eta_seconds`, `prefill_budget_seconds` | not availability gates; they feed the prefill-ETA deferral (`prefill-eta`, see *Prefill serialisation pacing* below) |
+
+With truthful lease state, the coarse global `local_lease_active` flag no
+longer blocks dispatch (`idle_leased` leases are exactly the case it
+over-reports). Per-slot fail-closed rules are unchanged: `slots: []`,
+`slots_stale: true` or unusable detail still yields `slots-unavailable` /
+`no-slots`. On a pre-v2 payload (fields absent — typically a proxy from
+before the upstream change) the legacy rule applies unchanged: any live
+`owner_session_id` lease makes the slot busy. Malformed
+availability-affecting fields (`lease_state`, `capacity_hint`) reject the
+poll (treated as busy); malformed advisory fields are ignored.
+
+Every no-dispatch decision entry records the observed `capacityHint`,
+`statusSchemaVersion`, `idleLeasedSlots`, `generatingSlots`, `slotPhases`
+and `slotPrefillEtaSeconds` so an operator can see *why* a tick refused.
+
+### Prefill serialisation pacing (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX)
+
+**Problem:** the proxy serialises local prefills (`local_max_concurrent_prefills`,
+default `1`), but the dispatcher used the free-slot count as its only
+concurrency budget. With two free slots it could launch two downtime panes;
+the second prefill queued behind the first and could fall back to a remote
+provider while the GPU was only ever prefilling one request. Prefill dominates
+hold time (measured p50 61.8 s, p90 269.8 s), so launching during an in-flight
+prefill is the worst moment to start — measured per-request first-byte p50 was
+85.0 s with one overlap vs 23.4 s alone, while aggregate prefill throughput
+stayed flat (concurrency added latency, not capacity).
+
+The proxy publishes the gate state on `GET /llama/local/status`:
+
+| Field | Meaning |
+|---|---|
+| `local_prefills_in_flight` | prefills currently in flight |
+| `local_max_concurrent_prefills` | effective cap; `1` = serialised (default), `0` = gate disabled |
+| `prefill_gate_waiters` | requests waiting for the prefill gate (the live gate queue depth) |
+| `queue_eta_seconds` / `prefill_budget_seconds` | the prefill-ETA guard's projected wait and admission budget (LP-0MVGDUV5E005UWBQ) |
+| `slots[].phase` / `slots[].prefill_eta_seconds` | per-slot prefill phase and calibrated prefill cost |
+
+**Concurrency-budget contract.** On every poll the dispatcher computes an
+**effective local dispatch budget** and passes it to the tier chain (and to
+`dispatchFromCoordination`):
+
+```
+effectiveBudget      = min(freeSlotBudget, prefillCapacityBudget)
+freeSlotBudget       = countFreeUnownedSlots(slots)      # downtimeRequiredFreeSlots gate
+prefillCapacityBudget = 0                                 when cap > 0 and inFlight >= cap
+                      = cap - inFlight                    otherwise (at least 1)
+                      = unbounded (freeSlotBudget)        when cap is absent or 0
+```
+
+- `prefillCapacityBudget = 0` → **no dispatch** that tick (reason
+  `prefill-cap`, header token `prefill-cap`); the budget recovers on the first
+  poll where `local_prefills_in_flight < local_max_concurrent_prefills`.
+- `prefill_gate_waiters > 0` → contention evidence, equivalent to a non-empty
+  `contention_queue_depth`: no dispatch, reason `prefill-gate`, header token
+  `prefill-gate` (deliberately distinct from `contention`).
+- `queue_eta_seconds` (or a per-slot `prefill_eta_seconds`) above
+  `prefill_budget_seconds` → defer, reason `prefill-eta`, header token
+  `prefill-eta`. Both values must be present and finite; a missing ETA **or**
+  budget never blocks dispatch. This mirrors the proxy's own admission guard
+  instead of parking a pane behind a doomed wait.
+- The effective budget is what the dispatch tier sees, so a reduced budget
+  interacts directly with `downtimeRequiredFreeSlots` and the **per-tier
+  free-slot minimums**: with a prefill headroom of `1` the audit tier (≥ 2
+  free slots) is skipped and the implement tier dispatches instead, even
+  though more slots are physically free.
+
+**Pacing only reduces concurrency.** It never raises the free-slot budget,
+never bypasses `slots_stale` / `slots: []` (`slots-unavailable`) or
+`capacity_hint: "saturated"` (`capacity-saturated`), and never bypasses the
+per-slot `lease_state` availability rule. All prefill fields are absent on a
+pre-v2/pre-feature proxy → `capacityBudget` is unbounded and the tick behaves
+exactly as before (no new configuration knob: pacing follows the proxy's own
+cap and budget, avoiding a second source of truth). Malformed gate counters
+(`local_prefills_in_flight`, `local_max_concurrent_prefills`,
+`prefill_gate_waiters`) fail closed (poll treated as busy, like
+`contention_queue_depth`); malformed ETA values are advisory and ignored.
+
+**Observability.** Every polled decision entry records `prefillsInFlight`,
+`maxConcurrentPrefills`, `prefillGateWaiters`, `prefillBudgetSeconds`,
+`queueEtaSeconds` (and the per-slot `slotPrefillEtaSeconds`) alongside the
+existing `capacityHint` / `contentionDepth` evidence, and the paced refusal
+carries its own `reason` (`prefill-gate` / `prefill-cap` / `prefill-eta`).
+
+**Tests.** `downtime-worker.parse.test.ts` pins the parser (gate counters
+fail-closed, ETA advisory, absent fields unchanged);
+`downtime-worker.idle.test.ts` pins `evaluatePrefillPacing` (budget 0 at the
+cap, headroom recovery, gate waiters, ETA deferral, missing budget/ETA
+non-blocking, cap absent/0 unbounded); `downtime-worker.test.ts` pins the tick
+reason/token, decision-log evidence, ETA deferral and the effective-budget
+clamp (audit vs implement tier).
+
+### Idle-age authority (`local_idle_seconds`, WL-0MVHSZR9C0012NQY)
+
+The proxy publishes the authoritative monotonic local idle age
+(`local_idle_seconds`, LP-0MVGD9Z8Z0055Y5J — updated on dispatch start, every
+forwarded SSE chunk and request finish; baseline is proxy process start).
+When it is present and finite it **owns the idle-duration qualification** in
+the worker's per-tick gate:
+
+| Idle age vs `downtimeIdleThresholdMs` | Effect |
+|---|---|
+| `>=` threshold | the duration requirement is met **on this poll** — a worker that starts polling while the GPU has been idle for hours (plugin/pane restart, resumed session) dispatches on its first poll, no local accumulation needed |
+| `<` threshold | **not qualified** — no dispatch, even when the worker's own tracker already holds an older idle run (the proxy is authoritative) |
+| absent / non-finite / negative | fall back to the local tracker exactly as a pre-feature proxy would (regression-pinned) |
+
+The signal qualifies **duration only** — it never relaxes capacity or
+availability:
+
+- `requiredFreeSlots` / per-slot free-slot budget unchanged; in per-slot mode
+  an elapsed idle age still requires the *current* free-unowned count to meet
+  the budget.
+- The fail-closed contract is unchanged: `slots_stale: true`, `slots: []` or
+  unusable per-slot detail still yields `slots-unavailable` / `no-slots` even
+  when the idle age is large.
+- A poll that reports **live activity** — a slot not available for dispatch, a
+  coarse live lease on a pre-v2 payload, or a live contention/gate waiter —
+  outranks the idle age: the age is ignored (local tracker decides) and a
+  live contention waiter additionally **resets the idle run immediately**, so
+  no idle credit survives onto the next poll. Contradictory payloads are
+  fail-closed, never dispatched.
+- Proxy restart resets the signal to a small value; the worker then waits one
+  threshold via the local tracker (documented trade-off, fail open to today's
+  behaviour).
+
+Observability: every polled decision entry records `localIdleSeconds` and
+`localLastActivitySource` (and `local_last_activity_at` where served) so an
+operator can see *why* a tick was admitted or deferred; a deferred tick with a
+usable idle age logs a rate-limited, non-blocking `idle-age-pending`
+observation, and a tick admitted by the proxy's elapsed idle age logs
+`idle-age-qualified` (both `blocking: false` — the header blocking token still
+reflects refusals only). Pre-feature proxies (`local_idle_seconds` absent)
+log nothing on the deferral path — byte-for-byte today's behaviour.
 
 ### Retired-stage recovery (WL-0MTYL7DX9000MZOH)
 
@@ -681,12 +839,10 @@ the attempt cap. An unreadable/absent cooldown signal is fail-safe — the scan
 simply has no cooldown candidates and the generic path is unchanged.
 
 > **Must not regress — no client drain (WL-0MUWIHUL2000JEFR).** This wake is
-> **not** a resurrection of the withdrawn "drain before switching to cheap"
-> design: there is **no** client-side slot-count completion gate, **no**
-> `drainPaused` dispatch pause and **no** unbounded latch. The scan is bounded
-> by `cooldownUntil`, resumes at most one pane per cycle, and the proxy's own
-> server-side bounded drain remains authoritative. See the "Withdrawn client
-> drain — must not regress" section of `docs/design/mode-switch-worker.md`.
+> **not** a client-side drain design: there is **no** slot-count completion
+> gate, **no** `drainPaused` dispatch pause and **no** unbounded latch. The
+> scan is bounded by `cooldownUntil`, resumes at most one pane per cycle, and
+> the proxy's own server-side bounded drain remains authoritative.
 
 #### Neutral outcome vocabulary and fail-safety (parent AC2/AC6)
 
@@ -729,6 +885,56 @@ Both settings are re-read from the plugin settings on **every idle tick**
 |---|---|---|
 | `downtimeStallScanEnabled` | `true` (`DEFAULT_DOWNTIME_STALL_SCAN_ENABLED`) | boolean; `false` disables the scan entirely and falls through to normal dispatch |
 | `downtimeStallThresholdMs` | 5 min / `300000` ms (`DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`) | `[60 s, 60 min]` / `[60000, 3600000]` ms (`clampDowntimeStallThresholdMs`); invalid/missing falls back to the default |
+| `downtimeCapacityStarvationAlertMs` | **2 h** / `7200000` ms (`DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS`) | `[5 min, 24 h]` (`clampDowntimeCapacityStarvationAlertMs`); invalid/missing falls back to the default |
+| `downtimeLongRunningThresholdMs` | **3 h** / `10800000` ms (`DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS`) | `[1 h, 48 h]` (`clampDowntimeLongRunningThresholdMs`); invalid/missing falls back to the default |
+
+### Capacity-starvation signal &amp; long-running pane detection (WL-0MVKNC2N50025HXE)
+
+A saturated local model NOPs the dispatcher **silently by design**: every capacity
+refusal (`slots-unavailable`, `capacity-saturated`, `slot-owned`,
+`proxy-contention`, `prefill-gate`/`prefill-cap`/`prefill-eta`) is a non-terminal
+decision. When it lasts hours (the 2026-10-22/23 incident: four
+`working` panes held every slot for 9.5–17.5 h, one dispatch in nine hours) the
+fleet simply stops dispatching with no visible trace after the ~1 h rotating
+decision log.
+
+Two new pieces of observability make such a night diagnosable **while it is
+happening**, with no change to dispatch behaviour:
+
+- **Capacity-starvation signal (`capacity-starvation.ts`).** The worker's
+decision-log path feeds a pure `CapacityStarvationTracker` with every blocking
+refusal (including rate-limited repeats). Any **non-capacity** outcome
+(`no-candidate`, `review-queue-hold`, `code-freeze`, `wl-error`, …) and any
+successful dispatch **ends the episode**. Once a continuous refusal run has
+outlasted `downtimeCapacityStarvationAlertMs` (default **2 h**), the tick writes
+one extra `capacity-starved` **observation** to the coordination decision log
+(`blocking: false` — the header blocking token and the underlying refusal
+reason are unchanged), carrying `starvedSince`, `starvedMs`,
+`consecutiveCapacityRefusals` and `lastCapacityReason`. It re-arms at most
+once per window, so an all-night outage keeps producing evidence every window.
+- **Long-running pane detector (`long-running-panes.ts`).** A pre-existing
+recovery gap: the stalled-work scan, the non-terminal cooldown and the pane
+reaper all key on a pane being NOT `working`, so a pane that stays `working`
+for 12+ hours while its item never advances is invisible to all of them yet
+monopolises every local slot. `classifyLongRunningPane` / `scanLongRunningPanes`
+flag a live-agent pane whose **non-terminal** item has had **no observable
+progress** (`updatedAt` bump or fresh dispatch marker) for at least
+`downtimeLongRunningThresholdMs` (default **3 h**) — **including while the agent
+is `working`**. It is **observation only**: nothing in this path may resume,
+prompt, hijack or close a pane, and a code-freeze never applies (no dispatch
+involved). When the starvation signal fires and the `scanLongRunningPanes` dep
+is wired, the `capacity-starved` entry names the offending panes
+(`longRunningPanes[]`: `paneId`, `itemId`, `cwd`, `kind`, `stalledForMs`,
+`agentStatus`, `stage`, `title`), so an operator sees **who is holding the
+model** without reading pane-by-pane.
+
+**Prefill-serialisation interaction (LP-0MVGDUUV3001XFRJ):** with
+`local_max_concurrent_prefills: 1` a single in-flight prefill collapses the
+dispatcher's effective budget to `0` (`prefill-cap`); combined with multi-slot
+long-running sessions the scheduler can hold zero dispatchable capacity for
+hours even when one slot is technically free. Operational levers: raise prefill
+concurrency, close/reap the long sessions, and/or enable the `pane-close`
+reaper (`paneCloseEnabled`) so abandoned sessions are eventually settled.
 
 ### Pane placement: project workspace first, `Dispatcher` fallback (WL-0MUR5FUWD00024XN)
 
@@ -998,6 +1204,54 @@ root-pane liveness source differ. The automated path checks the running
 the live **tracked pi/shell** panes (step 4).
 
 
+### Request priority (`X-Priority`) on dispatched panes
+
+The llama-proxy retired its global fast/cheap operating mode. Cost and
+urgency are expressed **per request** via the `X-Priority` request header
+(`low` | `medium` | `high`; absent → the proxy applies its own `medium`
+default, reported back in `X-Priority-Applied`). Herdr conveys the dispatched
+item's priority to the launched pi session as the pane-launch environment
+variable `HERDR_REQUEST_PRIORITY`; the Worklog pi extension turns it into the
+header on every provider request (fail-open — unset/invalid leaves headers
+untouched).
+
+Two mapping tables (`packages/herdr/src/request-priority.ts`) are fixed by
+the parent contract (WL-0MVE1NZ4J000H5NH):
+
+| Work-item priority | Interactive | Downtime |
+|---|---|---|
+| `low` | `medium` | `low` |
+| `medium` | `high` | `medium` |
+| `high` | `high` | `high` |
+| `critical` | `high` | `high` |
+| absent / unknown | `high` | `medium` |
+
+- **Downtime** — `dispatchClaimedTier` forwards the selected
+  `DowntimeCandidate.priority` through `spawnAgentPane` to
+  `buildDowntimeSpawnOptions`, which maps it with the downtime table and sets
+  `HERDR_REQUEST_PRIORITY` beside `HERDR_RESOLVED_CWD`. Unattended work is
+  therefore polite (`low` stays `low`) while `critical` work is served as
+  `high`. Scheduled prompts have no work item and get the downtime default
+  (`medium`).
+- **Interactive** — the agent route resolves the dispatched item's priority
+  with a bounded `wl show --json` lookup (2 s budget), maps it with the
+  interactive table and passes it to `buildSendToPiArgs(...,
+  requestPriority)` (`--request-priority <value>`) and to headless
+  `spawnBackgroundPi` runs (direct spawn env). Resolution is fail-open: no
+  id (`/prompt:`), a lookup failure or a timeout yields `high` and never
+  blocks the dispatch.
+- **Transport** — `send-to-pi.sh` accepts `--request-priority
+  low|medium|high` and injects it into the pane process with `exec env
+  HERDR_REQUEST_PRIORITY=<value> bash run-pi-agent.sh …` (a `pane run`
+  environment set on the script itself does not reach pi). Nothing is
+  forwarded when the flag is absent, so the proxy's `medium` default applies.
+  Shell-command panes (`run-in-pane.sh`) intentionally carry no priority:
+  they do not schedule agent work.
+- **Audit Phase 2 is always serial** (`AUDIT_PHASE2_PARALLELISM=1`); the
+  former mode-aware `'2'` selection and its `DowntimeSpawnConfig`
+  (`mode`/`slotBudget`/`freeSlots`/`concurrentDispatchCap`) plumbing are
+  gone. Free-slot dispatch gating is unchanged.
+
 ### No-candidate cooldown & the empty offer file
 
 The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
@@ -1082,8 +1336,8 @@ gate is the *outermost* audit-concurrency guard, never a replacement):
 |---|---|---|---|
 | **Host-wide marker** (this mechanism) | machine-wide, all projects/instances | an audit dispatched by ANY project on this host | skip audit tier; reason `audit-host-saturated` |
 | **Per-worklog single-flight** (WL-0MT3PHW4I002SNOV) | one project's dispatch log | a non-stale `kind=audit` marker mapping to an `in_progress` item in THIS worklog | skip audit tier; reason `audit-in-flight` |
-| **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot ownership) | the Local Proxy | live slot availability, queue depth, live leases | ineligible/skip audit dispatch (per-tier minimum 2 free slots) or `proxy-contention`; unusable per-slot detail → `slots-unavailable` |
-| **`AUDIT_PHASE2_PARALLELISM=1`** | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots |
+| **Proxy-slot gating** (per-slot availability / `contention_queue_depth` / per-slot `lease_state` / prefill gate) | the Local Proxy | live slot availability, queue depth, lease state (v2 distinguishes `generating` from `idle_leased`), `capacity_hint`, prefill in-flight/cap/waiters and prefill ETAs | ineligible/skip audit dispatch (per-tier minimum 2 free slots), `proxy-contention`, `capacity-saturated`, `prefill-gate` / `prefill-cap` / `prefill-eta`; unusable per-slot detail → `slots-unavailable` |
+| **`AUDIT_PHASE2_PARALLELISM=1`** (always) | the audit skill's child fan-out | Phase 2 deep-analysis children | parent + one child = exactly 2 local slots (fully serial Phase 2) |
 
 **Observability.** The skip is logged to stderr as
 `Downtime audit tier skipped: audit-host-saturated (concurrentAudits=1,
@@ -1109,6 +1363,161 @@ host-wide active audit skips the tier, reports `audit-host-saturated`, and
 falls through/deferred; a per-worklog active audit still reports
 `audit-in-flight`; the observability line carries the concurrent-audit count
 and slot state).
+
+### Depth-aware audit batching (parent WL-0MVEDM8OT007WDRS)
+
+**Problem.** The audit tier resets the idle tracker after every successful
+dispatch, so a backlog of auditable `completed`/`in_review` items drains at
+most one audit per full idle period — on a busy host the audit queue can sit
+untouched for hours even though the proxy is free between audits.
+
+**Contract.** When the queue is deep, one continuous idle window may issue up
+to `downtimeAuditBatchMax` **sequential** audit dispatches. The audits stay
+serialised globally: at most **one audit is active on the host at any
+moment** (see *Host-wide audit serialisation* above) and the audit runner's
+Phase 2 remains fully serial (`AUDIT_PHASE2_PARALLELISM=1`). Batching removes
+only the *fresh full idle period* requirement **between** consecutive audits
+of an already-deep queue.
+
+**Setting.** `downtimeAuditBatchMax` (plugin settings,
+`~/.config/herdr/worklog-plugin.json`) — default **`2`**, clamped to
+**`[1, 5]`** (`DEFAULT_DOWNTIME_AUDIT_BATCH_MAX`,
+`DOWNTIME_AUDIT_BATCH_MAX_MIN` / `DOWNTIME_AUDIT_BATCH_MAX_MAX`,
+`clampDowntimeAuditBatchMax` in `downtime-worker.ts`);
+non-finite/missing/invalid input falls back to the default. `1` means
+**batching off** and restores the legacy single-dispatch-per-idle-window
+behaviour. The setting is re-read every tick like
+`browseItemCount` / `downtimeMaxAttempts`, so a change applies without a
+plugin restart.
+
+**Activation rule.** A batch is armed only when **both** hold:
+
+1. the **audit-eligible depth** is at or above the live `browseItemCount`
+   threshold (the same "deep review queue" signal the review-queue gate
+   uses), and
+2. the clamped `downtimeAuditBatchMax` is **greater than 1**.
+
+The depth is derived from the **already-fetched Herdr head** — the count of
+items where `classifyItemForDispatch(item, now) === 'audit'` (root
+`completed`/`in_review`, excluding fresh-audited, producer-review,
+assignee-held and soft-deleted items) via `computeAuditEligibleDepth`. No
+second eligibility definition exists and no additional `wl` subprocess is
+added to the common dispatch path. Below the threshold, or with the cap at
+`1`, the worker behaves exactly as before: one dispatch followed by a full
+idle-tracker reset (`tracker.record(false)` / `perSlotTracker.record([])`).
+
+**Sequential single-audit safety invariants (nothing is relaxed).** Every
+gate is still re-checked on **every** tick, including a continuation tick;
+the **only** deferral is the dispatcher's own post-dispatch idle reset:
+
+- the continuous idle-duration gate (`downtimeIdleThresholdMs`),
+- `DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2` (the audit tier's per-tier minimum),
+- per-slot ownership (`slotOwned`) and proxy contention
+  (`contention_queue_depth == 0`),
+- code freeze, the host-wide `active-audit` marker and the per-worklog
+  `audit-in-flight` single-flight marker,
+- the dispatch-pipeline single-flight and the dispatched-marker exclusion —
+  each continuation must select a **distinct** item, enforced by the existing
+  marker guards plus an explicit batch-local exclusion set of ids already
+  dispatched in the window.
+
+A continuation that fails any gate is a **refusal that ends the batch** — it
+never target-hops to a different item.
+
+**Batch lifetime (in-memory per worker instance).** The budget is armed with
+`auditBatchMax` dispatches and counts down. It is cleared — restoring the
+legacy fresh-idle-period requirement — when any of the following happens:
+
+- the cap is reached or the audit-eligible depth drops below
+  `browseItemCount`;
+- a **non-audit** dispatch occurs (critical/implement/plan/intake/
+  risk-effort);
+- an audit dispatch ends in any non-`dispatched` outcome (`claim-failed`,
+  `claim-rolled-back`, `spawn-failed`, `marker-write-failed`,
+  `anchor-unavailable`, `wl-error`, or a gate refusal);
+- the worker pauses/cooldowns, leadership is lost, the proxy reports
+  busy/ambiguous/stale per-slot data, or no owned slot can host a
+  continuation.
+
+The state is in-memory (like `lastDispatchAt` / `cooldownUntil`), so a plugin
+restart starts a fresh batch.
+
+**Coordination-mode continuation & deferred leadership hand-off.** The
+production path is coordination mode, where the leader dispatches at most one
+offer per tick. While a batch is armed, `dispatchFromCoordination` first runs
+an **audit-only** continuation over the leader's own Herdr head **window
+extension** (the bounded `fetchExtendedHerdrItems` tail of its own head — the
+head itself is the already-considered ranking prefix) and
+dispatches at most one continuation audit per invocation. The scan is factored
+into `dispatchFromOwnHead`, so a continuation applies the **identical**
+sequential filter chain as the own-backlog fallback (classify → dispatched
+marker id-guard → attempt budget → non-terminal cooldown → code-freeze → audit
+≥ 2 free slots → critical in-flight guard → review-queue hold) and only
+`audit` items are eligible. If no audit candidate survives, the unchanged
+all-kinds own-backlog fallback runs.
+
+An own-backlog dispatch normally steps down leadership immediately
+(WL-0MUU4XFU90008E24). During a batch the step-down is **deferred to batch
+end**: mid-batch continuations do not call `releaseLeadership()`; the
+step-down fires exactly once, on the continuation (or the batch-ending
+dispatch) that reaches the cap or observes the depth drop. A failed
+continuation never hands off.
+
+**Trade-off — proxy-busy caveat.** Only the dispatcher's *own* post-dispatch
+reset is deferred. The dispatched audit pane's own occupancy makes the proxy
+busy, and a busy poll both resets the idle tracker through the normal per-tick
+busy path **and ends the batch window** (a busy poll closes the continuous
+idle window, so the budget is cleared and a fresh full idle period is
+required). A continuation therefore only fires while the proxy stays idle at
+the next poll — fast/quiet audit panes drain in sequence; a busy interlude
+restarts the fresh-idle requirement and the next audit dispatch re-arms a
+fresh batch while the queue is still deep. Batching is a queue-drain
+optimisation, never a relaxation of the idle-duration gate.
+
+**Observability.** Accepted continuations log the observation token
+`audit-batch-continue`; a silently deactivated batch logs `audit-batch-end`
+(cap/depth). Blocked/held continuations reuse the existing refusal token
+(`audit-in-flight`, `audit-host-saturated`, `code-freeze`, `slot-owned`,
+`proxy-contention`, `review-queue-hold`, `no-candidate`, `slots-unavailable`)
+and gain the additive `auditBatchDepth` / `auditBatchCap` /
+`auditBatchRemaining` metadata — see *Decision-log entries: audit-batch tokens
+& metadata* under *Log schema*.
+
+**Tests.** `downtime-worker.settings.test.ts` pins default/clamp/parse;
+`downtime-worker.audit-tier.test.ts` pins the activation rule, the sequential
+continuations and the gates that block them;
+`downtime-worker.dispatch.test.ts` pins the shallow-depth legacy behaviour;
+`coordination-dispatch.test.ts` and `downtime-worker.orchestrator.test.ts` pin
+the continuation, the batch-local exclusion set, the failing-continuation
+batch end and the deferred leadership hand-off.
+
+#### Verification record (WL-0MVFE1IRB0004X1U, 2026-10-20)
+
+The batch feature (parent WL-0MVEDM8OT007WDRS) was verified as one slice at
+`dev` head **4bdc1201**:
+
+| Command | Result |
+| --- | --- |
+| `npm --silent test -- packages/herdr/src` | **107 files / 3510 tests passed** (no failures, no unhandled rejections) |
+| `python3 run_tests.py --scope full` (the configured dev-push gate: `tests/cli` + `tests/unit`) | green |
+| doc-consistency scan for stale "single-dispatch-only" claims | clean — the only `single-dispatch-per-window` mentions are the deliberate `1` = legacy/off descriptions |
+
+**AC traceability.**
+
+| AC | Implementation | Pinned by |
+| --- | --- | --- |
+| AC1 depth-aware batching | `computeAuditEligibleDepth`, `resolveAuditBatchStatus`, `clampDowntimeAuditBatchMax`, worker `activeAuditBatch` budget | `downtime-worker.settings.test.ts`, `downtime-worker.audit-tier.test.ts`, `downtime-worker.orchestrator.test.ts` |
+| AC2 sequential single-audit safety | conditional reset in `tick()` (every gate re-checked); continuation runs through the unchanged filter chain | `downtime-worker.audit-tier.test.ts` (idle gate, ≥ 2 slots, markers), `coordination-dispatch.test.ts` |
+| AC3 no duplicate / re-dispatched items | marker id-guard + `auditBatchDispatchedIds` batch-local exclusion; any non-`dispatched` continuation ends the batch | `coordination-dispatch.test.ts` (AC3, AC6f, batch-local exclusion), `downtime-worker.audit-tier.test.ts` |
+| AC4 coordination-mode compatibility | `dispatchFromOwnHead` audit-only continuation from the leader's own head; deferred `ownBacklogDispatch` step-down | `coordination-dispatch.test.ts` (AC4) |
+| AC5 observability | `audit-batch-continue` / `audit-batch-end` observation tokens with depth/cap/remaining; existing tokens unchanged | `downtime-worker.orchestrator.test.ts` (batch decisions + metadata), `downtime-log.test.ts` |
+| AC6 herdr test coverage | (a)–(f) specs across the four suites named above | `downtime-worker.dispatch.test.ts`, `downtime-worker.audit-tier.test.ts`, `downtime-worker.orchestrator.test.ts`, `coordination-dispatch.test.ts`, `downtime-worker.settings.test.ts` |
+| AC7 documentation | this document, `packages/herdr/README.md`, code comments | this verification record |
+| AC8 full suite | herdr package suite + configured gate | table above |
+
+Known gate gap (discovered, not fixed here): the configured dev-push gate runs
+`tests/cli` + `tests/unit` only, so the herdr package suite is invoked
+explicitly for herdr-touching items — tracked as WL-0MVGJ4WSS005BMSI.
 
 ### Soft-delete exclusion (SA-0MUJBLZC60085DI9)
 
@@ -1638,8 +2047,11 @@ status refresh unchanged at 30s.**
 | Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
 | Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
 | Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
+| Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX`, `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.ts`) |
 | Stalled-work scan | enabled (`downtimeStallScanEnabled`; re-read live; `false` disables the pre-dispatch scan and falls through to normal dispatch, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_SCAN_ENABLED` (`downtime-worker.ts`) |
 | Stalled-work threshold | **5 min** / `300000` ms (`downtimeStallThresholdMs`; minimum continuous not-`working` duration before an in-place resume; clamped to 60 s – 60 min; invalid/missing falls back to the default, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`, `clampDowntimeStallThresholdMs` (`downtime-worker.ts`) |
+| Capacity-starvation alert window | **2 h** (`downtimeCapacityStarvationAlertMs`; clamped to 5 min – 24 h; continuous capacity-refusal run that triggers a `capacity-starved` observation, WL-0MVKNC2N50025HXE) | `DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS`, `clampDowntimeCapacityStarvationAlertMs` (`capacity-starvation.ts`) |
+| Long-running pane window | **3 h** (`downtimeLongRunningThresholdMs`; clamped to 1 h – 48 h; progress window before a live `working` pane is reported on a starvation signal, WL-0MVKNC2N50025HXE) | `DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS`, `clampDowntimeLongRunningThresholdMs` (`long-running-panes.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
 | Pane-closure idle threshold | **0 min** — idle close disabled (`paneCloseIdleThresholdMinutes`; clamped to 0 min – 24 h) | `pane-close-scheduler.ts` |
 | Pane-closure grace period | **5 min** (`paneCloseGracePeriodMinutes`; clamped to 1 min – 24 h; no pane is eligible for close within this window of first dispatch, WL-0MUMM5IUF003EVT8) | `pane-close-scheduler.ts` |
@@ -1658,7 +2070,10 @@ on load
 (`downtimeNonTerminalCooldownMs`) is likewise configurable and clamped on load
 (`clampDowntimeNonTerminalCooldownMs`). The per-item/per-kind attempt cap
 (`downtimeMaxAttempts`) is likewise configurable and clamped on load
-(`clampDowntimeMaxAttempts`). The stalled-work scan enable flag
+(`clampDowntimeMaxAttempts`). The depth-aware audit-batch cap
+(`downtimeAuditBatchMax`) is likewise configurable and clamped on load
+(`clampDowntimeAuditBatchMax`); see *Depth-aware audit batching* above for its
+activation rule and the sequential single-audit safety invariants. The stalled-work scan enable flag
 (`downtimeStallScanEnabled`) and threshold (`downtimeStallThresholdMs`) are
 likewise re-read live every tick and clamped on load
 (`clampDowntimeStallThresholdMs`).
@@ -1673,13 +2088,15 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
 | `packages/herdr/src/downtime-worker.ts` | Worker tick: election, check-in, idle gate, dispatch (anchor-before-claim); stalled-work scan wiring (`resumeStalledWorkIfAble`, `STALLED_RESUME_REASON`) |
 | `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
+| `packages/herdr/src/capacity-starvation.ts` | Capacity-refusal episode tracker + `capacity-starved` signal (`CapacityStarvationTracker`, `isCapacityRefusal`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
+| `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/downtime-log.ts` | Coordination/dispatch rolling logs (per worklog root, retained) |
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
 | `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |
 | `packages/herdr/src/pane-close-scheduler.ts` | Periodic scheduling, settings clamps, enabled guard (`runScheduledPaneClose`) |
 | `packages/herdr/src/pane-close-herdr.ts` | Production `ReaperDeps` over `herdr pane list` + `herdr pane process-info` + pi session logs (activity probes: agent status, recent file modifications, spawned child processes) |
 | `packages/herdr/src/process-group.ts` | Session-scoped child-process teardown (SIGTERM → grace → SIGKILL) |
-| `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` |
+| `packages/herdr/shared/send-to-pi.sh` | `--anchor <paneId>` \u2192 `herdr pane split --pane <anchor>` (no `pane current` in anchor mode); forwards `--cwd`/`--model`/`AUDIT_PHASE2_PARALLELISM` and injects `HERDR_REQUEST_PRIORITY` from `--request-priority` |
 | `packages/herdr/shared/grid.py` | Grid rebalance around anchor pane |
 | `~/.herdr/downtime/downtime-dispatch-anchor.json` | Persisted Dispatcher fallback anchor `{ paneId, workspaceId }` (machine dir; AC4 fallback + scheduled prompts only) |
 | ~~`~/.herdr/downtime/downtime-dispatch-tab-anchors.json`~~ | **Retired** (per-prefix map). Item tabs are discovered via `herdr tab list`; a leftover file is no longer read. |
@@ -1746,6 +2163,47 @@ likewise re-read live every tick and clamped on load
   `exitCode` (if available) is the CLI exit code.
 
 ## Log schema
+
+### Decision-log entries: audit-batch tokens & metadata (parent WL-0MVEDM8OT007WDRS AC5)
+
+The decision log (`<cwd>/.worklog/downtime-coordination.log`, entries with
+`kind: 'decision'`) records audit-batch decisions alongside the existing
+refusal reasons. Every entry keeps today's standard fields (`freeSlots`,
+`totalSlots`, `ownerPresent`, `runningPanes`, `contentionDepth`) and the same
+rate limit: an identical reason inside `DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS`
+(10 min) is suppressed, a reason change always writes. When the proxy serves
+them, every entry also carries the capacity/prefill evidence
+(`capacityHint`, `statusSchemaVersion`, `prefillsInFlight`,
+`maxConcurrentPrefills`, `prefillGateWaiters`, `prefillBudgetSeconds`,
+`queueEtaSeconds`, `slotPhases`, `slotPrefillEtaSeconds`); prefill pacing
+refusals use the distinct reasons/tokens `prefill-gate`, `prefill-cap` and
+`prefill-eta`.
+The header blocking
+token is still updated on **every refusal** and never on the observation
+tokens below.
+
+| Token | Meaning | Batch metadata |
+|---|---|---|
+| `audit-batch-continue` | An **accepted** audit continuation (never the first dispatch of a batch). | `auditBatchDepth`, `auditBatchCap`, `auditBatchRemaining` — the budget still available **after** this dispatch (`0` on the dispatch that consumes the last continuation). |
+| `audit-batch-end` | An armed batch ended **silently** after a successful audit dispatch (cap reached / depth dropped). Emitted at most once per batch-ending dispatch, never for a refusal. | Same three fields plus `auditBatchEndReason: 'cap' \| 'depth'`. |
+
+**Blocked/held continuations reuse the existing tokens unchanged** —
+`audit-in-flight` and `audit-host-saturated` (marker blocks), `slot-owned`,
+`proxy-contention`, `code-freeze`, `review-queue-hold`, `no-candidate`,
+`slots-unavailable` — and gain `auditBatchDepth` / `auditBatchCap` /
+`auditBatchRemaining` (the budget still available when the continuation was
+held) as **additive** fields whenever a batch was armed. A refusal ends the
+batch, so no separate `audit-batch-end` line is written for it. Decisions
+with no batch armed keep their existing shape: the metadata fields are
+absent.
+
+```json
+{"kind":"decision","operation":"no-dispatch","instanceId":"…",
+ "reason":"audit-batch-continue","freeSlots":2,"totalSlots":4,
+ "ownerPresent":false,"runningPanes":1,"contentionDepth":0,
+ "auditBatchDepth":7,"auditBatchCap":2,"auditBatchRemaining":1,
+ "at":"2026-10-20T02:00:00.000Z"}
+```
 
 ### `DowntimeErrorEvent` fields (per-strike error log entries)
 

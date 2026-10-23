@@ -1,0 +1,187 @@
+{
+  "version": 1,
+  "$comment": "Herdr large-DB refresh budget (parent WL-0MVJC1EQX001QR9W). The `default` profile is measured by the default-suite ratchet test (packages/herdr/src/large-db-refresh-budget.test.ts); the `full` profile (~2,600 items / ~124 MB, the operator-observed scale) is run on demand with `npm run test:perf:large`. A metric exceeding its recorded baseline plus documented headroom fails the ratchet — re-baseline deliberately with `npm run test:perf:large -- --json --update-budget`.",
+  "commands": {
+    "defaultProfile": "npx tsx packages/herdr/test/perf/large-db-harness.ts --profile default --json",
+    "fullScale": "npm run test:perf:large -- --json",
+    "fullScaleDist": "npm run build && npm run test:perf:large -- --json --target dist",
+    "expandProfile": "npx tsx packages/herdr/test/perf/large-db-harness.ts --profile full --expand --json",
+    "spawnBurst": "npm run test:perf:large -- --spawn-burst 8 --json",
+    "syncInFlight": "npm run test:perf:large -- --sync-in-flight --samples 5 --json",
+    "rebaseline": "npm run test:perf:large -- --json --update-budget  (add --target src|dist to pick the invocation)",
+    "acReport": "npm run build && npm run test:perf:large -- --ac-report --json --target dist  (F7 end-to-end parent AC evidence)"
+  },
+  "acTargets": {
+    "refreshP95WallMs": 1500,
+    "eventLoopBlockingP95Ms": 200,
+    "peakRssPerSpawnMb": 130,
+    "paneAggregateRssMb": 300,
+    "writeToReflectP95Ms": 2000,
+    "spawnsPerRefresh": 1,
+    "idleSpawns": 0,
+    "wlSpawnCap": 1,
+    "enforced": true,
+    "note": "Parent epic acceptance criteria at ~2,600 items / ~100 MB (WL-0MVJC1EQX001QR9W): a default-view refresh ≤ ~1.5 s p95 wall, ≤ ~200 ms aggregate event-loop blocking, a documented per-spawn peak-RSS budget below the ~130–145 MB/spawn pre-change baseline and ≤ ~300 MB aggregate for a single pane, write → reflect ≤ ~2 s p95, one consolidated `wl worklist` read per refresh and zero spawns when idle. F5 (WL-0MVJV2PC2008PY64) adds `wlSpawnCap` — the documented max concurrent `wl` read spawns per pane (enforced by the fetcher semaphore; the pane aggregate spawn RSS is bounded by cap × per-spawn peak, asserted by the spawn-burst scenario); F8 (WL-0MVKVJYV6008SL9G) tightened it from 2 to 1 after F7 measured a cold 144.6–175.3 MB per-spawn peak on the built CLI at full scale, which made `2 × peak` breach the ceiling. AC5 is enforced as the epic states it: EITHER the per-spawn peak is inside `peakRssPerSpawnMb` OR the capped fan-out (`wlSpawnCap × peak`) stays inside `paneAggregateRssMb`. The AC numbers are asserted for the built (`dist`) CLI only — the `src` (tsx) target pays tsx module-load cost inside every spawn and does not describe what `wl` runs. `enforced` was flipped true by F7 (WL-0MVJV2QHO003K6H3) after a compliant full-scale `dist` baseline was recorded."
+  },
+  "regression": {
+    "refreshSamples": 5,
+    "writeToReflectSamples": 5,
+    "cpuHeadroomPct": 100,
+    "wallHeadroomPct": 200,
+    "wallFloorMs": 500,
+    "rssHeadroomPct": 25,
+    "eventLoopHeadroomPct": 200,
+    "eventLoopFloorMs": 100,
+    "note": "CPU time (process.resourceUsage for the harness plus the per-spawn CPU from the WL_SPAWN_COUNT_FILE instrumentation) is the load-independent regression gate, with 100 % headroom because the tsx `src` target varies ~50 % run-to-run on a shared host. Wall time and event-loop blocking get 200 % + a 500 ms / 100 ms floor; peak and aggregate RSS keep a tighter 25 % headroom so memory regressions still fail promptly."
+  },
+  "profiles": {
+    "default": {
+      "scale": {
+        "items": 300,
+        "descriptionChars": 3000,
+        "commentsPerItem": 2,
+        "commentChars": 600,
+        "parentGroups": 12,
+        "childrenPerParent": 3,
+        "grandchildrenPerParent": 2,
+        "dependencyEvery": 10,
+        "expandedParents": 12,
+        "browseCount": 30
+      },
+      "baselines": {
+        "dist": {
+          "capturedAt": "2026-10-22T20:03:16.358Z",
+          "node": "v22.22.1",
+          "host": "rgardler-AI-Laptop",
+          "target": "dist",
+          "method": "/usr/bin/node dist/cli.js <argv> — built CLI, warm runs after a priming refresh; CPU/RSS from the WL_SPAWN_COUNT_FILE spawn records",
+          "dataset": {
+            "items": 300,
+            "descriptionChars": 3000,
+            "parentGroups": 12,
+            "expandedParents": 12,
+            "dependencyEdges": 29,
+            "dbSizeMb": 1.7,
+            "diskSizeMb": 1.7,
+            "generationMs": 376
+          },
+          "metrics": {
+            "refreshP50WallMs": 610.2,
+            "refreshP95WallMs": 637.1,
+            "refreshP95CpuMs": 726.2,
+            "eventLoopBlockingP95Ms": 69.6,
+            "maxEventLoopBlockedMs": 42.5,
+            "spawnsPerRefresh": 1,
+            "peakRssPerSpawnMb": 69.2,
+            "aggregateSpawnRssMb": 69.2,
+            "paneAggregateRssMb": 70.9,
+            "writeToReflectP95Ms": 1414
+          }
+        },
+        "src": {
+          "capturedAt": "2026-10-22T20:04:39.388Z",
+          "node": "v22.22.1",
+          "host": "rgardler-AI-Laptop",
+          "target": "src",
+          "method": "/usr/bin/node node_modules/.bin/tsx src/cli.ts <argv> — tsx target, warm runs after a priming refresh; CPU/RSS from the WL_SPAWN_COUNT_FILE spawn records",
+          "dataset": {
+            "items": 300,
+            "descriptionChars": 3000,
+            "parentGroups": 12,
+            "expandedParents": 12,
+            "dependencyEdges": 29,
+            "dbSizeMb": 1.7,
+            "diskSizeMb": 1.7,
+            "generationMs": 719
+          },
+          "metrics": {
+            "refreshP50WallMs": 5231.7,
+            "refreshP95WallMs": 6780.3,
+            "refreshP95CpuMs": 3164.6,
+            "eventLoopBlockingP95Ms": 1404.7,
+            "maxEventLoopBlockedMs": 103.9,
+            "spawnsPerRefresh": 1,
+            "peakRssPerSpawnMb": 110.3,
+            "aggregateSpawnRssMb": 110.3,
+            "paneAggregateRssMb": 110.3,
+            "writeToReflectP95Ms": 7242.9
+          }
+        }
+      }
+    },
+    "full": {
+      "scale": {
+        "items": 2600,
+        "descriptionChars": 6000,
+        "commentsPerItem": 10,
+        "commentChars": 2200,
+        "parentGroups": 40,
+        "childrenPerParent": 4,
+        "grandchildrenPerParent": 2,
+        "dependencyEvery": 10,
+        "expandedParents": 20,
+        "browseCount": 30
+      },
+      "baselines": {
+        "dist": {
+          "capturedAt": "2026-10-23T10:46:49.050Z",
+          "node": "v22.22.1",
+          "host": "rgardler-AI-Laptop",
+          "target": "dist",
+          "method": "/usr/bin/node dist/cli.js <argv> — built CLI, warm runs after a priming refresh; CPU/RSS from the WL_SPAWN_COUNT_FILE spawn records",
+          "dataset": {
+            "items": 2600,
+            "descriptionChars": 6000,
+            "parentGroups": 40,
+            "expandedParents": 20,
+            "dependencyEdges": 259,
+            "dbSizeMb": 123.7,
+            "diskSizeMb": 123.7,
+            "generationMs": 6953
+          },
+          "metrics": {
+            "refreshP50WallMs": 648.6,
+            "refreshP95WallMs": 714,
+            "refreshP95CpuMs": 885.4,
+            "eventLoopBlockingP95Ms": 172.7,
+            "maxEventLoopBlockedMs": 166.7,
+            "spawnsPerRefresh": 1,
+            "peakRssPerSpawnMb": 144.7,
+            "aggregateSpawnRssMb": 144.7,
+            "paneAggregateRssMb": 426.5,
+            "writeToReflectP95Ms": 1404.9
+          }
+        },
+        "src": {
+          "capturedAt": "2026-10-23T10:47:21.807Z",
+          "node": "v22.22.1",
+          "host": "rgardler-AI-Laptop",
+          "target": "src",
+          "method": "/usr/bin/node node_modules/.bin/tsx src/cli.ts <argv> — tsx target, warm runs after a priming refresh; CPU/RSS from the WL_SPAWN_COUNT_FILE spawn records",
+          "dataset": {
+            "items": 2600,
+            "descriptionChars": 6000,
+            "parentGroups": 40,
+            "expandedParents": 20,
+            "dependencyEdges": 259,
+            "dbSizeMb": 123.7,
+            "diskSizeMb": 123.7,
+            "generationMs": 4206
+          },
+          "metrics": {
+            "refreshP50WallMs": 1426,
+            "refreshP95WallMs": 2100.4,
+            "refreshP95CpuMs": 2238.4,
+            "eventLoopBlockingP95Ms": 187.2,
+            "maxEventLoopBlockedMs": 171.7,
+            "spawnsPerRefresh": 1,
+            "peakRssPerSpawnMb": 126.4,
+            "aggregateSpawnRssMb": 126.4,
+            "paneAggregateRssMb": 346,
+            "writeToReflectP95Ms": 3156.6
+          }
+        }
+      }
+    }
+  }
+}

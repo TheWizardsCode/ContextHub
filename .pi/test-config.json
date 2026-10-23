@@ -3,5 +3,11 @@
     "npm --silent test -- tests/cli",
     "npm --silent test -- tests/unit"
   ],
-  "timeoutPerCommand": 1800
+  "timeoutPerCommand": 1800,
+  "groups": {
+    "herdr": {
+      "commands": ["npm --silent test -- packages/herdr/src"],
+      "paths": ["packages/herdr/**"]
+    }
+  }
 }

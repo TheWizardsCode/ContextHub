@@ -19,14 +19,18 @@
  * `downtime-worker.fixtures.ts`; no setup logic is re-implemented here.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   isIdleStatus,
   evaluateIdle,
   createIdleTracker,
   createPerSlotIdleTracker,
+  createDowntimePoller,
+  createDowntimeWorker,
   countFreeUnownedSlots,
   isSlotOwned,
+  isSlotAvailableForDispatch,
+  evaluatePrefillPacing,
   DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS,
@@ -34,11 +38,14 @@ import {
   type LlamaSlot,
 } from './downtime-worker.js';
 import {
+  jsonResponseFixture,
   makeDeps,
   singleSlotIdleOwned,
   perSlotIdleOwned,
   perSlotOwnedOneUnowned,
+  prefillPacingStatus,
 } from './downtime-worker.fixtures.js';
+import type { CoordinationLogEntry } from './downtime-log.js';
 
 // ── Idle detection (AC2) ──────────────────────────────────────────────
 
@@ -594,3 +601,466 @@ describe('createPerSlotIdleTracker: owned slot timer resets (AC5)', () => {
   });
 });
 
+
+// ── Truthful lease_state availability (LP-0MVGDUVGE0024YAI) ───────────
+//
+// Schema v2 distinguishes `generating`, `idle_leased` (reserved-but-idle,
+// the upstream false-busy case) and `free`. Only `generating` is busy: an
+// `idle_leased` slot is dispatchable capacity, and the global
+// `local_lease_active` gate is superseded when truthful per-slot lease state
+// is available. Pre-v2 payloads keep the `owner_session_id` behaviour.
+
+describe('truthful lease_state availability (LP-0MVGDUVGE0024YAI)', () => {
+  const v2Pool = (leases: Array<'generating' | 'idle_leased' | 'free'>): LlamaStatus => ({
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    // A live global lease is present in every v2 case: the per-slot
+    // lease_state is the authoritative signal.
+    local_lease_active: true,
+    available_slots: 0,
+    total_slots: leases.length,
+    status_schema_version: 2,
+    capacity_hint: 'idle',
+    slots: leases.map((lease_state, index) => ({
+      slot_id: `slot-${index + 1}`,
+      is_processing: lease_state === 'generating',
+      owner_session_id: lease_state === 'free' ? null : 'sess-1',
+      lease_state,
+    })),
+  });
+
+  it('counts idle_leased slots as dispatchable capacity', () => {
+    expect(
+      countFreeUnownedSlots([
+        { slot_id: 'a', is_processing: false, owner_session_id: 'sess', lease_state: 'idle_leased' },
+        { slot_id: 'b', is_processing: false, lease_state: 'free' },
+        { slot_id: 'c', is_processing: false, owner_session_id: 'sess', lease_state: 'generating' },
+        { slot_id: 'd', is_processing: true, lease_state: 'free' },
+      ]),
+    ).toBe(2);
+  });
+
+  it('isSlotAvailableForDispatch: generating is busy, idle_leased/free are available', () => {
+    expect(
+      isSlotAvailableForDispatch({
+        slot_id: 'a',
+        is_processing: false,
+        lease_state: 'generating',
+      }),
+    ).toBe(false);
+    expect(
+      isSlotAvailableForDispatch({
+        slot_id: 'b',
+        is_processing: false,
+        lease_state: 'idle_leased',
+      }),
+    ).toBe(true);
+    expect(
+      isSlotAvailableForDispatch({ slot_id: 'c', is_processing: false, lease_state: 'free' }),
+    ).toBe(true);
+  });
+
+  it('isSlotAvailableForDispatch: a pre-v2 slot keeps the owner_session_id rule', () => {
+    expect(
+      isSlotAvailableForDispatch({ slot_id: 'a', is_processing: false, owner_session_id: 'live' }),
+    ).toBe(false);
+    expect(isSlotAvailableForDispatch({ slot_id: 'b', is_processing: false })).toBe(true);
+  });
+
+  it('evaluateIdle: an all-idle_leased pool is idle despite a global lease', () => {
+    expect(evaluateIdle(v2Pool(['idle_leased', 'idle_leased']), 0)).toBe(true);
+    expect(evaluateIdle(v2Pool(['idle_leased', 'idle_leased']), 2)).toBe(true);
+  });
+
+  it('evaluateIdle: a generating slot is not available capacity', () => {
+    expect(evaluateIdle(v2Pool(['generating', 'idle_leased']), 0)).toBe(false);
+    expect(evaluateIdle(v2Pool(['generating', 'idle_leased']), 1)).toBe(true);
+  });
+
+  it('evaluateIdle: capacity_hint=saturated is never idle (defensive cross-check)', () => {
+    const inconsistent: LlamaStatus = {
+      ...v2Pool(['free', 'free']),
+      capacity_hint: 'saturated',
+    };
+    expect(evaluateIdle(inconsistent, 0)).toBe(false);
+  });
+
+  it('per-slot tracker: an idle_leased slot accumulates idle time', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+    tracker.record(v2Pool(['idle_leased']).slots!, start);
+    expect(tracker.thresholdMetCount(1_000, start + 5_000)).toBe(1);
+  });
+
+  it('per-slot tracker: a generating slot never accumulates idle time', () => {
+    const tracker = createPerSlotIdleTracker();
+    const start = 1_000_000;
+    tracker.record(v2Pool(['generating']).slots!, start);
+    expect(tracker.thresholdMetCount(1_000, start + 5_000)).toBe(0);
+  });
+});
+
+describe('pre-v2 lease regression (LP-0MVGDUVGE0024YAI backward compatibility)', () => {
+  it('a pre-v2 idle-but-owned slot is still busy (owner_session_id rule)', () => {
+    // No status_schema_version / lease_state: the legacy behaviour must be
+    // preserved exactly, so an owned slot is never dispatchable.
+    const preV2: LlamaStatus = {
+      llama_server_running: true,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: true,
+      available_slots: 1,
+      total_slots: 1,
+      slots: [{ slot_id: 'slot-1', is_processing: false, owner_session_id: 'live' }],
+    };
+    expect(countFreeUnownedSlots(preV2.slots!)).toBe(0);
+    expect(evaluateIdle(preV2, 0)).toBe(false);
+  });
+});
+
+// ── Proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY) ──────────
+//
+// The llama-proxy publishes the authoritative monotonic local idle age
+// (`local_idle_seconds`, LP-0MVGD9Z8Z0055Y5J). When it is usable it OWNS the
+// idle-DURATION qualification: a worker that starts polling while the GPU has
+// already been idle for hours must dispatch on its FIRST poll, while a proxy
+// reporting a short idle age must never admit a dispatch on the strength of
+// an older local tracker run. The signal qualifies duration only — the
+// per-slot availability/fail-closed contract and `requiredFreeSlots` are
+// unchanged.
+
+describe('proxy-authoritative local idle age (WL-0MVHSZR9C0012NQY)', () => {
+  const THRESHOLD_MS = 60_000;
+
+  function idleAgeStatus(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
+    return {
+      llama_server_running: true,
+      local_active_query: false,
+      model_switch_in_progress: false,
+      local_lease_active: false,
+      available_slots: 4,
+      total_slots: 4,
+      slots: [
+        { slot_id: 'slot-1', is_processing: false },
+        { slot_id: 'slot-2', is_processing: false },
+        { slot_id: 'slot-3', is_processing: false },
+        { slot_id: 'slot-4', is_processing: false },
+      ],
+      contention_queue_depth: 0,
+      contention_queued_count: 0,
+      ...overrides,
+    };
+  }
+
+  function makeIdleAgeWorker(opts: {
+    status: LlamaStatus;
+    requiredFreeSlots?: number;
+    thresholdMs?: number;
+    recordDecision?: (entry: CoordinationLogEntry, cwd: string) => Promise<void>;
+  }) {
+    const poller = createDowntimePoller(
+      'http://proxy:8000',
+      vi.fn().mockResolvedValue(jsonResponseFixture(opts.status)),
+    );
+    const deps = makeDeps({
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-IDLE-AGE', title: 'Some task', stage: 'intake_complete' },
+      }),
+      ...(opts.recordDecision ? { recordDecision: opts.recordDecision } : {}),
+    });
+    const worker = createDowntimeWorker({
+      poller,
+      deps,
+      config: () => ({
+        enabled: true,
+        thresholdMs: opts.thresholdMs ?? THRESHOLD_MS,
+        requiredFreeSlots: opts.requiredFreeSlots ?? 0,
+        model: 'plan',
+        cwd: '/repo',
+        noCandidateCooldownMs: 3_600_000,
+        browseItemCount: 20,
+      }),
+    });
+    return { worker, deps };
+  }
+
+  it('AC2: an already-elapsed proxy idle age dispatches on the FIRST poll (global mode)', async () => {
+    // A fresh worker (fresh tracker, zero idle run) plus a proxy that has been
+    // idle for two hours: the first poll must dispatch, without waiting for
+    // the local tracker to accumulate `downtimeIdleThresholdMs`.
+    const { worker, deps } = makeIdleAgeWorker({
+      status: idleAgeStatus({ local_idle_seconds: 7_200, local_last_activity_source: 'finish' }),
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC2: an already-elapsed proxy idle age dispatches on the FIRST poll (per-slot mode)', async () => {
+    const { worker, deps } = makeIdleAgeWorker({
+      // 2 of 4 slots required: in per-slot mode the capacity budget still
+      // applies, the idle age only satisfies the duration requirement.
+      requiredFreeSlots: 2,
+      status: idleAgeStatus({ local_idle_seconds: 7_200 }),
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+  });
+
+  it('AC3: a short proxy idle age refuses even when the local tracker has an older run', async () => {
+    vi.useFakeTimers();
+    try {
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      const { worker, deps } = makeIdleAgeWorker({
+        status: idleAgeStatus({ local_idle_seconds: 5 }),
+      });
+      await worker.tick(); // starts the local idle run — no dispatch yet
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+
+      // Long past the threshold: the LOCAL tracker would qualify here, but the
+      // proxy (authoritative) still reports a 5 s idle age → refuse.
+      vi.setSystemTime(start + THRESHOLD_MS + 30_000);
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      // The refusal came from the proxy signal, not from a broken tracker:
+      // the local idle run is intact and older than the threshold.
+      expect(worker.idleSince).toBe(start);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC4: a live contention waiter resets the idle run despite a large reported idle age', async () => {
+    vi.useFakeTimers();
+    try {
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      const { worker, deps } = makeIdleAgeWorker({
+        status: idleAgeStatus({ local_idle_seconds: 7_200, contention_queue_depth: 2 }),
+      });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      // The run is reset — no idle credit survives the contention poll.
+      expect(worker.idleSince).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC4: a processing slot refuses a large reported idle age (per-slot mode)', async () => {
+    const { worker, deps } = makeIdleAgeWorker({
+      requiredFreeSlots: 2,
+      status: idleAgeStatus({
+        local_idle_seconds: 7_200,
+        slots: [
+          { slot_id: 'slot-1', is_processing: true },
+          { slot_id: 'slot-2', is_processing: false },
+          { slot_id: 'slot-3', is_processing: false },
+        ],
+        available_slots: 2,
+        total_slots: 3,
+      }),
+    });
+    const outcome = await worker.tick();
+    // Activity on the poll outranks the idle age: the local tracker decides,
+    // and a fresh worker has no accumulated run yet.
+    expect(outcome.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC4: a live (pre-v2) lease refuses a large reported idle age', async () => {
+    const { worker, deps } = makeIdleAgeWorker({
+      status: idleAgeStatus({
+        local_idle_seconds: 7_200,
+        local_lease_active: true,
+        local_owner_session_id: 'operator-session',
+        slots: [{ slot_id: 'slot-1', is_processing: false, owner_session_id: 'operator-session' }],
+        available_slots: 1,
+        total_slots: 1,
+      }),
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    expect(worker.idleSince).toBeNull();
+  });
+
+  it('AC5: an absent idle age (pre-feature proxy) restores the local tracker exactly', async () => {
+    vi.useFakeTimers();
+    try {
+      const start = 1_000_000;
+      vi.setSystemTime(start);
+      const { worker, deps } = makeIdleAgeWorker({ status: idleAgeStatus() });
+      await worker.tick();
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled(); // threshold not yet met
+      vi.setSystemTime(start + THRESHOLD_MS - 1);
+      expect((await worker.tick()).dispatched).toBe(false); // 1 ms short
+      vi.setSystemTime(start + THRESHOLD_MS);
+      expect((await worker.tick()).dispatched).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('AC6: a large idle age never bypasses the slots-unavailable contract', async () => {
+    for (const overrides of [
+      { slots: [], slots_stale: true },
+      { slots: [] },
+    ] as Array<Partial<LlamaStatus>>) {
+      const recordDecision = vi.fn().mockResolvedValue(undefined);
+      const { worker, deps } = makeIdleAgeWorker({
+        status: idleAgeStatus({ ...overrides, local_idle_seconds: 7_200 }),
+        recordDecision,
+      });
+      const outcome = await worker.tick();
+      expect(outcome.dispatched).toBe(false);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      expect(worker.blockReason).toBe('no-slots');
+      expect(recordDecision.mock.calls[0][0]).toMatchObject({
+        reason: 'slots-unavailable',
+        localIdleSeconds: 7_200,
+      });
+    }
+  });
+
+  it('AC7: a deferred tick records idle-age-pending with the idle-age evidence', async () => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const { worker } = makeIdleAgeWorker({
+      status: idleAgeStatus({ local_idle_seconds: 5, local_last_activity_source: 'dispatch' }),
+      recordDecision,
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(recordDecision.mock.calls[0][0]).toMatchObject({
+      reason: 'idle-age-pending',
+      localIdleSeconds: 5,
+      localLastActivitySource: 'dispatch',
+    });
+    // An observation, never a refusal: the header token is untouched.
+    expect(worker.blockReason).toBeNull();
+  });
+
+  it('AC7: the decision log records the idle age and the activity source', async () => {
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const { worker } = makeIdleAgeWorker({
+      // thresholdMs: 0 so the readiness gate is immediately satisfied and the
+      // contention refusal (which carries the idle-age evidence) is reached.
+      thresholdMs: 0,
+      status: idleAgeStatus({
+        local_idle_seconds: 12.5,
+        local_last_activity_source: 'chunk',
+        contention_queue_depth: 2,
+      }),
+      recordDecision,
+    });
+    await worker.tick();
+    expect(recordDecision).toHaveBeenCalledTimes(1);
+    expect(recordDecision.mock.calls[0][0]).toMatchObject({
+      reason: 'proxy-contention',
+      localIdleSeconds: 12.5,
+      localLastActivitySource: 'chunk',
+    });
+  });
+});
+
+// ── Prefill-gate pacing helper (WL-0MVHSZRZQ00482QX) ──────────────────
+//
+// `evaluatePrefillPacing` computes the per-tick prefill pacing decision from
+// the proxy's serialisation-gate fields (LP-0MVGDUUV3001XFRJ): the prefill
+// capacity budget (0 while cap reached, else the headroom, unbounded when
+// the cap is absent or 0) and the deferral reason (gate waiters first, then
+// cap saturation, then a projected wait above the admission budget).
+describe('evaluatePrefillPacing (WL-0MVHSZRZQ00482QX)', () => {
+  it('AC2: cap reached → capacityBudget 0 and deferReason prefill-cap', () => {
+    const pacing = evaluatePrefillPacing(
+      { ...prefillPacingStatus(), local_prefills_in_flight: 1 },
+      null,
+    );
+    expect(pacing.inFlight).toBe(1);
+    expect(pacing.cap).toBe(1);
+    expect(pacing.capacityBudget).toBe(0);
+    expect(pacing.deferReason).toBe('prefill-cap');
+  });
+
+  it('AC2: below the cap the budget is the remaining prefill headroom (at least 1)', () => {
+    const pacing = evaluatePrefillPacing(
+      { ...prefillPacingStatus(), local_max_concurrent_prefills: 2, local_prefills_in_flight: 1 },
+      null,
+    );
+    expect(pacing.capacityBudget).toBe(1);
+    expect(pacing.deferReason).toBeUndefined();
+    const atZero = evaluatePrefillPacing(
+      { ...prefillPacingStatus(), local_max_concurrent_prefills: 1, local_prefills_in_flight: 0 },
+      null,
+    );
+    expect(atZero.capacityBudget).toBe(1);
+  });
+
+  it('AC5: cap absent or 0 → unbounded prefill budget (capacityBudget undefined)', () => {
+    const absent = evaluatePrefillPacing(prefillPacingStatus({ local_max_concurrent_prefills: undefined }), null);
+    expect(absent.cap).toBeUndefined();
+    expect(absent.capacityBudget).toBeUndefined();
+    expect(absent.deferReason).toBeUndefined();
+    const zero = evaluatePrefillPacing(prefillPacingStatus({ local_max_concurrent_prefills: 0 }), null);
+    expect(zero.capacityBudget).toBeUndefined();
+    expect(zero.deferReason).toBeUndefined();
+  });
+
+  it('AC3: prefill_gate_waiters > 0 defers with the distinct prefill-gate reason', () => {
+    const pacing = evaluatePrefillPacing(prefillPacingStatus({ prefill_gate_waiters: 2 }), null);
+    expect(pacing.gateWaiters).toBe(2);
+    expect(pacing.deferReason).toBe('prefill-gate');
+  });
+
+  it('AC3: zero gate waiters is not contention evidence on its own', () => {
+    const pacing = evaluatePrefillPacing(prefillPacingStatus({ prefill_gate_waiters: 0 }), null);
+    expect(pacing.deferReason).toBeUndefined();
+  });
+
+  it('AC4: queue_eta_seconds above the budget defers with prefill-eta', () => {
+    const pacing = evaluatePrefillPacing(prefillPacingStatus({ queue_eta_seconds: 300 }), null);
+    expect(pacing.queueEtaSeconds).toBe(300);
+    expect(pacing.budgetSeconds).toBe(120);
+    expect(pacing.deferReason).toBe('prefill-eta');
+  });
+
+  it('AC4: a per-slot prefill ETA above the budget defers with prefill-eta', () => {
+    const status = prefillPacingStatus({
+      local_max_concurrent_prefills: 2,
+      local_prefills_in_flight: 1,
+      slots: [
+        { slot_id: 'slot-1', is_processing: true, lease_state: 'generating', phase: 'prefill', prefill_eta_seconds: 300 },
+        { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+        { slot_id: 'slot-3', is_processing: false, lease_state: 'free' },
+        { slot_id: 'slot-4', is_processing: false, lease_state: 'free' },
+      ],
+    });
+    const pacing = evaluatePrefillPacing(status, status.slots ?? null);
+    expect(pacing.maxSlotPrefillEtaSeconds).toBe(300);
+    expect(pacing.deferReason).toBe('prefill-eta');
+  });
+
+  it('AC4: a missing budget or ETA never blocks dispatch', () => {
+    const noBudget = evaluatePrefillPacing(
+      prefillPacingStatus({ prefill_budget_seconds: undefined, queue_eta_seconds: 300 }),
+      null,
+    );
+    expect(noBudget.deferReason).toBeUndefined();
+    const noEta = evaluatePrefillPacing(
+      prefillPacingStatus({ queue_eta_seconds: undefined }),
+      null,
+    );
+    expect(noEta.deferReason).toBeUndefined();
+  });
+
+  it('AC4: a queue ETA within the budget does not defer', () => {
+    const pacing = evaluatePrefillPacing(prefillPacingStatus({ queue_eta_seconds: 30 }), null);
+    expect(pacing.deferReason).toBeUndefined();
+  });
+});

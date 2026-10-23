@@ -10,7 +10,8 @@
  * concurrently-added comment was lost.
  *
  * These tests use REAL git + a real bare remote against the compiled CLI
- * (dist/cli.js), and a PATH git shim that parks the sync inside `git fetch`
+ * (a pre-compiled bundle of `src/cli.ts`, see cli-bundle.ts), and a PATH git
+ * shim that parks the sync inside `git fetch`
  * until the test releases it. Parking the sync widens the read→write window
  * deterministically, so the overlap does not depend on timing races.
  *
@@ -26,10 +27,21 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
+import { cliInvocation } from './cli-bundle.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const projectRoot = path.resolve(__dirname, '..', '..');
-const cliPath = path.join(projectRoot, 'dist', 'cli.js');
+// The pre-compiled CLI bundle (cli-bundle.ts) runs the same `src/cli.ts`
+// command graph as `dist/cli.js`, but ~30% cheaper per spawn and always in
+// step with `src/` — a stale build would otherwise silently test old code.
+function cliSpawn(
+  args: string[],
+  options: Parameters<typeof spawnSync>[2],
+) {
+  const [command, entry] = cliInvocation();
+  return spawnSync(command, [entry, ...args], options);
+}
+
 const mockBinDir = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
 
 /** PATH without the test mock-bin so subprocesses run the real git binary. */
@@ -54,7 +66,7 @@ function runCli(
   args: string[],
   env?: Record<string, string>,
 ): { stdout: string; stderr: string; status: number } {
-  const res = spawnSync('node', [cliPath, ...args], {
+  const res = cliSpawn([...args], {
     cwd,
     encoding: 'utf-8',
     env: env ?? realGitEnv(),
@@ -80,7 +92,8 @@ function spawnCli(
   args: string[],
   env: Record<string, string>,
 ): SpawnedCli {
-  const child = spawn('node', [cliPath, ...args], {
+  const [command, entry] = cliInvocation();
+  const child = spawn(command, [entry, ...args], {
     cwd,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],

@@ -7,6 +7,7 @@ import { cleanupTempDir, createTempDir } from '../test-utils.js';
 import { exportToJsonl } from '../../src/jsonl.js';
 import type { WorkItem, Comment, WorkItemPriority, WorkItemStatus } from '../../src/types.js';
 import { runInProcess } from './cli-inproc.js';
+import { rewriteCliCommandToBundle } from './cli-bundle.js';
 
 // ── Process lifecycle tracking ──────────────────────────────────────────
 // Track spawned child process PIDs so they can be cleaned up on shutdown.
@@ -191,8 +192,16 @@ export async function execAsync(command: string, options?: childProcess.ExecOpti
   const isInitCommand = /(^|\s)init(\s|$)/.test(command.replace(cliPath, ''));
   if (isLocalCli) {
     // Avoid in-process for init to preserve interactive behavior in tests.
+    //
+    // `init` must stay a real subprocess (it prompts on stdin, installs
+    // templates and shells out), but it does not need *tsx*: rewrite the
+    // `tsx <src>/cli.ts` prefix to the pre-compiled bundle from
+    // cli-bundle.ts (identical entry, identical command graph, ~5× cheaper
+    // per spawn). The rest of the command line — including any shell quoting
+    // the caller relies on — is passed through untouched.
     if (isInitCommand) {
-      const result = await _execTracked(command, execOptions as any);
+      const runnable = rewriteCliCommandToBundle(command);
+      const result = await _execTracked(runnable, execOptions as any);
       return result;
     }
     const originalCwd = process.cwd();
@@ -242,7 +251,7 @@ export async function execWithInput(
       // ignore
     }
 
-    const child = childProcess.spawn(command, {
+    const child = childProcess.spawn(rewriteCliCommandToBundle(command), {
       shell: true,
       cwd: options?.cwd,
       env,
@@ -469,4 +478,108 @@ export function seedWorkItems(
   const dataPath = path.join(dir, '.worklog', 'worklog-data.jsonl');
   exportToJsonl(seeded, comments, dataPath, [], auditResults || []);
   return seeded;
+}
+
+// ── Seeded worklog fixture (consolidated-read slice) ─────────────────
+
+/** Options for {@link seedWorklistFixture}. */
+export interface WorklistFixtureOptions {
+  /** Work-item id prefix (default `FIX`). */
+  prefix?: string;
+  /** projectName written to the fixture config (default `Worklist Fixture`). */
+  projectName?: string;
+}
+
+/** Stable ids of the seed mix produced by {@link seedWorklistFixture}. */
+export interface WorklistFixtureIds {
+  /** Root with priority critical, status open. */
+  criticalRoot: string;
+  /** Child item under {@link criticalRoot} (exercises `--root-only`). */
+  criticalChild: string;
+  /** Root completed / in_review (audited). */
+  reviewCompleted: string;
+  /** Root in-progress / in_review. */
+  reviewInProgress: string;
+  /** Root with status blocked. */
+  blockedRoot: string;
+  /** Root open with priority low/non-critical. */
+  openNonCritical: string;
+  /** Item that carries a stored audit result. */
+  audited: string;
+}
+
+/**
+ * The seeded worklog + the stable ids of its items.
+ */
+export interface WorklistFixture {
+  /** The worklog directory that was seeded (`.worklog/` inside it). */
+  dir: string;
+  /** The seeded items, exactly as persisted (see {@link seedWorkItems}). */
+  items: WorkItem[];
+  /** Stable ids of the seed mix (derived from the prefix). */
+  ids: WorklistFixtureIds;
+}
+
+/**
+ * Reusable seeded-worklog fixture for the new CLI and herdr tests
+ * (WL-0MVI0HH740065Z2T). Seeds the subset mix the consolidated `wl worklist`
+ * read must expose — root and child items spanning critical / in_review
+ * (completed + in-progress) / blocked / in-progress / open non-critical —
+ * with at least one stored audit result, so `--root-only` filters are
+ * provably exercised and the review-queue/audit fields can be asserted.
+ *
+ * The fixture is fully self-contained: it writes config + init semaphore +
+ * item data, so a fresh test can open it with `wl list`/`show` or the fetcher
+ * immediately after seeding.
+ */
+export function seedWorklistFixture(dir: string, options: WorklistFixtureOptions = {}): WorklistFixture {
+  const prefix = options.prefix ?? 'FIX';
+  const projectName = options.projectName ?? 'Worklist Fixture';
+  const id = (suffix: string): string => `${prefix}-${suffix}`;
+
+  writeConfig(dir, projectName, prefix);
+  writeInitSemaphore(dir);
+
+  const auditedAt = new Date().toISOString();
+  const items = seedWorkItems(
+    dir,
+    [
+      { id: id('CRITICAL-ROOT'), title: 'Critical open root', status: 'open', priority: 'critical' },
+      {
+        id: id('CRITICAL-CHILD'),
+        title: 'Child under the critical root',
+        status: 'open',
+        priority: 'high',
+        parentId: id('CRITICAL-ROOT'),
+      },
+      { id: id('REVIEW-COMPLETED'), title: 'Completed root awaiting review', status: 'completed', stage: 'in_review', priority: 'medium' },
+      { id: id('REVIEW-IN-PROGRESS'), title: 'In-progress root re-worked in review', status: 'in-progress', stage: 'in_review', priority: 'high' },
+      { id: id('BLOCKED-ROOT'), title: 'Blocked root', status: 'blocked', priority: 'high' },
+      { id: id('OPEN-ROOT'), title: 'Open non-critical root', status: 'open', priority: 'low' },
+    ],
+    [],
+    [
+      {
+        workItemId: id('REVIEW-COMPLETED'),
+        readyToClose: true,
+        auditedAt,
+        summary: 'ready to close',
+        author: 'producer',
+      },
+    ],
+  );
+
+  return {
+    dir,
+    items,
+    ids: {
+      criticalRoot: id('CRITICAL-ROOT'),
+      criticalChild: id('CRITICAL-CHILD'),
+      reviewCompleted: id('REVIEW-COMPLETED'),
+      reviewInProgress: id('REVIEW-IN-PROGRESS'),
+      blockedRoot: id('BLOCKED-ROOT'),
+      openNonCritical: id('OPEN-ROOT'),
+      audited: id('REVIEW-COMPLETED'),
+    },
+  };
 }

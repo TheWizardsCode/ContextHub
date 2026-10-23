@@ -1,6 +1,6 @@
 /**
  * E2E tests for deletion propagation through delta sync (WL-0MT2KZH0I005XUWE,
- * parent WL-0MSAKUBKW006FN8Q §4.3).
+ * parent WL-0MSAKUBKW006FN8Q §4.4).
  *
  * Uses REAL git + a real bare remote (mock-bin stripped from PATH) against
  * the compiled CLI (dist/cli.js).
@@ -21,10 +21,21 @@ import * as path from 'path';
 import * as os from 'os';
 import { spawnSync } from 'child_process';
 import { writeConfig, writeInitSemaphore } from './cli-helpers.js';
+import { cliInvocation } from './cli-bundle.js';
 
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 const projectRoot = path.resolve(__dirname, '..', '..');
-const cliPath = path.join(projectRoot, 'dist', 'cli.js');
+// The pre-compiled CLI bundle (cli-bundle.ts) runs the same `src/cli.ts`
+// command graph as `dist/cli.js`, but ~30% cheaper per spawn and always in
+// step with `src/` — a stale build would otherwise silently test old code.
+function cliSpawn(
+  args: string[],
+  options: Parameters<typeof spawnSync>[2],
+) {
+  const [command, entry] = cliInvocation();
+  return spawnSync(command, [entry, ...args], options);
+}
+
 const mockBinDir = path.join(projectRoot, 'tests', 'cli', 'mock-bin');
 
 /** PATH without the test mock-bin so subprocesses run the real git binary. */
@@ -45,7 +56,7 @@ function git(cwd: string, ...args: string[]): string {
 }
 
 function runCli(cwd: string, ...args: string[]): { stdout: string; stderr: string; status: number } {
-  const res = spawnSync('node', [cliPath, ...args], { cwd, encoding: 'utf-8', env: realGitEnv() });
+  const res = cliSpawn([...args], { cwd, encoding: 'utf-8', env: realGitEnv() });
   return { stdout: res.stdout || '', stderr: res.stderr || '', status: res.status ?? -1 };
 }
 
@@ -201,7 +212,7 @@ describe('deletion propagation via delta sync (real git)', () => {
     // after the delete triggers a full on the NEXT sync (cadence). Instead,
     // we assert the full-snapshot path directly: run push with
     // WL_DELTA_EXPORT_DISABLED=1 → exportForSync falls back to full.
-    const res = spawnSync('node', [cliPath, '--json', 'sync'], {
+    const res = cliSpawn(['--json', 'sync'], {
       cwd: s.local, encoding: 'utf-8',
       env: { ...realGitEnv(), WL_DELTA_EXPORT_DISABLED: '1' },
     });

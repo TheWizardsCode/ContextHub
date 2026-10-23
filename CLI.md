@@ -13,6 +13,112 @@ These options apply to any command:
 - `-w, --watch [seconds]` — Rerun the command every N seconds (default: 5).
 
 
+### Read cache (environment variables)
+
+The read cache serves repeat JSON read queries (`list`/`next`/`show`/`search`/`status`); see
+`CONFIG.md` for the full model and the cache-maintenance guidance. Runtime knobs:
+
+- `WL_CACHE_DISABLED=1` — bypass the cache entirely (baseline behaviour).
+- `WL_CACHE_DIR=<path>` — override the cache directory (default `$XDG_CACHE_HOME/wl` or `~/.cache/wl`).
+- `WL_CACHE_TTL_MS=<n>` — cache-entry TTL safety net (default 30000).
+- `WL_CACHE_DEBUG=1` — log cache hits, misses and invalidation reasons to stderr.
+- `WL_STATE_MAX_FILES=<n>` — bound on per-worklog-dir state counters (default 1000).
+- `WL_STATE_TTL_MS=<n>` — prune counters untouched for this long (default 604800000, 7 days).
+
+Maintenance: `wl doctor cache` reports the state directory (file count, bytes,
+stale-by-TTL, over-bound) and `wl doctor cache --prune` reclaims it;
+`--max-files`/`--ttl-days` override the bound for one run. See
+[`CONFIG.md`](CONFIG.md#read-cache-state-boundedness-f9--wl-0mvfrrq9w003kefl).
+
+### Startup architecture (fast path vs heavy graph)
+
+Every `wl` invocation starts in a **thin fast path** (`src/cli.ts`) and only
+loads the **heavy graph** (`src/cli-main.ts`: Commander, the command modules,
+the plugin loader and the SQLite runtime) when it has to:
+
+| Invocation | What loads |
+|---|---|
+| `wl --version` / `-V` | `src/version.ts` + the spawn recorder only — the version is printed and the process exits before anything else is imported |
+| warm cache hit (`list`/`next`/`show`/`search`/`status` with `--json`) | the fast path prints the cached JSON and exits — no Commander, no command module, no DB, no plugins |
+| `wl <command> …` (miss, write, help) | the fast path dynamically imports `cli-main.ts`, which registers commands through a lazy registry (`src/command-registry.ts`) |
+
+The lazy registry loads **only the command being run**; `--help`, bare `wl`,
+`wl help <cmd>` and `wl completion <shell>` register the full set because their
+output enumerates commands. If a command module fails to import, the CLI logs
+one warning and falls back to registering every other command, so a broken
+module can never take the whole CLI down.
+
+**Contributor rule — the static import allowlist.** `src/cli.ts` must only
+statically import what every invocation needs (`src/argv-normalize.ts`,
+`src/spawn-counter.ts`, `src/version.ts`). Anything optional is deferred with
+`await import(…)` **and recorded in the budget**. A new module — static or
+dynamic — fails `tests/cli/startup-import-budget.test.ts` until the budget is
+deliberately regenerated:
+
+```sh
+npm run benchmark:wl-startup -- --target src --update-budget
+npm run benchmark:wl-startup -- --target dist --update-budget   # needs `npm run build`
+```
+
+`bench/startup-import-budget.json` records the static boot graph, the fast
+path's dynamic entrypoints and their runtime module union, plus the measured
+`src`/`dist` baselines and regression headroom. Background and re-run
+instructions: [`docs/dev/wl-startup-import-budget.md`](docs/dev/wl-startup-import-budget.md).
+
+### Spawn instrumentation and CPU-seconds per refresh cycle
+
+When `WL_SPAWN_COUNT_FILE=<path>` is set, every `wl` process appends one line
+to that file:
+
+```
+<kind>\t<iso-timestamp>\t<pid>\t<cpuMs>\t<maxRssKb>
+```
+
+- `kind` — `cache-hit` (served from the read cache), `read-work` (a read that
+  did DB work), or `version` (`--version`).
+- `cpuMs` — user + system CPU time from `process.resourceUsage()`.
+- `maxRssKb` — that process's peak RSS.
+
+Set `WL_SPAWN_COUNT=1` to also print the record to stderr. Legacy three-field
+lines still parse (CPU/RSS reported as unknown rather than 0).
+
+**Totalling CPU-seconds per refresh cycle (the AC2 procedure).** The bundled
+harness reproduces the herdr worklist workload — 4 panes sharing one worklog,
+each running the refresh query set (critical / review-queue / in-progress /
+blocked subsets plus `wl next`) once per tick:
+
+```sh
+npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5
+# measure a different build (e.g. a pre-change worktree):
+npx tsx bench/herdr-refresh-cycle.ts --json --cli /path/to/dist/cli.js
+# no-cache baseline variant:
+WL_CACHE_DISABLED=1 npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5
+```
+
+It reports total `cpuSeconds` per cycle, `spawns` by kind, `cpuSecondsPerSpawn`,
+p95 per-spawn wall time and peak RSS. Reference numbers (4 panes, 30 s cycle,
+120 spawns) are recorded on the epic work item — the verdict is that per-spawn
+CPU has hit the process-startup floor, so further gains must come from fewer
+spawns per refresh tick.
+
+Since the consolidated read landed (WL-0MVGYLU0S004WZUS) the harness accepts
+`--query-set legacy|consolidated`, so the two workloads can be measured on the
+same host and build:
+
+```sh
+# the five-query workload (byte-identical to the recorded F10 baseline)
+npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5 --query-set legacy
+# the shipped one-read workload: one `wl worklist --json` per tick
+npm run benchmark:herdr-refresh:json -- --items 20 --cycle-seconds 30 --tick-seconds 5 --query-set consolidated
+```
+
+Measured on one host/build (4 panes, 30 s cycle, 20 items): **5 → 1 spawn per
+refresh** (120 → 24 per cycle), **75.68 → 11.89 CPU-s per cycle** (0.157×), p95
+per-spawn wall time 1228 → 568 ms. See
+[`docs/dev/herdr-event-driven-refresh.md`](docs/dev/herdr-event-driven-refresh.md#3-cold-refresh-cost-fetcherts)
+for the full table and the comparison against the pre-F4 baseline (159.44 CPU-s)
+and the F10 target (≤ 63.78 CPU-s).
+
 ### GitHub throttling (environment variables)
 
 Worklog includes a central client-side throttler to coordinate outgoing GitHub API
@@ -603,6 +709,62 @@ wl --json show WL-ABC   # tolerant JSON output
 wl show --exact WL-ABC  # strict: fails if not an exact match
 ```
 
+### `worklist` [options]
+
+One consolidated read of every subset a worklist UI needs — the response a
+Herdr pane otherwise assembles from five separate `wl` processes per refresh
+tick. It opens the database **once** and returns the critical, review-queue,
+in-progress-root, blocked-root and browse-feed subsets in a single JSON
+payload (WL-0MVI0HX58009JJRF, parent WL-0MVGYLU0S004WZUS).
+
+**Pure read.** `worklist` never re-sorts and never writes, so the payload is a
+deterministic function of `(DB state, argv)` and is served from the shared
+read cache as **one** entry (WL-0MVI0IS6Y0028KTO). It is also classified as a
+pure read by the CLI write-invalidation hook, so it never bumps the cache state
+counter.
+
+```sh
+wl worklist --json                 # 20 browse-feed items (default)
+wl worklist --json -n 40           # a wider browse window
+wl --worklog-dir /proj/.worklog worklist --json
+```
+
+Options:
+
+- `-n, --number <n>` — browse-feed window size (default `20`). Bounds **only**
+  the `browse` subset; the four mandatory subsets are always complete.
+- `--prefix <prefix>` — override the default work-item prefix.
+
+Payload (stable — the Herdr fetcher caches it verbatim and parses it directly,
+WL-0MVI0IT4S0070G78):
+
+```jsonc
+{
+  "success": true,
+  "worklogDir": "/abs/path/.worklog",   // resolved worklog dir (honours --worklog-dir)
+  "requestedCount": 20,                 // the -n value that was used
+  "subsets": {
+    // priority critical, status open|in-progress|blocked|completed, ALL parent levels
+    "critical":        [ /* WorkItem[] */ ],
+    // status completed|in-progress, stage in_review, root-only
+    "reviewQueue":     [ /* WorkItem[] */ ],
+    // status in-progress, root-only
+    "inProgressRoots": [ /* WorkItem[] */ ],
+    // status blocked, root-only
+    "blockedRoots":    [ /* WorkItem[] */ ],
+    // identical to `wl next -n <count> --include-in-progress --include-blocked --no-re-sort --json`
+    "browse":          [ /* { workItem, reason, group?, groupLabel? }[] */ ]
+  }
+}
+```
+
+Every subset key is always present — an empty array, never omitted. Items carry
+the same enrichment `wl list --json` emits (`auditResult`, `auditedAt`,
+`fingerprint`, `currentFingerprint`, `childCount`), and the list subsets use the
+same filter expressions and hierarchy ordering as the equivalent `wl list`
+invocations. `browse` is item-for-item and order-for-order identical to
+`wl next` with the same browse window and `--no-re-sort`.
+
 ### `next` [options]
 
 Suggest the next work item(s) to work on. Non-actionable items (deleted, completed, in-review, in-progress, dependency-blocked) are excluded by default.
@@ -822,15 +984,15 @@ wl list --needs-producer-review
 
 When `--json` is used, each work item includes the audit enrichment fields
 `auditResult`, `auditedAt`, and `fingerprint` (from the `audit_results`
-table), plus `currentFingerprint` — the canonical content fingerprint of the
-item's *current* content (per-touched-path git state + description hash + Key
-Files, matching the audit skill's algorithm). `currentFingerprint` is
-computed only for items that carry a stored `fingerprint`; it is `null`
-otherwise, or when git cannot determine it. Comparing `fingerprint` with
+table), plus `currentFingerprint` — the canonical content fingerprint (schema
+2) of the item's *current* content (its own `title` + `description` only, no
+git state — matching the audit skill's algorithm).
+`currentFingerprint` is computed only for items that carry a stored
+`fingerprint`; it is `null` otherwise. Comparing `fingerprint` with
 `currentFingerprint` is the primary `isAuditFresh` gate, so a fresh audit
-stays fresh across `updatedAt` churn (WL-0MUN7QWFP0010EQC). Like the other
-enrichment fields, `currentFingerprint` is omitted when an explicit `--fields`
-projection is active.
+stays fresh across `updatedAt` churn (WL-0MUN7QWFP0010EQC,
+WL-0MVK5SWZE00254Y7). Like the other enrichment fields, `currentFingerprint`
+is omitted when an explicit `--fields` projection is active.
 
 ---
 
@@ -942,6 +1104,47 @@ Diagnostics:
 wl sync debug
 wl --json sync debug
 ```
+
+#### Held claims and store identity
+
+A sync never downgrades an item that another session is actively working. Items
+that are `in-progress` (or carry a non-empty `assignee`) and were active within
+`syncClaimHoldTtlHours` (default 24 h, `0` disables) keep their claimed
+`status`/`stage` pair **and** their `updatedAt`/`activityAt` when a sync pulls a
+stale row for them — the stale row is not re-stamped as the newest row. Newer,
+more active transitions (a close, `in_review`, an audit demotion of a completed
+item, a reassignment) and attributed deletes still propagate, and a claim older
+than the TTL is released. Full behaviour:
+[DATA_SYNCING.md](DATA_SYNCING.md#held-claims-are-never-downgraded-by-a-sync).
+
+`--json` reports both the store identity and every refusal:
+
+```json
+{
+  "success": true,
+  "sync": {
+    "store": { "worklogDir": "/repo/.worklog", "databasePath": "/repo/.worklog/worklog.db", "secondStore": false },
+    "claimHolds": [
+      {
+        "workItemId": "WL-0ABC",
+        "keptStatus": "in-progress", "keptStage": "plan_complete",
+        "attemptedStatus": "open", "attemptedStage": "intake_complete",
+        "fields": ["status", "stage"],
+        "claimAgeHours": 0.42, "ttlHours": 24,
+        "reason": "held claim (status+stage downgrade refused): in-progress/plan_complete → open/intake_complete"
+      }
+    ],
+    "summary": { "itemsAdded": 0, "itemsUpdated": 0 }
+  }
+}
+```
+
+`sync.store.secondStore` is `true` when the sync operated on a store inside a
+managed worktree (`.worklog/worktrees/<name>`) instead of the main checkout's
+store — two stores for one prefix hold independent locks and watermarks. `wl`
+refuses to create such a store implicitly and binds to the main checkout
+instead (see
+[DATA_SYNCING.md](DATA_SYNCING.md#one-store-per-repository-worktrees)).
 
 Example (JSON / dry-run):
 
@@ -1086,6 +1289,7 @@ Subcommands:
 - `file-paths [options]` — Check intake-stage items for missing or incorrect `**Key Files:**` sections. Options: `--add-placeholder` (add a placeholder section).
 - `foreign-items [options]` — Report work items whose ID prefix does not match the project prefix (cross-project pollution detection). Options: `--dry-run` (read-only; default), `--apply` (hard-delete foreign items with full cascade — destructive, requires explicit opt-in), `--push` (after `--apply`, rewrite the remote worklog ref so it contains only own items — destructive; requires `--apply`), `--prefix <prefix>` (override classification prefix).
 - `audit-gaps [options]` — Read-only report of every `completed`/`in_review` item with **no audit record**, showing root vs `child of <parent-id>`, age (from `activityAt`/`updatedAt`), and coverage/waiver status (`uncovered` / `covered` / `waived`). Omits items with a fresh audit; a child covered by a fresh-audited direct parent is reported as `covered`, not flagged. Options: `--prefix <prefix>`. No `--apply` (read-only).
+- `cache [options]` — Report or prune the bounded read-cache **state directory** (`<cache-dir>/state`, one small counter file per worklog dir ever seen; see `CONFIG.md`). Options: `--prune` (remove stale counters and enforce the file bound; default is report-only), `--dry-run` (report-only; always wins when combined with `--prune`), `--max-files <n>` (counter bound, default 1000), `--ttl-days <n>` (remove counters untouched for this many days, default 7). Works without a worklog (pure cache hygiene).
 
 Examples:
 
@@ -1107,6 +1311,10 @@ wl doctor foreign-items --apply          # Hard-delete foreign items (destructiv
 wl doctor foreign-items --apply --push  # Clean DB and rewrite remote worklog ref
 wl doctor audit-gaps                    # Report completed/in_review items with no audit (read-only)
 wl doctor audit-gaps --json             # Machine-readable audit-gap report
+wl doctor cache                         # Report read-cache state counters (dry run)
+wl doctor cache --json                  # Machine-readable state report
+wl doctor cache --prune                 # Reclaim stale counters and enforce the bound
+wl doctor cache --prune --max-files 500 # Custom bound (Pi-class host example)
 
 Known stale combinations detected by `stage-sync`:
 
@@ -1132,6 +1340,11 @@ shape unchanged). Its `context` carries machine-readable pending-upgrade data:
 `pendingMigrations`, `pendingMigrationCount`, `outdatedHooks`, and
 `outdatedHookCount`. Consumers grouping findings by work item should skip this
 entry (`itemId: null`).
+
+When the read-cache state directory holds pruneable counters, a synthetic
+finding with `checkId: "read-cache.state"` and `type: "maintenance"` is appended
+the same additive way (`itemId: null`); its `message` names the counts and points
+at `wl doctor cache` / `wl doctor cache --prune`.
 
 ### `re-sort` [options]
 

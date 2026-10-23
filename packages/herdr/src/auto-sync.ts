@@ -8,6 +8,14 @@
  * Key design decisions:
  *  - Fire-and-forget: uses `spawn` with no output capture (stderr is ignored)
  *  - Never blocks: sync runs concurrently with refresh, errors are silently swallowed
+ *  - Off the TUI event loop: the spawn and every completion signal are
+ *    asynchronous libuv events; nothing in the sync path is awaited by the
+ *    refresh path, so a long `wl sync` can never delay a refresh
+ *    (F3 — WL-0MVJV2O7H003HY9N)
+ *  - Observable: a tiny in-flight status model (PID, monotonic start,
+ *    elapsed, last outcome) plus a change subscription lets the pane show a
+ *    non-blocking "syncing…" notice and lets a test prove the refresh never
+ *    waited on the sync
  *  - Clamped interval: minimum 60s, 0 means disabled
  *  - Idempotent: multiple overlapping syncs are harmless (wl sync is idempotent)
  */
@@ -15,6 +23,7 @@
 import { spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { performance } from 'node:perf_hooks';
 
 // ── Constants ─────────────────────────────────────────────────────────
 
@@ -100,6 +109,7 @@ let _syncInFlight = false;
  */
 export function _resetSyncInFlight(): void {
   _syncInFlight = false;
+  _syncStatus = { state: 'idle', inFlight: false };
 }
 
 /**
@@ -107,7 +117,172 @@ export function _resetSyncInFlight(): void {
  * Used by the UI to avoid piling on more syncs while one is running.
  */
 export function isSyncInFlight(): boolean {
-  return _syncInFlight;
+  return _syncStatus.inFlight;
+}
+
+// ── In-flight sync status model (F3 — WL-0MVJV2O7H003HY9N) ────────────
+
+/**
+ * Lifecycle state of the background sync in this pane process.
+ *
+ * - `idle`    — no sync has run yet, or the run started from a reset state.
+ * - `syncing` — a `wl sync` child process is currently in-flight.
+ * - `synced`  — the last run completed successfully.
+ * - `failed`  — the last run failed (spawn error, non-zero exit, timeout).
+ */
+export type SyncRunState = 'idle' | 'syncing' | 'synced' | 'failed';
+
+/** Outcome of the last completed background sync. */
+export interface SyncLastOutcome {
+  success: boolean;
+  error?: string;
+  /** Epoch ms at which the run settled. */
+  completedAtMs: number;
+  /** Monotonic duration of the run in ms (0 when unknown). */
+  durationMs: number;
+}
+
+/**
+ * Snapshot of the background sync's in-flight instrumentation.
+ *
+ * `startedAtMonotonicMs` uses `performance.now()`: it is monotonic within
+ * this process, so a caller (or a test) can prove that a concurrent refresh
+ * did not wait on the sync by comparing its own monotonic timeline against
+ * the sync's start (F3 AC3, no lock/wait coupling).
+ */
+export interface SyncStatusSnapshot {
+  state: SyncRunState;
+  inFlight: boolean;
+  /** PID of the in-flight `wl sync` child (undefined when idle). */
+  pid?: number;
+  /** Epoch ms when the in-flight sync started. */
+  startedAtMs?: number;
+  /** Monotonic (`performance.now()`) start of the in-flight sync. */
+  startedAtMonotonicMs?: number;
+  /** The most recent completed run's outcome (undefined before any run). */
+  lastOutcome?: SyncLastOutcome;
+}
+
+/** Current status snapshot (a defensive copy — callers cannot mutate it). */
+let _syncStatus: SyncStatusSnapshot = { state: 'idle', inFlight: false };
+
+/** Listeners notified after every status transition. */
+const syncStatusListeners = new Set<() => void>();
+
+function setSyncStatus(patch: Partial<SyncStatusSnapshot>): void {
+  _syncStatus = { ..._syncStatus, ...patch };
+  for (const listener of [...syncStatusListeners]) {
+    try {
+      listener();
+    } catch {
+      // Fail-open: a broken listener (e.g. a torn-down pane) must never
+      // break the sync bookkeeping or leak into the TUI event loop.
+    }
+  }
+}
+
+/**
+ * Read the current background-sync status snapshot. Never blocks.
+ */
+export function getSyncStatus(): SyncStatusSnapshot {
+  return { ..._syncStatus };
+}
+
+/**
+ * Monotonic elapsed time (ms) of the in-flight sync; 0 when no sync is
+ * in-flight. `nowMonotonic` is injectable for deterministic tests.
+ */
+export function getSyncElapsedMs(nowMonotonic: number = performance.now()): number {
+  const started = _syncStatus.startedAtMonotonicMs;
+  if (started === undefined) return 0;
+  return Math.max(0, nowMonotonic - started);
+}
+
+/**
+ * Subscribe to sync status transitions (start → syncing, settle → synced /
+ * failed). Returns an unsubscribe function. The callback runs synchronously
+ * in the settling scope and must stay cheap (the pane only schedules a
+ * render); a throwing listener is swallowed so it cannot break the sync.
+ */
+export function onSyncStatusChange(listener: () => void): () => void {
+  syncStatusListeners.add(listener);
+  return () => {
+    syncStatusListeners.delete(listener);
+  };
+}
+
+/**
+ * The pane's non-blocking "syncing…" notice text, or '' when idle.
+ *
+ * Never blocks and never throws: it is a pure read of the status snapshot, so
+ * the pane can render it on every frame (and on every status transition)
+ * without any I/O or lock.
+ */
+export function formatSyncNotice(nowMonotonic: number = performance.now()): string {
+  if (!_syncStatus.inFlight) return '';
+  const elapsedSeconds = Math.floor(getSyncElapsedMs(nowMonotonic) / 1000);
+  return elapsedSeconds > 0 ? `⟳ syncing… ${elapsedSeconds}s` : '⟳ syncing…';
+}
+
+// ── Injectable spawn seam (tests) ─────────────────────────────────────
+
+/** Minimal shape of the child returned by the sync spawn seam. */
+export interface SyncChildLike {
+  pid?: number;
+  on: (event: string, listener: (...args: any[]) => void) => unknown;
+  kill?: (signal?: any) => unknown;
+  unref?: () => void;
+}
+
+/** Spawn seam: defaults to `child_process.spawn`. */
+export type SyncSpawnFn = (
+  command: string,
+  args: string[],
+  options: Record<string, unknown>,
+) => SyncChildLike;
+
+let syncSpawnFn: SyncSpawnFn = spawn as unknown as SyncSpawnFn;
+
+/**
+ * Test seam: replace the sync spawn implementation (e.g. to hold a "long
+ * sync" in flight without a real child process). Always pair with
+ * {@link _resetSyncSpawnForTests}.
+ */
+export function _setSyncSpawnForTests(fn: SyncSpawnFn): void {
+  syncSpawnFn = fn;
+}
+
+/** Test helper: restore the real `child_process.spawn` seam. */
+export function _resetSyncSpawnForTests(): void {
+  syncSpawnFn = spawn as unknown as SyncSpawnFn;
+}
+
+/**
+ * Test helper: force a status snapshot (used by the pane's render tests to
+ * assert the notice without spawning anything). Pass `null` to reset to the
+ * idle state (keeping any recorded last outcome).
+ */
+export function _setSyncStatusForTests(snapshot: SyncStatusSnapshot | null): void {
+  _syncInFlight = snapshot?.inFlight ?? false;
+  setSyncStatus(
+    snapshot ?? {
+      state: 'idle',
+      inFlight: false,
+      pid: undefined,
+      startedAtMs: undefined,
+      startedAtMonotonicMs: undefined,
+    },
+  );
+}
+
+/**
+ * Test helper: drop every status listener and reset the snapshot. Used to
+ * isolate the module between test files that share a worker.
+ */
+export function _resetSyncStatusForTests(): void {
+  syncStatusListeners.clear();
+  _syncInFlight = false;
+  _syncStatus = { state: 'idle', inFlight: false };
 }
 
 // ── Options ───────────────────────────────────────────────────────────
@@ -160,6 +335,10 @@ export interface SyncOutcome {
   skipped?: boolean;
   /** Why the sync was skipped: `in-flight` (single-flight guard) or `heartbeat` (fresh marker). */
   reason?: 'in-flight' | 'heartbeat';
+  /** PID of the spawned `wl sync` (in-flight instrumentation). */
+  pid?: number;
+  /** Monotonic duration of the run in ms (0 for skips / pre-spawn failures). */
+  durationMs?: number;
 }
 
 /**
@@ -218,9 +397,18 @@ export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<
         detached: false,
       };
       if (syncCwd) spawnOptions.cwd = syncCwd;
-      const child = spawn('wl', syncArgs, spawnOptions);
+      const child = syncSpawnFn('wl', syncArgs, spawnOptions);
 
       _syncInFlight = true;
+      const startedAtMonotonicMs = performance.now();
+      const startedAtMs = Date.now();
+      setSyncStatus({
+        state: 'syncing',
+        inFlight: true,
+        pid: typeof child.pid === 'number' ? child.pid : undefined,
+        startedAtMs,
+        startedAtMonotonicMs,
+      });
 
       let settled = false;
       // Safety timeout: if spawn never fires close/error, resolve after 60s.
@@ -235,7 +423,24 @@ export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<
           settled = true;
           _syncInFlight = false;
           if (timeout) clearTimeout(timeout);
-          resolve(outcome);
+          const durationMs = Math.max(0, performance.now() - startedAtMonotonicMs);
+          // Publish the settled status BEFORE resolving the promise so a
+          // caller that awaits the outcome always observes the final state
+          // (and the pane's notice clears in the same tick).
+          setSyncStatus({
+            state: outcome.success ? 'synced' : 'failed',
+            inFlight: false,
+            pid: undefined,
+            startedAtMs: undefined,
+            startedAtMonotonicMs: undefined,
+            lastOutcome: {
+              success: outcome.success,
+              ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+              completedAtMs: Date.now(),
+              durationMs,
+            },
+          });
+          resolve({ ...outcome, pid: child.pid, durationMs });
         }
       };
 
@@ -255,13 +460,14 @@ export function runSync(worklogDir?: string, options?: RunSyncOptions): Promise<
       });
 
       timeout = setTimeout(() => {
-        child.kill();
+        child.kill?.();
         settle({ success: false, error: 'wl sync timed out' });
       }, 60_000);
       if (timeout.unref) timeout.unref(); // Don't keep node alive
     } catch (err) {
       // Worst-case: spawn itself throws (extremely rare)
       _syncInFlight = false;
+      setSyncStatus({ state: 'failed', inFlight: false, pid: undefined });
       const msg = err && typeof err === 'object' && 'message' in (err as any)
         ? String((err as any).message)
         : String(err);

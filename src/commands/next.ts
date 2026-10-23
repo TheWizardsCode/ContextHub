@@ -7,8 +7,7 @@ import { humanFormatWorkItem, resolveFormat, formatTitleAndId } from './helpers.
 import { theme } from '../theme.js';
 import { normalizeActionArgs } from './cli-utils.js';
 import { loadStatusStageRules } from '../status-stage-rules.js';
-import { extractFilePaths, type GroupAssignment } from './helpers.js';
-import { assignItemGroups, compareGroupedItems } from './grouping.js';
+import { selectBrowseFeed } from '../worklist-selection.js';
 import { invalidateCacheForWrite } from '../read-cache-cli.js';
 
 export default function register(ctx: PluginContext): void {
@@ -110,119 +109,44 @@ export default function register(ctx: PluginContext): void {
         } catch (_e) {}
       }
 
-      const results = (db as any).findNextWorkItems 
-        ? (db as any).findNextWorkItems(count, options.assignee, options.search, includeBlocked, options.stage, includeInProgress, options.risk, options.effort) 
-        : [db.findNextWorkItem(options.assignee, options.search, includeBlocked, options.stage, includeInProgress, options.risk, options.effort)];
-
-      const availableResults = results.filter((result: any) => Boolean(result.workItem));
-      const missingCount = Math.max(0, count - availableResults.length);
-      const note = missingCount > 0
-        ? `Only ${availableResults.length} of ${count} requested work item(s) available.`
-        : '';
-
-      // ── Grouping logic (only when count > 1) ──────────────────────
-      let groupsEnabled = false;
-      let groupMap: Map<string, GroupAssignment> | null = null;
-      if (count > 1) {
-        const groupsOpt = parseInt(String(options.groups || '3'), 10);
-        const maxGroups = Number.isNaN(groupsOpt) || groupsOpt < 1 ? 3 : groupsOpt;
-        if (maxGroups > 0) {
-          groupsEnabled = true;
-          // Extract file paths and priority from each work item's description.
-          // Also attach audit fields for in_review bucket sort (WL-0MSLPM5ZB003TADT).
-          const groupableItems = availableResults.map((result: any) => {
-            const wi = result.workItem;
-            const ar = db.getAuditResult(wi?.id);
-            return {
-              id: wi.id,
-              stage: wi.stage,
-              filePaths: extractFilePaths(wi.description || ''),
-              priority: wi.priority,
-              needsProducerReview: wi.needsProducerReview,
-              auditResult: ar?.readyToClose ?? null,
-              auditedAt: ar?.auditedAt ?? null,
-              updatedAt: wi.updatedAt,
-            };
-          });
-          groupMap = assignItemGroups(groupableItems, maxGroups);
-        }
-      }
+      // Selection, grouping and enrichment are shared with the consolidated
+      // `wl worklist` read so both commands produce the identical browse feed
+      // (WL-0MVI0HX58009JJRF). `selectBrowseFeed` is a pure read — the auto
+      // re-sort above remains the only write byproduct of `next`.
+      const selection = selectBrowseFeed(db, {
+        count,
+        assignee: options.assignee,
+        search: options.search,
+        stage: options.stage,
+        risk: options.risk,
+        effort: options.effort,
+        includeBlocked,
+        includeInProgress,
+        groups: parseInt(String(options.groups || '3'), 10),
+      });
 
       if (utils.isJsonMode()) {
-        // Pre-compute child counts for the full item set so we can enrich
-        // each work item with the number of direct children in O(1) per item
-        // instead of N+1 queries.
-        const childCounts = db.getChildCounts();
-
-        // Enrich each work item with audit result data from the dedicated table.
-        // This is needed so consumers (e.g. Pi TUI extension) can show the
-        // correct audit icon (✅/❌/❓) without an extra round-trip per item.
-        const enrichWorkItem = (wi: any) => {
-          if (!wi) return wi;
-          const auditResult = db.getAuditResult(wi.id);
-          const childCount = childCounts.get(wi.id) ?? 0;
-          return { ...wi, auditResult: auditResult?.readyToClose ?? null, auditedAt: auditResult?.auditedAt ?? null, childCount };
-        };
-
         if (count === 1) {
-          const single = results[0];
-          const enrichedItem = single.workItem ? enrichWorkItem(single.workItem) : single.workItem;
-          output.json({ success: true, workItem: enrichedItem, reason: single.reason });
+          const single = selection.results[0];
+          output.json({ success: true, workItem: single?.workItem ?? null, reason: single?.reason ?? '' });
           return;
-        }
-
-        const enrichedResults = availableResults.map((result: any) => {
-          const assignment = groupMap?.get(result.workItem.id);
-          return {
-            ...result,
-            workItem: result.workItem ? enrichWorkItem(result.workItem) : result.workItem,
-            ...(assignment ? { group: assignment.group, groupLabel: assignment.groupLabel } : {}),
-          };
-        });
-
-        const sortByGroup = (a: any, b: any) => {
-          return compareGroupedItems(
-            groupMap!,
-            {
-              id: a.workItem?.id,
-              stage: a.workItem?.stage,
-              priority: a.workItem?.priority,
-              filePaths: [],
-              needsProducerReview: a.workItem?.needsProducerReview,
-              auditResult: a.workItem?.auditResult,
-              auditedAt: a.workItem?.auditedAt,
-              updatedAt: a.workItem?.updatedAt,
-            },
-            {
-              id: b.workItem?.id,
-              stage: b.workItem?.stage,
-              priority: b.workItem?.priority,
-              filePaths: [],
-              needsProducerReview: b.workItem?.needsProducerReview,
-              auditResult: b.workItem?.auditResult,
-              auditedAt: b.workItem?.auditedAt,
-              updatedAt: b.workItem?.updatedAt,
-            },
-          );
-        };
-        if (groupsEnabled && groupMap) {
-          enrichedResults.sort(sortByGroup);
         }
 
         output.json({
           success: true,
-          count: enrichedResults.length,
+          count: selection.items.length,
           requested: count,
-          results: enrichedResults,
-          workItems: enrichedResults,
-          ...(note ? { note } : {})
+          results: selection.items,
+          workItems: selection.items,
+          ...(selection.note ? { note: selection.note } : {})
         });
         return;
       }
 
+      const availableResults = selection.items;
       if (!availableResults || availableResults.length === 0) {
         console.log('No work items found to work on.');
-        if (note) console.log(theme.text.muted(`Note: ${note}`));
+        if (selection.note) console.log(theme.text.muted(`Note: ${selection.note}`));
         return;
       }
 
@@ -232,12 +156,12 @@ export default function register(ctx: PluginContext): void {
         if (!result.workItem) {
           console.log('No work items found to work on.');
           if (result.reason) console.log(`Reason: ${result.reason}`);
-          if (note) console.log(theme.text.muted(`Note: ${note}`));
+          if (selection.note) console.log(theme.text.muted(`Note: ${selection.note}`));
           return;
         }
 
         console.log('');
-        const reasonText = result.reason.replace(/\b[A-Z]+-[A-Z0-9]+\b/g, (match: string) => {
+        const reasonText = (result.reason ?? '').replace(/\b[A-Z]+-[A-Z0-9]+\b/g, (match: string) => {
           const referenced = db.get(match);
           return referenced ? `"${referenced.title}" (${match})` : match;
         });
@@ -246,60 +170,26 @@ export default function register(ctx: PluginContext): void {
         console.log(theme.text.muted(reasonText));
         console.log('');
         console.log(`${theme.text.muted('ID')}: ${theme.text.muted(result.workItem.id)}`);
-        if (note) console.log(theme.text.muted(`Note: ${note}`));
+        if (selection.note) console.log(theme.text.muted(`Note: ${selection.note}`));
         return;
       }
 
       console.log(`\nNext ${availableResults.length} work item(s) to work on:`);
-      if (note) console.log(theme.text.muted(`Note: ${note}`));
+      if (selection.note) console.log(theme.text.muted(`Note: ${selection.note}`));
       console.log('===============================\n');
 
-      // Sort by group for display (groups first, then within groups by stage
-      // sub-order and priority, with in_review bucket sort — WL-0MSLPM5ZB003TADT).
-      const displayResults = [...availableResults];
-      if (groupsEnabled && groupMap) {
-        displayResults.sort((a: any, b: any) => {
-          // Attach audit fields for in_review bucket sort
-          const arA = db.getAuditResult(a.workItem?.id);
-          const arB = db.getAuditResult(b.workItem?.id);
-          return compareGroupedItems(
-            groupMap!,
-            {
-              id: a.workItem?.id,
-              stage: a.workItem?.stage,
-              priority: a.workItem?.priority,
-              filePaths: [],
-              needsProducerReview: a.workItem?.needsProducerReview,
-              auditResult: arA?.readyToClose ?? null,
-              auditedAt: arA?.auditedAt ?? null,
-              updatedAt: a.workItem?.updatedAt,
-            },
-            {
-              id: b.workItem?.id,
-              stage: b.workItem?.stage,
-              priority: b.workItem?.priority,
-              filePaths: [],
-              needsProducerReview: b.workItem?.needsProducerReview,
-              auditResult: arB?.readyToClose ?? null,
-              auditedAt: arB?.auditedAt ?? null,
-              updatedAt: b.workItem?.updatedAt,
-            },
-          );
-        });
-      }
-
       let lastGroup: number | null = null;
-      displayResults.forEach((res: any, _idx: number) => {
+      availableResults.forEach((res: any, _idx: number) => {
         if (!res.workItem) {
           return;
         }
 
-        // Render group heading if this item is in a new group
-        if (groupsEnabled && groupMap) {
-          const assignment = groupMap.get(res.workItem.id);
-          const currentGroup = assignment?.group ?? 0;
+        // Render group heading if this item is in a new group. The shared
+        // selection already assigned groups and applied the group sort.
+        if (selection.groupsEnabled && typeof res.group === 'number') {
+          const currentGroup = res.group;
           if (currentGroup !== lastGroup) {
-            console.log(theme.text.strong(`── ${assignment?.groupLabel ?? `Group ${currentGroup}`} ──`));
+            console.log(theme.text.strong(`── ${res.groupLabel ?? `Group ${currentGroup}`} ──`));
             console.log('');
             lastGroup = currentGroup;
           }

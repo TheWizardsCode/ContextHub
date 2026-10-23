@@ -149,6 +149,129 @@ export function resetExecFileAsync(): void {
   execFileAsync = promisify(execFile);
 }
 
+// ── Bounded `wl` spawn concurrency (F5 — WL-0MVJV2PC2008PY64) ────────
+
+/**
+ * Maximum number of concurrent `wl` READ spawns one pane may keep in flight.
+ *
+ * Without a bound, a spawn-heavy refresh (fallback per-subset/per-parent
+ * reads, per-edge `wl show` / `wl dep list` probes) can fan out to a dozen
+ * `wl` processes at once — each peaking at ~120–145 MB on a large DB — and
+ * blow past the parent epic's ≤ ~300 MB aggregate per-pane RSS ceiling
+ * before concurrency ever thins out naturally. Capping concurrent reads at
+ * {@link DEFAULT_WL_SPAWN_CAP} bounds the pane's aggregate spawn RSS at
+ * `cap × per-spawn peak` (per-spawn peaks measured per profile/target by the
+ * F1 harness and recorded in `large-db-budget.json`; the bound is documented
+ * in `docs/dev/herdr-event-driven-refresh.md` § "Bounded `wl` spawn
+ * concurrency (F5 — WL-0MVJV2PC2008PY64)").
+ *
+ * F8 (`WL-0MVKVJYV6008SL9G`) tightened the cap from 2 to 1: F7's end-to-end
+ * verification measured a **cold** `wl show` peak of 144.6–175.3 MB per spawn
+ * on the built CLI at full scale, so `2 × peak` (289–351 MB) could not
+ * guarantee the ≤ ~300 MB ceiling. A cap of 1 bounds the worst case at one
+ * spawn's peak (≤ ~176 MB) with margin, and also halves the measured
+ * event-loop blocking of a spawn burst. Serialising reads costs wall time on
+ * the rare fallback fan-out paths; the consolidated single-read default view
+ * and the in-process expand/hydrator reads are unaffected.
+ *
+ * Only READ commands are capped. Writes (claims, `wl comment add`, chord
+ * commands, `wl sync`) spawn immediately: they are user-driven, rare, and
+ * already serialised by the CLI's own mutation lock, so queueing them behind
+ * reads would add latency without bounding a real memory fan-out. `wl sync`
+ * additionally keeps its own F3 isolation path (auto-sync.ts) untouched.
+ *
+ * The queue is promise-based and strictly FIFO: a waiter is released on a
+ * microtask when a slot frees, so queued reads NEVER block the TUI event
+ * loop (asserted by the F1 harness spawn-burst scenario).
+ */
+export const DEFAULT_WL_SPAWN_CAP = 1;
+
+let wlSpawnCap = DEFAULT_WL_SPAWN_CAP;
+let activeWlSpawns = 0;
+let peakActiveWlSpawns = 0;
+const wlSpawnWaiters: Array<() => void> = [];
+
+/**
+ * The current spawn-concurrency cap (concurrent `wl` read spawns allowed).
+ * Exported so the harness/tests assert the documented bound.
+ */
+export function getWlSpawnCap(): number {
+  return wlSpawnCap;
+}
+
+/**
+ * Override the cap (a positive integer). The harness uses this to prove the
+ * enforcement is the documented constant even when a test changes it. Values
+ * below 1 are rejected — the documented bound must stay meaningful.
+ */
+export function setWlSpawnCap(cap: number): void {
+  if (!Number.isInteger(cap) || cap < 1) {
+    throw new Error(`wl spawn cap must be a positive integer (got ${String(cap)})`);
+  }
+  wlSpawnCap = cap;
+}
+
+/** Restore the documented default cap (test teardown / harness reset). */
+export function resetWlSpawnCap(): void {
+  wlSpawnCap = DEFAULT_WL_SPAWN_CAP;
+}
+
+/** Test helper: current semaphore state (cap, active, peak, queued waiters). */
+export function _wlSpawnStats(): {
+  cap: number;
+  active: number;
+  peak: number;
+  queued: number;
+} {
+  return {
+    cap: wlSpawnCap,
+    active: activeWlSpawns,
+    peak: peakActiveWlSpawns,
+    queued: wlSpawnWaiters.length,
+  };
+}
+
+/** Test helper: clear the semaphore counters (per-test isolation). */
+export function _resetWlSpawnStats(): void {
+  activeWlSpawns = 0;
+  peakActiveWlSpawns = 0;
+  wlSpawnWaiters.length = 0;
+}
+
+/**
+ * Reserve a spawn slot, waiting FIFO when the cap is reached. Never blocks.
+ *
+ * Returns how long the caller waited (ms) so a queued read can inherit the
+ * timeout budget of the refresh that issued it — see {@link queuedTimeout}.
+ */
+async function acquireWlSpawnSlot(): Promise<number> {
+  const grab = (): void => {
+    activeWlSpawns += 1;
+    if (activeWlSpawns > peakActiveWlSpawns) peakActiveWlSpawns = activeWlSpawns;
+  };
+  if (activeWlSpawns < wlSpawnCap) {
+    grab();
+    return 0;
+  }
+  const queuedAt = Date.now();
+  await new Promise<void>((resolve) => {
+    wlSpawnWaiters.push(() => {
+      grab();
+      resolve();
+    });
+  });
+  return Date.now() - queuedAt;
+}
+
+/** Free a slot and hand it to the oldest waiter (FIFO, on a microtask). */
+function releaseWlSpawnSlot(): void {
+  activeWlSpawns -= 1;
+  const next = wlSpawnWaiters.shift();
+  if (next !== undefined) {
+    queueMicrotask(next);
+  }
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 export interface WorkItem {
@@ -400,11 +523,21 @@ const CLI_BINARIES = ['wl', 'worklog'];
  * wl CLI read-cache command set (F2). Writes (update/create/sync/…) are
  * NEVER memoized — a deduped write would drop a mutation.
  */
-const MEMOIZABLE_COMMANDS = new Set(['list', 'next', 'show', 'search', 'status']);
+const MEMOIZABLE_COMMANDS = new Set(['list', 'next', 'worklist', 'show', 'search', 'status']);
 
 /** Cap on in-flight memo entries (bounded: entries are removed on settle, so
  * this caps only concurrent racing fetches, which is the dedupe window). */
 const MEMO_MAX_ENTRIES = 64;
+
+/**
+ * Read commands subject to the spawn-concurrency cap (F5). These are the
+ * per-pane data-load reads the parent AC targets; writes (update/create/
+ * comment/…/sync) are deliberately left uncapped (see the cap comment). `dep`
+ * is explicitly included though not memoizable: the metadata-panel dep-probe
+ * fallback fans out one `wl dep list <id>` / `wl show <id>` per edge and must
+ * never spawn unbounded.
+ */
+const WL_SPAWN_CAPPED_COMMANDS: ReadonlySet<string> = new Set([...MEMOIZABLE_COMMANDS, 'dep']);
 
 /**
  * In-flight promise memo: key → shared promise for an identical read that is
@@ -430,6 +563,8 @@ function fetchMemoKey(args: string[], includeJson: boolean, dirOverride?: string
  */
 export function clearFetchMemo(): void {
   inflightFetchMemo.clear();
+  lastWorklistBundle = null;
+  inflightWorklistBundle = null;
 }
 
 /**
@@ -458,6 +593,8 @@ interface InProcessDb {
     rootOnly?: boolean;
     stage?: string;
   }): any[];
+  /** Single item by ID (used to enrich dependency edges, matching `wl dep list`). */
+  get(id: string): any | null;
   getAllAuditResults(): {
     workItemId: string;
     readyToClose: boolean;
@@ -465,6 +602,8 @@ interface InProcessDb {
     fingerprint?: string | null;
   }[];
   getChildCounts(items?: any[]): Map<string, number>;
+  /** Outbound dependency edges (`fromId` depends on `toId`) — the `wl dep list` source. */
+  listDependencyEdgesFrom(fromId: string): { fromId: string; toId: string }[];
   close(): void;
 }
 
@@ -474,7 +613,72 @@ type InProcessDbCtor = new (
   jsonlPath: string,
   silent: boolean,
   autoSync: boolean,
+  syncProvider?: () => Promise<void>,
+  services?: unknown,
+  options?: { readOnly?: boolean },
 ) => InProcessDb;
+
+/**
+ * Open-accounting for the in-process connection (F6 — WL-0MVJV2PX4005JH8D).
+ *
+ * The large-DB harness and the F6 tests assert that a default-view refresh
+ * performs AT MOST ONE in-process SQLite open and that every helper read
+ * shares that single connection (no per-helper open). The open step is timed
+ * because it runs synchronously on the TUI event loop: the open (pragmas
+ * only on an already-initialised store, F6) must stay small enough to never
+ * threaten the parent's refresh/event-loop budgets.
+ */
+export interface InProcessOpenStats {
+  /** Connections actually opened (successful constructions only). */
+  opens: number;
+  /** Total event-loop ms spent constructing those connections. */
+  openMs: number;
+}
+
+let _inProcessOpens = 0;
+let _inProcessOpenMs = 0;
+
+/** Snapshot of the open accounting since the last reset. */
+export function getInProcessOpenStats(): InProcessOpenStats {
+  return { opens: _inProcessOpens, openMs: _inProcessOpenMs };
+}
+
+/** Reset the open accounting (tests / harness). */
+export function resetInProcessOpenStats(): void {
+  _inProcessOpens = 0;
+  _inProcessOpenMs = 0;
+}
+
+/**
+ * Open ONE refresh-scoped in-process connection, read-only, no DDL (F6).
+ *
+ * `readOnly` opens the store with SQLite's READONLY flag and skips all
+ * schema/FTS DDL on an already-initialised store, so the per-refresh open is
+ * pragmas-only cheap and a refresh helper can never mutate the store. The
+ * open runs synchronously on the event loop within the refresh, so its cost
+ * is accounted here. Any open failure throws and the caller fails open
+ * (degrades to the `wl` spawn path).
+ */
+function openInProcessConnection(
+  Ctor: InProcessDbCtor,
+  dir: string,
+  dbPath: string,
+): InProcessDb {
+  const startedAt = Date.now();
+  const db = new Ctor(
+    'WI',
+    dbPath,
+    join(dir, 'worklog-data.jsonl'),
+    true,
+    false,
+    undefined,
+    undefined,
+    { readOnly: true },
+  );
+  _inProcessOpens += 1;
+  _inProcessOpenMs += Math.max(0, Date.now() - startedAt);
+  return db;
+}
 
 let _dbCtorPromise: Promise<InProcessDbCtor | null> | null = null;
 
@@ -518,7 +722,7 @@ async function withInProcessDb<T>(fn: (db: InProcessDb) => T): Promise<T | undef
 
   let db: InProcessDb | null = null;
   try {
-    db = new Ctor('WI', dbPath, join(dir, 'worklog-data.jsonl'), true, false);
+    db = openInProcessConnection(Ctor, dir, dbPath);
     return fn(db);
   } catch {
     // Fail-open: any open/read failure degrades to the wl spawn path.
@@ -530,6 +734,112 @@ async function withInProcessDb<T>(fn: (db: InProcessDb) => T): Promise<T | undef
       // ignore: closing a broken handle must not mask the result.
     }
   }
+}
+
+/**
+ * Refresh-scoped in-process SQLite read session (WL-0MV6C6SLB005HX7B).
+ *
+ * A default-view refresh opened a FRESH `WorklogDatabase` per
+ * `withInProcessDb` call — twice per refresh (`fetchActionableCount` +
+ * `fetchChildrenForItems`). The synchronous open + pragmas + DDL
+ * (`initializeSchema`/`initializeFts`) ran on the UI event loop, so a
+ * refresh landing mid-typing breached the ≤ 100 ms p95 input-lag budget.
+ * A scope instead opens at most ONE connection per refresh and shares it
+ * across every reader that consumes it, bounding the blocking cost
+ * regardless of how many helpers the refresh fans out to.
+ *
+ * The no-stale-cache invariant (WL-0MV5CBQ6L005SPAG) is preserved: the
+ * connection is created per scope and released by `close()` at the end of
+ * the refresh — it is never reused across a refresh boundary, so the store's
+ * in-memory query cache can never serve data across a refresh.
+ *
+ * Fail-open: every read resolves `undefined` when no in-process read is
+ * possible (no worklog dir, no SQLite file, `@worklog/shared` unavailable,
+ * or an open/read error) so the caller falls back to its `wl` spawn path.
+ */
+export interface InProcessRefreshScope {
+  /**
+   * Run an in-process read against the shared connection, opening it lazily
+   * on first use. Multiple reads in one refresh share the SAME handle.
+   * Resolves `undefined` (fail-open) when no in-process read is possible or
+   * the read throws. A close requested while a read is pending is deferred
+   * until that read settles, so a read never runs against a closed handle.
+   */
+  read<T>(fn: (db: InProcessDb) => T): Promise<T | undefined>;
+  /**
+   * Release the shared connection (idempotent). Call once when the refresh
+   * finishes — typically in a `finally`. When a read is still pending
+   * (fire-and-forget callers), the release is deferred until the last
+   * pending read settles.
+   */
+  close(): void;
+}
+
+/**
+ * Create an {@link InProcessRefreshScope} (WL-0MV6C6SLB005HX7B). The
+ * connection is opened lazily on the scope's first read and closed by
+ * {@link InProcessRefreshScope.close}; the lazy `@worklog/shared` import is
+ * the same module-level `loadInProcessDbCtor` the per-call fast path uses,
+ * so no new dependency or import-time cost is introduced.
+ */
+export function createInProcessRefreshScope(): InProcessRefreshScope {
+  let db: InProcessDb | null = null;
+  let ctorPromise: Promise<InProcessDbCtor | null> | undefined;
+  let pendingReads = 0;
+  let closeRequested = false;
+
+  const release = (): void => {
+    const handle = db;
+    db = null;
+    ctorPromise = undefined;
+    pendingReads = 0;
+    try {
+      handle?.close();
+    } catch {
+      // ignore: closing a broken handle must not mask a read result.
+    }
+  };
+
+  return {
+    async read<T>(fn: (db: InProcessDb) => T): Promise<T | undefined> {
+      const dir = _worklogDir;
+      if (!dir) return undefined;
+      const dbPath = join(dir, 'worklog.db');
+      if (!existsSync(dbPath)) return undefined;
+      if (ctorPromise === undefined) ctorPromise = loadInProcessDbCtor();
+
+      // Hold a read slot BEFORE any await: a close() requested while this
+      // read is pending defers the release until the read settles, so the
+      // read always runs against an open handle (doRefresh's actionable-count
+      // read is fire-and-forget and can outlive the synchronous close call).
+      pendingReads += 1;
+      try {
+        const Ctor = await ctorPromise;
+        if (!Ctor) return undefined;
+        if (!db) {
+          try {
+            db = openInProcessConnection(Ctor, dir, dbPath);
+          } catch {
+            // Fail-open: an open failure degrades to the wl spawn path.
+            return undefined;
+          }
+        }
+        try {
+          return fn(db);
+        } catch {
+          // Fail-open: any read failure degrades to the wl spawn path.
+          return undefined;
+        }
+      } finally {
+        pendingReads -= 1;
+        if (closeRequested && pendingReads === 0) release();
+      }
+    },
+    close(): void {
+      closeRequested = true;
+      if (pendingReads === 0) release();
+    },
+  };
 }
 
 /**
@@ -557,7 +867,68 @@ function enrichInProcessItems(db: InProcessDb, items: any[]): WorkItem[] {
   });
 }
 
+/**
+ * True when a `wl` spawn error came from the bounded execFile timeout (the
+ * child was killed because it hung) rather than from the CLI rejecting the
+ * invocation. A hung `wl` must not trigger the consolidated-read fail-open
+ * path: retrying with the per-subset spawns would double the hang instead of
+ * surfacing it (WL-0MSJNJXX2001NMHS).
+ */
+function isWlTimeoutError(error: unknown): boolean {
+  const e = error as { killed?: boolean; signal?: string; code?: string; message?: string } | null;
+  if (!e) return false;
+  if (e.killed === true) return true;
+  if (e.signal === 'SIGTERM' || e.signal === 'SIGKILL') return true;
+  if (e.code === 'ETIMEDOUT') return true;
+  return /timed? ?out/i.test(e.message ?? '');
+}
+
 async function runWlInner(
+  args: string[],
+  includeJson: boolean,
+  timeoutMs?: number,
+  dirOverride?: string,
+): Promise<string> {
+  // F5 spawn cap: reads acquire a bounded-concurrency slot; a queued read
+  // releases on a microtask when a slot frees, so it never blocks the TUI
+  // event loop. Writes bypass the cap entirely (rare, user-driven).
+  const capped = WL_SPAWN_CAPPED_COMMANDS.has(args[0]);
+  let waitedMs = 0;
+  if (capped) {
+    waitedMs = await acquireWlSpawnSlot();
+  }
+  try {
+    return await runWlInnerUncapped(
+      args,
+      includeJson,
+      queuedTimeout(timeoutMs, waitedMs),
+      dirOverride,
+    );
+  } finally {
+    if (capped) releaseWlSpawnSlot();
+  }
+}
+
+/**
+ * A queued read inherits the bounded-timeout budget of the refresh that
+ * issued it: time spent waiting for a spawn slot counts against
+ * `DEFAULT_WL_TIMEOUT_MS`, so a hung child ahead of it cannot stack a fresh
+ * 60 s per queued read. F8's cap of 1 serialises reads, and without this a
+ * timed-out refresh with several fan-out reads could take N x 60 s to
+ * surface its failure (the guard is bounded, but the operator sees no toast
+ * for minutes). Returns the caller's override unchanged when the read did
+ * not queue, preserving the documented per-call timeouts.
+ */
+function queuedTimeout(timeoutMs: number | undefined, waitedMs: number): number | undefined {
+  // Sub-second queue hops are normal scheduler jitter (and must not perturb
+  // the documented per-call timeout, which callers assert exactly); only a
+  // read that genuinely queued behind a long/hung spawn inherits the budget.
+  if (waitedMs < 1_000) return timeoutMs;
+  const base = timeoutMs ?? DEFAULT_WL_TIMEOUT_MS;
+  return Math.max(1, base - waitedMs);
+}
+
+async function runWlInnerUncapped(
   args: string[],
   includeJson: boolean,
   timeoutMs?: number,
@@ -597,8 +968,11 @@ async function runWlInner(
       const stdout = typeof error?.stdout === 'string' ? error.stdout.trim() : '';
       const message = stderr || stdout || error?.message || String(error);
 
-      // Re-throw with a clean message
-      throw new Error(message);
+      // Re-throw with a clean message, preserving the timeout classification
+      // so callers can distinguish "hung wl" from "wl rejected the command".
+      const wrapped = new Error(message) as Error & { wlTimeout?: boolean };
+      if (isWlTimeoutError(error)) wrapped.wlTimeout = true;
+      throw wrapped;
     }
   }
 
@@ -617,6 +991,10 @@ async function runWl(
   // any in-flight read memo so a read issued after this write spawns fresh.
   if (!MEMOIZABLE_COMMANDS.has(command)) {
     if (inflightFetchMemo.size > 0) inflightFetchMemo.clear();
+    // A write also invalidates the review-queue snapshot derived from a
+    // previously fetched worklist bundle (WL-0MVI0IT4S0070G78).
+    lastWorklistBundle = null;
+    inflightWorklistBundle = null;
     return runWlInner(args, includeJson, timeoutMs, dirOverride);
   }
 
@@ -678,6 +1056,194 @@ function mergeUniqueById(...arrays: WorkItem[][]): WorkItem[] {
     }
   }
   return merged;
+}
+
+// ── Consolidated worklist bundle (WL-0MVI0IT4S0070G78) ────────────────
+//
+// One `wl worklist --json` read replaces the five per-subset spawns a
+// default-view refresh used to issue (four mandatory `wl list` queries + the
+// `wl next` browse feed). See `docs/dev/herdr-event-driven-refresh.md`
+// (§ "Cold-refresh cost") for the design rationale and the measured CPU
+// before/after; the command's payload contract is documented in `CLI.md`.
+
+/**
+ * The five subsets returned by `wl worklist --json` (WL-0MVI0HX58009JJRF),
+ * already normalized into {@link WorkItem}s.
+ */
+interface WorklistBundle {
+  critical: WorkItem[];
+  reviewQueue: WorkItem[];
+  inProgressRoots: WorkItem[];
+  blockedRoots: WorkItem[];
+  browse: WorkItem[];
+}
+
+/**
+ * How long a fetched bundle may satisfy {@link fetchReviewQueueState}. The
+ * banner state is refreshed on every tick, so a short window is invisible to
+ * the operator while guaranteeing the concurrent review-state read in a
+ * refresh derives from the SAME read instead of spawning a second `wl`.
+ * Cleared immediately on any write and on a worklog-dir change.
+ */
+const WORKLIST_BUNDLE_SNAPSHOT_TTL_MS = 10_000;
+
+/** Most recent successful bundle read, used only for review-queue state. */
+let lastWorklistBundle: { dirKey: string; at: number; bundle: WorklistBundle } | null = null;
+
+/**
+ * Bundle read currently in flight for the current worklog dir. The
+ * review-queue state read starts concurrently with the item fetch, so it
+ * awaits this instead of spawning a second `wl` for the same subset.
+ */
+let inflightWorklistBundle: { dirKey: string; promise: Promise<WorklistBundle> } | null = null;
+
+/** Identity of the worklog dir a bundle was read from. */
+function worklogDirKey(): string {
+  return _worklogDir ?? '';
+}
+
+/**
+ * Parse a `wl worklist --json` payload, failing loudly (so the caller can
+ * fail open) when the shape is not the documented one: a missing or
+ * non-array subset means the `wl` on PATH is older than the consolidated
+ * command and the per-subset spawn path must take over.
+ */
+function parseWorklistBundle(payload: unknown): WorklistBundle {
+  const subsets = (payload as { subsets?: Record<string, unknown> } | null)?.subsets;
+  if (!subsets || typeof subsets !== 'object') {
+    throw new Error('wl worklist payload has no "subsets" object');
+  }
+  const listSubset = (key: string): WorkItem[] => {
+    const value = subsets[key];
+    if (!Array.isArray(value)) {
+      throw new Error(`wl worklist payload is missing the "${key}" subset`);
+    }
+    return extractItems(value);
+  };
+  const browseRaw = subsets.browse;
+  if (!Array.isArray(browseRaw)) {
+    throw new Error('wl worklist payload is missing the "browse" subset');
+  }
+  return {
+    critical: listSubset('critical'),
+    reviewQueue: listSubset('reviewQueue'),
+    inProgressRoots: listSubset('inProgressRoots'),
+    blockedRoots: listSubset('blockedRoots'),
+    // Browse entries are `{ workItem, reason, group?, groupLabel? }` — the
+    // same shape `wl next -n <count> --json` emits, so `extractItems` applies
+    // the identical normalization/group propagation.
+    browse: browseRaw.length > 0 ? extractItems({ results: browseRaw }) : [],
+  };
+}
+
+/**
+ * Fetch every subset the default view needs in ONE `wl worklist` read.
+ *
+ * `count` bounds only the browse feed (the mandatory subsets are unbounded by
+ * it), mirroring `wl next -n <count> --include-in-progress --include-blocked`
+ * plus the four mandatory `wl list` queries. The command is a pure read: it
+ * never re-sorts, so this adds no write byproduct and the result is cacheable
+ * by the CLI read cache (WL-0MVI0IS6Y0028KTO).
+ */
+async function fetchWorklistBundle(count?: number, timeoutMs?: number): Promise<WorklistBundle> {
+  const args = ['worklist'];
+  if (count !== undefined) {
+    args.push('-n', String(count));
+  }
+  const dirKey = worklogDirKey();
+  const promise = runWl(args, true, timeoutMs).then((output) => {
+    const bundle = parseWorklistBundle(extractJson(output));
+    lastWorklistBundle = { dirKey, at: Date.now(), bundle };
+    return bundle;
+  });
+  inflightWorklistBundle = { dirKey, promise };
+  try {
+    return await promise;
+  } finally {
+    if (inflightWorklistBundle?.promise === promise) {
+      inflightWorklistBundle = null;
+    }
+  }
+}
+
+/**
+ * The bundle read currently in flight for this worklog dir, if any. The
+ * review-queue state read awaits it so a refresh needs only ONE `wl` spawn.
+ */
+function pendingWorklistBundle(): Promise<WorklistBundle> | null {
+  const inflight = inflightWorklistBundle;
+  if (inflight === null) return null;
+  if (inflight.dirKey !== worklogDirKey()) return null;
+  return inflight.promise;
+}
+
+/**
+ * Assemble the default worklist from a consolidated bundle, applying the same
+ * merge/enrich/select/regroup pipeline as the per-subset path:
+ *
+ *  - mandatory subsets (critical, review queue, in-progress roots, blocked
+ *    roots) are always included, whatever the browse window;
+ *  - items shared with a mandatory subset take the richer `wl list`-style
+ *    audit fields (`auditResult`, `auditedAt`, `fingerprint`,
+ *    `currentFingerprint`) so the audit-bucket sort classifies them exactly as
+ *    `wl list` does (WL-0MUWDW0N6003KF6G);
+ *  - the count limits only the remaining "other" items, and the final set is
+ *    regrouped so no duplicate section headings render (WL-0MSAK8YLB0025EGW).
+ */
+function assembleDefaultWorklist(bundle: WorklistBundle, count?: number): WorkItem[] {
+  const items = bundle.browse;
+  if (count === undefined) {
+    // Count-less callers get the base feed unchanged (historical behaviour).
+    return items;
+  }
+
+  const mandatory = mergeUniqueById(
+    bundle.critical,
+    bundle.reviewQueue,
+    bundle.inProgressRoots,
+    bundle.blockedRoots,
+  );
+  const mandatoryById = new Map(mandatory.map((item) => [item.id, item]));
+  const enrichedItems = items.map((item) => {
+    const rich = mandatoryById.get(item.id);
+    if (!rich) return item;
+    return {
+      ...item,
+      auditResult: rich.auditResult,
+      auditedAt: rich.auditedAt,
+      fingerprint: rich.fingerprint,
+      currentFingerprint: rich.currentFingerprint,
+    };
+  });
+  const merged = mergeUniqueById(enrichedItems, mandatory);
+  return regroupWorkItems(selectWorkItems(merged, count));
+}
+
+/**
+ * Derive the review-queue state from a bundle's `reviewQueue` subset: the
+ * root-only in_review items with status `completed`, plus whether any of them
+ * still lacks a current audit. Kept identical to the standalone-query
+ * derivation so the banner is unchanged.
+ */
+function reviewQueueStateFromItems(items: WorkItem[]): ReviewQueueState {
+  const completed = items.filter((item) => item.status === 'completed');
+  const auditsOutstanding = completed.some((item) =>
+    !isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint),
+  );
+  return { count: completed.length, auditsOutstanding };
+}
+
+/**
+ * Review-queue state from a bundle read earlier in this refresh (same worklog
+ * dir, within {@link WORKLIST_BUNDLE_SNAPSHOT_TTL_MS}), or `undefined` when
+ * there is none — the caller then runs the standalone query.
+ */
+function snapshotReviewQueueState(): ReviewQueueState | undefined {
+  const snapshot = lastWorklistBundle;
+  if (snapshot === null) return undefined;
+  if (snapshot.dirKey !== worklogDirKey()) return undefined;
+  if (Date.now() - snapshot.at > WORKLIST_BUNDLE_SNAPSHOT_TTL_MS) return undefined;
+  return reviewQueueStateFromItems(snapshot.bundle.reviewQueue);
 }
 
 /**
@@ -774,6 +1340,24 @@ async function fetchMandatorySubsets(): Promise<WorkItem[]> {
  * below the `-n` window is still shown.
  */
 export async function fetchNextItems(count?: number): Promise<WorkItem[]> {
+  // ── Consolidated read (WL-0MVI0IT4S0070G78) ───────────────────────
+  // One `wl worklist` spawn returns the browse feed AND the four mandatory
+  // subsets, replacing five spawns per refresh tick. Any failure (older `wl`
+  // without the command, non-zero exit, malformed payload, missing subset)
+  // falls through to the per-subset path below with unchanged behaviour.
+  try {
+    // A count-less call must mirror `wl next`'s default window (1 item).
+    const bundle = await fetchWorklistBundle(count === undefined ? 1 : count);
+    return assembleDefaultWorklist(bundle, count);
+  } catch (error) {
+    // A hung `wl` is not "unavailable": propagating the timeout keeps the
+    // refresh latency bounded instead of paying the timeout again per subset.
+    if ((error as { wlTimeout?: boolean } | null)?.wlTimeout === true) {
+      throw error;
+    }
+    // Fail-open: fall back to today's per-subset spawn path.
+  }
+
   const args = ['next'];
   if (count !== undefined) {
     args.push('-n', String(count));
@@ -955,6 +1539,67 @@ export interface BlockerRef {
 }
 
 /**
+ * A dependency target as the in-process dep read yields it — the fields of
+ * a `wl dep list --json` edge (id/status) plus the target `stage` the CLI
+ * enrichment path pays a `wl show` for (F4 — WL-0MVJV2ORY002MNFF). A
+ * missing target maps to status `deleted`, matching the CLI.
+ */
+export interface DependencyTargetRef {
+  id: string;
+  /** The target's status (`deleted` when the target no longer exists). */
+  status?: string;
+  /** The target's stage, when known (the CLI-enrichment `wl show` result). */
+  stage?: string;
+  /** The target's title (`(missing)` when the target no longer exists). */
+  title?: string;
+}
+
+/**
+ * Outbound dependency targets for MULTIPLE items in ONE in-process pass
+ * (F4 — WL-0MVJV2ORY002MNFF). The hydrator used to spawn `wl dep list <id>`
+ * (plus `wl show` per non-terminal edge) once per candidate per tick; this
+ * reads every candidate's outbound edges from the SQLite store in one pass,
+ * matching the CLI's field semantics (missing target → status `deleted`,
+ * title `(missing)`) and adding the target `stage` directly (the lookup the
+ * spawn path pays a `wl show` for).
+ *
+ * Fail-open: resolves `undefined` when no in-process read is possible (no
+ * worklog dir, no SQLite file, `@worklog/shared` unavailable, or any read
+ * throws) so the caller falls back to its `wl dep list` spawn path exactly
+ * as today. A refresh scope shares the refresh's ONE connection; scope-less
+ * callers open one fresh connection per call (bounded, batched — never one
+ * per item).
+ */
+export async function fetchOutboundDepsForItems(
+  itemIds: string[],
+  scope?: InProcessRefreshScope,
+): Promise<Map<string, DependencyTargetRef[]> | undefined> {
+  const unique = [...new Set(itemIds)];
+  if (unique.length === 0) return new Map();
+  const read = (db: InProcessDb): Map<string, DependencyTargetRef[]> => {
+    const byItem = new Map<string, DependencyTargetRef[]>();
+    for (const id of unique) {
+      const targets: DependencyTargetRef[] = [];
+      for (const edge of db.listDependencyEdgesFrom(id)) {
+        const target = db.get(edge.toId);
+        const ref: DependencyTargetRef = {
+          id: edge.toId,
+          status: typeof target?.status === 'string' ? target.status : 'deleted',
+          title: typeof target?.title === 'string' ? target.title : '(missing)',
+        };
+        if (typeof target?.stage === 'string' && target.stage.length > 0) {
+          ref.stage = target.stage;
+        }
+        targets.push(ref);
+      }
+      byItem.set(id, targets);
+    }
+    return byItem;
+  };
+  return scope ? await scope.read(read) : await withInProcessDb(read);
+}
+
+/**
  * Fetch the ACTIVE dependency blockers of a work item — the outbound
  * `depends-on` edges that still block it (WL-0MV8EZRDJ001TDA8).
  *
@@ -973,6 +1618,25 @@ export interface BlockerRef {
  */
 export async function fetchBlockersForItem(id: string): Promise<BlockerRef[]> {
   try {
+    // F4 in-process fast path (WL-0MVJV2ORY002MNFF): the active-blocker read
+    // runs against the SQLite store (no `wl dep list` or per-edge `wl show`
+    // spawn). The targets carry the stage directly, so the per-edge stage
+    // lookup the spawn path pays for is free here. Fail-open: an undefined
+    // in-process read (no dir/SQLite file/shared package) falls through to
+    // the spawn path below exactly as today.
+    const inProcess = await fetchOutboundDepsForItems([id]);
+    if (inProcess !== undefined) {
+      const blockers: BlockerRef[] = [];
+      for (const target of inProcess.get(id) ?? []) {
+        if (!isActiveBlocker({ id: target.id, status: target.status, stage: target.stage })) {
+          continue;
+        }
+        const edgeStatus = target.status;
+        blockers.push({ id: target.id, title: target.title ?? '(missing)', ...(edgeStatus ? { status: edgeStatus } : {}) });
+      }
+      return blockers;
+    }
+
     const output = await runWl(['dep', 'list', id]);
     const edges = parseDepListBlockersOutput(output);
     if (edges === null) return [];
@@ -1001,14 +1665,22 @@ export async function fetchBlockersForItem(id: string): Promise<BlockerRef[]> {
 
 /**
  * Fetch the total count of actionable work items.
+ *
+ * Pass a refresh scope (WL-0MV6C6SLB005HX7B) to read the count via the
+ * refresh's ONE shared in-process connection; omit it to open a fresh
+ * per-call connection (the pre-WL-0MV6C6SLB005HX7B behaviour).
  */
-export async function fetchActionableCount(): Promise<number | undefined> {
+export async function fetchActionableCount(
+  scope?: InProcessRefreshScope,
+): Promise<number | undefined> {
   // Fast path: count in-process against the SQLite store. This removes a
   // whole `wl` process spawn from every refresh and is exact: the CLI's
   // actionable count is the number of non-deleted items in those statuses.
-  const inProcess = await withInProcessDb((db) =>
-    db.list({ status: ['open', 'in-progress', 'blocked'] }).length,
-  );
+  const inProcess = scope
+    ? await scope.read((db) => db.list({ status: ['open', 'in-progress', 'blocked'] }).length)
+    : await withInProcessDb((db) =>
+        db.list({ status: ['open', 'in-progress', 'blocked'] }).length,
+      );
   if (inProcess !== undefined) {
     return inProcess;
   }
@@ -1088,17 +1760,25 @@ export interface ReviewQueueState {
  * and is never dispatched for audit independently.
  */
 export async function fetchReviewQueueState(): Promise<ReviewQueueState | undefined> {
+  // Derive from the consolidated bundle when one was already read (or is in
+  // flight) in this refresh (WL-0MVI0IT4S0070G78): the bundle's `reviewQueue`
+  // subset is the same query this function used to issue, so the banner needs
+  // no second `wl` spawn on the default view.
+  const pending = pendingWorklistBundle();
+  if (pending !== null) {
+    const bundle = await pending.catch(() => null);
+    if (bundle) return reviewQueueStateFromItems(bundle.reviewQueue);
+  }
+  const fromBundle = snapshotReviewQueueState();
+  if (fromBundle !== undefined) return fromBundle;
+
   try {
     // Identical args to {@link fetchMandatorySubsets}'s review query so the
     // in-flight memo deduplicates the two into ONE spawn when a refresh
     // schedules both concurrently (WL-0MV5CBQ6L005SPAG).
     const output = await runWl(reviewQueueArgs());
     const payload = extractJson(output);
-    const items = extractItems(payload).filter((item) => item.status === 'completed');
-    const auditsOutstanding = items.some((item) =>
-      !isAuditFresh(item.auditedAt, item.updatedAt, item.fingerprint, item.currentFingerprint),
-    );
-    return { count: items.length, auditsOutstanding };
+    return reviewQueueStateFromItems(extractItems(payload));
   } catch {
     // Fail-closed: a query failure means we cannot determine queue state
     // — the conservative default is to leave the banner state unchanged (AC1).
@@ -1118,6 +1798,42 @@ export async function fetchCompletedItemCount(): Promise<number | undefined> {
 }
 
 /**
+ * In-process read of the direct children of `parentIds`, shared by the
+ * single-parent expand read ({@link fetchChildrenForItem}) and the batched
+ * refresh read ({@link fetchChildrenForItems}) so BOTH apply the identical
+ * ordering, fields, depth-neutral enrichment and needs-CLI-fingerprint
+ * fallback rule (WL-0MVJV2ORY002MNFF).
+ *
+ * childCounts is computed over ALL items (deleted included), matching the
+ * CLI's `getChildCounts()` enrichment. Children themselves are non-deleted
+ * only, matching `wl list --parent`'s default filtering.
+ */
+function readChildrenInProcess(
+  db: InProcessDb,
+  parentIds: string[],
+): { byParent: Map<string, WorkItem[]>; needsCli: boolean } {
+  const wanted = new Set(parentIds);
+  const allRaw = db.list({});
+  const childCounts = db.getChildCounts(allRaw);
+  const matched = allRaw.filter(
+    (item) => item.parentId && wanted.has(String(item.parentId)) && item.status !== 'deleted',
+  );
+  const enriched = enrichInProcessItems(db, matched);
+  // A stored fingerprint needs the CLI's currentFingerprint enrichment, so
+  // the fast path must not serve the batch in that case.
+  const needsCli = enriched.some((item) => Boolean(item.fingerprint));
+  const byParent = new Map<string, WorkItem[]>();
+  for (const item of enriched) {
+    const parentId = item.parentId;
+    if (!parentId || !wanted.has(parentId)) continue;
+    const list = byParent.get(parentId) ?? [];
+    list.push({ ...item, childCount: childCounts.get(item.id) ?? 0 });
+    byParent.set(parentId, list);
+  }
+  return { byParent, needsCli };
+}
+
+/**
  * Fetch child work items for a given parent ID (via `wl list --parent`).
  *
  * Child items are returned with the given hierarchy `depth` for display
@@ -1134,8 +1850,31 @@ export async function fetchCompletedItemCount(): Promise<number | undefined> {
  * worklist render layer does that at read time (withParentAudit) when it
  * nests a child under its parent, so derived coverage
  * (WL-0MUBVH8QG0020H9L) never leaks into the fetch/model layer.
+ *
+ * F4 in-process fast path (WL-0MVJV2ORY002MNFF): expanding a node no
+ * longer spawns `wl list --parent <id>`. The read runs in-process against
+ * the SQLite store — the same reader the batched refresh path uses, so
+ * ordering/fields/fallback semantics match exactly — and falls back to the
+ * `wl` spawn when no in-process read is possible or a child carries a
+ * stored audit fingerprint (CLI `currentFingerprint` enrichment). Pass a
+ * refresh scope to reuse the refresh's ONE connection; scope-less callers
+ * (the per-expand keypress path) open one fresh connection per expand — a
+ * single bounded open replacing a whole `wl` spawn, never a per-helper open
+ * inside a refresh.
  */
-export async function fetchChildrenForItem(parentId: string, depth = 1): Promise<WorkItem[]> {
+export async function fetchChildrenForItem(
+  parentId: string,
+  depth = 1,
+  scope?: InProcessRefreshScope,
+): Promise<WorkItem[]> {
+  const inProcess = scope
+    ? await scope.read((db) => readChildrenInProcess(db, [parentId]))
+    : await withInProcessDb((db) => readChildrenInProcess(db, [parentId]));
+  if (inProcess && !inProcess.needsCli) {
+    const children = (inProcess.byParent.get(parentId) ?? []).map((item) => ({ ...item, depth }));
+    return regroupWorkItems(children);
+  }
+
   const output = await runWl(['list', '--parent', parentId]);
   const payload = extractJson(output);
   const items = extractItems(payload);
@@ -1163,40 +1902,27 @@ export async function fetchChildrenForItem(parentId: string, depth = 1): Promise
  * `depthByParent` overrides the display depth per parent (default 1); the
  * worklist passes each expanded item's hierarchy depth + 1 so nested
  * expansion still renders at the correct depth (WL-0MSQ3FH1K000MMJW).
+ *
+ * Pass a refresh scope (WL-0MV6C6SLB005HX7B) to read via the refresh's ONE
+ * shared in-process connection; omit it to open a fresh per-call connection
+ * exactly as before.
  */
 export async function fetchChildrenForItems(
   parentIds: string[],
   depthByParent?: Map<string, number>,
+  scope?: InProcessRefreshScope,
 ): Promise<Map<string, WorkItem[]>> {
   const uniqueParents = [...new Set(parentIds)];
   const result = new Map<string, WorkItem[]>();
   for (const id of uniqueParents) result.set(id, []);
   if (uniqueParents.length === 0) return result;
 
-  const wanted = new Set(uniqueParents);
-  const inProcess = await withInProcessDb((db) => {
-    // childCounts is computed over ALL items (deleted included), matching the
-    // CLI's `getChildCounts()` enrichment. Children themselves are non-deleted
-    // only, matching `wl list --parent`'s default filtering.
-    const allRaw = db.list({});
-    const childCounts = db.getChildCounts(allRaw);
-    const matched = allRaw.filter(
-      (item) => item.parentId && wanted.has(String(item.parentId)) && item.status !== 'deleted',
-    );
-    const enriched = enrichInProcessItems(db, matched);
-    // A stored fingerprint needs the CLI's currentFingerprint enrichment, so
-    // the fast path must not serve the batch in that case.
-    const needsCli = enriched.some((item) => Boolean(item.fingerprint));
-    const byParent = new Map<string, WorkItem[]>();
-    for (const item of enriched) {
-      const parentId = item.parentId;
-      if (!parentId || !wanted.has(parentId)) continue;
-      const list = byParent.get(parentId) ?? [];
-      list.push({ ...item, childCount: childCounts.get(item.id) ?? 0 });
-      byParent.set(parentId, list);
-    }
-    return { byParent, needsCli };
-  });
+  // A refresh scope shares ONE in-process connection with the refresh's other
+  // in-process readers (WL-0MV6C6SLB005HX7B); scope-less callers open a fresh
+  // per-call connection exactly as before.
+  const inProcess = scope
+    ? await scope.read((db) => readChildrenInProcess(db, uniqueParents))
+    : await withInProcessDb((db) => readChildrenInProcess(db, uniqueParents));
 
   if (inProcess && !inProcess.needsCli) {
     for (const id of uniqueParents) {

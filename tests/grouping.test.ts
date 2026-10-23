@@ -1,12 +1,17 @@
 import { execaSync } from 'execa';
 import { describe, it, expect } from 'vitest';
-import * as path from 'path';
+import { cliInvocation } from './cli/cli-bundle.js';
 
-const cli = path.resolve(__dirname, '..', 'dist', 'cli.js');
+/**
+ * The CLI under test: the pre-compiled bundle of `src/cli.ts`
+ * (`tests/cli/cli-bundle.ts`), so this suite asserts against current source
+ * instead of a possibly stale `dist/` build (WL-0MVII17N3003FJWT).
+ */
+const [cliCommand, cli] = cliInvocation();
 
 describe('Help grouping', () => {
   it('prints commands under the expected groups in order', () => {
-    const result = execaSync(process.execPath, [cli, '--help'], { encoding: 'utf-8' });
+    const result = execaSync(cliCommand, [cli, '--help'], { encoding: 'utf-8' });
     expect(result.exitCode).toBe(0);
     const out = result.stdout;
 

@@ -67,6 +67,74 @@ export interface CoordinationLogEntry {
   ownerPresent?: boolean;
   runningPanes?: number | null;
   contentionDepth?: number;
+  /**
+   * Schema-v2 truthful-capacity evidence (LP-0MVGDUVGE0024YAI): the pool
+   * summary, payload version and per-slot lease/phase/ETA detail observed at
+   * the poll. All optional so earlier entry shapes are unchanged.
+   */
+  capacityHint?: string;
+  statusSchemaVersion?: number;
+  idleLeasedSlots?: number;
+  generatingSlots?: number;
+  slotPhases?: Record<string, string>;
+  slotPrefillEtaSeconds?: Record<string, number>;
+  /**
+   * Proxy-authoritative local idle-age evidence (LP-0MVGD9Z8Z0055Y5J,
+   * WL-0MVHSZR9C0012NQY): the idle age in seconds the proxy reported for the
+   * backend, and the source of its last activity (`dispatch` / `chunk` /
+   * `finish` / startup …). Recorded on every polled decision so an operator
+   * can see WHY a tick was admitted or deferred. Absent on pre-feature
+   * proxies; never a gate. Additive/optional → earlier entry shapes are
+   * unchanged.
+   */
+  localIdleSeconds?: number;
+  localLastActivitySource?: string;
+  /**
+   * Depth-aware audit-batch decision metadata (parent WL-0MVEDM8OT007WDRS
+   * AC5): recorded on an `audit-batch-continue` decision so each
+   * continuation is diagnosable (depth, cap and remaining budget). All
+   * optional so every existing entry shape is unchanged (additive schema).
+   */
+  auditBatchDepth?: number;
+  auditBatchCap?: number;
+  auditBatchRemaining?: number;
+  /**
+   * Why an armed batch ended (parent WL-0MVEDM8OT007WDRS AC5): `cap` (the
+   * continuation budget was consumed) or `depth` (the audit-eligible depth
+   * dropped below `browseItemCount`). Present only on `audit-batch-end`
+   * decisions.
+   */
+  auditBatchEndReason?: string;
+  /**
+   * Continuous capacity-starvation signal (WL-0MVKNC2N50025HXE AC3): recorded
+   * on a `reason: 'capacity-starved'` observation when the dispatcher has
+   * refused a continuous run of capacity-flagged ticks for at least the
+   * configured window. `capacity-starved` is an OBSERVATION, not a refusal: it
+   * never sets the header blocking token and never replaces the underlying
+   * refusal reason.
+   */
+  starvedSince?: string;
+  /** Length of the starvation episode at the moment the signal was written (ms). */
+  starvedMs?: number;
+  /** Capacity refusals observed in the episode (includes rate-limited ticks). */
+  consecutiveCapacityRefusals?: number;
+  /** The most recent capacity-refusal reason in the episode. */
+  lastCapacityReason?: string;
+  /**
+   * Panes the long-running detector flagged when the starvation signal fired
+   * (WL-0MVKNC2N50025HXE AC2/AC3): each entry names the pane, item, kind and
+   * how long the item has gone without progress. Bounded; absent when the
+   * scan is unwired or found nothing.
+   */
+  longRunningPanes?: Array<{
+    paneId: string;
+    itemId: string;
+    cwd: string;
+    kind: string;
+    stalledForMs: number;
+    agentStatus: string;
+    stage: string;
+  }>;
   at?: string;
 }
 

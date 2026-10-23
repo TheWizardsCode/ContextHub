@@ -74,8 +74,9 @@
  *    `buildDowntimeSpawnOptions` bounds the dispatched audit fan-out:
  *    `AUDIT_PHASE2_PARALLELISM=1` makes the audit skill's Phase 2 child
  *    deep-analysis strictly sequential so a parent audit needs exactly
- *    2 local slots (parent + one child), fitting cheap mode's capacity
- *    (WL-0MSORQ1RG005DGUS). Dispatcher anchor (C0 WL-0MTR01EU7005SYZG):
+ *    2 local slots (parent + one child).
+ *    (original bound WL-0MSORQ1RG005DGUS; serialisation fixed by
+ *    WL-0MVE1NZ4J000H5NH). Dispatcher anchor (C0 WL-0MTR01EU7005SYZG):
  *    pane placement (WL-0MU321YK70035AYT): the worklog dispatch path resolves
  *    the candidate's project workspace from its worklog root
  *    (`deps.resolveProjectWorkspace` — the herdr plugin pane whose logical
@@ -115,7 +116,9 @@
  *    agent prompt, including the blocked-questions instruction.
  *  - `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` /
  *    `clampDowntimeRequiredFreeSlots` / `clampDowntimeNoCandidateCooldownMs` /
- *    `clampDowntimeMarkerStaleWindowMs` (WL-0MU6UL0RJ008IHGT)
+ *    `clampDowntimeMarkerStaleWindowMs` (WL-0MU6UL0RJ008IHGT) /
+ *    `clampDowntimeAuditBatchMax` (parent WL-0MVEDM8OT007WDRS AC1: the
+ *    depth-aware audit-batch cap, default 2, clamped to 1–5, `1` = off)
  *    — settings clamps, wired into `settings.ts`.
  *  - `selectWithRotation` (WL-0MSSRED76008LGB6) — rotation-aware selection:
  *    within each tier, candidates sharing the same priority level are
@@ -139,6 +142,10 @@ import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
 import {
+  REQUEST_PRIORITY_ENV_VAR,
+  mapDowntimeRequestPriority,
+} from './request-priority.js';
+import {
   readCoordinationFile,
   getEntry,
   upsertEntry,
@@ -157,6 +164,14 @@ import {
 } from './leader-election.js';
 import { appendCoordinationLogEntry, type CoordinationLogEntry } from './downtime-log.js';
 import {
+  CapacityStarvationTracker,
+  DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
+  type CapacityStarvationObservation,
+} from './capacity-starvation.js';
+import type {
+  LongRunningPaneObservation,
+  LongRunningScanOptions,
+} from './long-running-panes.js';import {
   readDowntimeLogEntries as _readDowntimeEntries,
   dispatchedItemMarkers as _dispatchedMarkers,
   markerStillExcludes as _markerStillExcludes,
@@ -272,9 +287,130 @@ export function decisionHeaderToken(reason: string): string {
       return 'review-queue';
     case 'slots-unavailable':
       return 'no-slots';
+    case 'capacity-saturated':
+      return 'saturated';
+    case 'prefill-gate':
+    case 'prefill-cap':
+    case 'prefill-eta':
+      // Prefill pacing refusals (WL-0MVHSZRZQ00482QX): each keeps its own
+      // distinct header token so a paced stop is distinguishable from
+      // `contention`, `slot-owner` and `no-slots` in the herdr header.
+      return reason;
     default:
       return reason;
   }
+}
+
+/**
+ * Schema-v2 capacity evidence attached to a no-dispatch decision entry
+ * (LP-0MVGDUVGE0024YAI): the pool summary, payload version and the observed
+ * per-slot lease/phase/ETA detail. Purely observability — no gate reads it.
+ */
+interface CapacityEvidence {
+  capacityHint?: string;
+  statusSchemaVersion?: number;
+  idleLeasedSlots?: number;
+  generatingSlots?: number;
+  slotPhases?: Record<string, string>;
+  slotPrefillEtaSeconds?: Record<string, number>;
+  /**
+   * Prefill serialisation-gate evidence (LP-0MVGDUUV3001XFRJ,
+   * WL-0MVHSZRZQ00482QX): the in-flight/cap counters, the live gate waiters
+   * and the prefill-ETA guard's queue ETA / admission budget. Attached to
+   * every polled decision so a paced stop is diagnosable from the log alone.
+   */
+  prefillsInFlight?: number;
+  maxConcurrentPrefills?: number;
+  prefillGateWaiters?: number;
+  prefillBudgetSeconds?: number;
+  queueEtaSeconds?: number;
+  /**
+   * Authoritative local idle-age evidence (LP-0MVGD9Z8Z0055Y5J,
+   * WL-0MVHSZR9C0012NQY): the proxy's reported idle age in seconds and the
+   * source of the last local activity. Observability only — they let an
+   * operator see WHY a tick was admitted or deferred without reading the
+   * proxy. Absent on pre-feature proxies (and when malformed).
+   */
+  localIdleSeconds?: number;
+  localLastActivitySource?: string;
+}
+
+/**
+ * Evidence fields shared by EVERY polled no-dispatch decision entry
+ * (WL-0MU8808ZY0091JIA). Extracted from `recordDecision` so the
+ * capacity-starvation observation (WL-0MVKNC2N50025HXE AC3) carries exactly
+ * the same evidence schema as the refusal it extends — one shape, no
+ * duplication, and an unchanged on-disk format for existing readers.
+ */
+export interface DecisionEntryFields extends CapacityEvidence {
+  freeSlots: number;
+  totalSlots: number;
+  ownerPresent: boolean;
+  runningPanes: number | null;
+  contentionDepth: number;
+  /** Depth-aware audit-batch metadata (parent WL-0MVEDM8OT007WDRS AC5). */
+  auditBatchDepth?: number;
+  auditBatchCap?: number;
+  auditBatchRemaining?: number;
+  /** Why an armed batch ended (`cap` reached / `depth` dropped, AC5). */
+  auditBatchEndReason?: string;
+}
+
+function capacityEvidence(
+  status: LlamaStatus,
+  slots: LlamaSlot[] | null,
+): CapacityEvidence {
+  const evidence: CapacityEvidence = {};
+  if (status.capacity_hint !== undefined) evidence.capacityHint = status.capacity_hint;
+  if (status.status_schema_version !== undefined) {
+    evidence.statusSchemaVersion = status.status_schema_version;
+  }
+  // Prefill serialisation-gate evidence (WL-0MVHSZRZQ00482QX): recorded on
+  // every polled decision (even when the per-slot detail is unusable) so a
+  // paced tick always shows the proxy's own gate state.
+  if (typeof status.local_prefills_in_flight === 'number') {
+    evidence.prefillsInFlight = status.local_prefills_in_flight;
+  }
+  if (typeof status.local_max_concurrent_prefills === 'number') {
+    evidence.maxConcurrentPrefills = status.local_max_concurrent_prefills;
+  }
+  if (typeof status.prefill_gate_waiters === 'number') {
+    evidence.prefillGateWaiters = status.prefill_gate_waiters;
+  }
+  if (typeof status.prefill_budget_seconds === 'number') {
+    evidence.prefillBudgetSeconds = status.prefill_budget_seconds;
+  }
+  if (typeof status.queue_eta_seconds === 'number') {
+    evidence.queueEtaSeconds = status.queue_eta_seconds;
+  }
+  // Idle-age evidence is attached on EVERY polled decision (even when the
+  // per-slot detail is unusable) so a refused/deferred tick always shows the
+  // proxy's own idle-age answer (WL-0MVHSZR9C0012NQY AC7).
+  const idleSeconds = reportedIdleSeconds(status);
+  if (idleSeconds !== null) evidence.localIdleSeconds = idleSeconds;
+  if (status.local_last_activity_source !== undefined) {
+    evidence.localLastActivitySource = status.local_last_activity_source;
+  }
+  if (slots === null) return evidence;
+  if (slots.some((slot) => slot.lease_state !== undefined)) {
+    evidence.idleLeasedSlots = slots.filter(
+      (slot) => slot.lease_state === 'idle_leased',
+    ).length;
+    evidence.generatingSlots = slots.filter(
+      (slot) => slot.lease_state === 'generating',
+    ).length;
+  }
+  const phases: Record<string, string> = {};
+  const etas: Record<string, number> = {};
+  for (const slot of slots) {
+    if (slot.phase !== undefined && slot.phase !== null) phases[slot.slot_id] = slot.phase;
+    if (typeof slot.prefill_eta_seconds === 'number') {
+      etas[slot.slot_id] = slot.prefill_eta_seconds;
+    }
+  }
+  if (Object.keys(phases).length > 0) evidence.slotPhases = phases;
+  if (Object.keys(etas).length > 0) evidence.slotPrefillEtaSeconds = etas;
+  return evidence;
 }
 
 /** Sane floor for the no-candidate cooldown (the pause cannot be disabled or set trivially small). */
@@ -320,6 +456,30 @@ export const DOWNTIME_MAX_ATTEMPTS_MIN = 1;
 
 /** Hard ceiling for `maxAttempts` (10): above this the cap is effectively disabled. */
 export const DOWNTIME_MAX_ATTEMPTS_MAX = 10;
+
+/**
+ * Default depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
+ * WL-0MVEDM8OT007WDRS AC1).
+ *
+ * Bounds how many SEQUENTIAL audit dispatches one continuous idle window
+ * may issue when the audit-eligible depth reaches `browseItemCount`. The
+ * default `2` is conservative: batching is on (the queue drains without a
+ * fresh full idle period between audits) but the per-window LLM load stays
+ * small.
+ */
+export const DEFAULT_DOWNTIME_AUDIT_BATCH_MAX = 2;
+
+/**
+ * Hard floor for `downtimeAuditBatchMax` (1): `1` means batching OFF and
+ * restores the legacy single-dispatch-per-idle-window behaviour.
+ */
+export const DOWNTIME_AUDIT_BATCH_MAX_MIN = 1;
+
+/**
+ * Hard ceiling for `downtimeAuditBatchMax` (5): mirrors the audit skill's
+ * `AUDIT_BATCH_MAX_ITEMS` — above this the per-window LLM load is unbounded.
+ */
+export const DOWNTIME_AUDIT_BATCH_MAX_MAX = 5;
 
 /**
  * Per-process dispatch-PIPELINE single-flight bound (WL-0MT50LKAK001EF5Q).
@@ -456,6 +616,36 @@ export const MIN_DOWNTIME_STALL_THRESHOLD_MS = 60 * 1000;
  * stalled pane could sit unattended for over an hour, defeating the feature.
  */
 export const MAX_DOWNTIME_STALL_THRESHOLD_MS = 60 * 60 * 1000;
+
+/**
+ * Default progress window before a live-agent pane is reported as
+ * long-running (WL-0MVKNC2N50025HXE AC2): 3 hours. Comfortably longer than a
+ * legitimate implement/audit session's normal stage transition, while short
+ * enough that an overnight session making no progress surfaces the same night.
+ *
+ * Defined here (the dispatcher's settings owner) so `long-running-panes.ts`
+ * imports it and the worker needs only a TYPE import of that module — no
+ * runtime import cycle (the same layering as the stall threshold).
+ */
+export const DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS = 3 * 60 * 60 * 1000;
+
+/** Hard floor for the long-running window (1 h) — below this, normal sessions alert. */
+export const DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS = 60 * 60 * 1000;
+
+/** Hard ceiling for the long-running window (48 h). */
+export const DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Clamp the long-running progress window to `[1 h, 48 h]`. Non-finite /
+ * missing / invalid values fall back to the default (3 h).
+ */
+export function clampDowntimeLongRunningThresholdMs(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS),
+    DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS,
+  );
+}
 
 /**
  * Three-strike rule: this many consecutive CLI-error dispatch outcomes
@@ -653,6 +843,98 @@ export interface LlamaStatus {
    * dispatch) rather than falling back to the count.
    */
   slots?: LlamaSlot[];
+  /**
+   * Schema-v2 payload version (LP-0MVGDUVGE0024YAI). ABSENT on pre-v2
+   * proxies. Consumers must gate new behaviour on a value >= 2.
+   */
+  status_schema_version?: number;
+  /**
+   * Schema-v2 pool summary (LP-0MVGDUVGE0024YAI). Defensive: `saturated`
+   * never admits a dispatch, even when the per-slot detail looks free
+   * (inconsistent payloads fail closed). ABSENT on pre-v2 proxies.
+   */
+  capacity_hint?: LlamaCapacityHint;
+  /**
+   * Schema-v2 admission-guard wait budget in seconds; advisory/observability
+   * only in this consumer. ABSENT on pre-v2 proxies.
+   */
+  prefill_budget_seconds?: number | null;
+  /**
+   * Prefill serialisation gate (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX):
+   * the number of local prefills CURRENTLY in flight. Availability-affecting:
+   * a malformed (non-finite / negative) value rejects the poll (fail-closed),
+   * mirroring `contention_queue_depth`. ABSENT on pre-feature proxies (no
+   * prefill pacing — today's behaviour exactly).
+   */
+  local_prefills_in_flight?: number;
+  /**
+   * The proxy's effective prefill concurrency cap: `1` = serialised (the
+   * default), `0` = gate disabled (the cap becomes the slot pool). When
+   * `> 0` and `local_prefills_in_flight >= local_max_concurrent_prefills`
+   * the prefill capacity budget is 0 for that tick. Availability-affecting
+   * (malformed → poll rejected). ABSENT on pre-feature proxies.
+   */
+  local_max_concurrent_prefills?: number;
+  /**
+   * Requests waiting on the proxy's prefill gate — the live
+   * contention-queue depth for the gate. `> 0` is contention evidence,
+   * equivalent to a non-empty `contention_queue_depth`
+   * (WL-0MVHSZRZQ00482QX AC3). Availability-affecting (malformed → poll
+   * rejected). ABSENT on pre-feature proxies.
+   */
+  prefill_gate_waiters?: number;
+  /**
+   * Prefill-ETA guard's projected queue wait in seconds
+   * (LP-0MVGDUV5E005UWBQ): when present and finite together with
+   * `prefill_budget_seconds` and above it, the dispatcher defers rather than
+   * parking a pane behind a doomed wait. Advisory (a malformed value
+   * degrades to undefined and never blocks dispatch). ABSENT on pre-feature
+   * proxies.
+   */
+  queue_eta_seconds?: number | null;
+  /**
+   * PROXY-AUTHORITATIVE local idle age in SECONDS (LP-0MVGD9Z8Z0055Y5J,
+   * WL-0MVHSZR9C0012NQY): the monotonic idle age of the local backend,
+   * updated by the proxy on dispatch start, on every forwarded SSE chunk and
+   * on request finish. Its baseline is the PROXY PROCESS start, so a freshly
+   * restarted proxy reports its true idle age rather than "unknown".
+   *
+   * When present and finite it is the AUTHORITATIVE idle-age signal for
+   * threshold qualification: `>= thresholdSeconds` satisfies the duration
+   * requirement on this poll (no local accumulation needed — the GPU may have
+   * been idle for hours before this worker started polling), and
+   * `< thresholdSeconds` refuses regardless of an older local tracker run.
+   * ABSENT on pre-feature proxies (or malformed/non-finite) → the local
+   * tracker decides exactly as before.
+   */
+  local_idle_seconds?: number;
+  /**
+   * Wall-clock timestamp (ISO string) of the last local activity
+   * (LP-0MVGD9Z8Z0055Y5J): operator-facing evidence recorded in the decision
+   * log. Never a gate. ABSENT on pre-feature proxies; malformed values
+   * degrade to undefined (never reject the poll).
+   */
+  local_last_activity_at?: string;
+  /**
+   * What last touched the local backend (LP-0MVGD9Z8Z0055Y5J): `dispatch` /
+   * `chunk` / `finish` / startup … Operator-facing evidence in the decision
+   * log — it explains WHY the backend is busy/idle. Never a gate. ABSENT on
+   * pre-feature proxies; malformed values degrade to undefined.
+   */
+  local_last_activity_source?: string;
+}
+
+/**
+ * The proxy-reported local idle age in SECONDS when it is usable, else
+ * `null` (WL-0MVHSZR9C0012NQY). Fail-closed/backward compatible: an absent,
+ * non-finite or negative value is never treated as "idle forever" — it
+ * returns `null` so the caller falls back to the local idle tracker exactly
+ * as a pre-feature proxy would.
+ */
+export function reportedIdleSeconds(status: LlamaStatus): number | null {
+  const seconds = status.local_idle_seconds;
+  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return null;
+  return seconds;
 }
 
 /**
@@ -662,6 +944,10 @@ export interface LlamaStatus {
  * and clamps negatives to 0 (WL-0MSVRMAWM007QNR5), so the normalized
  * `slot_id` is always a non-empty string — the per-slot idle tracker keys
  * its timers by it.
+ *
+ * Schema v2 (LP-0MVGDUVGE0024YAI) adds `lease_state`, `phase`,
+ * `context_tokens` and `prefill_eta_seconds`; all are additive, so a pre-v2
+ * payload parses exactly as before.
  */
 export interface LlamaSlot {
   slot_id: string;
@@ -669,12 +955,46 @@ export interface LlamaSlot {
   /**
    * Per-slot Local Proxy owner session id (AC5, parent WL-0MTYZXSLN008HZOW):
    * the pi session currently holding this slot's lease, or undefined/null
-   * when the slot is unowned. ABSENT on pre-feature proxies. A slot with a
-   * non-null owner is NEVER considered free for a new dispatch (the owner
-   * holds the lease until `release-lease-on-exit.mjs` releases it).
+   * when the slot is unowned. ABSENT on pre-feature proxies. On pre-v2
+   * payloads (no `lease_state`) a non-null owner is NEVER considered free
+   * for a new dispatch; with schema-v2 `lease_state` the lease state is
+   * authoritative and `idle_leased` IS dispatchable capacity
+   * (LP-0MVGDUVGE0024YAI).
    */
   owner_session_id?: string | null;
+  /**
+   * Schema-v2 lease state (LP-0MVGDUVGE0024YAI). ABSENT on pre-v2 proxies.
+   * Availability uses this when present: only `generating` is busy.
+   */
+  lease_state?: LlamaSlotLeaseState;
+  /** Schema-v2 phase inference; advisory only (never gates dispatch). */
+  phase?: LlamaSlotPhase | null;
+  /** Schema-v2 prompt progress; advisory only. */
+  context_tokens?: number | null;
+  /** Schema-v2 calibrated prefill cost; advisory only. */
+  prefill_eta_seconds?: number | null;
 }
+
+/**
+ * Per-slot lease state served by schema-v2 proxies (LP-0MVGDUVGE0024YAI):
+ * `generating` while a prefill/decode is in flight, `idle_leased` when the
+ * slot is not processing but a live lease still reserves it (including the
+ * post-stream cooldown), and `free` otherwise. Only `generating` is
+ * genuinely busy; `idle_leased` is the reserved-but-idle case the upstream
+ * change removes from the false-busy set.
+ */
+export type LlamaSlotLeaseState = 'generating' | 'idle_leased' | 'free';
+
+/** Proxy-side per-slot phase inference (schema v2; null when not processing). */
+export type LlamaSlotPhase = 'prefill' | 'decode';
+
+/**
+ * One-field summary of whether the local pool is genuinely working
+ * (schema v2): `idle` = at least one free slot or every occupied slot is
+ * `idle_leased`; `prefill_bound` = no free slot and at least one prefill;
+ * `saturated` = no free slot and every occupied slot is decoding.
+ */
+export type LlamaCapacityHint = 'idle' | 'prefill_bound' | 'saturated';
 
 // ── Idle detection (implemented) ──────────────────────────────────────
 
@@ -688,7 +1008,8 @@ export interface LlamaSlot {
  * `local_active_query` is the SOLE busy signal for the query gate:
  * `true` → busy, `false` → not busy from queries. ABSENT on pre-fix proxies
  * → busy (fail-closed), preventing dispatch when the busy signal is
- * unverifiable.
+ * unverifiable. With schema-v2 truthful `lease_state` the coarse global
+ * lease flag is superseded by per-slot availability (LP-0MVGDUVGE0024YAI).
  */
 function globalIdleChecks(status: LlamaStatus): boolean {
   if (!status.llama_server_running) return false;
@@ -696,8 +1017,28 @@ function globalIdleChecks(status: LlamaStatus): boolean {
   // true → busy, false → not busy, absent (pre-fix proxy) → busy (fail-closed).
   if (status.local_active_query !== false) return false;
   if (status.model_switch_in_progress) return false;
-  if (status.local_lease_active) return false;
+  // Schema v2 (LP-0MVGDUVGE0024YAI): truthful per-slot lease_state supersedes
+  // the coarse global `local_lease_active` flag — an `idle_leased` slot is
+  // reserved-but-idle and must not block dispatch. Without truthful
+  // per-slot lease state keep the fail-closed global gate.
+  if (!hasTruthfulLeaseState(status) && status.local_lease_active) return false;
   return true;
+}
+
+/**
+ * True when the payload carries schema-v2 truthful per-slot lease state:
+ * version >= 2 AND every reported slot has a `lease_state`. A mixed or
+ * pre-v2 payload returns false, so the legacy `owner_session_id` /
+ * `local_lease_active` rules apply unchanged.
+ */
+function hasTruthfulLeaseState(status: LlamaStatus): boolean {
+  return (
+    typeof status.status_schema_version === 'number' &&
+    status.status_schema_version >= 2 &&
+    Array.isArray(status.slots) &&
+    status.slots.length > 0 &&
+    status.slots.every((slot) => slot.lease_state !== undefined)
+  );
 }
 
 /**
@@ -718,26 +1059,45 @@ function perSlotGlobalIdleChecks(status: LlamaStatus): boolean {
 }
 
 /**
- * True when a slot carries a live Local Proxy owner lease (AC5, parent
- * WL-0MTYZXSLN008HZOW): a non-empty `owner_session_id` means the slot is
- * owned by a live pane and must NEVER be considered free for a new
- * dispatch until `release-lease-on-exit.mjs` releases it.
+ * True when a slot reports a live Local Proxy owner (AC5, parent
+ * WL-0MTYZXSLN008HZOW): a non-empty `owner_session_id`. On PRE-v2 payloads
+ * this means the slot must never be considered free for a new dispatch until
+ * `release-lease-on-exit.mjs` releases it. With schema-v2 `lease_state`
+ * (LP-0MVGDUVGE0024YAI) use {@link isSlotAvailableForDispatch} instead — an
+ * `idle_leased` slot is owned but still dispatchable capacity.
  */
 export function isSlotOwned(slot: LlamaSlot): boolean {
   return typeof slot.owner_session_id === 'string' && slot.owner_session_id.length > 0;
 }
 
 /**
- * Count slots that are BOTH not processing AND unowned — the only slots
- * eligible for a new dispatch (AC5). Fail-closed: a slot without an
- * explicit boolean `is_processing` is treated as processing (busy); an
- * owned slot is treated as busy regardless of `is_processing`.
+ * True when a slot is dispatchable capacity.
+ *
+ * Fail-closed: a slot without an explicit boolean `is_processing` is treated
+ * as busy. With schema-v2 `lease_state` (LP-0MVGDUVGE0024YAI) only
+ * `generating` is busy — `idle_leased` is reserved-but-idle and `free` is
+ * available. On pre-v2 payloads the legacy `owner_session_id` rule applies:
+ * any live owner lease makes the slot busy (AC5, WL-0MTYZXSLN008HZOW).
+ */
+export function isSlotAvailableForDispatch(slot: LlamaSlot): boolean {
+  if (typeof slot.is_processing !== 'boolean' || slot.is_processing) return false;
+  if (slot.lease_state !== undefined) return slot.lease_state !== 'generating';
+  return !isSlotOwned(slot);
+}
+
+/**
+ * Count slots eligible for a new dispatch. Fail-closed: a slot without an
+ * explicit boolean `is_processing` is treated as processing (busy).
+ *
+ * Schema v2 (LP-0MVGDUVGE0024YAI): eligibility follows `lease_state`, so an
+ * `idle_leased` slot counts as capacity even though it still carries an
+ * owner. On pre-v2 payloads an owned slot remains busy (legacy behaviour,
+ * AC5).
  */
 export function countFreeUnownedSlots(slots: LlamaSlot[]): number {
   let count = 0;
   for (const slot of slots) {
-    if (typeof slot.is_processing !== 'boolean' || slot.is_processing) continue;
-    if (isSlotOwned(slot)) continue;
+    if (!isSlotAvailableForDispatch(slot)) continue;
     count += 1;
   }
   return count;
@@ -761,11 +1121,39 @@ function usablePerSlotSlots(status: LlamaStatus): LlamaSlot[] | null {
 }
 
 /**
+ * True when the poll itself reports LIVE local activity
+ * (WL-0MVHSZR9C0012NQY AC3): a busy/owned slot, a coarse live lease (only
+ * when the payload carries no truthful per-slot `lease_state`, mirroring
+ * `globalIdleChecks`), or a live contention/gate waiter.
+ *
+ * Activity evidence ALWAYS outranks the proxy's reported
+ * `local_idle_seconds`: a contradictory payload (large idle age + live work)
+ * is refused the idle-age shortcut and falls back to the local tracker
+ * exactly as a pre-feature proxy would (fail closed, never dispatch on
+ * unverifiable signals). Per-slot continuous-free semantics are untouched —
+ * this only decides whether the GLOBAL idle age may satisfy the DURATION
+ * requirement on this poll.
+ */
+function pollShowsLocalActivity(
+  status: LlamaStatus,
+  slots: LlamaSlot[],
+  contentionDepth: number,
+): boolean {
+  if (contentionDepth > 0) return true;
+  // Schema v2: truthful per-slot `lease_state` supersedes the coarse global
+  // flag (an `idle_leased` slot is reserved-but-idle capacity).
+  if (!hasTruthfulLeaseState(status) && status.local_lease_active === true) return true;
+  return slots.some((slot) => !isSlotAvailableForDispatch(slot));
+}
+
+/**
  * True when the proxy reports an idle state for the required free-slot
  * count:
  *
  *  - llama-server is running,
- *  - no active query, model switch, or local lease,
+ *  - no active query or model switch, and (on pre-v2 payloads) no local
+ *    lease — with schema-v2 truthful `lease_state` the per-slot state
+ *    decides, so `idle_leased` does not block dispatch,
  *  - `requiredFreeSlots <= 0` (default) requires ALL slots free
  *    (`available_slots >= total_slots`) with `total_slots > 0`,
  *  - a positive N requires at least N slots free; N > total_slots can never
@@ -806,6 +1194,10 @@ export function isIdleStatus(status: LlamaStatus, requiredFreeSlots: number): bo
  *    be satisfied.
  */
 export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): boolean {
+  // Schema-v2 defensive cross-check (LP-0MVGDUVGE0024YAI AC4): a saturated
+  // pool is never idle, even if the per-slot detail looks inconsistent.
+  if (status.capacity_hint === 'saturated') return false;
+
   const total = status.total_slots;
   if (!Number.isFinite(total) || total <= 0) return false; // ambiguous → busy
 
@@ -827,6 +1219,107 @@ export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): bo
   // `is_processing` is treated as processing (busy), never free. Owned
   // slots (live lease) are excluded (AC5, WL-0MTYZXSLN008HZOW).
   return countFreeUnownedSlots(perSlotSlots) >= required;
+}
+
+// ── Prefill-gate pacing (WL-0MVHSZRZQ00482QX) ────────────────────────
+
+/**
+ * Per-tick prefill pacing decision derived from the proxy's serialisation
+ * gate (LP-0MVGDUUV3001XFRJ) and prefill-ETA guard (LP-0MVGDUV5E005UWBQ).
+ *
+ * Every field is optional and absent on a pre-feature proxy, so an absent
+ * gate restores today's free-slot-only budget exactly (`capacityBudget`
+ * `undefined`, `deferReason` `undefined`).
+ */
+export interface PrefillPacing {
+  /** `local_prefills_in_flight` when served. */
+  inFlight?: number;
+  /** `local_max_concurrent_prefills` when served (`0` = gate disabled). */
+  cap?: number;
+  /** `prefill_gate_waiters` when served (live gate queue depth). */
+  gateWaiters?: number;
+  /** `prefill_budget_seconds` when served (the admission wait budget). */
+  budgetSeconds?: number;
+  /** `queue_eta_seconds` when served (projected queue wait). */
+  queueEtaSeconds?: number;
+  /** Highest per-slot `prefill_eta_seconds` observed in flight. */
+  maxSlotPrefillEtaSeconds?: number;
+  /**
+   * Remaining prefill concurrency headroom: `0` while the cap is reached,
+   * otherwise `cap - inFlight` (at least 1). `undefined` = unbounded — the
+   * cap is absent or `0`, or the in-flight count is not served, so pacing
+   * must not reduce today's free-slot budget.
+   */
+  capacityBudget?: number;
+  /**
+   * Distinct reason a dispatch is paced this tick, in precedence order:
+   * gate waiters (contention evidence) → cap saturated → projected wait
+   * above the admission budget. `undefined` = no prefill pacing.
+   */
+  deferReason?: 'prefill-gate' | 'prefill-cap' | 'prefill-eta';
+}
+
+/**
+ * Compute the prefill pacing decision for one poll.
+ *
+ * PACING ONLY REDUCES CONCURRENCY: a missing/disabled cap leaves
+ * `capacityBudget` `undefined` (today's free-slot-only budget), and the
+ * caller takes `min(freeSlots, capacityBudget)`. `prefill_gate_waiters > 0`
+ * is contention evidence equivalent to a non-empty `contention_queue_depth`.
+ * A projected wait is deferred only when BOTH the ETA and the admission
+ * budget are present and finite — a missing value never blocks dispatch.
+ */
+export function evaluatePrefillPacing(
+  status: LlamaStatus,
+  slots: LlamaSlot[] | null,
+): PrefillPacing {
+  const pacing: PrefillPacing = {};
+
+  const inFlight = status.local_prefills_in_flight;
+  if (typeof inFlight === 'number') pacing.inFlight = inFlight;
+  const cap = status.local_max_concurrent_prefills;
+  if (typeof cap === 'number') pacing.cap = cap;
+  const gateWaiters = status.prefill_gate_waiters;
+  if (typeof gateWaiters === 'number') pacing.gateWaiters = gateWaiters;
+  const budget = status.prefill_budget_seconds;
+  if (typeof budget === 'number') pacing.budgetSeconds = budget;
+  const queueEta = status.queue_eta_seconds;
+  if (typeof queueEta === 'number') pacing.queueEtaSeconds = queueEta;
+
+  if (slots !== null) {
+    for (const slot of slots) {
+      const eta = slot.prefill_eta_seconds;
+      if (typeof eta !== 'number') continue;
+      if (pacing.maxSlotPrefillEtaSeconds === undefined || eta > pacing.maxSlotPrefillEtaSeconds) {
+        pacing.maxSlotPrefillEtaSeconds = eta;
+      }
+    }
+  }
+
+  // Prefill capacity budget: only a POSITIVE cap with a known in-flight count
+  // can pace. `cap === 0` disables the gate (unbounded); an absent cap or
+  // in-flight count cannot be judged → unbounded (today's behaviour).
+  if (typeof cap === 'number' && cap > 0 && typeof inFlight === 'number') {
+    pacing.capacityBudget = inFlight >= cap ? 0 : cap - inFlight;
+  }
+
+  // Deferral precedence: gate waiters (contention) → cap saturated → ETA.
+  if (typeof gateWaiters === 'number' && gateWaiters > 0) {
+    pacing.deferReason = 'prefill-gate';
+    return pacing;
+  }
+  if (pacing.capacityBudget === 0) {
+    pacing.deferReason = 'prefill-cap';
+    return pacing;
+  }
+  if (typeof budget === 'number') {
+    const queueEtaExceeds = typeof queueEta === 'number' && queueEta > budget;
+    const slotEtaExceeds =
+      pacing.maxSlotPrefillEtaSeconds !== undefined &&
+      pacing.maxSlotPrefillEtaSeconds > budget;
+    if (queueEtaExceeds || slotEtaExceeds) pacing.deferReason = 'prefill-eta';
+  }
+  return pacing;
 }
 
 // ── Idle-duration tracker (implemented — F3) ──────────────────────────
@@ -908,8 +1401,9 @@ export function createPerSlotIdleTracker(): PerSlotIdleTracker {
       const reported = new Set<string>();
       for (const slot of slots) {
         reported.add(slot.slot_id);
-        if (slot.is_processing || isSlotOwned(slot)) {
-          idleSince.set(slot.slot_id, null); // processing or owned → own timer reset only
+        if (!isSlotAvailableForDispatch(slot)) {
+          // Processing / generating / pre-v2-owned → this slot's timer resets.
+          idleSince.set(slot.slot_id, null);
         } else {
           idleSince.set(slot.slot_id, idleSince.get(slot.slot_id) ?? now);
         }
@@ -999,6 +1493,46 @@ function parseOptionalCount(value: unknown): number | undefined | null {
   if (value === undefined) return undefined;
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return null;
   return value;
+}
+
+/** Schema-v2 enum vocabularies (LP-0MVGDUVGE0024YAI). */
+const LEASE_STATES: ReadonlySet<string> = new Set(['generating', 'idle_leased', 'free']);
+const CAPACITY_HINTS: ReadonlySet<string> = new Set(['idle', 'prefill_bound', 'saturated']);
+const SLOT_PHASES: ReadonlySet<string> = new Set(['prefill', 'decode']);
+
+/**
+ * Parse an optional schema-v2 ADVISORY number (ETA / prompt progress).
+ * Absent → undefined; explicit null → null (the proxy's "not computable"
+ * marker); malformed → undefined. Advisory fields must never reject an
+ * otherwise usable poll.
+ */
+function parseAdvisoryNumber(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined;
+  return value;
+}
+
+/** As {@link parseAdvisoryNumber} but for integer counters (context tokens). */
+function parseAdvisoryInteger(value: unknown): number | null | undefined {
+  const parsed = parseAdvisoryNumber(value);
+  return typeof parsed === 'number' && !Number.isInteger(parsed) ? undefined : parsed;
+}
+
+/**
+ * Parse an optional operator-facing ISO timestamp (last local activity).
+ * Absent, explicit null and malformed values (non-string, empty, unparseable)
+ * all degrade to `undefined` — these fields are evidence only and must never
+ * reject an otherwise usable poll (WL-0MVHSZR9C0012NQY).
+ */
+function parseAdvisoryTimestamp(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  return Number.isNaN(Date.parse(value)) ? undefined : value;
+}
+
+/** Parse an optional non-empty evidence label (activity source). */
+function parseAdvisoryLabel(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 /**
@@ -1095,18 +1629,74 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
       if (typeof slot.owner_session_id === 'string' && slot.owner_session_id.length > 0) {
         ownerSessionId = slot.owner_session_id;
       }
-      parsed.push(
-        ownerSessionId !== null
-          ? {
-              slot_id: slotId,
-              is_processing: slot.is_processing,
-              owner_session_id: ownerSessionId,
-            }
-          : { slot_id: slotId, is_processing: slot.is_processing },
-      );
+      // Schema v2 (LP-0MVGDUVGE0024YAI): `lease_state` is AVAILABILITY-
+      // affecting and fail-closed when malformed/unknown (ambiguous →
+      // null/busy). `phase`, `context_tokens` and `prefill_eta_seconds` are
+      // advisory and degrade to undefined instead of rejecting the poll.
+      let leaseState: LlamaSlotLeaseState | undefined;
+      if (slot.lease_state !== undefined) {
+        if (typeof slot.lease_state !== 'string' || !LEASE_STATES.has(slot.lease_state)) {
+          return null;
+        }
+        leaseState = slot.lease_state as LlamaSlotLeaseState;
+      }
+      let phase: LlamaSlotPhase | null | undefined;
+      if (slot.phase === null) {
+        phase = null;
+      } else if (typeof slot.phase === 'string' && SLOT_PHASES.has(slot.phase)) {
+        phase = slot.phase as LlamaSlotPhase;
+      }
+      const contextTokens = parseAdvisoryInteger(slot.context_tokens);
+      const prefillEta = parseAdvisoryNumber(slot.prefill_eta_seconds);
+      const parsedSlot: LlamaSlot = {
+        slot_id: slotId,
+        is_processing: slot.is_processing,
+      };
+      if (ownerSessionId !== null) parsedSlot.owner_session_id = ownerSessionId;
+      if (leaseState !== undefined) parsedSlot.lease_state = leaseState;
+      if (phase !== undefined) parsedSlot.phase = phase;
+      if (contextTokens !== undefined) parsedSlot.context_tokens = contextTokens;
+      if (prefillEta !== undefined) parsedSlot.prefill_eta_seconds = prefillEta;
+      parsed.push(parsedSlot);
     }
     slots = parsed;
   }
+
+  // Schema-v2 truthful capacity (LP-0MVGDUVGE0024YAI): version, pool
+  // summary and admission budget. `capacity_hint` is availability-affecting
+  // (fail-closed when malformed); the version and budget are advisory.
+  let statusSchemaVersion: number | undefined;
+  if (o.status_schema_version !== undefined) {
+    if (
+      typeof o.status_schema_version === 'number' &&
+      Number.isInteger(o.status_schema_version) &&
+      o.status_schema_version >= 0
+    ) {
+      statusSchemaVersion = o.status_schema_version;
+    }
+  }
+  let capacityHint: LlamaCapacityHint | undefined;
+  if (o.capacity_hint !== undefined) {
+    if (typeof o.capacity_hint !== 'string' || !CAPACITY_HINTS.has(o.capacity_hint)) {
+      return null;
+    }
+    capacityHint = o.capacity_hint as LlamaCapacityHint;
+  }
+  const prefillBudget = parseAdvisoryNumber(o.prefill_budget_seconds);
+
+  // Proxy-authoritative local idle age (LP-0MVGD9Z8Z0055Y5J,
+  // WL-0MVHSZR9C0012NQY). ABSENT on pre-feature proxies → every field stays
+  // undefined and the worker falls back to its own idle tracker exactly as
+  // before. All three are ADVISORY in the fail-closed sense: a malformed
+  // value degrades to `undefined` (backward-compatible fallback) instead of
+  // rejecting an otherwise usable poll. `reportedIdleSeconds` additionally
+  // rejects non-finite/negative ages, so a bad age can never read as
+  // "idle forever".
+  const parsedIdleSeconds = parseAdvisoryNumber(o.local_idle_seconds);
+  const localIdleSeconds =
+    typeof parsedIdleSeconds === 'number' ? parsedIdleSeconds : undefined;
+  const localLastActivityAt = parseAdvisoryTimestamp(o.local_last_activity_at);
+  const localLastActivitySource = parseAdvisoryLabel(o.local_last_activity_source);
 
   // Optional contention metrics (AC6, WL-0MTYZXSLN008HZOW): ABSENT on
   // pre-feature proxies → undefined (treated as 0, no contention evidence).
@@ -1120,6 +1710,20 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
   if (contentionQueueDepth === null) return null;
   const contentionQueuedCount = parseOptionalCount(o.contention_queued_count);
   if (contentionQueuedCount === null) return null;
+
+  // Prefill serialisation gate (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX):
+  // the three gate counters are AVAILABILITY-affecting — a malformed value is
+  // ambiguous → null (busy, fail-closed), exactly like
+  // `contention_queue_depth`. ABSENT on pre-feature proxies → undefined (no
+  // pacing, today's behaviour). `queue_eta_seconds` is an ETA and therefore
+  // ADVISORY: a malformed value degrades to undefined and never blocks.
+  const localPrefillsInFlight = parseOptionalCount(o.local_prefills_in_flight);
+  if (localPrefillsInFlight === null) return null;
+  const localMaxConcurrentPrefills = parseOptionalCount(o.local_max_concurrent_prefills);
+  if (localMaxConcurrentPrefills === null) return null;
+  const prefillGateWaiters = parseOptionalCount(o.prefill_gate_waiters);
+  if (prefillGateWaiters === null) return null;
+  const queueEtaSeconds = parseAdvisoryNumber(o.queue_eta_seconds);
 
   return {
     llama_server_running: o.llama_server_running,
@@ -1141,6 +1745,16 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     contention_queued_count: contentionQueuedCount,
     slots,
     slots_stale: slotsStale,
+    status_schema_version: statusSchemaVersion,
+    capacity_hint: capacityHint,
+    prefill_budget_seconds: prefillBudget,
+    local_prefills_in_flight: localPrefillsInFlight,
+    local_max_concurrent_prefills: localMaxConcurrentPrefills,
+    prefill_gate_waiters: prefillGateWaiters,
+    queue_eta_seconds: queueEtaSeconds,
+    local_idle_seconds: localIdleSeconds,
+    local_last_activity_at: localLastActivityAt,
+    local_last_activity_source: localLastActivitySource,
   };
 }
 
@@ -2042,14 +2656,8 @@ export interface DowntimeWorkerDeps {
       itemTitle?: string;
       itemId?: string;
       anchorId?: string;
-      /**
-       * Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME): the
-       * worker forwards the genuine free-slot snapshot and mode so the spawn
-       * boundary can set `AUDIT_PHASE2_PARALLELISM` without reaching back
-       * into the worker. Absent → the spawn falls back to `'1'` (backward
-       * compatible).
-       */
-      spawnConfig?: DowntimeSpawnConfig;
+      /** Raw work-item priority of the dispatched candidate (parent AC3). */
+      priority?: string | null;
     },
   ): Promise<DowntimeSpawnResult>;
   /**
@@ -2264,6 +2872,26 @@ export interface DowntimeWorkerDeps {
     opts: StalledScanOptions,
   ): Promise<StalledResumeOutcome>;
   /**
+   * Machine-wide LONG-RUNNING pane scan (WL-0MVKNC2N50025HXE AC2): report live
+   * agent panes whose non-terminal item has had NO observable progress (no
+   * `updatedAt` bump, no fresh dispatch marker) for the configured window —
+   * INCLUDING panes whose `agent_status` is `working`.
+   *
+   * Consulted ONLY when a capacity-starvation signal fires (the dispatcher
+   * has refused every tick on local capacity for the configured window), so
+   * the signal names the panes holding the model. OBSERVATION ONLY: nothing
+   * in this path may resume, prompt or close a pane — a legitimately long
+   * session must never be interrupted by an alert.
+   *
+   * OPTIONAL — when absent the starvation signal is emitted without pane
+   * evidence. Must never throw: an unreadable/unparseable scan resolves an
+   * empty array.
+   */
+  scanLongRunningPanes?(
+    cwd: string,
+    opts: LongRunningScanOptions,
+  ): Promise<LongRunningPaneObservation[]>;
+  /**
    * Record a persistent CLI-error event (three consecutive wl failures).
    * Must never throw (fail-closed): logging must not crash the worker.
    */
@@ -2452,6 +3080,50 @@ export interface DowntimeDispatchOutcome {
    * Absent/false on every other outcome.
    */
   ownBacklogDispatch?: boolean;
+
+  /**
+   * Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1/AC2/AC3).
+   * Present on every AUDIT dispatch and on pre-selection gate refusals of an
+   * audit-batch continuation; absent on non-audit dispatches and on hard
+   * dispatch failures (spawn/marker/anchor/claim-rollback), which end the
+   * batch without a continuation surface. The worker loop defers the
+   * post-dispatch idle-tracker reset ONLY when `kind === 'audit'` and this
+   * status reports `active === true` with `remaining > 0`.
+   */
+  auditBatch?: DowntimeAuditBatchStatus;
+
+  /**
+   * True when this outcome came from an AUDIT-BATCH CONTINUATION — the leader
+   * sourced the target from its own Herdr head while a batch was armed
+   * (parent WL-0MVEDM8OT007WDRS AC4, implementation WL-0MVFE1DD8000D8T2).
+   *
+   * The worker loop uses it to keep the leadership hand-off deferred: the
+   * own-backlog step-down (`releaseLeadership()`) must happen exactly once, at
+   * BATCH END, never mid-batch. `dispatchFromCoordination` therefore raises
+   * `ownBacklogDispatch` for a continuation only when that dispatch ends the
+   * batch (cap reached / depth dropped); every other continuation leaves both
+   * flags false so the leader keeps draining its own head within the same
+   * idle window. Absent on every non-continuation outcome.
+   */
+  auditBatchContinuation?: boolean;
+}
+
+/**
+ * Depth-aware audit-batch status (parent WL-0MVEDM8OT007WDRS AC1/AC2/AC3).
+ *
+ * `depth` is the audit-eligible depth derived from the ALREADY-FETCHED Herdr
+ * head (no extra `wl` subprocess); `cap` is the clamped
+ * `downtimeAuditBatchMax`; `remaining` is the number of continuation audits
+ * still available AFTER the dispatch that produced this status (0 when the
+ * batch is inactive or its cap is consumed). `active` is true only while
+ * batching is engaged: `depth >= browseItemCount`, `cap > 1` and a
+ * continuation budget was available before the dispatch.
+ */
+export interface DowntimeAuditBatchStatus {
+  active: boolean;
+  depth: number;
+  cap: number;
+  remaining: number;
 }
 
 /**
@@ -2534,6 +3206,120 @@ export async function readReviewQueueGate(
     deep: count === null || count >= browseItemCount,
     count,
     threshold: browseItemCount,
+  };
+}
+
+/**
+ * Audit-eligible depth derived from the ALREADY-FETCHED Herdr head (parent
+ * WL-0MVEDM8OT007WDRS AC1). Root `completed`/`in_review` items (mandatory in
+ * the head) are classified with the SAME eligibility definition as the
+ * dispatch path — `classifyItemForDispatch` — so no second eligibility
+ * definition exists and no extra `wl` subprocess is added to the common
+ * dispatch path. The classifier excludes fresh-audited items, producer-review
+ * holds, assignee-held items and soft-deleted items.
+ *
+ * `now` is injectable for deterministic tests.
+ */
+export function computeAuditEligibleDepth(
+  items: DowntimeHerdrItem[],
+  now: number = Date.now(),
+): number {
+  let depth = 0;
+  for (const item of items) {
+    const info: DowntimeItemInfo = {
+      id: item.id,
+      title: item.title,
+      status: item.status,
+      stage: item.stage,
+      priority: item.priority,
+      risk: item.risk,
+      effort: item.effort,
+      auditedAt: item.auditedAt,
+      updatedAt: item.updatedAt,
+      sortIndex: item.sortIndex,
+      deletedBy: item.deletedBy,
+      assignee: item.assignee,
+      needsProducerReview: item.needsProducerReview,
+    };
+    if (classifyItemForDispatch(info, now) === 'audit') depth += 1;
+  }
+  return depth;
+}
+
+/**
+ * Resolve the depth-aware audit-batch status for a DISPATCHED audit outcome
+ * (parent WL-0MVEDM8OT007WDRS AC1). The batch is engaged only while the
+ * audit-eligible depth is at/over `browseItemCount`, the clamped cap is above
+ * 1 (`1` = legacy/off) and a continuation budget was available BEFORE this
+ * dispatch (absent `auditBatchRemaining` initialises the budget to the cap —
+ * the first dispatch of a batch). `remaining` is the budget AFTER this
+ * dispatch; an inactive batch always reports `remaining: 0`.
+ */
+export function resolveAuditBatchStatus(
+  cap: number,
+  depth: number,
+  threshold: number,
+  remainingBefore: number,
+): DowntimeAuditBatchStatus {
+  const active = cap > 1 && depth >= threshold && remainingBefore > 0;
+  return {
+    active,
+    depth,
+    cap,
+    remaining: active ? Math.max(0, remainingBefore - 1) : 0,
+  };
+}
+
+// Hard post-selection failures that END an audit batch without a continuation
+// surface (parent WL-0MVEDM8OT007WDRS AC3): the item was claimed/marked and
+// the dispatch failed — the caller's strike/skip semantics decide. These
+// outcomes keep the historical shape (no `auditBatch` field at all), the same
+// signal a non-continuation dispatch uses.
+const AUDIT_BATCH_HARD_FAILURE_REASONS = new Set([
+  'spawn-failed',
+  'wl-error',
+  'marker-write-failed',
+  'claim-rolled-back',
+  'anchor-unavailable',
+]);
+
+/**
+ * Attach the audit-batch surface to one dispatch outcome (parent
+ * WL-0MVFE1BTB0084T17):
+ *
+ *  - a dispatched AUDIT outcome gets its resolved status (active only when
+ *    the depth/cap/budget conditions hold);
+ *  - a dispatched NON-audit outcome never carries `auditBatch` (regression
+ *    safety — non-audit dispatch resets the tracker and never arms a batch);
+ *  - a hard failure (spawn-failed / marker-write-failed / claim-rolled-back /
+ *    anchor-unavailable / wl-error) keeps today's shape — no `auditBatch`;
+ *  - every other non-dispatched outcome (a gate refused a continuation)
+ *    reports an explicit INACTIVE status so the worker knows the batch is
+ *    over without relaxing any gate.
+ */
+export function finalizeAuditBatchOutcome(
+  outcome: DowntimeDispatchOutcome,
+  ctx: { depth: number; cap: number; threshold: number; remainingBefore: number },
+): DowntimeDispatchOutcome {
+  if (outcome.dispatched) {
+    if (outcome.kind !== 'audit') return outcome;
+    return {
+      ...outcome,
+      auditBatch: resolveAuditBatchStatus(
+        ctx.cap,
+        ctx.depth,
+        ctx.threshold,
+        ctx.remainingBefore,
+      ),
+    };
+  }
+  if (outcome.auditBatch !== undefined) return outcome;
+  if (outcome.reason !== undefined && AUDIT_BATCH_HARD_FAILURE_REASONS.has(outcome.reason)) {
+    return outcome;
+  }
+  return {
+    ...outcome,
+    auditBatch: { active: false, depth: ctx.depth, cap: ctx.cap, remaining: 0 },
   };
 }
 
@@ -2754,7 +3540,7 @@ export async function resumeStalledWorkIfAble(
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes; spawnConfig?: DowntimeSpawnConfig },
+  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
   flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
@@ -2835,7 +3621,6 @@ async function dispatchFromHerdrList(
       cwd: ctx.cwd,
       selectionPath: 'critical-first',
       selectionReason: guard.reason,
-      spawnConfig: ctx.spawnConfig,
     });
     if (outcome.dispatched) return outcome;
     // A lost CAS race / marker-recovery rollback applies to one candidate:
@@ -2967,7 +3752,6 @@ async function dispatchFromHerdrList(
       cwd: ctx.cwd,
       selectionPath: 'normal-scan',
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
-      spawnConfig: ctx.spawnConfig,
     });
     if (outcome.dispatched) return outcome;
     if (outcome.reason === 'claim-failed') continue;
@@ -3045,8 +3829,6 @@ async function dispatchClaimedTier(
     cwd: string;
     selectionPath?: string;
     selectionReason?: string;
-    /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
-    spawnConfig?: DowntimeSpawnConfig;
   },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
@@ -3230,15 +4012,14 @@ async function dispatchClaimedTier(
       // `Downtime triggered <kind> <title> - <id>`.
       itemTitle: candidate.title,
       itemId: candidate.id,
+      // Request priority (parent AC3): the candidate's raw work-item
+      // priority, mapped through the downtime table by the spawn boundary.
+      priority: candidate.priority,
       // Dispatcher anchor (C0): split from the dedicated Dispatcher anchor
       // pane so this pane lands in the Dispatcher workspace regardless of
       // leadership. Only set when the anchor resolved (never a bare
       // undefined key — legacy callers keep their exact opts shape).
       ...(anchorId !== undefined ? { anchorId } : {}),
-      // Mode-aware Phase 2 parallelism (WL-0MT50S9JW001DHME): only set when
-      // the worker supplied a snapshot (legacy/test callers keep the exact
-      // historical opts shape and fall back to '1').
-      ...(opts.spawnConfig !== undefined ? { spawnConfig: opts.spawnConfig } : {}),
     },
   );
   if (!spawn.ok) {
@@ -3437,7 +4218,7 @@ async function recordDispatchEnrichmentBestEffort(
 async function dispatchScheduledPrompt(
   deps: DowntimeWorkerDeps,
   prompt: ScheduledPrompt,
-  opts: { model: string; cwd: string; spawnConfig?: DowntimeSpawnConfig },
+  opts: { model: string; cwd: string },
 ): Promise<DowntimeDispatchOutcome> {
   const at = new Date().toISOString();
 
@@ -3498,7 +4279,6 @@ async function dispatchScheduledPrompt(
     cwd: opts.cwd,
     paneName: `Downtime ${prompt.id}`,
     ...(anchorId !== undefined ? { anchorId } : {}),
-    ...(opts.spawnConfig !== undefined ? { spawnConfig: opts.spawnConfig } : {}),
   });
   if (!spawn.ok) {
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2 pattern): the audit log
@@ -4005,8 +4785,274 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; spawnConfig?: DowntimeSpawnConfig },
+  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number; /** Batch-local exclusion set: item ids already dispatched in the current audit batch (WL-0MVFE1DD8000D8T2 AC3/AC4). Never re-selected within one batch. */ auditBatchDispatchedIds?: readonly string[] },
   now: number = Date.now(),
+): Promise<DowntimeDispatchOutcome> {
+  // Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1–AC5):
+  // every outcome of this invocation is finalized against the leader's own
+  // audit-eligible depth so the worker can decide the idle-reset deferral and
+  // the (deferred) leadership hand-off without re-deriving state. Skipped
+  // entirely when the caller supplies no batch surface, keeping direct API
+  // callers byte-for-byte unchanged.
+  const batchSupplied =
+    opts.auditBatchMax !== undefined || opts.auditBatchRemaining !== undefined;
+  const batchRuntime = createCoordinationBatchRuntime(deps, opts, now);
+  const outcome = await dispatchFromCoordinationGated(deps, entries, opts, now, batchRuntime);
+  if (!batchSupplied) return outcome;
+  const cap = clampDowntimeAuditBatchMax(
+    opts.auditBatchMax ?? DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+  );
+  const remainingBefore =
+    opts.auditBatchRemaining === undefined
+      ? cap
+      : Math.max(0, Math.trunc(opts.auditBatchRemaining));
+  const threshold = resolveSprintViewWindow(opts.browseItemCount);
+  const finalized = finalizeAuditBatchOutcome(outcome, {
+    depth: await batchRuntime.readDepth(),
+    cap,
+    threshold,
+    remainingBefore,
+  });
+  if (finalized.auditBatchContinuation !== true) return finalized;
+  // AC4: the own-backlog leadership hand-off is deferred to BATCH END. Raise
+  // the step-down surface only when THIS continuation ended the batch (cap
+  // reached or depth dropped); a failed continuation never hands off (AC3).
+  const status = finalized.auditBatch;
+  const batchEnded = status === undefined || !status.active || status.remaining <= 0;
+  const { auditBatchContinuation: _continuation, ...rest } = finalized;
+  return {
+    ...rest,
+    auditBatchContinuation: true,
+    ownBacklogDispatch: finalized.dispatched && batchEnded,
+  };
+}
+
+/**
+ * Batch runtime shared between the coordination dispatcher and its finalizer
+ * (WL-0MVFE1DD8000D8T2 AC4): memoises the leader's own audit-eligible depth so
+ * one invocation reads the own Herdr head at most once, whether the read came
+ * from the continuation scan or from the outcome finalizer.
+ */
+interface CoordinationBatchRuntime {
+  /** Memoised audit-eligible depth over the leader's own head + window extension. */
+  readDepth(): Promise<number>;
+  /** Record a depth already computed from a window this invocation read. */
+  setDepth(depth: number): void;
+}
+
+function createCoordinationBatchRuntime(
+  deps: DowntimeWorkerDeps,
+  opts: { cwd: string; browseItemCount?: number },
+  now: number,
+): CoordinationBatchRuntime {
+  let depth: number | null = null;
+  let pending: Promise<number> | null = null;
+  return {
+    setDepth(value: number): void {
+      depth = value;
+    },
+    async readDepth(): Promise<number> {
+      if (depth !== null) return depth;
+      pending ??= (async () => {
+        const window = await readOwnHeadWindow(deps, opts.cwd, opts.browseItemCount);
+        return window === null
+          ? 0
+          : computeAuditEligibleDepth([...window.head, ...window.tail], now);
+      })();
+      depth = await pending;
+      return depth;
+    },
+  };
+}
+
+/**
+ * The leader's own dispatch window (WL-0MVFE1DD8000D8T2 AC4): the canonical
+ * ranking head windowed to the live sprint view, plus the bounded window
+ * EXTENSION (`fetchExtendedHerdrItems`, never a second ranking). Fail-open:
+ * a `{ok:false}`/thrown lookup resolves `null` — the caller then falls back to
+ * its unchanged behaviour or to a depth of 0 (no batch armed).
+ */
+async function readOwnHeadWindow(
+  deps: DowntimeWorkerDeps,
+  cwd: string,
+  browseItemCount?: number,
+): Promise<{ head: DowntimeHerdrItem[]; tail: DowntimeHerdrItem[] } | null> {
+  const sprintWindow = resolveSprintViewWindow(browseItemCount);
+  let ownHead: DowntimeHerdrListResult | null = null;
+  try {
+    ownHead = await deps.getHerdrListHead(cwd, sprintWindow);
+  } catch {
+    ownHead = null;
+  }
+  if (ownHead === null || !ownHead.ok) return null;
+  const tail = await fetchExtendedHerdrItems(deps, cwd, ownHead.items, {
+    includeNonCritical: true,
+  });
+  return { head: ownHead.items, tail };
+}
+
+/**
+ * Own-head candidate scan shared by the leader's own-backlog fallback
+ * (parent WL-0MUU4XFU90008E24) and the audit-batch continuation (parent
+ * WL-0MVEDM8OT007WDRS AC4).
+ *
+ * Factored out so the continuation applies the EXACT same sequential filter
+ * chain as the fallback — classify → dispatched-marker exclusion (id-guard) →
+ * attempt budget → non-terminal cooldown → code-freeze → audit slot minimum →
+ * critical in-flight guard → review-queue hold — with no duplicated gate
+ * logic. The scan never ranks: `window.head` + `window.tail` is the canonical
+ * order.
+ *
+ * Returns `null` when no candidate was dispatched or attempted (the caller
+ * keeps its original terminal reason), otherwise the dispatch outcome with
+ * `ownBacklogDispatch` deliberately LEFT UNSET — the caller decides the
+ * leadership hand-off semantics (the fallback hands off immediately, the
+ * batch continuation defers it to batch end).
+ */
+async function dispatchFromOwnHead(
+  deps: DowntimeWorkerDeps,
+  opts: { model: string; cwd: string },
+  ctx: {
+    window: { head: DowntimeHerdrItem[]; tail: DowntimeHerdrItem[] };
+    frozen: boolean;
+    auditEligible: boolean;
+    markerStaleWindowMs: number;
+    maxAttempts: number;
+    cooldownMs: number;
+    cooldownEntriesForRoot(root: string): Promise<DowntimeLogEntry[]>;
+    inFlightForRoot(root: string): Promise<InFlightPanes>;
+    reviewGateForRoot(root: string): Promise<ReviewQueueGateResult | null>;
+    /** Kinds this scan may dispatch; `null` = every classified kind. */
+    kinds: readonly DowntimeSkillKind[] | null;
+    /** Batch-local exclusion set (never re-selected within one batch). */
+    excludeIds: ReadonlySet<string>;
+    /** Selection reason recorded on the dispatch pipeline. */
+    selectionReason: string;
+    /** `claim-failed`/`claim-rolled-back` → try the next item (fallback) or end the scan (continuation). */
+    skipOnLostClaim: boolean;
+    /** Holds reported back to the caller's terminal-reason composition. */
+    holds: {
+      budget: boolean;
+      cooldown: boolean;
+      inFlight: boolean;
+      review: boolean;
+    };
+    /** Producer-review flag writes already performed this cycle (deduped). */
+    flaggedForBudget: Set<string>;
+  },
+  now: number,
+): Promise<DowntimeDispatchOutcome | null> {
+  const { head, tail } = ctx.window;
+  const ownTail = tail.filter(item => !ctx.excludeIds.has(item.id));
+  if (ownTail.length === 0) return null;
+  const ownEntries = await ctx.cooldownEntriesForRoot(opts.cwd);
+  const ownMarkerMaps: Record<DowntimeSkillKind, Map<string, DispatchMarker>> = {
+    audit: _dispatchedMarkers(ownEntries, 'audit'),
+    implement: _dispatchedMarkers(ownEntries, 'implement'),
+    plan: _dispatchedMarkers(ownEntries, 'plan'),
+    intake: _dispatchedMarkers(ownEntries, 'intake'),
+    'risk-effort': _dispatchedMarkers(ownEntries, 'risk-effort'),
+  };
+  const ownInFlight = await ctx.inFlightForRoot(opts.cwd);
+  void head; // the extension alone is the supplement; `head` is the ranked prefix
+  for (const item of ownTail) {
+    // Sequential filters — the same contract as the offer path.
+    const kind = classifyItemForDispatch(item, now);
+    if (kind === null) continue;
+    if (ctx.kinds !== null && !ctx.kinds.includes(kind)) continue;
+    const marker = ownMarkerMaps[kind]?.get(item.id);
+    if (
+      marker !== undefined &&
+      _markerStillExcludes(
+        marker,
+        item.stage,
+        now,
+        ctx.markerStaleWindowMs,
+        kind === 'audit' || kind === 'implement' ? 'id-guard' : 'stage-guard',
+      )
+    ) {
+      continue;
+    }
+    if (isAttemptBudgetExhausted(ownEntries, item.id, kind, item.stage, ctx.maxAttempts)) {
+      if (!ctx.flaggedForBudget.has(item.id)) {
+        ctx.flaggedForBudget.add(item.id);
+        await flagBudgetExhausted(deps, item.id, opts.cwd);
+      }
+      ctx.holds.budget = true;
+      continue;
+    }
+    if (_isNonTerminalCooldownActive(ownEntries, item.id, kind, item.stage, ctx.cooldownMs, now)) {
+      ctx.holds.cooldown = true;
+      continue;
+    }
+    if (ctx.frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) continue;
+    if (kind === 'audit' && !ctx.auditEligible) continue;
+    if (item.priority === 'critical') {
+      const guard = evaluateCriticalFirstGuard(
+        item.id,
+        ownInFlight,
+        marker?.dispatchedAt,
+        now,
+        ctx.markerStaleWindowMs,
+      );
+      if (!guard.escalate) {
+        ctx.holds.inFlight = true;
+        continue;
+      }
+    }
+    if (kind === 'implement') {
+      const gate = await ctx.reviewGateForRoot(opts.cwd);
+      if (isImplementHeldByReviewGate(kind, item, gate)) {
+        ctx.holds.review = true;
+        continue;
+      }
+    }
+    const outcome = await dispatchClaimedTier(
+      deps,
+      kind,
+      {
+        id: item.id,
+        title: item.title,
+        stage: kind === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
+        status: item.status,
+        priority: item.priority,
+        sortIndex: item.sortIndex,
+      },
+      {
+        model: opts.model,
+        cwd: opts.cwd,
+        selectionPath: 'own-backlog',
+        selectionReason: ctx.selectionReason,
+      },
+    );
+    if (outcome.dispatched) return outcome;
+    // A lost CAS race / marker-recovery rollback applies to one candidate.
+    if (
+      ctx.skipOnLostClaim &&
+      (outcome.reason === 'claim-failed' || outcome.reason === 'claim-rolled-back')
+    ) {
+      continue;
+    }
+    // Any other terminal outcome (or, for a continuation, ANY non-dispatched
+    // outcome — AC3: a batch never hops to another target) is returned
+    // unchanged so the caller's strike/skip semantics are preserved.
+    return outcome;
+  }
+  return null;
+}
+
+/**
+ * The gate-and-scan half of `dispatchFromCoordination` (unchanged behaviour):
+ * safety gates, scheduled prompts, the coordination offer scan and the
+ * own-backlog fallback. Split out so the audit-batch surface can be applied to
+ * EVERY outcome once, in `dispatchFromCoordination`.
+ */
+async function dispatchFromCoordinationGated(
+  deps: DowntimeWorkerDeps,
+  entries: CoordinationEntry[],
+  opts: Parameters<typeof dispatchFromCoordination>[2],
+  now: number,
+  batchRuntime: CoordinationBatchRuntime,
 ): Promise<DowntimeDispatchOutcome> {
   // The leader path REQUIRES the item-fetch dep: without it the leader can
   // never classify an entry — fail closed to a strike (a misconfigured
@@ -4120,7 +5166,6 @@ export async function dispatchFromCoordination(
       return await dispatchScheduledPrompt(deps, duePrompt, {
         model: opts.model,
         cwd: opts.cwd,
-        spawnConfig: opts.spawnConfig,
       });
     }
   }
@@ -4157,6 +5202,24 @@ export async function dispatchFromCoordination(
   // True when at least one non-critical implement offer was held this cycle
   // by the review-queue depth gate (drives the terminal reason).
   let reviewHold = false;
+  const ownHeadHolds = {
+    budget: false,
+    cooldown: false,
+    inFlight: false,
+    review: false,
+  };
+  // Audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1/AC4): the
+  // clamped cap and the continuation budget available BEFORE this dispatch
+  // (absent `auditBatchRemaining` initialises it to the cap — the first
+  // dispatch of a potential batch; `1` disables batching).
+  const batchCap = clampDowntimeAuditBatchMax(
+    opts.auditBatchMax ?? DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+  );
+  const batchRemainingBefore =
+    opts.auditBatchRemaining === undefined
+      ? batchCap
+      : Math.max(0, Math.trunc(opts.auditBatchRemaining));
+
   for (const entry of entries) {
     if (entry.instanceId.length === 0 || entry.workItemId.length === 0) continue;
     fetchAttempts += 1;
@@ -4253,7 +5316,7 @@ export async function dispatchFromCoordination(
       deps,
       kind,
       toCoordinationCandidate(result.info),
-      { model: opts.model, cwd: worklogRoot, selectionPath: 'coordination-offer', selectionReason: 'leader-offer', spawnConfig: opts.spawnConfig },
+      { model: opts.model, cwd: worklogRoot, selectionPath: 'coordination-offer', selectionReason: 'leader-offer' },
     );
     if (outcome.dispatched) {
       // Dispatched — remove the entry so the owner re-queues its next
@@ -4320,114 +5383,72 @@ export async function dispatchFromCoordination(
   // successful own-backlog dispatch is flagged `ownBacklogDispatch` so the
   // worker loop steps down leadership exactly once (AC4); a normal in-view
   // dispatch never reaches this block.
+  //
+  // WL-0MVFE1DD8000D8T2: the filter chain lives in `dispatchFromOwnHead` so
+  // the audit-batch continuation above applies it byte-for-byte identically
+  // (no duplicated gates, no second ranking).
   {
-    const sprintWindow = resolveSprintViewWindow(opts.browseItemCount);
     // Fail-open (AC9): a thrown own-root lookup must leave the original
     // terminal reason unchanged and never panic.
-    let ownHead: DowntimeHerdrListResult | null = null;
-    try {
-      ownHead = await deps.getHerdrListHead(opts.cwd, sprintWindow);
-    } catch {
-      ownHead = null;
-    }
-    if (ownHead !== null && ownHead.ok) {
-      const ownTail = await fetchExtendedHerdrItems(deps, opts.cwd, ownHead.items, {
-        includeNonCritical: true,
-      });
-      if (ownTail.length > 0) {
-        const ownEntries = await cooldownEntriesForRoot(opts.cwd);
-        const ownMarkerMaps: Record<DowntimeSkillKind, Map<string, DispatchMarker>> = {
-          audit: _dispatchedMarkers(ownEntries, 'audit'),
-          implement: _dispatchedMarkers(ownEntries, 'implement'),
-          plan: _dispatchedMarkers(ownEntries, 'plan'),
-          intake: _dispatchedMarkers(ownEntries, 'intake'),
-          'risk-effort': _dispatchedMarkers(ownEntries, 'risk-effort'),
-        };
-        const ownInFlight = await inFlightForRoot(opts.cwd);
-        const flaggedForOwnBudget = new Set<string>();
-        for (const item of ownTail) {
-          // Sequential filters — the same contract as the offer path.
-          const kind = classifyItemForDispatch(item, now);
-          if (kind === null) continue;
-          const marker = ownMarkerMaps[kind]?.get(item.id);
-          if (
-            marker !== undefined &&
-            _markerStillExcludes(
-              marker,
-              item.stage,
-              now,
-              markerStaleWindowMs,
-              kind === 'audit' || kind === 'implement' ? 'id-guard' : 'stage-guard',
-            )
-          ) {
-            continue;
-          }
-          if (isAttemptBudgetExhausted(ownEntries, item.id, kind, item.stage, maxAttempts)) {
-            if (!flaggedForOwnBudget.has(item.id)) {
-              flaggedForOwnBudget.add(item.id);
-              await flagBudgetExhausted(deps, item.id, opts.cwd);
-            }
-            budgetHold = true;
-            continue;
-          }
-          if (_isNonTerminalCooldownActive(ownEntries, item.id, kind, item.stage, cooldownMs, now)) {
-            cooldownHold = true;
-            continue;
-          }
-          if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) continue;
-          if (kind === 'audit' && !auditEligible) continue;
-          if (item.priority === 'critical') {
-            const guard = evaluateCriticalFirstGuard(
-              item.id,
-              ownInFlight,
-              marker?.dispatchedAt,
-              now,
-              markerStaleWindowMs,
-            );
-            if (!guard.escalate) {
-              inFlightHold = true;
-              continue;
-            }
-          }
-          if (kind === 'implement') {
-            const gate = await reviewGateForRoot(opts.cwd);
-            if (isImplementHeldByReviewGate(kind, item, gate)) {
-              reviewHold = true;
-              continue;
-            }
-          }
-          const ownOutcome = await dispatchClaimedTier(
-            deps,
-            kind,
-            {
-              id: item.id,
-              title: item.title,
-              stage: kind === 'audit' ? 'audit' : ((item.stage as DowntimeStage) ?? 'idea'),
-              status: item.status,
-              priority: item.priority,
-              sortIndex: item.sortIndex,
-            },
-            {
-              model: opts.model,
-              cwd: opts.cwd,
-              selectionPath: 'own-backlog',
-              selectionReason: 'own-backlog-fallback',
-              spawnConfig: opts.spawnConfig,
-            },
-          );
-          if (ownOutcome.dispatched) {
-            return { ...ownOutcome, ownBacklogDispatch: true };
-          }
-          // A lost CAS race / marker-recovery rollback applies to one
-          // candidate: try the next ranked own-backlog item.
-          if (ownOutcome.reason === 'claim-failed' || ownOutcome.reason === 'claim-rolled-back') {
-            continue;
-          }
-          // Any other terminal outcome (wl-error / spawn-failed /
-          // anchor-unavailable / marker-write-failed) is returned unchanged
-          // so the caller's strike/skip semantics are preserved.
-          return ownOutcome;
-        }
+    const ownWindow = await readOwnHeadWindow(deps, opts.cwd, opts.browseItemCount);
+    if (ownWindow !== null) {
+      batchRuntime.setDepth(computeAuditEligibleDepth([...ownWindow.head, ...ownWindow.tail], now));
+      const sharedScan = {
+        window: ownWindow,
+        frozen,
+        auditEligible,
+        markerStaleWindowMs,
+        maxAttempts,
+        cooldownMs,
+        cooldownEntriesForRoot,
+        inFlightForRoot,
+        reviewGateForRoot,
+        holds: ownHeadHolds,
+        flaggedForBudget,
+      };
+      // ── Audit-batch continuation (parent WL-0MVEDM8OT007WDRS AC4) ──
+      // While a batch is armed the leader continues the audit drain from its
+      // OWN head — the same bounded window EXTENSION and the same sequential
+      // filter chain as the fallback below — instead of waiting for the offer
+      // list to be re-populated. AUDIT-kind only, distinct targets (marker
+      // exclusion + the batch-local exclusion set), exactly one dispatch per
+      // invocation, and any non-`dispatched` outcome ENDS the batch (AC3): a
+      // continuation never hops to another target. Armed only when the worker
+      // passed a live budget (`auditBatchRemaining > 0`) and batching is on
+      // (`cap > 1`); otherwise the unchanged fallback runs.
+      if (batchRemainingBefore > 0 && batchCap > 1) {
+        const continuation = await dispatchFromOwnHead(
+          deps,
+          { model: opts.model, cwd: opts.cwd },
+          {
+            ...sharedScan,
+            kinds: ['audit'],
+            excludeIds: new Set(opts.auditBatchDispatchedIds ?? []),
+            selectionReason: 'own-backlog-audit-batch-continuation',
+            skipOnLostClaim: false,
+          },
+          now,
+        );
+        if (continuation !== null) return { ...continuation, auditBatchContinuation: true };
+      }
+      const ownOutcome = await dispatchFromOwnHead(
+        deps,
+        { model: opts.model, cwd: opts.cwd },
+        {
+          ...sharedScan,
+          kinds: null,
+          excludeIds: new Set<string>(),
+          selectionReason: 'own-backlog-fallback',
+          skipOnLostClaim: true,
+        },
+        now,
+      );
+      if (ownOutcome !== null) {
+        if (ownOutcome.dispatched) return { ...ownOutcome, ownBacklogDispatch: true };
+        // Any other terminal outcome (wl-error / spawn-failed /
+        // anchor-unavailable / marker-write-failed) is returned unchanged so
+        // the caller's strike/skip semantics are preserved.
+        return ownOutcome;
       }
     }
   }
@@ -4440,15 +5461,17 @@ export async function dispatchFromCoordination(
   // empty BACKLOG. A deep-queue hold is reported as the neutral
   // 'review-queue-hold' (never 'no-candidate' — the cooldown must not fire
   // while audits are draining the queue; the gate may lift at any moment).
+  // A hold reported by the own-head scan (fallback or batch continuation) is
+  // folded in here so a filtered own-head backlog keeps its neutral reason.
   return frozen
     ? { dispatched: false, reason: 'code-freeze' }
-    : reviewHold
+    : reviewHold || ownHeadHolds.review
       ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
-      : cooldownHold
+      : cooldownHold || ownHeadHolds.cooldown
         ? { dispatched: false, reason: 'non-terminal-cooldown' }
-        : budgetHold
+        : budgetHold || ownHeadHolds.budget
           ? { dispatched: false, reason: 'attempt-budget-exhausted' }
-          : inFlightHold
+          : inFlightHold || ownHeadHolds.inFlight
           ? { dispatched: false, reason: 'in-flight-pane' }
           : { dispatched: false, reason: 'no-candidate' };
 }
@@ -4665,6 +5688,23 @@ export async function dispatchDowntimeWork(
     freeSlots?: number;
     browseItemCount?: number;
     /**
+     * Depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
+     * WL-0MVEDM8OT007WDRS AC1). Optional for backward compat — absent
+     * leaves batching off (legacy single-dispatch behaviour). Threaded from
+     * `DowntimeWorkerConfig.config()`. Clamped to `[1, 5]`; `1` disables
+     * batching and restores legacy single-dispatch behaviour.
+     */
+    auditBatchMax?: number;
+    /**
+     * Depth-aware audit-batch continuation budget (parent
+     * WL-0MVEDM8OT007WDRS AC1/AC2): continuation audits still available in
+     * the CURRENT idle window BEFORE this dispatch. Absent = the first
+     * dispatch (the worker owns the budget and initialises it to the cap)
+     * or batching off. A successful audit dispatch reports the decremented
+     * remainder via `outcome.auditBatch.remaining`.
+     */
+    auditBatchRemaining?: number;
+    /**
      * True when the polled status reports the target slot is OWNED by a
      * live Local Proxy lease (AC2, WL-0MTYZXSLN008HZOW). Optional — absent
      * disables the gate. When true, dispatch is refused with reason
@@ -4716,8 +5756,6 @@ export async function dispatchDowntimeWork(
      * `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS` (5 min).
      */
     stallScanThresholdMs?: number;
-    /** Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME). */
-    spawnConfig?: DowntimeSpawnConfig;
   },
 ): Promise<DowntimeDispatchOutcome> {
   // Per-process PIPELINE single-flight gate (F3, WL-0MT50LKAK001EF5Q): at
@@ -4768,6 +5806,18 @@ export async function dispatchDowntimeWork(
     // head below equals the rendered sprint view. Non-critical work outside
     // this window is never dispatched.
     const sprintWindow = resolveSprintViewWindow(opts.browseItemCount);
+
+    // Depth-aware audit-batch budget (parent WL-0MVEDM8OT007WDRS AC1): the
+    // clamped cap and the continuation budget available BEFORE this dispatch.
+    // Absent `auditBatchRemaining` initialises the budget to the cap (the
+    // first dispatch of a batch); `1` disables batching entirely.
+    const auditBatchCap = clampDowntimeAuditBatchMax(
+      opts.auditBatchMax ?? DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+    );
+    const auditBatchRemainingBefore =
+      opts.auditBatchRemaining === undefined
+        ? auditBatchCap
+        : Math.max(0, Math.trunc(opts.auditBatchRemaining));
 
     let auditInFlight = false;
     let auditCheckFailed = false;
@@ -4840,15 +5890,28 @@ export async function dispatchDowntimeWork(
       const head = await deps.getHerdrListHead(opts.cwd, sprintWindow);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
+        // Depth-derived batch activation (parent WL-0MVEDM8OT007WDRS AC1):
+        // derive the audit-eligible depth from the ALREADY-FETCHED head (no
+        // extra `wl` subprocess) and resolve the batch surface on every
+        // outcome of this path. The head path is the production ranking, so
+        // the batch decision never introduces a second eligibility definition.
+        const auditDepth = computeAuditEligibleDepth(head.items, Date.now());
+        const finalize = (outcome: DowntimeDispatchOutcome): DowntimeDispatchOutcome =>
+          finalizeAuditBatchOutcome(outcome, {
+            depth: auditDepth,
+            cap: auditBatchCap,
+            threshold: sprintWindow,
+            remainingBefore: auditBatchRemainingBefore,
+          });
         // Item-scoped in-flight state (WL-0MUBEZ6PE002WLP4 / F3): resolved
         // ONCE per idle cycle (a single `herdr pane list` read shared by both
         // dispatch loops) so the guard never adds a per-candidate process
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight, spawnConfig: opts.spawnConfig };
+        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
-        if (herdrOutcome !== null) return herdrOutcome;
+        if (herdrOutcome !== null) return finalize(herdrOutcome);
 
         // ── Extended dispatch window (WL-0MU6UL3GQ0015AA5) ──
         // The initial head is windowed (mandatory items always included, the
@@ -4865,7 +5928,7 @@ export async function dispatchDowntimeWork(
         const extendedItems = await fetchExtendedHerdrItems(deps, opts.cwd, head.items);
         if (extendedItems.length > 0) {
           const extendedOutcome = await dispatchFromHerdrList(deps, extendedItems, ctx, flags);
-          if (extendedOutcome !== null) return extendedOutcome;
+          if (extendedOutcome !== null) return finalize(extendedOutcome);
         }
         auditInFlight = flags.auditInFlight;
         auditCheckFailed = flags.auditCheckFailed;
@@ -4878,8 +5941,8 @@ export async function dispatchDowntimeWork(
         // Herdr list had items but every one was filtered by a safety gate:
         // compose the terminal reason and DO NOT fall through to the legacy
         // chain (AC2 — gates are filters, not a fallback ranking).
-        if (frozen) return { dispatched: false, reason: 'code-freeze' };
-        if (freshnessSkip) return { dispatched: false, reason: 'fresh-audit-skip' };
+        if (frozen) return finalize({ dispatched: false, reason: 'code-freeze' });
+        if (freshnessSkip) return finalize({ dispatched: false, reason: 'fresh-audit-skip' });
         if (auditInFlight) {
           // Host-wide saturation (WL-0MUIVE0YG000UVIA) vs per-worklog:
           // distinct reason strings for observability. 'audit-host-saturated'
@@ -4889,27 +5952,27 @@ export async function dispatchDowntimeWork(
           // auditCheckFailed (a mixed tick still reports the audit skip).
           if (auditHostSaturated) {
             logHostAuditSaturation(opts.freeSlots, opts.contentionQueueDepth);
-            return { dispatched: false, reason: 'audit-host-saturated' };
+            return finalize({ dispatched: false, reason: 'audit-host-saturated' });
           }
-          return { dispatched: false, reason: 'audit-in-flight' };
+          return finalize({ dispatched: false, reason: 'audit-in-flight' });
         }
-        if (auditCheckFailed) return { dispatched: false, reason: 'wl-error', error: auditCheckError };
+        if (auditCheckFailed) return finalize({ dispatched: false, reason: 'wl-error', error: auditCheckError });
         // Deep review queue held the only remaining (non-critical implement)
         // candidates: neutral 'review-queue-hold', NEVER 'no-candidate' — no
         // cooldown while audits drain the queue (WL-0MTTSWC1X005P4VD AC2).
-        if (reviewHeld) return { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON };
+        if (reviewHeld) return finalize({ dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON });
         // Non-terminal cooldown held the only remaining candidates: neutral
         // 'non-terminal-cooldown', NEVER 'no-candidate' — the backlog is not
         // empty, so the no-candidate cooldown must not fire
         // (WL-0MUKYERLZ006ELL5 AC3/AC6).
-        if (cooldownHeld) return { dispatched: false, reason: 'non-terminal-cooldown' };
+        if (cooldownHeld) return finalize({ dispatched: false, reason: 'non-terminal-cooldown' });
         // Per-item/per-kind attempt budget exhausted (WL-0MUKYEXMK0033MFK
         // AC2/AC5): neutral 'attempt-budget-exhausted', NEVER 'no-candidate'
         // — the backlog is not empty and no strike is recorded; polling
         // continues so other work still dispatches and the flag write is
         // retried if it failed.
-        if (budgetExhausted) return { dispatched: false, reason: 'attempt-budget-exhausted' };
-        return { dispatched: false, reason: 'no-candidate' };
+        if (budgetExhausted) return finalize({ dispatched: false, reason: 'attempt-budget-exhausted' });
+        return finalize({ dispatched: false, reason: 'no-candidate' });
       }
       // Genuinely empty Herdr list → keep flags and fall through to the
       // legacy chain (test-compat path; flags still drive the terminal reason).
@@ -5266,106 +6329,45 @@ export type DowntimeSpawnResult =
 export type DowntimeSpawn = (
   scriptPath: string,
   args: string[],
-  opts: { cwd: string; config?: DowntimeSpawnConfig },
+  opts: { cwd: string; priority?: string | null },
 ) => DowntimeSpawnHandle;
-
-/**
- * Optional spawn-time configuration for mode-aware `AUDIT_PHASE2_PARALLELISM`
- * (WL-0MT50S9JW001DHME).
- *
- * When supplied, `buildDowntimeSpawnOptions` selects the Phase 2 parallelism
- * level based on the current operating mode, the GENUINELY free slots at
- * dispatch time, and the concurrent dispatch budget:
- *
- * - `'1'` (safe default): fast mode, cheap mode without a genuinely free
- *   second slot, a non-single-flight dispatch budget, or config not supplied.
- * - `'2'`: cheap mode AND a second slot is genuinely free AND exactly one
- *   dispatch pipeline is in flight (combined streams ≤ slot budget).
- *
- * `freeSlots` (not `slotBudget`) is the operative input for the second-slot
- * check: `slotBudget` is the mode's total pool and being "free" cannot be
- * inferred from it. When the config is absent the function falls back to
- * `'1'` (the historic, backward-compatible value).
- */
-export interface DowntimeSpawnConfig {
-  /** `'cheap'` or `'fast'` — the proxy's current operating mode. */
-  mode: 'cheap' | 'fast';
-  /** Total number of local proxy slots in the current mode (cheap = 2, fast = 3). */
-  slotBudget: number;
-  /**
-   * Genuinely free local proxy slots at dispatch time (unowned and not
-   * processing) — the real availability signal, never the total pool.
-   */
-  freeSlots: number;
-  /**
-   * Maximum number of concurrent downtime dispatch pipelines allowed.
-   * `0` means UNBOUNDED (no cap): other dispatches may be in flight, so the
-   * cheap 2-slot pool cannot be guaranteed → treated as unsafe for `'2'`.
-   * Only a single-flight budget (`1`) enables `'2'`.
-   */
-  concurrentDispatchCap: number;
-}
 
 /**
  * Spawn options for `send-to-pi.sh`: detached, stdio ignored, resolved cwd
  * forwarded so the pane opens in the right project root.
  *
- * `AUDIT_PHASE2_PARALLELISM` is mode-aware (WL-0MT50S9JW001DHME):
- *
- * - `'1'` (safe default): fast mode, cheap mode without a genuinely free
- *   second slot, a non-single-flight dispatch budget, or config not supplied.
- * - `'2'`: cheap mode AND a second slot is genuinely free AND the dispatch
- *   is single-flight — up to 2 Phase 2 children run in parallel, fitting the
- *   2-slot cheap-mode pool (parent already done Phase 1).
- *
- * The parent audit always completes Phase 1 before Phase 2 children start,
- * so the max concurrent streams per audit is 2 (the children). This fits
- * cheap mode's slot budget only when a second slot is genuinely free — the
- * free count is therefore the operative check, never the total budget.
+ * `AUDIT_PHASE2_PARALLELISM` is fixed at `'1'`: audit Phase 2 child
+ * deep-analysis runs strictly sequentially, so a parent audit needs exactly
+ * two local slots (the parent plus one child). The former mode-aware
+ * `'2'` selection (WL-0MT50S9JW001DHME) was retired with the proxy's
+ * fast/cheap operating mode (WL-0MVE1NZ4J000H5NH). The audit skill honours
+ * the env var (integer >= 1); interactive (non-downtime) panes are
+ * unaffected.
  */
 export function buildDowntimeSpawnOptions(
   cwd: string,
-  opts?: { config?: DowntimeSpawnConfig },
+  opts?: { priority?: string | null },
 ): {
   detached: boolean;
   stdio: 'ignore';
   cwd: string;
   env: NodeJS.ProcessEnv;
 } {
-  // Derive Phase 2 parallelism from config (WL-0MT50S9JW001DHME).
-  // Default to '1' for backward compatibility when config is absent.
-  let parallelism = '1';
-  if (opts?.config) {
-    const { mode, slotBudget, freeSlots, concurrentDispatchCap } = opts.config;
-    // Cheap mode is the 2-slot local pool this bound protects; fast mode
-    // (cloud-routed, wider pool) keeps the serial historic default.
-    const cheapPool = mode === 'cheap' && slotBudget >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
-    // A GENUINELY free second slot right now — Phase 2 needs the parent plus
-    // a child = 2 concurrent streams (the total budget is not availability).
-    const secondSlotFree = freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
-    // Single-flight dispatch only: an unbounded (0) or ≥ 2 concurrent-dispatch
-    // budget means a second audit could run, so two audits × 2 children would
-    // exceed the cheap 2-slot pool. Only cap === 1 is safe.
-    const dispatchIsSingleFlight = concurrentDispatchCap === 1;
-    if (cheapPool && secondSlotFree && dispatchIsSingleFlight) {
-      parallelism = '2';
-    }
-    // Fast mode, no free second slot, non-single-flight budget, or config
-    // supplied but constraints not met → '1'.
-  }
-
   return {
     detached: true,
     stdio: 'ignore',
     cwd,
-    // AUDIT_PHASE2_PARALLELISM controls Phase 2 child deep-analysis concurrency.
-    // The audit skill honours this env var (legacy fallback, integer >= 1);
-    // no audit-skill change needed. Interactive (non-downtime) panes are
-    // unaffected.
     env: {
       ...scrubRepositoryOverrides(process.env),
       HERDR_RESOLVED_CWD: cwd,
-      AUDIT_PHASE2_PARALLELISM: parallelism,
+      // Phase 2 child deep-analysis is always serial (parent + one child =
+      // two local slots).
+      AUDIT_PHASE2_PARALLELISM: '1',
+      // Convey the selected candidate's priority to the launched pi session
+      // (the Worklog pi extension turns it into the `X-Priority` header).
+      // Mapped through the downtime table; defaults to `medium` for an
+      // unknown/absent priority (parent WL-0MVE1NZ4J000H5NH AC3).
+      [REQUEST_PRIORITY_ENV_VAR]: mapDowntimeRequestPriority(opts?.priority),
     },
   };
 }
@@ -5410,7 +6412,7 @@ export const defaultDowntimeSpawn: DowntimeSpawn = (
   args,
   opts,
 ) =>
-  spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd, { config: opts.config }));
+  spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd, opts));
 
 /**
  * How long to wait for a spawn-level `error` event or an immediate
@@ -5435,7 +6437,7 @@ export const DOWNTIME_SPAWN_PROBE_MS = 500;
 export async function spawnDowntimePane(
   scriptPath: string,
   args: string[],
-  opts: { cwd: string; config?: DowntimeSpawnConfig },
+  opts: { cwd: string; priority?: string | null },
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): Promise<DowntimeSpawnResult> {
   const child = spawnFn(scriptPath, args, opts);
@@ -5658,19 +6660,6 @@ export interface DowntimeWorkerConfig {
     requiredFreeSlots: number;
     model: string;
     cwd: string;
-    /**
-     * Current proxy operating mode (WL-0MT50S9JW001DHME). `undefined` when
-     * unknown (mode switching disabled, or the proxy has not been polled
-     * yet) → the dispatcher conservatively keeps `AUDIT_PHASE2_PARALLELISM`
-     * at `'1'`.
-     */
-    mode?: 'cheap' | 'fast';
-    /**
-     * Maximum concurrent dispatch pipelines (WL-0MT50S9JW001DHME). Defaults
-     * to `DISPATCH_PIPELINE_SINGLE_FLIGHT` (1). Only a single-flight budget
-     * permits `'2'`; an unbounded (`0`) or ≥ 2 budget keeps `'1'`.
-     */
-    concurrentDispatchCap?: number;
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
     /**
@@ -5689,6 +6678,14 @@ export interface DowntimeWorkerConfig {
     /** Sprint-complete threshold (parent WL-0MTHSHN5V008R5L0). Optional for backward compat — defaults to 20. */
     browseItemCount?: number;
     /**
+     * Depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
+     * WL-0MVEDM8OT007WDRS AC1). Optional for backward compat — defaults to
+     * `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX` (2). `1` = batching off (legacy
+     * single-dispatch behaviour); read live on every tick and threaded into
+     * both dispatch paths.
+     */
+    auditBatchMax?: number;
+    /**
      * Dispatched success-marker staleness window, ms (WL-0MU6UL0RJ008IHGT).
      * Optional for backward compat — defaults to
      * `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (24 h).
@@ -5704,6 +6701,19 @@ export interface DowntimeWorkerConfig {
      * every tick. Optional — defaults to `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`.
      */
     stallScanThresholdMs?: number;
+    /**
+     * Continuous capacity-refusal window before a `capacity-starved`
+     * observation is written (WL-0MVKNC2N50025HXE AC3). Read live on every
+     * tick. Optional — defaults to
+     * `DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS` (2 h).
+     */
+    capacityStarvationAlertMs?: number;
+    /**
+     * Progress window before a live-agent pane is reported as long-running on
+     * a starvation signal (WL-0MVKNC2N50025HXE AC2). Read live on every tick.
+     * Optional — defaults to `DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS` (3 h).
+     */
+    longRunningThresholdMs?: number;
     /**
      * Pane-lifecycle monitor cadence, ms (WL-0MU308WSF0002JWN). Optional —
      * defaults to `DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS` (30 s). Tests may
@@ -5769,15 +6779,6 @@ export interface DowntimeWorkerConfig {
    * ms.
    */
   leaderCheckInIntervalMs?: number;
-  /**
-   * Called whenever the proxy reports idle (after poll, before the dispatch
-   * decision). Passes the latest parsed `LlamaStatus` so the caller (e.g.
-   * the mode-switch worker) can evaluate immediately instead of waiting for
-   * its own poll cycle. Never called on a busy/ambiguous poll (the worker
-   * only invokes it when `idle` is true). Fire-and-forget: a rejected
-   * promise is swallowed so a broken hook cannot crash the dispatcher.
-   */
-  onProxyIdle?: (proxyStatus: LlamaStatus) => Promise<void>;
 }
 
 export interface DowntimeWorkerTickResult {
@@ -5875,6 +6876,38 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   const perSlotTracker = createPerSlotIdleTracker();
   let dispatching = false;
   let lastDispatchAt: number | null = null;
+  // Depth-aware audit-batch continuation state (parent WL-0MVEDM8OT007WDRS
+  // AC1/AC2/AC3/AC5): the continuation audits still available in the CURRENT
+  // continuous idle window plus the depth/cap they were measured against.
+  // `null` = no batch armed (legacy single-dispatch behaviour). Armed only by
+  // a successful AUDIT dispatch whose outcome reports an active batch with
+  // budget remaining; cleared on the cap, a depth drop, a non-audit dispatch,
+  // ANY non-`dispatched` outcome, a busy or unavailable poll, a pause/
+  // cooldown, leadership loss, or a disabled worker. Keeping depth/cap here
+  // (not just the budget) lets every blocked/ended batch decision carry the
+  // `auditBatchDepth`/`auditBatchCap`/`auditBatchRemaining` diagnostics.
+  //
+  // Trade-off (AC2): only this dispatcher's OWN post-dispatch reset is
+  // deferred. The dispatched audit pane's occupancy still makes the proxy
+  // busy, which (a) resets the idle tracker through the normal per-tick
+  // busy path and (b) ends the batch window (a busy poll closes the
+  // continuous idle window, `activeAuditBatch` is cleared below on every
+  // non-idle poll). A continuation therefore only fires while the proxy
+  // stays idle at the next poll; after any busy interlude the worker
+  // requires a fresh full idle period and the next audit dispatch re-arms
+  // a fresh batch while the queue is still deep. Batching is a queue-drain
+  // optimisation, never a relaxation of the idle-duration gate.
+  let activeAuditBatch: {
+    depth: number;
+    cap: number;
+    remaining: number;
+    /**
+     * Batch-local exclusion set (WL-0MVFE1DD8000D8T2 AC3/AC4): every item id
+     * already dispatched in THIS batch window, so a continuation can never
+     * re-select an item even before its dispatched marker is written/read.
+     */
+    dispatchedIds: Set<string>;
+  } | null = null;
   // Pane-lifecycle monitor cadence gate (WL-0MU308WSF0002JWN): the timestamp
   // of the last monitor pass. 0 forces a pass on the first tick.
   let lastPaneMonitorAt = 0;
@@ -5894,6 +6927,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // written and when, so repeated identical refusals are rate-limited.
   let lastDecisionReason: string | null = null;
   let lastDecisionAt = 0;
+  // Continuous capacity-starvation tracking (WL-0MVKNC2N50025HXE AC3): a run
+  // of capacity-flagged refusals is an episode; once it has lasted the
+  // configured window a `capacity-starved` observation is written ONCE per
+  // window so a silent all-night NOP becomes diagnosable. Observation only —
+  // it never gates dispatch, never strikes and never replaces the refusal
+  // reason/header token. Reset by any non-capacity outcome and by a
+  // successful dispatch.
+  const starvationTracker = new CapacityStarvationTracker();
+  // Long-running pane progress window (AC2), re-read from settings every tick
+  // and used only to annotate a starvation signal.
+  let longRunningThresholdMs = DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS;
   // Current header blocking token; null when not gate-blocked. Reset each tick.
   let blockReason: string | null = null;
   // Per-instance in-memory enabled override (parent WL-0MSZ4NSOE007AQEF):
@@ -6011,6 +7055,57 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     }
   };
 
+  // ── Capacity-starvation observation (WL-0MVKNC2N50025HXE AC3) ──
+  // Write ONE observation entry for a capacity-refusal episode that has
+  // outlasted the configured window. It reuses the refusal's evidence fields
+  // (same schema), adds the episode length and — when the long-running scan
+  // is wired — names the panes holding the model. Observation only: it does
+  // not set the header blocking token, never gates dispatch, and a logging
+  // failure is swallowed (fail-closed).
+  const writeCapacityStarvationSignal = async (
+    cwd: string,
+    starvation: CapacityStarvationObservation,
+    fields: DecisionEntryFields,
+    now: number,
+  ): Promise<void> => {
+    let longRunningPanes: LongRunningPaneObservation[] | undefined;
+    if (typeof opts.deps.scanLongRunningPanes === 'function') {
+      try {
+        const observed = await opts.deps.scanLongRunningPanes(cwd, {
+          thresholdMs: longRunningThresholdMs,
+          now,
+        });
+        if (Array.isArray(observed) && observed.length > 0) {
+          longRunningPanes = observed;
+        }
+      } catch {
+        // fail-safe: an unreadable scan must never suppress the signal
+      }
+    }
+    const entry: CoordinationLogEntry = {
+      kind: 'decision',
+      operation: 'no-dispatch',
+      instanceId,
+      reason: 'capacity-starved',
+      ...fields,
+      starvedSince: new Date(starvation.starvedSince).toISOString(),
+      starvedMs: starvation.starvedMs,
+      consecutiveCapacityRefusals: starvation.consecutiveRefusals,
+      lastCapacityReason: starvation.lastReason,
+      ...(longRunningPanes !== undefined ? { longRunningPanes } : {}),
+      at: new Date(now).toISOString(),
+    };
+    try {
+      if (typeof opts.deps.recordDecision === 'function') {
+        await opts.deps.recordDecision(entry, cwd);
+      } else {
+        await appendCoordinationLogEntry(cwd, entry);
+      }
+    } catch {
+      // fail-closed: observation logging must never affect dispatch
+    }
+  };
+
   // ── No-dispatch decision log (WL-0MU8808ZY0091JIA) ──
   // Record WHY a polled tick refused to dispatch so "idle slots but no
   // dispatches" is diagnosable from the logs alone. Rate-limited: a repeated
@@ -6019,24 +7114,56 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // header blocking token is updated on EVERY refusal (even a rate-limited
   // one) so the header never goes stale. Fail-closed: a logging failure never
   // affects the dispatch decision.
+  //
+  // Audit-batch observability (parent WL-0MVEDM8OT007WDRS AC5) rides on the
+  // same log and the same rate limit:
+  //  - refusals keep their EXISTING reason tokens; while a batch is armed they
+  //    additionally carry `auditBatchDepth` / `auditBatchCap` /
+  //    `auditBatchRemaining`;
+  //  - `audit-batch-continue` (an accepted continuation) and
+  //    `audit-batch-end` (a silent cap/depth deactivation) are OBSERVATIONS,
+  //    not refusals — they are written with `blocking: false` so the header
+  //    blocking token still reflects refusals only, exactly as today.
   const recordDecision = async (
     cwd: string,
     reason: string,
-    fields: {
-      freeSlots: number;
-      totalSlots: number;
-      ownerPresent: boolean;
-      runningPanes: number | null;
-      contentionDepth: number;
-    },
+    fields: DecisionEntryFields,
+    options: {
+      /**
+       * `false` for a NON-refusal observation (`audit-batch-continue` /
+       * `audit-batch-end`): it is recorded in the decision log but must NOT
+       * set the header blocking token, which reflects refusals only
+       * (parent AC5 "header blocking token updates on every refusal exactly
+       * as today"). Defaults to `true` — every refusal keeps today's
+       * behaviour.
+       */
+      blocking?: boolean;
+    } = {},
   ): Promise<void> => {
-    blockReason = decisionHeaderToken(reason);
+    if (options.blocking !== false) blockReason = decisionHeaderToken(reason);
     const now = Date.now();
+    // ── Continuous capacity-starvation signal (WL-0MVKNC2N50025HXE AC3) ──
+    // The episode tracker is fed with EVERY blocking refusal BEFORE the rate
+    // limiter below, so a rate-limited repeat still advances the episode. A
+    // non-capacity refusal resets it (capacity was available, so the fleet is
+    // not starved). Once the episode crosses the configured window ONE extra
+    // `capacity-starved` OBSERVATION entry is written AFTER the refusal line,
+    // carrying the episode length and the panes the long-running detector
+    // flags — the diagnosis the 2026-10-22/23 incident could not make. It is
+    // an observation, not a refusal: the header blocking token and the
+    // underlying reason are unchanged, it is written even when the refusal
+    // itself is rate-limited, and a logging failure never affects dispatch.
+    const starvation =
+      options.blocking !== false ? starvationTracker.observe(reason, now) : null;
     if (
       lastDecisionReason === reason &&
       now - lastDecisionAt < DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS
     ) {
-      return; // rate-limited: identical refusal within the window
+      // Rate-limited refusal: skip the refusal line, but never the signal.
+      if (starvation !== null) {
+        await writeCapacityStarvationSignal(cwd, starvation, fields, now);
+      }
+      return; // identical refusal within the window
     }
     lastDecisionReason = reason;
     lastDecisionAt = now;
@@ -6057,7 +7184,32 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     } catch {
       // fail-closed: decision logging must never crash the worker
     }
+    // The starvation observation always follows the refusal line (it never
+    // replaces it) — AC5: the reason/token stream stays intact.
+    if (starvation !== null) {
+      await writeCapacityStarvationSignal(cwd, starvation, fields, now);
+    }
   };
+
+  /**
+   * Depth-aware audit-batch diagnostics (parent WL-0MVEDM8OT007WDRS AC5):
+   * metadata attached to a decision while a batch is armed. `depth`/`cap` are
+   * re-measured from the dispatch outcome when it read the Herdr head (a
+   * blocked continuation), otherwise they are the values the active batch was
+   * armed with; `remaining` is the continuation budget still available BEFORE
+   * this decision (`0` once the batch has ended). Absent entirely when no
+   * batch is active, so non-batch decisions keep their existing shape.
+   */
+  const batchMetadata = (
+    live?: { depth: number; cap: number },
+  ): { auditBatchDepth?: number; auditBatchCap?: number; auditBatchRemaining?: number } =>
+    activeAuditBatch === null
+      ? {}
+      : {
+          auditBatchDepth: live?.depth ?? activeAuditBatch.depth,
+          auditBatchCap: live?.cap ?? activeAuditBatch.cap,
+          auditBatchRemaining: activeAuditBatch.remaining,
+        };
 
   return {
     get idleSince(): number | null {
@@ -6123,13 +7275,24 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     },
     async tick(): Promise<DowntimeWorkerTickResult> {
       const cfg = opts.config();
+      // Capacity-starvation tracking (WL-0MVKNC2N50025HXE AC3): the window and
+      // the long-running progress window are re-read from settings every tick,
+      // so an operator change applies live without a plugin restart.
+      starvationTracker.configure(
+        cfg.capacityStarvationAlertMs ?? DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
+      );
+      longRunningThresholdMs =
+        cfg.longRunningThresholdMs ?? DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS;
       // Fresh per-tick decision state: clear the header blocking reason; a
       // gate below re-sets it when this tick is refused (WL-0MU8808ZY0091JIA).
       blockReason = null;
       // Short-circuit on the EFFECTIVE enabled state (override ?? settings):
       // while toggled off the worker performs no proxy polling, no idle
       // tracking, and no dispatch — exactly the settings-disabled path.
-      if (!(override ?? cfg.enabled)) return { polled: false, dispatched: false, idle: false };
+      if (!(override ?? cfg.enabled)) {
+        activeAuditBatch = null; // disabled → no carried batch window
+        return { polled: false, dispatched: false, idle: false };
+      }
 
       // ── Live marker gate (MANUAL `d`-toggle semantics only) ──────────
       // WL-0MTTSWC1X005P4VD removed the sprint-complete auto-disable that
@@ -6147,6 +7310,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // construction) so a disable survives a pane/plugin restart and is
       // honoured cross-process.
       if (disableMarkerExists(cfg.cwd) && override === null) {
+        activeAuditBatch = null; // disabled → no carried batch window
         return { polled: false, dispatched: false, idle: false };
       }
 
@@ -6283,6 +7447,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // tracking, no dispatch — the check-in above is the instance's only
         // coordination activity. (Lease takeover was handled above.)
         if (!leaderState) {
+          activeAuditBatch = null; // leadership lost → the batch window ends
           return { polled: false, dispatched: false, idle: false };
         }
       }
@@ -6362,6 +7527,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // dispatch (no stale idle credit from before the pause).
       if (cooldownUntil !== null) {
         if (Date.now() < cooldownUntil) {
+          activeAuditBatch = null; // paused → the idle window is over
           return { polled: false, dispatched: false, idle: false };
         }
         // ── F5 cooldown-exit hook (AC3) ──
@@ -6375,6 +7541,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // the cooldown-exit path can never dispatch on stale leadership.
         cooldownUntil = null; // pause expired — resume normal polling
         errorStrikes = 0; // fresh strike counter after the pause
+        activeAuditBatch = null; // no stale batch budget across a pause
       }
       if (opts.poller.isPolling()) return { polled: false, dispatched: false, idle: tracker.idleSince !== null };
 
@@ -6383,6 +7550,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (status === null) {
         tracker.record(false); // endpoint failure/ambiguity → busy
         perSlotTracker.record([]); // fail-closed: ambiguous poll resets every slot timer
+        activeAuditBatch = null; // an ambiguous poll ends the batch window
         return { polled: true, dispatched: false, idle: false };
       }
 
@@ -6396,12 +7564,29 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // dispatch, parent WL-0MT32F90V008UAD2). A slot reporting processing
       // resets only its own timer.
       const perSlotSlots = usablePerSlotSlots(status);
+      // LIVE contention/gate-waiter depth (WL-0MU1DWXO600153OI): computed once
+      // per poll for the decision entries, the idle-age activity check below
+      // and the dispatch gate. The CUMULATIVE `contention_queued_count` is
+      // telemetry only and never a gate.
+      const contentionQueueDepth =
+        typeof status.contention_queue_depth === 'number' ? status.contention_queue_depth : 0;
+      // Prefill-gate contention evidence (WL-0MVHSZRZQ00482QX AC3): the
+      // proxy's serialisation-gate queue depth. `> 0` is equivalent to a
+      // non-empty `contention_queue_depth` for the pace/back-off decision
+      // (and it feeds the idle-age activity check and reset below).
+      const prefillGateWaiters =
+        typeof status.prefill_gate_waiters === 'number' ? status.prefill_gate_waiters : 0;
+      // Truthful-capacity evidence for every decision entry on this poll
+      // (LP-0MVGDUVGE0024YAI). Computed once; purely observational.
+      const capacity = capacityEvidence(status, perSlotSlots);
       // Fail-closed precondition (WL-0MUXVPXAZ005RESW): unusable per-slot
       // detail — absent, empty (`slots: []`), or stale (`slots_stale: true`)
       // — means there is NO trustworthy availability signal. Refuse to
       // dispatch and record the distinct `slots-unavailable` reason so the
       // stop is observable in the decision log and header (never fall back
-      // to the count-based path).
+      // to the count-based path). NOTE: a large `local_idle_seconds` must
+      // never bypass this contract — the idle age qualifies DURATION only,
+      // never availability (WL-0MVHSZR9C0012NQY AC5).
       if (perSlotSlots === null) {
         tracker.record(false);
         perSlotTracker.record([]); // fail-closed: reset every slot timer
@@ -6410,13 +7595,60 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           totalSlots: status.total_slots,
           ownerPresent: status.local_lease_active === true,
           runningPanes: null,
-          contentionDepth:
-            typeof status.contention_queue_depth === 'number'
-              ? status.contention_queue_depth
-              : 0,
+          contentionDepth: contentionQueueDepth,
+          ...capacity,
+          // AC5: a batch that was armed is blocked by this fail-closed poll —
+          // attach its metadata, then end it (no batch survives an unusable
+          // availability signal).
+          ...batchMetadata(),
         });
+        activeAuditBatch = null;
         return { polled: true, dispatched: false, idle: false };
       }
+      // Schema-v2 saturated pool (LP-0MVGDUVGE0024YAI AC4): a defensive
+      // cross-check that never admits a dispatch, even when the per-slot
+      // detail looks inconsistent. Distinct reason/token so it is
+      // distinguishable from slot-owner / contention / no-slots.
+      if (status.capacity_hint === 'saturated') {
+        tracker.record(false);
+        perSlotTracker.record([]); // saturated → reset every slot timer
+        void recordDecision(cfg.cwd, 'capacity-saturated', {
+          freeSlots: countFreeUnownedSlots(perSlotSlots),
+          totalSlots: status.total_slots,
+          ownerPresent: status.local_lease_active === true,
+          runningPanes: null,
+          contentionDepth: contentionQueueDepth,
+          ...capacity,
+          ...batchMetadata(),
+        });
+        activeAuditBatch = null;
+        return { polled: true, dispatched: false, idle: false };
+      }
+
+      // ── Proxy-authoritative idle age (WL-0MVHSZR9C0012NQY) ──
+      // When the proxy reports a usable `local_idle_seconds` it OWNS the
+      // DURATION qualification: the GPU may already have been idle for hours
+      // before this worker started polling (plugin/pane restart, resumed
+      // session), so waiting for the local tracker to accumulate a fresh
+      // threshold would leave the local model idle when it could be working.
+      // Two hard limits keep this surgical and fail-closed:
+      //   - it qualifies DURATION only — the per-slot availability budget,
+      //     the fail-closed `slots-unavailable`/`saturated` paths and
+      //     `requiredFreeSlots` are unchanged;
+      //   - LIVE activity evidence on the same poll (busy/owned slot, coarse
+      //     live lease, or a contention/gate waiter) always outranks it →
+      //     fall back to the local tracker (a contradictory payload never
+      //     admits a dispatch).
+      // Absent/non-finite → `null`, i.e. today's behaviour exactly.
+      const idleAgeSeconds = reportedIdleSeconds(status);
+      const activityOnPoll = pollShowsLocalActivity(
+        status,
+        perSlotSlots,
+        contentionQueueDepth + prefillGateWaiters,
+      );
+      const idleAgeAuthority = idleAgeSeconds !== null && !activityOnPoll;
+      const idleAgeQualifies = idleAgeAuthority && idleAgeSeconds * 1000 >= cfg.thresholdMs;
+
       const perSlotMode =
         cfg.requiredFreeSlots > 0 &&
         cfg.requiredFreeSlots < status.total_slots;
@@ -6438,8 +7670,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         if (globalIdle) {
           perSlotTracker.record(perSlotSlots);
           idle = true;
-          ready =
-            perSlotTracker.thresholdMetCount(cfg.thresholdMs) >= cfg.requiredFreeSlots;
+          if (idleAgeAuthority) {
+            // The proxy's idle age satisfies the duration requirement, so the
+            // CURRENT free/unowned-slot budget is the only remaining check —
+            // `requiredFreeSlots` (capacity) is deliberately NOT relaxed.
+            ready =
+              idleAgeQualifies &&
+              countFreeUnownedSlots(perSlotSlots) >= cfg.requiredFreeSlots;
+          } else {
+            ready =
+              perSlotTracker.thresholdMetCount(cfg.thresholdMs) >= cfg.requiredFreeSlots;
+          }
         } else {
           perSlotTracker.record([]); // global busy → reset every slot timer
           idle = false;
@@ -6450,24 +7691,72 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // unchanged all-slots-free behaviour (parent AC2 parity).
         idle = evaluateIdle(status, cfg.requiredFreeSlots);
         tracker.record(idle);
-        ready = idle && tracker.isThresholdMet(cfg.thresholdMs);
+        ready = idle && (idleAgeAuthority
+          ? idleAgeQualifies
+          : tracker.isThresholdMet(cfg.thresholdMs));
       }
 
-      // Notify idle callback (if present — e.g. mode-switch worker) so it
-      // can evaluate the proxy state immediately, without waiting for its
-      // own poll cycle. Pass the latest status so the caller avoids a
-      // redundant fetch. Fire-and-forget: a rejected callback is swallowed
-      // (fail-closed — a broken hook must never crash or block the
-      // dispatcher).
-      if (opts.onProxyIdle && idle) {
-        void opts.onProxyIdle(status).catch(() => {
-          /* fail-closed: idle hook failure is non-fatal */
-        });
+      // AC3/AC4: an idle-age poll that reports a live contention/gate waiter
+      // resets the run immediately instead of carrying an older idle credit
+      // into the next poll — the backend is already working off that queue.
+      // Runs AFTER the branches so it can never be re-seeded by them. Scoped
+      // to the idle-age signal so a pre-feature proxy keeps today's
+      // contention behaviour byte-for-byte.
+      if (idleAgeSeconds !== null && (contentionQueueDepth > 0 || prefillGateWaiters > 0)) {
+        tracker.record(false);
+        perSlotTracker.record([]);
+        activeAuditBatch = null;
       }
 
-      if (!idle) return { polled: true, dispatched: false, idle: false };
-      if (!ready) return { polled: true, dispatched: false, idle: true };
+      if (!idle) {
+        activeAuditBatch = null; // busy poll ends the continuous idle window
+        return { polled: true, dispatched: false, idle: false };
+      }
+      if (!ready) {
+        // Idle-age observability (WL-0MVHSZR9C0012NQY AC7): an idle tick
+        // deferred by the proxy's authoritative idle age records the evidence
+        // at the existing rate limit (non-blocking — the header blocking
+        // token still reflects refusals only) so "why did it not dispatch?"
+        // is answerable from the decision log. Scoped to the idle-age
+        // authority: a pre-feature proxy OR a poll with live activity keeps
+        // today's silent deferral byte-for-byte.
+        if (idleAgeAuthority && !idleAgeQualifies) {
+          void recordDecision(
+            cfg.cwd,
+            'idle-age-pending',
+            {
+              freeSlots: countFreeUnownedSlots(perSlotSlots),
+              totalSlots: status.total_slots,
+              ownerPresent: status.local_lease_active === true,
+              runningPanes: null,
+              contentionDepth: contentionQueueDepth,
+              ...capacity,
+            },
+            { blocking: false },
+          );
+        }
+        return { polled: true, dispatched: false, idle: true };
+      }
       if (dispatching) return { polled: true, dispatched: false, idle: true };
+      // Idle-age observability (AC7): when the proxy's elapsed idle age is
+      // what admitted this poll, record it (non-blocking) so an admitted
+      // dispatch carries the age/source evidence too. Rate-limited, so a
+      // long idle window logs this at most once per interval.
+      if (idleAgeAuthority && idleAgeQualifies) {
+        void recordDecision(
+          cfg.cwd,
+          'idle-age-qualified',
+          {
+            freeSlots: countFreeUnownedSlots(perSlotSlots),
+            totalSlots: status.total_slots,
+            ownerPresent: status.local_lease_active === true,
+            runningPanes: null,
+            contentionDepth: contentionQueueDepth,
+            ...capacity,
+          },
+          { blocking: false },
+        );
+      }
 
       // ── Dispatch (parent WL-0MST3OJ8S0001ROL AC4, F5 WL-0MTII48OV008P2QU AC4) ──
       // Single machine-wide slot budget: ONE leader poll → ONE freeSlots
@@ -6481,22 +7770,6 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // unchanged and shared. The untrusted `available_slots` count is NEVER
       // used as a dispatch budget.
       const freeSlots = countFreeUnownedSlots(perSlotSlots);
-
-      // Mode-aware Phase 2 parallelism inputs (WL-0MT50S9JW001DHME): the
-      // genuine free-slot snapshot (never the total budget), the current
-      // proxy mode, and the single-flight pipeline budget. `mode` is
-      // undefined until the mode-switch worker has observed the proxy, so an
-      // unknown mode leaves `spawnConfig` absent → the spawn defaults to the
-      // safe serial '1'.
-      const spawnConfig: DowntimeSpawnConfig | undefined =
-        cfg.mode === undefined
-          ? undefined
-          : {
-              mode: cfg.mode,
-              slotBudget: status.total_slots,
-              freeSlots,
-              concurrentDispatchCap: cfg.concurrentDispatchCap ?? DISPATCH_PIPELINE_SINGLE_FLIGHT,
-            };
 
       // ── Running-pane liveness (decision-log telemetry only) ──
       // Count dispatched downtime panes that are STILL ALIVE (machine-wide,
@@ -6536,10 +7809,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // for the decision log (derived from `local_lease_active`).
       const ownerPresent = status.local_lease_active === true;
       const slotOwned = countFreeUnownedSlots(perSlotSlots) === 0;
-      // LIVE depth only (WL-0MU1DWXO600153OI): `contention_queued_count` is
+      // `contentionQueueDepth` (LIVE depth only, WL-0MU1DWXO600153OI) is
+      // computed once at the top of the tick: `contention_queued_count` is
       // cumulative telemetry and must never gate dispatch.
-      const contentionQueueDepth =
-        typeof status.contention_queue_depth === 'number' ? status.contention_queue_depth : 0;
 
       // Single machine-wide dispatch gate applied to BOTH coordination and
       // legacy modes: a new pane must never be dispatched while the slot is
@@ -6560,7 +7832,12 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           ownerPresent,
           runningPanes,
           contentionDepth: contentionQueueDepth,
+          ...capacity,
+          // AC5: an armed batch blocked by slot ownership keeps the existing
+          // `slot-owned` token, now with its depth/cap/remaining metadata.
+          ...batchMetadata(),
         });
+        activeAuditBatch = null; // no owned slot can host a continuation
         return { polled: true, dispatched: false, idle: true };
       }
       if (contentionQueueDepth > 0) {
@@ -6570,9 +7847,47 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           ownerPresent,
           runningPanes,
           contentionDepth: contentionQueueDepth,
+          ...capacity,
+          // AC5: an armed batch blocked by proxy contention keeps the existing
+          // `proxy-contention` token, now with its metadata.
+          ...batchMetadata(),
         });
+        activeAuditBatch = null; // proxy contention ends the batch window
         return { polled: true, dispatched: false, idle: true };
       }
+
+      // ── Prefill-gate pacing (WL-0MVHSZRZQ00482QX) ──
+      // The proxy serialises local prefills (LP-0MVGDUUV3001XFRJ), so a
+      // free slot alone does not mean a NEW pane can prefill: its request
+      // would queue behind the in-flight prefill and possibly fall back to a
+      // remote provider. Pace to the same gate the proxy enforces. This can
+      // only make the dispatcher MORE conservative — it never raises the
+      // free-slot budget and never bypasses the fail-closed checks above.
+      //   - gate waiters > 0 → contention evidence (reason `prefill-gate`);
+      //   - cap reached → prefill capacity budget 0 (reason `prefill-cap`);
+      //   - projected wait above the admission budget → reason `prefill-eta`.
+      // Every field is absent on a pre-feature proxy → no pacing at all.
+      const prefillPacing = evaluatePrefillPacing(status, perSlotSlots);
+      if (prefillPacing.deferReason !== undefined) {
+        void recordDecision(cfg.cwd, prefillPacing.deferReason, {
+          freeSlots,
+          totalSlots: status.total_slots,
+          ownerPresent,
+          runningPanes,
+          contentionDepth: contentionQueueDepth,
+          ...capacity,
+          ...batchMetadata(),
+        });
+        activeAuditBatch = null; // a paced tick ends the batch window
+        return { polled: true, dispatched: false, idle: true };
+      }
+      // Effective local dispatch budget (AC2): min(free-slot budget, prefill
+      // headroom). `capacityBudget` is undefined when the cap is absent/0 or
+      // the in-flight count is not served — today's free-slot-only budget.
+      const effectiveFreeSlots =
+        prefillPacing.capacityBudget === undefined
+          ? freeSlots
+          : Math.min(freeSlots, prefillPacing.capacityBudget);
 
       // Coordination mode: the elected leader reads the shared coordination
       // list, re-fetches and classifies each entry's item (tier priority:
@@ -6587,6 +7902,14 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       // per-instance tier chain (`dispatchDowntimeWork`) — pre-refactor
       // behavior, retained as the fail-open fallback.
       dispatching = true;
+      // Depth-aware audit-batch continuation budget BEFORE this dispatch
+      // (parent WL-0MVEDM8OT007WDRS AC1/AC2/AC5): `null` = no batch armed.
+      // Passed to the dispatcher so a continuation decrements it; captured
+      // here so the observability decisions below can distinguish a
+      // continuation from the first dispatch of a batch AND attach the active
+      // batch metadata to a blocked/ended decision.
+      const armedBatch = activeAuditBatch;
+      const continuationBudget = armedBatch !== null ? armedBatch.remaining : null;
       try {
         const outcome =
           opts.coordinationDir && typeof opts.deps.fetchItem === 'function'
@@ -6597,8 +7920,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   model: cfg.model,
                   cwd: cfg.cwd,
                   coordinationDir: opts.coordinationDir,
-                  freeSlots,
+                  freeSlots: effectiveFreeSlots,
                   browseItemCount: cfg.browseItemCount,
+                  auditBatchMax: cfg.auditBatchMax,
+                  // Continuation budget (parent WL-0MVEDM8OT007WDRS AC1) —
+                  // consumed by the coordination continuation item.
+                  ...(continuationBudget !== null ? { auditBatchRemaining: continuationBudget } : {}),
+                  // Batch-local exclusion set (WL-0MVFE1DD8000D8T2 AC3/AC4):
+                  // every target already dispatched in this batch window.
+                  ...(armedBatch !== null
+                    ? { auditBatchDispatchedIds: [...armedBatch.dispatchedIds] }
+                    : {}),
                   nonTerminalCooldownMs: cfg.nonTerminalCooldownMs,
                   maxAttempts: cfg.maxAttempts,
                   // Dispatched success-marker staleness window
@@ -6610,14 +7942,18 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
-                  spawnConfig,
                 },
               )
             : await dispatchDowntimeWork(opts.deps, {
                 model: cfg.model,
                 cwd: cfg.cwd,
-                freeSlots,
+                freeSlots: effectiveFreeSlots,
                 browseItemCount: cfg.browseItemCount,
+                // Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1).
+                auditBatchMax: cfg.auditBatchMax,
+                // Continuation budget for the current idle window; absent on
+                // the first dispatch / when no batch is armed.
+                ...(continuationBudget !== null ? { auditBatchRemaining: continuationBudget } : {}),
                 // Owner-lease (AC2) + contention (AC6) gates
                 // (WL-0MTYZXSLN008HZOW). No pane-count cap
                 // (WL-0MU2EP6JL006A1U3).
@@ -6633,7 +7969,6 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 // (WL-0MUYMBSA90092QV2).
                 stallScanEnabled: cfg.stallScanEnabled,
                 stallScanThresholdMs: cfg.stallScanThresholdMs,
-                spawnConfig,
               });
         // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
         // no-dispatch outcomes (no-candidate / review-queue-hold / code-freeze
@@ -6647,16 +7982,114 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             ownerPresent,
             runningPanes,
             contentionDepth: contentionQueueDepth,
+            ...capacity,
+            // AC5: a held/blocked continuation reuses the EXISTING token
+            // unchanged (`audit-in-flight` / `audit-host-saturated` /
+            // `code-freeze` / `review-queue-hold` / `no-candidate` / ...) and
+            // gains the active batch metadata as an additive field.
+            ...batchMetadata(outcome.auditBatch),
           });
         }
+        // Any non-`dispatched` outcome ends the audit batch (parent
+        // WL-0MVEDM8OT007WDRS AC3): the next audit requires a fresh full idle
+        // period, and a continuation never skips to another target. The
+        // refusal token above already carries the batch metadata, so no
+        // separate end token is emitted (no duplicate line per refusal).
+        if (!outcome.dispatched) activeAuditBatch = null;
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
           errorStrikes = 0; // a successful dispatch proves the CLI is healthy
-          // Belt-and-suspenders: even if the proxy does not immediately
-          // report busy, require a fresh full idle period before the next
-          // dispatch (AC5).
-          tracker.record(false);
-          perSlotTracker.record([]);
+          // A successful dispatch proves capacity was available, so the
+          // capacity-starvation episode is over (WL-0MVKNC2N50025HXE AC3).
+          starvationTracker.reset();
+          const batch = outcome.auditBatch;
+          // AC5 observability: a CONTINUATION audit dispatch records its own
+          // decision token (with depth/cap/remaining) at the existing rate
+          // limit. The first dispatch of a batch is a normal dispatch. This
+          // is an observation, not a refusal — it must not touch the header
+          // blocking token.
+          if (
+            continuationBudget !== null &&
+            continuationBudget > 0 &&
+            outcome.kind === 'audit' &&
+            batch !== undefined &&
+            batch.active
+          ) {
+            void recordDecision(
+              cfg.cwd,
+              'audit-batch-continue',
+              {
+                freeSlots,
+                totalSlots: status.total_slots,
+                ownerPresent,
+                runningPanes,
+                contentionDepth: contentionQueueDepth,
+                auditBatchDepth: batch.depth,
+                auditBatchCap: batch.cap,
+                auditBatchRemaining: batch.remaining,
+              },
+              { blocking: false },
+            );
+          }
+          // Conditional idle reset (parent WL-0MVEDM8OT007WDRS AC2): only a
+          // successful AUDIT dispatch in an active batch with budget
+          // remaining defers the reset — every gate (idle-duration, free
+          // slots, slot ownership, contention, freeze, active-audit markers,
+          // single-flight) is still re-checked on the continuation tick.
+          // Every other dispatch keeps today's full reset exactly.
+          const deferIdleReset =
+            outcome.kind === 'audit' &&
+            batch !== undefined &&
+            batch.active &&
+            batch.remaining > 0;
+          if (deferIdleReset) {
+            // The batch-local exclusion set accumulates every target dispatched
+            // in this window (WL-0MVFE1DD8000D8T2 AC3/AC4).
+            const dispatchedId = outcome.candidate?.id;
+            const nextIds = new Set(armedBatch?.dispatchedIds ?? []);
+            if (dispatchedId !== undefined && dispatchedId.length > 0) {
+              nextIds.add(dispatchedId);
+            }
+            activeAuditBatch = {
+              depth: batch.depth,
+              cap: batch.cap,
+              remaining: batch.remaining,
+              dispatchedIds: nextIds,
+            };
+          } else {
+            // Batch-end observability (AC5): the silent deactivation of an
+            // armed batch after a successful audit dispatch (cap reached or
+            // depth dropped below the threshold) gets ONE distinct token so
+            // "why did the batch stop?" is answerable from the log. It is
+            // rate-limited like every other decision and is never emitted on
+            // a refusal (that token already carries the metadata) or when no
+            // batch was armed (nothing ended).
+            if (continuationBudget !== null && outcome.kind === 'audit' && batch !== undefined) {
+              const batchThreshold = resolveSprintViewWindow(cfg.browseItemCount);
+              void recordDecision(
+                cfg.cwd,
+                'audit-batch-end',
+                {
+                  freeSlots,
+                  totalSlots: status.total_slots,
+                  ownerPresent,
+                  runningPanes,
+                  contentionDepth: contentionQueueDepth,
+                  auditBatchDepth: batch.depth,
+                  auditBatchCap: batch.cap,
+                  auditBatchRemaining: batch.remaining,
+                  auditBatchEndReason: batch.depth < batchThreshold ? 'depth' : 'cap',
+                },
+                { blocking: false },
+              );
+            }
+            activeAuditBatch = null;
+            // Belt-and-suspenders: even if the proxy does not immediately
+            // report busy, require a fresh full idle period before the next
+            // dispatch (AC5).
+            tracker.record(false);
+            perSlotTracker.record([]);
+          }
           // Voluntary leadership hand-off after an own-backlog fallback
           // dispatch (parent WL-0MUU4XFU90008E24 AC4/AC5/A3): the fallback
           // reached beyond the sprint-view window into the leader's own
@@ -7822,6 +9255,22 @@ export function clampDowntimeMaxAttempts(value: number): number {
   return Math.min(
     Math.max(Math.round(value), DOWNTIME_MAX_ATTEMPTS_MIN),
     DOWNTIME_MAX_ATTEMPTS_MAX,
+  );
+}
+
+/**
+ * Clamp the depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
+ * WL-0MVEDM8OT007WDRS AC1): non-finite input (NaN/±Infinity) falls back to
+ * the default `2`, and every other value is rounded and clamped to
+ * [DOWNTIME_AUDIT_BATCH_MAX_MIN, DOWNTIME_AUDIT_BATCH_MAX_MAX] (1–5). `1`
+ * is accepted and means batching is off (legacy single-dispatch behaviour);
+ * the ceiling bounds the per-idle-window LLM load.
+ */
+export function clampDowntimeAuditBatchMax(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_AUDIT_BATCH_MAX;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_AUDIT_BATCH_MAX_MIN),
+    DOWNTIME_AUDIT_BATCH_MAX_MAX,
   );
 }
 

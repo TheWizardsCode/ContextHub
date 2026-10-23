@@ -499,7 +499,16 @@ describe('dispatch critical-first tier', () => {
     // Observable contract: spawnAgentPane boundary call — sole observable channel for the spawn
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:intake WL-CRIT-I'),
-      { model: 'plan', cwd: '/repo', itemId: 'WL-CRIT-I', itemTitle: 'Critical idea WL-CRIT-I' },
+      {
+        model: 'plan',
+        cwd: '/repo',
+        itemId: 'WL-CRIT-I',
+        itemTitle: 'Critical idea WL-CRIT-I',
+        // Request priority (WL-0MVF3Q4X5001FOXV AC3): the critical candidate's
+        // raw work-item priority is carried to the spawn boundary so the
+        // launched session is served at the mapped request priority.
+        priority: 'critical',
+      },
     );
   });
 
