@@ -461,7 +461,7 @@ describe('large-DB budget policy', () => {
         syntheticInput({
           profile: 'full',
           target: 'src',
-          refresh: { p95WallMs: 8000 },
+          refresh: { p95WallMs: 2000 },
         }),
         enforced,
       ).violations,

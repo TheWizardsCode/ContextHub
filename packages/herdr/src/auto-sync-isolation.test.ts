@@ -30,10 +30,12 @@ import { describe, it, expect } from 'vitest';
 
 import {
   REPO_ROOT,
+  evaluateLargeDbBudget,
   percentile,
   readLargeDbBudget,
   runSyncInFlightScenario,
   runSyncLockContentionScenario,
+  type LargeDbEvaluationInput,
 } from '../test/perf/large-db-harness.js';
 
 const repoRoot = REPO_ROOT;
@@ -100,11 +102,32 @@ describe('auto-sync isolation — refresh never waits on a long sync (F3 AC1/AC3
 
   it('absolute AC budget check once the full-scale baseline is enforced (F7 gate)', () => {
     const budget = readLargeDbBudget(repoRoot);
-    // When the F1 policy starts enforcing AC targets (enforced: true after
-    // F7 records a compliant full-scale baseline), the sync-in-flight
-    // refreshes must also be inside the parent AC2 budget. Until then the
-    // measured ratchet is the relative/no-wait guarantees above.
-    expect(budget.acTargets.enforced).toBe(false);
+    // F7 recorded a compliant full-scale baseline and flipped the F1 policy to
+    // enforce the parent AC targets, so the absolute numbers are now gated at
+    // full scale by the budget ratchet and by the end-to-end `--ac-report`
+    // (AC3 includes the sync-in-flight measurements). Pin the enforcement and
+    // prove the policy rejects a with-sync refresh over the AC2 wall target.
+    expect(budget.acTargets.enforced).toBe(true);
+
+    const breaching: LargeDbEvaluationInput = {
+      profile: 'full',
+      target: 'dist',
+      refresh: {
+        p95WallMs: budget.acTargets.refreshP95WallMs + 1,
+        p95CpuMs: 1,
+        eventLoopBlockingP95Ms: 0,
+        maxEventLoopBlockedMs: 0,
+        spawnsPerRefresh: 1,
+        consolidatedWorklistSpawns: 1,
+        peakRssPerSpawnMb: 100,
+        aggregateSpawnRssMb: 100,
+      },
+      pane: { peakRssMb: 100, aggregateRssMb: 100 },
+      idle: { changed: false, spawns: 0 },
+      writeToReflect: { p95ReflectMs: 1 },
+    };
+    const violations = evaluateLargeDbBudget(breaching, budget).violations.join('\n');
+    expect(violations).toContain('AC refreshP95WallMs');
   });
 
   it('a refresh completes while the sync holds its file lock and a real write transaction (AC3 lock contention)', async () => {

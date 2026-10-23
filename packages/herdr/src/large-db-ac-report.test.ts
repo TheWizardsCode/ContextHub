@@ -14,6 +14,8 @@
 import { describe, it, expect } from 'vitest';
 
 import {
+  LARGE_DB_PROFILES,
+  baselineFromReport,
   buildAcReport,
   defaultLargeDbBudget,
   formatAcReport,
@@ -148,6 +150,21 @@ function expandReport(overrides: Partial<ExpandReadMetrics> = {}): ExpandReadMet
   };
 }
 
+/**
+ * A budget with recorded full-scale baselines derived from the synthetic
+ * report, so the ratchet verdict in the pure tests is exercised against a
+ * complete budget (an empty baseline would fail every evaluation).
+ */
+function budgetWithBaselines(enforced = false): LargeDbBudget {
+  const budget = defaultLargeDbBudget();
+  budget.profiles.full = {
+    scale: { ...LARGE_DB_PROFILES.full },
+    baselines: { dist: baselineFromReport(refreshReport()) },
+  };
+  budget.acTargets = { ...budget.acTargets, enforced };
+  return budget;
+}
+
 function acInputs(
   overrides: {
     refresh?: Partial<LargeDbReport>;
@@ -171,7 +188,7 @@ function acInputs(
     syncInFlight: syncInFlightReport(overrides.sync),
     spawnCap: spawnCapReport(overrides.spawnCap),
     expand: expandReport(overrides.expand),
-    budget: overrides.budget ?? defaultLargeDbBudget(),
+    budget: overrides.budget ?? budgetWithBaselines(),
   };
 }
 
@@ -282,8 +299,7 @@ describe('end-to-end parent AC report', () => {
   });
 
   it('reports the budget ratchet alongside the AC verdicts', () => {
-    const budget = defaultLargeDbBudget();
-    budget.acTargets = { ...budget.acTargets, enforced: true };
+    const budget = budgetWithBaselines(true);
     const report = buildAcReport(acInputs({ budget }));
     expect(report.budget.enforced).toBe(true);
     expect(report.budget.evaluation.ok).toBe(true);
