@@ -43,6 +43,9 @@ import {
   runSync,
   heartbeatTtlForInterval,
   isSyncHeartbeatFresh,
+  onSyncStatusChange,
+  getSyncStatus,
+  formatSyncNotice,
 } from './auto-sync.js';
 import { TaskScheduler, DEFAULT_SCHEDULER_TICK_MS } from './scheduler.js';
 import { loadSettings } from './settings.js';
@@ -4278,6 +4281,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   metaBlockedBy?: BlockerRef[] | null,
   /** Active dependency blockers of the detail item, rendered as `Blocked By` rows (WL-0MVBMLY2Z0032CYR). */
   detailBlockedBy?: BlockerRef[] | null,
+  /** Non-blocking background-sync status notice appended to the header (F3 — WL-0MVJV2O7H003HY9N). */
+  syncNotice?: string,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -4321,6 +4326,8 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     metaBlockedBy?: BlockerRef[] | null,
     /** Active dependency blockers of the detail item, rendered as `Blocked By` rows (WL-0MVBMLY2Z0032CYR). */
     detailBlockedBy?: BlockerRef[] | null,
+    /** Non-blocking background-sync status notice appended to the header (F3 — WL-0MVJV2O7H003HY9N). */
+    syncNotice?: string,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -4384,6 +4391,16 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     }
     if (downtimeStatus) {
       header += downtimeStatus;
+    }
+    // ── Non-blocking sync notice (F3 — WL-0MVJV2O7H003HY9N) ─────
+    // A tiny, render-only status notice ("⟳ syncing… Ns") while a background
+    // `wl sync` is in flight. It NEVER blocks input: it is a pure string read
+    // of the auto-sync status snapshot, appended to the header and clamped by
+    // the same truncation guard as every other header segment. The notice is
+    // the only "hanging" indication the operator sees — no spinner, no modal,
+    // no lock wait.
+    if (syncNotice) {
+      header += ` ${ANSI.fg(45)}${syncNotice}${ANSI.reset}`;
     }
     // ── Header truncation guard (WL-0MSNI6TQ5003JY1Z) ────────────
     // In narrow panes the concatenated header can exceed `cols`,
@@ -6080,6 +6097,39 @@ export async function runWorklistTui(
     }
   }
 
+  // ── Non-blocking sync status notice (F3 — WL-0MVJV2O7H003HY9N) ────
+  // The pane renders a tiny `⟳ syncing… Ns` notice in the header while a
+  // background `wl sync` is in flight (auto-sync.ts's status model). The
+  // notice is a pure string read of that snapshot: it never awaits, locks or
+  // touches the DB, so input handling and refreshes stay fully responsive
+  // while a long (~36 s) sync runs. `syncNoticeText` is recomputed on every
+  // status transition and, while in flight, on a 1 s unref'd ticker so the
+  // elapsed counter keeps moving (the operator sees progress, not a hang).
+  let syncNoticeText = '';
+  let syncNoticeTicker: ReturnType<typeof setInterval> | null = null;
+  let unsubscribeSyncStatus: (() => void) | null = null;
+
+  const stopSyncNoticeTicker = (): void => {
+    if (syncNoticeTicker !== null) {
+      clearInterval(syncNoticeTicker);
+      syncNoticeTicker = null;
+    }
+  };
+
+  const refreshSyncNotice = (): void => {
+    syncNoticeText = formatSyncNotice();
+  };
+
+  const startSyncNoticeTicker = (): void => {
+    if (syncNoticeTicker !== null) return;
+    syncNoticeTicker = setInterval(() => {
+      refreshSyncNotice();
+      render();
+    }, 1000);
+    // Never keep the pane process alive just for the status notice.
+    if (syncNoticeTicker.unref) syncNoticeTicker.unref();
+  };
+
   // Setup cleanup
   const cleanup = (): void => {
     // Clear form mode on cleanup
@@ -6098,6 +6148,11 @@ export async function runWorklistTui(
     process.stdin.pause();
     process.stdout.write(ANSI.showCursor);
     process.stdout.write(ANSI.reset);
+    // Sync-notice teardown: stop the in-flight elapsed ticker and drop the
+    // status subscription so an exiting pane cannot leak a timer or receive
+    // status callbacks after teardown (F3 — WL-0MVJV2O7H003HY9N).
+    stopSyncNoticeTicker();
+    if (unsubscribeSyncStatus) unsubscribeSyncStatus();
   };
 
   // Event-subscriber teardown on TUI exit (WL-0MSHB7DHO004RHBJ F6): close
@@ -7480,6 +7535,7 @@ export async function runWorklistTui(
       sprintAuditsOutstanding,
       metaBlockers,
       detailBlockers,
+      syncNoticeText,
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a
@@ -7696,6 +7752,22 @@ export async function runWorklistTui(
         },
       }),
     });
+  }
+
+  // Subscribe to background-sync status transitions so the header notice
+  // appears the instant a sync spawns and clears the instant it settles —
+  // both via asynchronous libuv events, never on the refresh path. The
+  // subscription also adopts a sync already in flight in this process
+  // (F3 — WL-0MVJV2O7H003HY9N).
+  if (opts.autoSync) {
+    unsubscribeSyncStatus = onSyncStatusChange(() => {
+      refreshSyncNotice();
+      if (getSyncStatus().inFlight) startSyncNoticeTicker();
+      else stopSyncNoticeTicker();
+      render();
+    });
+    refreshSyncNotice();
+    if (getSyncStatus().inFlight) startSyncNoticeTicker();
   }
 
   // Visibility resume-poll — runs only while the pane's tab is hidden. Polls

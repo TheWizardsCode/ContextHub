@@ -62,6 +62,15 @@ import {
   readSyncHeartbeatMs,
   syncHeartbeatPath,
   _resetSyncInFlight,
+  formatSyncNotice,
+  getSyncElapsedMs,
+  getSyncStatus,
+  isSyncInFlight,
+  onSyncStatusChange,
+  _resetSyncSpawnForTests,
+  _resetSyncStatusForTests,
+  _setSyncSpawnForTests,
+  _setSyncStatusForTests,
 } from './auto-sync.js';
 
 // Re-import the mocked spawn for assertions
@@ -431,6 +440,226 @@ describe('sync heartbeat', () => {
       expect(outcome.reason).toBe('heartbeat');
     }
     expect(mockSpawn).toHaveBeenCalledTimes(1); // 6 panes, 1 process spawned
+  });
+});
+
+// ---------------------------------------------------------------------------
+// In-flight status instrumentation + non-blocking notice (F3 — WL-0MVJV2O7H003HY9N)
+// ---------------------------------------------------------------------------
+
+/**
+ * Controllable fake child returned by the injected spawn seam: it stays
+ * "in flight" until the test fires its close/error event, which is exactly
+ * the `wl sync` shape the pane must never wait on.
+ */
+interface FakeSyncChild {
+  pid: number;
+  on: (event: string, cb: (...args: any[]) => void) => FakeSyncChild;
+  kill: () => void;
+  unref: () => void;
+  fireClose: (code?: number | null) => void;
+  fireError: (message: string) => void;
+  killed: boolean;
+}
+
+function makeFakeSyncChild(pid = 40_211): FakeSyncChild {
+  const handlers: Record<string, (...args: any[]) => void> = {};
+  const child: FakeSyncChild = {
+    pid,
+    on(event, cb) {
+      handlers[event] = cb;
+      return child;
+    },
+    kill() {
+      child.killed = true;
+    },
+    unref() {},
+    fireClose(code = 0) {
+      handlers.close?.(code);
+    },
+    fireError(message: string) {
+      handlers.error?.(new Error(message));
+    },
+    killed: false,
+  };
+  return child;
+}
+
+describe('in-flight sync status (F3 — auto-sync isolation)', () => {
+  let child: FakeSyncChild;
+
+  beforeEach(() => {
+    _resetSyncInFlight();
+    child = makeFakeSyncChild();
+    _setSyncSpawnForTests(() => child);
+  });
+
+  afterEach(() => {
+    _resetSyncSpawnForTests();
+    _resetSyncStatusForTests();
+  });
+
+  it('reports the spawned PID and a monotonic start while the sync is in flight', async () => {
+    expect(getSyncStatus()).toMatchObject({ state: 'idle', inFlight: false });
+
+    const promise = runSync('/tmp/proj/.worklog', { ifIdle: true });
+
+    // The status is published synchronously at spawn time, so a concurrent
+    // refresh reading it sees the sync immediately.
+    const status = getSyncStatus();
+    expect(status.state).toBe('syncing');
+    expect(status.inFlight).toBe(true);
+    expect(status.pid).toBe(child.pid);
+    expect(typeof status.startedAtMs).toBe('number');
+    expect(typeof status.startedAtMonotonicMs).toBe('number');
+    expect(isSyncInFlight()).toBe(true);
+
+    // Elapsed is monotonic and injectable — no clock read blocks anything.
+    const start = status.startedAtMonotonicMs as number;
+    expect(getSyncElapsedMs(start)).toBe(0);
+    expect(getSyncElapsedMs(start + 4_321)).toBe(4_321);
+
+    child.fireClose(0);
+    await promise;
+  });
+
+  it('keeps the monotonic start stable for the whole run and clears it exactly once on settle', async () => {
+    const promise = runSync(undefined, { ifIdle: true });
+    const startedAt = getSyncStatus().startedAtMonotonicMs;
+    expect(typeof startedAt).toBe('number');
+
+    // While in flight the start never changes (a reset would be a wait
+    // marker: the pane's notice/elapsed must not restart mid-sync).
+    await Promise.resolve();
+    expect(getSyncStatus().startedAtMonotonicMs).toBe(startedAt);
+    expect(getSyncStatus().pid).toBe(child.pid);
+
+    child.fireClose(0);
+    const outcome = await promise;
+    expect(outcome.pid).toBe(child.pid);
+    expect(typeof outcome.durationMs).toBe('number');
+    expect(outcome.durationMs).toBeGreaterThanOrEqual(0);
+
+    const settled = getSyncStatus();
+    expect(settled.state).toBe('synced');
+    expect(settled.inFlight).toBe(false);
+    expect(settled.pid).toBeUndefined();
+    expect(settled.startedAtMonotonicMs).toBeUndefined();
+    expect(settled.lastOutcome).toMatchObject({ success: true });
+    expect(isSyncInFlight()).toBe(false);
+  });
+
+  it('records a failed outcome with the error when the sync exits non-zero', async () => {
+    const promise = runSync(undefined, { ifIdle: true });
+    child.fireClose(3);
+    const outcome = await promise;
+    expect(outcome.success).toBe(false);
+    expect(outcome.error).toContain('status 3');
+
+    const settled = getSyncStatus();
+    expect(settled.state).toBe('failed');
+    expect(settled.inFlight).toBe(false);
+    expect(settled.lastOutcome?.success).toBe(false);
+    expect(settled.lastOutcome?.error).toContain('status 3');
+  });
+
+  it('records a failed outcome when the spawn errors (e.g. wl not on PATH)', async () => {
+    const promise = runSync(undefined, { ifIdle: true });
+    child.fireError('spawn wl ENOENT');
+    const outcome = await promise;
+    expect(outcome.success).toBe(false);
+    expect(getSyncStatus().state).toBe('failed');
+    expect(getSyncStatus().lastOutcome?.error).toContain('ENOENT');
+  });
+
+  it('notifies subscribers on start and settle, and stops after unsubscribe', async () => {
+    const transitions: string[] = [];
+    const unsubscribe = onSyncStatusChange(() => {
+      transitions.push(`${getSyncStatus().state}:${getSyncStatus().inFlight}`);
+    });
+
+    const promise = runSync(undefined, { ifIdle: true });
+    expect(transitions).toEqual(['syncing:true']);
+
+    child.fireClose(0);
+    await promise;
+    expect(transitions).toEqual(['syncing:true', 'synced:false']);
+
+    unsubscribe();
+    // A reset transition must no longer reach the removed listener.
+    _setSyncStatusForTests(null);
+    expect(transitions).toEqual(['syncing:true', 'synced:false']);
+  });
+
+  it('a skipped tick (single-flight / heartbeat) never claims the sync is running', async () => {
+    child.fireClose(0); // settle an earlier run so the status is idle
+    _resetSyncInFlight();
+
+    // Single-flight skip: hold one sync in flight, then a second tick skips.
+    const first = runSync(undefined, { ifIdle: true });
+    const settledStart = getSyncStatus().startedAtMonotonicMs;
+    const skipped = await runSync(undefined, { ifIdle: true });
+    expect(skipped.skipped).toBe(true);
+    // The skip must not reset the in-flight instrumentation.
+    expect(getSyncStatus().inFlight).toBe(true);
+    expect(getSyncStatus().startedAtMonotonicMs).toBe(settledStart);
+
+    child.fireClose(0);
+    await first;
+  });
+
+  it('clears a failed spawn state (spawn throws) and still resolves an outcome', async () => {
+    _setSyncSpawnForTests(() => {
+      throw new Error('spawn exploded');
+    });
+    const outcome = await runSync(undefined, { ifIdle: true });
+    expect(outcome.success).toBe(false);
+    expect(outcome.error).toContain('spawn exploded');
+    expect(getSyncStatus().inFlight).toBe(false);
+    expect(getSyncStatus().state).toBe('failed');
+  });
+});
+
+describe('formatSyncNotice (non-blocking pane status notice)', () => {
+  afterEach(() => {
+    _resetSyncStatusForTests();
+    _resetSyncSpawnForTests();
+  });
+
+  it('is empty when no sync is in flight', () => {
+    expect(formatSyncNotice()).toBe('');
+  });
+
+  it('shows "syncing…" with an elapsed seconds counter while in flight', () => {
+    const started = 1_000_000;
+    _setSyncStatusForTests({
+      state: 'syncing',
+      inFlight: true,
+      pid: 1234,
+      startedAtMs: Date.now(),
+      startedAtMonotonicMs: started,
+    });
+
+    // Pure + non-blocking: the same snapshot renders deterministically for an
+    // injected monotonic clock (no timer, no I/O, no lock).
+    expect(formatSyncNotice(started)).toBe('⟳ syncing…');
+    expect(formatSyncNotice(started + 999)).toBe('⟳ syncing…');
+    expect(formatSyncNotice(started + 5_400)).toBe('⟳ syncing… 5s');
+    expect(formatSyncNotice(started + 36_000)).toBe('⟳ syncing… 36s');
+  });
+
+  it('is empty again once the sync settles (no stale "hanging" indication)', () => {
+    _setSyncStatusForTests({
+      state: 'syncing',
+      inFlight: true,
+      pid: 1234,
+      startedAtMonotonicMs: 0,
+    });
+    expect(formatSyncNotice(1_000)).not.toBe('');
+
+    _setSyncStatusForTests(null);
+    expect(formatSyncNotice(1_000)).toBe('');
+    expect(getSyncStatus().inFlight).toBe(false);
   });
 });
 

@@ -28,12 +28,20 @@ vi.mock('./fetcher.js', () => ({
   })),
 }));
 
-vi.mock('./auto-sync.js', () => ({
-  runSync: vi.fn().mockResolvedValue({ success: true }),
-  createSyncTimer: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })),
-  clampSyncInterval: vi.fn((v: number) => v),
-  heartbeatTtlForInterval: vi.fn(() => 45_000),
-}));
+// Partial mock: keep every real export (the pane subscribes to the sync
+// status model via `onSyncStatusChange`, reads `getSyncStatus` and formats
+// the notice), overriding only the spawn-driving surface so no test in this
+// file ever spawns a real `wl sync` (F3 — WL-0MVJV2O7H003HY9N).
+vi.mock('./auto-sync.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./auto-sync.js')>();
+  return {
+    ...actual,
+    runSync: vi.fn().mockResolvedValue({ success: true }),
+    createSyncTimer: vi.fn(() => ({ start: vi.fn(), stop: vi.fn() })),
+    clampSyncInterval: vi.fn((v: number) => v),
+    heartbeatTtlForInterval: vi.fn(() => 45_000),
+  };
+});
 
 vi.mock('./notify.js', () => ({
   showToast: vi.fn(),

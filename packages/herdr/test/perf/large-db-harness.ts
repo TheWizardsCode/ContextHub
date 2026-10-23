@@ -96,6 +96,18 @@ import {
 } from '../../src/fetcher.js';
 import { DbChangeTracker, stateCounterFilePath, watchDbChanges } from '../../src/db-change.js';
 import { WorkItemListState, formatItemLine } from '../../src/worklist.js';
+import {
+  formatSyncNotice,
+  getSyncStatus,
+  runSync as runBackgroundSync,
+  _resetSyncInFlight,
+  _resetSyncSpawnForTests,
+  _setSyncSpawnForTests,
+  type SyncChildLike,
+  type SyncRunState,
+} from '../../src/auto-sync.js';
+import { acquireFileLock, releaseFileLock } from '../../../../src/file-lock.js';
+import Database from 'better-sqlite3';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1483,6 +1495,355 @@ export async function runLargeDbHarness(
   }
 }
 
+// ── Auto-sync isolation scenarios (F3 — WL-0MVJV2O7H003HY9N) ─────────
+//
+// F1/F2 measure the refresh. F3 has to prove the OPPOSITE direction: a long
+// `wl sync` running in the background can never make the pane wait. Two
+// scenarios provide that evidence deterministically, without a real 36 s
+// sync process:
+//
+//   - `runSyncInFlightScenario()` — a hooked ("in flight forever" until the
+//     measurement ends) sync started through the REAL `runSync`, so the
+//     in-flight instrumentation (PID + monotonic start), the off-loop spawn
+//     and the pane's non-blocking notice are all exercised; concurrent
+//     refreshes are measured against a no-sync baseline from the same host.
+//   - `runSyncLockContentionScenario()` — the sync-shaped writer holds both
+//     the per-worklog sync FILE lock and a real SQLite write transaction on
+//     the worklog DB; concurrent refreshes must complete without waiting.
+
+/** Options for the F3 auto-sync isolation scenarios. */
+export interface SyncIsolationScenarioOptions {
+  /** Fixture profile (default `default`). */
+  profile?: LargeDbProfileName;
+  /** Override the profile's scale. */
+  scale?: Partial<LargeDbScale>;
+  /** Measured refresh samples in each phase (default 3). */
+  samples?: number;
+  /** Simulated `wl sync` duration in ms (default: the operator-observed ~36 s). */
+  syncDurationMs?: number;
+  /** CLI target to drive (default `auto`). */
+  target?: 'auto' | LargeDbTarget;
+  /** Repository root (defaults to this checkout). */
+  repoRoot?: string;
+  /** Keep the generated fixture on disk for inspection. */
+  keep?: boolean;
+  /** Pre-generated fixture (the caller owns cleanup). */
+  fixture?: LargeDbFixture;
+}
+
+/** One refresh measured while the hooked long sync was in flight. */
+export interface SyncInFlightSample extends RefreshSample {
+  /** Monotonic elapsed time of the sync when this refresh ended (ms). */
+  syncElapsedAtEndMs: number;
+  /** How much of the simulated sync duration was still left (ms). */
+  syncRemainingAtEndMs: number;
+  /** PID reported by the in-flight instrumentation at refresh end. */
+  syncPidAtEnd: number | undefined;
+  /** The pane's status-notice text at refresh end. */
+  noticeText: string;
+}
+
+/** Report of the "refresh while a long sync is in flight" scenario. */
+export interface SyncInFlightReport {
+  profile: LargeDbProfileName;
+  target: LargeDbTarget;
+  invocation: string;
+  samples: number;
+  /** Simulated sync duration (ms). */
+  syncDurationMs: number;
+  /** PID observed at spawn time — the instrumentation the pane reads. */
+  syncPid: number | undefined;
+  /** `getSyncStatus().state` at spawn time (must be `syncing`). */
+  syncStateAtSpawn: SyncRunState;
+  /** Event-loop blocking attributable to STARTING the sync (ms). */
+  spawnBlockingMs: number;
+  /** The pane's notice text while the sync was in flight. */
+  noticeWhileInFlight: string;
+  /** Refresh measurements with NO sync in flight (same run, same host). */
+  baseline: RefreshSample[];
+  /** Refresh measurements taken while the long sync was in flight. */
+  withSync: SyncInFlightSample[];
+  /** Smallest sync-remaining across all with-sync refreshes (ms). */
+  minRemainingAtEndMs: number;
+  /** True when EVERY with-sync refresh finished before the sync did. */
+  noWaitGap: boolean;
+  /** Sync state after the hook settled (must be `synced`). */
+  settledState: SyncRunState;
+  /** Outcome success of the hooked sync run. */
+  lastOutcomeSuccess: boolean | undefined;
+}
+
+/** Context shared by the F3 isolation scenarios (mirrors F1's setup). */
+interface IsolationContext {
+  fixture: LargeDbFixture;
+  profile: LargeDbProfileName;
+  invocation: LargeDbCliInvocation;
+  scale: LargeDbScale;
+  spawnFile: string;
+  spawnArgs: string[][];
+  refresh: () => Promise<void>;
+  cleanup: () => void;
+}
+
+/**
+ * Set up the fixture, cache dir, spawn-count file, fetcher exec seam, the
+ * in-process read preflight and cache priming — the same environment the F1
+ * ratchet measures, so both scenarios describe the real data path. The caller
+ * owns `cleanup()` (restores env + exec seam, drops the fixture).
+ */
+async function openIsolationContext(
+  options: SyncIsolationScenarioOptions,
+): Promise<IsolationContext> {
+  const repoRoot = options.repoRoot ?? REPO_ROOT;
+  const profileName: LargeDbProfileName = options.profile ?? 'default';
+  const scale: LargeDbScale = { ...LARGE_DB_PROFILES[profileName], ...options.scale };
+  const invocation = resolveCliInvocation(options.target ?? 'auto', repoRoot);
+  const fixture = options.fixture ?? generateLargeWorklog(scale);
+  const cacheDir = path.join(fixture.rootDir, 'cache');
+  const spawnFile = path.join(fixture.rootDir, 'spawns.log');
+  const spawnArgs: string[][] = [];
+  const savedCacheDir = process.env.WL_CACHE_DIR;
+  const savedSpawnFile = process.env.WL_SPAWN_COUNT_FILE;
+
+  const refresh = async (): Promise<void> => {
+    const scope = createInProcessRefreshScope();
+    try {
+      await Promise.all([
+        fetchNextItems(scale.browseCount),
+        fetchChildrenForItems(fixture.expandedParentIds, undefined, scope),
+        fetchReviewQueueState(),
+        fetchActionableCount(scope),
+      ]);
+    } finally {
+      scope.close();
+    }
+  };
+
+  process.env.WL_CACHE_DIR = cacheDir;
+  process.env.WL_SPAWN_COUNT_FILE = spawnFile;
+  setWorklogDir(fixture.worklogDir);
+  setExecFileAsync((async (file: unknown, args: unknown, execOptions: unknown) => {
+    const argv = (args as string[]) ?? [];
+    spawnArgs.push([...argv]);
+    void file;
+    return runCliTarget(invocation, argv, execOptions);
+  }) as Parameters<typeof setExecFileAsync>[0]);
+
+  // Preflight: the measured path relies on the in-process SQLite read path.
+  const preflightScope = createInProcessRefreshScope();
+  let inProcessItems: number | undefined;
+  try {
+    inProcessItems = await preflightScope.read((db) => db.list({}).length);
+  } finally {
+    preflightScope.close();
+  }
+  if (inProcessItems === undefined) {
+    throw new Error(
+      'sync-isolation harness: the in-process SQLite read path is unavailable, so the default-view ' +
+        'refresh would fall back to per-parent `wl` spawns — build the shared package first ' +
+        '(`npm run build:shared`).',
+    );
+  }
+  // Prime the read cache so the measured refreshes are genuinely warm.
+  await refresh();
+  await refresh();
+
+  return {
+    fixture,
+    profile: profileName,
+    invocation,
+    scale,
+    spawnFile,
+    spawnArgs,
+    refresh,
+    cleanup: () => {
+      resetExecFileAsync();
+      resetWorklogDir();
+      if (savedCacheDir === undefined) delete process.env.WL_CACHE_DIR;
+      else process.env.WL_CACHE_DIR = savedCacheDir;
+      if (savedSpawnFile === undefined) delete process.env.WL_SPAWN_COUNT_FILE;
+      else process.env.WL_SPAWN_COUNT_FILE = savedSpawnFile;
+      if (!options.keep) fixture.cleanup();
+    },
+  };
+}
+
+/**
+ * F3 AC1/AC2/AC3 — a concurrent default-view refresh while a long `wl sync`
+ * is in flight.
+ *
+ *   1. Refreshes are measured first with no sync running (baseline, same
+ *      host, same fixture) so host load cannot be mistaken for sync coupling.
+ *   2. A hooked sync is started through the REAL `runSync` with the injectable
+ *      spawn seam: the instrumentation (PID + monotonic start), the off-loop
+ *      spawn cost and the pane's notice text are all the production ones.
+ *   3. The hook stays in flight until every with-sync refresh has completed,
+ *      so `noWaitGap` proves the refresh never waited on the sync (the sync
+ *      still had `minRemainingAtEndMs` of its simulated duration left).
+ *
+ * The simulated duration is pure arithmetic (the hook does not sleep), so a
+ * default-suite run can use the operator-observed ~36 s figure at zero cost.
+ */
+export async function runSyncInFlightScenario(
+  options: SyncIsolationScenarioOptions = {},
+): Promise<SyncInFlightReport> {
+  const samples = Math.max(1, options.samples ?? 3);
+  const syncDurationMs = Math.max(1, options.syncDurationMs ?? 36_000);
+  const ctx = await openIsolationContext(options);
+  try {
+    // Phase 1 — baseline refreshes, no sync in flight.
+    const baseline: RefreshSample[] = [];
+    for (let index = 0; index < samples; index += 1) {
+      baseline.push(await measureRefresh(ctx.refresh, ctx.spawnFile, ctx.spawnArgs));
+    }
+
+    // Phase 2 — hold a long sync in flight through the REAL runSync.
+    _resetSyncInFlight();
+    const control = { close: null as ((code?: number | null) => void) | null };
+    const child: SyncChildLike = {
+      pid: 900_000 + (process.pid % 500),
+      on: (event, cb) => {
+        if (event === 'close') control.close = cb;
+        return child;
+      },
+      kill: () => {
+        // no-op: the hook ends when the scenario closes it.
+      },
+      unref: () => {
+        // no-op: the hook is not a real process.
+      },
+    };
+    _setSyncSpawnForTests(() => child);
+
+    const probe = startEventLoopProbe();
+    const syncStartedAtMonotonic = performance.now();
+    const syncPromise = runBackgroundSync(ctx.fixture.worklogDir, { ifIdle: true });
+    const spawnBlocking = probe.stop();
+    const statusAtSpawn = getSyncStatus();
+    const noticeWhileInFlight = formatSyncNotice();
+
+    const withSync: SyncInFlightSample[] = [];
+    for (let index = 0; index < samples; index += 1) {
+      const sample = await measureRefresh(ctx.refresh, ctx.spawnFile, ctx.spawnArgs);
+      const elapsed = performance.now() - syncStartedAtMonotonic;
+      const atEnd = getSyncStatus();
+      withSync.push({
+        ...sample,
+        syncElapsedAtEndMs: round1(elapsed),
+        syncRemainingAtEndMs: round1(syncDurationMs - elapsed),
+        syncPidAtEnd: atEnd.pid,
+        noticeText: formatSyncNotice(),
+      });
+    }
+
+    // Phase 3 — settle the hook: the sync "completes" normally.
+    control.close?.(0);
+    await syncPromise;
+    const settled = getSyncStatus();
+
+    const remaining = withSync.map((sample) => sample.syncRemainingAtEndMs);
+    return {
+      profile: ctx.profile,
+      target: ctx.invocation.target,
+      invocation: ctx.invocation.method,
+      samples: withSync.length,
+      syncDurationMs,
+      syncPid: statusAtSpawn.pid,
+      syncStateAtSpawn: statusAtSpawn.state,
+      spawnBlockingMs: round1(spawnBlocking.totalBlockedMs),
+      noticeWhileInFlight,
+      baseline,
+      withSync,
+      minRemainingAtEndMs: round1(Math.min(...remaining)),
+      noWaitGap: remaining.every((value) => value > 0),
+      settledState: settled.state,
+      lastOutcomeSuccess: settled.lastOutcome?.success,
+    };
+  } finally {
+    _resetSyncSpawnForTests();
+    _resetSyncInFlight();
+    ctx.cleanup();
+  }
+}
+
+/** Report of the "refresh while the sync holds its locks" scenario. */
+export interface SyncLockContentionReport {
+  profile: LargeDbProfileName;
+  target: LargeDbTarget;
+  invocation: string;
+  baseline: RefreshSample[];
+  underWriterLock: RefreshSample[];
+  /** Whether the per-worklog sync file lock was held throughout. */
+  syncFileLockHeld: boolean;
+  /** Whether a real SQLite write transaction was open throughout. */
+  writerTransactionOpen: boolean;
+  dbItemCount: number;
+}
+
+/**
+ * F3 AC3 (lock contention) — a refresh while a sync-shaped WRITER holds both
+ * (a) the per-worklog sync file lock (`worklog-data.jsonl.lock`, the exact
+ * lock `wl sync --if-idle` takes) and (b) a real SQLite write transaction on
+ * the worklog DB (the shape of the sync's persist phase). The pane's
+ * in-process refresh scope must complete without waiting on either: the
+ * refresh never shares the sync's handle and never takes its file lock.
+ */
+export async function runSyncLockContentionScenario(
+  options: SyncIsolationScenarioOptions = {},
+): Promise<SyncLockContentionReport> {
+  const samples = Math.max(1, options.samples ?? 3);
+  const ctx = await openIsolationContext(options);
+  try {
+    const baseline: RefreshSample[] = [];
+    for (let index = 0; index < samples; index += 1) {
+      baseline.push(await measureRefresh(ctx.refresh, ctx.spawnFile, ctx.spawnArgs));
+    }
+
+    const db = new Database(ctx.fixture.dbPath);
+    const dbItemCount = (db.prepare('SELECT COUNT(*) AS n FROM workitems').get() as { n: number }).n;
+    const lockPath = `${path.join(ctx.fixture.worklogDir, 'worklog-data.jsonl')}.lock`;
+    acquireFileLock(lockPath, { timeout: 5_000 });
+    let writerTransactionOpen = false;
+    try {
+      // Hold an exclusive write transaction: the sync's persist writes. WAL
+      // mode means a reader never blocks on the writer — that is the property
+      // the pane relies on.
+      db.pragma('busy_timeout = 0');
+      db.exec('BEGIN IMMEDIATE');
+      const row = db.prepare('SELECT id FROM workitems LIMIT 1').get() as { id?: string } | undefined;
+      if (row?.id) {
+        db.prepare('UPDATE workitems SET updatedAt = updatedAt WHERE id = ?').run(row.id);
+      }
+      writerTransactionOpen = true;
+
+      const underWriterLock: RefreshSample[] = [];
+      for (let index = 0; index < samples; index += 1) {
+        underWriterLock.push(await measureRefresh(ctx.refresh, ctx.spawnFile, ctx.spawnArgs));
+      }
+      return {
+        profile: ctx.profile,
+        target: ctx.invocation.target,
+        invocation: ctx.invocation.method,
+        baseline,
+        underWriterLock,
+        syncFileLockHeld: true,
+        writerTransactionOpen,
+        dbItemCount,
+      };
+    } finally {
+      try {
+        db.exec('ROLLBACK');
+      } catch {
+        // Already rolled back — nothing to undo.
+      }
+      db.close();
+      releaseFileLock(lockPath);
+    }
+  } finally {
+    ctx.cleanup();
+  }
+}
+
 /** Report the parent AC verdicts for a measurement (report-only view). */
 export function withinAcTargets(
   report: LargeDbReport,
@@ -2407,11 +2768,23 @@ interface CliOptions extends LargeDbHarnessOptions {
   json: boolean;
   updateBudget: boolean;
   stages: boolean;
+  /** F3: measure a concurrent refresh while a long sync is in flight. */
+  syncInFlight: boolean;
+  /** F3: measure a concurrent refresh while the sync holds its locks. */
+  lockContention: boolean;
+  /** F3: simulated sync duration for `--sync-in-flight` (ms). */
+  syncDurationMs?: number;
 }
 
 /** Parse CLI arguments (exported for the contract tests). */
 export function parseCliArgs(argv: string[]): CliOptions {
-  const options: CliOptions = { json: false, updateBudget: false, stages: false };
+  const options: CliOptions = {
+    json: false,
+    updateBudget: false,
+    stages: false,
+    syncInFlight: false,
+    lockContention: false,
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     const next = argv[index + 1];
@@ -2459,6 +2832,20 @@ export function parseCliArgs(argv: string[]): CliOptions {
       case '--stages':
         options.stages = true;
         break;
+      case '--sync-in-flight':
+        options.syncInFlight = true;
+        break;
+      case '--lock-contention':
+        options.lockContention = true;
+        break;
+      case '--sync-duration': {
+        const value = readValue();
+        if (!value || !Number.isFinite(Number(value)) || Number(value) <= 0) {
+          throw new Error('--sync-duration requires a positive number of milliseconds');
+        }
+        options.syncDurationMs = Number(value);
+        break;
+      }
       case '--json':
         options.json = true;
         break;
@@ -2470,6 +2857,61 @@ export function parseCliArgs(argv: string[]): CliOptions {
     }
   }
   return options;
+}
+
+/** p95 of the given samples (0 when empty) — the scenario report summary. */
+function p95Of(values: number[]): number {
+  return percentile(values, 0.95) ?? 0;
+}
+
+/** Render the F3 isolation-scenario report as human-readable text. */
+export function formatSyncIsolationReport(
+  report: SyncInFlightReport | SyncLockContentionReport,
+): string {
+  if ('withSync' in report) {
+    const inFlight = report as SyncInFlightReport;
+    const wallBase = p95Of(inFlight.baseline.map((s) => s.wallMs));
+    const wallWith = p95Of(inFlight.withSync.map((s) => s.wallMs));
+    const blBase = p95Of(inFlight.baseline.map((s) => s.eventLoopBlockedMs));
+    const blWith = p95Of(inFlight.withSync.map((s) => s.eventLoopBlockedMs));
+    return [
+      '',
+      '================================================',
+      '  Auto-sync isolation — refresh under a long sync (F3)',
+      '================================================',
+      '',
+      `  profile:                ${inFlight.profile} (${inFlight.target} CLI target)`,
+      `  sync in flight:         ${inFlight.syncDurationMs} ms simulated, ` +
+        `state ${inFlight.syncStateAtSpawn}, pid ${inFlight.syncPid}`, 
+      `  spawn event-loop cost:  ${inFlight.spawnBlockingMs} ms (off-loop check)`,
+      `  pane notice in flight:  ${inFlight.noticeWhileInFlight || '(none)'}`,
+      '',
+      `  refresh wall p95:       baseline ${Math.round(wallBase)} ms -> with sync ${Math.round(wallWith)} ms`,
+      `  event-loop blocked p95: baseline ${Math.round(blBase)} ms -> with sync ${Math.round(blWith)} ms`,
+      `  spawns per refresh:     baseline ${inFlight.baseline[0]?.spawns ?? '?'} / ` +
+        `with sync ${inFlight.withSync[0]?.spawns ?? '?'} (sync adds none)`,
+      `  no wait gap:            ${inFlight.noWaitGap} ` +
+        `(min sync remaining at refresh end ${inFlight.minRemainingAtEndMs} ms)`, 
+      `  settled:                ${inFlight.settledState} ` +
+        `(last success ${inFlight.lastOutcomeSuccess})`,
+      '',
+    ].join('\n');
+  }
+  const lock = report as SyncLockContentionReport;
+  const wallBase = p95Of(lock.baseline.map((s) => s.wallMs));
+  const wallUnder = p95Of(lock.underWriterLock.map((s) => s.wallMs));
+  return [
+    '',
+    '================================================',
+    '  Auto-sync isolation — refresh under sync locks (F3 AC3)',
+    '================================================',
+    '',
+    `  profile:                ${lock.profile} (${lock.target} CLI target)`,
+    `  sync file lock held:    ${lock.syncFileLockHeld}`,
+    `  writer transaction:     ${lock.writerTransactionOpen} (${lock.dbItemCount} items)`,
+    `  refresh wall p95:       baseline ${Math.round(wallBase)} ms -> under locks ${Math.round(wallUnder)} ms`,
+    '',
+  ].join('\n');
 }
 
 /** Render a report as human-readable text. */
@@ -2523,6 +2965,33 @@ async function main(): Promise<void> {
   const options = parseCliArgs(process.argv.slice(2));
   const budget = readLargeDbBudget(REPO_ROOT);
   const profile = options.profile ?? 'default';
+
+  // F3 isolation scenarios: a concurrent refresh while a long sync is in
+  // flight (`--sync-in-flight`) or while it holds its file lock + a writer
+  // transaction (`--lock-contention`). Neither mutates the budget file.
+  if (options.syncInFlight || options.lockContention) {
+    const samples = options.samples ?? (profile === 'full' ? 5 : 3);
+    const report = options.lockContention
+      ? await runSyncLockContentionScenario({
+          profile,
+          samples,
+          target: options.target,
+          keep: options.keep,
+        })
+      : await runSyncInFlightScenario({
+          profile,
+          samples,
+          target: options.target,
+          syncDurationMs: options.syncDurationMs,
+          keep: options.keep,
+        });
+    process.stdout.write(
+      options.json
+        ? `${JSON.stringify(report, null, 2)}\n`
+        : `${formatSyncIsolationReport(report)}\n`,
+    );
+    return;
+  }
 
   // `--stages` measures each refresh driver on its own (F2) instead of the
   // aggregate refresh budget F1 records.

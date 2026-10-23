@@ -363,6 +363,81 @@ The full-scale F2 results (cost table, `wl sync` breakdown, RSS decomposition
 and the fix/defer decision per driver) are recorded on the work item
 `WL-0MVJV2NNG00771C6`; the harness is the re-runnable evidence behind them.
 
+## Auto-sync isolation: the pane never stalls on `wl sync` (F3 — WL-0MVJV2O7H003HY9N)
+
+The epic's Auto-sync acceptance criteria: while a long ~36 s `wl sync` is in
+flight the pane stays responsive — a concurrent default-view refresh completes
+without waiting, the sync spawn never blocks the TUI event loop, and the only
+"hanging" indication is a brief non-blocking status notice. The `wl sync`
+perf fix itself is a separate item (`WL-0MVK3WRY9009KV6P`); this item is
+pane-side isolation only.
+
+### What changed
+
+- **In-flight instrumentation + status model** (`packages/herdr/src/auto-sync.ts`):
+  `runSync` now publishes a status snapshot the moment the child spawns
+  (`getSyncStatus()` → `syncing` with the child PID, an epoch `startedAtMs` and a
+  **monotonic** `startedAtMonotonicMs` via `performance.now()`) and clears it
+  with a recorded outcome (`synced`/`failed`, duration) when the child settles.
+  A tiny subscription primitive (`onSyncStatusChange`) and a pure non-blocking
+  notice renderer (`formatSyncNotice`, `⟳ syncing… Ns`) let the pane observe the
+  sync without polling, and let the harness prove a refresh never waited on it.
+  The spawn itself goes through an injectable seam (`_setSyncSpawnForTests`)
+  still defaulting to `child_process.spawn`, so the real path is unchanged.
+- **Non-blocking status notice** (`packages/herdr/src/worklist.ts`): while a
+  sync is in flight the header appends the notice (`⟳ syncing… 7s`), refreshed
+  on status transitions and by a 1 s unref'd ticker, cleared the moment the
+  sync settles, torn down on pane exit. It is a pure string read — it never
+  awaits, locks or touches the DB, and it is clamped by the existing header
+  truncation guard, so input handling is untouched (the notice is the only
+  "hanging" indication, exactly as the AC allows).
+- **Sync-in-flight + lock-contention scenarios** (`large-db-harness.ts`):
+  - `runSyncInFlightScenario()` — a hooked long sync started through the REAL
+    `runSync` (so the instrumentation and notice are the production ones),
+    with concurrent refreshes measured against a no-sync baseline from the
+    same host; reports the spawn's event-loop cost, the pane notice, and the
+    sync-remaining at each refresh end (`noWaitGap`).
+  - `runSyncLockContentionScenario()` — a sync-shaped writer holding both the
+    per-worklog sync **file lock** (`worklog-data.jsonl.lock`, the lock `wl
+    sync --if-idle` takes) and a real SQLite **write transaction** on the
+    worklog DB; concurrent refreshes must complete without waiting (the
+    refresh never shares the sync's handle and never takes its lock).
+  Both are exposed as CLI flags for the on-demand full-scale run:
+
+  ```sh
+  npm run test:perf:large -- --sync-in-flight --samples 5     # text
+  npm run test:perf:large -- --sync-in-flight --json
+  npm run test:perf:large -- --lock-contention
+  npm run test:perf:large -- --sync-in-flight --sync-duration 36000 --json --target dist
+  ```
+
+### Automated (default suite)
+
+- `auto-sync.test.ts` — status model unit tests: PID + monotonic start,
+  elapsed, `synced`/`failed` transitions, subscriber notifications, skip paths
+  never claim a sync is running, spawn-throw clears the state, `formatSyncNotice`
+  is empty when idle and shows an elapsed counter while in flight.
+- `worklist-sync-notice.test.ts` — the TUI renders the notice while a sync is
+  in flight (and still renders the list), a keystroke (`q`) quits while the
+  notice is showing (input is never blocked), the 1 s ticker moves the elapsed
+  counter, settling clears the notice, auto-sync disabled shows nothing, and a
+  sync already in flight when the pane starts is adopted.
+- `auto-sync-isolation.test.ts` — `runSyncInFlightScenario` at the default
+  profile with the operator-observed ~36 s figure: spawn blocks the event loop
+  ≤ 200 ms (measured ~0), the notice shows "syncing…" for every with-sync
+  refresh, every refresh ends with ≥ half the sync duration still remaining
+  (no wait gap), refresh wall/event-loop stay inside the documented F1
+  headroom of their own no-sync baseline, the refresh path still issues
+  exactly one consolidated `wl worklist` spawn (the sync adds none), and the
+  hook settles to `synced`. `runSyncLockContentionScenario` asserts the same
+  relative budget while the file lock and a real write transaction are held.
+
+Like F1, the absolute AC numbers (refresh ≤ 1.5 s wall p95, ≤ 200 ms event-loop
+blocking at full scale) stay gated behind `acTargets.enforced` (flipped once F7
+records a compliant full-scale baseline); F3's tests prove **non-interference**
+(the no-wait-gap invariant, absolute) plus host-load-tolerant relative
+headroom, which is the actual F3 deliverable.
+
 ### `wl sync` persist phases
 
 `wl sync` is not on the Herdr refresh path, but F2 measured it because the
