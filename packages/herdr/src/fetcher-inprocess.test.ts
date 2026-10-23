@@ -41,6 +41,8 @@ import {
   fetchOutboundDepsForItems,
   fetchBlockersForItem,
   createInProcessRefreshScope,
+  getInProcessOpenStats,
+  resetInProcessOpenStats,
   setExecFileAsync,
   resetExecFileAsync,
   setWorklogDir,
@@ -55,7 +57,7 @@ import {
  * registry), so other suites keep the real module. `vi.hoisted` makes the
  * counter visible to the hoisted mock factory and to the test bodies.
  */
-const inProcessState = vi.hoisted(() => ({ opens: 0, closed: 0 }));
+const inProcessState = vi.hoisted(() => ({ opens: 0, closed: 0, lastArgs: [] as unknown[] }));
 
 vi.mock('@worklog/shared', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@worklog/shared')>();
@@ -65,6 +67,7 @@ vi.mock('@worklog/shared', async (importOriginal) => {
       constructor(...args: any[]) {
         super(...args);
         inProcessState.opens += 1;
+        inProcessState.lastArgs = args;
       }
       close(): void {
         inProcessState.closed += 1;
@@ -579,5 +582,57 @@ describe('refresh-scoped shared in-process connection (WL-0MV6C6SLB005HX7B)', ()
     expect(await pending).toBe(seeded.actionable);
     expect(inProcessState.opens).toBe(1);
     expect(inProcessState.closed).toBe(1);
+  });
+
+  it('opens the refresh connection READ-ONLY, so a refresh helper can never write (F6)', async () => {
+    setWorklogDir(seeded.worklogDir);
+
+    const scope = createInProcessRefreshScope();
+    try {
+      await fetchActionableCount(scope);
+    } finally {
+      scope.close();
+    }
+
+    // The 8th WorklogDatabase constructor argument is the open-mode options:
+    // the refresh path must request the read-only / no-DDL open (F6).
+    const options = inProcessState.lastArgs[7] as { readOnly?: boolean } | undefined;
+    expect(options?.readOnly).toBe(true);
+  });
+
+  it('accounts one in-process open per refresh and reuses it across helpers (F6)', async () => {
+    setWorklogDir(seeded.worklogDir);
+    resetInProcessOpenStats();
+
+    // A default-view-shaped refresh: the expanded-children read and the
+    // actionable count run through ONE refresh scope (as doRefresh schedules
+    // them), so a refresh performs exactly one open.
+    const scope = createInProcessRefreshScope();
+    try {
+      await Promise.all([
+        fetchChildrenForItems([seeded.parentA, seeded.parentB], undefined, scope),
+        fetchActionableCount(scope),
+      ]);
+      // Repeat reads on the same scope must NOT open again.
+      await fetchActionableCount(scope);
+      await fetchChildrenForItems([seeded.parentA], undefined, scope);
+      expect(getInProcessOpenStats().opens).toBe(1);
+    } finally {
+      scope.close();
+    }
+
+    // A second refresh opens its own (fresh) connection: one per refresh,
+    // never reused across a refresh boundary.
+    const next = createInProcessRefreshScope();
+    try {
+      await fetchActionableCount(next);
+      expect(getInProcessOpenStats().opens).toBe(2);
+    } finally {
+      next.close();
+    }
+    expect(getInProcessOpenStats().openMs).toBeGreaterThanOrEqual(0);
+
+    resetInProcessOpenStats();
+    expect(getInProcessOpenStats()).toEqual({ opens: 0, openMs: 0 });
   });
 });

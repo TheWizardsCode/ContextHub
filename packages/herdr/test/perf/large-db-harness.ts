@@ -92,6 +92,8 @@ import {
   fetchNextItems,
   fetchOutboundDepsForItems,
   fetchReviewQueueState,
+  getInProcessOpenStats,
+  resetInProcessOpenStats,
   resetExecFileAsync,
   resetWlSpawnCap,
   resetWorklogDir,
@@ -575,6 +577,19 @@ export interface RefreshSample {
   peakRssPerSpawnMb: number | null;
   /** Sum of the per-spawn peaks in this refresh (MiB, null when unknown). */
   aggregateSpawnRssMb: number | null;
+  /**
+   * In-process SQLite connections this refresh opened (F6 —
+   * WL-0MVJV2PX4005JH8D). The default-view fast path must open AT MOST ONE
+   * and share it across every helper read; each scoped refresh but the last
+   * closes it, so a value above 1 means a helper opened its own connection.
+   */
+  inProcessOpens: number;
+  /**
+   * Event-loop ms this refresh spent constructing in-process connections
+   * (F6). The read-only / no-DDL open keeps this in the low single digits
+   * on an already-initialised store.
+   */
+  inProcessOpenMs: number;
 }
 
 /** Measured write → reflect latencies over the real watch primitive. */
@@ -627,6 +642,13 @@ export interface LargeDbReport {
     spawnKinds: Record<string, number>;
     peakRssPerSpawnMb: number | null;
     aggregateSpawnRssMb: number | null;
+    /**
+     * Highest in-process opens in one refresh (F6). The single-open
+     * invariant: this must never exceed 1.
+     */
+    inProcessOpensPerRefresh: number;
+    /** p95 event-loop ms spent opening the refresh's in-process connection (F6). */
+    inProcessOpenMsP95: number;
   };
   pane: {
     /** Harness (= pane) process peak RSS after the measured refreshes. */
@@ -1247,6 +1269,7 @@ async function measureRefresh(
 ): Promise<RefreshSample> {
   fs.rmSync(spawnFile, { force: true });
   spawnArgs.length = 0;
+  resetInProcessOpenStats();
 
   const cpuStart = process.cpuUsage();
   const probe = startEventLoopProbe();
@@ -1255,6 +1278,7 @@ async function measureRefresh(
   const wallMs = performance.now() - startedAt;
   const blocking = probe.stop();
   const cpu = process.cpuUsage(cpuStart);
+  const inProcess = getInProcessOpenStats();
 
   const summary = summariseSpawnRecords(spawnFile);
   const records = readSpawnRecords(spawnFile);
@@ -1275,6 +1299,8 @@ async function measureRefresh(
     maxEventLoopBlockedMs: blocking.maxBlockedMs,
     peakRssPerSpawnMb,
     aggregateSpawnRssMb,
+    inProcessOpens: inProcess.opens,
+    inProcessOpenMs: round1(inProcess.openMs),
   };
 }
 
@@ -1425,6 +1451,7 @@ export async function runLargeDbHarness(
     const worklistSpawnsPerRefresh = measured.map((sample) =>
       sample.spawnArgs.filter((args) => isConsolidatedWorklistSpawn(args)).length,
     );
+    const inProcessOpenMsSamples = measured.map((sample) => sample.inProcessOpenMs);
     const consolidatedReads = worklistSpawnsPerRefresh.filter((count) => count > 0).length;
     const spawnKinds: Record<string, number> = {};
     for (const sample of measured) {
@@ -1480,6 +1507,11 @@ export async function runLargeDbHarness(
         spawnKinds,
         peakRssPerSpawnMb,
         aggregateSpawnRssMb,
+        inProcessOpensPerRefresh: percentile(
+          measured.map((sample) => sample.inProcessOpens),
+          0.95,
+        ) ?? 0,
+        inProcessOpenMsP95: percentile(inProcessOpenMsSamples, 0.95) ?? 0,
       },
       pane: {
         peakRssMb: round1(process.resourceUsage().maxRSS / 1024),
@@ -2375,6 +2407,46 @@ export function withinAcTargets(
     spawnsPerRefresh: report.refresh.spawnsPerRefresh === ac.spawnsPerRefresh,
     idleSpawns: report.idle.spawns === ac.idleSpawns,
   };
+}
+
+// ── Single cheap in-process open (F6 — WL-0MVJV2PX4005JH8D) ──────────
+
+/**
+ * Documented budget for one refresh's in-process SQLite open (F6).
+ *
+ * The open runs synchronously inside the refresh (on the TUI event loop), so
+ * it must never threaten the parent AC 1 ≤ ~200 ms event-loop bound. The
+ * pre-F6 open measured 46–70 ms cold (schema DDL + additive-column probes +
+ * the FTS5 probe's virtual-table create/drop — F2); the read-only no-DDL open
+ * of an already-initialised store is a pragmas-only open, measured in the low
+ * single-digit ms. This budget leaves generous headroom for a loaded host
+ * while still failing if the DDL path creeps back in.
+ */
+export const IN_PROCESS_OPEN_BUDGET_MS = 25;
+
+/**
+ * F6 invariant: a default-view refresh performs AT MOST ONE in-process SQLite
+ * open, reuses that single connection across its helpers, and the open cost
+ * stays inside {@link IN_PROCESS_OPEN_BUDGET_MS}.
+ *
+ * Returns the violations (empty = pass) so both the on-demand full-scale run
+ * and the default-suite test can assert the same policy.
+ */
+export function assertOpenBudget(report: LargeDbReport): string[] {
+  const violations: string[] = [];
+  const opens = report.refresh.inProcessOpensPerRefresh;
+  if (opens > 1) {
+    violations.push(
+      `in-process opens per refresh: ${opens} (expected at most 1 — one shared connection per refresh)`,
+    );
+  }
+  if (report.refresh.inProcessOpenMsP95 > IN_PROCESS_OPEN_BUDGET_MS) {
+    violations.push(
+      `in-process open cost p95: ${report.refresh.inProcessOpenMsP95} ms ` +
+        `(budget ${IN_PROCESS_OPEN_BUDGET_MS} ms — read-only open must skip the schema/FTS DDL)`,
+    );
+  }
+  return violations;
 }
 
 // ── Stage profile (F2 — WL-0MVJV2NNG00771C6) ─────────────────────────
@@ -3292,6 +3364,12 @@ interface CliOptions extends LargeDbHarnessOptions {
   syncDurationMs?: number;
   /** F5: run the bounded-spawn burst scenario with this many concurrent reads. */
   spawnBurst?: number;
+  /**
+   * F6: assert the single-cheap-open invariants (≤ 1 in-process open per
+   * refresh, open cost inside the documented budget) and exit non-zero on a
+   * violation. Used by the on-demand full-scale verification.
+   */
+  assertOpen: boolean;
 }
 
 /** Parse CLI arguments (exported for the contract tests). */
@@ -3303,6 +3381,7 @@ export function parseCliArgs(argv: string[]): CliOptions {
     expand: false,
     syncInFlight: false,
     lockContention: false,
+    assertOpen: false,
   };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
@@ -3353,6 +3432,9 @@ export function parseCliArgs(argv: string[]): CliOptions {
         break;
       case '--expand':
         options.expand = true;
+        break;
+      case '--assert-open':
+        options.assertOpen = true;
         break;
       case '--sync-in-flight':
         options.syncInFlight = true;
@@ -3473,6 +3555,9 @@ export function formatReport(
       `(${report.refresh.consolidatedWorklistSpawns} worklist read/refresh, ` +
       `${report.refresh.consolidatedWorklistReads}/${report.samples} refreshes)`,
     `  peak RSS / spawn:   ${report.refresh.peakRssPerSpawnMb ?? 'n/a'} MB`,
+    `  in-process opens:   ${report.refresh.inProcessOpensPerRefresh} per refresh ` +
+      `(open cost p95 ${report.refresh.inProcessOpenMsP95} ms, ` +
+      `budget ${IN_PROCESS_OPEN_BUDGET_MS} ms)`,
     `  pane aggregate RSS: ${report.pane.aggregateRssMb} MB ` +
       `(refresh delta ${report.pane.refreshRssDeltaMb} MB, process peak ${report.pane.peakRssMb} MB)`,
     `  idle tick:          ${report.idle.spawns} spawns (changed: ${report.idle.changed})`,
@@ -3629,20 +3714,41 @@ async function main(): Promise<void> {
   }
 
   const evaluation = evaluateLargeDbBudget(report, readLargeDbBudget(REPO_ROOT));
+  const openViolations = options.assertOpen ? assertOpenBudget(report) : null;
 
   if (options.json) {
     process.stdout.write(
       `${JSON.stringify(
-        { report, evaluation, acTargets: withinAcTargets(report, readLargeDbBudget(REPO_ROOT)) },
+        {
+          report,
+          evaluation,
+          acTargets: withinAcTargets(report, readLargeDbBudget(REPO_ROOT)),
+          ...(openViolations === null
+            ? {}
+            : { openBudget: { ok: openViolations.length === 0, violations: openViolations } }),
+        },
         null,
         2,
       )}\n`,
     );
   } else {
     process.stdout.write(`${formatReport(report, readLargeDbBudget(REPO_ROOT), evaluation)}\n`);
+    if (openViolations !== null) {
+      if (openViolations.length === 0) {
+        process.stdout.write(
+          `  single cheap open:  PASS (≤ 1 in-process open/refresh, open ≤ ${IN_PROCESS_OPEN_BUDGET_MS} ms p95)\n`,
+        );
+      } else {
+        process.stdout.write(`  single cheap open:  FAIL\n`);
+        for (const violation of openViolations) {
+          process.stdout.write(`    - ${violation}\n`);
+        }
+      }
+    }
   }
 
   if (!evaluation.ok) process.exitCode = 1;
+  if (openViolations !== null && openViolations.length > 0) process.exitCode = 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

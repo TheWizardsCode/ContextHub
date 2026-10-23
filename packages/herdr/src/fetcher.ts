@@ -597,7 +597,72 @@ type InProcessDbCtor = new (
   jsonlPath: string,
   silent: boolean,
   autoSync: boolean,
+  syncProvider?: () => Promise<void>,
+  services?: unknown,
+  options?: { readOnly?: boolean },
 ) => InProcessDb;
+
+/**
+ * Open-accounting for the in-process connection (F6 — WL-0MVJV2PX4005JH8D).
+ *
+ * The large-DB harness and the F6 tests assert that a default-view refresh
+ * performs AT MOST ONE in-process SQLite open and that every helper read
+ * shares that single connection (no per-helper open). The open step is timed
+ * because it runs synchronously on the TUI event loop: the open (pragmas
+ * only on an already-initialised store, F6) must stay small enough to never
+ * threaten the parent's refresh/event-loop budgets.
+ */
+export interface InProcessOpenStats {
+  /** Connections actually opened (successful constructions only). */
+  opens: number;
+  /** Total event-loop ms spent constructing those connections. */
+  openMs: number;
+}
+
+let _inProcessOpens = 0;
+let _inProcessOpenMs = 0;
+
+/** Snapshot of the open accounting since the last reset. */
+export function getInProcessOpenStats(): InProcessOpenStats {
+  return { opens: _inProcessOpens, openMs: _inProcessOpenMs };
+}
+
+/** Reset the open accounting (tests / harness). */
+export function resetInProcessOpenStats(): void {
+  _inProcessOpens = 0;
+  _inProcessOpenMs = 0;
+}
+
+/**
+ * Open ONE refresh-scoped in-process connection, read-only, no DDL (F6).
+ *
+ * `readOnly` opens the store with SQLite's READONLY flag and skips all
+ * schema/FTS DDL on an already-initialised store, so the per-refresh open is
+ * pragmas-only cheap and a refresh helper can never mutate the store. The
+ * open runs synchronously on the event loop within the refresh, so its cost
+ * is accounted here. Any open failure throws and the caller fails open
+ * (degrades to the `wl` spawn path).
+ */
+function openInProcessConnection(
+  Ctor: InProcessDbCtor,
+  dir: string,
+  dbPath: string,
+): InProcessDb {
+  const startedAt = Date.now();
+  const db = new Ctor(
+    'WI',
+    dbPath,
+    join(dir, 'worklog-data.jsonl'),
+    true,
+    false,
+    undefined,
+    undefined,
+    { readOnly: true },
+  );
+  _inProcessOpens += 1;
+  _inProcessOpenMs += Math.max(0, Date.now() - startedAt);
+  return db;
+}
 
 let _dbCtorPromise: Promise<InProcessDbCtor | null> | null = null;
 
@@ -641,7 +706,7 @@ async function withInProcessDb<T>(fn: (db: InProcessDb) => T): Promise<T | undef
 
   let db: InProcessDb | null = null;
   try {
-    db = new Ctor('WI', dbPath, join(dir, 'worklog-data.jsonl'), true, false);
+    db = openInProcessConnection(Ctor, dir, dbPath);
     return fn(db);
   } catch {
     // Fail-open: any open/read failure degrades to the wl spawn path.
@@ -737,7 +802,7 @@ export function createInProcessRefreshScope(): InProcessRefreshScope {
         if (!Ctor) return undefined;
         if (!db) {
           try {
-            db = new Ctor('WI', dbPath, join(dir, 'worklog-data.jsonl'), true, false);
+            db = openInProcessConnection(Ctor, dir, dbPath);
           } catch {
             // Fail-open: an open failure degrades to the wl spawn path.
             return undefined;

@@ -62,6 +62,21 @@ export interface UpdateIfMatchesResult {
 }
 
 /**
+ * Open-mode options for {@link WorklogDatabase} (F6 — WL-0MVJV2PX4005JH8D).
+ *
+ * `readOnly` opens the SQLite store with SQLite's READONLY flag and skips all
+ * schema/FTS DDL when the store is already initialised. It is the cheapest
+ * safe handle for a reader that must never write (the Herdr refresh scope):
+ * the ~46–70 ms cold open cost (schema DDL, additive-column probes, FTS
+ * probe) becomes a few-ms pragma-only open on an already-initialised store,
+ * and a write attempt fails instead of mutating the store.
+ */
+export interface WorklogDatabaseOptions {
+  /** Open the store read-only and skip DDL when the schema is present. */
+  readOnly?: boolean;
+}
+
+/**
  * Optional CLI-specific services injected into WorklogDatabase.
  * When not provided, features that depend on them become no-ops or throw
  * appropriate errors. This allows the class to be used in contexts (like the
@@ -193,7 +208,8 @@ export class WorklogDatabase {
     silent: boolean = false,
     autoSync: boolean = false,
     syncProvider?: () => Promise<void>,
-    services?: WorklogDatabaseServices
+    services?: WorklogDatabaseServices,
+    options: WorklogDatabaseOptions = {}
   ) {
     this.services = services ?? {};
     this.prefix = prefix;
@@ -207,13 +223,21 @@ export class WorklogDatabase {
     const defaultDbPath = path.join(path.dirname(this.jsonlPath), 'worklog.db');
     const actualDbPath = dbPath || defaultDbPath;
     
-    this.store = new SqlitePersistentStore(actualDbPath, !silent, this.services.persistentStoreServices, this.services.cacheOptions);
+    this.store = new SqlitePersistentStore(
+      actualDbPath,
+      !silent,
+      this.services.persistentStoreServices,
+      this.services.cacheOptions,
+      { readOnly: options.readOnly === true },
+    );
     
     // Refresh from JSONL only if SQLite is empty (ephemeral JSONL pattern)
     // In the ephemeral pattern, SQLite is the sole runtime source of truth.
     // JSONL only exists transiently during sync operations.
+    // A read-only handle must NEVER write, so the JSONL refresh (an import
+    // into SQLite) is skipped for it (F6): the store is opened as-is.
     const itemCount = this.store.countWorkItems();
-    if (itemCount === 0) {
+    if (itemCount === 0 && options.readOnly !== true) {
       this.refreshFromJsonlIfNewer();
     }
   }
