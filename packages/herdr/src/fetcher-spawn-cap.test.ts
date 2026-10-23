@@ -93,11 +93,14 @@ describe('bounded wl spawn concurrency (F5 — WL-0MVJV2PC2008PY64)', () => {
     _resetWlSpawnStats();
   });
 
-  it('documents a cap of 2 concurrent read spawns per pane', () => {
+  it('documents a cap of 1 concurrent read spawn per pane', () => {
     // The documented budget (docs/dev/herdr-event-driven-refresh.md) is
-    // cap × per-spawn peak; at ~125–145 MB per spawn a cap of 2 keeps the
-    // aggregate ≤ ~290 MB, inside the parent AC 5 ≤ ~300 MB ceiling.
-    expect(DEFAULT_WL_SPAWN_CAP).toBe(2);
+    // cap × per-spawn peak. F7 measured a COLD `wl show` peak of 144.6–175.3
+    // MB per spawn on the built CLI at full scale (2,600 items / 123.7 MB),
+    // so a cap of 2 could reach ~351 MB — over the parent AC 5 ≤ ~300 MB
+    // ceiling. A cap of 1 bounds the worst case at one spawn's peak (F8,
+    // WL-0MVKVJYV6008SL9G).
+    expect(DEFAULT_WL_SPAWN_CAP).toBe(1);
     expect(getWlSpawnCap()).toBe(DEFAULT_WL_SPAWN_CAP);
   });
 

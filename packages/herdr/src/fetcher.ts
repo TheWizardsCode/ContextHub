@@ -165,6 +165,15 @@ export function resetExecFileAsync(): void {
  * in `docs/dev/herdr-event-driven-refresh.md` § "Bounded `wl` spawn
  * concurrency (F5 — WL-0MVJV2PC2008PY64)").
  *
+ * F8 (`WL-0MVKVJYV6008SL9G`) tightened the cap from 2 to 1: F7's end-to-end
+ * verification measured a **cold** `wl show` peak of 144.6–175.3 MB per spawn
+ * on the built CLI at full scale, so `2 × peak` (289–351 MB) could not
+ * guarantee the ≤ ~300 MB ceiling. A cap of 1 bounds the worst case at one
+ * spawn's peak (≤ ~176 MB) with margin, and also halves the measured
+ * event-loop blocking of a spawn burst. Serialising reads costs wall time on
+ * the rare fallback fan-out paths; the consolidated single-read default view
+ * and the in-process expand/hydrator reads are unaffected.
+ *
  * Only READ commands are capped. Writes (claims, `wl comment add`, chord
  * commands, `wl sync`) spawn immediately: they are user-driven, rare, and
  * already serialised by the CLI's own mutation lock, so queueing them behind
@@ -175,7 +184,7 @@ export function resetExecFileAsync(): void {
  * microtask when a slot frees, so queued reads NEVER block the TUI event
  * loop (asserted by the F1 harness spawn-burst scenario).
  */
-export const DEFAULT_WL_SPAWN_CAP = 2;
+export const DEFAULT_WL_SPAWN_CAP = 1;
 
 let wlSpawnCap = DEFAULT_WL_SPAWN_CAP;
 let activeWlSpawns = 0;
