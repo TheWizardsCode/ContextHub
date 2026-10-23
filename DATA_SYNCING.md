@@ -100,6 +100,86 @@ Regression coverage: `tests/cli/sync-audit-newest-wins.test.ts` (real git,
 two audits with distinct `auditedAt`) and
 `tests/unit/audit-sync-monotonic.test.ts` (merge + persist guards).
 
+### Held Claims Are Never Downgraded by a Sync
+
+A background `wl sync` must never undo a claim. The project invariant is
+*actively worked ⇒ `status: in-progress`*, and `wl sync` (including
+`--if-idle` syncs from Herdr, auto-sync spawns and `skill/shared/worklog_sync.py`)
+is a frequent background writer — it must not decide that an item is unclaimed.
+
+**What counts as a held claim.** An item is claimed while either
+
+- its `status` is `in-progress` (the implement/plan/intake claim), or
+- its `assignee` is non-empty and the item is neither `completed` nor
+  `deleted` (the audit tier's status-neutral `--if-assignee` hold and the
+  producer scheduling hold),
+
+**and** the claim was active within the protection window (see
+`syncClaimHoldTtlHours` below). `stage` alone is never a claim.
+
+**What the guard does.** Before persisting a pull, the sync re-reads the
+store's *current* rows (bypassing the in-process query cache, so a claim
+written by another process seconds ago is visible) and refuses any downgrade of
+a held claim:
+
+- the claimed `status`/`stage` **pair** is preserved — a stale remote `open` /
+  `intake_complete` cannot replace `in-progress` / `plan_complete`; and
+- the claim's own `updatedAt`/`activityAt` are preserved, so the losing stale
+  row is never re-stamped as the newest row by `import()` / `upsertItems()`
+  (that re-stamp is what made a reverted claim stick permanently).
+
+**What it deliberately does not do.**
+
+- It is not "last writer wins on status": a newer, *more active* transition
+  still propagates (`in-progress → completed`, `→ in_review`, a close, an
+  audit demotion of a completed item, a reassignment).
+- It does not freeze any fieldset: only `status`/`stage` (and the claim's
+  timestamps) are pinned; every other field still resolves by timestamp, so a
+  newer title/priority/description change from another store still lands.
+- It never blocks an **attributed delete** (`deletedBy`/`deleteReason`) —
+  deletion is terminal intent and keeps propagating
+  (WL-0MSKZ30SK007K9TO).
+- It is **time-bounded**: an abandoned claim older than the TTL is released and
+  newer-wins applies again.
+
+**Diagnostics.** Every refusal is written to the sync log
+(`~/.worklog/logs/sync.log`) and to the `--json` output as
+`sync.claimHolds[]` (work item id, the preserved and attempted pairs, which
+fields were pinned, the claim age and the configured TTL), and the sync's store
+identity is reported as `sync.store` — so the next recurrence is diagnosable
+without source archaeology.
+
+Regression coverage: `tests/cli/sync-claim-revert.test.ts` (a claim landing
+during a parked sync; a stale second store pushing a newer downgrade) and
+`tests/unit/claim-hold.test.ts` (the pure decision rules, including TTL expiry
+and the attributed-delete exemption).
+
+### One Store Per Repository (Worktrees)
+
+`.worklog/config.yaml` is tracked in git (`.gitignore` re-includes it), so every
+`git worktree add` — in particular each implement/audit worktree under
+`.worklog/worktrees/<name>` — checks out a `.worklog/` directory that holds
+configuration but **no store**.
+
+`wl` binds to the main checkout's store in that situation, never to the
+worktree:
+
+- a worktree `.worklog/` is used only when it is a *genuine* store (created by
+  `wl init`: an `initialized` marker and/or `worklog.db`);
+- otherwise the command binds to the main checkout's `.worklog/`;
+- when neither exists, the command **fails with an actionable error** telling
+  you to run `wl init` in the main checkout or pass `--worklog-dir` explicitly.
+
+This matters because two stores for one project prefix do not serialise: the
+mutation lock (`<data-file>.lock`) and the `last-synced-ref` watermark are both
+derived from the data path, so two roots hold *different* locks and *different*
+watermarks while pushing to the *same* worklog ref. A sync detects and reports
+that condition (`sync.store.secondStore` in `--json`, plus a warning in the sync
+log) instead of silently crossing the two stores.
+
+**Agent guidance:** when running `wl` from inside a worktree, pass
+`--worklog-dir <main-checkout>/.worklog` (the implement skill already does).
+
 ### Config Options
 
 Set in `.worklog/config.yaml` (local) or `.worklog/config.defaults.yaml` (team defaults):
@@ -110,6 +190,12 @@ Set in `.worklog/config.yaml` (local) or `.worklog/config.defaults.yaml` (team d
   - Git remote used for sync
 - `syncBranch` (string, default `refs/worklog/data`)
   - Git ref used for the canonical JSONL file
+- `syncClaimHoldTtlHours` (number, default `24`; also accepted as the nested
+  `sync.claimHoldTtlHours`)
+  - How long a held claim is protected from being downgraded by a sync, in
+    hours. Covers an 8-hour drive run with headroom. `0` disables the
+    protection (newer-wins everywhere). See
+    [Held Claims Are Never Downgraded by a Sync](#held-claims-are-never-downgraded-by-a-sync).
 - `syncAllowedAuthors` (allow-list, default `[]`)
   - Emails allowed to merge during `wl sync` besides the local `user.email`.
     `[]` = only `user.email`; `['a@x','b@y']` = plus listed emails

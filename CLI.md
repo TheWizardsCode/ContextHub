@@ -1105,6 +1105,47 @@ wl sync debug
 wl --json sync debug
 ```
 
+#### Held claims and store identity
+
+A sync never downgrades an item that another session is actively working. Items
+that are `in-progress` (or carry a non-empty `assignee`) and were active within
+`syncClaimHoldTtlHours` (default 24 h, `0` disables) keep their claimed
+`status`/`stage` pair **and** their `updatedAt`/`activityAt` when a sync pulls a
+stale row for them — the stale row is not re-stamped as the newest row. Newer,
+more active transitions (a close, `in_review`, an audit demotion of a completed
+item, a reassignment) and attributed deletes still propagate, and a claim older
+than the TTL is released. Full behaviour:
+[DATA_SYNCING.md](DATA_SYNCING.md#held-claims-are-never-downgraded-by-a-sync).
+
+`--json` reports both the store identity and every refusal:
+
+```json
+{
+  "success": true,
+  "sync": {
+    "store": { "worklogDir": "/repo/.worklog", "databasePath": "/repo/.worklog/worklog.db", "secondStore": false },
+    "claimHolds": [
+      {
+        "workItemId": "WL-0ABC",
+        "keptStatus": "in-progress", "keptStage": "plan_complete",
+        "attemptedStatus": "open", "attemptedStage": "intake_complete",
+        "fields": ["status", "stage"],
+        "claimAgeHours": 0.42, "ttlHours": 24,
+        "reason": "held claim (status+stage downgrade refused): in-progress/plan_complete → open/intake_complete"
+      }
+    ],
+    "summary": { "itemsAdded": 0, "itemsUpdated": 0 }
+  }
+}
+```
+
+`sync.store.secondStore` is `true` when the sync operated on a store inside a
+managed worktree (`.worklog/worktrees/<name>`) instead of the main checkout's
+store — two stores for one prefix hold independent locks and watermarks. `wl`
+refuses to create such a store implicitly and binds to the main checkout
+instead (see
+[DATA_SYNCING.md](DATA_SYNCING.md#one-store-per-repository-worktrees)).
+
 Example (JSON / dry-run):
 
 ```sh
