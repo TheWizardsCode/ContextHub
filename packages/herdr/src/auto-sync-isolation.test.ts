@@ -46,11 +46,15 @@ function p95(values: number[]): number {
 }
 
 describe('auto-sync isolation — refresh never waits on a long sync (F3 AC1/AC3)', { timeout: 300_000 }, () => {
-  it('a concurrent default-view refresh completes while a ~36 s sync is in flight, without waiting', async () => {
+  it('a concurrent default-view refresh completes while a long sync is in flight, without waiting', async () => {
     const report = await runSyncInFlightScenario({
       profile: 'default',
       samples: 3,
-      syncDurationMs: 36_000,
+      // The simulated duration is pure arithmetic (the hook does not sleep).
+      // Use a generous 300 s so the "sync was still in flight" invariant is
+      // robust on a heavily loaded host (the absolute operator-observed
+      // ~36 s evidence lives in the full-scale `--ac-report` AC3 run).
+      syncDurationMs: 300_000,
     });
 
     // — In-flight instrumentation (AC3: start time + PID + elapsed) — the

@@ -412,7 +412,10 @@ describe('worklist recovery from timed-out refresh (WL-0MSJNJXX2001NMHS)', () =>
 
     // t=90s: the DEFAULT_WL_TIMEOUT_MS (60s) fired mid-cycle → the fetch
     // rejected → 'Refresh failed' toast, guard cleared in `finally`.
-    await vi.advanceTimersByTimeAsync(60_000);
+    // F8's cap of 1 serialises the refresh's fan-out reads, so a read queued
+    // behind the hung one starts at t=90s with the remaining timeout budget
+    // (queuedTimeout) — advance just past the boundary to let it reject.
+    await vi.advanceTimersByTimeAsync(60_100);
     expect(showToastMock).toHaveBeenCalledWith('Refresh failed');
 
     // t=150s: the next refresh tick ran to completion (new wl spawns after

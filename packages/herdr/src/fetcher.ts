@@ -238,22 +238,29 @@ export function _resetWlSpawnStats(): void {
   wlSpawnWaiters.length = 0;
 }
 
-/** Reserve a spawn slot, waiting FIFO when the cap is reached. Never blocks. */
-async function acquireWlSpawnSlot(): Promise<void> {
+/**
+ * Reserve a spawn slot, waiting FIFO when the cap is reached. Never blocks.
+ *
+ * Returns how long the caller waited (ms) so a queued read can inherit the
+ * timeout budget of the refresh that issued it — see {@link queuedTimeout}.
+ */
+async function acquireWlSpawnSlot(): Promise<number> {
   const grab = (): void => {
     activeWlSpawns += 1;
     if (activeWlSpawns > peakActiveWlSpawns) peakActiveWlSpawns = activeWlSpawns;
   };
   if (activeWlSpawns < wlSpawnCap) {
     grab();
-    return;
+    return 0;
   }
+  const queuedAt = Date.now();
   await new Promise<void>((resolve) => {
     wlSpawnWaiters.push(() => {
       grab();
       resolve();
     });
   });
+  return Date.now() - queuedAt;
 }
 
 /** Free a slot and hand it to the oldest waiter (FIFO, on a microtask). */
@@ -886,14 +893,36 @@ async function runWlInner(
   // releases on a microtask when a slot frees, so it never blocks the TUI
   // event loop. Writes bypass the cap entirely (rare, user-driven).
   const capped = WL_SPAWN_CAPPED_COMMANDS.has(args[0]);
+  let waitedMs = 0;
   if (capped) {
-    await acquireWlSpawnSlot();
+    waitedMs = await acquireWlSpawnSlot();
   }
   try {
-    return await runWlInnerUncapped(args, includeJson, timeoutMs, dirOverride);
+    return await runWlInnerUncapped(
+      args,
+      includeJson,
+      queuedTimeout(timeoutMs, waitedMs),
+      dirOverride,
+    );
   } finally {
     if (capped) releaseWlSpawnSlot();
   }
+}
+
+/**
+ * A queued read inherits the bounded-timeout budget of the refresh that
+ * issued it: time spent waiting for a spawn slot counts against
+ * `DEFAULT_WL_TIMEOUT_MS`, so a hung child ahead of it cannot stack a fresh
+ * 60 s per queued read. F8's cap of 1 serialises reads, and without this a
+ * timed-out refresh with several fan-out reads could take N x 60 s to
+ * surface its failure (the guard is bounded, but the operator sees no toast
+ * for minutes). Returns the caller's override unchanged when the read did
+ * not queue, preserving the documented per-call timeouts.
+ */
+function queuedTimeout(timeoutMs: number | undefined, waitedMs: number): number | undefined {
+  if (waitedMs <= 0) return timeoutMs;
+  const base = timeoutMs ?? DEFAULT_WL_TIMEOUT_MS;
+  return Math.max(1, base - waitedMs);
 }
 
 async function runWlInnerUncapped(

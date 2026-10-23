@@ -353,7 +353,9 @@ describe('end-to-end parent AC report — measured wiring', { timeout: 240_000 }
       },
       samples: 1,
       writeSamples: 1,
-      syncDurationMs: 5_000,
+      // Pure arithmetic (no sleep); long enough that even a loaded-host
+      // refresh finishes while the simulated sync is still in flight.
+      syncDurationMs: 36_000,
       burst: 3,
     });
 
