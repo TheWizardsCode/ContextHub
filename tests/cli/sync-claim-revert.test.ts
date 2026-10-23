@@ -170,6 +170,15 @@ function setupProject(): Setup {
   git(local, 'remote', 'add', 'origin', remote);
   writeConfig(local, 'Claim Revert Test', 'CRV');
   writeInitSemaphore(local);
+  // Mirror a real project's .gitignore: `.worklog/` is ignored except the
+  // tracked config, so a `git worktree add` materialises a `.worklog/`
+  // directory holding configuration but NO store (no `initialized`, no
+  // `worklog.db`). That is the precondition for mechanism (b).
+  fs.writeFileSync(
+    path.join(local, '.gitignore'),
+    ['.worklog/*', '!.worklog/config.yaml', '!.worklog/config.defaults.yaml', ''].join('\n'),
+    'utf8',
+  );
   fs.writeFileSync(path.join(local, 'README.md'), '# claim revert\n', 'utf8');
   git(local, 'add', '-A');
   git(local, 'commit', '-q', '-m', 'init');
@@ -259,7 +268,7 @@ describe('wl sync cannot revert a held claim', () => {
     expect(fs.existsSync(path.join(worktree, '.worklog', 'worklog.db'))).toBe(false);
 
     // A claim made from the main checkout...
-    const claim = runCli(s.local, ['--json', 'update', id, '-s', 'in_progress']);
+    const claim = runCli(s.local, ['--json', 'update', id, '-s', 'in_progress', '--no-re-sort']);
     expect(claim.status, claim.stderr).toBe(0);
 
     // ...must be visible from inside the worktree: one store per repo.
@@ -291,7 +300,7 @@ describe('wl sync cannot revert a held claim', () => {
 
     // Claim the item. Today this steals the "expired" lock, completes, and is
     // then overwritten by the parked sync's pre-claim snapshot.
-    const claim = runCli(s.local, ['--json', 'update', id, '-s', 'in_progress']);
+    const claim = runCli(s.local, ['--json', 'update', id, '-s', 'in_progress', '--no-re-sort']);
     expect(claim.status, claim.stderr).toBe(0);
     const claimed = showItem(s.local, id);
     expect(claimed.workItem.status).toBe('in-progress');
@@ -310,4 +319,156 @@ describe('wl sync cannot revert a held claim', () => {
       'the losing stale row must not be re-stamped newer than the claim',
     ).toBe(claimedUpdatedAt);
   }, 120000);
+  it("refuses a stale second store's newer downgrade of a held claim (AC2)", () => {
+    const title = 'Stale clone target';
+    const id = createItem(s.local, title);
+
+    // Put the item at prd_complete, then seed the remote with that
+    // pre-claim state (open / prd_complete).
+    expect(runCli(s.local, ['--json', 'update', id, '--stage', 'prd_complete', '--no-re-sort']).status).toBe(0);
+    const seed = runCli(s.local, ['--json', 'sync']);
+    expect(seed.status, seed.stderr).toBe(0);
+
+    // A second checkout ("clone") of the same project: same worklog remote,
+    // same project prefix — i.e. a second store. It pulls the pre-claim row.
+    const other = path.join(s.root, 'other');
+    git(s.root, 'init', '-q', other);
+    git(other, 'config', 'user.email', 'test@example.com');
+    git(other, 'config', 'user.name', 'Test User');
+    git(other, 'remote', 'add', 'origin', s.remote);
+    writeConfig(other, 'Claim Revert Test', 'CRV');
+    writeInitSemaphore(other);
+    fs.writeFileSync(path.join(other, 'README.md'), '# other\n', 'utf8');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-q', '-m', 'init');
+    expect(runCli(other, ['--json', 'sync']).status).toBe(0);
+
+    // The agent claims the item and advances it in the main checkout.
+    const claim = runCli(s.local, ['--json', 'update', id, '-s', 'in_progress', '--stage', 'plan_complete', '--no-re-sort']);
+    expect(claim.status, claim.stderr).toBe(0);
+    const claimed = showItem(s.local, id);
+    expect(claimed.workItem.status).toBe('in-progress');
+    expect(claimed.workItem.stage).toBe('plan_complete');
+
+    // The stale store bumps the row (edit and revert: the *content* ends up
+    // unchanged, so the eventual merge must not re-stamp the claim) and pushes
+    // its stale status/stage pair with a newer updatedAt.
+    expect(runCli(other, ['--json', 'update', id, '-t', 'temp title', '--no-re-sort']).status).toBe(0);
+    expect(runCli(other, ['--json', 'update', id, '-t', title, '--no-re-sort']).status).toBe(0);
+    const staleRow = showItem(other, id);
+    expect(staleRow.workItem.status).toBe('open');
+    expect(staleRow.workItem.stage).toBe('prd_complete');
+    expect(new Date(staleRow.workItem.updatedAt!).getTime())
+      .toBeGreaterThan(new Date(claimed.workItem.updatedAt!).getTime());
+    expect(runCli(other, ['--json', 'sync']).status).toBe(0);
+
+    // The main checkout syncs: the stale, newer row must not downgrade the
+    // held claim, and the claim's timestamps must be preserved.
+    const res = runCli(s.local, ['--json', 'sync']);
+    expect(res.status, res.stderr).toBe(0);
+
+    const after = showItem(s.local, id);
+    expect(after.workItem.status, 'claim status must survive').toBe('in-progress');
+    expect(after.workItem.stage, 'claim stage must survive').toBe('plan_complete');
+    expect(after.workItem.updatedAt, 'claim must not be re-stamped').toBe(claimed.workItem.updatedAt);
+    expect(after.workItem.title).toBe(title);
+
+    // The refusal is diagnosable from the --json output (AC2).
+    const parsed = JSON.parse(res.stdout) as { sync?: { claimHolds?: Array<{ workItemId: string; fields: string[] }> } };
+    const holds = parsed.sync?.claimHolds ?? [];
+    expect(holds.some(h => h.workItemId === id)).toBe(true);
+  }, 180000);
+
+  it('releases the claim once protection is disabled (TTL-bounded, AC3)', () => {
+    const title = 'TTL-bounded claim target';
+    const id = createItem(s.local, title);
+    expect(runCli(s.local, ['--json', 'update', id, '--stage', 'prd_complete', '--no-re-sort']).status).toBe(0);
+    expect(runCli(s.local, ['--json', 'sync']).status).toBe(0);
+
+    const other = path.join(s.root, 'other');
+    git(s.root, 'init', '-q', other);
+    git(other, 'config', 'user.email', 'test@example.com');
+    git(other, 'config', 'user.name', 'Test User');
+    git(other, 'remote', 'add', 'origin', s.remote);
+    writeConfig(other, 'Claim Revert Test', 'CRV');
+    writeInitSemaphore(other);
+    fs.writeFileSync(path.join(other, 'README.md'), '# other\n', 'utf8');
+    git(other, 'add', '-A');
+    git(other, 'commit', '-q', '-m', 'init');
+    expect(runCli(other, ['--json', 'sync']).status).toBe(0);
+
+    const claim = runCli(s.local, ['--json', 'update', id, '-s', 'in_progress', '--stage', 'plan_complete', '--no-re-sort']);
+    expect(claim.status, claim.stderr).toBe(0);
+    const claimed = showItem(s.local, id);
+    expect(claimed.workItem.status).toBe('in-progress');
+    expect(claimed.workItem.stage).toBe('plan_complete');
+
+    expect(runCli(other, ['--json', 'update', id, '-t', 'temp title', '--no-re-sort']).status).toBe(0);
+    expect(runCli(other, ['--json', 'update', id, '-t', title, '--no-re-sort']).status).toBe(0);
+    expect(runCli(other, ['--json', 'sync']).status).toBe(0);
+
+    // `syncClaimHoldTtlHours: 0` disables the claim-hold guard: the newer stale
+    // row wins again, proving the protection is time-bounded rather than an
+    // unconditional local precedence.
+    const configPath = path.join(s.local, '.worklog', 'config.yaml');
+    fs.appendFileSync(configPath, '\nsyncClaimHoldTtlHours: 0\n');
+
+    const res = runCli(s.local, ['--json', 'sync']);
+    expect(res.status, res.stderr).toBe(0);
+
+    const after = showItem(s.local, id);
+    // The stale stage now wins (non-default → non-default, resolved by
+    // timestamp) and the row is re-stamped as the newest row.
+    expect(after.workItem.stage).toBe('prd_complete');
+    expect(new Date(after.workItem.updatedAt!).getTime())
+      .toBeGreaterThan(new Date(claimed.workItem.updatedAt!).getTime());
+    // The *status* still cannot regress: that is the pre-existing merge-layer
+    // regression guard (`isRegressionDefault`), which is independent of the
+    // claim-hold TTL.
+    expect(after.workItem.status).toBe('in-progress');
+    // No claim-hold refusal is reported when the guard is disabled.
+    const parsed = JSON.parse(res.stdout) as { sync?: { claimHolds?: unknown[] } };
+    expect(parsed.sync?.claimHolds ?? []).toEqual([]);
+  }, 180000);
+  it('mechanism (b): refuses to create a second store when no main store exists (actionable error)', () => {
+    // A repository with a managed worktree path but no initialised store
+    // anywhere: a command inside the worktree must fail loudly instead of
+    // silently initialising a second store for the same prefix.
+    const project = path.join(s.root, 'nostore');
+    git(s.root, 'init', '-q', project);
+    const worktree = path.join(project, '.worklog', 'worktrees', 'wl-CRV-2-nostore');
+    fs.mkdirSync(path.join(worktree, '.worklog'), { recursive: true });
+    fs.writeFileSync(
+      path.join(worktree, '.worklog', 'config.yaml'),
+      'projectName: No Store\nprefix: CRV\n',
+      'utf8',
+    );
+
+    const res = runCli(worktree, ['--json', 'show', 'CRV-000000']);
+    expect(res.status).not.toBe(0);
+    const output = `${res.stdout}\n${res.stderr}`;
+    expect(output).toContain('--worklog-dir');
+    expect(output.toLowerCase()).toContain('second store');
+    expect(fs.existsSync(path.join(worktree, '.worklog', 'worklog.db'))).toBe(false);
+  }, 60000);
+
+  it('mechanism (b): a deliberately initialised worktree store is still honoured', () => {
+    const project = path.join(s.root, 'ownstore');
+    git(s.root, 'init', '-q', project);
+    const worktree = path.join(project, '.worklog', 'worktrees', 'wl-CRV-3-ownstore');
+    fs.mkdirSync(path.join(worktree, '.worklog'), { recursive: true });
+    fs.writeFileSync(
+      path.join(worktree, '.worklog', 'config.yaml'),
+      'projectName: Own Store\nprefix: CRV\n',
+      'utf8',
+    );
+    // `wl init` marks a store as genuine (the `initialized` semaphore).
+    fs.writeFileSync(path.join(worktree, '.worklog', 'initialized'), '{}', 'utf8');
+
+    const res = runCli(worktree, ['--json', 'show', 'CRV-000000']);
+    const output = `${res.stdout}\n${res.stderr}`;
+    // No store-identity refusal: the command bound to the worktree's own store
+    // and simply did not find the (non-existent) item there.
+    expect(output.toLowerCase()).not.toContain('second store');
+  }, 60000);
 });

@@ -3,6 +3,7 @@
  */
 
 import { WorkItem, Comment, ConflictDetail, ConflictFieldDetail, DependencyEdge, AuditResult } from './types.js';
+import type { ClaimHoldDecision } from './claim-hold.js';
 import { isDefaultValue, stableValueKey, stableItemKey, mergeTags } from './sync/merge-utils.js';
 import { importFromJsonlContent } from './jsonl.js';
 import * as childProcess from 'child_process';
@@ -105,6 +106,12 @@ export interface SyncResult {
   commentsUnchanged: number;
   conflicts: string[]; // Legacy text-based conflicts (for backward compatibility)
   conflictDetails: ConflictDetail[]; // Detailed conflict information
+  /**
+   * Held-claim downgrades the sync refused to write (SA-0MVE34D9B005TUYJ).
+   * Empty unless a claim landed during the sync window or a stale remote row
+   * tried to downgrade a held claim. Present for the sync log / `--json`.
+   */
+  claimHolds?: ClaimHoldDecision[];
 }
 
 export interface MergeOptions {
