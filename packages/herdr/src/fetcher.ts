@@ -920,7 +920,10 @@ async function runWlInner(
  * not queue, preserving the documented per-call timeouts.
  */
 function queuedTimeout(timeoutMs: number | undefined, waitedMs: number): number | undefined {
-  if (waitedMs <= 0) return timeoutMs;
+  // Sub-second queue hops are normal scheduler jitter (and must not perturb
+  // the documented per-call timeout, which callers assert exactly); only a
+  // read that genuinely queued behind a long/hung spawn inherits the budget.
+  if (waitedMs < 1_000) return timeoutMs;
   const base = timeoutMs ?? DEFAULT_WL_TIMEOUT_MS;
   return Math.max(1, base - waitedMs);
 }

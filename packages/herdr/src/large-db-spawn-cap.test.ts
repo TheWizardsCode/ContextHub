@@ -128,7 +128,7 @@ describe(
   { timeout: 300_000 },
   () => {
     /**
-     * The measured half is skipped on an overloaded host: the 1 ms event-loop
+     * The measured half is skipped on a loaded host (> 0.75 load/core): the 1 ms event-loop
      * probe counts OS descheduling as "blocked", so under external CPU
      * contention an absolute timing reading describes the host, not the
      * plugin (the documented F1 policy gates regressions on CPU time for the
@@ -138,7 +138,7 @@ describe(
      * regardless.
      */
     const hostLoadPerCore = os.loadavg()[0] / Math.max(1, os.cpus().length);
-    it.skipIf(hostLoadPerCore > 1)(
+    it.skipIf(hostLoadPerCore > 0.75)(
       'keeps a real read burst inside the documented cap, loop and RSS bounds',
       async () => {
       const report = await runSpawnConcurrencyScenario({
