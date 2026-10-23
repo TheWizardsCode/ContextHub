@@ -25,8 +25,7 @@
  */
 
 import type { WorkItem } from './types.js';
-import { getGitRepoRoot } from '@worklog/shared/worklog-paths';
-import { computeContentFingerprint, createGitRunner, type GitRunner } from './audit-fingerprint.js';
+import { computeContentFingerprint } from './audit-fingerprint.js';
 
 /** Audit/fingerprint fields `wl list --json` adds to every item. */
 export interface ListItemAuditFields {
@@ -56,7 +55,11 @@ export interface ListEnrichmentDb {
 
 /** Options for {@link createListEnricher}. */
 export interface ListEnricherOptions {
-  /** Git working directory for fingerprint computation (default: repo root / cwd). */
+  /**
+   * @deprecated No longer used: the schema-2 content fingerprint hashes only
+   * the item's own title/description and needs no git access
+   * (WL-0MVK5SWZE00254Y7). Retained so existing callers keep compiling.
+   */
   gitRepoRoot?: string;
 }
 
@@ -77,7 +80,7 @@ export interface ListEnricher {
  */
 export function createListEnricher(
   db: ListEnrichmentDb,
-  options: ListEnricherOptions = {},
+  _options: ListEnricherOptions = {},
 ): ListEnricher {
   const auditMap = new Map<
     string,
@@ -91,8 +94,6 @@ export function createListEnricher(
     });
   }
 
-  const gitRepoRoot = options.gitRepoRoot ?? getGitRepoRoot() ?? process.cwd();
-  let runGit: GitRunner | null = null;
   const fingerprintCache = new Map<string, string | null>();
 
   const currentFingerprintFor = (item: WorkItem, storedFingerprint: string | null): string | null => {
@@ -100,11 +101,11 @@ export function createListEnricher(
     if (fingerprintCache.has(item.id)) {
       return fingerprintCache.get(item.id) ?? null;
     }
-    if (runGit === null) runGit = createGitRunner(gitRepoRoot);
+    // Schema 2: the item's own title/description only — no git invocations,
+    // so this is cheap enough to run for every listed item.
     const computed = computeContentFingerprint({
-      id: item.id,
+      title: item.title ?? '',
       description: item.description ?? '',
-      runGit,
     });
     fingerprintCache.set(item.id, computed);
     return computed;
