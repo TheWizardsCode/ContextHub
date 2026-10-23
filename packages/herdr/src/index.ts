@@ -150,6 +150,11 @@ import {
   type StalledScanOptions,
 } from './stalled-work.js';
 import {
+  scanLongRunningPanes,
+  type LongRunningPaneObservation,
+  type LongRunningScanOptions,
+} from './long-running-panes.js';
+import {
   getDueScheduledPrompt as getFirstDuePrompt,
   loadScheduledPrompts,
   updateScheduledPromptLastTriggered,
@@ -2212,6 +2217,26 @@ export function createDowntimeDeps(
         opts,
       );
     },
+    // Long-running pane detection (WL-0MVKNC2N50025HXE AC2): reuses the same
+    // machine-wide seams as the stalled scan (pane list, wl show, rolling
+    // log, root resolver). Used ONLY to annotate a capacity-starvation signal
+    // with the panes holding the local model — observation only, never a
+    // resume/close. Fail-safe: the scan resolves [] on any failure.
+    async scanLongRunningPanes(
+      cwd: string,
+      opts: LongRunningScanOptions,
+    ): Promise<LongRunningPaneObservation[]> {
+      return scanLongRunningPanes(
+        {
+          listPanes: defaultStalledPanesLister,
+          fetchItem: fetchAuditItemById,
+          readEntries: readDowntimeLogEntries,
+          resolveRoot: defaultStalledPaneRootResolver,
+        },
+        cwd,
+        opts,
+      );
+    },
     async resumeStalledPane(candidate: StalledPaneCandidate, opts: StalledScanOptions) {
       return resumeStalledPane(
         {
@@ -2441,6 +2466,12 @@ export async function main(): Promise<void> {
         // Stalled-work scan before new-item selection (WL-0MUYMBSA90092QV2).
         stallScanEnabled: s.downtimeStallScanEnabled,
         stallScanThresholdMs: s.downtimeStallThresholdMs,
+        // Capacity-starvation observability (WL-0MVKNC2N50025HXE): the window
+        // of continuous capacity refusal before a `capacity-starved` signal is
+        // written, and the progress window used to name the panes holding the
+        // model. Both are re-read each tick (live).
+        capacityStarvationAlertMs: s.downtimeCapacityStarvationAlertMs,
+        longRunningThresholdMs: s.downtimeLongRunningThresholdMs,
         browseItemCount: s.browseItemCount,
         // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
         // `paneCloseEnabled` setting (default on) with a configurable

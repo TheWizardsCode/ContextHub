@@ -163,7 +163,7 @@ const KIND_STAGE_RANK: Record<DowntimeSkillKind, number> = {
  * an `implement` pane on an item now at `in_review`. An unknown stage cannot
  * prove advancement, so it fails open (not stale).
  */
-function itemAdvancedPastKind(kind: DowntimeSkillKind, stage: string | undefined): boolean {
+export function itemAdvancedPastKind(kind: DowntimeSkillKind, stage: string | undefined): boolean {
   const itemRank = typeof stage === 'string' ? (ITEM_STAGE_RANK[stage] ?? -1) : -1;
   return itemRank > KIND_STAGE_RANK[kind];
 }
@@ -186,7 +186,7 @@ const WORKING_AGENT_STATUSES: ReadonlySet<string> = new Set([
  * not mistaken for a stall. Returns `null` when neither is parseable — the
  * caller treats that as an unprovable stall (fail-safe: skip).
  */
-function resolveLastActivityAt(
+export function resolveLastActivityAt(
   itemInfo: DowntimeItemInfo,
   entries: DowntimeLogEntry[],
   itemId: string,

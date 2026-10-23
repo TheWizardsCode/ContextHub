@@ -885,6 +885,56 @@ Both settings are re-read from the plugin settings on **every idle tick**
 |---|---|---|
 | `downtimeStallScanEnabled` | `true` (`DEFAULT_DOWNTIME_STALL_SCAN_ENABLED`) | boolean; `false` disables the scan entirely and falls through to normal dispatch |
 | `downtimeStallThresholdMs` | 5 min / `300000` ms (`DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`) | `[60 s, 60 min]` / `[60000, 3600000]` ms (`clampDowntimeStallThresholdMs`); invalid/missing falls back to the default |
+| `downtimeCapacityStarvationAlertMs` | **2 h** / `7200000` ms (`DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS`) | `[5 min, 24 h]` (`clampDowntimeCapacityStarvationAlertMs`); invalid/missing falls back to the default |
+| `downtimeLongRunningThresholdMs` | **3 h** / `10800000` ms (`DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS`) | `[1 h, 48 h]` (`clampDowntimeLongRunningThresholdMs`); invalid/missing falls back to the default |
+
+### Capacity-starvation signal &amp; long-running pane detection (WL-0MVKNC2N50025HXE)
+
+A saturated local model NOPs the dispatcher **silently by design**: every capacity
+refusal (`slots-unavailable`, `capacity-saturated`, `slot-owned`,
+`proxy-contention`, `prefill-gate`/`prefill-cap`/`prefill-eta`) is a non-terminal
+decision. When it lasts hours (the 2026-10-22/23 incident: four
+`working` panes held every slot for 9.5–17.5 h, one dispatch in nine hours) the
+fleet simply stops dispatching with no visible trace after the ~1 h rotating
+decision log.
+
+Two new pieces of observability make such a night diagnosable **while it is
+happening**, with no change to dispatch behaviour:
+
+- **Capacity-starvation signal (`capacity-starvation.ts`).** The worker's
+decision-log path feeds a pure `CapacityStarvationTracker` with every blocking
+refusal (including rate-limited repeats). Any **non-capacity** outcome
+(`no-candidate`, `review-queue-hold`, `code-freeze`, `wl-error`, …) and any
+successful dispatch **ends the episode**. Once a continuous refusal run has
+outlasted `downtimeCapacityStarvationAlertMs` (default **2 h**), the tick writes
+one extra `capacity-starved` **observation** to the coordination decision log
+(`blocking: false` — the header blocking token and the underlying refusal
+reason are unchanged), carrying `starvedSince`, `starvedMs`,
+`consecutiveCapacityRefusals` and `lastCapacityReason`. It re-arms at most
+once per window, so an all-night outage keeps producing evidence every window.
+- **Long-running pane detector (`long-running-panes.ts`).** A pre-existing
+recovery gap: the stalled-work scan, the non-terminal cooldown and the pane
+reaper all key on a pane being NOT `working`, so a pane that stays `working`
+for 12+ hours while its item never advances is invisible to all of them yet
+monopolises every local slot. `classifyLongRunningPane` / `scanLongRunningPanes`
+flag a live-agent pane whose **non-terminal** item has had **no observable
+progress** (`updatedAt` bump or fresh dispatch marker) for at least
+`downtimeLongRunningThresholdMs` (default **3 h**) — **including while the agent
+is `working`**. It is **observation only**: nothing in this path may resume,
+prompt, hijack or close a pane, and a code-freeze never applies (no dispatch
+involved). When the starvation signal fires and the `scanLongRunningPanes` dep
+is wired, the `capacity-starved` entry names the offending panes
+(`longRunningPanes[]`: `paneId`, `itemId`, `cwd`, `kind`, `stalledForMs`,
+`agentStatus`, `stage`, `title`), so an operator sees **who is holding the
+model** without reading pane-by-pane.
+
+**Prefill-serialisation interaction (LP-0MVGDUUV3001XFRJ):** with
+`local_max_concurrent_prefills: 1` a single in-flight prefill collapses the
+dispatcher's effective budget to `0` (`prefill-cap`); combined with multi-slot
+long-running sessions the scheduler can hold zero dispatchable capacity for
+hours even when one slot is technically free. Operational levers: raise prefill
+concurrency, close/reap the long sessions, and/or enable the `pane-close`
+reaper (`paneCloseEnabled`) so abandoned sessions are eventually settled.
 
 ### Pane placement: project workspace first, `Dispatcher` fallback (WL-0MUR5FUWD00024XN)
 
@@ -2000,6 +2050,8 @@ status refresh unchanged at 30s.**
 | Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX`, `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.ts`) |
 | Stalled-work scan | enabled (`downtimeStallScanEnabled`; re-read live; `false` disables the pre-dispatch scan and falls through to normal dispatch, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_SCAN_ENABLED` (`downtime-worker.ts`) |
 | Stalled-work threshold | **5 min** / `300000` ms (`downtimeStallThresholdMs`; minimum continuous not-`working` duration before an in-place resume; clamped to 60 s – 60 min; invalid/missing falls back to the default, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`, `clampDowntimeStallThresholdMs` (`downtime-worker.ts`) |
+| Capacity-starvation alert window | **2 h** (`downtimeCapacityStarvationAlertMs`; clamped to 5 min – 24 h; continuous capacity-refusal run that triggers a `capacity-starved` observation, WL-0MVKNC2N50025HXE) | `DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS`, `clampDowntimeCapacityStarvationAlertMs` (`capacity-starvation.ts`) |
+| Long-running pane window | **3 h** (`downtimeLongRunningThresholdMs`; clamped to 1 h – 48 h; progress window before a live `working` pane is reported on a starvation signal, WL-0MVKNC2N50025HXE) | `DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS`, `clampDowntimeLongRunningThresholdMs` (`long-running-panes.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
 | Pane-closure idle threshold | **0 min** — idle close disabled (`paneCloseIdleThresholdMinutes`; clamped to 0 min – 24 h) | `pane-close-scheduler.ts` |
 | Pane-closure grace period | **5 min** (`paneCloseGracePeriodMinutes`; clamped to 1 min – 24 h; no pane is eligible for close within this window of first dispatch, WL-0MUMM5IUF003EVT8) | `pane-close-scheduler.ts` |
@@ -2036,6 +2088,8 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
 | `packages/herdr/src/downtime-worker.ts` | Worker tick: election, check-in, idle gate, dispatch (anchor-before-claim); stalled-work scan wiring (`resumeStalledWorkIfAble`, `STALLED_RESUME_REASON`) |
 | `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
+| `packages/herdr/src/capacity-starvation.ts` | Capacity-refusal episode tracker + `capacity-starved` signal (`CapacityStarvationTracker`, `isCapacityRefusal`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
+| `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/downtime-log.ts` | Coordination/dispatch rolling logs (per worklog root, retained) |
 | `packages/herdr/src/pane-close.ts` | Shared pane-closure classifier (`classifySession`, `extractFinalAssistantText`) consumed by the reaper and `pane-triage` (WL-0MUJL1NAH0042GOS) |
 | `packages/herdr/src/pane-close-reaper.ts` | Closure reaper orchestration + CLI (`runReaper`, `runReaperCli`) |

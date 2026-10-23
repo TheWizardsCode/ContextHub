@@ -164,6 +164,14 @@ import {
 } from './leader-election.js';
 import { appendCoordinationLogEntry, type CoordinationLogEntry } from './downtime-log.js';
 import {
+  CapacityStarvationTracker,
+  DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
+  type CapacityStarvationObservation,
+} from './capacity-starvation.js';
+import type {
+  LongRunningPaneObservation,
+  LongRunningScanOptions,
+} from './long-running-panes.js';import {
   readDowntimeLogEntries as _readDowntimeEntries,
   dispatchedItemMarkers as _dispatchedMarkers,
   markerStillExcludes as _markerStillExcludes,
@@ -325,6 +333,27 @@ interface CapacityEvidence {
    */
   localIdleSeconds?: number;
   localLastActivitySource?: string;
+}
+
+/**
+ * Evidence fields shared by EVERY polled no-dispatch decision entry
+ * (WL-0MU8808ZY0091JIA). Extracted from `recordDecision` so the
+ * capacity-starvation observation (WL-0MVKNC2N50025HXE AC3) carries exactly
+ * the same evidence schema as the refusal it extends — one shape, no
+ * duplication, and an unchanged on-disk format for existing readers.
+ */
+export interface DecisionEntryFields extends CapacityEvidence {
+  freeSlots: number;
+  totalSlots: number;
+  ownerPresent: boolean;
+  runningPanes: number | null;
+  contentionDepth: number;
+  /** Depth-aware audit-batch metadata (parent WL-0MVEDM8OT007WDRS AC5). */
+  auditBatchDepth?: number;
+  auditBatchCap?: number;
+  auditBatchRemaining?: number;
+  /** Why an armed batch ended (`cap` reached / `depth` dropped, AC5). */
+  auditBatchEndReason?: string;
 }
 
 function capacityEvidence(
@@ -587,6 +616,36 @@ export const MIN_DOWNTIME_STALL_THRESHOLD_MS = 60 * 1000;
  * stalled pane could sit unattended for over an hour, defeating the feature.
  */
 export const MAX_DOWNTIME_STALL_THRESHOLD_MS = 60 * 60 * 1000;
+
+/**
+ * Default progress window before a live-agent pane is reported as
+ * long-running (WL-0MVKNC2N50025HXE AC2): 3 hours. Comfortably longer than a
+ * legitimate implement/audit session's normal stage transition, while short
+ * enough that an overnight session making no progress surfaces the same night.
+ *
+ * Defined here (the dispatcher's settings owner) so `long-running-panes.ts`
+ * imports it and the worker needs only a TYPE import of that module — no
+ * runtime import cycle (the same layering as the stall threshold).
+ */
+export const DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS = 3 * 60 * 60 * 1000;
+
+/** Hard floor for the long-running window (1 h) — below this, normal sessions alert. */
+export const DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS = 60 * 60 * 1000;
+
+/** Hard ceiling for the long-running window (48 h). */
+export const DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Clamp the long-running progress window to `[1 h, 48 h]`. Non-finite /
+ * missing / invalid values fall back to the default (3 h).
+ */
+export function clampDowntimeLongRunningThresholdMs(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS;
+  return Math.min(
+    Math.max(Math.round(value), DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS),
+    DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS,
+  );
+}
 
 /**
  * Three-strike rule: this many consecutive CLI-error dispatch outcomes
@@ -2812,6 +2871,26 @@ export interface DowntimeWorkerDeps {
     candidate: StalledPaneCandidate,
     opts: StalledScanOptions,
   ): Promise<StalledResumeOutcome>;
+  /**
+   * Machine-wide LONG-RUNNING pane scan (WL-0MVKNC2N50025HXE AC2): report live
+   * agent panes whose non-terminal item has had NO observable progress (no
+   * `updatedAt` bump, no fresh dispatch marker) for the configured window —
+   * INCLUDING panes whose `agent_status` is `working`.
+   *
+   * Consulted ONLY when a capacity-starvation signal fires (the dispatcher
+   * has refused every tick on local capacity for the configured window), so
+   * the signal names the panes holding the model. OBSERVATION ONLY: nothing
+   * in this path may resume, prompt or close a pane — a legitimately long
+   * session must never be interrupted by an alert.
+   *
+   * OPTIONAL — when absent the starvation signal is emitted without pane
+   * evidence. Must never throw: an unreadable/unparseable scan resolves an
+   * empty array.
+   */
+  scanLongRunningPanes?(
+    cwd: string,
+    opts: LongRunningScanOptions,
+  ): Promise<LongRunningPaneObservation[]>;
   /**
    * Record a persistent CLI-error event (three consecutive wl failures).
    * Must never throw (fail-closed): logging must not crash the worker.
@@ -6623,6 +6702,19 @@ export interface DowntimeWorkerConfig {
      */
     stallScanThresholdMs?: number;
     /**
+     * Continuous capacity-refusal window before a `capacity-starved`
+     * observation is written (WL-0MVKNC2N50025HXE AC3). Read live on every
+     * tick. Optional — defaults to
+     * `DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS` (2 h).
+     */
+    capacityStarvationAlertMs?: number;
+    /**
+     * Progress window before a live-agent pane is reported as long-running on
+     * a starvation signal (WL-0MVKNC2N50025HXE AC2). Read live on every tick.
+     * Optional — defaults to `DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS` (3 h).
+     */
+    longRunningThresholdMs?: number;
+    /**
      * Pane-lifecycle monitor cadence, ms (WL-0MU308WSF0002JWN). Optional —
      * defaults to `DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS` (30 s). Tests may
      * pass 0 to run the monitor on every tick.
@@ -6835,6 +6927,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   // written and when, so repeated identical refusals are rate-limited.
   let lastDecisionReason: string | null = null;
   let lastDecisionAt = 0;
+  // Continuous capacity-starvation tracking (WL-0MVKNC2N50025HXE AC3): a run
+  // of capacity-flagged refusals is an episode; once it has lasted the
+  // configured window a `capacity-starved` observation is written ONCE per
+  // window so a silent all-night NOP becomes diagnosable. Observation only —
+  // it never gates dispatch, never strikes and never replaces the refusal
+  // reason/header token. Reset by any non-capacity outcome and by a
+  // successful dispatch.
+  const starvationTracker = new CapacityStarvationTracker();
+  // Long-running pane progress window (AC2), re-read from settings every tick
+  // and used only to annotate a starvation signal.
+  let longRunningThresholdMs = DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS;
   // Current header blocking token; null when not gate-blocked. Reset each tick.
   let blockReason: string | null = null;
   // Per-instance in-memory enabled override (parent WL-0MSZ4NSOE007AQEF):
@@ -6952,6 +7055,57 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     }
   };
 
+  // ── Capacity-starvation observation (WL-0MVKNC2N50025HXE AC3) ──
+  // Write ONE observation entry for a capacity-refusal episode that has
+  // outlasted the configured window. It reuses the refusal's evidence fields
+  // (same schema), adds the episode length and — when the long-running scan
+  // is wired — names the panes holding the model. Observation only: it does
+  // not set the header blocking token, never gates dispatch, and a logging
+  // failure is swallowed (fail-closed).
+  const writeCapacityStarvationSignal = async (
+    cwd: string,
+    starvation: CapacityStarvationObservation,
+    fields: DecisionEntryFields,
+    now: number,
+  ): Promise<void> => {
+    let longRunningPanes: LongRunningPaneObservation[] | undefined;
+    if (typeof opts.deps.scanLongRunningPanes === 'function') {
+      try {
+        const observed = await opts.deps.scanLongRunningPanes(cwd, {
+          thresholdMs: longRunningThresholdMs,
+          now,
+        });
+        if (Array.isArray(observed) && observed.length > 0) {
+          longRunningPanes = observed;
+        }
+      } catch {
+        // fail-safe: an unreadable scan must never suppress the signal
+      }
+    }
+    const entry: CoordinationLogEntry = {
+      kind: 'decision',
+      operation: 'no-dispatch',
+      instanceId,
+      reason: 'capacity-starved',
+      ...fields,
+      starvedSince: new Date(starvation.starvedSince).toISOString(),
+      starvedMs: starvation.starvedMs,
+      consecutiveCapacityRefusals: starvation.consecutiveRefusals,
+      lastCapacityReason: starvation.lastReason,
+      ...(longRunningPanes !== undefined ? { longRunningPanes } : {}),
+      at: new Date(now).toISOString(),
+    };
+    try {
+      if (typeof opts.deps.recordDecision === 'function') {
+        await opts.deps.recordDecision(entry, cwd);
+      } else {
+        await appendCoordinationLogEntry(cwd, entry);
+      }
+    } catch {
+      // fail-closed: observation logging must never affect dispatch
+    }
+  };
+
   // ── No-dispatch decision log (WL-0MU8808ZY0091JIA) ──
   // Record WHY a polled tick refused to dispatch so "idle slots but no
   // dispatches" is diagnosable from the logs alone. Rate-limited: a repeated
@@ -6973,47 +7127,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   const recordDecision = async (
     cwd: string,
     reason: string,
-    fields: {
-      freeSlots: number;
-      totalSlots: number;
-      ownerPresent: boolean;
-      runningPanes: number | null;
-      contentionDepth: number;
-      /** Depth-aware audit-batch metadata (parent WL-0MVEDM8OT007WDRS AC5). */
-      auditBatchDepth?: number;
-      auditBatchCap?: number;
-      auditBatchRemaining?: number;
-      /** Why an armed batch ended (`cap` reached / `depth` dropped, AC5). */
-      auditBatchEndReason?: string;
-      /**
-       * Schema-v2 truthful-capacity evidence (LP-0MVGDUVGE0024YAI): pool
-       * summary, payload version and per-slot lease/phase/ETA detail.
-       */
-      capacityHint?: string;
-      statusSchemaVersion?: number;
-      idleLeasedSlots?: number;
-      generatingSlots?: number;
-      slotPhases?: Record<string, string>;
-      slotPrefillEtaSeconds?: Record<string, number>;
-      /**
-       * Prefill serialisation-gate evidence (WL-0MVHSZRZQ00482QX): the
-       * in-flight/cap counters, the live gate waiters and the prefill-ETA
-       * guard's queue ETA / admission budget. Attached to paced refusals and
-       * to every other polled decision when the proxy serves them.
-       */
-      prefillsInFlight?: number;
-      maxConcurrentPrefills?: number;
-      prefillGateWaiters?: number;
-      prefillBudgetSeconds?: number;
-      queueEtaSeconds?: number;
-      /**
-       * Authoritative local idle-age evidence (WL-0MVHSZR9C0012NQY): the
-       * proxy's reported idle age (seconds) and the source of its last local
-       * activity. Observability only, never a gate.
-       */
-      localIdleSeconds?: number;
-      localLastActivitySource?: string;
-    },
+    fields: DecisionEntryFields,
     options: {
       /**
        * `false` for a NON-refusal observation (`audit-batch-continue` /
@@ -7028,11 +7142,28 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   ): Promise<void> => {
     if (options.blocking !== false) blockReason = decisionHeaderToken(reason);
     const now = Date.now();
+    // ── Continuous capacity-starvation signal (WL-0MVKNC2N50025HXE AC3) ──
+    // The episode tracker is fed with EVERY blocking refusal BEFORE the rate
+    // limiter below, so a rate-limited repeat still advances the episode. A
+    // non-capacity refusal resets it (capacity was available, so the fleet is
+    // not starved). Once the episode crosses the configured window ONE extra
+    // `capacity-starved` OBSERVATION entry is written AFTER the refusal line,
+    // carrying the episode length and the panes the long-running detector
+    // flags — the diagnosis the 2026-10-22/23 incident could not make. It is
+    // an observation, not a refusal: the header blocking token and the
+    // underlying reason are unchanged, it is written even when the refusal
+    // itself is rate-limited, and a logging failure never affects dispatch.
+    const starvation =
+      options.blocking !== false ? starvationTracker.observe(reason, now) : null;
     if (
       lastDecisionReason === reason &&
       now - lastDecisionAt < DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS
     ) {
-      return; // rate-limited: identical refusal within the window
+      // Rate-limited refusal: skip the refusal line, but never the signal.
+      if (starvation !== null) {
+        await writeCapacityStarvationSignal(cwd, starvation, fields, now);
+      }
+      return; // identical refusal within the window
     }
     lastDecisionReason = reason;
     lastDecisionAt = now;
@@ -7052,6 +7183,11 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       }
     } catch {
       // fail-closed: decision logging must never crash the worker
+    }
+    // The starvation observation always follows the refusal line (it never
+    // replaces it) — AC5: the reason/token stream stays intact.
+    if (starvation !== null) {
+      await writeCapacityStarvationSignal(cwd, starvation, fields, now);
     }
   };
 
@@ -7139,6 +7275,14 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     },
     async tick(): Promise<DowntimeWorkerTickResult> {
       const cfg = opts.config();
+      // Capacity-starvation tracking (WL-0MVKNC2N50025HXE AC3): the window and
+      // the long-running progress window are re-read from settings every tick,
+      // so an operator change applies live without a plugin restart.
+      starvationTracker.configure(
+        cfg.capacityStarvationAlertMs ?? DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
+      );
+      longRunningThresholdMs =
+        cfg.longRunningThresholdMs ?? DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS;
       // Fresh per-tick decision state: clear the header blocking reason; a
       // gate below re-sets it when this tick is refused (WL-0MU8808ZY0091JIA).
       blockReason = null;
@@ -7855,6 +7999,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         if (outcome.dispatched) {
           lastDispatchAt = Date.now();
           errorStrikes = 0; // a successful dispatch proves the CLI is healthy
+          // A successful dispatch proves capacity was available, so the
+          // capacity-starvation episode is over (WL-0MVKNC2N50025HXE AC3).
+          starvationTracker.reset();
           const batch = outcome.auditBatch;
           // AC5 observability: a CONTINUATION audit dispatch records its own
           // decision token (with depth/cap/remaining) at the existing rate

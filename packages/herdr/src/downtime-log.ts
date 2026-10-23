@@ -105,6 +105,36 @@ export interface CoordinationLogEntry {
    * decisions.
    */
   auditBatchEndReason?: string;
+  /**
+   * Continuous capacity-starvation signal (WL-0MVKNC2N50025HXE AC3): recorded
+   * on a `reason: 'capacity-starved'` observation when the dispatcher has
+   * refused a continuous run of capacity-flagged ticks for at least the
+   * configured window. `capacity-starved` is an OBSERVATION, not a refusal: it
+   * never sets the header blocking token and never replaces the underlying
+   * refusal reason.
+   */
+  starvedSince?: string;
+  /** Length of the starvation episode at the moment the signal was written (ms). */
+  starvedMs?: number;
+  /** Capacity refusals observed in the episode (includes rate-limited ticks). */
+  consecutiveCapacityRefusals?: number;
+  /** The most recent capacity-refusal reason in the episode. */
+  lastCapacityReason?: string;
+  /**
+   * Panes the long-running detector flagged when the starvation signal fired
+   * (WL-0MVKNC2N50025HXE AC2/AC3): each entry names the pane, item, kind and
+   * how long the item has gone without progress. Bounded; absent when the
+   * scan is unwired or found nothing.
+   */
+  longRunningPanes?: Array<{
+    paneId: string;
+    itemId: string;
+    cwd: string;
+    kind: string;
+    stalledForMs: number;
+    agentStatus: string;
+    stage: string;
+  }>;
   at?: string;
 }
 

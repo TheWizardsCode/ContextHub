@@ -426,6 +426,14 @@ dispatches; the other herdr instances coordinate instead of polling:
   degrades to the unchanged dispatch path. A foreign-root pane is resumed
   against the root resolved from the pane's `cwd` / `agent_session`. See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#stalled-work-scan-and-resume-wl-0muymbsa90092qv2-parent-wl-0muma5omh0024pn1).
+- **Capacity starvation signal (WL-0MVKNC2N50025HXE)** — a saturated local
+  model NOPs dispatch silently by design; once capacity refusals have run
+  continuously for `downtimeCapacityStarvationAlertMs` (default 2 h) the
+  dispatcher writes a `capacity-starved` observation to the decision log
+  with episode evidence (`starvedSince`, `starvedMs`,
+  `consecutiveCapacityRefusals`, `lastCapacityReason`). Observation only —
+  the refusal reason/header token are unchanged. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#capacity-starvation-signal--long-running-pane-detection-wl-0mvknc2n50025hxe).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
@@ -564,6 +572,15 @@ pacing* below).
   before a pane is considered stalled and resumed in place (default:
   `300000` = 5 minutes, clamped to 60 s – 60 min; invalid/missing falls back
   to the default)
+- `downtimeCapacityStarvationAlertMs` — Continuous capacity-refusal window
+  before the dispatcher writes a `capacity-starved` observation to the
+  decision log (default: `7200000` = 2 hours, clamped to 5 min – 24 h;
+  observation only — it never gates dispatch). When the signal fires, the
+  long-running pane scan names the panes holding the model
+- `downtimeLongRunningThresholdMs` — Progress window before a live-agent
+  pane whose non-terminal item has not advanced is reported on a starvation
+  signal (default: `10800000` = 3 hours, clamped to 1 h – 48 h; observation
+  only — a flagged pane is never resumed, prompted or closed)
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (the proxy's
