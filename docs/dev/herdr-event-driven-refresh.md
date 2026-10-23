@@ -278,7 +278,7 @@ CLI target. The exact figures — dataset shape, measurement command and every
 metric — live in `packages/herdr/test/perf/large-db-budget.json` under
 `profiles.<name>.baselines.<target>`; these are the numbers to quote in
 work-item comments. F7 re-verified and re-recorded the `full` profile after
-F3–F6 (see [F7 — end-to-end verification](#f7--end-to-end-parent-ac-verification-wl-0mvjv2qho003k6h3)).
+F3–F6 (see [F7 — end-to-end parent AC verification](#f7--end-to-end-parent-ac-verification-wl-0mvjv2qho003k6h3)).
 
 `full` profile — 2,600 items, nested parent/child/grandchild subtrees, 259
 dependency edges, 10 comments per item, **~124 MB on disk** (the operator's
@@ -567,6 +567,70 @@ persist phases take ~97 % of the pipeline, and 78–90 % of that CPU is
 so a no-change sync pays the whole cost. The fix is a separate work item
 (`WL-0MVK3WRY9009KV6P`, blocked by F2) per the epic's scope guardrail; the
 probe is the before/after measurement tool for it.
+
+## F7 — end-to-end parent AC verification (WL-0MVJV2QHO003K6H3)
+
+F1–F6 each verify one slice. F7 is the end-to-end evidence run that every
+parent acceptance criterion holds **together**, after all the fixes, at the
+operator's real scale. It adds `--ac-report` to the F1 harness: the existing
+F1 refresh budget, F3 sync-in-flight, F4 in-process expand and F5 spawn-burst
+scenarios run in one pass and are aggregated into one JSON document
+(`runAcReport()` → `buildAcReport()`) plus a human summary. AC1–AC6 are each
+reported with the measured number, its target and the scenario that produced
+it; the budget ratchet and the raw scenario reports are attached so every
+quoted number is reproducible.
+
+```sh
+# The evidence run (built CLI, parent's full scale ~2,600 items / 123.7 MB)
+npm run build && npm run test:perf:large -- --ac-report --json --target dist
+# Human summary instead of JSON
+npm run build && npm run test:perf:large -- --ac-report --target dist
+```
+
+`--ac-report` also accepts `--samples N`, `--write-samples N`,
+`--sync-duration MS`, `--spawn-burst N` and `--profile default|full`; the
+default-suite `large-db-ac-report.test.ts` pins the AC mapping (pure) and a
+small-scale end-to-end run of the same wiring.
+
+### Verified numbers (built CLI, full scale)
+
+Measured on `rgardler-AI-Laptop` (node v22.22.1, 16 CPUs, 1-min load 2.7 —
+~0.2/core), `dist` target, 5 refresh / 5 write → reflect / 5 sync-in-flight
+samples, 2,600-item fixture (123.7 MB):
+
+| AC | Criterion (parent) | Measured | Target | Verdict |
+|---|---|---|---|---|
+| AC1 | refresh lag in aggregate | 196 ms event-loop blocked p95; 144 ms during the capped spawn burst | ≤ ~200 ms | met |
+| AC2 | refresh cost + single read | 478 ms refresh p95 wall; 1 consolidated `wl worklist` read; 0 expand/hydrator spawns with CLI parity | ≤ ~1.5 s p95 | met |
+| AC3 | auto-sync cannot stall the pane | no wait gap (sync had ~34 s left at every refresh end); 0 ms sync-spawn loop cost; 82 ms refresh loop p95 with sync; non-blocking `⟳ syncing…` notice | no lock wait / no stall | met |
+| AC4 | write → reflect | 780 ms p95 (watch detection 160 ms) | ≤ ~2 s p95 | met |
+| AC5 | memory budget | 145 MB refresh per-spawn peak; capped fan-out 1 concurrent read, aggregate bound 175 MB (`1 × 175 MB`) | per-spawn budget OR cap × peak ≤ ~300 MB | met via the capped route |
+| AC6 | no regressions | 1 spawn/refresh, 0 idle spawns, 1 in-process open (open p95 4 ms), event-driven watch fires | invariants | met (suites below) |
+
+All six parent ACs are met at full scale and the budget ratchet passes with
+`acTargets.enforced: true`. The full Herdr plugin + TUI suites are the other
+half of AC6 and ran green at the pushed commit (the dev-push gate's full-suite
+run, cached for the audit).
+
+### Notes and limits
+
+- **Host-load sensitivity.** AC1/AC2/AC4 are user-perceived (wall-clock) numbers,
+  so they are only meaningful on a host that is not CPU-starved. A run during
+  heavy external contention (1-min load ~10–30 on 16 CPUs) measured 271 ms
+  loop blocking and 2.2 s write → reflect with no code change; the report
+  records the host + load average so a reading can be judged. The regression
+  ratchet remains CPU-time based (load independent), as documented above.
+- **AC5 route choice.** The per-spawn peak (145–176 MB cold, measured on
+  `dist`) is not below the pre-change baseline, so AC5 is satisfied by the
+  bounded fan-out route: F8 (`WL-0MVKVJYV6008SL9G`) tightened the read-spawn
+  cap from 2 to 1 after F7 showed `2 × cold peak` could reach ~351 MB. The
+  one-open, zero-spawn-when-idle and single-consolidated-read guarantees are
+  unchanged.
+- **Per-expand child fetches** are measured in-process (F4) and must be zero
+  spawns with exact CLI row parity; the AC report asserts both.
+- The raw JSON report is not checked in (it is host-dependent evidence); the
+  stable, checked-in artefact is `large-db-budget.json`, which F7 re-baselined
+  (full `dist` + `src`) and marked enforced.
 
 ## References
 

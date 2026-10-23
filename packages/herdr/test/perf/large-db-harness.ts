@@ -2653,12 +2653,20 @@ export function buildAcReport(inputs: LargeDbAcReportInputs): LargeDbAcReport {
     criterion: string,
     evidence: string,
     measurements: LargeDbAcMeasurement[],
+    /**
+     * Explicit satisfaction for a criterion that is an OR of routes (AC5):
+     * its individual route measurements are intentionally not all `ok`.
+     * Defaults to "every measurement is ok".
+     */
+    satisfied?: boolean,
   ): LargeDbAcVerdict => ({
     id,
     criterion,
     evidence,
     measurements,
-    status: measurements.every((measurement) => measurement.ok) ? 'met' : 'unmet',
+    status: (satisfied ?? measurements.every((measurement) => measurement.ok))
+      ? 'met'
+      : 'unmet',
   });
 
   const acs: LargeDbAcVerdict[] = [
@@ -2844,6 +2852,7 @@ export function buildAcReport(inputs: LargeDbAcReportInputs): LargeDbAcReport {
           ok: memoryVerdict,
         },
       ],
+      memoryVerdict,
     ),
     verdict(
       'AC6',
