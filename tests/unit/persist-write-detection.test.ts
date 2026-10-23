@@ -365,4 +365,85 @@ describe('persist write-detection (WL-0MVK6S4HM005GBCO)', () => {
       expect(db.search('Fix the bug').results.length).toBe(0);
     });
   });
+
+  describe('transactional atomicity (AC4 — one transaction per record type)', () => {
+    it('importComments() rolls back the whole comment snapshot when a save fails mid-transaction', () => {
+      db.import([
+        makeItem({ id: 'WI-0001' }),
+        makeItem({ id: 'WI-0002', title: 'Second item' }),
+      ]);
+      db.importComments([
+        makeComment('C-1', 'WI-0001', 'one'),
+        makeComment('C-2', 'WI-0001', 'two'),
+        makeComment('C-3', 'WI-0002', 'three'),
+      ]);
+
+      const store = storeOf();
+      const realSaveComment = store.saveComment.bind(store);
+      let saves = 0;
+      const spy = vi.spyOn(store, 'saveComment').mockImplementation(comment => {
+        saves += 1;
+        if (saves === 2) {
+          throw new Error('simulated save failure');
+        }
+        realSaveComment(comment);
+      });
+
+      // Incoming snapshot is missing C-2 (delete) and changes C-1 + C-3
+      // (two saves; the second one throws).
+      expect(() =>
+        db.importComments([
+          makeComment('C-1', 'WI-0001', 'one updated'),
+          makeComment('C-3', 'WI-0002', 'three updated'),
+        ]),
+      ).toThrow('simulated save failure');
+      spy.mockRestore();
+
+      // Nothing from the failed snapshot survives — not the C-2 deletion and
+      // not the already-executed C-1 save.
+      expect(db.getComment('C-1')?.comment).toBe('one');
+      expect(db.getComment('C-2')?.comment).toBe('two');
+      expect(db.getComment('C-3')?.comment).toBe('three');
+      expect(db.getAllComments().length).toBe(3);
+    });
+
+    it('import() rolls back every record type when a save fails mid-transaction', () => {
+      const items = [
+        makeItem({ id: 'WI-0001' }),
+        makeItem({ id: 'WI-0002', title: 'Second item' }),
+      ];
+      db.import(items, [makeEdge('WI-0001', 'WI-0002')]);
+
+      const store = storeOf();
+      const realSaveWorkItem = store.saveWorkItem.bind(store);
+      let saves = 0;
+      const spy = vi.spyOn(store, 'saveWorkItem').mockImplementation(item => {
+        saves += 1;
+        if (saves === 2) {
+          throw new Error('simulated save failure');
+        }
+        realSaveWorkItem(item);
+      });
+
+      // Incoming snapshot removes WI-0002, changes WI-0001 and adds WI-0003.
+      // The WI-0003 save throws after WI-0001 was already written.
+      expect(() =>
+        db.import([
+          makeItem({ id: 'WI-0001', title: 'changed' }),
+          makeItem({ id: 'WI-0003', title: 'third item' }),
+        ]),
+      ).toThrow('simulated save failure');
+      spy.mockRestore();
+
+      // The whole differential persist is atomic: the deletion, the changed
+      // item and the new item are all rolled back together.
+      expect(db.get('WI-0001')?.title).toBe('Fix the bug');
+      expect(db.get('WI-0002')?.title).toBe('Second item');
+      expect(db.get('WI-0003')).toBeNull();
+      // The edge cascaded from the (rolled-back) WI-0002 delete is restored.
+      expect(db.getAllDependencyEdges().map(e => `${e.fromId}->${e.toId}`)).toEqual([
+        'WI-0001->WI-0002',
+      ]);
+    });
+  });
 });
