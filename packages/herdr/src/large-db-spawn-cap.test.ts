@@ -137,10 +137,7 @@ describe(
      * cap/RSS/no-drop policy is covered by the synthetic tests above
      * regardless.
      */
-    const hostLoadPerCore = os.loadavg()[0] / Math.max(1, os.cpus().length);
-    it.skipIf(hostLoadPerCore > 0.75)(
-      'keeps a real read burst inside the documented cap, loop and RSS bounds',
-      async () => {
+    it('keeps a real read burst inside the documented cap, loop and RSS bounds', async () => {
       const report = await runSpawnConcurrencyScenario({
         profile: 'default',
         // A modest default-suite burst; the on-demand full-scale run uses
@@ -164,7 +161,21 @@ describe(
 
       // Queued reads never blocked input: total event-loop blocking during a
       // spawn-heavy burst stays well inside the parent AC 1 ≤ ~200 ms bound.
-      expect(report.capped.eventLoopBlockedMs).toBeLessThanOrEqual(200);
+      // The 1 ms probe counts OS descheduling as blocked, so the absolute
+      // reading is only valid on a quiet host (check AFTER the measurement:
+      // a 1-min average sampled at collection time misses contention spikes).
+      // The absolute AC1 number is measured at full scale by F7's
+      // `--ac-report` on a quiet reference host; the deterministic cap/RSS/
+      // no-drop policy above holds regardless.
+      const loadPerCore = os.loadavg()[0] / Math.max(1, os.cpus().length);
+      if (loadPerCore <= 0.75) {
+        expect(report.capped.eventLoopBlockedMs).toBeLessThanOrEqual(200);
+      } else {
+        console.warn(
+          `[spawn-cap] host load ${loadPerCore.toFixed(2)}/core — absolute event-loop ` +
+            `assertion skipped (measured ${report.capped.eventLoopBlockedMs} ms)`,
+        );
+      }
 
       // RSS: the per-spawn peaks were recorded by the CLI's own spawn
       // instrumentation and the documented aggregate bound (cap × peak) holds.
@@ -177,8 +188,12 @@ describe(
       }
 
       const evaluation = evaluateSpawnCapReport(report, budget);
-      expect(evaluation.violations, evaluation.violations.join('\n')).toEqual([]);
-      expect(report.ok).toBe(true);
+      const violations =
+        loadPerCore <= 0.75
+          ? evaluation.violations
+          : evaluation.violations.filter((violation) => !violation.includes('event loop blocked'));
+      expect(violations, violations.join('\n')).toEqual([]);
+      if (loadPerCore <= 0.75) expect(report.ok).toBe(true);
 
       // Same fixture logic as the refresh ratchet (nested + dependency-edged).
       expect(report.datasetItems).toBe(LARGE_DB_PROFILES.default.items);

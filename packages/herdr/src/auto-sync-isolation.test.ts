@@ -69,11 +69,12 @@ describe('auto-sync isolation — refresh never waits on a long sync (F3 AC1/AC3
     // is only meaningful when the host is not CPU-starved (the absolute AC
     // evidence is F7's full-scale `--ac-report` on a quiet host); on a loaded
     // host the measured ~0 ms value is reported but not gated.
-    if (os.loadavg()[0] / Math.max(1, os.cpus().length) <= 1) {
+    const loadPerCore = os.loadavg()[0] / Math.max(1, os.cpus().length);
+    if (loadPerCore <= 0.75) {
       expect(report.spawnBlockingMs).toBeLessThanOrEqual(200);
     } else {
       console.warn(
-        `[auto-sync] host load ${(os.loadavg()[0] / os.cpus().length).toFixed(2)}/core — ` +
+        `[auto-sync] host load ${loadPerCore.toFixed(2)}/core — ` +
           `absolute spawn-blocking assertion skipped (measured ${report.spawnBlockingMs} ms)`,
       );
     }
@@ -158,7 +159,7 @@ describe('auto-sync isolation — refresh never waits on a long sync (F3 AC1/AC3
     // the pane's in-process scope never touches, and the write transaction is
     // on a DIFFERENT connection than the pane's refresh scope (WAL readers do
     // not block). Same host-relative headroom gate as the in-flight case.
-    const loadedHost = os.loadavg()[0] / Math.max(1, os.cpus().length) > 1;
+    const loadedHost = os.loadavg()[0] / Math.max(1, os.cpus().length) > 0.75;
     for (const sample of report.underWriterLock) {
       if (loadedHost) {
         // Under external CPU contention the in-process read can hit the short
