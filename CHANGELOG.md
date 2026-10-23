@@ -1,5 +1,32 @@
 # Changelog
 
+## v1.0.23 (2026-10-23)
+> **Release focus:** This release focuses on performance and responsiveness across the app, with faster `wl` commands, quicker tests, and lower CPU use in Herdr panes and the Work Items pane. It also improves GPU scheduling so downtime tasks start promptly and run one at a time, ensures your own dispatched work jumps ahead of background tasks, and fixes several reliability issues including late-joining agent status, test gate failure messages, and long-running AI sessions blocking overnight work.
+### Features
+- `wl` commands now start much faster and use less CPU, keeping your host responsive. (WL-0MVFNMSRW002FI6B)
+- Downtime tasks now start right away when your GPU has already been idle long enough. (WL-0MVHSZR9C0012NQY)
+- Downtime sessions now start one at a time so each gets the full GPU speed instead of waiting in line. (WL-0MVHSZRZQ00482QX)
+- Tests now run much faster, so you get quicker feedback and less waiting. (WL-0MVF9JJUH0077OB8)
+- Downtime work now starts whenever the local GPU is truly free, instead of waiting on idle reservations. (WL-0MVHSZQVX0000T6P)
+- Work you dispatch yourself now reliably jumps ahead of background tasks. (WL-0MVGC6JVP00812DS)
+- Herdr panes now refresh with far less CPU load, keeping your machine responsive. (WL-0MVGYLU0S004WZUS)
+- Urgent tasks now get faster responses automatically, while background work stays efficient. (WL-0MVE1NZ4J000H5NH)
+- Herdr tests can now be run through the official test runner, making it easier to catch bugs before they ship. (WL-0MVGJ4WSS005BMSI)
+- Downtime now clears deep review backlogs faster by running several audits per idle window. (WL-0MVEDM8OT007WDRS)
+- The In Review section now has a grey background so you can spot it instantly in long lists. (WL-0MUYJ8WJG0087VSU)
+- Background refreshes no longer cause brief typing pauses in the Work Items pane. (WL-0MV6C6SLB005HX7B)
+### Bug Fixes
+- Fixed flaky Blocked By display tests so work item lists render reliably. (WL-0MVFX6404003TE2E)
+- Fixes a timing issue so late-joining agents reliably show their green status circle. (WL-0MVFX70SB000YRQH)
+- Fixed a test setup issue so version checks now run reliably against the latest build. (WL-0MVH44JRR000A23U)
+- Speeds up the test suite so updates reach you faster and more reliably. (WL-0MVH47YF300087AQ)
+- Test gate failures now explain why they failed instead of showing an empty message. (WL-0MVGUT787000LNDG)
+- Long-running AI sessions can no longer silently block overnight work from running. (WL-0MVKNC2N50025HXE)
+- The Work Items pane now stays responsive and updates quickly, even on very large worklogs. (WL-0MVJC1EQX001QR9W)
+- Work item freshness checks are now faster and more reliable. (WL-0MVK5SWZE00254Y7)
+- The model display now updates instantly when you switch models mid-session. (WL-0MVGEB3IP002V8IB)
+- Fixed flaky pane visibility checks so tests behave reliably when run inside a herdr pane. (WL-0MU2GCNKT004W6KK)
+
 ## v1.0.22 (2026-10-17)
 > **Release focus:** This release focuses on making the worklist clearer and more responsive, with better visibility into blocked items, priorities, review status, and in-progress markers, plus instant refresh and a new help screen for shortcuts. It also improves reliability around audits, quick-create, rejections, and finish-gate so work isn't stranded or interrupted.
 ### Features
