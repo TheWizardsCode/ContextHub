@@ -6,7 +6,7 @@ import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, AuditWaiver, DemotedParent, RevertedItem } from './types.js';
-import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps } from './persistent-store.js';
+import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps, unescapeText } from './persistent-store.js';
 import { normalizeStatusValue } from './status-stage-rules.js';
 // Self-referencing package export (WL-0MSJ4BT4Z002HH9B grep guard forbids a
 // relative `icons.js` import; `@worklog/shared/icons` is the canonical path
@@ -3188,17 +3188,22 @@ export class WorklogDatabase {
   /**
    * Import work items by **replacing** all existing data.
    *
-   * **WARNING — DESTRUCTIVE**: This method calls `clearWorkItems()` (DELETE
-   * FROM workitems) before re-inserting the provided items. If `dependencyEdges`
-   * is supplied it also calls `clearDependencyEdges()` first. Any items or
-   * edges NOT included in the arguments will be permanently deleted.
+   * **WARNING — DESTRUCTIVE**: any items, edges or audits NOT included in the
+   * arguments are permanently deleted (comments cascade with their item).
    *
-   * **Atomic**: The clear-and-re-insert cycle is wrapped in a SQLite
-   * transaction so that concurrent readers always see either the old
-   * complete state or the new complete state — never an empty or
-   * partially-populated database. This prevents the race condition where
-   * another Pi TUI instance's selection list appears empty or stale during
-   * a sync operation.
+   * **Change detection (WL-0MVK3WRY9009KV6P / WL-0MVK6S9TN00500UL)**: the
+   * replace is now differential rather than clear-and-re-insert. Records whose
+   * merged value is identical to the stored value are not written at all, and
+   * their FTS row is left untouched, so a no-change sync performs zero record
+   * writes and zero FTS writes (F2 measured `upsertFtsEntry` at 78–90 % of the
+   * persist CPU when every row was rewritten). Deleted ids still have their
+   * item row, comments, edges, audit row and FTS entry removed.
+   *
+   * **Atomic**: the whole differential persist runs in one SQLite transaction
+   * so that concurrent readers always see either the old complete state or the
+   * new complete state — never an empty or partially-populated database. This
+   * prevents the race condition where another Pi TUI instance's selection list
+   * appears empty or stale during a sync operation.
    *
    * Only call this method with a **complete** item set (e.g. the result of
    * merging local + remote data). For partial / incremental updates — such as
@@ -3228,82 +3233,122 @@ export class WorklogDatabase {
    *
    * @param items - The full set of work items to store.
    * @param dependencyEdges - Optional full set of dependency edges. When
-   *   provided, existing edges are cleared and replaced with these.
+   *   provided, edges absent from this set are deleted and only new/changed
+   *   edges are written.
    * @param auditResults - Optional full set of audit results. When provided,
    *   existing audit results are replaced with these — but never with an
    *   OLDER row than a stored one for the same item (monotonic,
    *   SA-0MUJNFF3K009BF03).
    */
   import(items: WorkItem[], dependencyEdges?: DependencyEdge[], auditResults?: AuditResult[]): void {
-    // Snapshot existing items before clearing so we can detect unchanged items
-    // and preserve their updatedAt timestamps.
+    // Snapshot the current state up front: it is the diff base for every
+    // record type, so unchanged rows are never re-written.
     const existingItems = new Map<string, WorkItem>();
     for (const existing of this.store.getAllWorkItems()) {
       existingItems.set(existing.id, existing);
     }
-
-    // clearWorkItems() cascades to audit_results (FK), so snapshot the stored
-    // audits first. They are folded back after the re-insert with the same
-    // newest-wins rule as the merge: a newer stored audit can never be
-    // downgraded by this destructive replace, and when auditResults is absent
-    // the surviving items keep their audits instead of losing them
-    // (SA-0MUJNFF3K009BF03 AC3).
     const storedAudits = this.store.getAllAuditResults();
+    const storedEdges = dependencyEdges ? this.store.getAllDependencyEdges() : [];
     const importedIdSet = new Set(items.map(item => item.id));
 
-    // Wrap the clear-and-re-insert in a transaction so that concurrent
+    // Destructive-replace semantics are preserved: ids absent from the
+    // incoming snapshot are deleted (their comments, edges and audit rows
+    // cascade through the FK constraints, their FTS row is removed below).
+    const removedIds = Array.from(existingItems.keys()).filter(id => !importedIdSet.has(id));
+
+    // One transaction for the whole differential persist so concurrent
     // readers never see an empty or partially-populated database during sync.
-    // This matches the pattern used by SqlitePersistentStore.importData().
     this.store.transaction(() => {
-      this.store.clearWorkItems();
+      for (const id of removedIds) {
+        this.store.deleteWorkItem(id);
+        if (this.store.ftsAvailable) {
+          this.store.deleteFtsEntry(id);
+        }
+      }
+
       for (const item of items) {
         const existing = existingItems.get(item.id);
+        let toSave: WorkItem;
         if (existing && !this.hasWorkItemChanged(existing, item)) {
-          // No semantic change — preserve the existing updatedAt, and keep the
-          // later activityAt so locally recorded comment activity is not lost.
-          this.store.saveWorkItem({
-            ...item,
-            updatedAt: existing.updatedAt,
-            activityAt: laterTimestamp(item.activityAt, existing.activityAt),
-          });
+          // Semantically unchanged — preserve the existing updatedAt and keep
+          // the later activityAt. Only write when the merged activityAt
+          // actually advances, so a true no-change import performs zero
+          // writes (comment activity must never be lost — WL-0MUBVH6JM0093KVM).
+          const activityAt = laterTimestamp(item.activityAt, existing.activityAt);
+          if (activityAt === existing.activityAt) {
+            continue;
+          }
+          toSave = { ...item, updatedAt: existing.updatedAt, activityAt };
         } else if (existing) {
-          // Semantic change detected — bump the timestamp
-          this.store.saveWorkItem({
+          // Semantic change detected — bump the timestamp.
+          toSave = {
             ...item,
             updatedAt: new Date().toISOString(),
             activityAt: laterTimestamp(item.activityAt, existing.activityAt),
-          });
+          };
         } else {
-          // New item — use the incoming updatedAt as-is
-          this.store.saveWorkItem(item);
+          // New item — use the incoming updatedAt as-is.
+          toSave = item;
+        }
+        this.store.saveWorkItem(toSave);
+        // Keep FTS fresh only for the records actually written.
+        if (this.store.ftsAvailable) {
+          this.store.upsertFtsEntry(toSave);
         }
       }
+
       if (dependencyEdges) {
-        this.store.clearDependencyEdges();
+        // Replace the edge set differentially: drop edges absent from the
+        // incoming set, write only new/changed edges whose endpoints exist.
+        const desiredEdges = new Map<string, DependencyEdge>();
         for (const edge of dependencyEdges) {
           if (this.store.getWorkItem(edge.fromId) && this.store.getWorkItem(edge.toId)) {
+            desiredEdges.set(`${edge.fromId}\u0000${edge.toId}`, edge);
+          }
+        }
+        const storedEdgeKey = new Map<string, DependencyEdge>();
+        for (const edge of storedEdges) {
+          storedEdgeKey.set(`${edge.fromId}\u0000${edge.toId}`, edge);
+        }
+        for (const [key, edge] of storedEdgeKey) {
+          if (!desiredEdges.has(key)) {
+            this.store.deleteDependencyEdge(edge.fromId, edge.toId);
+          }
+        }
+        for (const [key, edge] of desiredEdges) {
+          const stored = storedEdgeKey.get(key);
+          if (!stored || stored.createdAt !== edge.createdAt) {
             this.store.saveDependencyEdge(edge);
           }
         }
       }
+
+      // Newest-wins: the incoming set replaces the stored set except where an
+      // incoming row is strictly older than a stored row for the same item.
+      // Only rows that actually differ from the stored value are written.
       const survivingAudits = storedAudits.filter(audit => importedIdSet.has(audit.workItemId));
-      if (auditResults) {
-        // Newest-wins: the incoming set replaces the stored set except where an
-        // incoming row is strictly older than a stored row for the same item.
-        this.store.saveAuditResults(this.mergeAuditsNewestWins(survivingAudits, auditResults));
-      } else if (survivingAudits.length > 0) {
-        // No audit set supplied — keep the stored audits for surviving items.
-        this.store.saveAuditResults(survivingAudits);
+      const mergedAudits = auditResults
+        ? this.mergeAuditsNewestWins(survivingAudits, auditResults)
+        : survivingAudits;
+      const storedAuditByItem = new Map(storedAudits.map(audit => [audit.workItemId, audit]));
+      const auditsToSave = mergedAudits.filter(audit => {
+        const stored = storedAuditByItem.get(audit.workItemId);
+        if (!stored) {
+          return true;
+        }
+        return (
+          stored.readyToClose !== audit.readyToClose ||
+          stored.auditedAt !== audit.auditedAt ||
+          (stored.summary ?? null) !== (audit.summary ?? null) ||
+          (stored.rawOutput ?? null) !== (audit.rawOutput ?? null) ||
+          (stored.author ?? null) !== (audit.author ?? null) ||
+          (stored.fingerprint ?? null) !== (audit.fingerprint ?? null)
+        );
+      });
+      if (auditsToSave.length > 0) {
+        this.store.saveAuditResults(auditsToSave);
       }
     });
-
-    // Rebuild FTS index for all imported items — the transaction cleared the
-    // FTS table via clearWorkItems, so every imported item needs a fresh row.
-    if (this.store.ftsAvailable) {
-      for (const item of items) {
-        this.store.upsertFtsEntry(item);
-      }
-    }
 
     this.triggerAutoSync();
   }
@@ -3705,18 +3750,28 @@ export class WorklogDatabase {
    * existing comments first: each provided comment is saved via the store's
    * INSERT OR REPLACE so local comments absent from the incoming delta are
    * preserved, while overlapping ids converge to the merged value.
+   *
+   * Change detection (WL-0MVK6S4HM005GBCO): unchanged comments are not
+   * re-saved, and FTS upkeep is restricted to the affected parent items —
+   * looked up by id instead of scanning every work item, so a comment merge
+   * never re-indexes the whole store.
    */
   upsertComments(comments: Comment[]): void {
+    const affectedItemIds = new Set<string>();
     for (const comment of comments) {
+      const stored = this.store.getComment(comment.id);
+      if (stored && !this.hasCommentChanged(stored, comment)) {
+        continue;
+      }
       this.store.saveComment(comment);
+      affectedItemIds.add(comment.workItemId);
     }
-    // Comment text is embedded in the parent item's FTS row, so update
-    // all parent items to keep the index fresh.
-    if (this.store.ftsAvailable && comments.length > 0) {
-      const affectedIds = new Set(comments.map(c => c.workItemId));
-      const items = this.store.getAllWorkItems();
-      for (const item of items) {
-        if (affectedIds.has(item.id)) {
+    // Comment text is embedded in the parent item's FTS row, so refresh only
+    // the affected parents.
+    if (this.store.ftsAvailable && affectedItemIds.size > 0) {
+      for (const id of affectedItemIds) {
+        const item = this.store.getWorkItem(id);
+        if (item) {
           this.store.upsertFtsEntry(item);
         }
       }
@@ -3725,21 +3780,78 @@ export class WorklogDatabase {
   }
 
   /**
-   * Import comments
+   * Import comments destructively (full-snapshot sync).
+   *
+   * **Change detection (WL-0MVK6S4HM005GBCO)**: comments absent from the
+   * incoming set are deleted, unchanged comments are not re-saved, and FTS
+   * upkeep is restricted to the parents whose comment text actually changed —
+   * a no-change comment import performs zero `saveComment` writes and zero FTS
+   * writes instead of clearing and re-indexing every item.
    */
   importComments(comments: Comment[]): void {
-    this.store.clearComments();
-    for (const comment of comments) {
-      this.store.saveComment(comment);
+    const existingById = new Map<string, Comment>();
+    for (const stored of this.store.getAllComments()) {
+      existingById.set(stored.id, stored);
     }
-    // Re-index all items whose comments changed (FTS rows embed comment text)
-    if (this.store.ftsAvailable) {
-      const items = this.store.getAllWorkItems();
-      for (const item of items) {
-        this.store.upsertFtsEntry(item);
+    const incomingIds = new Set(comments.map(comment => comment.id));
+    // Parents whose FTS row (which embeds comment text) must be refreshed.
+    const affectedItemIds = new Set<string>();
+
+    // One transaction for the whole differential persist (clear/save/FTS), so
+    // readers never observe a partially-applied comment snapshot.
+    this.store.transaction(() => {
+      for (const [id, stored] of existingById) {
+        if (!incomingIds.has(id)) {
+          this.store.deleteComment(id);
+          affectedItemIds.add(stored.workItemId);
+        }
       }
-    }
+      for (const comment of comments) {
+        const stored = existingById.get(comment.id);
+        if (stored && !this.hasCommentChanged(stored, comment)) {
+          continue;
+        }
+        this.store.saveComment(comment);
+        affectedItemIds.add(comment.workItemId);
+        // A comment that moved between items affects both parents.
+        if (stored && stored.workItemId !== comment.workItemId) {
+          affectedItemIds.add(stored.workItemId);
+        }
+      }
+
+      // Re-index only the affected parents (FTS rows embed comment text).
+      if (this.store.ftsAvailable) {
+        for (const id of affectedItemIds) {
+          const item = this.store.getWorkItem(id);
+          if (item) {
+            this.store.upsertFtsEntry(item);
+          }
+        }
+      }
+    });
+
     this.triggerAutoSync();
+  }
+
+  /**
+   * Compare a stored comment with an incoming candidate and return true when
+   * persisting the candidate would change the stored row.
+   *
+   * `saveComment()` stores comment text unescaped (`unescapeText`), so the
+   * incoming text is normalised the same way before comparison — a re-import
+   * of the identical snapshot must not look changed. Optional GitHub mapping
+   * fields are normalised (null vs undefined are equivalent).
+   */
+  private hasCommentChanged(stored: Comment, incoming: Comment): boolean {
+    return (
+      stored.workItemId !== incoming.workItemId ||
+      stored.author !== incoming.author ||
+      stored.comment !== unescapeText(incoming.comment ?? '') ||
+      stored.createdAt !== incoming.createdAt ||
+      JSON.stringify(stored.references ?? []) !== JSON.stringify(incoming.references ?? []) ||
+      (stored.githubCommentId ?? null) !== (incoming.githubCommentId ?? null) ||
+      (stored.githubCommentUpdatedAt ?? null) !== (incoming.githubCommentUpdatedAt ?? null)
+    );
   }
 
   /**
