@@ -7,15 +7,18 @@
  *   1. SAFETY — the probe must never modify the store it is pointed at (it
  *      copies the SQLite file into a temp dir first). A broker/worklog store
  *      corrupted by a profiling tool would be far worse than the slow sync.
- *   2. COVERAGE — every phase of `performSync`'s persist pipeline
- *      (open → read-local → parse-jsonl → merge → persist-items →
- *      persist-comments → export-jsonl) is reported with wall and CPU time.
+ *   2. COVERAGE — every phase of `performSync`'s persist pipeline is reported
+ *      under the contract phase names shared with `wl sync` (`pull`,
+ *      `persist-items`, `persist-comments`, `export`, `push` — the `pull`
+ *      entry aggregates the open/read/parse/merge sub-phases in its note),
+ *      each with wall and CPU time.
  */
 
 import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
+import { SYNC_PHASE_NAMES } from '../../../src/sync-phase-timings.js';
 import { generateLargeWorklog, LARGE_DB_PROFILES } from '../test/perf/large-db-harness.js';
 import {
   formatSyncPhaseReport,
@@ -50,15 +53,16 @@ describe('wl sync persist-phase probe', () => {
       expect(after.size).toBe(before.size);
       expect(after.mtimeMs).toBe(before.mtimeMs);
 
-      expect(report.phases.map((phase) => phase.phase)).toEqual([
-        'sqlite-open',
-        'read-local',
-        'parse-jsonl',
-        'merge',
-        'persist-items',
-        'persist-comments',
-        'export-jsonl',
-      ]);
+      expect(report.phases.map((phase) => phase.phase)).toEqual([...SYNC_PHASE_NAMES]);
+      // Every reported phase is a contract phase name (shared with `wl sync`
+      // `--json` `summary.phaseTimings`) — the probe and the CLI stay aligned.
+      for (const phase of report.phases) {
+        expect(SYNC_PHASE_NAMES.includes(phase.phase)).toBe(true);
+      }
+      // The offline probe cannot push: the phase is still reported (shape) as 0.
+      const push = report.phases.find((phase) => phase.phase === 'push');
+      expect(push).toBeDefined();
+      expect(push!.wallMs).toBe(0);
       expect(report.dataset.items).toBe(fixture.itemCount);
       expect(report.dataset.comments).toBeGreaterThan(0);
       expect(report.dataset.jsonlBytes).toBeGreaterThan(0);

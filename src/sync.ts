@@ -4,6 +4,7 @@
 
 import { WorkItem, Comment, ConflictDetail, ConflictFieldDetail, DependencyEdge, AuditResult } from './types.js';
 import type { ClaimHoldDecision } from './claim-hold.js';
+import type { SyncPhaseTimings } from './sync-phase-timings.js';
 import { isDefaultValue, stableValueKey, stableItemKey, mergeTags } from './sync/merge-utils.js';
 import { importFromJsonlContent } from './jsonl.js';
 import * as childProcess from 'child_process';
@@ -112,6 +113,14 @@ export interface SyncResult {
    * tried to downgrade a held claim. Present for the sync log / `--json`.
    */
   claimHolds?: ClaimHoldDecision[];
+  /**
+   * Wall-clock milliseconds per sync phase (`pull`, `persist-items`,
+   * `persist-comments`, `export`, `push` — {@link SyncPhaseTimings}).
+   * Populated by `performSync` so the `--json` summary and the sync log can
+   * attribute the wall-clock cost (WL-0MVK6SD5O001K901). Skipped phases
+   * report 0 rather than disappearing.
+   */
+  phaseTimings?: SyncPhaseTimings;
 }
 
 export interface MergeOptions {

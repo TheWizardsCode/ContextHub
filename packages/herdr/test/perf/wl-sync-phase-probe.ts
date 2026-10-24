@@ -1,14 +1,19 @@
 /**
  * `wl sync` persist-phase probe (F2 — WL-0MVJV2NNG00771C6).
  *
- * `wl sync` is a black box: one wall-clock number and no phase attribution.
- * The F2 profile needs to know whether the ~36 s the operator observes is
- * network, JSONL export, DB work or CLI start-up, so this probe replays the
- * EXACT persist pipeline `performSync` runs (`src/commands/sync.ts`) on a
- * disposable copy of a real worklog store and times each phase:
+ * `wl sync` used to be a black box: one wall-clock number and no phase
+ * attribution. The F2 profile needed to know whether the ~36 s the operator
+ * observes is network, JSONL export, DB work or CLI start-up, so this probe
+ * replays the EXACT persist pipeline `performSync` runs (`src/commands/sync.ts`)
+ * on a disposable copy of a real worklog store and times each phase.
  *
- *   open → read-local → parse-jsonl → merge → persist-items →
- *   persist-comments → export-jsonl
+ * Phase names are shared with the CLI (WL-0MVK6SD5O001K901): `pull`,
+ * `persist-items`, `persist-comments`, `export`, `push` — the same names
+ * `performSync` reports in its `--json` `summary.phaseTimings` and sync log,
+ * so the before/after table lines up with in-CLI timings. `pull` is the
+ * offline aggregate of the store open, local read, JSONL parse and merge
+ * sub-phases (no network fetch is exercised); `push` is not exercised at all
+ * and is reported as 0 so the shape matches.
  *
  * Measured on the F1 full-scale fixture (2,600 items / 26,000 comments,
  * 123.7 MB DB), the persist phases account for essentially the whole
@@ -45,10 +50,14 @@ import {
   mergeDependencyEdges,
   mergeWorkItems,
 } from '../../../../src/sync.js';
+import {
+  SYNC_PHASE_NAMES,
+  type SyncPhaseName,
+} from '../../../../src/sync-phase-timings.js';
 
-/** One measured phase of the sync persist pipeline. */
+/** One measured phase of the sync persist pipeline (name shared with `wl sync`). */
 export interface SyncPhaseSample {
-  phase: string;
+  phase: SyncPhaseName;
   label: string;
   wallMs: number;
   cpuMs: number;
@@ -88,6 +97,24 @@ export interface SyncPhaseProfileOptions {
 const round1 = (value: number): number => Math.round(value * 10) / 10;
 const toMb = (bytes: number): number => Math.round((bytes / 1048576) * 10) / 10;
 
+/** Human labels for the contract phase names (kept in step with the CLI). */
+const PHASE_LABELS: Record<SyncPhaseName, string> = {
+  pull: 'Pull (open, read-local, parse-jsonl, merge — offline replay)',
+  'persist-items': 'Persist items (`db.import` / `upsertItems` + audits)',
+  'persist-comments': 'Persist comments (`db.importComments` / `upsertComments`)',
+  export: 'JSONL export (`db.exportForSync` full)',
+  push: 'Git push (`gitPushDataFileToBranch`)',
+};
+
+/** Note shown when a phase was never measured (0, but reported for shape). */
+const DEFAULT_NOTES: Record<SyncPhaseName, string> = {
+  pull: 'offline replay: no network fetch',
+  'persist-items': 'not exercised on this store',
+  'persist-comments': 'not exercised on this store',
+  export: 'not exercised on this store',
+  push: 'not exercised: the probe replays the persist pipeline offline (no git push)',
+};
+
 /** Copy the SQLite database (and any WAL sidecars) into `targetDir`. */
 function copyStore(worklogDir: string, targetDir: string): string {
   const source = path.join(worklogDir, 'worklog.db');
@@ -112,45 +139,43 @@ export async function profileSyncPhases(
   options: SyncPhaseProfileOptions,
 ): Promise<SyncPhaseReport> {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wl-sync-phase-'));
-  const phases: SyncPhaseSample[] = [];
 
-  const record = (
-    phase: string,
-    label: string,
-    note: string,
-    wallMs: number,
-    cpu: NodeJS.CpuUsage,
-  ): SyncPhaseSample => {
-    const sample: SyncPhaseSample = {
-      phase,
-      label,
-      wallMs: round1(wallMs),
-      cpuMs: round1((cpu.user + cpu.system) / 1000),
-      note,
-    };
-    phases.push(sample);
-    return sample;
+  // Accumulate wall + CPU time per contract phase. `pull` is measured through
+  // its four sub-phases; the other phases through one window each.
+  const totals = new Map<SyncPhaseName, { wallMs: number; cpuMs: number; notes: string[] }>();
+  for (const phase of SYNC_PHASE_NAMES) {
+    totals.set(phase, { wallMs: 0, cpuMs: 0, notes: [] });
+  }
+
+  const record = (phase: SyncPhaseName, label: string, wallMs: number, cpu: NodeJS.CpuUsage) => {
+    const total = totals.get(phase)!;
+    total.wallMs += wallMs;
+    total.cpuMs += (cpu.user + cpu.system) / 1000;
+    total.notes.push(`${label}: ${round1(wallMs)}ms wall / ${round1((cpu.user + cpu.system) / 1000)}ms cpu`);
   };
 
-  const measure = <T>(phase: string, label: string, note: string, fn: () => T): T => {
+  const measure = <T>(phase: SyncPhaseName, label: string, fn: () => T): T => {
     const cpuStart = process.cpuUsage();
     const at = performance.now();
-    const value = fn();
-    record(phase, label, note, performance.now() - at, process.cpuUsage(cpuStart));
-    return value;
+    try {
+      return fn();
+    } finally {
+      record(phase, label, performance.now() - at, process.cpuUsage(cpuStart));
+    }
   };
 
   const measureAsync = async <T>(
-    phase: string,
+    phase: SyncPhaseName,
     label: string,
-    note: string,
     fn: () => Promise<T>,
   ): Promise<T> => {
     const cpuStart = process.cpuUsage();
     const at = performance.now();
-    const value = await fn();
-    record(phase, label, note, performance.now() - at, process.cpuUsage(cpuStart));
-    return value;
+    try {
+      return await fn();
+    } finally {
+      record(phase, label, performance.now() - at, process.cpuUsage(cpuStart));
+    }
   };
 
   try {
@@ -174,64 +199,61 @@ export async function profileSyncPhases(
     const content = fs.readFileSync(jsonlPath as string, 'utf-8');
 
     const db = measure(
+      'pull',
       'sqlite-open',
-      'SQLite open',
-      'Store open, pragmas, schema and FTS DDL.',
       () => new WorklogDatabase('WI', dbPath, dataPath, true, false),
     );
 
     try {
-      const local = measure(
-        'read-local',
-        'Read local state (`getAll` + `getAllComments` + edges/audits)',
-        'Materialises the whole local store before the merge.',
-        () => ({
-          items: db.getAll(),
-          comments: db.getAllComments(),
-          edges: db.getAllDependencyEdges(),
-          audits: db.getAllAuditResults(),
-        }),
+      const local = measure('pull', 'read-local', () => ({
+        items: db.getAll(),
+        comments: db.getAllComments(),
+        edges: db.getAllDependencyEdges(),
+        audits: db.getAllAuditResults(),
+      }));
+
+      const remote = measure('pull', 'parse-jsonl', () =>
+        importFromJsonlContent(content),
       );
 
-      const remote = measure(
-        'parse-jsonl',
-        'Parse remote JSONL (`importFromJsonlContent`)',
-        'Parses the pulled snapshot (or the export when profiling offline).',
-        () => importFromJsonlContent(content),
-      );
-
-      const merged = measure(
-        'merge',
-        'Merge (`mergeWorkItems` + comments + edges + audits)',
-        'Computes the merged state; a no-change sync produces the same records back.',
-        () => ({
-          items: mergeWorkItems(local.items, remote.items),
-          comments: mergeComments(local.comments, remote.comments),
-          edges: mergeDependencyEdges(local.edges, remote.dependencyEdges ?? []),
-          audits: mergeAuditResults(local.audits, remote.auditResults ?? []),
-        }),
-      );
+      const merged = measure('pull', 'merge', () => ({
+        items: mergeWorkItems(local.items, remote.items),
+        comments: mergeComments(local.comments, remote.comments),
+        edges: mergeDependencyEdges(local.edges, remote.dependencyEdges ?? []),
+        audits: mergeAuditResults(local.audits, remote.auditResults ?? []),
+      }));
 
       measure(
         'persist-items',
-        'Persist items (`db.import`)',
-        'Writes every merged item and re-indexes its FTS row, even when unchanged.',
+        'persist-items',
         () => db.import(merged.items.merged, merged.edges.merged, merged.audits.merged),
       );
 
       measure(
         'persist-comments',
-        'Persist comments (`db.importComments`)',
-        'Clears and re-inserts every comment, then re-indexes EVERY item FTS row.',
+        'persist-comments',
         () => db.importComments(merged.comments.merged),
       );
 
       await measureAsync(
+        'export',
         'export-jsonl',
-        'JSONL export (`db.exportForSync` full)',
-        'Serialises the whole store to the ephemeral JSONL the push publishes.',
         async () => db.exportForSync({ mode: 'full' }),
       );
+
+      const phases: SyncPhaseSample[] = SYNC_PHASE_NAMES.map((phase) => {
+        const total = totals.get(phase)!;
+        return {
+          phase,
+          label: PHASE_LABELS[phase],
+          wallMs: round1(total.wallMs),
+          cpuMs: round1(total.cpuMs),
+          note:
+            total.notes.length > 0
+              ? total.notes.join('; ')
+              : DEFAULT_NOTES[phase],
+        };
+      });
 
       return {
         capturedAt: new Date().toISOString(),
