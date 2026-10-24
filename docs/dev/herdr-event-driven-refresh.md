@@ -562,11 +562,19 @@ npx tsx packages/herdr/test/perf/wl-sync-phase-probe.ts --worklog-dir <dir>/.wor
 ```
 
 On the F1 full-scale fixture (2,600 items / 26,000 comments / 123.7 MB DB) the
-persist phases take ~97 % of the pipeline, and 78–90 % of that CPU is
-`upsertFtsEntry` — every item's FTS row is rebuilt even when nothing changed,
-so a no-change sync pays the whole cost. The fix is a separate work item
-(`WL-0MVK3WRY9009KV6P`, blocked by F2) per the epic's scope guardrail; the
-probe is the before/after measurement tool for it.
+persist phases took ~97 % of the pipeline, and 78–90 % of that CPU was
+`upsertFtsEntry` — every item's FTS row was rebuilt even when nothing changed,
+so a no-change sync paid the whole cost. That is **fixed** by the differential
+persist work (`WL-0MVK3WRY9009KV6P`: implementation in
+`WL-0MVK6S9TN00500UL`, write-detection regression tests in
+`WL-0MVK6S4HM005GBCO`, phase-timing observability in `WL-0MVK6SD5O001K901`):
+only records whose merged value differs are written, FTS upkeep is proportional
+to the changed ids, and a no-change sync performs zero record writes and zero
+FTS writes. The probe remains the re-runnable measurement tool; the
+before/after numbers (persist total **0.68 s vs 141.4 s** re-measured at the
+pre-fix commit, ~1.2 % of F2's 57.4 s quiet-host baseline, and **zero
+`upsertFtsEntry` self time** on the no-change profile) are recorded in
+[`docs/dev/sync-persist-performance.md`](./sync-persist-performance.md).
 
 ## F7 — end-to-end parent AC verification (WL-0MVJV2QHO003K6H3)
 
