@@ -47,6 +47,16 @@
 #                        provider header on the pane's first request. Absent
 #                        (fail-open/older proxy) = no env var, byte-identical
 #                        launch to today.
+#   --local-preference <local-only|remote-ok>
+#                        Per-turn locality preference (parent
+#                        WL-0MVIKRFP0005JDL8 AC4, slice C4). Forwarded into
+#                        the pane process as HERDR_LOCAL_PREFERENCE, which the
+#                        Worklog pi extension turns into the
+#                        `X-Local-Preference` provider header on every request
+#                        (and records the response `X-Local-Route` /
+#                        `X-Local-Fallback-Reason` in the bounded route log).
+#                        Absent/invalid = no env var, byte-identical launch to
+#                        today (fail-open).
 #   -h, --help           Show this help message
 #
 # Environment variables:
@@ -85,6 +95,7 @@ model_arg=""
 pane_id_file=""
 request_priority=""
 reservation_ticket=""
+local_preference=""
 anchor_arg=""
 resize=true
 herdr_bin="${HERDR_BIN_PATH:-herdr}"
@@ -151,6 +162,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --reservation-ticket=*)
       reservation_ticket="${1#*=}"
+      shift
+      ;;
+    --local-preference)
+      local_preference="${2:-}"
+      shift 2
+      ;;
+    --local-preference=*)
+      local_preference="${1#*=}"
       shift
       ;;
     --model)
@@ -223,6 +242,21 @@ case "$reservation_ticket" in
   *[!A-Za-z0-9._:-]*)
     echo "Warning: ignoring invalid --reservation-ticket (expected a token id)" >&2
     reservation_ticket=""
+    ;;
+esac
+
+# ── Validate the locality preference (fail-open) ──────────────────────
+# Only the proxy's two preferences are forwarded; anything else is ignored so
+# the extension sends no header and the request stays exactly as today.
+# Never fails the launch (C4-AC3).
+case "$local_preference" in
+  local-only|remote-ok)
+    ;;
+  "")
+    ;;
+  *)
+    echo "Warning: ignoring invalid --local-preference '$local_preference' (expected local-only|remote-ok)" >&2
+    local_preference=""
     ;;
 esac
 
@@ -317,12 +351,17 @@ quoted_cmd="$(printf '%q' "$COMMAND")"
 #   HERDR_REQUEST_PRIORITY    -> Worklog extension -> `X-Priority` header
 #   PI_LOCAL_RESERVATION_TICKET -> Worklog extension -> `X-Local-Reservation`
 #                                header on the pane's first request (C2 AC1)
+#   HERDR_LOCAL_PREFERENCE    -> Worklog extension -> `X-Local-Preference`
+#                                header + route log (C4 AC1)
 env_words=()
 if [ -n "$request_priority" ]; then
   env_words+=("HERDR_REQUEST_PRIORITY=$(printf '%q' "$request_priority")")
 fi
 if [ -n "$reservation_ticket" ]; then
   env_words+=("PI_LOCAL_RESERVATION_TICKET=$(printf '%q' "$reservation_ticket")")
+fi
+if [ -n "$local_preference" ]; then
+  env_words+=("HERDR_LOCAL_PREFERENCE=$(printf '%q' "$local_preference")")
 fi
 pane_cmd=(bash "$quoted_wrapper" "$quoted_lease_id")
 if [ -n "$model_arg" ]; then

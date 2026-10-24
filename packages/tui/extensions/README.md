@@ -14,6 +14,12 @@ registers the agent-side plugin modules that complement the Herdr plugin
 - [Skill-path Tool](#skill-path-tool)
 - [Error Recovery Module](#error-recovery-module) (`/retry`)
 - [Lease Release](#lease-release)
+- [Per-turn Local Preference and Route Log](#per-turn-local-preference-and-route-log)
+
+The package also ships a **second extension entry point**,
+`local-preference/index.ts` (declared in this package's `pi.extensions`), which
+is independent of the Worklog module above (see [Per-turn Local Preference and
+Route Log](#per-turn-local-preference-and-route-log)).
 
 > The Pi-based TUI browse UI (chat pane, action palette, `/wl` command,
 > `ctrl+shift+b` shortcut, settings overlay, auto-injection, and periodic
@@ -427,6 +433,30 @@ drift (WL-0MSGI7UIH008USVB).
   `packages/shared/src/lease-release.test.ts` (shared HTTP behavior).
 - The Herdr plugin runs the same release on pi-pane close — see
   `packages/herdr/README.md` ("Pi agent dispatch").
+
+## Per-turn Local Preference and Route Log
+
+`local-preference/index.ts` + `local-preference/local-preference.ts`
+(WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4) give an agent pane a
+per-turn capacity claim against the llama-proxy:
+
+- **Request** — reads `HERDR_LOCAL_PREFERENCE` (`local-only` | `remote-ok`, set
+  by the herdr runner per spawn via `--local-preference`) on every provider
+  request and sets `X-Local-Preference` through `before_provider_headers`.
+  `local-only` makes the proxy refuse immediately instead of silently waiting
+  for a contended local slot; `remote-ok` lets background work go remote.
+- **Response** — parses `X-Local-Route` / `X-Local-Fallback-Reason` on
+  `after_provider_response` and appends one bounded JSONL line per response to
+  `<cwd>/.worklog/local-route.log` (rolling, capped at 2000 entries;
+  `{ at, sessionId, preference, route, fallbackReason, model, ticket? }`). The
+  session id and reservation ticket let a dispatcher decision be correlated
+  with the turns it produced.
+- **Fail-open** — with no knob set (an interactive pane), no header is sent and
+  no log is written; an older proxy with no route headers writes no entry; a
+  capture or write failure never throws into a turn.
+
+See `packages/herdr/README.md` and `docs/dev/downtime-dispatcher.md` for the
+policy knob (`downtimeLocalPreference`) and the transport.
 
 ## Pane-Closure Reaper (WL-0MUJL1NAH0042GOS)
 

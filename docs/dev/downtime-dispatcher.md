@@ -1385,6 +1385,75 @@ the parent contract (WL-0MVE1NZ4J000H5NH):
   (`mode`/`slotBudget`/`freeSlots`/`concurrentDispatchCap`) plumbing are
   gone. Free-slot dispatch gating is unchanged.
 
+### Per-turn local preference and route log (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4, slice C4)
+
+**Problem.** A dispatched pane's turns were previously sent with no locality
+claim: when the local slot was contended the proxy silently waited (up to
+120 s) and only then fell back, so a turn could look stuck with no evidence of
+which route it took. The reservation handshake (C2) claims capacity for a
+pane's *first* request; this slice records the *per-turn* decision for every
+request the pane makes.
+
+**Wire contract** (pinned by C1, shared with the proxy change
+`LP-0MVIKPCSG002B0NL`):
+
+| Direction | Header | Meaning |
+|---|---|---|
+| request | `X-Local-Preference: local-only` | Work the operator marks local-first: the proxy refuses immediately when the local slot is contended instead of silently waiting |
+| request | `X-Local-Preference: remote-ok` | Background work: may go remote without queuing local capacity |
+| response | `X-Local-Route` | Route the proxy took (e.g. `local`, `remote:<provider>`) |
+| response | `X-Local-Fallback-Reason` | Why the request left the local route |
+
+**Policy knob.** `downtimeLocalPreference` (herdr setting, clamped to the two
+values, default `local-only`) is read live on every tick and threaded through
+`DowntimeWorkerConfig.config()` → both dispatch paths →
+`dispatchClaimedTier` → `spawnAgentPane` → `buildDowntimePaneArgs` /
+`buildDowntimeSpawnOptions`:
+
+- **Downtime backlog panes** carry the knob's value.
+- **Scheduled-prompt panes** and **headless background dispatches**
+  (`spawnBackgroundPi`) default to `remote-ok`: unattended work never queues
+  local capacity the operator may need.
+- **Interactive panes** carry no preference unless the operator exports
+  `HERDR_LOCAL_PREFERENCE` — requests stay byte-identical to today.
+
+**Transport.** `send-to-pi.sh --local-preference <local-only|remote-ok>`
+injects the value into the pane process (`exec env
+HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`); anything else is
+ignored with a warning and the launch proceeds unchanged (fail-open). An
+absent flag omits the env var entirely.
+
+**Header injection + route capture.** The Worklog pi extension
+(`packages/tui/extensions/local-preference/`, loaded through the extension
+package's `pi.extensions` list) reads `HERDR_LOCAL_PREFERENCE` on every
+provider request (never cached) and sets `X-Local-Preference` via
+`before_provider_headers`. On `after_provider_response` it parses
+`X-Local-Route` / `X-Local-Fallback-Reason` and appends one JSONL line per
+response to `<cwd>/.worklog/local-route.log` (bounded rolling log, capped at
+`2000` entries, atomic temp+rename write): `{ at, sessionId, preference,
+route, fallbackReason, model, ticket? }`.
+
+**Dispatch correlation (AC4).** Each line carries the pi session id (the same
+`herdr-<ts>-<pid>-<rand>` id `run-pi-agent.sh` passes as `--session-id`) and,
+when one was forwarded, the reservation ticket (`PI_LOCAL_RESERVATION_TICKET`).
+The dispatch marker in `.worklog/downtime-dispatches.log` records
+`reservationTicketId` / `reservationGrantedAt`, so an operator can join the
+decision to the turns it produced. No secrets/PII are recorded.
+
+**Fail-open (AC3).** No knob → no header and no log; an older proxy with no
+route headers → no entry; a capture/write failure (unwritable log, stale ctx,
+malformed headers) never throws into the turn. There is no new polling loop —
+logging is per response.
+
+**Tests.** `packages/tui/extensions/local-preference/local-preference.test.ts`
+(pure module and hooks: both values, the unset case, absent/malformed headers,
+bounded log, session/ticket correlation, never-throw);
+`packages/herdr/src/local-preference.test.ts` (defaults + clamp);
+`packages/herdr/src/downtime-worker.reserve.test.ts` (pane args/env
+forwarding and the dispatch → spawn thread);
+`tests/herdr/send-to-pi.test.ts` (`--local-preference` passthrough and
+fail-open) and `tests/herdr/settings.test.ts` (setting default + clamp).
+
 ### No-candidate cooldown & the empty offer file
 
 The no-candidate cooldown (WL-0MSI7DQL10016QYX) pauses the worker entirely
@@ -2241,6 +2310,7 @@ likewise re-read live every tick and clamped on load
 | `<worklog-root>/.worklog/downtime-leader.lock` | Legacy per-worklog lock (orphaned after F6, ignored) |
 | `<worklog-root>/.worklog/downtime-coordination.log` | Check-ins, elections, pruning (per worklog, retained) |
 | `<worklog-root>/.worklog/downtime-dispatches.log` | Dispatched items (per worklog, retained; includes `anchor-unavailable` neutral no-dispatch) |
+| `<worklog-root>/.worklog/local-route.log` | Per-response local-preference route evidence written by the Worklog pi extension (bounded at 2000 lines; `at`/`sessionId`/`preference`/`route`/`fallbackReason`/`model`/`ticket`, WL-0MVLJTV03000KIQZ) |
 | `<worklog-root>/.worklog/pane-close-ledger.jsonl` | Pane-closure reaper ledger (one JSONL row per evaluated pane, per worklog, WL-0MUJL1NAH0042GOS) |
 
 ## Troubleshooting / operations

@@ -29,6 +29,8 @@
 #   turns it into `X-Local-Reservation` on the session's first request. Absent
 #   on a fail-open dispatch (older proxy) — nothing is synthesised here.
 #   HERDR_REQUEST_PRIORITY is inherited the same way (the `X-Priority` header).
+#   HERDR_LOCAL_PREFERENCE is inherited the same way (the per-turn
+#   `X-Local-Preference` header + route log, C4 AC1).
 
 set -uo pipefail
 

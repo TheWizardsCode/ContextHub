@@ -8,6 +8,11 @@
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { clampSyncInterval } from './auto-sync.js';
 import {
+  DOWNTIME_LOCAL_PREFERENCE,
+  clampDowntimeLocalPreference,
+  type LocalPreference,
+} from './local-preference.js';
+import {
   clampBrowseItemCount,
   DEFAULT_BROWSE_ITEM_COUNT,
   MIN_BROWSE_ITEM_COUNT,
@@ -92,6 +97,15 @@ export interface PluginSettings {
   downtimeProxyUrl: string;
   /** pi model pattern for dispatched agent panes (default `plan`). */
   downtimeModel: string;
+  /**
+   * Per-turn locality preference for downtime-dispatched panes
+   * (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4): `local-only`
+   * (default) makes the proxy refuse immediately rather than silently wait
+   * for a contended local slot; `remote-ok` lets unattended work go remote.
+   * Forwarded to the pane as `HERDR_LOCAL_PREFERENCE`, which the Worklog pi
+   * extension turns into the `X-Local-Preference` request header.
+   */
+  downtimeLocalPreference: LocalPreference;
   /**
    * Full pause (no proxy polling, no idle tracking, no dispatch) after the
    * worker finds no candidate in either stage (genuine empty backlog).
@@ -201,6 +215,7 @@ export const defaultSettings: PluginSettings = {
   downtimePollIntervalMs: DEFAULT_DOWNTIME_POLL_INTERVAL_MS,
   downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
+  downtimeLocalPreference: DOWNTIME_LOCAL_PREFERENCE,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   downtimeNonTerminalCooldownMs: DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   downtimeMaxAttempts: DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -297,6 +312,7 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         ? parsed.downtimeProxyUrl : defaultSettings.downtimeProxyUrl,
       downtimeModel: typeof parsed.downtimeModel === 'string' && parsed.downtimeModel.length > 0
         ? parsed.downtimeModel : defaultSettings.downtimeModel,
+      downtimeLocalPreference: clampDowntimeLocalPreference(parsed.downtimeLocalPreference),
       downtimeNoCandidateCooldownMs: typeof parsed.downtimeNoCandidateCooldownMs === 'number'
         ? clampDowntimeNoCandidateCooldownMs(parsed.downtimeNoCandidateCooldownMs)
         : defaultSettings.downtimeNoCandidateCooldownMs,

@@ -412,3 +412,80 @@ describe('send-to-pi.sh --reservation-ticket forwarding (C2 AC1)', () => {
     expect(log.some((line) => line.includes('pane run'))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Local-preference passthrough (slice C4, parent WL-0MVIKRFP0005JDL8 AC4)
+//
+// Herdr conveys the per-turn locality preference per spawn. Like the request
+// priority and the reservation ticket, the value must be injected into the
+// PANE process (an env var set on send-to-pi.sh does not reach pi): the
+// Worklog pi extension reads HERDR_LOCAL_PREFERENCE, sends
+// `X-Local-Preference` on every request and records the response route
+// headers in `<cwd>/.worklog/local-route.log`.
+// ---------------------------------------------------------------------------
+
+describe('send-to-pi.sh --local-preference forwarding (C4-AC1)', () => {
+  it('passes both preference values into the pane process', () => {
+    for (const preference of ['local-only', 'remote-ok']) {
+      const { status, log } = runScript([
+        '--no-resize',
+        '--cwd',
+        '/tmp/project-root',
+        '--local-preference',
+        preference,
+        '/skill:implement <id>',
+      ]);
+      expect(status).toBe(0);
+      expect(
+        log.some(
+          (line) =>
+            line.includes(`HERDR_LOCAL_PREFERENCE=${preference}`) ||
+            (line.includes('HERDR_LOCAL_PREFERENCE') && line.includes('--env')),
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('forwards the preference alongside the ticket, priority and model', () => {
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--request-priority',
+      'low',
+      '--reservation-ticket',
+      'tkt-2',
+      '--local-preference',
+      'local-only',
+      '--model',
+      'code',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    const run = log.find((line) => line.includes('pane run'));
+    expect(run).toBeDefined();
+    expect(run).toContain('HERDR_LOCAL_PREFERENCE=local-only');
+    expect(run).toContain('PI_LOCAL_RESERVATION_TICKET=tkt-2');
+    expect(run).toContain('HERDR_REQUEST_PRIORITY=low');
+  });
+
+  it('omits HERDR_LOCAL_PREFERENCE when none is supplied (byte-identical launch)', () => {
+    const { status, log } = runScript(['--no-resize', '--cwd', '/tmp/project-root', '/skill:implement <id>']);
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('HERDR_LOCAL_PREFERENCE'))).toBe(false);
+  });
+
+  it('ignores an invalid preference (fail-open, launch not aborted)', () => {
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--local-preference',
+      'auto; rm -rf /',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('HERDR_LOCAL_PREFERENCE'))).toBe(false);
+    expect(log.some((line) => line.includes('pane run'))).toBe(true);
+  });
+});

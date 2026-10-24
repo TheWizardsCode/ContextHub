@@ -81,6 +81,12 @@ describe('defaultSettings', () => {
     expect(defaultSettings.downtimeProxyUrl).toBe('http://192.168.0.199:8000');
     expect(defaultSettings.downtimeModel).toBe('plan');
   });
+
+  it('defaults downtimeLocalPreference to local-only (C4-AC1)', () => {
+    // Downtime panes fail fast to remote rather than silently waiting for a
+    // contended local slot (WL-0MVLJTV03000KIQZ, parent AC4).
+    expect(defaultSettings.downtimeLocalPreference).toBe('local-only');
+  });
 });
 
 describe('loadSettings', () => {
@@ -129,6 +135,17 @@ describe('loadSettings', () => {
     expect(settings.downtimeIdleThresholdMs).toBe(75000);
     expect(settings.downtimeRequiredFreeSlots).toBe(2);
     expect(settings.downtimeModel).toBe('plan');
+  });
+
+  it('accepts both local-preference values and clamps anything else (C4-AC1)', () => {
+    for (const value of ['local-only', 'remote-ok']) {
+      writeFileSync(settingsPath, JSON.stringify({ downtimeLocalPreference: value }), 'utf-8');
+      expect(loadSettings(settingsPath).downtimeLocalPreference).toBe(value);
+    }
+    writeFileSync(settingsPath, JSON.stringify({ downtimeLocalPreference: 'auto' }), 'utf-8');
+    expect(loadSettings(settingsPath).downtimeLocalPreference).toBe('local-only');
+    writeFileSync(settingsPath, JSON.stringify({ downtimeLocalPreference: 42 }), 'utf-8');
+    expect(loadSettings(settingsPath).downtimeLocalPreference).toBe('local-only');
   });
 
   it('merges partial downtime settings with defaults', () => {

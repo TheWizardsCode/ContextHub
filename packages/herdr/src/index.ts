@@ -48,6 +48,11 @@ import {
   resolveInteractiveRequestPriority,
   type RequestPriority,
 } from './request-priority.js';
+import {
+  BACKGROUND_LOCAL_PREFERENCE,
+  LOCAL_PREFERENCE_ENV_VAR,
+  type LocalPreference,
+} from './local-preference.js';
 import { AgentTracker, AGENT_PANES_FILE } from './agent-tracker.js';
 import {
   isAgentCommand,
@@ -479,6 +484,13 @@ export interface BackgroundSpawnDeps {
    * when omitted.
    */
   requestPriority?: RequestPriority;
+  /**
+   * Per-turn locality preference for background (no-pane) work
+   * (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4). Defaults to
+   * `remote-ok` — unattended background work must never queue local capacity
+   * the operator may need for interactive work.
+   */
+  localPreference?: LocalPreference;
 }
 
 /**
@@ -571,6 +583,10 @@ export function spawnBackgroundPi(
       HERDR_RESOLVED_CWD: targetCwd,
       [REQUEST_PRIORITY_ENV_VAR]:
         deps.requestPriority ?? INTERACTIVE_DEFAULT_REQUEST_PRIORITY,
+      // Per-turn locality preference (C4-AC1): background work defaults to
+      // `remote-ok` so it never waits on contended local capacity. The
+      // Worklog pi extension turns this into `X-Local-Preference`.
+      [LOCAL_PREFERENCE_ENV_VAR]: deps.localPreference ?? BACKGROUND_LOCAL_PREFERENCE,
     },
   });
   child.unref(); // Allow the parent to exit independently
@@ -2472,6 +2488,10 @@ export async function main(): Promise<void> {
         // the concurrency limiter.
         model: s.downtimeModel,
         cwd: targetCwd,
+        // Per-turn locality preference (slice C4 AC1), forwarded to every
+        // dispatched pane as `HERDR_LOCAL_PREFERENCE`. The extension turns it
+        // into the `X-Local-Preference` header and records the route log.
+        localPreference: s.downtimeLocalPreference,
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
         nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,

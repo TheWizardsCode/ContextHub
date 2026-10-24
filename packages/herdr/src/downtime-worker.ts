@@ -146,6 +146,18 @@ import {
   mapDowntimeRequestPriority,
 } from './request-priority.js';
 import {
+  BACKGROUND_LOCAL_PREFERENCE,
+  LOCAL_PREFERENCE_ENV_VAR,
+  type LocalPreference,
+} from './local-preference.js';
+
+/**
+ * Re-exported for the dispatch tests: the pane-launch env var carrying the
+ * per-turn locality preference (canonical definition in
+ * `./local-preference.ts`).
+ */
+export { LOCAL_PREFERENCE_ENV_VAR };
+import {
   readCoordinationFile,
   getEntry,
   upsertEntry,
@@ -231,7 +243,13 @@ export const LOCAL_RESERVATION_HEADER = 'X-Local-Reservation';
 /** Per-turn locality preference header (parent AC4, implemented in C4). */
 export const LOCAL_PREFERENCE_HEADER = 'X-Local-Preference';
 
-/** Response header reporting the route the proxy actually took (parent AC4). */
+/**
+ * Response header reporting the route the proxy actually took (parent AC4).
+ * The per-turn preference itself travels on `X-Local-Preference`; the
+ * pane-launch env var is `LOCAL_PREFERENCE_ENV_VAR` (re-exported above from
+ * `./local-preference.ts`). Absent headers = no route-log entry and no
+ * behaviour change (C4 fail-open contract).
+ */
 export const LOCAL_ROUTE_HEADER = 'X-Local-Route';
 
 /** Response header reporting why a request fell back off the local route (parent AC4). */
@@ -3147,6 +3165,14 @@ export interface DowntimeWorkerDeps {
        * `X-Local-Reservation`. Absent on a fail-open (older proxy) dispatch.
        */
       reservationTicketId?: string;
+      /**
+       * Per-turn locality preference (parent WL-0MVIKRFP0005JDL8 AC4, slice
+       * C4): forwarded to the pane as `--local-preference` /
+       * `HERDR_LOCAL_PREFERENCE` so the Worklog pi extension sends
+       * `X-Local-Preference` on every request and logs the route. Absent →
+       * no header, no route log (fail-open).
+       */
+      localPreference?: LocalPreference;
     },
   ): Promise<DowntimeSpawnResult>;
   /**
@@ -4081,7 +4107,7 @@ export async function resumeStalledWorkIfAble(
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
+  ctx: { cwd: string; model: string; localPreference?: LocalPreference; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
   flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
@@ -4160,6 +4186,7 @@ async function dispatchFromHerdrList(
     const outcome = await dispatchClaimedTier(deps, kind, cand, {
       model: ctx.model,
       cwd: ctx.cwd,
+      localPreference: ctx.localPreference,
       selectionPath: 'critical-first',
       selectionReason: guard.reason,
     });
@@ -4291,6 +4318,7 @@ async function dispatchFromHerdrList(
     const outcome = await dispatchClaimedTier(deps, k, cand, {
       model: ctx.model,
       cwd: ctx.cwd,
+      localPreference: ctx.localPreference,
       selectionPath: 'normal-scan',
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
     });
@@ -4370,6 +4398,8 @@ async function dispatchClaimedTier(
     cwd: string;
     selectionPath?: string;
     selectionReason?: string;
+    /** Per-turn locality preference forwarded to the pane (C4-AC1). */
+    localPreference?: LocalPreference;
   },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
@@ -4648,6 +4678,10 @@ async function dispatchClaimedTier(
       // its first request carries `X-Local-Reservation`. Absent on a
       // fail-open (older proxy) dispatch.
       ...(reservationTicketId !== undefined ? { reservationTicketId } : {}),
+      // Per-turn locality preference (slice C4 AC1): forwarded to the pane so
+      // the extension sends `X-Local-Preference` and writes the route log.
+      // Absent → today's byte-identical launch (fail-open C4-AC3).
+      ...(opts.localPreference !== undefined ? { localPreference: opts.localPreference } : {}),
     },
   );
   if (!spawn.ok) {
@@ -4853,7 +4887,7 @@ async function recordDispatchEnrichmentBestEffort(
 async function dispatchScheduledPrompt(
   deps: DowntimeWorkerDeps,
   prompt: ScheduledPrompt,
-  opts: { model: string; cwd: string },
+  opts: { model: string; cwd: string; localPreference?: LocalPreference },
 ): Promise<DowntimeDispatchOutcome> {
   const at = new Date().toISOString();
 
@@ -4914,6 +4948,9 @@ async function dispatchScheduledPrompt(
     cwd: opts.cwd,
     paneName: `Downtime ${prompt.id}`,
     ...(anchorId !== undefined ? { anchorId } : {}),
+    // Scheduled/background work defaults to `remote-ok` (C4-AC1): it must
+    // never queue local capacity the operator may need for interactive work.
+    localPreference: opts.localPreference ?? BACKGROUND_LOCAL_PREFERENCE,
   });
   if (!spawn.ok) {
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2 pattern): the audit log
@@ -5420,7 +5457,7 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number; /** Batch-local exclusion set: item ids already dispatched in the current audit batch (WL-0MVFE1DD8000D8T2 AC3/AC4). Never re-selected within one batch. */ auditBatchDispatchedIds?: readonly string[] },
+  opts: { model: string; cwd: string; coordinationDir: string; localPreference?: LocalPreference; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number; /** Batch-local exclusion set: item ids already dispatched in the current audit batch (WL-0MVFE1DD8000D8T2 AC3/AC4). Never re-selected within one batch. */ auditBatchDispatchedIds?: readonly string[] },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1–AC5):
@@ -5546,7 +5583,7 @@ async function readOwnHeadWindow(
  */
 async function dispatchFromOwnHead(
   deps: DowntimeWorkerDeps,
-  opts: { model: string; cwd: string },
+  opts: { model: string; cwd: string; localPreference?: LocalPreference },
   ctx: {
     window: { head: DowntimeHerdrItem[]; tail: DowntimeHerdrItem[] };
     frozen: boolean;
@@ -5656,6 +5693,7 @@ async function dispatchFromOwnHead(
       {
         model: opts.model,
         cwd: opts.cwd,
+        localPreference: opts.localPreference,
         selectionPath: 'own-backlog',
         selectionReason: ctx.selectionReason,
       },
@@ -5801,6 +5839,7 @@ async function dispatchFromCoordinationGated(
       return await dispatchScheduledPrompt(deps, duePrompt, {
         model: opts.model,
         cwd: opts.cwd,
+        ...(opts.localPreference !== undefined ? { localPreference: opts.localPreference } : {}),
       });
     }
   }
@@ -5951,7 +5990,13 @@ async function dispatchFromCoordinationGated(
       deps,
       kind,
       toCoordinationCandidate(result.info),
-      { model: opts.model, cwd: worklogRoot, selectionPath: 'coordination-offer', selectionReason: 'leader-offer' },
+      {
+        model: opts.model,
+        cwd: worklogRoot,
+        localPreference: opts.localPreference,
+        selectionPath: 'coordination-offer',
+        selectionReason: 'leader-offer',
+      },
     );
     if (outcome.dispatched) {
       // Dispatched — remove the entry so the owner re-queues its next
@@ -6065,7 +6110,7 @@ async function dispatchFromCoordinationGated(
       if (batchRemainingBefore > 0 && batchCap > 1) {
         const continuation = await dispatchFromOwnHead(
           deps,
-          { model: opts.model, cwd: opts.cwd },
+          { model: opts.model, cwd: opts.cwd, localPreference: opts.localPreference },
           {
             ...sharedScan,
             kinds: ['audit'],
@@ -6079,7 +6124,7 @@ async function dispatchFromCoordinationGated(
       }
       const ownOutcome = await dispatchFromOwnHead(
         deps,
-        { model: opts.model, cwd: opts.cwd },
+        { model: opts.model, cwd: opts.cwd, localPreference: opts.localPreference },
         {
           ...sharedScan,
           kinds: null,
@@ -6402,6 +6447,13 @@ export async function dispatchDowntimeWork(
      * `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS` (5 min).
      */
     stallScanThresholdMs?: number;
+    /**
+     * Per-turn locality preference for the dispatched pane (parent
+     * WL-0MVIKRFP0005JDL8 AC4, slice C4): forwarded to the pane as
+     * `--local-preference` / `HERDR_LOCAL_PREFERENCE`. Optional — absent
+     * leaves the launch byte-identical to today (fail-open C4-AC3).
+     */
+    localPreference?: LocalPreference;
   },
 ): Promise<DowntimeDispatchOutcome> {
   // Per-process PIPELINE single-flight gate (F3, WL-0MT50LKAK001EF5Q): at
@@ -6555,7 +6607,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
+        const ctx = { cwd: opts.cwd, model: opts.model, localPreference: opts.localPreference, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return finalize(herdrOutcome);
 
@@ -6936,6 +6988,13 @@ export function buildDowntimePaneArgs(
      * a fail-open dispatch — the launch args stay byte-identical to today.
      */
     reservationTicketId?: string;
+    /**
+     * Per-turn locality preference (parent AC4, slice C4): forwarded as
+     * `--local-preference <local-only|remote-ok>` so send-to-pi.sh passes
+     * `HERDR_LOCAL_PREFERENCE` into the pane process. Absent leaves the launch
+     * args byte-identical (fail-open C4-AC3).
+     */
+    localPreference?: LocalPreference;
   },
 ): string[] {
   const paneName =
@@ -6954,6 +7013,12 @@ export function buildDowntimePaneArgs(
   // var set on the launching script does NOT reach the herdr pane process).
   if (opts.reservationTicketId) {
     args.push('--reservation-ticket', opts.reservationTicketId);
+  }
+  // Per-turn locality preference (slice C4 AC1): forwarded explicitly for the
+  // same reason as the reservation ticket — an env var set on the launching
+  // script does NOT reach the herdr pane process.
+  if (opts.localPreference) {
+    args.push('--local-preference', opts.localPreference);
   }
   args.push('--cwd', opts.cwd, '--model', opts.model, prompt);
   return args;
@@ -6988,7 +7053,13 @@ export type DowntimeSpawnResult =
 export type DowntimeSpawn = (
   scriptPath: string,
   args: string[],
-  opts: { cwd: string; priority?: string | null; reservationTicketId?: string },
+  opts: {
+    cwd: string;
+    priority?: string | null;
+    reservationTicketId?: string;
+    /** Per-turn locality preference (parent AC4, slice C4). */
+    localPreference?: LocalPreference;
+  },
 ) => DowntimeSpawnHandle;
 
 /**
@@ -7005,7 +7076,7 @@ export type DowntimeSpawn = (
  */
 export function buildDowntimeSpawnOptions(
   cwd: string,
-  opts?: { priority?: string | null; reservationTicketId?: string },
+  opts?: { priority?: string | null; reservationTicketId?: string; localPreference?: LocalPreference },
 ): {
   detached: boolean;
   stdio: 'ignore';
@@ -7034,6 +7105,13 @@ export function buildDowntimeSpawnOptions(
       // env stays byte-identical to today.
       ...(opts?.reservationTicketId
         ? { [LOCAL_RESERVATION_TICKET_ENV]: opts.reservationTicketId }
+        : {}),
+      // Per-turn locality preference (parent AC4, slice C4): belt-and-braces
+      // beside the `--local-preference` arg. The Worklog pi extension turns
+      // this into the `X-Local-Preference` header on every provider request.
+      // Absent leaves the child env byte-identical to today (fail-open).
+      ...(opts?.localPreference
+        ? { [LOCAL_PREFERENCE_ENV_VAR]: opts.localPreference }
         : {}),
     },
   };
@@ -7104,7 +7182,13 @@ export const DOWNTIME_SPAWN_PROBE_MS = 500;
 export async function spawnDowntimePane(
   scriptPath: string,
   args: string[],
-  opts: { cwd: string; priority?: string | null; reservationTicketId?: string },
+  opts: {
+    cwd: string;
+    priority?: string | null;
+    reservationTicketId?: string;
+    /** Per-turn locality preference (parent AC4, slice C4). */
+    localPreference?: LocalPreference;
+  },
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): Promise<DowntimeSpawnResult> {
   const child = spawnFn(scriptPath, args, opts);
@@ -7329,6 +7413,14 @@ export interface DowntimeWorkerConfig {
     cwd: string;
     /** Pause duration after a genuine empty backlog (no-candidate), ms. */
     noCandidateCooldownMs: number;
+    /**
+     * Per-turn locality preference for dispatched panes (parent
+     * WL-0MVIKRFP0005JDL8 AC4, slice C4). Read live on every tick from the
+     * `downtimeLocalPreference` setting (default `local-only`). Optional for
+     * backward compat — absent leaves the pane launch byte-identical to
+     * today (no `X-Local-Preference`, no route log).
+     */
+    localPreference?: LocalPreference;
     /**
      * Non-terminal pane-close cooldown, ms (WL-0MUKYERLZ006ELL5). Optional
      * for backward compat — defaults to DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS.
@@ -8651,6 +8743,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   model: cfg.model,
                   cwd: cfg.cwd,
                   coordinationDir: opts.coordinationDir,
+                  localPreference: cfg.localPreference,
                   freeSlots: effectiveFreeSlots,
                   browseItemCount: cfg.browseItemCount,
                   auditBatchMax: cfg.auditBatchMax,
@@ -8678,6 +8771,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             : await dispatchDowntimeWork(opts.deps, {
                 model: cfg.model,
                 cwd: cfg.cwd,
+                // Per-turn locality preference (slice C4 AC1), read live from
+                // `downtimeLocalPreference`. Absent on legacy configs →
+                // today's byte-identical launch (fail-open C4-AC3).
+                localPreference: cfg.localPreference,
                 freeSlots: effectiveFreeSlots,
                 browseItemCount: cfg.browseItemCount,
                 // Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1).

@@ -537,6 +537,13 @@ pacing* below).
 - `downtimeProxyUrl` — Base URL of the llama-proxy (default:
 `http://192.168.0.199:8000`)
 - `downtimeModel` — pi model pattern for dispatched panes (default: `plan`)
+- `downtimeLocalPreference` — Per-turn locality preference sent to the proxy by
+  every dispatched pane (default: `local-only`; the other value is
+  `remote-ok`; anything else clamps back to `local-only`). It travels to the
+  pane as `HERDR_LOCAL_PREFERENCE`, where the Worklog pi extension turns it
+  into the `X-Local-Preference` request header and records the response route
+  headers in `.worklog/local-route.log` — see [Per-turn local preference and
+  route log](#per-turn-local-preference-x-local-preference-and-route-log-wl-0mvljtv03000kiqz)
 - `downtimeNoCandidateCooldownMs` — Full pause (no proxy polling, no idle
   tracking, no dispatch) after the worker finds no candidate in either
   stage — a genuine empty backlog (default: `3600000` = 60 minutes, floor
@@ -1144,6 +1151,57 @@ scheduled reaper over Herdr panes.
 **`pane-triage` skill reuse.** The approval-gated `pane-triage` skill
 (`WL-0MUJMXVPO0016DZM`) consumes `classifySession` / `extractFinalAssistantText`
 from this module rather than re-deriving idle state from the session log.
+
+### Per-turn local preference (`X-Local-Preference`) and route log (WL-0MVLJTV03000KIQZ)
+
+The llama-proxy accepts a **per-request locality preference** and reports the
+route it actually took. Herdr conveys the policy **per spawn**, and the
+Worklog pi extension turns it into the request header and the route log — so
+an agent turn either gets a local route or receives an immediate, recorded
+fallback decision instead of a silent ~120 s proxy-side wait.
+
+| Direction | Header | Meaning |
+|---|---|---|
+| request | `X-Local-Preference: local-only` | Work the operator marks local-first — the proxy refuses immediately when the local slot is contended (an honest fallback, not a silent queue) |
+| request | `X-Local-Preference: remote-ok` | Background work — may go remote without queuing local capacity |
+| response | `X-Local-Route` | The route the proxy took (e.g. `local`, `remote:<provider>`) |
+| response | `X-Local-Fallback-Reason` | Why the request left the local route (e.g. `queue-full`, `stall_after_reasoning`) |
+
+- **Policy knob.** `downtimeLocalPreference` (default `local-only`) governs
+  downtime-dispatched panes; scheduled-prompt panes and headless background
+  dispatches default to `remote-ok` (unattended work never queues local
+  capacity). Interactive panes carry no preference unless the operator exports
+  `HERDR_LOCAL_PREFERENCE` themselves.
+- **Transport.** `send-to-pi.sh --local-preference <local-only|remote-ok>`
+  injects `exec env HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`;
+  the headless path sets it directly on the spawn environment. An absent or
+  invalid value omits the env var — the pane launch stays byte-identical to
+  the pre-feature behaviour.
+- **Header injection + route capture.** The Worklog pi extension
+  (`packages/tui/extensions/local-preference/`) reads the env var on every
+  provider request (never cached, so a re-launched pane is never stale) and
+  sets `X-Local-Preference` through `before_provider_headers`; on
+  `after_provider_response` it parses `X-Local-Route` /
+  `X-Local-Fallback-Reason` and appends one bounded JSONL line per response to
+  `<cwd>/.worklog/local-route.log` (rolling, capped at 2000 entries).
+- **Route-log line.** `{ at, sessionId, preference, route, fallbackReason,
+  model, ticket? }` — the pi session id and, when one was forwarded, the
+  reservation ticket (`PI_LOCAL_RESERVATION_TICKET`), so a dispatcher decision
+  recorded in `.worklog/downtime-dispatches.log` (which records
+  `reservationTicketId`) can be correlated with the turns it produced. No
+  secrets/PII are written; the log is a per-root local artefact.
+- **Fail-open (no behaviour change without the feature).** No knob set → no
+  header, no route log, requests byte-identical to today. An older proxy that
+  serves no route headers → no log entry. A capture/write failure, a missing
+  `.worklog` directory or a stale context never throws into a turn.
+
+Tests: `packages/tui/extensions/local-preference/local-preference.test.ts`
+(pure module + hook behaviour, both preference values, the unset case, route
+parsing and the bounded log), `packages/herdr/src/local-preference.test.ts`
+(policy defaults/clamp), `packages/herdr/src/downtime-worker.reserve.test.ts`
+(pane-arg/env forwarding), `tests/herdr/send-to-pi.test.ts`
+(`--local-preference` passthrough, both values, invalid/absent fail-open) and
+`tests/herdr/settings.test.ts` (setting default + clamp).
 
 ### Request priority (per-request `X-Priority`)
 

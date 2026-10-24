@@ -23,6 +23,7 @@ import {
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
   DEFAULT_LOCAL_RESERVATION_EXPECTED_TOKENS,
   LOCAL_FALLBACK_REASON_HEADER,
+  LOCAL_PREFERENCE_ENV_VAR,
   LOCAL_PREFERENCE_HEADER,
   LOCAL_RESERVATION_HEADER,
   LOCAL_RESERVATION_TICKET_ENV,
@@ -223,7 +224,12 @@ function planCandidate(id = 'WL-PLAN-1') {
  */
 async function runDispatchTick(
   deps: DowntimeWorkerDeps,
-  opts: { status?: unknown; requiredFreeSlots?: number } = {},
+  opts: {
+    status?: unknown;
+    requiredFreeSlots?: number;
+    /** Per-turn locality preference (C4-AC1); absent → legacy config shape. */
+    localPreference?: 'local-only' | 'remote-ok';
+  } = {},
 ) {
   const pollFetch = vi.fn().mockResolvedValue(jsonResponseFixture(opts.status ?? idleAllSlotsFree));
   const worker = createDowntimeWorker({
@@ -236,6 +242,7 @@ async function runDispatchTick(
       model: 'plan',
       cwd: C2_CWD,
       noCandidateCooldownMs: 3_600_000,
+      ...(opts.localPreference !== undefined ? { localPreference: opts.localPreference } : {}),
     }),
   });
   const start = 1_000_000;
@@ -376,6 +383,53 @@ describe('ticket forwarding to the pane (AC1)', () => {
 
     const spawn = buildDowntimeSpawnOptions(C2_CWD, { priority: 'low' });
     expect(spawn.env[LOCAL_RESERVATION_TICKET_ENV]).toBeUndefined();
+  });
+});
+
+// ══════════════════════════════════════════════════════════════════════
+// Per-turn local preference forwarding (slice C4, parent AC4)
+// ══════════════════════════════════════════════════════════════════════
+
+describe('local-preference forwarding to the pane (C4-AC1)', () => {
+  it('C4-AC1: forwards --local-preference and HERDR_LOCAL_PREFERENCE for both values', () => {
+    for (const preference of ['local-only', 'remote-ok'] as const) {
+      const args = buildDowntimePaneArgs('plan', '/skill:plan WL-X', {
+        model: 'code',
+        cwd: C2_CWD,
+        localPreference: preference,
+      });
+      const idx = args.indexOf('--local-preference');
+      expect(idx).toBeGreaterThan(-1);
+      expect(args[idx + 1]).toBe(preference);
+      // The command must stay the final argv token.
+      expect(args[args.length - 1]).toBe('/skill:plan WL-X');
+
+      const spawn = buildDowntimeSpawnOptions(C2_CWD, {
+        priority: 'low',
+        localPreference: preference,
+      });
+      expect(spawn.env[LOCAL_PREFERENCE_ENV_VAR]).toBe(preference);
+    }
+  });
+
+  it('C4-AC3: no preference leaves the launch byte-identical (fail-open)', () => {
+    const args = buildDowntimePaneArgs('plan', '/skill:plan WL-X', { model: 'code', cwd: C2_CWD });
+    expect(args).not.toContain('--local-preference');
+
+    const spawn = buildDowntimeSpawnOptions(C2_CWD, { priority: 'low' });
+    expect(spawn.env[LOCAL_PREFERENCE_ENV_VAR]).toBeUndefined();
+  });
+
+  it('C4-AC1: a dispatch configured with a preference carries it into the spawn', async () => {
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+    });
+
+    const outcome = await runDispatchTick(deps, { localPreference: 'remote-ok' });
+
+    expect(outcome.dispatched).toBe(true);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.localPreference).toBe('remote-ok');
   });
 });
 
