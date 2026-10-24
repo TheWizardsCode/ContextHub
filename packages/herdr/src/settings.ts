@@ -63,6 +63,10 @@ import {
 import { dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {
+  clampDowntimeCpuGatePercent,
+  DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
+} from './host-cpu.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -166,6 +170,15 @@ export interface PluginSettings {
    */
   downtimeCapacityStarvationAlertMs: number;
   /**
+   * Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6): at or above this measured
+   * host CPU utilisation (percent, from `/proc/stat` deltas with a
+   * load-average fallback) the dispatcher refuses NEW audit/implement work on
+   * every dispatch path while intake/plan/risk-effort keep flowing. `0`
+   * disables the gate. Default **75**; clamped to [0, 100]; invalid/missing
+   * values fall back to the default. Re-read live on every dispatch tick.
+   */
+  downtimeCpuGatePercent: number;
+  /**
    * Progress window (WL-0MVKNC2N50025HXE AC2) before a live-agent pane whose
    * item has not advanced is reported as long-running on a starvation signal.
    * Panes are never resumed/closed from this signal. Default **3 h**; clamped
@@ -225,6 +238,7 @@ export const defaultSettings: PluginSettings = {
   downtimeStallThresholdMs: DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
   downtimeCapacityStarvationAlertMs: DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS,
   downtimeLongRunningThresholdMs: DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
+  downtimeCpuGatePercent: DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
   paneCloseEnabled: DEFAULT_PANE_CLOSE_ENABLED,
   paneCloseIdleThresholdMinutes: DEFAULT_PANE_CLOSE_IDLE_THRESHOLD_MINUTES,
   paneCloseGracePeriodMinutes: DEFAULT_PANE_CLOSE_GRACE_PERIOD_MINUTES,
@@ -341,6 +355,9 @@ export function loadSettings(settingsPath?: string): PluginSettings {
         typeof parsed.downtimeLongRunningThresholdMs === 'number'
           ? clampDowntimeLongRunningThresholdMs(parsed.downtimeLongRunningThresholdMs)
           : defaultSettings.downtimeLongRunningThresholdMs,
+      downtimeCpuGatePercent: typeof parsed.downtimeCpuGatePercent === 'number'
+        ? clampDowntimeCpuGatePercent(parsed.downtimeCpuGatePercent)
+        : defaultSettings.downtimeCpuGatePercent,
       paneCloseEnabled: typeof parsed.paneCloseEnabled === 'boolean'
         ? parsed.paneCloseEnabled : defaultSettings.paneCloseEnabled,
       paneCloseIdleThresholdMinutes: typeof parsed.paneCloseIdleThresholdMinutes === 'number'

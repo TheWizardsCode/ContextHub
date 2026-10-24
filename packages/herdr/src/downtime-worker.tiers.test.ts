@@ -376,11 +376,15 @@ describe('dispatch scheduled-prompts tier', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('scheduled');
     // The prompt text is the dispatch payload — not a skill+work-item wrap.
+    // Scheduled (background) dispatches default to `localPreference:
+    // 'remote-ok'` (WL-0MVLJTV03000KIQZ, C4-AC1): unattended work must not
+    // wait on a contended local slot.
     // Observable contract: spawnAgentPane boundary call
     expect(deps.spawnAgentPane).toHaveBeenCalledWith('/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
       paneName: 'Downtime /skill:refactor',
+      localPreference: 'remote-ok',
     });
     // No pre-dispatch claim — there is no work item (AC4).
     expect(deps.claimItem).not.toHaveBeenCalled();

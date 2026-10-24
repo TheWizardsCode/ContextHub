@@ -1070,6 +1070,77 @@ hours even when one slot is technically free. Operational levers: raise prefill
 concurrency, close/reap the long sessions, and/or enable the `pane-close`
 reaper (`paneCloseEnabled`) so abandoned sessions are eventually settled.
 
+### Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6)
+
+The dispatcher gates on local-LLM slot capacity, prefill pacing, the code freeze
+and pane state, but until this change it had **no host-CPU signal at all**: it
+would happily launch *more* implement/audit panes while the machine was already
+at or above 75 % CPU utilisation, slowing every agent (including the operator's
+own session). The gate adds one host-local reading per dispatch tick.
+
+**Metric (`packages/herdr/src/host-cpu.ts`).** Utilisation is a
+`/proc/stat` delta between two samples:
+
+- `parseProcStatCpu(text)` reads the aggregate `cpu` line
+  (`user nice system idle iowait irq softirq steal`); `guest*` counters are
+  excluded because they are already contained in `user`/`nice`. `busy` is
+  `total − (idle + iowait)`; per-CPU lines (`cpu0`, …) are ignored — the gate
+  measures the whole host.
+- `cpuPercentFromSamples(prev, next)` = `busyΔ / totalΔ × 100`, clamped to
+  `0–100`, `null` when the total counter did not advance.
+- `createHostCpuSampler()` holds the **previous sample in memory only** (no disk
+  state, no machine-wide marker, no cross-host coordination — the downtime
+  leader is the single dispatcher per host). Degradation order:
+  1. `/proc/stat` delta, when a previous sample exists **and** the window is at
+     least `1 s` (`HOST_CPU_MIN_SAMPLE_WINDOW_MS`; two dispatches inside one
+     tick would otherwise measure a misleading 0 %);
+  2. `1-min load average ÷ core count × 100` (capped at 100) from
+     `/proc/loadavg` — load is an upper-bound proxy, and the conservative
+     direction is the intended one for a *dispatch* gate;
+  3. `{ ok: false }` — **fail open**, dispatch unchanged.
+  The whole module never throws: unreadable/unparseable input, thrown readers,
+  `NaN`/non-finite values and an absent `/proc` all degrade to the next step.
+  The production seam in `index.ts` reads only the whitelisted absolute paths
+  `/proc/stat` and `/proc/loadavg` via `node:fs` and `os.cpus().length`.
+
+**Gate.** `isCpuGateActive(percent, threshold)` is
+`threshold > 0 && percent >= threshold` (equal blocks). While active it is
+applied like the code-freeze **split-by-skill safety gate**, not like the
+non-safety filters a critical item may bypass:
+
+- **refused**: `audit` and `implement` dispatch — including a CRITICAL
+  implement — on every path: the direct Herdr head (critical-first scan and
+  normal scan), the coordination leader's offer dispatch, the own-backlog
+  fallback and the audit-batch continuation;
+- **allowed**: `intake`, `plan` and `risk-effort` dispatch, and every
+  operator-initiated/manual dispatch;
+- **stalled resume skipped**: a gated tick does not resume a stalled pane in
+  place (that would wake an agent and add load). Once CPU falls below the
+  threshold the next idle tick resumes normally, unchanged.
+- **offers are NOT gated**: `computeMostImportantItem` still returns
+  candidates (only its stalled-resume step is skipped). Suppressing offers
+  would strip the leader's candidate list and, when everything is held, drive
+  the 60-minute `no-candidate` cooldown — dispatch would then not resume
+  promptly after CPU recovers.
+
+**Neutral token.** A gated tick reports the distinct reason
+**`cpu-saturated`** (header token of the same name) and records it in the
+decision log with `hostCpuPercent`, `hostCpuSource` (`proc-stat` / `loadavg`)
+and `cpuGatePercent`. It is never a CLI-error strike, never enters the
+`no-candidate` cooldown, never removes a coordination entry, and never rolls
+back or writes a dispatch marker. It is deliberately **NOT** counted as a
+capacity refusal in `CAPACITY_REFUSAL_REASONS` (`capacity-starvation.ts`): the
+local model may be perfectly idle while the host is busy, so a CPU-gated night
+must never be reported as local-model capacity starvation. If the code freeze
+and the CPU gate are both active, `code-freeze` keeps precedence.
+
+**Configuration.** `downtimeCpuGatePercent` (default **75**, clamped to
+`[0, 100]`, `0` disables) is re-read live on every dispatch tick and threaded
+through `DowntimeWorkerConfig.config()` into both dispatch entry points.
+`packages/herdr/README.md` documents the setting. No new dependency (`node:fs`
++ `node:os` only) and no persistent state: a worker restart simply re-seeds via
+the load-average fallback on the first tick.
+
 ### Pane placement: project workspace first, `Dispatcher` fallback (WL-0MUR5FUWD00024XN)
 
 Automated downtime panes spawn **inside the owning project's herdr

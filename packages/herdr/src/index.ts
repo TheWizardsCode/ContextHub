@@ -23,7 +23,7 @@
 import { spawn, type ChildProcess, type SpawnOptions } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
-import { tmpdir } from 'node:os';
+import { tmpdir, cpus } from 'node:os';
 import { existsSync, mkdirSync, openSync, readFileSync, unlinkSync } from 'node:fs';
 import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
 import { isAuditFresh } from '@worklog/shared/icons';
@@ -67,6 +67,7 @@ import { HerdrEventSubscriber, resolveSocketPath } from './events.js';
 import { runWorklistTui, getTermSize } from './worklist.js';
 import { loadShortcutConfig } from './shortcut-config.js';
 import { readCodeFreezeStatusForRoot } from './code-freeze.js';
+import { createHostCpuSampler, type HostCpuReading } from './host-cpu.js';
 import {
   getMachineCoordinationDir,
   isHostAuditActive,
@@ -1342,6 +1343,61 @@ async function readClosedPaneIds(cwd: string): Promise<Set<string>> {
  *   only when no project workspace resolves for the item's root
  *   (WL-0MUR5FUWD00024XN).
  */
+// ── Host-CPU sampler (WL-0MVK0UO3Q002TXW6) ───────────────────────────
+
+/**
+ * Whitelisted absolute host-metrics paths (never caller-supplied, so the
+ * sampler cannot be pointed at an arbitrary file).
+ */
+const HOST_PROC_STAT_PATH = '/proc/stat';
+const HOST_PROC_LOADAVG_PATH = '/proc/loadavg';
+
+/**
+ * Read a host-metrics file, resolving `null` on ANY failure (missing file,
+ * permissions, a restricted `/proc` in a container). Fail-open by design.
+ */
+function readHostMetricsFile(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Module-level host-CPU sampler (WL-0MVK0UO3Q002TXW6): holds the previous
+ * `/proc/stat` sample IN MEMORY only (no disk state, no machine-wide marker),
+ * so the delta across the worker's poll interval measures host utilisation.
+ * A worker restart simply re-seeds via the load-average fallback on the first
+ * tick. `os.cpus()` is read lazily per reading so a hot-plugged core count is
+ * honoured.
+ */
+const defaultHostCpuSampler = createHostCpuSampler({
+  readProcStat: () => readHostMetricsFile(HOST_PROC_STAT_PATH),
+  readLoadAvg: () => readHostMetricsFile(HOST_PROC_LOADAVG_PATH),
+  cpuCount: () => cpus().length,
+});
+
+/**
+ * Test seam for the module-level host-CPU sampler (WL-0MVK0UO3Q002TXW6 AC6:
+ * "tests must never read the real `/proc/stat`"). Production never calls the
+ * setter; `null` restores the real `/proc` sampler.
+ */
+let hostCpuSamplerOverride: (() => HostCpuReading) | null = null;
+
+/**
+ * Replace the host-CPU sampler that {@link createDowntimeDeps} exposes as
+ * `readHostCpu`. Intended for tests only — the gate is pinned with fixture
+ * readings rather than the host's current load.
+ *
+ * @param sampler - The fixture sampler, or `null` to restore production.
+ */
+export function setHostCpuSamplerForTests(
+  sampler: (() => HostCpuReading) | null,
+): void {
+  hostCpuSamplerOverride = sampler;
+}
+
 export function createDowntimeDeps(
   scriptPath: string,
   assignee: string,
@@ -1506,6 +1562,12 @@ export function createDowntimeDeps(
     // (fail-closed) identically: no audit/implement dispatch during a
     // release; plan/intake continue.
     readCodeFreezeStatus: (cwd: string) => readCodeFreezeStatusForRoot(cwd),
+    // Host-CPU gate seam (WL-0MVK0UO3Q002TXW6 AC1/AC2): `/proc/stat` delta
+    // utilisation with a 1-min load-average fallback, read fresh on every
+    // dispatch tick. Fail-open: an unreadable/unparseable `/proc` resolves
+    // `{ ok: false }` (via the sampler), so the gate never blocks a tick it
+    // cannot evaluate.
+    readHostCpu: () => (hostCpuSamplerOverride ?? defaultHostCpuSampler)(),
     async getNextAuditCandidate(cwd: string): Promise<DowntimeNextResult> {
       try {
         // Audit tier (WL-0MSI8H3HP000K0RG): select the first completed /
@@ -2512,6 +2574,10 @@ export async function main(): Promise<void> {
         // model. Both are re-read each tick (live).
         capacityStarvationAlertMs: s.downtimeCapacityStarvationAlertMs,
         longRunningThresholdMs: s.downtimeLongRunningThresholdMs,
+        // Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6 AC5): re-read each tick
+        // like the other downtime settings, so a threshold change (or `0` to
+        // disable) applies without a plugin restart.
+        cpuGatePercent: s.downtimeCpuGatePercent,
         browseItemCount: s.browseItemCount,
         // Scheduled pane-close reaper (WL-0MUJL1NAH0042GOS): gated by the
         // `paneCloseEnabled` setting (default on) with a configurable

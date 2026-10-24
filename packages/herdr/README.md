@@ -435,6 +435,23 @@ dispatches; the other herdr instances coordinate instead of polling:
   `consecutiveCapacityRefusals`, `lastCapacityReason`). Observation only —
   the refusal reason/header token are unchanged. See
   [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#capacity-starvation-signal--long-running-pane-detection-wl-0mvknc2n50025hxe).
+- **Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6)** — many concurrent
+  implement/audit panes can push the host towards CPU saturation even while
+  the local model is idle. At or above `downtimeCpuGatePercent` (default
+  75 %, `0` disables) measured host CPU utilisation, the dispatcher refuses
+  NEW **audit** and **implement** dispatch on every path (direct Herdr head,
+  critical-first scan, coordination offers, own-backlog fallback and
+  audit-batch continuation) and does **not** resume a stalled pane; intake,
+  plan and risk-effort keep dispatching and a manual/operator dispatch is
+  never gated. The reading is `/proc/stat` delta utilisation normalised
+  across all cores, falling back to `1-min load average ÷ cores × 100` when
+  `/proc/stat` is unavailable or the sampling window is under 1 s, and
+  failing open when neither signal is available. The tick is recorded with
+  the distinct neutral reason `cpu-saturated` plus `hostCpuPercent`,
+  `hostCpuSource` and `cpuGatePercent` evidence — never a CLI-error strike,
+  never a `no-candidate` cooldown, never an evicted coordination entry, and
+  deliberately NOT counted as local-model capacity starvation. See
+  [docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#host-cpu-dispatch-gate-wl-0mvk0uo3q002txw6).
 
 Coordination operations (check-ins, elections/takeovers, eligibility drops) are recorded in `.worklog/downtime-coordination.log` — a separate
 rolling log from the dispatch log, so the dispatch-marker readers never see
@@ -589,6 +606,16 @@ pacing* below).
   pane whose non-terminal item has not advanced is reported on a starvation
   signal (default: `10800000` = 3 hours, clamped to 1 h – 48 h; observation
   only — a flagged pane is never resumed, prompted or closed)
+- `downtimeCpuGatePercent` — Host-CPU dispatch gate. At or above this
+  measured host CPU utilisation (percent, from `/proc/stat` deltas with a
+  1-min load-average fallback) the dispatcher refuses NEW **audit** and
+  **implement** dispatch (including critical implements) and skips the
+  stalled-pane resume, while **intake**, **plan** and **risk-effort** keep
+  dispatching. The refusal is neutral: reason `cpu-saturated`, never a
+  strike, never a no-candidate cooldown, never an evicted coordination
+  entry, and it is NOT reported as capacity starvation. `0` disables the
+  gate (default: `75`, clamped to 0 – 100; re-read live on every dispatch
+  tick). See the *Host-CPU dispatch gate* bullet above
 
 The worker polls `GET {proxyUrl}/llama/local/status` on the poll interval.
 Idle means: llama-server running, no active **local** query (the proxy's

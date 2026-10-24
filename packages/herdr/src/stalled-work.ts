@@ -686,6 +686,13 @@ export interface StalledScanOptions {
   enabled: boolean;
   /** True while the code-freeze marker is frozen/ambiguous (split-by-skill). */
   frozen: boolean;
+  /**
+   * True while the host-CPU dispatch gate is active (WL-0MVK0UO3Q002TXW6
+   * AC3): a gated tick must NOT resume a stalled pane in place — waking an
+   * agent adds load to an already saturated host. Absent/false leaves the
+   * scan unchanged.
+   */
+  cpuSaturated?: boolean;
   /** Minimum continuous not-working duration (`downtimeStallThresholdMs`). */
   thresholdMs: number;
   /** Non-terminal pane-close cooldown window (ms). */

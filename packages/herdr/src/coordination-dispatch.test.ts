@@ -438,11 +438,14 @@ describe('dispatchFromCoordination', () => {
     expect(outcome.dispatched).toBe(true);
     expect(outcome.kind).toBe('scheduled');
     // The prompt text is the dispatch payload — no work item wrap, pane
-    // named `Downtime <id>` (AC3 spawn path).
+    // named `Downtime <id>` (AC3 spawn path). Scheduled (background)
+    // dispatches default to `localPreference: 'remote-ok'`
+    // (WL-0MVLJTV03000KIQZ, C4-AC1).
     expect(deps.spawnAgentPane).toHaveBeenCalledWith('/skill:refactor', {
       model: 'plan',
       cwd: '/repo',
       paneName: 'Downtime /skill:refactor',
+      localPreference: 'remote-ok',
     });
     // No pre-dispatch claim and NO coordination-tier work (AC3/AC4/AC6).
     expect(deps.claimItem).not.toHaveBeenCalled();

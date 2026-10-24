@@ -32,9 +32,18 @@ describe('isCapacityRefusal (WL-0MVKNC2N50025HXE)', () => {
   it('does not treat non-capacity outcomes or observations as capacity refusals', () => {
     for (const reason of ['no-candidate', 'review-queue-hold', 'code-freeze', 'wl-error',
       'audit-in-flight', 'audit-host-saturated', 'idle-age-pending', 'idle-age-qualified',
-      'audit-batch-continue', 'audit-batch-end', 'stalled-resume', 'capacity-starved']) {
+      'audit-batch-continue', 'audit-batch-end', 'stalled-resume', 'capacity-starved',
+      'cpu-saturated']) {
       expect(isCapacityRefusal(reason)).toBe(false);
     }
+  });
+
+  it('`cpu-saturated` is the host-CPU gate, never capacity starvation (WL-0MVK0UO3Q002TXW6 AC4)', () => {
+    // A CPU-gated night must not be reported as local-model capacity
+    // starvation: the local model can be idle while the host is saturated by
+    // other agents' panes. Explicitly excluded from the refusal vocabulary.
+    expect(CAPACITY_REFUSAL_REASONS.has('cpu-saturated')).toBe(false);
+    expect(isCapacityRefusal('cpu-saturated')).toBe(false);
   });
 
   it('`capacity-starved` is never itself a capacity refusal (no feedback loop)', () => {

@@ -67,6 +67,15 @@ export function clampDowntimeCapacityStarvationAlertMs(value: number): number {
  * decision entry groups them under `reservation-refused` but passes the
  * proxy's reason as `starvationReason`), so `queue-full` / `reserved-fallback`
  * still count.
+ *
+ * `cpu-saturated` (WL-0MVK0UO3Q002TXW6) is DELIBERATELY excluded: it is the
+ * host-CPU gate, not a local-model capacity refusal. A CPU-gated night must
+ * NEVER be reported as local-model capacity starvation — the local model may
+ * be perfectly idle while the HOST is busy with other agents' panes, so
+ * paging the capacity-starvation signal would name the wrong bottleneck and
+ * blame panes that hold no model slot. Feeding it here would keep an episode
+ * alive (`isCapacityRefusal` treats non-capacity reasons as "capacity was
+ * available" and resets), which is the intended neutral semantics.
  */
 export const CAPACITY_REFUSAL_REASONS: ReadonlySet<string> = new Set([
   'slots-unavailable',

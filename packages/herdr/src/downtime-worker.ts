@@ -138,6 +138,13 @@ import { spawn } from 'node:child_process';
 import { isAuditFresh } from '@worklog/shared/icons';
 import { DEFAULT_BROWSE_ITEM_COUNT, resolveSprintViewWindow } from './browse-window.js';
 import type { CodeFreezeStatus } from './code-freeze.js';
+import {
+  DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
+  clampDowntimeCpuGatePercent,
+  isCpuGateActive,
+  type HostCpuReading,
+  type HostCpuSource,
+} from './host-cpu.js';
 import { disableMarkerExists, removeDisableMarker, writeDisableMarker } from './downtime-disable-marker.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
@@ -459,6 +466,16 @@ export interface DecisionEntryFields extends CapacityEvidence {
    * guard itself refuses the tick before any dispatch attempt.
    */
   pendingLaunches?: number;
+  /**
+   * Host-CPU gate evidence (WL-0MVK0UO3Q002TXW6 AC4): the measured host CPU
+   * utilisation (0–100 %), its source (`proc-stat` delta vs `loadavg`
+   * fallback) and the configured threshold. Present on a `cpu-saturated`
+   * refusal so the hold is diagnosable from the decision log alone; absent on
+   * every non-CPU decision, which keeps the existing log shape.
+   */
+  hostCpuPercent?: number;
+  hostCpuSource?: HostCpuSource;
+  cpuGatePercent?: number;
 }
 
 function capacityEvidence(
@@ -750,6 +767,83 @@ export function clampDowntimeLongRunningThresholdMs(value: number): number {
     Math.max(Math.round(value), DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS),
     DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS,
   );
+}
+
+// ── Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6) ──────────────────────
+
+/**
+ * Distinct, NEUTRAL no-dispatch reason for the host-CPU gate
+ * (WL-0MVK0UO3Q002TXW6 AC4). It is never a CLI-error strike, never enters the
+ * `no-candidate` cooldown, never removes a coordination entry and is
+ * deliberately NOT a capacity refusal (see `capacity-starvation.ts`).
+ */
+export const CPU_SATURATED_REASON = 'cpu-saturated';
+
+/**
+ * Read the host-CPU seam, FAIL-OPEN (AC1/AC2): an unwired dep, a thrown
+ * reader, a malformed reading (`NaN`, out-of-range percent, unknown source)
+ * all resolve `{ ok: false }` — the gate then cannot evaluate and dispatch
+ * proceeds unchanged. Never throws.
+ */
+export function readHostCpuReading(deps: DowntimeWorkerDeps): HostCpuReading {
+  if (typeof deps.readHostCpu !== 'function') return { ok: false };
+  let raw: unknown;
+  try {
+    raw = deps.readHostCpu();
+  } catch {
+    return { ok: false };
+  }
+  if (typeof raw !== 'object' || raw === null) return { ok: false };
+  const reading = raw as { ok?: unknown; percent?: unknown; source?: unknown };
+  if (reading.ok !== true) return { ok: false };
+  if (typeof reading.percent !== 'number' || !Number.isFinite(reading.percent)) return { ok: false };
+  if (reading.percent < 0 || reading.percent > 100) return { ok: false };
+  if (reading.source !== 'proc-stat' && reading.source !== 'loadavg') return { ok: false };
+  return { ok: true, percent: reading.percent, source: reading.source };
+}
+
+/**
+ * Resolve the CPU-gate state for one dispatch tick: the live threshold
+ * (clamped, `0` disables) plus the measured reading.
+ *
+ * `saturated` is true only when the reading is usable AND the threshold is
+ * positive AND `percent >= threshold` (AC2 boundary: equal blocks). Fail-open
+ * on every unusable reading (AC1/constraints).
+ */
+export function resolveCpuGate(
+  deps: DowntimeWorkerDeps,
+  cpuGatePercent: number | undefined,
+): { saturated: boolean; thresholdPercent: number; reading: HostCpuReading } {
+  const thresholdPercent = clampDowntimeCpuGatePercent(
+    cpuGatePercent ?? DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
+  );
+  const reading = readHostCpuReading(deps);
+  const saturated = reading.ok && isCpuGateActive(reading.percent, thresholdPercent);
+  return { saturated, thresholdPercent, reading };
+}
+
+/**
+ * CPU-gate evidence copied onto a dispatch outcome / decision entry (AC4):
+ * the measured utilisation, its source and the configured threshold. Empty
+ * when the gate is inactive or the reading is unusable, so a non-CPU refusal
+ * keeps its existing log shape byte-for-byte.
+ */
+export interface HostCpuGateEvidence {
+  hostCpuPercent?: number;
+  hostCpuSource?: HostCpuSource;
+  cpuGatePercent?: number;
+}
+
+/** Build the evidence fields for one resolved gate (empty when not gated). */
+export function hostCpuGateEvidence(
+  gate: { saturated: boolean; thresholdPercent: number; reading: HostCpuReading },
+): HostCpuGateEvidence {
+  if (!gate.saturated || !gate.reading.ok) return {};
+  return {
+    hostCpuPercent: gate.reading.percent,
+    hostCpuSource: gate.reading.source,
+    cpuGatePercent: gate.thresholdPercent,
+  };
 }
 
 /**
@@ -3108,6 +3202,24 @@ export interface DowntimeWorkerDeps {
    */
   readCodeFreezeStatus(cwd: string): CodeFreezeStatus;
   /**
+   * Host-CPU reading for the CPU-aware dispatch gate (WL-0MVK0UO3Q002TXW6
+   * AC1/AC2): 0–100 % host utilisation from `/proc/stat` deltas across the
+   * worker's poll interval, normalised across all cores, with a 1-min
+   * load-average fallback.
+   *
+   * Consulted once per dispatch tick (never cached). FAIL-OPEN: when absent
+   * (unwired seam) or when it resolves `{ ok: false }` (unreadable/
+   * unparseable host metrics) the gate cannot evaluate and dispatch proceeds
+   * unchanged. At or above the live `downtimeCpuGatePercent` threshold new
+   * audit/implement dispatch is refused with the neutral
+   * `cpu-saturated` reason while intake/plan/risk-effort keep flowing; stalled
+   * panes are not resumed either. Must never throw.
+   *
+   * Production wiring (`createDowntimeDeps`) uses a module-level sampler that
+   * holds the previous `/proc/stat` sample in memory — no disk state.
+   */
+  readHostCpu?(): HostCpuReading;
+  /**
    * Claim the item (CAS: `wl update <id> --status in_progress --if-status
    * <expected.status> [--if-stage <expected.stage>]`) BEFORE anything else.
    * Exactly one concurrent pane wins; a loser resolves `{ok:false,
@@ -3660,6 +3772,16 @@ export interface DowntimeDispatchOutcome {
    * decision entry so the log answers "why did we not launch?".
    */
   reservation?: DowntimeReservationEvidence;
+
+  /**
+   * Host-CPU gate evidence (WL-0MVK0UO3Q002TXW6 AC4): present on a
+   * `cpu-saturated` outcome — the measured utilisation, its source and the
+   * live threshold — so the worker loop can copy it onto the decision entry.
+   * Absent on every other outcome.
+   */
+  hostCpuPercent?: number;
+  hostCpuSource?: HostCpuSource;
+  cpuGatePercent?: number;
 }
 
 /**
@@ -4079,6 +4201,11 @@ export async function resumeStalledWorkIfAble(
 ): Promise<boolean> {
   // Unwired deps / disabled scan degrade to normal dispatch (AC2/AC3).
   if (opts.enabled !== true) return false;
+  // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC3): while the host is saturated a
+  // resume would WAKE an agent (adding load), so the stalled pane is left
+  // untouched until CPU falls below the threshold — the next idle tick
+  // resumes normally, unchanged.
+  if (opts.cpuSaturated === true) return false;
   if (
     typeof deps.scanStalledPanes !== 'function' ||
     typeof deps.resumeStalledPane !== 'function'
@@ -4107,8 +4234,8 @@ export async function resumeStalledWorkIfAble(
 async function dispatchFromHerdrList(
   deps: DowntimeWorkerDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; localPreference?: LocalPreference; freeSlots?: number; frozen: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
-  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; auditHostSaturated: boolean },
+  ctx: { cwd: string; model: string; localPreference?: LocalPreference; freeSlots?: number; frozen: boolean; cpuSaturated: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
+  flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; cpuHeld: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
   const entries = await _readDowntimeEntries(ctx.cwd);
@@ -4148,6 +4275,13 @@ async function dispatchFromHerdrList(
   // item-scoped guard below — see `evaluateCriticalFirstGuard` for the full
   // decision table. Escalation of a genuinely stuck item is preserved (AC3).
   for (const { item: candidate, kind } of selectCriticalFirstCandidates(items, Date.now(), ctx.frozen)) {
+    // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2): while the host is saturated a
+    // critical implement is refused too — saturation is exactly when starting
+    // new heavy work does harm. Critical plan/intake prep still passes.
+    if (ctx.cpuSaturated && (kind === 'audit' || kind === 'implement')) {
+      flags.cpuHeld = true;
+      continue;
+    }
     // Safety gate: per-tier free-slot minimums (parent WL-0MT32F90UAD2 AC3).
     if (kind === 'audit' && !ctx.auditEligible) continue;
     if (kind !== 'audit' && !ctx.panesEligible) continue;
@@ -4283,6 +4417,14 @@ async function dispatchFromHerdrList(
     // Code-freeze split-by-skill: audit+implement dispatch pauses during
     // a freeze/ambiguous marker (plan/intake still dispatch).
     if (ctx.frozen && (k === 'audit' || k === 'implement')) continue;
+    // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2): refuse NEW audit/implement
+    // dispatch at or above the threshold; plan/intake/risk-effort keep
+    // flowing. Evaluated AFTER the code freeze so a dual-gated tick reports
+    // `code-freeze` (AC4 precedence).
+    if (ctx.cpuSaturated && (k === 'audit' || k === 'implement')) {
+      flags.cpuHeld = true;
+      continue;
+    }
     // In-flight guard for CRITICAL candidates on the normal loop (AC2.5):
     // the same item-scoped decision table as the critical-first scan, so AC2
     // holds "regardless of selection path". Non-critical candidates keep the
@@ -5153,6 +5295,7 @@ export async function computeMostImportantItem(
   maxAttempts: number = DEFAULT_DOWNTIME_MAX_ATTEMPTS,
   stallScanEnabled: boolean = true,
   stallThresholdMs: number = DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+  cpuGatePercent: number = DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
 ): Promise<MostImportantItemResult> {
   // The check-in (and the worker's no-candidate probe) requires the Herdr
   // head lookup: without it there is no canonical ranking to offer from —
@@ -5162,6 +5305,12 @@ export async function computeMostImportantItem(
   }
   const freezeStatus = deps.readCodeFreezeStatus(cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
+  // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC4): the OFFER computation is
+  // deliberately NOT gated — suppressing audit/implement offers would strip
+  // the leader's candidate list and drive the 60-minute `no-candidate`
+  // cooldown, so dispatch would not resume promptly after CPU recovers. Only
+  // the stalled-resume side effect below is skipped while saturated (AC3).
+  const cpuSaturated = resolveCpuGate(deps, cpuGatePercent).saturated;
 
   // ── Stalled-work scan (WL-0MUYMBSA90092QV2 AC4) ──
   // Consult the scan FIRST, before any new-item selection: a successfully
@@ -5171,6 +5320,7 @@ export async function computeMostImportantItem(
     const resumed = await resumeStalledWorkIfAble(deps, cwd, {
       enabled: stallScanEnabled,
       frozen,
+      cpuSaturated,
       thresholdMs: stallThresholdMs,
       nonTerminalCooldownMs,
       maxAttempts,
@@ -5457,7 +5607,17 @@ export async function computeMostImportantItem(
 export async function dispatchFromCoordination(
   deps: DowntimeWorkerDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; localPreference?: LocalPreference; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number; /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number; /** Batch-local exclusion set: item ids already dispatched in the current audit batch (WL-0MVFE1DD8000D8T2 AC3/AC4). Never re-selected within one batch. */ auditBatchDispatchedIds?: readonly string[] },
+  opts: { model: string; cwd: string; coordinationDir: string; localPreference?: LocalPreference; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number;
+    /**
+     * Host-CPU gate threshold (WL-0MVK0UO3Q002TXW6 AC2/AC5): live
+     * `downtimeCpuGatePercent` re-read every tick. At or above it new
+     * audit/implement offers are KEPT but skipped this cycle, the own-backlog
+     * fallback / audit-batch continuation skip those kinds, and stalled panes
+     * are not resumed. `0` disables. Optional — absent falls back to the
+     * default (75).
+     */
+    cpuGatePercent?: number;
+    /** Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1); optional — absent leaves batching off. */ auditBatchMax?: number; /** Depth-aware audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1); consumed by the coordination continuation item (WL-0MVFE1DD8000D8T2). */ auditBatchRemaining?: number; /** Batch-local exclusion set: item ids already dispatched in the current audit batch (WL-0MVFE1DD8000D8T2 AC3/AC4). Never re-selected within one batch. */ auditBatchDispatchedIds?: readonly string[] },
   now: number = Date.now(),
 ): Promise<DowntimeDispatchOutcome> {
   // Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1–AC5):
@@ -5587,6 +5747,12 @@ async function dispatchFromOwnHead(
   ctx: {
     window: { head: DowntimeHerdrItem[]; tail: DowntimeHerdrItem[] };
     frozen: boolean;
+    /**
+     * Host-CPU gate state (WL-0MVK0UO3Q002TXW6 AC2): while saturated this scan
+     * refuses audit/implement kinds in the same place as the code freeze, so
+     * the own-backlog fallback and the audit-batch continuation are gated too.
+     */
+    cpuSaturated: boolean;
     auditEligible: boolean;
     markerStaleWindowMs: number;
     maxAttempts: number;
@@ -5608,6 +5774,7 @@ async function dispatchFromOwnHead(
       cooldown: boolean;
       inFlight: boolean;
       review: boolean;
+      cpu: boolean;
     };
     /** Producer-review flag writes already performed this cycle (deduped). */
     flaggedForBudget: Set<string>;
@@ -5658,6 +5825,13 @@ async function dispatchFromOwnHead(
       continue;
     }
     if (ctx.frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) continue;
+    // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2): refuse NEW audit/implement work
+    // while the host is saturated; plan/intake/risk-effort still dispatch.
+    // After the freeze so a dual-gated tick reports `code-freeze`.
+    if (ctx.cpuSaturated && (kind === 'audit' || kind === 'implement')) {
+      ctx.holds.cpu = true;
+      continue;
+    }
     if (kind === 'audit' && !ctx.auditEligible) continue;
     if (item.priority === 'critical') {
       const guard = evaluateCriticalFirstGuard(
@@ -5736,6 +5910,18 @@ async function dispatchFromCoordinationGated(
   const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
   const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
+  // ── Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2–AC4) ──
+  // ONE reading per dispatch tick (the sampler keeps the previous /proc/stat
+  // sample in memory). At or above the live threshold new audit/implement
+  // dispatch is refused while plan/intake/risk-effort keep flowing and the
+  // stalled-work resume is skipped (it would wake an agent and add load).
+  // Neutral: the coordination entry is KEPT (never removed), no strike, no
+  // no-candidate cooldown. Fail-open when the reading is unusable.
+  const cpuGate = resolveCpuGate(deps, opts.cpuGatePercent);
+  const cpuSaturated = cpuGate.saturated;
+  const cpuEvidence = hostCpuGateEvidence(cpuGate);
+  let cpuHold = false;
+
   // No wall-clock prune (WL-0MTMPIQBE001J41P) — entries persist until
   // dispatch-time eligibility check (fetchItem+classify) finds them
   // non-dispatchable. Stale offers are dropped at dispatch, never by age.
@@ -5764,6 +5950,7 @@ async function dispatchFromCoordinationGated(
     const resumed = await resumeStalledWorkIfAble(deps, opts.cwd, {
       enabled: opts.stallScanEnabled ?? true,
       frozen,
+      cpuSaturated,
       thresholdMs: opts.stallScanThresholdMs ?? DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
       nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
       maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -5881,6 +6068,7 @@ async function dispatchFromCoordinationGated(
     cooldown: false,
     inFlight: false,
     review: false,
+    cpu: false,
   };
   // Audit-batch continuation budget (parent WL-0MVEDM8OT007WDRS AC1/AC4): the
   // clamped cap and the continuation budget available BEFORE this dispatch
@@ -5951,6 +6139,16 @@ async function dispatchFromCoordinationGated(
     // its next head at the next check-in.
     if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) {
       removeEntry(opts.coordinationDir, entry.instanceId);
+      continue;
+    }
+    // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2/AC4): at or above the threshold
+    // audit/implement offers are refused. The entry is KEPT — it is still a
+    // valid offer and the next idle tick re-checks the live CPU (removing it
+    // would also force an owner re-offer cycle for work that is only
+    // temporarily held). Evaluated AFTER the freeze so a dual-gated tick
+    // reports `code-freeze` (AC4 precedence).
+    if (cpuSaturated && (kind === 'audit' || kind === 'implement')) {
+      cpuHold = true;
       continue;
     }
     // Audit-tier slot minimum: an audit pane needs a second slot for its
@@ -6087,6 +6285,7 @@ async function dispatchFromCoordinationGated(
       const sharedScan = {
         window: ownWindow,
         frozen,
+        cpuSaturated,
         auditEligible,
         markerStaleWindowMs,
         maxAttempts,
@@ -6156,15 +6355,17 @@ async function dispatchFromCoordinationGated(
   // folded in here so a filtered own-head backlog keeps its neutral reason.
   return frozen
     ? { dispatched: false, reason: 'code-freeze' }
-    : reviewHold || ownHeadHolds.review
-      ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
-      : cooldownHold || ownHeadHolds.cooldown
-        ? { dispatched: false, reason: 'non-terminal-cooldown' }
-        : budgetHold || ownHeadHolds.budget
-          ? { dispatched: false, reason: 'attempt-budget-exhausted' }
-          : inFlightHold || ownHeadHolds.inFlight
-          ? { dispatched: false, reason: 'in-flight-pane' }
-          : { dispatched: false, reason: 'no-candidate' };
+    : cpuHold || ownHeadHolds.cpu
+      ? { ...cpuEvidence, dispatched: false, reason: CPU_SATURATED_REASON }
+      : reviewHold || ownHeadHolds.review
+        ? { dispatched: false, reason: REVIEW_QUEUE_HOLD_REASON }
+        : cooldownHold || ownHeadHolds.cooldown
+          ? { dispatched: false, reason: 'non-terminal-cooldown' }
+          : budgetHold || ownHeadHolds.budget
+            ? { dispatched: false, reason: 'attempt-budget-exhausted' }
+            : inFlightHold || ownHeadHolds.inFlight
+            ? { dispatched: false, reason: 'in-flight-pane' }
+            : { dispatched: false, reason: 'no-candidate' };
 }
 
 /**
@@ -6448,6 +6649,15 @@ export async function dispatchDowntimeWork(
      */
     stallScanThresholdMs?: number;
     /**
+     * Host-CPU gate threshold (WL-0MVK0UO3Q002TXW6 AC2/AC5): the live
+     * `downtimeCpuGatePercent` value, re-read on every dispatch tick. At or
+     * above it new audit/implement dispatch is refused (including a critical
+     * implement) and stalled panes are not resumed, while plan/intake/
+     * risk-effort still dispatch. `0` disables the gate. Optional — absent
+     * falls back to `DEFAULT_DOWNTIME_CPU_GATE_PERCENT` (75).
+     */
+    cpuGatePercent?: number;
+    /**
      * Per-turn locality preference for the dispatched pane (parent
      * WL-0MVIKRFP0005JDL8 AC4, slice C4): forwarded to the pane as
      * `--local-preference` / `HERDR_LOCAL_PREFERENCE`. Optional — absent
@@ -6536,6 +6746,17 @@ export async function dispatchDowntimeWork(
     const freezeStatus = deps.readCodeFreezeStatus(opts.cwd);
     const frozen = freezeStatus === 'frozen' || freezeStatus === 'ambiguous';
 
+    // ── Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC1/AC2/AC3) ──
+    // ONE reading per dispatch tick (the sampler keeps the previous
+    // /proc/stat sample in memory; nothing is written to disk). Fail-open:
+    // an unusable reading leaves dispatch unchanged. At or above the live
+    // threshold new audit/implement work is refused (no strike, no cooldown)
+    // and stalled panes are not resumed, while plan/intake/risk-effort still
+    // dispatch.
+    const cpuGate = resolveCpuGate(deps, opts.cpuGatePercent);
+    const cpuSaturated = cpuGate.saturated;
+    const cpuEvidence = hostCpuGateEvidence(cpuGate);
+
     // ── Stalled-work scan (WL-0MUYMBSA90092QV2 AC1/AC3/AC4) ──
     // Idle-gated (a pane slot is free) and immediately before new-item
     // selection: prefer resuming a stalled pane over opening a new one. A
@@ -6546,6 +6767,7 @@ export async function dispatchDowntimeWork(
       const resumed = await resumeStalledWorkIfAble(deps, opts.cwd, {
         enabled: opts.stallScanEnabled ?? true,
         frozen,
+        cpuSaturated,
         thresholdMs: opts.stallScanThresholdMs ?? DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
         nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
         maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -6569,7 +6791,7 @@ export async function dispatchDowntimeWork(
     // completed/in_review queue is at/over browseItemCount; audits/plan/
     // intake/critical flow unconditionally.
     let reviewGate: ReviewQueueGateResult | null = null;
-    if (!frozen && panesEligible) {
+    if (!frozen && !cpuSaturated && panesEligible) {
       reviewGate = await readReviewQueueGate(deps, opts.cwd, sprintWindow);
     }
 
@@ -6584,7 +6806,7 @@ export async function dispatchDowntimeWork(
     // work exists, so the fallback is unreachable there and will be removed
     // once the suite is fully on Herdr-head stubs.
     {
-      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, auditHostSaturated };
+      const flags = { auditInFlight, auditCheckFailed, auditCheckError: undefined, freshnessSkip, reviewHeld: false, cooldownHeld: false, budgetExhausted: false, cpuHeld: false, auditHostSaturated };
       const head = await deps.getHerdrListHead(opts.cwd, sprintWindow);
       if (!head.ok) return { dispatched: false, reason: 'wl-error', error: (head as { error?: string }).error };
       if (head.items.length > 0) {
@@ -6607,7 +6829,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, localPreference: opts.localPreference, freeSlots, frozen, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
+        const ctx = { cwd: opts.cwd, model: opts.model, localPreference: opts.localPreference, freeSlots, frozen, cpuSaturated, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return finalize(herdrOutcome);
 
@@ -6636,10 +6858,18 @@ export async function dispatchDowntimeWork(
         const reviewHeld = flags.reviewHeld;
         const cooldownHeld = flags.cooldownHeld;
         const budgetExhausted = flags.budgetExhausted;
+        const cpuHeld = flags.cpuHeld;
         // Herdr list had items but every one was filtered by a safety gate:
         // compose the terminal reason and DO NOT fall through to the legacy
         // chain (AC2 — gates are filters, not a fallback ranking).
         if (frozen) return finalize({ dispatched: false, reason: 'code-freeze' });
+        // Host-CPU gate (AC2/AC4): at or above the threshold the remaining
+        // audit/implement candidates were filtered by CPU — report the
+        // distinct neutral reason (never 'no-candidate') with the measured
+        // evidence. Code freeze keeps precedence above.
+        if (cpuHeld) {
+          return finalize({ ...cpuEvidence, dispatched: false, reason: CPU_SATURATED_REASON });
+        }
         if (freshnessSkip) return finalize({ dispatched: false, reason: 'fresh-audit-skip' });
         if (auditInFlight) {
           // Host-wide saturation (WL-0MUIVE0YG000UVIA) vs per-worklog:
@@ -6682,7 +6912,9 @@ export async function dispatchDowntimeWork(
 
     // ── Legacy tier chain (retained for test compat; production-unreachable) ──
     // See the Herdr-list-head contract above.
-    if (!frozen) {
+    // Host-CPU gate (WL-0MVK0UO3Q002TXW6 AC2): the audit tier is refused while
+    // the host is saturated — same placement as the code-freeze skip.
+    if (!frozen && !cpuSaturated) {
       // Audit tier (WL-0MSI8H3HP000K0RG): dispatch /skill:audit for the
       // first completed/in_review item without a valid audit. Root-only
       // (WL-0MSTLFW14000KPEC): only PARENT items are candidates —
@@ -6818,7 +7050,15 @@ export async function dispatchDowntimeWork(
       if (critical.ok) {
         if (critical.candidate !== null && critical.candidate.needsProducerReview !== true) {
           const kind = criticalSkillKind(critical.candidate.stage);
-          if (kind !== null && !(frozen && kind === 'implement')) {
+          // Safety gates: code freeze pauses a critical IMPLEMENT, and the
+          // host-CPU gate pauses a critical implement too (saturation is
+          // exactly when new heavy work does harm); critical plan/intake prep
+          // still dispatches under both gates (WL-0MVK0UO3Q002TXW6 AC2).
+          if (
+            kind !== null &&
+            !(frozen && kind === 'implement') &&
+            !(cpuSaturated && kind === 'implement')
+          ) {
             return await dispatchClaimedTier(deps, kind, critical.candidate, { ...opts, selectionPath: 'legacy-tier', selectionReason: 'critical-tier' });
           }
           // Frozen implement-kind critical (or a non-dispatchable stage):
@@ -6830,7 +7070,7 @@ export async function dispatchDowntimeWork(
       }
     }
 
-    if (!frozen && panesEligible) {
+    if (!frozen && !cpuSaturated && panesEligible) {
       // Review-queue depth gate (WL-0MT2UQWOR007CYY9, shared by the live
       // Herdr-head path — read ONCE per dispatch above via
       // `readReviewQueueGate`, never a second wl call): when the root-only
@@ -6937,7 +7177,9 @@ export async function dispatchDowntimeWork(
       // lifts (WL-0MSQ0RPQP00636JY).
       return frozen
         ? { dispatched: false, reason: 'code-freeze' }
-        : freshnessSkip
+        : cpuSaturated
+          ? { ...cpuEvidence, dispatched: false, reason: CPU_SATURATED_REASON }
+          : freshnessSkip
           ? { dispatched: false, reason: 'fresh-audit-skip' }
           : auditInFlight
             ? {
@@ -7460,6 +7702,13 @@ export interface DowntimeWorkerConfig {
      * every tick. Optional — defaults to `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`.
      */
     stallScanThresholdMs?: number;
+    /**
+     * Host-CPU dispatch gate threshold, percent (WL-0MVK0UO3Q002TXW6 AC5):
+     * read live on every tick from `downtimeCpuGatePercent`, so a settings
+     * change applies without a plugin restart. Optional — defaults to
+     * `DEFAULT_DOWNTIME_CPU_GATE_PERCENT` (75); `0` disables the gate.
+     */
+    cpuGatePercent?: number;
     /**
      * Continuous capacity-refusal window before a `capacity-starved`
      * observation is written (WL-0MVKNC2N50025HXE AC3). Read live on every
@@ -8763,6 +9012,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                   markerStaleWindowMs: cfg.markerStaleWindowMs,
                   stallScanEnabled: cfg.stallScanEnabled,
                   stallScanThresholdMs: cfg.stallScanThresholdMs,
+                  cpuGatePercent: cfg.cpuGatePercent,
                   leaseTtlMs: opts.leaseTtlSeconds
                     ? opts.leaseTtlSeconds * 1000
                     : DEFAULT_LEASE_TTL_SECONDS * 1000,
@@ -8797,6 +9047,8 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
                 // (WL-0MUYMBSA90092QV2).
                 stallScanEnabled: cfg.stallScanEnabled,
                 stallScanThresholdMs: cfg.stallScanThresholdMs,
+                // Host-CPU gate threshold (WL-0MVK0UO3Q002TXW6 AC2/AC5).
+                cpuGatePercent: cfg.cpuGatePercent,
               });
         // Record the refusal reason (WL-0MU8808ZY0091JIA): actionable
         // no-dispatch outcomes (no-candidate / review-queue-hold / code-freeze
@@ -8836,6 +9088,17 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
               // carries `reservationTicket` + `reservationReleased`. Absent on
               // fail-open dispatches and pre-reservation outcomes.
               ...outcome.reservation,
+              // Host-CPU gate evidence (WL-0MVK0UO3Q002TXW6 AC4): present on a
+              // `cpu-saturated` refusal so the measured utilisation, its
+              // source and the configured threshold are recoverable from the
+              // decision log. Absent on every other outcome.
+              ...(outcome.hostCpuPercent !== undefined
+                ? {
+                    hostCpuPercent: outcome.hostCpuPercent,
+                    hostCpuSource: outcome.hostCpuSource,
+                    cpuGatePercent: outcome.cpuGatePercent,
+                  }
+                : {}),
             },
             // The grouped token must not change the starvation signal: the
             // tracker keeps judging the PROXY's own reason, exactly as it did
@@ -8984,7 +9247,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           //    and reset the idle tracker (fresh full idle period required
           //    after the pause).
           if (opts.coordinationDir && typeof opts.deps.fetchItem === 'function') {
-            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs, cfg.maxAttempts, cfg.stallScanEnabled, cfg.stallScanThresholdMs);
+            const probe = await computeMostImportantItem(opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs, cfg.maxAttempts, cfg.stallScanEnabled, cfg.stallScanThresholdMs, cfg.cpuGatePercent);
             if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
               errorStrikes = 0; // the CLI answered — it is healthy
               cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
