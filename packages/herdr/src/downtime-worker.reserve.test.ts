@@ -430,11 +430,18 @@ describe('dispatch reserve gate — refused (AC2/AC4)', () => {
     expect(deps.recordDispatch).not.toHaveBeenCalled();
     // The claim is rolled back so the item is selectable next idle period.
     expect(deps.rollbackClaim).toHaveBeenCalledTimes(1);
-    // The proxy's refusal reason is carried into the decision entry, with
-    // the retry advice and `admit: false` evidence (AC2/AC4).
-    const refusal = recordedDecisions(recordDecision).find((d) => d.reason === 'queue-full');
+    // The proxy's refusal evidence is carried into the decision entry, with
+    // the retry advice and `admit: false` (AC2/AC4). Since slice C3 the entry
+    // reason is the grouped `reservation-refused` token (header token
+    // `reservation-lost`, deliberately distinct from herdr's own paced
+    // `prefill-gate`/`prefill-cap`) and the proxy's own vocabulary is
+    // preserved in `reservationReason`.
+    const refusal = recordedDecisions(recordDecision).find(
+      (d) => d.reason === 'reservation-refused',
+    );
     expect(refusal).toBeDefined();
     expect(refusal?.fields).toMatchObject({
+      reservationReason: 'queue-full',
       admit: false,
       retryAfterS: 12,
       projectedWaitS: 12,
@@ -445,6 +452,9 @@ describe('dispatch reserve gate — refused (AC2/AC4)', () => {
     for (const reason of ['reserved-fallback', 'prefill-gate', 'queue-full']) {
       expect(decisionHeaderToken(reason)).toBe(reason);
     }
+    // The dispatch-path refusal token is reserved for the proxy's verdict and
+    // must never collapse into a paced-stop token (slice C3 AGAIN check).
+    expect(decisionHeaderToken('reservation-refused')).toBe('reservation-lost');
   });
 });
 

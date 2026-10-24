@@ -458,6 +458,75 @@ unchanged) and the pane-arg/env forwarding;
 `tests/herdr/send-to-pi.test.ts` pins `--reservation-ticket` →
 `PI_LOCAL_RESERVATION_TICKET` in the pane process.
 
+### One launch per idle window (parent WL-0MVIKRFP0005JDL8 AC3, slice C3)
+
+**Problem (the residual half of the race).** The reservation handshake above is
+the *cross-instance* arbiter — two instances observing the same idle window ask
+for a ticket and exactly one is granted. But a `200` grant was not yet enough
+to guarantee *one pane per window*, because a freshly launched pane takes
+seconds to boot pi and start its prefill: for the next few polls the proxy's
+`local_prefills_in_flight` still reports the **pre-launch** value, so the same
+(or a permissive) dispatcher sees headroom that the launch has already spent
+and can be granted a second ticket against it. Observed impact: an idle window
+*observed* by N instances but *owned* by one.
+
+**The rule.** An idle window produces **at most one** launch for this instance,
+and a further launch is admitted only when BOTH hold:
+
+1. a **fresh status tick** whose `local_prefills_in_flight` has advanced past
+   the admission value — i.e. the proxy has REGISTERED the launch, so the
+   headroom it reports is demonstrably post-launch (with the serialised default
+   `local_max_concurrent_prefills: 1` this also means the pacing gate itself
+   refuses until the launched prefill finishes); and
+2. a **new reservation ticket granted for that specific launch** (the launch
+   carries its own ticket; nothing is reused).
+
+With a headroom-permitting proxy (`cap > 1`) the rule permits at most `cap`
+concurrent launches per window, matching the prefill headroom — it never
+raises the budget.
+
+**Implementation.** A per-instance fence (`createIdleWindowLaunchFence`) is fed
+by every usable poll (`idle`, `local_prefills_in_flight`,
+`local_max_concurrent_prefills`) and records each successful launch. It is
+consulted at the single machine-wide gate the worker runs **before BOTH dispatch
+paths** (coordination-leader and own-backlog), so the rule is identical on each:
+
+| Situation | Behaviour |
+|---|---|
+| No launch yet in this window | admit (subject to every existing gate) |
+| Launched, proxy still reports the pre-launch in-flight count | **refuse** — reason `idle-window-spent`, token `window-spent`: no reserve request, no spawn, no strike, no cooldown, claim never taken |
+| Launched, proxy now counts the launched prefill | admit (the pacing gate then decides on the real headroom) |
+| Window ended (busy poll), counters absent / `cap: 0`, or no registration within the 5-minute grace | admit (fail-open — an older proxy and a dead pane can never wedge the dispatcher) |
+
+**Evidence.** A refusal on the `dispatchClaimedTier` reserve gate is recorded
+under the grouped reason `reservation-refused` with header token
+`reservation-lost`, and the proxy's own vocabulary is preserved in
+`reservationReason` (`prefill-gate` / `queue-full` / `reserved-fallback` / …)
+alongside `admit: false`, `retryAfterS` and `projectedWaitS`. The token is
+deliberately distinct from herdr's OWN paced stops (`prefill-gate` /
+`prefill-cap` / `prefill-eta`) and from the fence hold (`window-spent`), so an
+operator can tell a lost reservation race from a paced stop from the herdr
+header alone. The coordination-leader path returns that refusal directly
+instead of falling through to the own-backlog fallback (which would retry other
+items and replace the evidence with a generic terminal reason).
+
+**Composition with the coordination leader.** The fence holds no distributed
+lock and never claims capacity: the proxy remains the arbiter (an atomic
+grant), the coordination leader remains the only dispatcher, and the fence only
+ever *adds* refusals on top of the per-slot / saturated / prefill gates — it
+never admits a dispatch they would refuse.
+
+**Tests.** `downtime-worker.launch-window.test.ts` pins the fence state machine
+(registration releases it, a busy poll ends the window, absent counters and
+`cap: 0` are inert, the bounded grace self-releases, `cap > 1` still requires
+registration first), the same-tick two-instance race (one spawn total from one
+shared mock-proxy ledger; the loser records `reservation-refused` with
+`admit: false` / `retryAfterS` / `reservationReason` under the
+`reservation-lost` token), later-tick suppression against a stale status,
+the positive path (registered headroom + its own ticket), and
+coordination-leader parity (evidence returned, not masked; the leader window
+fenced like the own-backlog window).
+
 ### Idle-age authority (`local_idle_seconds`, WL-0MVHSZR9C0012NQY)
 
 The proxy publishes the authoritative monotonic local idle age
@@ -2241,7 +2310,12 @@ them, every entry also carries the capacity/prefill evidence
 `maxConcurrentPrefills`, `prefillGateWaiters`, `prefillBudgetSeconds`,
 `queueEtaSeconds`, `slotPhases`, `slotPrefillEtaSeconds`); prefill pacing
 refusals use the distinct reasons/tokens `prefill-gate`, `prefill-cap` and
-`prefill-eta`.
+`prefill-eta`. The reservation slices add two more distinct tokens:
+`reservation-refused` (header token `reservation-lost`, with the proxy's own
+reason in `reservationReason` plus `admit: false` / `retryAfterS` /
+`projectedWaitS`) and `idle-window-spent` (header token `window-spent`, with
+`pendingLaunches`) — see [One launch per idle
+window](#one-launch-per-idle-window-parent-wl-0mvikrfp0005jdl8-ac3-slice-c3).
 The header blocking
 token is still updated on **every refusal** and never on the observation
 tokens below.

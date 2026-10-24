@@ -59,6 +59,14 @@ export function clampDowntimeCapacityStarvationAlertMs(value: number): number {
  * `idle-age-pending` is excluded on purpose: it is a non-blocking observation
  * written when free slots exist but the idle age is still short — capacity is
  * available, so it is not starvation.
+ *
+ * `idle-window-spent` (parent WL-0MVIKRFP0005JDL8 slice C3) is excluded too:
+ * it means this instance ALREADY used the window's capacity and is waiting for
+ * the proxy to register that launch — the opposite of starvation. Reservation
+ * refusals keep feeding the episode through the proxy's own reason (the
+ * decision entry groups them under `reservation-refused` but passes the
+ * proxy's reason as `starvationReason`), so `queue-full` / `reserved-fallback`
+ * still count.
  */
 export const CAPACITY_REFUSAL_REASONS: ReadonlySet<string> = new Set([
   'slots-unavailable',

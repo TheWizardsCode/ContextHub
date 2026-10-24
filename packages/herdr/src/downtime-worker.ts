@@ -334,6 +334,22 @@ export function decisionHeaderToken(reason: string): string {
       // is never collapsed into `no-slots` / `contention` and the operator
       // can tell WHY no ticket was granted from the herdr header alone.
       return reason;
+    case 'idle-window-spent':
+      // Idle-window launch fence (parent AC3, slice C3): this instance
+      // already launched from this idle window and the proxy has not yet
+      // reported that launch, so its headroom cannot be trusted yet. Distinct
+      // from every paced stop (`prefill-gate` / `prefill-cap` / `prefill-eta`)
+      // and from `reservation-lost` below.
+      return 'window-spent';
+    case 'reservation-refused':
+      // Reserve-handshake refusal observed on the DISPATCH path (slice C3):
+      // the proxy declined the admission ticket. The proxy's own vocabulary
+      // (`prefill-gate` / `queue-full` / …) is carried as `reservationReason`
+      // evidence, but the header token must NOT collapse into the paced-stop
+      // tokens — an operator has to be able to tell a lost reservation race
+      // (`reservation-lost`) from herdr's own pacing (`prefill-gate` /
+      // `prefill-cap`).
+      return 'reservation-lost';
     default:
       return reason;
   }
@@ -410,6 +426,21 @@ export interface DecisionEntryFields extends CapacityEvidence {
   projectedWaitS?: number;
   retryAfterS?: number;
   reservationReleased?: boolean;
+  /**
+   * The proxy's OWN refusal reason (`reservation-refused` entries only,
+   * parent AC3 slice C3). The entry's `reason` is the grouped
+   * `reservation-refused` token (so the header reads `reservation-lost`,
+   * distinct from a paced `prefill-gate`/`prefill-cap` stop) and this field
+   * preserves the proxy's open vocabulary for diagnosis.
+   */
+  reservationReason?: string;
+  /**
+   * Launches this instance made in the current idle window that the proxy's
+   * `local_prefills_in_flight` has not yet accounted for (parent AC3 slice
+   * C3; the entry's reason is `idle-window-spent`). Evidence only — the
+   * guard itself refuses the tick before any dispatch attempt.
+   */
+  pendingLaunches?: number;
 }
 
 function capacityEvidence(
@@ -2047,6 +2078,165 @@ export function createLocalReserver(
     } finally {
       clearTimeout(timer);
     }
+  };
+}
+
+// ── Idle-window launch fence (parent WL-0MVIKRFP0005JDL8, slice C3) ──
+//
+// One-per-idle-window reservation race guard, client side. The proxy's
+// atomic reservation (slice C2) already arbitrates CROSS-instance: two
+// instances asking for a ticket in the same idle window get exactly one
+// grant between them, and the loser defers with the refusal evidence. This
+// fence closes the residual same-instance window in which a *granted*
+// launch could be followed by ANOTHER granted launch before the proxy's
+// own status catches up:
+//
+//   - a fresh launch takes seconds to boot pi and start its prefill, so
+//     `local_prefills_in_flight` can still report the pre-launch headroom
+//     on the next few polls;
+//   - without a fence, a permissive proxy (grants N tickets for N slots —
+//     the slice's recorded risky assumption) would grant a second ticket
+//     against that stale headroom and herdr would launch a second pane in
+//     the same idle window;
+//   - the guard therefore treats an idle window as SPENT once this instance
+//     launches a ticket-backed pane, and refuses further launches until a
+//     fresh observation shows the launched prefill REGISTERED
+//     (`local_prefills_in_flight` advanced past the admission value) and
+//     headroom returned (`in_flight < cap`). The AC2 test drives exactly
+//     this: launch → stale in_flight (fence holds, no spawn) → in_flight
+//     advances (registered, fence clear) → headroom + a NEW ticket → the
+//     second launch is admitted with its own ticket.
+//
+// Fail-open by construction: when the proxy does not serve the prefill
+// counters (older proxy), or `cap` is 0/absent (unbounded), the fence can
+// never be evaluated and stays inert — today's behaviour byte-for-byte. A
+// launch it can never confirm (crash / remote fallback) is reported as
+// registered after a bounded grace so a dead pane cannot wedge the
+// dispatcher. It never admits a dispatch the per-slot / saturated / prefill
+// gates would refuse (AC5) — it only ever adds refusals, never a grant.
+
+/**
+ * Bounded grace after a launch before the fence self-releases even without
+ * observed registration. Covers a pane that was granted a ticket but died
+ * before ever prefilling (crash / remote fallback) — the fence must never
+ * wedge the worker on an admit it can never observe.
+ */
+export const DEFAULT_LAUNCH_CONFIRMATION_GRACE_MS = 5 * 60_000;
+
+/** Observation-fed state for the one-per-idle-window launch fence. */
+export interface IdleWindowLaunchObservation {
+  /** True when the poll reports a continuous idle window (started/ongoing). */
+  idle: boolean;
+  /** `local_prefills_in_flight` when served (undefined = pre-feature proxy). */
+  inFlight?: number;
+  /** `local_max_concurrent_prefills` when served (0 = gate disabled). */
+  cap?: number;
+}
+
+/** Verdict of {@link IdleWindowLaunchFence.admit}. */
+export interface IdleWindowLaunchVerdict {
+  ok: boolean;
+  /** Refusal reason when `ok` is false (never a paced-stop token). */
+  reason?: 'idle-window-spent';
+}
+
+/**
+ * Per-instance one-per-idle-window launch fence (parent AC3, slice C3).
+ * Holds once a successful launch has been recorded and releases when a
+ * later observation proves the launched prefill has REGISTERED in the
+ * proxy's counter, or the window ended, or the bounded grace elapsed.
+ */
+export interface IdleWindowLaunchFence {
+  /** Record a successful launch from the CURRENT observation (instance state). */
+  recordLaunch(now: number): void;
+  /**
+   * Observe one status ticket. Releases the fence when the launched pane's
+   * prefill has advanced past the admission count (fresh headroom is
+   * trustworthy again), when the window ends, or after the grace window.
+   */
+  observePoll(observation: IdleWindowLaunchObservation): void;
+  /**
+   * May a new launch be attempted now? Holds while launches recorded in the
+   * current window are still unobserved (the status is stale).
+   */
+  admit(now: number): IdleWindowLaunchVerdict;
+  /** Number of recorded-but-unobserved launches (decision-log evidence). */
+  readonly pendingLaunches: number;
+}
+
+/** Create a per-worker {@link IdleWindowLaunchFence}. */
+export function createIdleWindowLaunchFence(
+  graceMs: number = DEFAULT_LAUNCH_CONFIRMATION_GRACE_MS,
+): IdleWindowLaunchFence {
+  // Admission snapshot: the last usable `local_prefills_in_flight` a launch
+  // decision was based on. A launch is registered once a later poll reports a
+  // STRICTLY greater count (the launched pane joined the proxy's counter),
+  // which is what makes the next observation trustworthy.
+  let baseline: number | undefined;
+  let pending = 0;
+  let pendingSince = 0;
+
+  /** Drop the hold but keep the baseline — a launch admitted on this same
+   *  poll must still be recordable (and therefore fenced). */
+  const release = (): void => {
+    pending = 0;
+    pendingSince = 0;
+  };
+  /** The counters are no longer judgeable: the fence goes fully inert. */
+  const reset = (): void => {
+    release();
+    baseline = undefined;
+  };
+
+  /** The fence is evaluable only when the proxy serves a serialised cap. */
+  const usable = (inFlight: number | undefined, cap: number | undefined): boolean =>
+    typeof inFlight === 'number' && typeof cap === 'number' && cap > 0;
+
+  return {
+    get pendingLaunches(): number {
+      return pending;
+    },
+    recordLaunch(now: number): void {
+      // Only a counter-serving observation can hold the fence; a launch
+      // recorded on a pre-feature proxy is never fenced (fail-open).
+      if (typeof baseline !== 'number') return;
+      pending += 1;
+      pendingSince = now;
+    },
+    observePoll({ idle, inFlight, cap }: IdleWindowLaunchObservation): void {
+      if (!usable(inFlight, cap)) {
+        // The proxy stopped serving counters (or the cap is unbounded) —
+        // the fence can no longer be judged; fail open.
+        reset();
+        return;
+      }
+      if (pending > 0) {
+        if (!idle) {
+          // The window ended (busy poll): the launched pane registered or the
+          // window gave way — nothing to hold any more.
+          release();
+        } else if (inFlight! > baseline!) {
+          // The launched pane is now counted: this observation is
+          // demonstrably POST-launch, so its headroom is trustworthy again.
+          release();
+        } else {
+          // Still the pre-launch count — keep holding against the stale
+          // snapshot (the baseline stays put).
+          return;
+        }
+      }
+      baseline = inFlight;
+    },
+    admit(now: number): IdleWindowLaunchVerdict {
+      if (pending === 0) return { ok: true };
+      // Dead-pane safety: without observed registration within the grace
+      // window (crash / remote fallback), release the fence — never wedged.
+      if (now - pendingSince >= graceMs) {
+        release();
+        return { ok: true };
+      }
+      return { ok: false, reason: 'idle-window-spent' };
+    },
   };
 }
 
@@ -5769,6 +5959,17 @@ async function dispatchFromCoordinationGated(
       removeEntry(opts.coordinationDir, entry.instanceId);
       return outcome;
     }
+    if (outcome.reservation?.admit === false) {
+      // The proxy REFUSED the local-capacity ticket (parent AC3/AC4, slice
+      // C3): a capacity deferral, not an offer problem. Keep the entry (the
+      // offer is still valid) and return the refusal evidence WITHOUT falling
+      // through to the own-backlog fallback — that fallback would retry other
+      // items and eventually report a generic terminal reason, losing the
+      // `admit: false` / `retryAfterS` / proxy-reason evidence the decision
+      // log needs to distinguish a lost reservation race from a paced stop
+      // (coordination-path parity, C3-AC4).
+      return outcome;
+    }
     if (outcome.reason === 'claim-failed') {
       // Another pane won the CAS race — neutral; try the next offer.
       continue;
@@ -7406,6 +7607,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
   let longRunningThresholdMs = DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS;
   // Current header blocking token; null when not gate-blocked. Reset each tick.
   let blockReason: string | null = null;
+  // One-per-idle-window launch fence (parent WL-0MVIKRFP0005JDL8, slice C3):
+  // holds once the instance launches a ticket-backed pane and releases only
+  // when a fresh observation shows the launched prefill registered. This is
+  // per-instance state — the proxy's atomic reservation is the cross-instance
+  // arbiter (slice C2); the fence closes the STALE-STATUS same-instance window
+  // (a permissive proxy granting N tickets against unchanged headroom).
+  const launchWindow = createIdleWindowLaunchFence();
   // Per-instance in-memory enabled override (parent WL-0MSZ4NSOE007AQEF):
   // null (default) = follow the global setting; true/false force dispatch
   // on/off for THIS instance. In-memory only — resets on plugin restart,
@@ -7604,6 +7812,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
        * behaviour.
        */
       blocking?: boolean;
+      /**
+       * Reason fed to the capacity-starvation tracker INSTEAD of `reason`.
+       * Used when a refusal is grouped under one decision/header token while
+       * the starvation signal must still see the underlying vocabulary —
+       * `reservation-refused` is grouped for the header (proxy reason in
+       * `reservationReason`), but the tracker must judge the PROXY's reason
+       * (`prefill-gate` / `queue-full` are capacity refusals, an unknown
+       * open-vocabulary reason is not). Defaults to `reason`.
+       */
+      starvationReason?: string;
     } = {},
   ): Promise<void> => {
     if (options.blocking !== false) blockReason = decisionHeaderToken(reason);
@@ -7620,7 +7838,9 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
     // underlying reason are unchanged, it is written even when the refusal
     // itself is rate-limited, and a logging failure never affects dispatch.
     const starvation =
-      options.blocking !== false ? starvationTracker.observe(reason, now) : null;
+      options.blocking !== false
+        ? starvationTracker.observe(options.starvationReason ?? reason, now)
+        : null;
     if (
       lastDecisionReason === reason &&
       now - lastDecisionAt < DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS
@@ -8017,6 +8237,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         tracker.record(false); // endpoint failure/ambiguity → busy
         perSlotTracker.record([]); // fail-closed: ambiguous poll resets every slot timer
         activeAuditBatch = null; // an ambiguous poll ends the batch window
+        launchWindow.observePoll({ idle: false }); // unusable poll → window over
         return { polled: true, dispatched: false, idle: false };
       }
 
@@ -8056,6 +8277,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (perSlotSlots === null) {
         tracker.record(false);
         perSlotTracker.record([]); // fail-closed: reset every slot timer
+        launchWindow.observePoll({ idle: false }); // no trustworthy window → fence releases
         void recordDecision(cfg.cwd, 'slots-unavailable', {
           freeSlots: 0,
           totalSlots: status.total_slots,
@@ -8078,6 +8300,7 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
       if (status.capacity_hint === 'saturated') {
         tracker.record(false);
         perSlotTracker.record([]); // saturated → reset every slot timer
+        launchWindow.observePoll({ idle: false }); // saturated pool → no window
         void recordDecision(cfg.cwd, 'capacity-saturated', {
           freeSlots: countFreeUnownedSlots(perSlotSlots),
           totalSlots: status.total_slots,
@@ -8173,6 +8396,16 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         perSlotTracker.record([]);
         activeAuditBatch = null;
       }
+
+      // One-per-idle-window launch fence observation (parent AC3, slice C3):
+      // feed every usable poll so a launch recorded earlier in this window is
+      // released as soon as the proxy's own in-flight counter shows it
+      // registered (or the window ends / counters are no longer servable).
+      launchWindow.observePoll({
+        idle,
+        inFlight: status.local_prefills_in_flight,
+        cap: status.local_max_concurrent_prefills,
+      });
 
       if (!idle) {
         activeAuditBatch = null; // busy poll ends the continuous idle window
@@ -8355,6 +8588,38 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
           ? freeSlots
           : Math.min(freeSlots, prefillPacing.capacityBudget);
 
+      // ── One-per-idle-window launch fence (parent AC3, slice C3) ──
+      // The proxy's atomic reservation (C2) arbitrates a cross-instance race;
+      // this client-side fence handles the STALE-STATUS same-instance window:
+      // once a launch is recorded, no further launch may be admitted while
+      // the proxy's in-flight counter has not yet shown the launched prefill
+      // registered — the current headroom is the pre-launch snapshot, so a
+      // permissive proxy could otherwise grant a second ticket against it.
+      // Distinct header token (`window-spent`) so an operator can tell this
+      // hold from a paced stop (`prefill-gate`/`prefill-cap`) and from a lost
+      // cross-instance race (`reservation-lost`). Neutral: never a strike,
+      // never a cooldown.
+      const launchVerdict = launchWindow.admit(Date.now());
+      if (!launchVerdict.ok) {
+        void recordDecision(cfg.cwd, 'idle-window-spent', {
+          freeSlots,
+          totalSlots: status.total_slots,
+          ownerPresent,
+          runningPanes,
+          contentionDepth: contentionQueueDepth,
+          ...capacity,
+          ...batchMetadata(),
+          // How many of THIS instance's launches the proxy has not yet
+          // accounted for (observability evidence, AC3).
+          pendingLaunches: launchWindow.pendingLaunches,
+        });
+        // The batch window is unchanged: the fence applies to the NEXT launch
+        // decision, not to an already-armed batch (a continuation retries on
+        // the following tick once registration is observed). No spawn is
+        // attempted, no reserve request is made.
+        return { polled: true, dispatched: false, idle: true };
+      }
+
       // Coordination mode: the elected leader reads the shared coordination
       // list, re-fetches and classifies each entry's item (tier priority:
       // audit → implement → plan → intake) and dispatches the
@@ -8442,26 +8707,44 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // dispatcher's decision is observable. A successful dispatch is not a
         // refusal.
         if (!outcome.dispatched && typeof outcome.reason === 'string') {
-          void recordDecision(cfg.cwd, outcome.reason, {
-            freeSlots,
-            totalSlots: status.total_slots,
-            ownerPresent,
-            runningPanes,
-            contentionDepth: contentionQueueDepth,
-            ...capacity,
-            // AC5: a held/blocked continuation reuses the EXISTING token
-            // unchanged (`audit-in-flight` / `audit-host-saturated` /
-            // `code-freeze` / `review-queue-hold` / `no-candidate` / ...) and
-            // gains the active batch metadata as an additive field.
-            ...batchMetadata(outcome.auditBatch),
-            // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
-            // slice C2): a refusal carries its reason as the decision reason
-            // (distinct header token) plus `admit: false`, `retryAfterS` and
-            // `projectedWaitS`; a granted ticket that could not be forwarded
-            // carries `reservationTicket` + `reservationReleased`. Absent on
-            // fail-open dispatches and pre-reservation outcomes.
-            ...outcome.reservation,
-          });
+          // A reserve-handshake refusal is a DISTINCT operator signal from a
+          // paced stop (parent AC3, slice C3): record it under the grouped
+          // `reservation-refused` reason (header token `reservation-lost`) and
+          // keep the proxy's own vocabulary in `reservationReason`, so a lost
+          // reservation race can never be confused with herdr's own
+          // `prefill-gate`/`prefill-cap` pacing.
+          const reservationRefused = outcome.reservation?.admit === false;
+          void recordDecision(
+            cfg.cwd,
+            reservationRefused ? 'reservation-refused' : outcome.reason,
+            {
+              freeSlots,
+              totalSlots: status.total_slots,
+              ownerPresent,
+              runningPanes,
+              contentionDepth: contentionQueueDepth,
+              ...capacity,
+              // AC5: a held/blocked continuation reuses the EXISTING token
+              // unchanged (`audit-in-flight` / `audit-host-saturated` /
+              // `code-freeze` / `review-queue-hold` / `no-candidate` / ...) and
+              // gains the active batch metadata as an additive field.
+              ...batchMetadata(outcome.auditBatch),
+              // The proxy's own refusal reason (open vocabulary), preserved
+              // for diagnosis alongside the grouped entry reason.
+              ...(reservationRefused ? { reservationReason: outcome.reason } : {}),
+              // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
+              // slice C2): a refusal carries its reason as the decision reason
+              // (distinct header token) plus `admit: false`, `retryAfterS` and
+              // `projectedWaitS`; a granted ticket that could not be forwarded
+              // carries `reservationTicket` + `reservationReleased`. Absent on
+              // fail-open dispatches and pre-reservation outcomes.
+              ...outcome.reservation,
+            },
+            // The grouped token must not change the starvation signal: the
+            // tracker keeps judging the PROXY's own reason, exactly as it did
+            // when that reason was the entry reason (slice C3).
+            reservationRefused ? { starvationReason: outcome.reason } : {},
+          );
         }
         // Any non-`dispatched` outcome ends the audit batch (parent
         // WL-0MVEDM8OT007WDRS AC3): the next audit requires a fresh full idle
@@ -8470,6 +8753,10 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
         // separate end token is emitted (no duplicate line per refusal).
         if (!outcome.dispatched) activeAuditBatch = null;
         if (outcome.dispatched) {
+          // One-per-idle-window fence (parent AC3, slice C3): record the
+          // launch so the NEXT dispatch decision in this window requires a
+          // fresh observation that the launched prefill registered.
+          launchWindow.recordLaunch(Date.now());
           lastDispatchAt = Date.now();
           errorStrikes = 0; // a successful dispatch proves the CLI is healthy
           // A successful dispatch proves capacity was available, so the

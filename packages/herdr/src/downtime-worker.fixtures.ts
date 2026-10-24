@@ -326,6 +326,25 @@ export const prefillSlotEtaOverBudget: LlamaStatus = prefillPacingStatus({
   ],
 });
 
+/**
+ * Idle status that ALSO serves the prefill-serialisation counters needed to
+ * judge a one-per-idle-window launch (parent WL-0MVIKRFP0005JDL8, slice C3).
+ * Defaults model the serialised proxy: four free slots, nothing prefilling,
+ * cap `1`. Override one field per scenario (e.g. raise `cap` to model a
+ * proxy that would otherwise admit a second concurrent launch, or keep
+ * `local_prefills_in_flight` at `0` to model the STALE status that follows a
+ * launch before the new pane's prefill registers).
+ */
+export function launchWindowStatus(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
+  return {
+    ...idleAllSlotsFree,
+    local_prefills_in_flight: 0,
+    local_max_concurrent_prefills: 1,
+    prefill_gate_waiters: 0,
+    ...overrides,
+  };
+}
+
 /** Raw `herdr pane list` output with two live downtime panes + noise. */
 export const herdrPaneListRaw: string = JSON.stringify({
   id: 'cli:pane:list',
