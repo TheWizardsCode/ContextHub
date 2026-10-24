@@ -4,3 +4,20 @@ autoSync: false
 githubRepo: TheWizardsCode/ContextHub
 githubLabelPrefix: 'wl:'
 githubImportCreateNew: true
+# syncAllowedAuthors — finite allow-list for the `wl sync` author-identity gate
+# (WL-0MTGDW58X007UJDS). `refs/worklog/data` is written by more than one
+# environment, so its history legitimately carries commits from both the
+# operator identity and the agent-store identity. The gate always allows this
+# store's local `user.email` in addition to the addresses below, so listing both
+# identities makes the gate pass whichever of them a given environment has
+# configured. See docs/SYNC_IDENTITY_GATE.md.
+#
+# Kept here rather than in `.worklog/config.defaults.yaml`: that file is the
+# project template (`projectName: TestProject`, `prefix: TEST`), so identities
+# listed there would leak into every new project. Keep this list NARROW — never
+# `null`/`true` (allow-all). Empty-author commits are refused unconditionally
+# regardless of this setting. Add a new identity explicitly, under a work item,
+# only when a new legitimate writer appears on the ref (WL-0MVM92MZ50075E6B).
+syncAllowedAuthors:
+  - 250240+SorraTheOrc@users.noreply.github.com
+  - pi@local
