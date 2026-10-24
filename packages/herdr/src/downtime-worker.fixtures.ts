@@ -21,7 +21,12 @@ import { join } from 'node:path';
 import { vi } from 'vitest';
 
 import { DOWNTIME_LOG_FILE } from './downtime-log.js';
-import type { DowntimeWorkerDeps, LlamaStatus } from './downtime-worker.js';
+import type {
+  DowntimeWorkerDeps,
+  LlamaStatus,
+  LocalReservationGrantedBody,
+  LocalReservationRefusedBody,
+} from './downtime-worker.js';
 
 // ── Status payloads ───────────────────────────────────────────────────
 
@@ -415,6 +420,69 @@ export const statusFixtures: LlamaStatusFixture[] = [
     note: 'total_slots 0 → ambiguous → busy',
   },
 ];
+
+// ── Reservation handshake fixtures (parent WL-0MVIKRFP0005JDL8, slice C1) ──
+//
+// The reserve handshake (`POST /llama/local/reserve`) is pinned by
+// `downtime-worker.reserve.test.ts` before any client exists. One fixture per
+// real response class the proxy may produce: granted ticket, `429` refusal,
+// endpoint absent, server error and timeout — so no contract test needs an
+// ad-hoc inline response object (C1-AC2).
+
+/**
+ * A mocked reserve-handshake response: the HTTP status the caller observed
+ * plus the parsed body. `status: 0` models "no response at all" (timeout /
+ * network abort) — the fail-open path an older or unreachable proxy takes.
+ */
+export interface LocalReservationHttpFixture<Body = unknown> {
+  status: number;
+  body: Body;
+}
+
+/**
+ * Granted ticket (`2xx`): the gate ticket id and its TTL in seconds. Override
+ * any field to model an alias rename or an invalid variant the tolerant
+ * parser must reject.
+ */
+export function reserveGranted(
+  overrides: Record<string, unknown> = {},
+): LocalReservationHttpFixture<LocalReservationGrantedBody> {
+  return {
+    status: 200,
+    body: { ticket_id: 'tkt-granted-1', ttl_s: 30, ...overrides },
+  };
+}
+
+/**
+ * Refused ticket (`429`): `{ reason, retry_after_s }`. The dispatcher must
+ * defer by `retry_after_s` and record the reason instead of launching.
+ */
+export function reserveRefused429(
+  overrides: Record<string, unknown> = {},
+): LocalReservationHttpFixture<LocalReservationRefusedBody> {
+  return {
+    status: 429,
+    body: { reason: 'prefill-gate', retry_after_s: 12, ...overrides },
+  };
+}
+
+/** Older proxy with no reserve handler → `404`, no body → fail open to null. */
+export const reserveEndpointAbsent: LocalReservationHttpFixture<null> = {
+  status: 404,
+  body: null,
+};
+
+/** The proxy failed on the reserve path → `500`, no body → fail open to null. */
+export const reserveServerError: LocalReservationHttpFixture<null> = {
+  status: 500,
+  body: null,
+};
+
+/** The call timed out or was aborted → no HTTP status, no body → fail open. */
+export const reserveTimeout: LocalReservationHttpFixture<null> = {
+  status: 0,
+  body: null,
+};
 
 // ── HTTP response / error fixtures (poller tests, F2) ─────────────────
 

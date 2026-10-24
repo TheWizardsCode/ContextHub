@@ -214,6 +214,29 @@ export type { CoordinationEntry } from './coordination.js';
 /** Proxy status endpoint path. */
 export const DOWNTIME_STATUS_PATH = '/llama/local/status';
 
+/**
+ * Local capacity reservation endpoint path (parent WL-0MVIKRFP0005JDL8):
+ * `POST {proxyUrl}/llama/local/reserve`. ABSENT on older proxies — the
+ * caller fails open to today's polling behaviour (AC2).
+ */
+export const LOCAL_RESERVE_PATH = '/llama/local/reserve';
+
+/**
+ * Request/response header carrying the granted reservation ticket id
+ * (`X-Local-Reservation: <ticketId>`), sent on the pane's FIRST request
+ * (parent AC1).
+ */
+export const LOCAL_RESERVATION_HEADER = 'X-Local-Reservation';
+
+/** Per-turn locality preference header (parent AC4, implemented in C4). */
+export const LOCAL_PREFERENCE_HEADER = 'X-Local-Preference';
+
+/** Response header reporting the route the proxy actually took (parent AC4). */
+export const LOCAL_ROUTE_HEADER = 'X-Local-Route';
+
+/** Response header reporting why a request fell back off the local route (parent AC4). */
+export const LOCAL_FALLBACK_REASON_HEADER = 'X-Local-Fallback-Reason';
+
 /** Hard floor for the poll interval (must not hammer the proxy). */
 export const DOWNTIME_POLL_INTERVAL_FLOOR_MS = 10_000;
 
@@ -1756,6 +1779,154 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     local_last_activity_at: localLastActivityAt,
     local_last_activity_source: localLastActivitySource,
   };
+}
+
+// ── Local reservation handshake (parent WL-0MVIKRFP0005JDL8, slice C1) ──
+//
+// The llama-proxy is adding an atomic reservation handshake: `POST
+// {proxyUrl}/llama/local/reserve` returns a gate ticket (granted) or an HTTP
+// 429 refusal carrying `{ reason, retry_after_s }`. This slice pins the
+// contract — types, header names, wire-body shapes, tolerant parser — BEFORE
+// any client exists; the reserve client (C2) and the one-per-idle-window
+// guard (C3) are built against it. NOTHING here is called on the dispatch
+// path yet (no behaviour change, C1-AC5).
+//
+// Risky assumption (work item): the exact granted-body field names are only
+// known once the proxy lands, so one typed accessor reads a small set of
+// aliases and a rename is a one-line change. Additive proxy fields must never
+// break parsing.
+
+/**
+ * Locality priority the dispatcher asks the proxy to schedule a turn with.
+ * Advisory to the proxy; unknown values are the proxy's to reject.
+ */
+export type LocalReservationPriority = 'interactive' | 'background';
+
+/**
+ * Prefix-cache expectation for the turn: `warm` (the proxy's cache should
+ * serve the prefill), `cold` (it should not) or `unknown` (the caller cannot
+ * tell — the proxy decides).
+ */
+export type LocalReservationCacheState = 'warm' | 'cold' | 'unknown';
+
+/**
+ * Request body for `POST /llama/local/reserve`: the pane's expected token
+ * size, its scheduling priority and its cache state. The proxy contract is
+ * additive-only, so extra fields are permitted and ignored by this consumer.
+ */
+export interface LocalReservationRequest {
+  /** Expected prompt + completion token size for the turn. */
+  expected_tokens: number;
+  /** Scheduling priority the proxy may use to admit or refuse. */
+  priority: LocalReservationPriority;
+  /** Whether the proxy's prefix cache is expected to serve this prefill. */
+  cache_state: LocalReservationCacheState;
+  /** Additive fields are allowed (additive-only proxy contract). */
+  [extra: string]: unknown;
+}
+
+/**
+ * Granted reserve response body (`2xx`). Field names are the documented
+ * contract; {@link parseLocalReservationResponse} additionally accepts the
+ * `ticket` / `ttl_seconds` aliases while the proxy contract settles.
+ */
+export interface LocalReservationGrantedBody {
+  ticket_id: string;
+  ttl_s: number;
+  [extra: string]: unknown;
+}
+
+/**
+ * Refused reserve response body (`429`): `reason` is an OPEN vocabulary
+ * (`reserved-fallback`, `prefill-gate`, `queue-full`, …) — consumers accept
+ * any non-empty string and never branch on an unknown one.
+ */
+export interface LocalReservationRefusedBody {
+  reason: string;
+  retry_after_s: number;
+  [extra: string]: unknown;
+}
+
+/** A granted gate ticket: its id goes on the pane's first request. */
+export interface LocalReservationTicket {
+  /** Gate ticket id, surfaced as `X-Local-Reservation`. */
+  ticketId: string;
+  /** Seconds the ticket remains valid (always finite and > 0). */
+  ttlSeconds: number;
+}
+
+/** A refusal: defer by `retryAfterSeconds`, record `reason` as evidence. */
+export interface LocalReservationRefusal {
+  /** Proxy-supplied refusal reason (open vocabulary). */
+  reason: string;
+  /** Seconds to wait before asking again (finite, >= 0). */
+  retryAfterSeconds: number;
+}
+
+/** Parsed reservation outcome: a ticket to claim with, or a refusal to defer on. */
+export type LocalReservationResult =
+  | { status: 'granted'; ticket: LocalReservationTicket }
+  | { status: 'refused'; refusal: LocalReservationRefusal };
+
+/** First non-empty string among `keys` (the tolerant alias reader). */
+function firstNonEmptyString(
+  source: Record<string, unknown>,
+  keys: readonly string[],
+): string | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'string' && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+/** First finite number among `keys`; `undefined` when none is usable. */
+function firstFiniteNumber(
+  source: Record<string, unknown>,
+  keys: readonly string[],
+): number | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+  }
+  return undefined;
+}
+
+/**
+ * Fail-open parse of a reserve-handshake response. Returns a typed
+ * {@link LocalReservationResult} for a usable grant (`2xx` with a ticket id
+ * and a finite positive TTL) or refusal (`429` with a non-empty reason and a
+ * finite non-negative `retry_after_s`), and `null` for EVERY other outcome —
+ * endpoint absent (`404`), server error (`500`), timeout (no response), and
+ * malformed bodies included. This never throws: an older proxy must leave the
+ * caller on today's polling behaviour (parent AC2), and an unusable ticket is
+ * never better than no ticket.
+ *
+ * `httpStatus` is the response status the caller observed; `0` (or any other
+ * non-2xx/non-429 value) means "no usable reservation response".
+ */
+export function parseLocalReservationResponse(
+  raw: unknown,
+  httpStatus: number,
+): LocalReservationResult | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const body = raw as Record<string, unknown>;
+
+  if (httpStatus === 429) {
+    const reason = firstNonEmptyString(body, ['reason']);
+    const retryAfterSeconds = firstFiniteNumber(body, ['retry_after_s', 'retry_after_seconds']);
+    if (reason === undefined || retryAfterSeconds === undefined || retryAfterSeconds < 0) {
+      return null;
+    }
+    return { status: 'refused', refusal: { reason, retryAfterSeconds } };
+  }
+
+  if (!Number.isFinite(httpStatus) || httpStatus < 200 || httpStatus > 299) return null;
+
+  const ticketId = firstNonEmptyString(body, ['ticket_id', 'ticket']);
+  const ttlSeconds = firstFiniteNumber(body, ['ttl_s', 'ttl_seconds']);
+  if (ticketId === undefined || ttlSeconds === undefined || ttlSeconds <= 0) return null;
+  return { status: 'granted', ticket: { ticketId, ttlSeconds } };
 }
 
 /**
