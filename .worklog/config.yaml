@@ -21,3 +21,6 @@ githubImportCreateNew: true
 syncAllowedAuthors:
   - 250240+SorraTheOrc@users.noreply.github.com
   - pi@local
+  # Operator's second environment (7 legitimate sync commits on
+  # refs/worklog/data); added under WL-0MVMZP6A5005PB66.
+  - sorra@thewizardscode.com
