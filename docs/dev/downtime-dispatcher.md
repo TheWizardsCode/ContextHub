@@ -396,10 +396,11 @@ clamp (audit vs implement tier).
 
 ### Local capacity reservation (LP-0MVIKPCSG002B0NL, parent WL-0MVIKRFP0005JDL8, slice C2)
 
-**Problem:** polling `GET /llama/local/status` and then launching is racy —
-two herdr instances can observe the same idle window and both launch. With the
-prefill gate serialised (`local_max_concurrent_prefills: 1`) only one start is
-admissible, so the loser queues behind the winner's prefill and can fall back
+**Problem (pre-reservation behaviour, now replaced by the handshake below):**
+polling `GET /llama/local/status` and then launching was racy — two herdr
+instances could observe the same idle window and both launch. With the prefill
+gate serialised (`local_max_concurrent_prefills: 1`) only one start was
+admissible, so the loser queued behind the winner's prefill and could fall back
 to a remote provider after a long wait. An idle window can be *observed* by N
 instances but *owned* by one.
 

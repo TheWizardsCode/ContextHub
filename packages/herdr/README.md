@@ -751,8 +751,8 @@ alone.
 
 **Local capacity reservation** (LP-0MVIKPCSG002B0NL, parent
 WL-0MVIKRFP0005JDL8 slice C2) — polling the status endpoint and then launching
-is racy: two herdr instances can both observe the same idle window and both
-launch, while the proxy's serialised prefill gate admits only one. The worker
+was racy: two herdr instances could both observe the same idle window and both
+launch, while the proxy's serialised prefill gate admitted only one. The worker
 therefore claims capacity atomically: after winning the CAS claim and **before**
 the success marker and the pane spawn it sends one
 `POST {proxyUrl}/llama/local/reserve` with
