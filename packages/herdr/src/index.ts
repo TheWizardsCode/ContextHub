@@ -126,6 +126,7 @@ import {
   isSafeDowntimePaneToClose,
   type HerdrPaneRecord,
   type RunningPanesResult,
+  createLocalReserver,
 } from './downtime-worker.js';
 import { createRoundRobinRegistry, type RoundRobinRegistry } from './downtime-round-robin.js';
 import {
@@ -1847,13 +1848,22 @@ export function createDowntimeDeps(
         itemId?: string;
         anchorId?: string;
         priority?: string | null;
+        reservationTicketId?: string;
       },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
       return spawnDowntimePane(
         scriptPath,
         buildDowntimePaneArgs(kind, prompt, opts),
-        { cwd: opts.cwd, priority: opts.priority },
+        {
+          cwd: opts.cwd,
+          priority: opts.priority,
+          // Granted reservation ticket (slice C2 AC1): forwarded into the
+          // pane process env beside the `--reservation-ticket` arg.
+          ...(opts.reservationTicketId !== undefined
+            ? { reservationTicketId: opts.reservationTicketId }
+            : {}),
+        },
         spawnFn,
       );
     },
@@ -2427,9 +2437,19 @@ export async function main(): Promise<void> {
   // wins; default ~/.herdr/downtime/.
   const coordinationDir = getMachineCoordinationDir() ?? join(targetCwd, '.worklog');
 
+  // Local capacity reservation client (parent WL-0MVIKRFP0005JDL8, slice
+  // C2): `POST {proxyUrl}/llama/local/reserve` on the existing poll cadence.
+  // Wired here rather than into `createDowntimeDeps` so the proxy URL comes
+  // from the SAME `runSettings` snapshot as the status poller (a settings
+  // change applies on restart, exactly like the poller). Fail-open by
+  // construction: an older proxy answers 404 → the client resolves null and
+  // dispatch behaves exactly as before.
+  const downtimeDeps = createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE);
+  downtimeDeps.reserveLocalCapacity = createLocalReserver(runSettings.downtimeProxyUrl);
+
   const downtimeWorker: DowntimeWorker = createDowntimeWorker({
     poller: createDowntimePoller(runSettings.downtimeProxyUrl),
-    deps: createDowntimeDeps(SEND_TO_PI_SCRIPT, AGENT_ASSIGNEE),
+    deps: downtimeDeps,
     registry: createRoundRobinRegistry({
       worklogDir: join(targetCwd, '.worklog'),
     }),

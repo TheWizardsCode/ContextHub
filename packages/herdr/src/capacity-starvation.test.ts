@@ -40,6 +40,13 @@ describe('isCapacityRefusal (WL-0MVKNC2N50025HXE)', () => {
   it('`capacity-starved` is never itself a capacity refusal (no feedback loop)', () => {
     expect(isCapacityRefusal('capacity-starved')).toBe(false);
   });
+
+  it('treats reserve-handshake refusals as capacity refusals (WL-0MVIKRFP0005JDL8 C2)', () => {
+    // The proxy refused the local admission ticket: the local model had no
+    // capacity for the pane, so the starvation episode must stay open.
+    expect(isCapacityRefusal('queue-full')).toBe(true);
+    expect(isCapacityRefusal('reserved-fallback')).toBe(true);
+  });
 });
 
 describe('clampDowntimeCapacityStarvationAlertMs', () => {

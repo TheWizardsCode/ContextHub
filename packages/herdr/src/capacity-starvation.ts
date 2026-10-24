@@ -68,6 +68,13 @@ export const CAPACITY_REFUSAL_REASONS: ReadonlySet<string> = new Set([
   'prefill-gate',
   'prefill-cap',
   'prefill-eta',
+  // Reserve-handshake refusals (parent WL-0MVIKRFP0005JDL8, slice C2): the
+  // proxy refused the local admission ticket, so the local model had no
+  // capacity for the pane. An open-vocabulary reason is NOT added here
+  // automatically — only the documented refusals that mean "no local
+  // capacity" do, so an unknown proxy reason cannot silently fake starvation.
+  'queue-full',
+  'reserved-fallback',
 ]);
 
 /** True when a no-dispatch reason represents a local-capacity refusal. */

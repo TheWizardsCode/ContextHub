@@ -18,6 +18,7 @@ A Herdr plugin that provides a keyboard-navigable work item selection list for b
 - **Downtime worker (local-LLM idle dispatch)** — During operator idle time the plugin dispatches pi agent panes to run audits/refactors of completed items against the local llama-server (see [Downtime worker](#downtime-worker-local-llm-idle-dispatch))
 - **Hydrator (self-healing `in_progress` claims)** — Every 30 seconds the plugin fetches all `in_progress` work items, matches each against the panes of the current workspace (the pane title contains the work-item ID), and releases any claim with no matching pane so it re-enters the dispatchable pool: `in_review` items complete, dependency-blocked items are marked `blocked`, everything else returns to `open` at its claimed stage. The check also runs immediately when the worklog tab regains focus, and is fully visibility-gated (a hidden tab spawns zero `wl`/`herdr` processes). The same pane-title lookup drives the selection list's **in-progress marker**: an item with a matching pane is shown as `in-progress` (marker + Group N) even when its worklog status is still `open`, and loses the marker when the pane closes. See [Hydrator](#hydrator-self-healing-in_progress-claims-wl-0msojlzd9004p8pi).
 - **Per-request priority (`X-Priority`)** — The proxy's retired fast/cheap operating mode is replaced by a per-request priority. Herdr maps each dispatched work item's priority onto a request priority and conveys it as the pane-launch environment variable `HERDR_REQUEST_PRIORITY`, which the Worklog pi extension turns into the `X-Priority` provider header. See [Request priority](#request-priority-per-request-x-priority).
+- **Local capacity reservation** — Before launching a downtime pane the worker claims capacity atomically via `POST /llama/local/reserve`: a granted ticket travels into the pane as `PI_LOCAL_RESERVATION_TICKET` (its first request carries `X-Local-Reservation`), a `429` refusal defers with the proxy's `retry_after_s` and the decision log records the evidence, and an absent/failing endpoint fails open to the pre-reservation polling behaviour. See [Local capacity reservation](#downtime-worker-local-llm-idle-dispatch).
 - **Work-item pane indicator** — The selection list shows a green circle icon (🟢) in the icon prefix of every item with an open work-item pane in the current workspace: a pane whose title carries the work-item ID (the dispatch pane-title convention preserves the ID as a trailing suffix). The icon appears exactly when such a pane is open and never otherwise (producer's rule, WL-0MV1BWETT005GSUJ) — it is pane existence, not a live agent status. The worklist also records which pi agent pane is attached to each dispatched item — including the dispatched command — persisted to the gitignored `.worklog/agent-panes.json`, shared across worklist panes (used for the hover tooltip). The icon occupies a fixed-width slot so the item-ID column never shifts. See [Green-circle icon (work-item pane open)](#green-circle-icon-work-item-pane-open).
 - **Open Pi Agent action** — The plugin provides an action to open a fresh interactive pi session pane
 - **Tab-based opening** — The worklist opens in a new tab in the current workspace, providing full-screen access without reducing space for existing panes
@@ -740,6 +741,37 @@ polled decision entry records `prefillsInFlight`, `maxConcurrentPrefills`,
 `prefillGateWaiters`, `prefillBudgetSeconds`, `queueEtaSeconds` and the
 per-slot `slotPrefillEtaSeconds` so a paced tick is diagnosable from the log
 alone.
+
+**Local capacity reservation** (LP-0MVIKPCSG002B0NL, parent
+WL-0MVIKRFP0005JDL8 slice C2) — polling the status endpoint and then launching
+is racy: two herdr instances can both observe the same idle window and both
+launch, while the proxy's serialised prefill gate admits only one. The worker
+therefore claims capacity atomically: after winning the CAS claim and **before**
+the success marker and the pane spawn it sends one
+`POST {proxyUrl}/llama/local/reserve` with
+`{ expected_tokens, priority: "background", cache_state: "unknown" }`.
+
+- **Granted** (`200 { ticket_id, ttl_s }`) → the pane launches carrying the
+  ticket: `send-to-pi.sh --reservation-ticket <id>` injects
+  `PI_LOCAL_RESERVATION_TICKET` into the pane process, so the session's first
+  request carries `X-Local-Reservation` (the header injection itself is the
+  per-turn preference slice, parent AC4). The dispatch marker records
+  `reservationTicketId` / `reservationGrantedAt`.
+- **Refused** (`429 { reason, retry_after_s }`) → **no launch**: the tick
+  defers by `retry_after_s`, the claim is rolled back (the item is re-selectable
+  next idle period) and the decision entry records the proxy's reason,
+  `admit: false`, `retryAfterS` and `projectedWaitS`.
+- **Absent / 500 / timeout / malformed** → fail open: exactly today's polling
+  behaviour, no ticket, no header, no retry loop. An older proxy is fully
+  supported.
+
+The call rides the existing single-flight status-poll cadence (at most one
+reserve request per poll, no new timer), never raises the free-slot budget and
+never bypasses the fail-closed `slots-unavailable` / `capacity-saturated` /
+prefill-gate checks that run earlier in the tick. A ticket is single-use: if it
+cannot be forwarded (marker/spawn failure) it is recorded as
+`reservationReleased` and dropped — never reused or leaked. See
+[docs/dev/downtime-dispatcher.md](../../docs/dev/downtime-dispatcher.md#local-capacity-reservation-lp-0mvikpcsg002b0nl-parent-wl-0mvikrfp0005jdl8-slice-c2).
 
 **Per-tier free-slot minimums** (parent WL-0MT32F90V008UAD2 AC3) — at
 selection time, against the latest polled status, each dispatch tier

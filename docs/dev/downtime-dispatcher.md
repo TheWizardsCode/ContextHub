@@ -394,6 +394,70 @@ non-blocking, cap absent/0 unbounded); `downtime-worker.test.ts` pins the tick
 reason/token, decision-log evidence, ETA deferral and the effective-budget
 clamp (audit vs implement tier).
 
+### Local capacity reservation (LP-0MVIKPCSG002B0NL, parent WL-0MVIKRFP0005JDL8, slice C2)
+
+**Problem:** polling `GET /llama/local/status` and then launching is racy —
+two herdr instances can observe the same idle window and both launch. With the
+prefill gate serialised (`local_max_concurrent_prefills: 1`) only one start is
+admissible, so the loser queues behind the winner's prefill and can fall back
+to a remote provider after a long wait. An idle window can be *observed* by N
+instances but *owned* by one.
+
+The proxy adds an atomic reservation handshake:
+
+```
+POST {proxyUrl}/llama/local/reserve
+     { "expected_tokens": <n>, "priority": "interactive" | "background",
+       "cache_state": "warm" | "cold" | "unknown" }
+
+200  -> { "ticket_id": "<id>", "ttl_s": <seconds> }      # granted
+429  -> { "reason": "<open vocabulary>", "retry_after_s": <seconds> }  # refused
+```
+
+**Dispatch gate.** After winning the CAS claim and **before** the success
+marker and the pane spawn, `dispatchClaimedTier` asks for ONE ticket:
+
+| Reserve outcome | Dispatcher behaviour |
+|---|---|
+| `200` granted | The ticket id is forwarded to the pane (`--reservation-ticket` / `PI_LOCAL_RESERVATION_TICKET`) and the spawn proceeds. The marker records `reservationTicketId` + `reservationGrantedAt`. |
+| `429` refused | **No launch.** The tick defers by the proxy's `retry_after_s`, the CAS claim is rolled back (the item is re-selectable next idle period), and the decision entry records `reason` = the proxy's reason (`reserved-fallback` / `prefill-gate` / `queue-full` / …), `admit: false`, `retryAfterS` and `projectedWaitS`. |
+| absent (404) / 500 / timeout / malformed | **Fail open** — the dispatch behaves exactly as before this feature: no ticket, no header, no behaviour change. Once per poll, no retry loop (a failed reserve is simply asked again on the next poll cadence). |
+
+**No new polling loop.** The reserve call rides the existing single-flight
+status-poll cadence: `dispatchClaimedTier` is reached at most once per tick
+with a won claim, so a poll issues **at most one** `POST /llama/local/reserve`.
+It never raises the free-slot budget and never bypasses the fail-closed
+`slots-unavailable` / `capacity-saturated` / prefill-gate checks, which all run
+earlier in the tick.
+
+**Ticket forwarding.** The pane's first request must carry
+`X-Local-Reservation: <ticket_id>`, but an env var set on the launching script
+does not reach the herdr pane process. The dispatcher therefore forwards the id
+as `--reservation-ticket <id>` (and sets `PI_LOCAL_RESERVATION_TICKET` on the
+spawn's env); `send-to-pi.sh` injects it into the pane process
+(`exec env PI_LOCAL_RESERVATION_TICKET=… bash run-pi-agent.sh …`), where the
+Worklog pi extension (parent slice C4) turns it into the request header.
+Ticket ids are validated token-safe (`[A-Za-z0-9._:-]`); an invalid or absent
+id is ignored (fail-open, the pane still launches).
+
+**Ticket lifetime.** A ticket is single-use. When it cannot be forwarded (the
+marker or spawn fails) it is dropped — the outcome records
+`reservationReleased: true` with the ticket evidence, and the next idle period
+asks for a fresh one. Tickets are never reused or leaked.
+
+**Observability.** Decision entries carry `reservationTicket` (`{ id,
+grantedAt }`), `admit`, `projectedWaitS` and `retryAfterS` alongside the
+existing capacity evidence (see [Decision-log
+entries](#decision-log-entries-audit-batch-tokens--metadata-parent-wl-0mvedm8ot007wdrs-ac5)).
+
+**Tests.** `downtime-worker.reserve.test.ts` pins the client (POST shape,
+grant, 429 refusal, 404/500/timeout/garbage fail-open), the dispatch gate
+(grant → launch with the ticket; refusal → defer, roll back and never spawn;
+fail-open per failure mode; at most one reserve per poll; prefill pacing
+unchanged) and the pane-arg/env forwarding;
+`tests/herdr/send-to-pi.test.ts` pins `--reservation-ticket` →
+`PI_LOCAL_RESERVATION_TICKET` in the pane process.
+
 ### Idle-age authority (`local_idle_seconds`, WL-0MVHSZR9C0012NQY)
 
 The proxy publishes the authoritative monotonic local idle age
@@ -2203,6 +2267,35 @@ absent.
  "ownerPresent":false,"runningPanes":1,"contentionDepth":0,
  "auditBatchDepth":7,"auditBatchCap":2,"auditBatchRemaining":1,
  "at":"2026-10-20T02:00:00.000Z"}
+```
+
+### Decision-log entries: reservation evidence (parent WL-0MVIKRFP0005JDL8 AC4, slice C2)
+
+Every polled decision entry produced by a dispatch attempt that asked the
+proxy for a capacity ticket carries the reservation evidence as **additive**
+fields:
+
+| Field | Meaning |
+|---|---|
+| `reservationTicket` | `{ id, grantedAt }` — the granted gate ticket (absent on a refusal). |
+| `admit` | `true` when the proxy granted this poll, `false` on a `429` refusal. |
+| `projectedWaitS` | The proxy's projected wait before local capacity: `0` on a grant, the refusal's `retry_after_s` on a refusal. |
+| `retryAfterS` | The refusal's `retry_after_s` deferral advice (refusals only). |
+| `reservationReleased` | `true` when a granted ticket could not be forwarded to a pane (marker/spawn failure) — the ticket is treated as released/expired and never reused. |
+
+A refusal uses the proxy's own reason as the entry `reason` (and therefore as
+the header blocking token): `reserved-fallback`, `prefill-gate` (shared with
+the pacing stop — the same underlying gate), `queue-full`, or any future
+reason the proxy introduces (the vocabulary is open and never branched on).
+Fail-open dispatches (older proxy: 404/500/timeout) record none of these
+fields, so the log shape is unchanged for a pre-feature proxy.
+
+```json
+{"kind":"decision","operation":"no-dispatch","instanceId":"…",
+ "reason":"queue-full","freeSlots":2,"totalSlots":4,
+ "ownerPresent":false,"runningPanes":1,"contentionDepth":0,
+ "admit":false,"retryAfterS":12,"projectedWaitS":12,
+ "at":"2026-10-24T02:00:00.000Z"}
 ```
 
 ### `DowntimeErrorEvent` fields (per-strike error log entries)

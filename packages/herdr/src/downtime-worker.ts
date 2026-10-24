@@ -237,6 +237,14 @@ export const LOCAL_ROUTE_HEADER = 'X-Local-Route';
 /** Response header reporting why a request fell back off the local route (parent AC4). */
 export const LOCAL_FALLBACK_REASON_HEADER = 'X-Local-Fallback-Reason';
 
+/**
+ * Pane-launch environment variable carrying a granted reservation ticket id
+ * from the dispatcher to the spawned pi session (`send-to-pi.sh` /
+ * `run-pi-agent.sh`). The Worklog pi extension (parent slice C4) turns it
+ * into `X-Local-Reservation` on the pane's FIRST provider request.
+ */
+export const LOCAL_RESERVATION_TICKET_ENV = 'PI_LOCAL_RESERVATION_TICKET';
+
 /** Hard floor for the poll interval (must not hammer the proxy). */
 export const DOWNTIME_POLL_INTERVAL_FLOOR_MS = 10_000;
 
@@ -319,6 +327,13 @@ export function decisionHeaderToken(reason: string): string {
       // distinct header token so a paced stop is distinguishable from
       // `contention`, `slot-owner` and `no-slots` in the herdr header.
       return reason;
+    case 'reserved-fallback':
+    case 'queue-full':
+      // Reserve-handshake refusals (parent WL-0MVIKRFP0005JDL8, slice C2):
+      // each reason keeps its own distinct token, so a reservation deferral
+      // is never collapsed into `no-slots` / `contention` and the operator
+      // can tell WHY no ticket was granted from the herdr header alone.
+      return reason;
     default:
       return reason;
   }
@@ -377,6 +392,24 @@ export interface DecisionEntryFields extends CapacityEvidence {
   auditBatchRemaining?: number;
   /** Why an armed batch ended (`cap` reached / `depth` dropped, AC5). */
   auditBatchEndReason?: string;
+  /**
+   * Local-capacity reservation evidence (parent WL-0MVIKRFP0005JDL8 AC4,
+   * slice C2): recorded on every polled decision entry produced by a
+   * dispatch attempt that asked the proxy for a ticket. `reservationTicket`
+   * is the granted gate ticket (id + grant time), `admit` is the proxy's
+   * verdict for this poll, `projectedWaitS` its projected wait before local
+   * capacity and `retryAfterS` its `retry_after_s` deferral advice (refusals
+   * only). `reservationReleased` marks a granted ticket that could not be
+   * forwarded to a pane (spawn failure) and is therefore treated as
+   * released/expired — a ticket is never leaked or reused. Observability
+   * only: no gate reads these fields, and an older proxy (fail-open)
+   * records none of them.
+   */
+  reservationTicket?: { id: string; grantedAt: string };
+  admit?: boolean;
+  projectedWaitS?: number;
+  retryAfterS?: number;
+  reservationReleased?: boolean;
 }
 
 function capacityEvidence(
@@ -1930,6 +1963,94 @@ export function parseLocalReservationResponse(
 }
 
 /**
+ * Conservative expected-token estimate sent with a reserve request. The
+ * dispatcher cannot know a pane's first-turn size in advance (the prompt is
+ * built locally, the response is unconstrained), so ONE documented constant
+ * is sent and a real measurement is a one-line change once the proxy
+ * documents its interpretation.
+ */
+export const DEFAULT_LOCAL_RESERVATION_EXPECTED_TOKENS = 8_192;
+
+/**
+ * Build the reserve request for a downtime dispatch: background priority
+ * (unattended work is polite) and an unknown cache state (a fresh pane's
+ * first prefill is not known to be warm, so the proxy decides).
+ */
+export function buildLocalReservationRequest(
+  _candidate: Pick<DowntimeCandidate, 'priority'>,
+): LocalReservationRequest {
+  return {
+    expected_tokens: DEFAULT_LOCAL_RESERVATION_EXPECTED_TOKENS,
+    priority: 'background',
+    cache_state: 'unknown',
+  };
+}
+
+/**
+ * Injectable POST boundary for the reserve handshake (mirrors the existing
+ * `LlamaStatusFetcher` injectable-seam pattern; narrow enough that tests can
+ * stub it with a plain object).
+ */
+export type LocalReserveFetcher = (
+  url: string,
+  init: { method: 'POST'; headers: Record<string, string>; body: string; signal?: unknown },
+) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
+
+/**
+ * The reserve client: asks the proxy for an admission ticket. Resolves the
+ * typed result, or `null` on ANY unusable outcome (endpoint absent, server
+ * error, timeout, malformed body) — NEVER throws. A `null` means "this proxy
+ * does not reserve": the caller fails open to today's polling behaviour
+ * (parent AC2).
+ */
+export type LocalReserveClient = (
+  request: LocalReservationRequest,
+) => Promise<LocalReservationResult | null>;
+
+/**
+ * Create the reserve client for `POST {proxyUrl}/llama/local/reserve`.
+ *
+ * One call = one POST, bounded by `timeoutMs`; a `429` body is parsed as a
+ * refusal (the response is `ok:false` yet carries the deferral advice), a
+ * `2xx` body as a grant, and everything else (404/500/abort/network error/
+ * garbage) resolves `null`. Never throws, so a broken/older proxy can never
+ * block or crash a dispatch (parent AC2).
+ */
+export function createLocalReserver(
+  proxyUrl: string,
+  fetcher: LocalReserveFetcher = globalThis.fetch as unknown as LocalReserveFetcher,
+  timeoutMs: number = DEFAULT_DOWNTIME_POLL_TIMEOUT_MS,
+): LocalReserveClient {
+  const url = `${proxyUrl.replace(/\/+$/, '')}${LOCAL_RESERVE_PATH}`;
+  return async (request) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetcher(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(request),
+        signal: controller.signal,
+      });
+      // A 429 refusal is meaningful even though `ok` is false; any other
+      // non-2xx status carries no usable reservation → fail open.
+      if (!res.ok && res.status !== 429) return null;
+      let raw: unknown;
+      try {
+        raw = await res.json();
+      } catch {
+        return null; // non-JSON / unreadable body
+      }
+      return parseLocalReservationResponse(raw, res.status);
+    } catch {
+      return null; // network error / timeout / abort → fail open
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+}
+
+/**
  * Fetch and parse `GET {url}/llama/local/status` with a per-poll timeout.
  * Every failure mode — network error, timeout, HTTP error status, invalid
  * JSON, ambiguous payload — resolves to null (busy); this function never
@@ -2829,8 +2950,33 @@ export interface DowntimeWorkerDeps {
       anchorId?: string;
       /** Raw work-item priority of the dispatched candidate (parent AC3). */
       priority?: string | null;
+      /**
+       * Granted local-reservation ticket id (parent WL-0MVIKRFP0005JDL8,
+       * slice C2 AC1): forwarded to the pane as `--reservation-ticket` /
+       * `PI_LOCAL_RESERVATION_TICKET` so the session's first request carries
+       * `X-Local-Reservation`. Absent on a fail-open (older proxy) dispatch.
+       */
+      reservationTicketId?: string;
     },
   ): Promise<DowntimeSpawnResult>;
+  /**
+   * Local capacity reservation (parent WL-0MVIKRFP0005JDL8 AC1/AC2, slice
+   * C2): `POST {proxyUrl}/llama/local/reserve`, called ONCE per dispatch
+   * attempt (the existing single-flight poll cadence — never a new polling
+   * loop) after the CAS claim and BEFORE the success marker/spawn.
+   *
+   * - granted → the ticket is forwarded to the pane and the spawn proceeds;
+   * - refused (`429`) → the dispatch DEFERS with the proxy's `retry_after_s`,
+   *   the claim is rolled back and the spawn path never runs;
+   * - `null` (absent endpoint / 500 / timeout) → fail OPEN: dispatch
+   *   proceeds exactly as today, with no reservation header.
+   *
+   * A throwing client is treated as `null` (fail-open) at the call site.
+   * Optional for backward compatibility: when ABSENT no reservation is
+   * attempted and behaviour is byte-identical to today (older proxies are
+   * fully supported). Production wiring (`index.ts`) always provides it.
+   */
+  reserveLocalCapacity?(request: LocalReservationRequest): Promise<LocalReservationResult | null>;
   /**
    * Resolve the dedicated machine-wide Dispatcher anchor pane (C0
    * WL-0MTR01EU7005SYZG, F1 WL-0MTR2CD4X006XI7U): the persisted anchor pane
@@ -3116,6 +3262,15 @@ export interface DowntimeDispatchEvent {
    * absent on legacy entries.
    */
   selectionReason?: string;
+  /**
+   * Granted local-reservation ticket id forwarded to the pane (parent
+   * WL-0MVIKRFP0005JDL8 AC1/AC4, slice C2). Lets the dispatch marker be
+   * correlated with the pane's route log. Backward compatible — absent on
+   * legacy entries, fail-open dispatches and reservation refusals.
+   */
+  reservationTicketId?: string;
+  /** ISO timestamp the ticket was granted at (parent AC4, slice C2). */
+  reservationGrantedAt?: string;
 }
 
 /**
@@ -3277,6 +3432,31 @@ export interface DowntimeDispatchOutcome {
    * idle window. Absent on every non-continuation outcome.
    */
   auditBatchContinuation?: boolean;
+
+  /**
+   * Local-capacity reservation evidence from this dispatch attempt (parent
+   * WL-0MVIKRFP0005JDL8 AC1/AC2/AC4, slice C2). Present on a reservation
+   * REFUSAL (admit `false` + the proxy's `retryAfterS`) and on a granted
+   * ticket that could not be forwarded (spawn failure → `reservationReleased`).
+   * Absent when no reservation was attempted (no client wired / fail-open
+   * older proxy) and on a successful dispatch (the ticket is forwarded to the
+   * pane instead). The worker loop copies these fields onto the no-dispatch
+   * decision entry so the log answers "why did we not launch?".
+   */
+  reservation?: DowntimeReservationEvidence;
+}
+
+/**
+ * Reservation evidence carried by a dispatch outcome and copied onto the
+ * polled decision entry (parent AC4). Field names mirror
+ * {@link DecisionEntryFields} so the worker loop can spread it directly.
+ */
+export interface DowntimeReservationEvidence {
+  reservationTicket?: { id: string; grantedAt: string };
+  admit?: boolean;
+  projectedWaitS?: number;
+  retryAfterS?: number;
+  reservationReleased?: boolean;
 }
 
 /**
@@ -4133,6 +4313,65 @@ async function dispatchClaimedTier(
       : { dispatched: false, reason: 'wl-error', error: claim.error ?? 'claim failed' };
   }
 
+  // ── Local capacity reservation gate (parent WL-0MVIKRFP0005JDL8, slice C2) ──
+  //
+  // The dispatcher never launches without a ticket: it ASKS the proxy for an
+  // admission ticket after winning the CAS claim and BEFORE the success
+  // marker/spawn — never poll-then-hope. The call rides the existing
+  // single-flight poll cadence (this function is reached at most once per
+  // tick with a won claim, so there is no second request and no new timer).
+  //
+  //   - granted → the ticket id is forwarded to the pane, so the session's
+  //     first request carries `X-Local-Reservation` (AC1);
+  //   - refused (`429`) → DEFER with the proxy's `retry_after_s`, roll the
+  //     claim back (the item must become selectable again) and never write a
+  //     marker or run the spawn path (AC2);
+  //   - `null` / throwing client → fail OPEN: proceed exactly as today, with
+  //     no ticket (an older proxy is fully supported, AC3).
+  //
+  // A granted ticket is single-use: when it cannot be forwarded (a later
+  // marker/spawn failure) it is recorded as released/expired and the next
+  // idle period asks for a fresh one — it is never reused or leaked.
+  let reservation: DowntimeReservationEvidence | undefined;
+  let reservationTicketId: string | undefined;
+  if (typeof deps.reserveLocalCapacity === 'function') {
+    let reserveResult: LocalReservationResult | null = null;
+    try {
+      reserveResult = await deps.reserveLocalCapacity(buildLocalReservationRequest(candidate));
+    } catch {
+      reserveResult = null; // fail-open: a throwing client never blocks dispatch
+    }
+    if (reserveResult?.status === 'refused') {
+      // The proxy's OPEN-vocabulary reason becomes the decision reason (its
+      // own distinct header token via decisionHeaderToken) and the deferral
+      // advice is carried in the evidence fields (AC2/AC4).
+      const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
+      return {
+        dispatched: false,
+        reason: reserveResult.refusal.reason,
+        // A failed rollback leaves the item claimed (no worse than the
+        // pre-fix state) — it is still not a spawn.
+        ...(rollbackOk ? {} : { error: 'claim rollback failed after reserve refusal' }),
+        reservation: {
+          admit: false,
+          retryAfterS: reserveResult.refusal.retryAfterSeconds,
+          projectedWaitS: reserveResult.refusal.retryAfterSeconds,
+        },
+      };
+    }
+    if (reserveResult?.status === 'granted') {
+      reservationTicketId = reserveResult.ticket.ticketId;
+      reservation = {
+        admit: true,
+        reservationTicket: {
+          id: reserveResult.ticket.ticketId,
+          grantedAt: new Date().toISOString(),
+        },
+        projectedWaitS: 0,
+      };
+    }
+  }
+
   let marked = false;
   // Capture ONE timestamp shared by the success marker and its post-spawn
   // enrichment entry (WL-0MUBVL251006JAQ0 / F6 AC6.2) so the marker readers
@@ -4152,6 +4391,17 @@ async function dispatchClaimedTier(
       // selected this candidate and why — makes the log self-explanatory.
       ...(opts.selectionPath !== undefined ? { selectionPath: opts.selectionPath } : {}),
       ...(opts.selectionReason !== undefined ? { selectionReason: opts.selectionReason } : {}),
+      // Reservation provenance (parent WL-0MVIKRFP0005JDL8 AC4, slice C2):
+      // the marker records the granted ticket so the dispatch can be
+      // correlated with the pane's route log. Absent on a fail-open dispatch.
+      ...(reservationTicketId !== undefined
+        ? {
+            reservationTicketId,
+            ...(reservation?.reservationTicket !== undefined
+              ? { reservationGrantedAt: reservation.reservationTicket.grantedAt }
+              : {}),
+          }
+        : {}),
     });
   } catch {
     // Fail-closed: a throwing recordDispatch (stub or regression) is a marker
@@ -4163,14 +4413,27 @@ async function dispatchClaimedTier(
     // succeeded but the marker write failed — the item is stranded in
     // `in_progress` with no marker, invisible to all future tiers.
     // Roll back the claim so the next idle period can re-select it.
+    //
+    // A granted reservation ticket can no longer reach a pane here: record
+    // it as released/expired (single-use, never leaked) on the outcome.
+    const releasedReservation: DowntimeReservationEvidence | undefined =
+      reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
     const rollbackOk = await rollbackClaimForFailure(deps, candidate.id, expected, opts.cwd);
     if (!rollbackOk) {
       // The item was already moved by a concurrent agent/human — nothing
       // to roll back; report marker-write-failed so the caller can fall
       // through to the next candidate.
-      return { dispatched: false, reason: 'marker-write-failed' };
+      return {
+        dispatched: false,
+        reason: 'marker-write-failed',
+        ...(releasedReservation !== undefined ? { reservation: releasedReservation } : {}),
+      };
     }
-    return { dispatched: false, reason: 'claim-rolled-back' };
+    return {
+      dispatched: false,
+      reason: 'claim-rolled-back',
+      ...(releasedReservation !== undefined ? { reservation: releasedReservation } : {}),
+    };
   }
 
   const spawn = await deps.spawnAgentPane(
@@ -4191,9 +4454,18 @@ async function dispatchClaimedTier(
       // leadership. Only set when the anchor resolved (never a bare
       // undefined key — legacy callers keep their exact opts shape).
       ...(anchorId !== undefined ? { anchorId } : {}),
+      // Granted reservation ticket (slice C2 AC1): forwarded to the pane so
+      // its first request carries `X-Local-Reservation`. Absent on a
+      // fail-open (older proxy) dispatch.
+      ...(reservationTicketId !== undefined ? { reservationTicketId } : {}),
     },
   );
   if (!spawn.ok) {
+    // The granted ticket could not be forwarded to a pane: it is single-use,
+    // so it is DROPPED here (the next idle period asks for a fresh one) and
+    // recorded as released/expired — never leaked or reused.
+    const released: DowntimeReservationEvidence | undefined =
+      reservation === undefined ? undefined : { ...reservation, reservationReleased: true };
     // Spawn-failure freshness re-check (WL-0MT8KSTOE00871E7): between
     // selection and spawn, a valid audit may have been recorded. If so, the
     // pane is moot — do NOT record a failure trace or comment. The failure
@@ -4212,6 +4484,7 @@ async function dispatchClaimedTier(
             reason: 'spawn-failed',
             error: spawn.error,
             exitCode: spawn.exitCode,
+            ...(released !== undefined ? { reservation: released } : {}),
           };
         }
       } catch {
@@ -4254,6 +4527,7 @@ async function dispatchClaimedTier(
       reason: 'spawn-failed',
       error: spawn.error,
       exitCode: spawn.exitCode,
+      ...(released !== undefined ? { reservation: released } : {}),
     };
   }
 
@@ -6454,6 +6728,13 @@ export function buildDowntimePaneArgs(
     itemTitle?: string;
     itemId?: string;
     anchorId?: string;
+    /**
+     * Granted local-reservation ticket id (parent WL-0MVIKRFP0005JDL8 AC1,
+     * slice C2): forwarded as `--reservation-ticket <id>` so send-to-pi.sh
+     * passes `PI_LOCAL_RESERVATION_TICKET` into the pane process. Absent on
+     * a fail-open dispatch — the launch args stay byte-identical to today.
+     */
+    reservationTicketId?: string;
   },
 ): string[] {
   const paneName =
@@ -6466,6 +6747,12 @@ export function buildDowntimePaneArgs(
   // leader's current pane. Absent → legacy `pane current` behavior.
   if (opts.anchorId) {
     args.push('--anchor', opts.anchorId);
+  }
+  // Local reservation ticket (slice C2 AC1): the pane's first request must
+  // carry `X-Local-Reservation`, so the id is forwarded explicitly (an env
+  // var set on the launching script does NOT reach the herdr pane process).
+  if (opts.reservationTicketId) {
+    args.push('--reservation-ticket', opts.reservationTicketId);
   }
   args.push('--cwd', opts.cwd, '--model', opts.model, prompt);
   return args;
@@ -6500,7 +6787,7 @@ export type DowntimeSpawnResult =
 export type DowntimeSpawn = (
   scriptPath: string,
   args: string[],
-  opts: { cwd: string; priority?: string | null },
+  opts: { cwd: string; priority?: string | null; reservationTicketId?: string },
 ) => DowntimeSpawnHandle;
 
 /**
@@ -6517,7 +6804,7 @@ export type DowntimeSpawn = (
  */
 export function buildDowntimeSpawnOptions(
   cwd: string,
-  opts?: { priority?: string | null },
+  opts?: { priority?: string | null; reservationTicketId?: string },
 ): {
   detached: boolean;
   stdio: 'ignore';
@@ -6539,6 +6826,14 @@ export function buildDowntimeSpawnOptions(
       // Mapped through the downtime table; defaults to `medium` for an
       // unknown/absent priority (parent WL-0MVE1NZ4J000H5NH AC3).
       [REQUEST_PRIORITY_ENV_VAR]: mapDowntimeRequestPriority(opts?.priority),
+      // Granted reservation ticket (slice C2 AC1): belt-and-braces beside
+      // the `--reservation-ticket` arg — the pane process reads this env var
+      // on its first request (the Worklog pi extension turns it into
+      // `X-Local-Reservation`). Absent on a fail-open dispatch, so the child
+      // env stays byte-identical to today.
+      ...(opts?.reservationTicketId
+        ? { [LOCAL_RESERVATION_TICKET_ENV]: opts.reservationTicketId }
+        : {}),
     },
   };
 }
@@ -6608,7 +6903,7 @@ export const DOWNTIME_SPAWN_PROBE_MS = 500;
 export async function spawnDowntimePane(
   scriptPath: string,
   args: string[],
-  opts: { cwd: string; priority?: string | null },
+  opts: { cwd: string; priority?: string | null; reservationTicketId?: string },
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): Promise<DowntimeSpawnResult> {
   const child = spawnFn(scriptPath, args, opts);
@@ -8159,6 +8454,13 @@ export function createDowntimeWorker(opts: DowntimeWorkerConfig): DowntimeWorker
             // `code-freeze` / `review-queue-hold` / `no-candidate` / ...) and
             // gains the active batch metadata as an additive field.
             ...batchMetadata(outcome.auditBatch),
+            // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
+            // slice C2): a refusal carries its reason as the decision reason
+            // (distinct header token) plus `admit: false`, `retryAfterS` and
+            // `projectedWaitS`; a granted ticket that could not be forwarded
+            // carries `reservationTicket` + `reservationReleased`. Absent on
+            // fail-open dispatches and pre-reservation outcomes.
+            ...outcome.reservation,
           });
         }
         // Any non-`dispatched` outcome ends the audit batch (parent
