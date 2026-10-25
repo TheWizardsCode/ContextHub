@@ -49,6 +49,7 @@ import {
   type ScheduledPrompt,
 } from './downtime-worker.js';
 import { ago, makeDeps } from './downtime-worker.fixtures.js';
+import { defaultSettings } from './settings.js';
 
 // ── Implement dispatch tier (WL-0MSMAYIKX005LLO4) ────────────────────
 
@@ -392,6 +393,40 @@ describe('dispatch scheduled-prompts tier', () => {
     expect(deps.getNextAuditCandidate).not.toHaveBeenCalled();
     expect(deps.getNextImplementCandidate).not.toHaveBeenCalled();
     expect(deps.getNextItem).not.toHaveBeenCalled();
+  });
+
+  it('AC4: a scheduled prompt inherits the settings-default preference (remote-ok)', async () => {
+    // `index.ts` supplies `loadSettings().downtimeLocalPreference`, so with
+    // no key persisted the settings default reaches the scheduled pane
+    // (WL-0MVNUHWH500196K1 AC4).
+    expect(defaultSettings.downtimeLocalPreference).toBe('remote-ok');
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+    });
+
+    await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      localPreference: defaultSettings.downtimeLocalPreference,
+    });
+
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      '/skill:refactor',
+      expect.objectContaining({ localPreference: 'remote-ok' }),
+    );
+  });
+
+  it('AC5: an explicit local-only deployment also makes scheduled work local-only', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+    });
+
+    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', localPreference: 'local-only' });
+
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      '/skill:refactor',
+      expect.objectContaining({ localPreference: 'local-only' }),
+    );
   });
 
   it('persists lastTriggeredAt and writes the scheduled log marker before the spawn (AC4)', async () => {

@@ -103,11 +103,13 @@ export interface PluginSettings {
   downtimeModel: string;
   /**
    * Per-turn locality preference for downtime-dispatched panes
-   * (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4): `local-only`
-   * (default) makes the proxy refuse immediately rather than silently wait
-   * for a contended local slot; `remote-ok` lets unattended work go remote.
-   * Forwarded to the pane as `HERDR_LOCAL_PREFERENCE`, which the Worklog pi
-   * extension turns into the `X-Local-Preference` request header.
+   * (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4; default flipped
+   * in WL-0MVNUHWH500196K1): `remote-ok` (default) lets unattended work go
+   * remote rather than queue a contended local slot; `local-only`
+   * (explicit opt-in) makes the proxy refuse immediately rather than
+   * silently wait. Forwarded to the pane as `HERDR_LOCAL_PREFERENCE`,
+   * which the Worklog pi extension turns into the `X-Local-Preference`
+   * request header.
    */
   downtimeLocalPreference: LocalPreference;
   /**

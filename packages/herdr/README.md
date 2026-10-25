@@ -555,8 +555,8 @@ pacing* below).
 `http://192.168.0.199:8000`)
 - `downtimeModel` — pi model pattern for dispatched panes (default: `plan`)
 - `downtimeLocalPreference` — Per-turn locality preference sent to the proxy by
-  every dispatched pane (default: `local-only`; the other value is
-  `remote-ok`; anything else clamps back to `local-only`). It travels to the
+  every dispatched pane (default: `remote-ok`; the opt-in alternative is
+  `local-only`; anything else clamps back to `remote-ok`). It travels to the
   pane as `HERDR_LOCAL_PREFERENCE`, where the Worklog pi extension turns it
   into the `X-Local-Preference` request header and records the response route
   headers in `.worklog/local-route.log` — see [Per-turn local preference and
@@ -1194,11 +1194,13 @@ fallback decision instead of a silent ~120 s proxy-side wait.
 | response | `X-Local-Route` | The route the proxy took (e.g. `local`, `remote:<provider>`) |
 | response | `X-Local-Fallback-Reason` | Why the request left the local route (e.g. `queue-full`, `stall_after_reasoning`) |
 
-- **Policy knob.** `downtimeLocalPreference` (default `local-only`) governs
-  downtime-dispatched panes; scheduled-prompt panes and headless background
-  dispatches default to `remote-ok` (unattended work never queues local
-  capacity). Interactive panes carry no preference unless the operator exports
-  `HERDR_LOCAL_PREFERENCE` themselves.
+- **Policy knob.** `downtimeLocalPreference` (default `remote-ok` since
+  WL-0MVNUHWH500196K1; `local-only` is the explicit per-deployment opt-in)
+  governs downtime-dispatched panes. Scheduled-prompt panes and headless
+  background dispatches default to `remote-ok` (unattended work never queues
+  local capacity) and inherit an explicit knob — so a `local-only` deployment
+  also makes scheduled work local-only. Interactive panes carry no preference
+  unless the operator exports `HERDR_LOCAL_PREFERENCE` themselves.
 - **Transport.** `send-to-pi.sh --local-preference <local-only|remote-ok>`
   injects `exec env HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`;
   the headless path sets it directly on the spawn environment. An absent or

@@ -456,7 +456,8 @@ per-turn capacity claim against the llama-proxy:
   capture or write failure never throws into a turn.
 
 See `packages/herdr/README.md` and `docs/dev/downtime-dispatcher.md` for the
-policy knob (`downtimeLocalPreference`) and the transport.
+policy knob (`downtimeLocalPreference` — default `remote-ok`, `local-only`
+opt-in) and the transport.
 
 ## Pane-Closure Reaper (WL-0MUJL1NAH0042GOS)
 

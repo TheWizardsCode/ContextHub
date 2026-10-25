@@ -1044,8 +1044,9 @@ export interface DowntimeWorkerConfig {
     /**
      * Per-turn locality preference for dispatched panes (parent
      * WL-0MVIKRFP0005JDL8 AC4, slice C4). Read live on every tick from the
-     * `downtimeLocalPreference` setting (default `local-only`). Optional for
-     * backward compat — absent leaves the pane launch byte-identical to
+     * `downtimeLocalPreference` setting (default `remote-ok`,
+     * WL-0MVNUHWH500196K1; `local-only` is the explicit opt-in). Optional
+     * for backward compat — absent leaves the pane launch byte-identical to
      * today (no `X-Local-Preference`, no route log).
      */
     localPreference?: LocalPreference;

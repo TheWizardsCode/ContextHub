@@ -39,6 +39,7 @@ import {
 } from './downtime-worker.js';
 import { createLeaderElectionManager, LEASE_FILE } from './leader-election.js';
 import { writeDowntimeLog } from './downtime-worker.fixtures.js';
+import { defaultSettings } from './settings.js';
 import {
   writeCoordinationFile,
   readCoordinationFile,
@@ -2015,6 +2016,55 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
   );
 
   it(
+    'AC4: an own-backlog dispatch forwards the settings-default preference (remote-ok) to the pane',
+    async () => {
+      // `index.ts` supplies `loadSettings().downtimeLocalPreference`, so with
+      // no key persisted the settings default reaches the own-backlog pane
+      // (WL-0MVNUHWH500196K1 AC4).
+      expect(defaultSettings.downtimeLocalPreference).toBe('remote-ok');
+      const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BACKLOG-PREF')]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatchFromCoordination(deps, [], {
+        model: 'plan',
+        cwd: '/leader-root',
+        coordinationDir: testDir,
+        browseItemCount: SPRINT,
+        localPreference: defaultSettings.downtimeLocalPreference,
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(outcome.candidate?.id).toBe('WL-BACKLOG-PREF');
+      expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+        expect.stringContaining('/skill:implement WL-BACKLOG-PREF'),
+        expect.objectContaining({ localPreference: 'remote-ok' }),
+      );
+    },
+  );
+
+  it(
+    'AC5: an explicit local-only setting is forwarded verbatim by the own-backlog fallback',
+    async () => {
+      const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BACKLOG-LOCAL')]);
+      const deps = makeCoordinationDeps({ getHerdrListHead });
+
+      const outcome = await dispatchFromCoordination(deps, [], {
+        model: 'plan',
+        cwd: '/leader-root',
+        coordinationDir: testDir,
+        browseItemCount: SPRINT,
+        localPreference: 'local-only',
+      });
+
+      expect(outcome.dispatched).toBe(true);
+      expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+        expect.stringContaining('/skill:implement WL-BACKLOG-LOCAL'),
+        expect.objectContaining({ localPreference: 'local-only' }),
+      );
+    },
+  );
+
+  it(
     'AC1: falls back when every in-view item is filtered, not only when the view is literally empty',
     async () => {
       const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-FILTERED-BACKLOG')]);
@@ -2361,6 +2411,58 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
     expect(third.candidate?.id).toBe('WL-AUD-3');
     expect(third.auditBatch?.remaining).toBe(0);
     expect(ownBacklogFlag(third)).toBe(true);
+  });
+
+  it('AC4: every audit-batch continuation pane carries the settings-default preference (remote-ok)', async () => {
+    // Two ranked audits beyond the sprint view keep the batch armed
+    // (depth >= threshold); the first seed comes from the coordination offer.
+    const tail = [auditHead('WL-AUD-2P', 1), auditHead('WL-AUD-3P', 2)];
+    const getHerdrListHead = vi.fn(async (_cwd: string, limit = BATCH_SPRINT) => ({
+      ok: true as const,
+      items: limit <= BATCH_SPRINT ? [] : [...tail],
+    }));
+    const deps = makeCoordinationDeps({
+      getHerdrListHead,
+      // The offered item must classify as an AUDIT (the batch seed).
+      fetchItem: vi.fn().mockResolvedValue({ ok: true, info: auditInfo('WL-AUD-1P') }),
+    });
+
+    const first = await dispatchFromCoordination(
+      deps,
+      [makeEntry('inst-audit', 'WL-AUD-1P', '/leader-root')],
+      {
+        model: 'plan',
+        cwd: '/leader-root',
+        coordinationDir: testDir,
+        browseItemCount: BATCH_SPRINT,
+        auditBatchMax: 3,
+        localPreference: defaultSettings.downtimeLocalPreference,
+      },
+    );
+    expect(first.dispatched).toBe(true);
+    expect(first.kind).toBe('audit');
+    expect(first.auditBatch?.remaining).toBe(2);
+
+    // Continuation from the leader's own head consumes one unit of budget.
+    const second = await dispatchFromCoordination(deps, [], {
+      model: 'plan',
+      cwd: '/leader-root',
+      coordinationDir: testDir,
+      browseItemCount: BATCH_SPRINT,
+      auditBatchMax: 3,
+      auditBatchRemaining: 2,
+      localPreference: defaultSettings.downtimeLocalPreference,
+    });
+    expect(second.dispatched).toBe(true);
+    expect(second.candidate?.id).toBe('WL-AUD-2P');
+    expect(second.auditBatch?.remaining).toBe(1);
+
+    // Both the first audit pane and the continuation carry the default.
+    const spawnCalls = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls;
+    expect(spawnCalls).toHaveLength(2);
+    for (const call of spawnCalls) {
+      expect((call[1] as { localPreference?: string }).localPreference).toBe('remote-ok');
+    }
   });
 
   it('AC6f: a dispatched marker in the leader own head prevents a duplicate continuation target', async () => {

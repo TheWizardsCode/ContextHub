@@ -343,6 +343,30 @@ describe('registerLocalPreference hooks', () => {
     expect(line.preference).toBe('local-only');
   });
 
+  it('records preference "remote-ok" in the route log for a remote-ok pane (WL-0MVNUHWH500196K1 AC4)', async () => {
+    const { handlers } = await register();
+    const cwd = makeTempCwd();
+    process.env[ENV_VAR] = 'remote-ok';
+    const response = handlers.after_provider_response as (
+      event: Record<string, unknown>,
+      c: unknown,
+    ) => void;
+    response(
+      { status: 200, headers: { 'x-local-route': 'remote:opencode-go' } },
+      ctx(cwd),
+    );
+    // The append is async — allow microtasks to settle.
+    await vi.waitFor(() => {
+      const raw = readFileSync(join(cwd, '.worklog', 'local-route.log'), 'utf8');
+      expect(raw).toContain('"route":"remote:opencode-go"');
+    });
+    const line = JSON.parse(
+      readFileSync(join(cwd, '.worklog', 'local-route.log'), 'utf8').trim(),
+    );
+    // The observable route log matches the default downtime preference.
+    expect(line.preference).toBe('remote-ok');
+  });
+
   it('writes no entry when no route header is present, even with the knob set (C4-AC2)', async () => {
     const { handlers } = await register();
     const cwd = makeTempCwd();

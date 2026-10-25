@@ -52,6 +52,7 @@ import {
   reserveServerError,
   reserveTimeout,
 } from './downtime-worker.fixtures.js';
+import { defaultSettings } from './settings.js';
 
 /** Parse a fixture exactly as the C2 client will after reading the response. */
 function parse(fixture: { status: number; body: unknown }) {
@@ -431,6 +432,42 @@ describe('local-preference forwarding to the pane (C4-AC1)', () => {
     const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
     expect(spawnOpts.localPreference).toBe('remote-ok');
   });
+
+  it(
+    'AC4/AC5: the settings value reaches the pane — remote-ok by default, local-only when persisted',
+    async () => {
+      // `index.ts` always supplies `loadSettings().downtimeLocalPreference`, so
+      // an unconfigured deployment (no persisted key) dispatches with the
+      // settings default (WL-0MVNUHWH500196K1 AC4), while an explicit
+      // `local-only` opt-in is forwarded verbatim and never overridden (AC5).
+      expect(defaultSettings.downtimeLocalPreference).toBe('remote-ok');
+
+      for (const preference of ['remote-ok', 'local-only'] as const) {
+        const deps = makeDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+        });
+
+        const outcome = await runDispatchTick(deps, { localPreference: preference });
+
+        expect(outcome.dispatched).toBe(true);
+        const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+        expect(spawnOpts.localPreference).toBe(preference);
+
+        // The same value is what the pane-launch helpers put on the wire.
+        const args = buildDowntimePaneArgs('plan', '/skill:plan WL-X', {
+          model: 'code',
+          cwd: C2_CWD,
+          localPreference: preference,
+        });
+        expect(args[args.indexOf('--local-preference') + 1]).toBe(preference);
+        const paneSpawn = buildDowntimeSpawnOptions(C2_CWD, {
+          priority: 'low',
+          localPreference: preference,
+        });
+        expect(paneSpawn.env[LOCAL_PREFERENCE_ENV_VAR]).toBe(preference);
+      }
+    },
+  );
 });
 
 describe('dispatch reserve gate — granted (AC1)', () => {

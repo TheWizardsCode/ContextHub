@@ -1477,17 +1477,30 @@ request the pane makes.
 | response | `X-Local-Fallback-Reason` | Why the request left the local route |
 
 **Policy knob.** `downtimeLocalPreference` (herdr setting, clamped to the two
-values, default `local-only`) is read live on every tick and threaded through
-`DowntimeWorkerConfig.config()` → both dispatch paths →
+values, default `remote-ok` since WL-0MVNUHWH500196K1; `local-only` is the
+explicit per-deployment opt-in) is read live on every tick and threaded
+through `DowntimeWorkerConfig.config()` → both dispatch paths →
 `dispatchClaimedTier` → `spawnAgentPane` → `buildDowntimePaneArgs` /
 `buildDowntimeSpawnOptions`:
 
-- **Downtime backlog panes** carry the knob's value.
+- **Downtime backlog panes** carry the knob's value; an unconfigured
+  deployment (no persisted key) therefore forwards `remote-ok` — unattended
+  work goes remote rather than stall on a contended local slot.
 - **Scheduled-prompt panes** and **headless background dispatches**
   (`spawnBackgroundPi`) default to `remote-ok`: unattended work never queues
-  local capacity the operator may need.
+  local capacity the operator may need. They also *inherit the knob when it
+  is present* — so an explicit `local-only` deployment also makes scheduled
+  work local-only. For an unconfigured deployment the knob and the
+  background fallback agree on `remote-ok`.
 - **Interactive panes** carry no preference unless the operator exports
   `HERDR_LOCAL_PREFERENCE` — requests stay byte-identical to today.
+
+> **Default flip (WL-0MVNUHWH500196K1).** The C4-AC1 downtime default of
+> `local-only` (WL-0MVLJTV03000KIQZ) is superseded by `remote-ok`. The
+> trade is deliberate: contended downtime work may now leave the box for a
+> remote (possibly metered) provider rather than silently not run. Keep
+> `local-only` where that spend/reach profile is unwanted; the route log
+> makes the actual route visible either way.
 
 **Transport.** `send-to-pi.sh --local-preference <local-only|remote-ok>`
 injects the value into the pane process (`exec env

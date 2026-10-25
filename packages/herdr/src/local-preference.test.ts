@@ -8,10 +8,12 @@
  * Worklog pi extension turns into the request header and records in the
  * route log.
  *
- * Policy defaults (C4-AC1): downtime panes default to `local-only` (fail
- * fast to remote when the local slot is contended) and background/scheduled
- * work defaults to `remote-ok` (never queue local capacity for unattended
- * work). Both are configurable through the setting/env.
+ * Policy defaults: downtime panes default to `remote-ok` (never queue
+ * local capacity the operator may need — unattended work goes remote when
+ * the local slot is contended) and background/scheduled work also defaults
+ * to `remote-ok`. `local-only` is the explicit per-deployment opt-in
+ * (WL-0MVNUHWH500196K1, superseding the C4-AC1 `local-only` default of
+ * WL-0MVLJTV03000KIQZ). Both are configurable through the setting/env.
  *
  * These specs were authored first (test-first).
  */
@@ -39,9 +41,9 @@ describe('local-preference policy (C4-AC1)', () => {
     expect(m.LOCAL_PREFERENCE_ENV_VAR).toBe('HERDR_LOCAL_PREFERENCE');
   });
 
-  it('defaults downtime panes to local-only and background work to remote-ok', async () => {
+  it('defaults downtime panes to remote-ok and background work to remote-ok', async () => {
     const m = await loadModule();
-    expect(m.DOWNTIME_LOCAL_PREFERENCE).toBe('local-only');
+    expect(m.DOWNTIME_LOCAL_PREFERENCE).toBe('remote-ok');
     expect(m.BACKGROUND_LOCAL_PREFERENCE).toBe('remote-ok');
   });
 
