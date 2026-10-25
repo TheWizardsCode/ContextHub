@@ -228,546 +228,92 @@ import type {
 export type { ScheduledPrompt } from './scheduled-prompts.js';
 export type { CoordinationEntry } from './coordination.js';
 
-// ── Constants ─────────────────────────────────────────────────────────
+// ── Re-exports for moved constants/types/clamps ─────────────────
+export * from './downtime-worker.constants.js';
+export * from './downtime-worker.types.js';
+export * from './downtime-worker.clamps.js';
 
-/** Proxy status endpoint path. */
-export const DOWNTIME_STATUS_PATH = '/llama/local/status';
+import {
+  COORDINATION_TIER_ORDER,
+  DEFAULT_COORDINATION_CHECK_IN_MS,
+  DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
+  DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
+  DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
+  DEFAULT_DOWNTIME_MAX_ATTEMPTS,
+  DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
+  DEFAULT_DOWNTIME_STALL_THRESHOLD_MS,
+  DEFAULT_LEADER_CHECK_IN_MS,
+  DISPATCH_PIPELINE_SINGLE_FLIGHT,
+  DOWNTIME_AUDIT_MIN_FREE_SLOTS,
+  DOWNTIME_AUDIT_RECENCY_WINDOW_MS,
+  DOWNTIME_AUDIT_STALE_WINDOW_MS,
+  DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS,
+  DOWNTIME_DISPATCH_EXTEND_MAX,
+  DOWNTIME_ERROR_STRIKE_LIMIT,
+  DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS,
+  DOWNTIME_PANE_MIN_FREE_SLOTS,
+  DOWNTIME_STATUS_PATH,
+  DOWNTIME_WL_TIMEOUT_MS,
+  capacityEvidence,
+  LOCAL_RESERVATION_TICKET_ENV,
+  LOCAL_RESERVE_PATH,
+  PANE_LIFECYCLE_MONITOR_ENABLED,
+  decisionHeaderToken,
+  reportedIdleSeconds
+} from './downtime-worker.constants.js';
+import type {
+  CoordinationTierKind,
+  DecisionEntryFields
+} from './downtime-worker.constants.js';
 
-/**
- * Local capacity reservation endpoint path (parent WL-0MVIKRFP0005JDL8):
- * `POST {proxyUrl}/llama/local/reserve`. ABSENT on older proxies — the
- * caller fails open to today's polling behaviour (AC2).
- */
-export const LOCAL_RESERVE_PATH = '/llama/local/reserve';
+import type {
+  AuditCandidate,
+  CriticalFirstGuardDecision,
+  DowntimeActiveAuditResult,
+  DowntimeCandidate,
+  DowntimeClaimExpected,
+  DowntimeClaimResult,
+  DowntimeDispatchKind,
+  DowntimeHerdrItem,
+  DowntimeHerdrListResult,
+  DowntimeItemInfo,
+  DowntimeItemResult,
+  DowntimeNextResult,
+  DowntimePoller,
+  DowntimeSkillKind,
+  DowntimeStage,
+  HerdrPaneRecord,
+  IdleTracker,
+  IdleWindowLaunchFence,
+  IdleWindowLaunchObservation,
+  IdleWindowLaunchVerdict,
+  ImplementCandidate,
+  InFlightPanes,
+  LlamaCapacityHint,
+  LlamaSlot,
+  LlamaSlotLeaseState,
+  LlamaSlotPhase,
+  LlamaStatus,
+  LlamaStatusFetcher,
+  LocalReservationRequest,
+  LocalReservationResult,
+  LocalReserveClient,
+  LocalReserveFetcher,
+  MostImportantItemResult,
+  PerSlotIdleTracker,
+  PrefillPacing,
+  RunningPanesResult
+} from './downtime-worker.types.js';
 
-/**
- * Request/response header carrying the granted reservation ticket id
- * (`X-Local-Reservation: <ticketId>`), sent on the pane's FIRST request
- * (parent AC1).
- */
-export const LOCAL_RESERVATION_HEADER = 'X-Local-Reservation';
+import {
+  clampDowntimeAuditBatchMax,
+  clampDowntimeIdleThresholdMs,
+  clampDowntimeMarkerStaleWindowMs,
+  clampDowntimeNoCandidateCooldownMs,
+  clampDowntimePollInterval,
+  clampDowntimeRequiredFreeSlots
+} from './downtime-worker.clamps.js';
 
-/** Per-turn locality preference header (parent AC4, implemented in C4). */
-export const LOCAL_PREFERENCE_HEADER = 'X-Local-Preference';
-
-/**
- * Response header reporting the route the proxy actually took (parent AC4).
- * The per-turn preference itself travels on `X-Local-Preference`; the
- * pane-launch env var is `LOCAL_PREFERENCE_ENV_VAR` (re-exported above from
- * `./local-preference.ts`). Absent headers = no route-log entry and no
- * behaviour change (C4 fail-open contract).
- */
-export const LOCAL_ROUTE_HEADER = 'X-Local-Route';
-
-/** Response header reporting why a request fell back off the local route (parent AC4). */
-export const LOCAL_FALLBACK_REASON_HEADER = 'X-Local-Fallback-Reason';
-
-/**
- * Pane-launch environment variable carrying a granted reservation ticket id
- * from the dispatcher to the spawned pi session (`send-to-pi.sh` /
- * `run-pi-agent.sh`). The Worklog pi extension (parent slice C4) turns it
- * into `X-Local-Reservation` on the pane's FIRST provider request.
- */
-export const LOCAL_RESERVATION_TICKET_ENV = 'PI_LOCAL_RESERVATION_TICKET';
-
-/** Hard floor for the poll interval (must not hammer the proxy). */
-export const DOWNTIME_POLL_INTERVAL_FLOOR_MS = 10_000;
-
-/** Defensive floor for the idle threshold (prevents immediate dispatch). */
-export const DOWNTIME_IDLE_THRESHOLD_FLOOR_MS = 1_000;
-
-export const DEFAULT_DOWNTIME_POLL_INTERVAL_MS = 10_000;
-/**
- * Default LLM idle threshold: 75 seconds. Chosen so that the slot-exhaustion
- * cooldown (1 min) has elapsed before the Dispatcher considers a slot fresh
- * enough for a new work item — this gives currently-active sessions the
- * opportunity to reclaim the slot first.
- */
-export const DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS = 75_000;
-
-/**
- * Default required-free-slots count: 2 of 3 slots (spare-capacity dispatch,
- * parent WL-0MT32F90V008UAD2). At least two slots must be free before
- * downtime work is dispatched, so one operator session slot is always
- * reserved for interactive work. A value of 0 means ALL slots must be free
- * (the pre-spare-capacity default); any positive integer N is accepted.
- */
-export const DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS = 2;
-
-/**
- * Minimum free slots required for an AUDIT dispatch (parent
- * WL-0MT32F90V008UAD2 AC3, machine-wide budget WL-0MTF0KLO10043YAN AC4 /
- * WL-0MTII48OV008P2QU F5): an audit pane needs a second slot for its
- * Phase 2 child deep-analysis (`AUDIT_PHASE2_PARALLELISM=1` — the child
- * runs strictly after the parent, so parent + one child = 2 local slots,
- * WL-0MSORQ1RG005DGUS). Applied as an ADDITIONAL selection-time check on
- * the latest polled status; the idle-duration gate (configured N) is
- * unchanged. Single machine-wide budget (one leader poll, one snapshot) -
- * see WL-0MT50LKAK001EF5Q bounded concurrent dispatches: the same cap
- * source, no per-worklog duplication. `AUDIT_PHASE2_PARALLELISM=1` → 2
- * slots minimum.
- */
-export const DOWNTIME_AUDIT_MIN_FREE_SLOTS = 2;
-
-/**
- * Minimum free slots required for a single-pane dispatch (implement /
- * plan / intake / scheduled tiers, parent WL-0MT32F90V008UAD2 AC3, F5
- * WL-0MTII48OV008P2QU single budget): each pane consumes exactly one local
- * slot, so ≥1 free slot suffices. Machine-wide, not per-worklog — shares
- * the single leader snapshot with WL-0MT50LKAK001EF5Q (one cap source).
- */
-export const DOWNTIME_PANE_MIN_FREE_SLOTS = 1;
-
-/**
- * Minimum interval between identical no-dispatch decision-log entries
- * (WL-0MU8808ZY0091JIA AC3): a healthy idle/gate-blocked loop must not flood
- * `.worklog/downtime-coordination.log`. A repeated refusal with the SAME
- * reason is suppressed until this window elapses; a reason CHANGE is always
- * logged immediately. 10 minutes → at most 6 identical lines per hour.
- */
-export const DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS = 10 * 60_000;
-
-/**
- * Short, stable header token for a no-dispatch reason (WL-0MU8808ZY0091JIA
- * AC4). Distinct from the plain idle/busy labels so "idle slots but no
- * dispatches" is visible in the herdr header. The RAW reason is what gets
- * logged; only the header label is abbreviated.
- */
-export function decisionHeaderToken(reason: string): string {
-  switch (reason) {
-    case 'slot-owned':
-      return 'slot-owner';
-    case 'proxy-contention':
-      return 'contention';
-    case 'review-queue-hold':
-      return 'review-queue';
-    case 'slots-unavailable':
-      return 'no-slots';
-    case 'capacity-saturated':
-      return 'saturated';
-    case 'prefill-gate':
-    case 'prefill-cap':
-    case 'prefill-eta':
-      // Prefill pacing refusals (WL-0MVHSZRZQ00482QX): each keeps its own
-      // distinct header token so a paced stop is distinguishable from
-      // `contention`, `slot-owner` and `no-slots` in the herdr header.
-      return reason;
-    case 'reserved-fallback':
-    case 'queue-full':
-      // Reserve-handshake refusals (parent WL-0MVIKRFP0005JDL8, slice C2):
-      // each reason keeps its own distinct token, so a reservation deferral
-      // is never collapsed into `no-slots` / `contention` and the operator
-      // can tell WHY no ticket was granted from the herdr header alone.
-      return reason;
-    case 'idle-window-spent':
-      // Idle-window launch fence (parent AC3, slice C3): this instance
-      // already launched from this idle window and the proxy has not yet
-      // reported that launch, so its headroom cannot be trusted yet. Distinct
-      // from every paced stop (`prefill-gate` / `prefill-cap` / `prefill-eta`)
-      // and from `reservation-lost` below.
-      return 'window-spent';
-    case 'reservation-refused':
-      // Reserve-handshake refusal observed on the DISPATCH path (slice C3):
-      // the proxy declined the admission ticket. The proxy's own vocabulary
-      // (`prefill-gate` / `queue-full` / …) is carried as `reservationReason`
-      // evidence, but the header token must NOT collapse into the paced-stop
-      // tokens — an operator has to be able to tell a lost reservation race
-      // (`reservation-lost`) from herdr's own pacing (`prefill-gate` /
-      // `prefill-cap`).
-      return 'reservation-lost';
-    default:
-      return reason;
-  }
-}
-
-/**
- * Schema-v2 capacity evidence attached to a no-dispatch decision entry
- * (LP-0MVGDUVGE0024YAI): the pool summary, payload version and the observed
- * per-slot lease/phase/ETA detail. Purely observability — no gate reads it.
- */
-interface CapacityEvidence {
-  capacityHint?: string;
-  statusSchemaVersion?: number;
-  idleLeasedSlots?: number;
-  generatingSlots?: number;
-  slotPhases?: Record<string, string>;
-  slotPrefillEtaSeconds?: Record<string, number>;
-  /**
-   * Prefill serialisation-gate evidence (LP-0MVGDUUV3001XFRJ,
-   * WL-0MVHSZRZQ00482QX): the in-flight/cap counters, the live gate waiters
-   * and the prefill-ETA guard's queue ETA / admission budget. Attached to
-   * every polled decision so a paced stop is diagnosable from the log alone.
-   */
-  prefillsInFlight?: number;
-  maxConcurrentPrefills?: number;
-  prefillGateWaiters?: number;
-  prefillBudgetSeconds?: number;
-  queueEtaSeconds?: number;
-  /**
-   * Authoritative local idle-age evidence (LP-0MVGD9Z8Z0055Y5J,
-   * WL-0MVHSZR9C0012NQY): the proxy's reported idle age in seconds and the
-   * source of the last local activity. Observability only — they let an
-   * operator see WHY a tick was admitted or deferred without reading the
-   * proxy. Absent on pre-feature proxies (and when malformed).
-   */
-  localIdleSeconds?: number;
-  localLastActivitySource?: string;
-}
-
-/**
- * Evidence fields shared by EVERY polled no-dispatch decision entry
- * (WL-0MU8808ZY0091JIA). Extracted from `recordDecision` so the
- * capacity-starvation observation (WL-0MVKNC2N50025HXE AC3) carries exactly
- * the same evidence schema as the refusal it extends — one shape, no
- * duplication, and an unchanged on-disk format for existing readers.
- */
-export interface DecisionEntryFields extends CapacityEvidence {
-  freeSlots: number;
-  totalSlots: number;
-  ownerPresent: boolean;
-  runningPanes: number | null;
-  contentionDepth: number;
-  /** Depth-aware audit-batch metadata (parent WL-0MVEDM8OT007WDRS AC5). */
-  auditBatchDepth?: number;
-  auditBatchCap?: number;
-  auditBatchRemaining?: number;
-  /** Why an armed batch ended (`cap` reached / `depth` dropped, AC5). */
-  auditBatchEndReason?: string;
-  /**
-   * Local-capacity reservation evidence (parent WL-0MVIKRFP0005JDL8 AC4,
-   * slice C2): recorded on every polled decision entry produced by a
-   * dispatch attempt that asked the proxy for a ticket. `reservationTicket`
-   * is the granted gate ticket (id + grant time), `admit` is the proxy's
-   * verdict for this poll, `projectedWaitS` its projected wait before local
-   * capacity and `retryAfterS` its `retry_after_s` deferral advice (refusals
-   * only). `reservationReleased` marks a granted ticket that could not be
-   * forwarded to a pane (spawn failure) and is therefore treated as
-   * released/expired — a ticket is never leaked or reused. Observability
-   * only: no gate reads these fields, and an older proxy (fail-open)
-   * records none of them.
-   */
-  reservationTicket?: { id: string; grantedAt: string };
-  admit?: boolean;
-  projectedWaitS?: number;
-  retryAfterS?: number;
-  reservationReleased?: boolean;
-  /**
-   * The proxy's OWN refusal reason (`reservation-refused` entries only,
-   * parent AC3 slice C3). The entry's `reason` is the grouped
-   * `reservation-refused` token (so the header reads `reservation-lost`,
-   * distinct from a paced `prefill-gate`/`prefill-cap` stop) and this field
-   * preserves the proxy's open vocabulary for diagnosis.
-   */
-  reservationReason?: string;
-  /**
-   * Launches this instance made in the current idle window that the proxy's
-   * `local_prefills_in_flight` has not yet accounted for (parent AC3 slice
-   * C3; the entry's reason is `idle-window-spent`). Evidence only — the
-   * guard itself refuses the tick before any dispatch attempt.
-   */
-  pendingLaunches?: number;
-  /**
-   * Host-CPU gate evidence (WL-0MVK0UO3Q002TXW6 AC4): the measured host CPU
-   * utilisation (0–100 %), its source (`proc-stat` delta vs `loadavg`
-   * fallback) and the configured threshold. Present on a `cpu-saturated`
-   * refusal so the hold is diagnosable from the decision log alone; absent on
-   * every non-CPU decision, which keeps the existing log shape.
-   */
-  hostCpuPercent?: number;
-  hostCpuSource?: HostCpuSource;
-  cpuGatePercent?: number;
-}
-
-function capacityEvidence(
-  status: LlamaStatus,
-  slots: LlamaSlot[] | null,
-): CapacityEvidence {
-  const evidence: CapacityEvidence = {};
-  if (status.capacity_hint !== undefined) evidence.capacityHint = status.capacity_hint;
-  if (status.status_schema_version !== undefined) {
-    evidence.statusSchemaVersion = status.status_schema_version;
-  }
-  // Prefill serialisation-gate evidence (WL-0MVHSZRZQ00482QX): recorded on
-  // every polled decision (even when the per-slot detail is unusable) so a
-  // paced tick always shows the proxy's own gate state.
-  if (typeof status.local_prefills_in_flight === 'number') {
-    evidence.prefillsInFlight = status.local_prefills_in_flight;
-  }
-  if (typeof status.local_max_concurrent_prefills === 'number') {
-    evidence.maxConcurrentPrefills = status.local_max_concurrent_prefills;
-  }
-  if (typeof status.prefill_gate_waiters === 'number') {
-    evidence.prefillGateWaiters = status.prefill_gate_waiters;
-  }
-  if (typeof status.prefill_budget_seconds === 'number') {
-    evidence.prefillBudgetSeconds = status.prefill_budget_seconds;
-  }
-  if (typeof status.queue_eta_seconds === 'number') {
-    evidence.queueEtaSeconds = status.queue_eta_seconds;
-  }
-  // Idle-age evidence is attached on EVERY polled decision (even when the
-  // per-slot detail is unusable) so a refused/deferred tick always shows the
-  // proxy's own idle-age answer (WL-0MVHSZR9C0012NQY AC7).
-  const idleSeconds = reportedIdleSeconds(status);
-  if (idleSeconds !== null) evidence.localIdleSeconds = idleSeconds;
-  if (status.local_last_activity_source !== undefined) {
-    evidence.localLastActivitySource = status.local_last_activity_source;
-  }
-  if (slots === null) return evidence;
-  if (slots.some((slot) => slot.lease_state !== undefined)) {
-    evidence.idleLeasedSlots = slots.filter(
-      (slot) => slot.lease_state === 'idle_leased',
-    ).length;
-    evidence.generatingSlots = slots.filter(
-      (slot) => slot.lease_state === 'generating',
-    ).length;
-  }
-  const phases: Record<string, string> = {};
-  const etas: Record<string, number> = {};
-  for (const slot of slots) {
-    if (slot.phase !== undefined && slot.phase !== null) phases[slot.slot_id] = slot.phase;
-    if (typeof slot.prefill_eta_seconds === 'number') {
-      etas[slot.slot_id] = slot.prefill_eta_seconds;
-    }
-  }
-  if (Object.keys(phases).length > 0) evidence.slotPhases = phases;
-  if (Object.keys(etas).length > 0) evidence.slotPrefillEtaSeconds = etas;
-  return evidence;
-}
-
-/** Sane floor for the no-candidate cooldown (the pause cannot be disabled or set trivially small). */
-export const DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS = 60_000;
-
-/** Default pause after a genuine empty backlog: 60 minutes. */
-export const DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS = 3_600_000;
-
-/**
- * Default minimum cooldown (WL-0MUKYERLZ006ELL5) between successive downtime
- * dispatches of the same `(item, kind)` after a pane closed WITHOUT reaching a
- * terminal stage (`agent-ended-no-terminal`, `audit-ended-no-result`, or any
- * future non-terminal code). Prevents a repeatedly failing session from being
- * re-selected immediately and wasting local-LLM slots. Default 30 minutes.
- */
-export const DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS = 30 * 60 * 1000;
-
-/**
- * Hard floor for the non-terminal cooldown (1 minute): a defensive minimum so
- * the control cannot be disabled or set trivially small (no immediate retry).
- */
-export const DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS = 60 * 1000;
-
-/**
- * Hard ceiling for the non-terminal cooldown (24 hours): above this a
- * repeatedly-failing item could be stranded indefinitely.
- */
-export const DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Default per-item, per-kind dispatch-ATTEMPT cap (WL-0MUKYEXMK0033MFK).
- *
- * After this many dispatch attempts (panes opened) for the same `(item,
- * kind)` at the SAME worklog stage, the item is excluded from further
- * automatic dispatch of that kind and flagged for producer review. Chosen
- * from the observed pattern (2–4 non-terminal retries before human
- * intervention is warranted).
- */
-export const DEFAULT_DOWNTIME_MAX_ATTEMPTS = 3;
-
-/** Hard floor for `maxAttempts` (1): at least one automatic attempt is always allowed. */
-export const DOWNTIME_MAX_ATTEMPTS_MIN = 1;
-
-/** Hard ceiling for `maxAttempts` (10): above this the cap is effectively disabled. */
-export const DOWNTIME_MAX_ATTEMPTS_MAX = 10;
-
-/**
- * Default depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
- * WL-0MVEDM8OT007WDRS AC1).
- *
- * Bounds how many SEQUENTIAL audit dispatches one continuous idle window
- * may issue when the audit-eligible depth reaches `browseItemCount`. The
- * default `2` is conservative: batching is on (the queue drains without a
- * fresh full idle period between audits) but the per-window LLM load stays
- * small.
- */
-export const DEFAULT_DOWNTIME_AUDIT_BATCH_MAX = 2;
-
-/**
- * Hard floor for `downtimeAuditBatchMax` (1): `1` means batching OFF and
- * restores the legacy single-dispatch-per-idle-window behaviour.
- */
-export const DOWNTIME_AUDIT_BATCH_MAX_MIN = 1;
-
-/**
- * Hard ceiling for `downtimeAuditBatchMax` (5): mirrors the audit skill's
- * `AUDIT_BATCH_MAX_ITEMS` — above this the per-window LLM load is unbounded.
- */
-export const DOWNTIME_AUDIT_BATCH_MAX_MAX = 5;
-
-/**
- * Per-process dispatch-PIPELINE single-flight bound (WL-0MT50LKAK001EF5Q).
- *
- * This bounds PIPELINES (claim → marker → spawn), NOT live panes. There is
- * deliberately NO client-side limit on the number of dispatched panes
- * (WL-0MU2EP6JL006A1U3): panes stay open until an operator closes them, so a
- * pane count can never be the concurrency limiter — the local LLM idle /
- * free-slot check is (each running agent holds a proxy slot/lease).
- */
-export const DISPATCH_PIPELINE_SINGLE_FLIGHT = 1;
-
-/**
- * Default review-queue depth threshold (`browseItemCount`, parent
- * WL-0MT2UQWOR007CYY9): when the ROOT-ONLY `completed`/`in_review` count
- * reaches this, the review queue is "deep" and NON-CRITICAL implement
- * dispatch is held until audits / producer review drain it back below.
- * Re-read live from settings each tick (no restart); root-only counting
- * via `wl list --status completed --stage in_review --root-only --json`.
- *
- * The canonical definition lives in the leaf `browse-window.ts` module
- * (shared with the TUI sprint view without an import cycle,
- * WL-0MUNS8X97007C9H9 AC1); re-exported here for backward compatibility.
- */
-export { DEFAULT_BROWSE_ITEM_COUNT };
-
-/**
- * Maximum number of additional items to fetch when extending the dispatch
- * window (WL-0MU6UL3GQ0015AA5; restricted to critical-only by
- * WL-0MUNS8X97007C9H9 AC2/AC4).
- *
- * The dispatcher head is the sprint view, so a defensive out-of-window read
- * re-checks the SAME ranking path with a window of
- * `head length + DOWNTIME_DISPATCH_EXTEND_MAX` items. The extension returns
- * ONLY `critical` items: every non-critical candidate must be visible in the
- * sprint view, so a non-critical item beyond `browseItemCount` is never
- * dispatched. Because all `critical` items are mandatory in the view, this
- * escape hatch is normally a no-op.
- *
- * The extension is bounded: at most `head length + 30` items are ever scanned
- * per dispatch cycle. The TUI worklist continues to show exactly
- * `browseItemCount` items (clamped 1–50).
- */
-export const DOWNTIME_DISPATCH_EXTEND_MAX = 30;
-
-/**
- * Audit-tier recency window: a completed/in_review candidate is only
- * dispatched for audit when it was modified within the last 7 days.
- */
-export const DOWNTIME_AUDIT_RECENCY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * Stale-audit window (WL-0MT3PHW4I002SNOV): an audit dispatch marker older
- * than this is treated as stale — the audit pane may have crashed without
- * updating the work item — and is ignored by the active-audit single-flight
- * check, so a NEW audit dispatch can proceed. Only one audit is active at a
- * time during downtime dispatch.
- */
-export const DOWNTIME_AUDIT_STALE_WINDOW_MS = 2 * 60 * 60 * 1000; // 2 hours
-
-/**
- * Default dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT):
- * a SUCCESS dispatch marker whose item is STILL at the marker's dispatched-at
- * stage is released once its age exceeds this window — a pane that spawned
- * but whose agent never advanced the item (crash, manual close, silent
- * failure) must not strand the item permanently. Default 24 hours.
- */
-export const DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/**
- * Pane-lifecycle monitor cadence (WL-0MU308WSF0002JWN): the worker re-checks
- * dispatched panes for terminal states at most once per this interval,
- * bounding the per-tick worklog queries ("reasonable polling cadence" —
- * parent Constraint) while still closing completed panes promptly. Overridable
- * per tick via the optional `paneLifecycleIntervalMs` config field.
- *
- * NOTE: the monitor itself is currently DISABLED — see
- * `PANE_LIFECYCLE_MONITOR_ENABLED` below.
- */
-export const DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS = 30_000;
-
-/**
- * Mechanism B (dispatch-monitor pane auto-close, `pane-lifecycle.ts`) is
- * DISABLED (WL-0MUMEKDK0008LKH8).
- *
- * The classifier was observed to close panes prematurely (stage-propagation
- * lag; `requires-attention` outcomes still closing) and to race with the
- * scheduled reaper (Mechanism A) — the two mechanisms share only a
- * non-atomic idempotency key, so a pane could be closed twice. It is switched
- * off here until its design is revisited; the scheduled reaper
- * (`pane-close-scheduler.ts`) is the only active auto-close path. The
- * classifier and its unit tests are retained for that future redesign — do
- * not re-enable without reworking the double-close race. See
- * `docs/dev/downtime-dispatcher.md` and `packages/herdr/README.md`.
- */
-export const PANE_LIFECYCLE_MONITOR_ENABLED: boolean = false;
-
-/**
- * Hard floor for the success-marker staleness window (1 h): below this the
- * age release would fire while a dispatched pane is plausibly still running,
- * weakening duplicate-dispatch protection for genuinely in-flight work.
- */
-export const DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS = 60 * 60 * 1000;
-
-/**
- * Hard ceiling for the success-marker staleness window (7 days): above this
- * a stranded item could be excluded for a week, reintroducing the original
- * permanent-stranding failure mode at a large but bounded scale.
- */
-export const DOWNTIME_MARKER_STALE_WINDOW_MAX_MS = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * Default for the pre-dispatch stalled-work scan (WL-0MUYMBK6H005PY16):
- * enabled. The scan prefers resuming an existing stalled pane over opening a
- * new one; it can be turned off without a code change.
- */
-export const DEFAULT_DOWNTIME_STALL_SCAN_ENABLED = true;
-
-/**
- * Default stall threshold (WL-0MUYMBK6H005PY16): 5 minutes, aligned with the
- * pane-closure reaper's grace period. A pane is a stall candidate only once
- * its not-`working` state has persisted at least this long.
- */
-export const DEFAULT_DOWNTIME_STALL_THRESHOLD_MS = 5 * 60 * 1000;
-
-/**
- * Hard floor for the stall threshold (60 s): below this the scan would resume
- * panes that are merely between tool calls, hijacking active sessions.
- */
-export const MIN_DOWNTIME_STALL_THRESHOLD_MS = 60 * 1000;
-
-/**
- * Hard ceiling for the stall threshold (60 min): above this a genuinely
- * stalled pane could sit unattended for over an hour, defeating the feature.
- */
-export const MAX_DOWNTIME_STALL_THRESHOLD_MS = 60 * 60 * 1000;
-
-/**
- * Default progress window before a live-agent pane is reported as
- * long-running (WL-0MVKNC2N50025HXE AC2): 3 hours. Comfortably longer than a
- * legitimate implement/audit session's normal stage transition, while short
- * enough that an overnight session making no progress surfaces the same night.
- *
- * Defined here (the dispatcher's settings owner) so `long-running-panes.ts`
- * imports it and the worker needs only a TYPE import of that module — no
- * runtime import cycle (the same layering as the stall threshold).
- */
-export const DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS = 3 * 60 * 60 * 1000;
-
-/** Hard floor for the long-running window (1 h) — below this, normal sessions alert. */
-export const DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS = 60 * 60 * 1000;
-
-/** Hard ceiling for the long-running window (48 h). */
-export const DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS = 48 * 60 * 60 * 1000;
-
-/**
- * Clamp the long-running progress window to `[1 h, 48 h]`. Non-finite /
- * missing / invalid values fall back to the default (3 h).
- */
-export function clampDowntimeLongRunningThresholdMs(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS;
-  return Math.min(
-    Math.max(Math.round(value), DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS),
-    DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS,
-  );
-}
 
 // ── Host-CPU dispatch gate (WL-0MVK0UO3Q002TXW6) ──────────────────────
 
@@ -846,354 +392,6 @@ export function hostCpuGateEvidence(
   };
 }
 
-/**
- * Three-strike rule: this many consecutive CLI-error dispatch outcomes
- * pause the worker entirely (after logging the persistent error).
- */
-export const DOWNTIME_ERROR_STRIKE_LIMIT = 3;
-
-/**
- * Timeout for the downtime worker's `wl` CLI invocations (`getNextItem` /
- * `getNextAuditCandidate` in index.ts): a hung `wl` child must be killed
- * and the lookup fail closed (a CLI-error strike) within a bounded time
- * instead of wedging the dispatch task until the pane restarts
- * (WL-0MSJIPHD0001L1J9). 10s is comfortably above the healthy ~0.15s wl
- * latency and below the CLI's own 60s safety timeout (used as the upper
- * bound for this value).
- */
-export const DOWNTIME_WL_TIMEOUT_MS = 10_000;
-
-/**
- * Bounded transient-retry for `wl` CLI invocations (WL-0MTOTCETU004YYIU
- * AC3): a single `SQLITE_BUSY` / `database is locked` / timeout is a
- * transient contention that must not burn a strike. The caller retries
- * with exponential backoff within the same dispatch tick so one transient
- * does not cascade into the three-strike 60-min cooldown. Only the
- * patterns below are retried — parse/author-gate errors fail fast.
- */
-export function isTransientDowntimeError(message: string): boolean {
-  const m = message.toLowerCase();
-  if (m.includes('sqlite_busy') || m.includes('sqlite busy')) return true;
-  if (m.includes('database is locked') || m.includes('database table is locked')) return true;
-  // "database busy" variants — better-sqlite3 busy_timeout contention
-  if (m.includes('database') && m.includes('busy')) return true;
-  return false;
-}
-
-/**
- * Execute `fn` with bounded retry on transient `wl` errors only.
- * Retries `retries` times (default 2 → up to 3 total attempts) with
- * exponential backoff `baseDelayMs * 2^attempt` (default 50ms → 50,100ms).
- * Non-transient errors throw immediately. The total extra wall-clock
- * added is < 200ms so the tick stays well inside DOWNTIME_RUN_TIMEOUT_MS.
- */
-export async function withTransientRetry<T>(
-  fn: () => Promise<T>,
-  retries = 2,
-  baseDelayMs = 50,
-): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      const msg = err instanceof Error ? err.message : String(err);
-      const transient = isTransientDowntimeError(msg);
-      if (!transient || attempt === retries) throw err;
-      const delay = baseDelayMs * (1 << attempt);
-      await new Promise<void>((r) => setTimeout(r, delay));
-    }
-  }
-  throw lastErr as Error;
-}
-
-/**
- * Scheduler-level watchdog bound for ONE downtime-worker tick run
- * (WL-0MSJIPHD0001L1J9): the maximum wall-clock time a scheduler run may
- * take before it is abandoned and the task's single-flight flag is reset so
- * the next tick retries — a hung run can never permanently wedge the
- * downtime task. Chosen comfortably above the worst-case bounded dispatch
- * path (5s proxy poll + up to three 10s wl lookups + 3s claim + 5s dispatch
- * comment ≈ 45s) so healthy runs never trip it, while a hung run still
- * recovers within a minute instead of wedging until a pane restart.
- */
-export const DOWNTIME_RUN_TIMEOUT_MS = 60_000;
-
-export const DEFAULT_DOWNTIME_PROXY_URL = 'http://192.168.0.199:8000';
-export const DEFAULT_DOWNTIME_MODEL = 'plan';
-
-/**
- * Default coordination check-in interval: 5 minutes (WL-0MTMPSCL8000O45H,
- * parent AC3 — was 30 min). Every instance re-verifies/updates its entry
- * in the shared coordination file at this cadence. The leader checks in
- * more often (WL-0MTOCBP1D009P4U3) — see DEFAULT_LEADER_CHECK_IN_MS.
- */
-export const DEFAULT_COORDINATION_CHECK_IN_MS = 5 * 60 * 1000;
-
-/**
- * Leader coordination check-in interval (WL-0MTOCBP1D009P4U3): the leader
- * re-offers every 4 minutes so offers stay fresh and the lease is renewed
- * inside the 5-minute TTL with ~1 min grace. Non-leaders use
- * DEFAULT_COORDINATION_CHECK_IN_MS (5 min, WL-0MTMPSCL8000O45H).
- */
-export const DEFAULT_LEADER_CHECK_IN_MS = 4 * 60 * 1000;
-
-/**
- * Maximum local DISPATCH-lease TTL (seconds) the llama-proxy can hold a
- * local slot — the cross-repo contract from `llm-manager`
- * (`proxy/proxy/router_helpers.py`, WL-0MU8809SZ0022VZG).
- *
- * The lease is ADAPTIVE, not a fixed ~180 s: a static base plus
- * generation-proportional extension, capped at
- * `local_dispatch_lease_max_seconds` (default 1500 s), with chunk/prefill
- * refresh buffers that keep it alive while a stream is active. A long agent
- * generation therefore holds the lease for its WHOLE run — the RCA observed a
- * dispatched-pane lease run 836 s → 0 (WL-0MU87ZGPP0029V28).
- *
- * The dispatcher MUST NOT assume leases expire after ~180 s. It does not WAIT
- * OUT a lease: it dispatches into genuinely free UNOWNED slots (the per-slot
- * gate, WL-0MU8807BI008C9ME) and only the count-based single-slot path treats
- * a held lease as blocking. If `llm-manager` changes the default, revisit
- * this constant and `docs/dev/downtime-dispatcher.md`.
- */
-export const LOCAL_DISPATCH_LEASE_MAX_SECONDS = 1500;
-
-/**
- * Retired coordination tier ordering (parent AC4 → WL-0MTK1ILM2009QYB2).
- * The coordination leader no longer re-ranks offers by tier: it dispatches
- * the OFFER list in file order (each offer is its root's Herdr list head,
- * WL-0MTK1ILM2009QYB2 "dispatcher == Herdr list head"; see
- * `dispatchFromCoordination`). This constant and `coordinationTierRank`
- * are kept exported only for the module's tier-rank unit tests — nothing
- * on the dispatch path calls them.
- */
-export const COORDINATION_TIER_ORDER = ['audit', 'critical', 'implement', 'plan', 'risk-effort', 'intake'] as const;
-
-export type CoordinationTierKind = (typeof COORDINATION_TIER_ORDER)[number];
-
-// ── Types ─────────────────────────────────────────────────────────────
-
-/** Shape of `GET /llama/local/status` as served by the llama-proxy. */
-export interface LlamaStatus {
-  llama_server_running: boolean;
-  /**
-   * LOCAL-only query activity (served by proxies exposing the
-   * `local_active_queries` counter, LP-0MSL2ZLLS009RVKR). This is the
-   * SOLE busy signal for idle detection: `local_active_query=true` means
-   * busy (dispatch inhibited), `local_active_query=false` means idle.
-   * ABSENT on pre-fix proxies — absence is treated as busy (fail-closed)
-   * to prevent silent degraded dispatch on unverifiable signals.
-   */
-  local_active_query?: boolean;
-  model_switch_in_progress: boolean;
-  local_lease_active: boolean;
-  available_slots: number;
-  total_slots: number;
-  current_model?: string;
-  local_owner_session_id?: string | null;
-  /**
-   * Every owner session id reported by the proxy, normalised across the
-   * legacy string form and the current array form (WL-0MU88086A0089US4):
-   * array elements that are HTTP(S) URLs (the proxy's own base URL, e.g.
-   * `"http://localhost:8080"`) are excluded, and a legacy string yields a
-   * single-element array. Empty when no owner is reported. Kept alongside
-   * `local_owner_session_id` (the first id) for backward compatibility.
-   */
-  local_owner_session_ids?: string[];
-  local_owner_lease_remaining_seconds?: number | null;
-  /**
-   * Proxy-reported LIVE contention queue depth (AC6, parent
-   * WL-0MTYZXSLN008HZOW): the number of requests CURRENTLY queued behind a
-   * busy local slot. A positive value means dispatched panes are already
-   * contending for the slot — the dispatcher backs off until the queue
-   * drains. ABSENT on pre-feature proxies (treated as 0 — no contention
-   * evidence). This is the SOLE contention gate signal
-   * (WL-0MU1DWXO600153OI).
-   */
-  contention_queue_depth?: number;
-  /**
-   * Proxy-reported CUMULATIVE queue metric: the number of requests that have
-   * EVER queued on this proxy process (never decremented; resets only on a
-   * proxy restart). Telemetry only — it MUST NOT gate dispatch
-   * (WL-0MU1DWXO600153OI): a past queue event leaves this > 0 forever, which
-   * would keep the dispatcher backed off even with an empty queue. ABSENT on
-   * pre-feature proxies.
-   */
-  contention_queued_count?: number;
-  /**
-   * Proxy degradation flag (LP-0MSVP7XJ6008QPKX; fail-closed contract
-   * WL-0MUXVPXAZ005RESW): `true` when the served slot COUNTS came from the
-   * proxy's last-known cache because the fresh `/slots` query failed. The
-   * per-slot `slots` detail then cannot be trusted/paired with the counts,
-   * so per-slot detail is UNUSABLE and the worker fails closed (no
-   * dispatch) rather than falling back to the untrusted count. ABSENT on
-   * pre-feature proxies (treated as not stale).
-   */
-  slots_stale?: boolean;
-  /**
-   * Per-slot identity (LP-0MSG5TA7Y002GN39): served by proxies that expose
-   * slot-level detail, and the ONLY trusted availability source
-   * (WL-0MUXVPXAZ005RESW). When present and non-stale, the downtime worker
-   * tracks idle duration PER SLOT ID so a configured N requires the SAME N
-   * slots continuously free. ABSENT on pre-feature proxies, and an EMPTY
-   * array means "no per-slot detail available" (WL-0MUFP30T2003OX1F) —
-   * never "zero free slots"; in both cases the worker fails closed (no
-   * dispatch) rather than falling back to the count.
-   */
-  slots?: LlamaSlot[];
-  /**
-   * Schema-v2 payload version (LP-0MVGDUVGE0024YAI). ABSENT on pre-v2
-   * proxies. Consumers must gate new behaviour on a value >= 2.
-   */
-  status_schema_version?: number;
-  /**
-   * Schema-v2 pool summary (LP-0MVGDUVGE0024YAI). Defensive: `saturated`
-   * never admits a dispatch, even when the per-slot detail looks free
-   * (inconsistent payloads fail closed). ABSENT on pre-v2 proxies.
-   */
-  capacity_hint?: LlamaCapacityHint;
-  /**
-   * Schema-v2 admission-guard wait budget in seconds; advisory/observability
-   * only in this consumer. ABSENT on pre-v2 proxies.
-   */
-  prefill_budget_seconds?: number | null;
-  /**
-   * Prefill serialisation gate (LP-0MVGDUUV3001XFRJ, WL-0MVHSZRZQ00482QX):
-   * the number of local prefills CURRENTLY in flight. Availability-affecting:
-   * a malformed (non-finite / negative) value rejects the poll (fail-closed),
-   * mirroring `contention_queue_depth`. ABSENT on pre-feature proxies (no
-   * prefill pacing — today's behaviour exactly).
-   */
-  local_prefills_in_flight?: number;
-  /**
-   * The proxy's effective prefill concurrency cap: `1` = serialised (the
-   * default), `0` = gate disabled (the cap becomes the slot pool). When
-   * `> 0` and `local_prefills_in_flight >= local_max_concurrent_prefills`
-   * the prefill capacity budget is 0 for that tick. Availability-affecting
-   * (malformed → poll rejected). ABSENT on pre-feature proxies.
-   */
-  local_max_concurrent_prefills?: number;
-  /**
-   * Requests waiting on the proxy's prefill gate — the live
-   * contention-queue depth for the gate. `> 0` is contention evidence,
-   * equivalent to a non-empty `contention_queue_depth`
-   * (WL-0MVHSZRZQ00482QX AC3). Availability-affecting (malformed → poll
-   * rejected). ABSENT on pre-feature proxies.
-   */
-  prefill_gate_waiters?: number;
-  /**
-   * Prefill-ETA guard's projected queue wait in seconds
-   * (LP-0MVGDUV5E005UWBQ): when present and finite together with
-   * `prefill_budget_seconds` and above it, the dispatcher defers rather than
-   * parking a pane behind a doomed wait. Advisory (a malformed value
-   * degrades to undefined and never blocks dispatch). ABSENT on pre-feature
-   * proxies.
-   */
-  queue_eta_seconds?: number | null;
-  /**
-   * PROXY-AUTHORITATIVE local idle age in SECONDS (LP-0MVGD9Z8Z0055Y5J,
-   * WL-0MVHSZR9C0012NQY): the monotonic idle age of the local backend,
-   * updated by the proxy on dispatch start, on every forwarded SSE chunk and
-   * on request finish. Its baseline is the PROXY PROCESS start, so a freshly
-   * restarted proxy reports its true idle age rather than "unknown".
-   *
-   * When present and finite it is the AUTHORITATIVE idle-age signal for
-   * threshold qualification: `>= thresholdSeconds` satisfies the duration
-   * requirement on this poll (no local accumulation needed — the GPU may have
-   * been idle for hours before this worker started polling), and
-   * `< thresholdSeconds` refuses regardless of an older local tracker run.
-   * ABSENT on pre-feature proxies (or malformed/non-finite) → the local
-   * tracker decides exactly as before.
-   */
-  local_idle_seconds?: number;
-  /**
-   * Wall-clock timestamp (ISO string) of the last local activity
-   * (LP-0MVGD9Z8Z0055Y5J): operator-facing evidence recorded in the decision
-   * log. Never a gate. ABSENT on pre-feature proxies; malformed values
-   * degrade to undefined (never reject the poll).
-   */
-  local_last_activity_at?: string;
-  /**
-   * What last touched the local backend (LP-0MVGD9Z8Z0055Y5J): `dispatch` /
-   * `chunk` / `finish` / startup … Operator-facing evidence in the decision
-   * log — it explains WHY the backend is busy/idle. Never a gate. ABSENT on
-   * pre-feature proxies; malformed values degrade to undefined.
-   */
-  local_last_activity_source?: string;
-}
-
-/**
- * The proxy-reported local idle age in SECONDS when it is usable, else
- * `null` (WL-0MVHSZR9C0012NQY). Fail-closed/backward compatible: an absent,
- * non-finite or negative value is never treated as "idle forever" — it
- * returns `null` so the caller falls back to the local idle tracker exactly
- * as a pre-feature proxy would.
- */
-export function reportedIdleSeconds(status: LlamaStatus): number | null {
-  const seconds = status.local_idle_seconds;
-  if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds < 0) return null;
-  return seconds;
-}
-
-/**
- * Per-slot detail served inside `LlamaStatus.slots` (NORMALIZED by
- * `parseLlamaStatus`). The proxy (observability.py) serves `slot_id` as an
- * INTEGER (`slot.get("id", i)`); the parser coerces numeric ids to strings
- * and clamps negatives to 0 (WL-0MSVRMAWM007QNR5), so the normalized
- * `slot_id` is always a non-empty string — the per-slot idle tracker keys
- * its timers by it.
- *
- * Schema v2 (LP-0MVGDUVGE0024YAI) adds `lease_state`, `phase`,
- * `context_tokens` and `prefill_eta_seconds`; all are additive, so a pre-v2
- * payload parses exactly as before.
- */
-export interface LlamaSlot {
-  slot_id: string;
-  is_processing: boolean;
-  /**
-   * Per-slot Local Proxy owner session id (AC5, parent WL-0MTYZXSLN008HZOW):
-   * the pi session currently holding this slot's lease, or undefined/null
-   * when the slot is unowned. ABSENT on pre-feature proxies. On pre-v2
-   * payloads (no `lease_state`) a non-null owner is NEVER considered free
-   * for a new dispatch; with schema-v2 `lease_state` the lease state is
-   * authoritative and `idle_leased` IS dispatchable capacity
-   * (LP-0MVGDUVGE0024YAI).
-   */
-  owner_session_id?: string | null;
-  /**
-   * Schema-v2 lease state (LP-0MVGDUVGE0024YAI). ABSENT on pre-v2 proxies.
-   * Availability uses this when present: only `generating` is busy.
-   */
-  lease_state?: LlamaSlotLeaseState;
-  /** Schema-v2 phase inference; advisory only (never gates dispatch). */
-  phase?: LlamaSlotPhase | null;
-  /** Schema-v2 prompt progress; advisory only. */
-  context_tokens?: number | null;
-  /** Schema-v2 calibrated prefill cost; advisory only. */
-  prefill_eta_seconds?: number | null;
-}
-
-/**
- * Per-slot lease state served by schema-v2 proxies (LP-0MVGDUVGE0024YAI):
- * `generating` while a prefill/decode is in flight, `idle_leased` when the
- * slot is not processing but a live lease still reserves it (including the
- * post-stream cooldown), and `free` otherwise. Only `generating` is
- * genuinely busy; `idle_leased` is the reserved-but-idle case the upstream
- * change removes from the false-busy set.
- */
-export type LlamaSlotLeaseState = 'generating' | 'idle_leased' | 'free';
-
-/** Proxy-side per-slot phase inference (schema v2; null when not processing). */
-export type LlamaSlotPhase = 'prefill' | 'decode';
-
-/**
- * One-field summary of whether the local pool is genuinely working
- * (schema v2): `idle` = at least one free slot or every occupied slot is
- * `idle_leased`; `prefill_bound` = no free slot and at least one prefill;
- * `saturated` = no free slot and every occupied slot is decoding.
- */
-export type LlamaCapacityHint = 'idle' | 'prefill_bound' | 'saturated';
 
 // ── Idle detection (implemented) ──────────────────────────────────────
 
@@ -1422,41 +620,6 @@ export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): bo
 
 // ── Prefill-gate pacing (WL-0MVHSZRZQ00482QX) ────────────────────────
 
-/**
- * Per-tick prefill pacing decision derived from the proxy's serialisation
- * gate (LP-0MVGDUUV3001XFRJ) and prefill-ETA guard (LP-0MVGDUV5E005UWBQ).
- *
- * Every field is optional and absent on a pre-feature proxy, so an absent
- * gate restores today's free-slot-only budget exactly (`capacityBudget`
- * `undefined`, `deferReason` `undefined`).
- */
-export interface PrefillPacing {
-  /** `local_prefills_in_flight` when served. */
-  inFlight?: number;
-  /** `local_max_concurrent_prefills` when served (`0` = gate disabled). */
-  cap?: number;
-  /** `prefill_gate_waiters` when served (live gate queue depth). */
-  gateWaiters?: number;
-  /** `prefill_budget_seconds` when served (the admission wait budget). */
-  budgetSeconds?: number;
-  /** `queue_eta_seconds` when served (projected queue wait). */
-  queueEtaSeconds?: number;
-  /** Highest per-slot `prefill_eta_seconds` observed in flight. */
-  maxSlotPrefillEtaSeconds?: number;
-  /**
-   * Remaining prefill concurrency headroom: `0` while the cap is reached,
-   * otherwise `cap - inFlight` (at least 1). `undefined` = unbounded — the
-   * cap is absent or `0`, or the in-flight count is not served, so pacing
-   * must not reduce today's free-slot budget.
-   */
-  capacityBudget?: number;
-  /**
-   * Distinct reason a dispatch is paced this tick, in precedence order:
-   * gate waiters (contention evidence) → cap saturated → projected wait
-   * above the admission budget. `undefined` = no prefill pacing.
-   */
-  deferReason?: 'prefill-gate' | 'prefill-cap' | 'prefill-eta';
-}
 
 /**
  * Compute the prefill pacing decision for one poll.
@@ -1523,20 +686,6 @@ export function evaluatePrefillPacing(
 
 // ── Idle-duration tracker (implemented — F3) ──────────────────────────
 
-export interface IdleTracker {
-  /** Idle-since timestamp (ms), or null when not currently in an idle run. */
-  readonly idleSince: number | null;
-  /**
-   * Record one poll result. `isIdle` true starts (or continues) the idle
-   * run; false resets it (idleSince = null).
-   */
-  record(isIdle: boolean, now?: number): void;
-  /**
-   * True once the current idle run has lasted `thresholdMs` or longer
-   * continuously.
-   */
-  isThresholdMet(thresholdMs: number, now?: number): boolean;
-}
 
 /**
  * Continuous idle-duration tracker. `idleSince` is set on the first idle
@@ -1563,27 +712,6 @@ export function createIdleTracker(): IdleTracker {
 
 // ── Per-slot idle tracker (WL-0MSG7P9N8009PCKG) ───────────────────────
 
-/**
- * Per-slot idle-duration tracker: one timer per `slot_id` so a configured
- * N < total requires the SAME N slots continuously free for the full
- * threshold (LP-0MSG5TA7Y002GN39) — never transient any-N availability.
- */
-export interface PerSlotIdleTracker {
-  /** idle-since timestamp per slot_id; null = slot busy / timer reset. */
-  readonly idleSince: ReadonlyMap<string, number | null>;
-  /**
-   * Record one per-slot poll. A free slot starts (first free poll) or
-   * continues (subsequent free polls) its OWN timer; a processing slot
-   * resets ONLY its own timer; a slot absent from the payload is
-   * fail-closed to busy (its timer resets). An empty payload resets every
-   * known slot timer (the global-busy reset path).
-   */
-  record(slots: LlamaSlot[], now?: number): void;
-  /**
-   * Number of slots continuously free for `thresholdMs` or longer.
-   */
-  thresholdMetCount(thresholdMs: number, now?: number): number;
-}
 
 /**
  * Map-backed per-slot idle tracker. `idleSince` is set on each slot's first
@@ -1626,15 +754,6 @@ export function createPerSlotIdleTracker(): PerSlotIdleTracker {
 
 // ── Poller (implemented — F2) ────────────────────────────────────────
 
-/**
- * Minimal structural fetch signature (the DOM `fetch` type is not part of
- * this project's tsconfig lib). Node's global `fetch` satisfies it at
- * runtime.
- */
-export type LlamaStatusFetcher = (
-  url: string,
-  init?: { signal?: unknown },
-) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
 /** Per-poll timeout: an unresponsive proxy must fail closed, not hang. */
 export const DEFAULT_DOWNTIME_POLL_TIMEOUT_MS = 5_000;
@@ -1972,77 +1091,6 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
 // aliases and a rename is a one-line change. Additive proxy fields must never
 // break parsing.
 
-/**
- * Locality priority the dispatcher asks the proxy to schedule a turn with.
- * Advisory to the proxy; unknown values are the proxy's to reject.
- */
-export type LocalReservationPriority = 'interactive' | 'background';
-
-/**
- * Prefix-cache expectation for the turn: `warm` (the proxy's cache should
- * serve the prefill), `cold` (it should not) or `unknown` (the caller cannot
- * tell — the proxy decides).
- */
-export type LocalReservationCacheState = 'warm' | 'cold' | 'unknown';
-
-/**
- * Request body for `POST /llama/local/reserve`: the pane's expected token
- * size, its scheduling priority and its cache state. The proxy contract is
- * additive-only, so extra fields are permitted and ignored by this consumer.
- */
-export interface LocalReservationRequest {
-  /** Expected prompt + completion token size for the turn. */
-  expected_tokens: number;
-  /** Scheduling priority the proxy may use to admit or refuse. */
-  priority: LocalReservationPriority;
-  /** Whether the proxy's prefix cache is expected to serve this prefill. */
-  cache_state: LocalReservationCacheState;
-  /** Additive fields are allowed (additive-only proxy contract). */
-  [extra: string]: unknown;
-}
-
-/**
- * Granted reserve response body (`2xx`). Field names are the documented
- * contract; {@link parseLocalReservationResponse} additionally accepts the
- * `ticket` / `ttl_seconds` aliases while the proxy contract settles.
- */
-export interface LocalReservationGrantedBody {
-  ticket_id: string;
-  ttl_s: number;
-  [extra: string]: unknown;
-}
-
-/**
- * Refused reserve response body (`429`): `reason` is an OPEN vocabulary
- * (`reserved-fallback`, `prefill-gate`, `queue-full`, …) — consumers accept
- * any non-empty string and never branch on an unknown one.
- */
-export interface LocalReservationRefusedBody {
-  reason: string;
-  retry_after_s: number;
-  [extra: string]: unknown;
-}
-
-/** A granted gate ticket: its id goes on the pane's first request. */
-export interface LocalReservationTicket {
-  /** Gate ticket id, surfaced as `X-Local-Reservation`. */
-  ticketId: string;
-  /** Seconds the ticket remains valid (always finite and > 0). */
-  ttlSeconds: number;
-}
-
-/** A refusal: defer by `retryAfterSeconds`, record `reason` as evidence. */
-export interface LocalReservationRefusal {
-  /** Proxy-supplied refusal reason (open vocabulary). */
-  reason: string;
-  /** Seconds to wait before asking again (finite, >= 0). */
-  retryAfterSeconds: number;
-}
-
-/** Parsed reservation outcome: a ticket to claim with, or a refusal to defer on. */
-export type LocalReservationResult =
-  | { status: 'granted'; ticket: LocalReservationTicket }
-  | { status: 'refused'; refusal: LocalReservationRefusal };
 
 /** First non-empty string among `keys` (the tolerant alias reader). */
 function firstNonEmptyString(
@@ -2129,26 +1177,6 @@ export function buildLocalReservationRequest(
   };
 }
 
-/**
- * Injectable POST boundary for the reserve handshake (mirrors the existing
- * `LlamaStatusFetcher` injectable-seam pattern; narrow enough that tests can
- * stub it with a plain object).
- */
-export type LocalReserveFetcher = (
-  url: string,
-  init: { method: 'POST'; headers: Record<string, string>; body: string; signal?: unknown },
-) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
-
-/**
- * The reserve client: asks the proxy for an admission ticket. Resolves the
- * typed result, or `null` on ANY unusable outcome (endpoint absent, server
- * error, timeout, malformed body) — NEVER throws. A `null` means "this proxy
- * does not reserve": the caller fails open to today's polling behaviour
- * (parent AC2).
- */
-export type LocalReserveClient = (
-  request: LocalReservationRequest,
-) => Promise<LocalReservationResult | null>;
 
 /**
  * Create the reserve client for `POST {proxyUrl}/llama/local/reserve`.
@@ -2235,46 +1263,6 @@ export function createLocalReserver(
  */
 export const DEFAULT_LAUNCH_CONFIRMATION_GRACE_MS = 5 * 60_000;
 
-/** Observation-fed state for the one-per-idle-window launch fence. */
-export interface IdleWindowLaunchObservation {
-  /** True when the poll reports a continuous idle window (started/ongoing). */
-  idle: boolean;
-  /** `local_prefills_in_flight` when served (undefined = pre-feature proxy). */
-  inFlight?: number;
-  /** `local_max_concurrent_prefills` when served (0 = gate disabled). */
-  cap?: number;
-}
-
-/** Verdict of {@link IdleWindowLaunchFence.admit}. */
-export interface IdleWindowLaunchVerdict {
-  ok: boolean;
-  /** Refusal reason when `ok` is false (never a paced-stop token). */
-  reason?: 'idle-window-spent';
-}
-
-/**
- * Per-instance one-per-idle-window launch fence (parent AC3, slice C3).
- * Holds once a successful launch has been recorded and releases when a
- * later observation proves the launched prefill has REGISTERED in the
- * proxy's counter, or the window ended, or the bounded grace elapsed.
- */
-export interface IdleWindowLaunchFence {
-  /** Record a successful launch from the CURRENT observation (instance state). */
-  recordLaunch(now: number): void;
-  /**
-   * Observe one status ticket. Releases the fence when the launched pane's
-   * prefill has advanced past the admission count (fresh headroom is
-   * trustworthy again), when the window ends, or after the grace window.
-   */
-  observePoll(observation: IdleWindowLaunchObservation): void;
-  /**
-   * May a new launch be attempted now? Holds while launches recorded in the
-   * current window are still unobserved (the status is stale).
-   */
-  admit(now: number): IdleWindowLaunchVerdict;
-  /** Number of recorded-but-unobserved launches (decision-log evidence). */
-  readonly pendingLaunches: number;
-}
 
 /** Create a per-worker {@link IdleWindowLaunchFence}. */
 export function createIdleWindowLaunchFence(
@@ -2384,17 +1372,6 @@ export async function fetchLocalStatus(
   }
 }
 
-export interface DowntimePoller {
-  /**
-   * Poll `GET {proxyUrl}/llama/local/status` once. Resolves to the parsed
-   * status, or null when the endpoint failed/timed out or the payload was
-   * ambiguous (both cases are treated as busy by the caller). Overlapping
-   * calls coalesce onto the in-flight poll (single-flight).
-   */
-  poll(): Promise<LlamaStatus | null>;
-  /** True while a poll is in flight (single-flight guard for the loop). */
-  isPolling(): boolean;
-}
 
 /**
  * Single-flight poller for the llama-proxy status endpoint. `poll()` never
@@ -2425,42 +1402,6 @@ export function createDowntimePoller(
 
 // ── Dispatch (implemented — F3) ───────────────────────────────────────
 
-export type DowntimeStage = 'intake_complete' | 'idea' | 'audit' | 'implement';
-
-/** Ordered Herdr list head item (canonical ranking: fetcher → smart-selection → grouping). */
-export interface DowntimeHerdrItem {
-  id: string;
-  title: string;
-  stage?: string;
-  status?: string;
-  priority?: string;
-  risk?: string;
-  effort?: string;
-  auditedAt?: string | null;
-  updatedAt?: string;
-  sortIndex?: number;
-  parentId?: string | null;
-  /**
-   * Soft-delete attribution (`wl delete` sets it; SA-0MUJBLZC60085DI9): a
-   * non-empty value excludes the item from every dispatch path. Carried by
-   * the fetcher's `WorkItem`.
-   */
-  deletedBy?: string;
-  /**
-   * Needs-producer-review flag (WL-0MTIAL65N004T22F): carried by the
-   * fetcher's `WorkItem`; when `true` the item is not dispatchable — the
-   * producer-review gate is a sequential filter on the Herdr sequence
-   * (via `classifyItemForDispatch`) for both the direct dispatcher and
-   * the check-in offer computation.
-   */
-  needsProducerReview?: boolean;
-  /**
-   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
-   * scheduling hold: the item is held by a human/agent and must not be
-   * dispatched at any tier (WL-0MV85WCJJ0087VMP).
-   */
-  assignee?: string;
-}
 
 /**
  * Whether a candidate/work item carries a soft-delete marker.
@@ -2497,306 +1438,7 @@ export function isAssigneeHeld(
   const assignee = item.assignee;
   return typeof assignee === 'string' && assignee.trim() !== '';
 }
-export type DowntimeHerdrListResult =
-  | { ok: true; items: DowntimeHerdrItem[] }
-  | { ok: false; error?: string };
-export type DowntimeSkillKind = 'plan' | 'intake' | 'audit' | 'implement' | 'risk-effort';
 
-/**
- * Every dispatch kind recorded in the rolling audit log: the worklog tiers
- * plus the scheduled-prompts tier (WL-0MSS1Q5ER007QDKX), which has no work
- * item (kind `scheduled`, log-only markers), plus the risk-effort evaluation
- * tier (WL-0MTTSWCJR003OMN7) that populates missing risk/effort on plan_complete
- * items so they become implement-dispatchable.
- */
-export type DowntimeDispatchKind = DowntimeSkillKind | 'scheduled';
-
-export interface DowntimeCandidate {
-  id: string;
-  title: string;
-  stage: DowntimeStage;
-  /**
-   * Worklog status of the candidate (`open` or `blocked` for selectable
-   * plan/intake/implement items; `completed` for audit candidates). The
-   * plan/intake/implement selection filters client-side to `status` being
-   * `open` or `blocked` (RCA WL-0MSRBFFLN005W3VT amplifier fix): `wl next
-   * --stage X` keeps completed items under a stage filter, so without this
-   * guard a completed/in_review item whose stage matches could be dispatched
-   * for /skill:plan or /skill:intake.
-   */
-  status?: string;
-  /** wl next priority order preserved for deterministic selection. */
-  sortIndex?: number;
-  /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
-  priority?: string;
-  /**
-   * Soft-delete attribution (SA-0MUJBLZC60085DI9): a non-empty `deletedBy`
-   * marks the item as deleted and excludes it from every `select*` filter.
-   */
-  deletedBy?: string;
-  /**
-   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
-   * the item must NOT be auto-dispatched by the downtime worker — a human
-   * producer must review it first. Absent/false/undefined → dispatchable.
-   * Filtered in every `select*` function (AC1).
-   */
-  needsProducerReview?: boolean;
-  /**
-   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
-   * scheduling hold — the item is held by a human/agent and is excluded from
-   * every `select*` filter (WL-0MV85WCJJ0087VMP).
-   */
-  assignee?: string;
-}
-
-/**
- * A candidate for the implement tier, parsed from
- * `wl next --stage plan_complete --risk low --effort small -n N --json`.
- * The `status` field distinguishes open items from completed epics that
- * `wl next` keeps under a stage filter (the implement tier must filter
- * client-side to `status === 'open'`, AC2). `sortIndex` preserves wl next's
- * priority order for deterministic selection.
- */
-export interface ImplementCandidate {
-  id: string;
-  title: string;
-  status: string;
-  risk?: string;
-  effort?: string;
-  sortIndex?: number;
-  /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
-  priority?: string;
-  /** Soft-delete attribution (SA-0MUJBLZC60085DI9): non-empty ⇒ excluded from selection. */
-  deletedBy?: string;
-  /** Assignee hold (WL-0MV85WCJJ0087VMP): non-empty ⇒ excluded from selection. */
-  assignee?: string;
-  /**
-   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
-   * exclude from implement-tier selection (AC1).
-   */
-  needsProducerReview?: boolean;
-}
-
-/**
- * A completed/in_review item candidate for the downtime audit tier.
- * Parsed from `wl list --status completed --stage in_review --root-only
- * --json` — root-only (WL-0MSTLFW14000KPEC): only parent items (no
- * parentId) can be audit candidates; children are never dispatched
- * independently.
- */
-export interface AuditCandidate {
-  id: string;
-  title: string;
-  auditedAt?: string | null;
-  updatedAt?: string;
-  /** Stored content fingerprint from the audit result (optional). */
-  fingerprint?: string | null;
-  /** Current content fingerprint for the item, when the caller can compute it. */
-  currentFingerprint?: string | null;
-  sortIndex?: number;
-  /** Worklog priority level (critical/high/medium/low) — round-robin grouping key. */
-  priority?: string;
-  /** Soft-delete attribution (SA-0MUJBLZC60085DI9): non-empty ⇒ excluded from selection. */
-  deletedBy?: string;
-  /**
-   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
-   * exclude from audit-tier selection (AC1).
-   */
-  needsProducerReview?: boolean;
-  /**
-   * Parent work item id when present. The audit-tier query is root-only
-   * (`--root-only`, WL-0MSTLFW14000KPEC) so children never reach selection;
-   * this field powers a belt-and-suspenders client-side guard that excludes
-   * any child that would otherwise slip through (WL-0MUBVH8QG0020H9L AC2).
-   */
-  parentId?: string | null;
-  /**
-   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
-   * scheduling hold — the audit tier excludes it so a producer-held item is
-   * never claimed (the claim's `--if-assignee ""` CAS would fail stale)
-   * (WL-0MV85WCJJ0087VMP).
-   */
-  assignee?: string;
-}
-
-/**
- * Outcome of one `wl next --stage <stage> --json` lookup.
- *
- * `ok: true` means the CLI answered (candidate may still be null when the
- * stage is genuinely empty); `ok: false` means a transient wl/CLI failure
- * (fail-closed to busy — never a candidate). The distinction matters: an
- * empty backlog pauses the worker immediately, while a CLI failure counts
- * as one strike and only pauses after `DOWNTIME_ERROR_STRIKE_LIMIT`
- * consecutive failures (three-strike rule).
- */
-export type DowntimeNextResult =
-  | { ok: true; candidate: DowntimeCandidate | null }
-  | { ok: false; error?: string };
-
-/**
- * Enriched single-item view fetched by the leader for a coordination entry
- * (via `deps.fetchItem` — `wl show <id>` enriched with the audit timestamp
- * from the completed/in_review list query). Carries the fields the
- * coordinator needs to classify an item into its dispatch tier.
- */
-export interface DowntimeItemInfo {
-  id: string;
-  title?: string;
-  /** Worklog status (`open` | `completed` | `in_progress` | …). */
-  status?: string;
-  /** Worklog stage (idea | intake_complete | plan_complete | in_review | …). */
-  stage?: string;
-  /** Worklog priority level (critical/high/medium/low). */
-  priority?: string;
-  /** Risk level (Low/Medium/High/…). */
-  risk?: string;
-  /** Effort level (XS/S/M/L/XL). */
-  effort?: string;
-  /**
-   * Current assignee (empty/absent = unassigned). A non-empty assignee is a
-   * scheduling hold: the item is held by a human/agent and must not be
-   * dispatched at any tier (WL-0MV85WCJJ0087VMP).
-   */
-  assignee?: string;
-  /** Latest audit timestamp (enriched; absent on show-only items). */
-  auditedAt?: string | null;
-  /** Item update timestamp (audit-tier recency window). */
-  updatedAt?: string;
-  /** Stored content fingerprint from the audit result (optional). */
-  fingerprint?: string | null;
-  /** Current content fingerprint for the item, when the caller can compute it. */
-  currentFingerprint?: string | null;
-  /** wl priority order preserved for deterministic ordering. */
-  sortIndex?: number;
-  /**
-   * Soft-delete attribution such as parsed from `wl show --json`
-   * (SA-0MUJBLZC60085DI9): a non-empty `deletedBy` makes the item
-   * non-dispatchable (`classifyItemForDispatch` returns null).
-   */
-  deletedBy?: string;
-  /**
-   * Needs producer review flag (parent WL-0MTIAL65N004T22F): when `true`,
-   * exclude from classification (the item is not dispatchable) and the
-   * coordination leader path skips it (AC3).
-   */
-  needsProducerReview?: boolean;
-  /**
-   * Recorded audit verdict (`auditResult.readyToClose` from `wl show
-   * --json`, WL-0MU308WSF0002JWN): `false` means the audit FAILED; `true`
-   * means it passed. Absent when the item has no recorded audit result.
-   */
-  auditResult?: boolean | null;
-}
-
-/**
- * Outcome of one `fetchItem` lookup: `{ok:true}` with the item info, or
- * `{ok:false}` on a wl/CLI failure or an unparseable item (fail-closed —
- * never a silent skip).
- */
-export type DowntimeItemResult =
-  | { ok: true; info: DowntimeItemInfo }
-  | { ok: false; error?: string };
-
-/**
- * Outcome of the check-in most-important-item computation. `{ok:true,
- * kind/candidate}` — a dispatchable item was found; `{ok:true,
- * noCandidate:true}` — the instance genuinely has nothing dispatchable
- * (its own entry may be removed); `{ok:false}` — wl/CLI errors occurred
- * during the computation (fail-open: keep the existing entry, retry at
- * the next check-in).
- */
-export type MostImportantItemResult =
-  | { ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate }
-  | { ok: true; noCandidate: true }
-  /** Deep review queue + only held non-critical implements remain: nothing offerable NOW, but the backlog is NOT empty — the caller must not pause (WL-0MTTSWC1X005P4VD AC2). */
-  | { ok: true; reviewQueueHold: true }
-  /** Every remaining offerable candidate is a critical item already in flight (live working pane): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry (WL-0MUBVKYH5009CGBI / F4). */
-  | { ok: true; inFlightHold: true }
-  /** The only remaining offerable candidates are held by the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
-  | { ok: true; nonTerminalCooldownHold: true }
-  /** The only remaining offerable candidates have exhausted their per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
-  | { ok: true; attemptBudgetHold: true }
-  /** A stalled pane was resumed in place this cycle (WL-0MUYMBSA90092QV2): the instance must NOT offer new work — the resumed pane is the preferred work. Neutral: not an error, not a CLI strike, not a no-candidate cooldown. */
-  | { ok: true; stalledResume: true }
-  | { ok: false; error?: string };
-
-
-/**
- * Expected state for the pre-dispatch claim (compare-and-swap, RCA
- * WL-0MSRBFFLN005W3VT design point 1): the claim transition to
- * `in_progress` only applies while the item is still in the state the tier
- * selected it in. `status` matches the stored hyphenated status
- * (`open`/`completed`/...); `stage` matches the worklog stage.
- */
-export interface DowntimeClaimExpected {
-  status?: string;
-  stage?: string;
-  /**
-   * The claiming agent's assignee (WL-0MV85WD400091OZ6). Carried from the
-   * claim to the failure rollback so the recovery can clear ONLY this claim's
-   * assignee (guarded by `--if-assignee <agent>`) — a failed dispatch must
-   * never leave a non-empty assignee (a non-empty assignee acts as a
-   * scheduling hold and would make the item permanently undispatchable).
-   */
-  assignee?: string;
-}
-
-/**
- * Outcome of a pre-dispatch claim. `ok:true` means THIS pane won the
- * claim; `ok:false` with reason `stale` means another pane claimed the item
- * first (or its state changed since selection) — the dispatch MUST abort;
- * `ok:false` with reason `error` is a wl CLI failure (counted as a
- * wl-error strike).
- */
-export type DowntimeClaimResult =
-  | { ok: true }
-  | { ok: false; reason: 'stale' | 'error'; error?: string };
-
-/**
- * Result of the active-audit single-flight check (WL-0MT3PHW4I002SNOV).
- *
- *  - `{ok:true, active:true}` — a non-stale `kind=audit` dispatch marker
- *    maps to an item still `in_progress` (dispatched but not yet
- *    completed/reviewed): an audit is running, so the audit tier must be
- *    skipped this tick (outcome reason `audit-in-flight`).
- *  - `{ok:true, active:false}` — no non-stale marker maps to an
- *    `in_progress` item: the audit tier may proceed (audits stay strictly
- *    sequential — never fan-out).
- *  - `{ok:false}` — the check could not complete (e.g. worklog query
- *    failure): fail-open — the audit tier is skipped and dispatch falls
- *    through to the next tier; all dispatch is never blocked by an
- *    unanswerable check.
- */
-export type DowntimeActiveAuditResult =
-  | { ok: true; active: boolean; source?: 'host-wide' | 'per-worklog' }
-  | { ok: false; error?: string };
-
-/**
- * Result of the running-downtime-panes liveness query (AC1/AC3, parent
- * WL-0MTYZXSLN008HZOW). `count` is the number of dispatched downtime panes
- * that are STILL ALIVE (their pi agent session is live in a Herdr pane),
- * machine-wide and therefore across roots and leader/instance restarts.
- *
- *  - `{ok:true, count}` — the query succeeded; `count` is authoritative.
- *  - `{ok:false}` — the query could not complete (herdr unavailable):
- *    fail-closed — the dispatcher treats the running-pane bound as reached
- *    (no dispatch) rather than risk over-dispatch on unknown state.
- */
-export type RunningPanesResult =
-  | { ok: true; count: number; paneIds?: string[]; records?: HerdrPaneRecord[] }
-  | { ok: false; error?: string };
-
-/** One parsed `herdr pane list` record (only the fields liveness needs). */
-export interface HerdrPaneRecord {
-  paneId: string;
-  label?: string;
-  agent?: string;
-  agentStatus?: string;
-  /** Pane working directory (worklog-root hint for cross-root resume). */
-  cwd?: string;
-  /** Raw `agent_session` field (session log path + agent metadata). */
-  agentSession?: HerdrAgentSession;
-}
 
 /**
  * Prefix of every downtime dispatched pane label (`buildDowntimePaneTitle`
@@ -2934,43 +1576,6 @@ export function runningDowntimePaneItemIds(panes: HerdrPaneRecord[]): Set<string
   return inFlight;
 }
 
-/**
- * Item-scoped in-flight state, resolved ONCE per idle cycle and threaded into
- * the dispatch loops (WL-0MUBEZ6PE002WLP4 / F3 WL-0MUBVKXQJ000L8EO).
- *
- * Tri-state, not a boolean, because the correct behaviour differs between
- * "no live pane" and "could not find out":
- *
- *  - `available: true`  — the pane query succeeded; `itemIds` is authoritatively
- *    the set of items with a live working pane. A candidate in the set is
- *    skipped; a candidate outside it is escalated.
- *  - `available: false` — the query failed/was unparseable, OR the dep is not
- *    wired. The caller falls back to the dispatched-marker TTL so escalation
- *    is never permanently starved and a duplicate is never permitted while an
- *    item is proven in-flight.
- */
-export interface InFlightPanes {
-  available: boolean;
-  itemIds: Set<string>;
-}
-
-/** The shared "nothing is provably in flight" value (also the fail-open fallback). */
-export const NO_IN_FLIGHT_PANES: InFlightPanes = { available: true, itemIds: new Set() };
-
-/** Why the critical-first guard reached its escalate/skip decision (WL-0MUBEZ6PE002WLP4). */
-export type CriticalFirstGuardReason =
-  | 'in-flight-pane'
-  | 'no-live-pane'
-  | 'in-flight-unverified'
-  | 'marker-stale-escalation';
-
-/** The critical-first guard's verdict for one candidate. */
-export interface CriticalFirstGuardDecision {
-  /** True when the candidate may be escalated; false when a live/unverified pane holds it. */
-  escalate: boolean;
-  /** Machine-readable reason (also the AC6 selectionReason vocabulary). */
-  reason: CriticalFirstGuardReason;
-}
 
 /**
  * Decide whether a critical-first candidate may be escalated, given the
@@ -10288,126 +8893,6 @@ export async function resolveDependencyFrontier(
   return walk(candidate, 0);
 }
 
-// ── Settings clamps (implemented — wired into settings.ts by F2) ──────
-
-/**
- * Clamp the downtime poll interval: never below the 10s hard floor, default
- * 10s for non-finite input (matches DEFAULT_DOWNTIME_POLL_INTERVAL_MS; the
- * spec's '30s proxy poll' refers to the 30s proxy status refresh).
- */
-export function clampDowntimePollInterval(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_POLL_INTERVAL_MS;
-  return Math.max(Math.round(value), DOWNTIME_POLL_INTERVAL_FLOOR_MS);
-}
-
-/**
- * Clamp the idle threshold: reject negative/non-finite (fall back to the
- * 75s default, DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS) and floor at 1s to
- * prevent immediate dispatch.
- */
-export function clampDowntimeIdleThresholdMs(value: number): number {
-  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS;
-  return Math.max(Math.round(value), DOWNTIME_IDLE_THRESHOLD_FLOOR_MS);
-}
-
-/**
- * Clamp the required-free-slots count: a non-negative integer; 0 = all
- * slots. Negative/non-finite input falls back to 0 (all slots, the
- * strictest safe default).
- */
-export function clampDowntimeRequiredFreeSlots(value: number): number {
-  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_REQUIRED_FREE_SLOTS;
-  return Math.round(value);
-}
-
-/**
- * Clamp the no-candidate cooldown: reject negative/non-finite (fall back to
- * the 60-minute default) and floor at 60s so the pause cannot be disabled or
- * set trivially small (WL-0MSI7DQL10016QYX).
- */
-export function clampDowntimeNoCandidateCooldownMs(value: number): number {
-  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS;
-  return Math.max(Math.round(value), DOWNTIME_NO_CANDIDATE_COOLDOWN_FLOOR_MS);
-}
-
-/**
- * Clamp the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): reject
- * negative/non-finite (fall back to the 30-minute default) and clamp to
- * [DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS,
- * DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS] (1 minute – 24 hours) so the control
- * can neither be disabled/trivially small (immediate retry) nor set so large
- * that a repeatedly-failing item is stranded.
- */
-export function clampDowntimeNonTerminalCooldownMs(value: number): number {
-  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS;
-  return Math.min(
-    Math.max(Math.round(value), DOWNTIME_NON_TERMINAL_COOLDOWN_FLOOR_MS),
-    DOWNTIME_NON_TERMINAL_COOLDOWN_MAX_MS,
-  );
-}
-
-/**
- * Clamp the dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT):
- * reject negative/non-finite (fall back to the 24 h default) and clamp to
- * [DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS, DOWNTIME_MARKER_STALE_WINDOW_MAX_MS]
- * (1 h – 7 days) so the age release can neither fire while a freshly
- * dispatched pane is plausibly still running (double-dispatch risk) nor be
- * set so large that a stranded item is excluded for weeks (the original
- * permanent-stranding failure mode at a large but bounded scale).
- */
-export function clampDowntimeMarkerStaleWindowMs(value: number): number {
-  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS;
-  return Math.min(
-    Math.max(Math.round(value), DOWNTIME_MARKER_STALE_WINDOW_FLOOR_MS),
-    DOWNTIME_MARKER_STALE_WINDOW_MAX_MS,
-  );
-}
-
-/**
- * Clamp the per-item, per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK):
- * reject negative/non-finite (fall back to the 3-attempt default) and clamp
- * to [DOWNTIME_MAX_ATTEMPTS_MIN, DOWNTIME_MAX_ATTEMPTS_MAX] (1–10) so the
- * control can neither disable retries entirely nor be set so high that a
- * stuck item loops indefinitely.
- */
-export function clampDowntimeMaxAttempts(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_MAX_ATTEMPTS;
-  return Math.min(
-    Math.max(Math.round(value), DOWNTIME_MAX_ATTEMPTS_MIN),
-    DOWNTIME_MAX_ATTEMPTS_MAX,
-  );
-}
-
-/**
- * Clamp the depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
- * WL-0MVEDM8OT007WDRS AC1): non-finite input (NaN/±Infinity) falls back to
- * the default `2`, and every other value is rounded and clamped to
- * [DOWNTIME_AUDIT_BATCH_MAX_MIN, DOWNTIME_AUDIT_BATCH_MAX_MAX] (1–5). `1`
- * is accepted and means batching is off (legacy single-dispatch behaviour);
- * the ceiling bounds the per-idle-window LLM load.
- */
-export function clampDowntimeAuditBatchMax(value: number): number {
-  if (!Number.isFinite(value)) return DEFAULT_DOWNTIME_AUDIT_BATCH_MAX;
-  return Math.min(
-    Math.max(Math.round(value), DOWNTIME_AUDIT_BATCH_MAX_MIN),
-    DOWNTIME_AUDIT_BATCH_MAX_MAX,
-  );
-}
-
-/**
- * Clamp the stalled-work scan threshold (WL-0MUYMBK6H005PY16): reject
- * negative/non-finite (fall back to the 5-minute default) and clamp to
- * [MIN_DOWNTIME_STALL_THRESHOLD_MS, MAX_DOWNTIME_STALL_THRESHOLD_MS]
- * (60 s – 60 min) so the scan can neither resume panes that are merely
- * between tool calls nor leave genuinely stalled panes unattended for hours.
- */
-export function clampDowntimeStallThresholdMs(value: number): number {
-  if (!Number.isFinite(value) || value < 0) return DEFAULT_DOWNTIME_STALL_THRESHOLD_MS;
-  return Math.min(
-    Math.max(Math.round(value), MIN_DOWNTIME_STALL_THRESHOLD_MS),
-    MAX_DOWNTIME_STALL_THRESHOLD_MS,
-  );
-}
 
 // ── Round-robin helpers (WL-0MTJE0FXC006WAOX) ──────────────────────────
 
