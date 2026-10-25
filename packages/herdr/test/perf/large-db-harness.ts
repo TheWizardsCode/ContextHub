@@ -114,6 +114,13 @@ import {
   type WorkItem,
 } from '../../src/fetcher.js';
 import { DbChangeTracker, stateCounterFilePath, watchDbChanges } from '../../src/db-change.js';
+import {
+  DEFAULT_DOWNTIME_CPU_GATE_PERCENT,
+  HOST_CPU_MIN_SAMPLE_WINDOW_MS,
+  cpuPercentFromSamples,
+  parseProcStatCpu,
+  type CpuStatSample,
+} from '../../src/host-cpu.js';
 import { regroupWorkItems } from '../../src/grouping.js';
 import { WorkItemListState, formatItemLine } from '../../src/worklist.js';
 import {
@@ -571,6 +578,263 @@ export function startEventLoopProbe(toleranceMs = 2): { stop(): EventLoopBlockin
       };
     },
   };
+}
+
+// ── Host-contention indicators ───────────────────────────────────────
+//
+// The 1 ms event-loop probe counts OS descheduling as "blocked" (and its
+// aggregate grows with the measured window), so an absolute reading only
+// describes the plugin when the HOST is not CPU-starved. Sampling the 1-min
+// load average once after the run is not enough: the average trails the
+// window (WL-0MVMSE2S0006L56D — a shared multi-agent host read 0.69
+// load/core while `/proc/stat` showed ~100 % utilisation and refreshes
+// blocked 400 ms). These helpers therefore measure the host DURING the
+// window: per-core load (max), host CPU utilisation from a `/proc/stat`
+// delta, and an idle-loop canary that quantifies ambient probe noise.
+
+/** load1 ÷ cores above which an absolute event-loop reading describes the host. */
+export const HOST_LOAD_LIMIT_PER_CORE = 0.75;
+
+/** Host CPU utilisation (%) at or above which the host counts as contended. */
+export const HOST_CPU_LIMIT_PERCENT = DEFAULT_DOWNTIME_CPU_GATE_PERCENT;
+
+/** Idle-window blocking fraction (of the window) that marks a noisy host. */
+export const HOST_NOISE_RATIO_LIMIT = 0.05;
+
+/** Idle-window blocking (ms) treated as probe/timer granularity, not noise. */
+export const HOST_NOISE_FLOOR_MS = 10;
+
+/** Per-core load observed across a measured window. */
+export interface HostLoadSamples {
+  /** `loadavg[0] / cpus` when the window opened. */
+  start: number;
+  /** Highest `loadavg[0] / cpus` sampled WHILE the window was open. */
+  max: number;
+  /** `loadavg[0] / cpus` at the last sample. */
+  end: number;
+  /** Readings collected (opening sample + periodic samples + closing sample). */
+  samples: number;
+}
+
+/** Where a host CPU utilisation reading came from. */
+export type HostCpuProbeSource = 'proc-stat' | 'unavailable';
+
+/** Host CPU utilisation measured across a window (`/proc/stat` delta). */
+export interface HostCpuSamples {
+  /** Aggregate host utilisation (`0–100`), or `null` when unmeasurable. */
+  cpuPercent: number | null;
+  /** `proc-stat` on Linux; `unavailable` elsewhere (load fallback applies). */
+  cpuSource: HostCpuProbeSource;
+}
+
+/** Event-loop blocking measured over an IDLE window (no product work). */
+export interface IdleLoopNoise {
+  /** Window length (ms). */
+  durationMs: number;
+  /** Aggregate blocking measured while the loop was idle (ms). */
+  blockedMs: number;
+  /** Longest single stall (ms). */
+  maxBlockedMs: number;
+}
+
+/** Host conditions measured across a scenario's measured window. */
+export interface HostConditions {
+  /** Per-core load sampled before, during and after the window. */
+  loadPerCore: HostLoadSamples;
+  /** Host-wide CPU utilisation across the window (`null` when unmeasurable). */
+  cpuPercent: number | null;
+  /** Source of {@link HostConditions.cpuPercent}. */
+  cpuSource: HostCpuProbeSource;
+  /** Ambient event-loop noise measured on an idle window, same host/run. */
+  idleNoise: IdleLoopNoise;
+}
+
+/** Current 1-min load, normalised per core. */
+function currentLoadPerCore(): number {
+  const load1 = os.loadavg()[0] ?? 0;
+  return load1 / Math.max(1, os.cpus().length);
+}
+
+/**
+ * Start sampling the per-core load for as long as a measured window is open.
+ *
+ * The closing `stop()` sample is what the old single post-run read did; the
+ * periodic samples additionally catch a contention spike that ENDED before
+ * the window closed (the load average trails the window).
+ */
+export function startHostLoadProbe(intervalMs = 250): {
+  peek(): HostLoadSamples;
+  stop(): HostLoadSamples;
+} {
+  const start = currentLoadPerCore();
+  let latest = start;
+  let max = start;
+  let samples = 1;
+  let result: HostLoadSamples | null = null;
+  const sample = (): void => {
+    latest = currentLoadPerCore();
+    if (latest > max) max = latest;
+    samples += 1;
+  };
+  const handle = setInterval(sample, Math.max(50, Math.round(intervalMs)));
+  // Never keep the process alive on the sampler's account.
+  handle.unref?.();
+  return {
+    peek(): HostLoadSamples {
+      return result ?? { start, max, end: latest, samples };
+    },
+    stop(): HostLoadSamples {
+      if (result !== null) return result;
+      clearInterval(handle);
+      sample();
+      result = { start, max, end: latest, samples };
+      return result;
+    },
+  };
+}
+
+/** Read the aggregate `cpu` line of `/proc/stat` (null when unavailable). */
+function readProcStatSample(): CpuStatSample | null {
+  try {
+    return parseProcStatCpu(fs.readFileSync('/proc/stat', 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Start measuring host CPU utilisation from a `/proc/stat` delta.
+ *
+ * Unlike the 1-min load average this is an instantaneous, interval-scoped
+ * reading: a shared host running other agents' test suites shows up as high
+ * utilisation even when its load average happens to sit just below the
+ * guard. Non-Linux hosts (and windows shorter than
+ * {@link HOST_CPU_MIN_SAMPLE_WINDOW_MS}) report `unavailable`, so callers
+ * fall back to the load signal.
+ */
+export function startHostCpuProbe(): { stop(): HostCpuSamples } {
+  const startedAt = performance.now();
+  const first = readProcStatSample();
+  let result: HostCpuSamples | null = null;
+  return {
+    stop(): HostCpuSamples {
+      if (result !== null) return result;
+      const windowMs = performance.now() - startedAt;
+      const last = readProcStatSample();
+      if (first === null || last === null || windowMs < HOST_CPU_MIN_SAMPLE_WINDOW_MS) {
+        result = { cpuPercent: null, cpuSource: 'unavailable' };
+      } else {
+        result = { cpuPercent: cpuPercentFromSamples(first, last), cpuSource: 'proc-stat' };
+      }
+      return result;
+    },
+  };
+}
+
+/**
+ * Measure ambient event-loop noise on an IDLE window.
+ *
+ * The same 1 ms probe that measures a refresh, but with nothing to do: on a
+ * quiet host it reports ~0, on a starved host it reports the scheduling
+ * noise the host injects into any measurement. Callers use it as a
+ * self-calibrating contention signal (no fixed host assumption).
+ */
+export async function measureIdleLoopNoise(durationMs = 250): Promise<IdleLoopNoise> {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return { durationMs: 0, blockedMs: 0, maxBlockedMs: 0 };
+  }
+  const startedAt = performance.now();
+  const probe = startEventLoopProbe();
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, durationMs);
+  });
+  const blocking = probe.stop();
+  return {
+    durationMs: round1(performance.now() - startedAt),
+    blockedMs: blocking.totalBlockedMs,
+    maxBlockedMs: blocking.maxBlockedMs,
+  };
+}
+
+/**
+ * Pure policy: is the host too contended for an ABSOLUTE 1 ms event-loop
+ * reading to describe the plugin? (WL-0MVMSE2S0006L56D)
+ *
+ * Contended when ANY in-window signal says so:
+ *  - host CPU utilisation at/above {@link HOST_CPU_LIMIT_PERCENT} (the same
+ *    threshold the downtime dispatcher uses to stop launching work),
+ *  - peak per-core load above {@link HOST_LOAD_LIMIT_PER_CORE} (the legacy
+ *    fallback for hosts without `/proc/stat`),
+ *  - idle-window blocking above `max(HOST_NOISE_FLOOR_MS, 5 % of the
+ *    window)` (direct evidence the probe is measuring the host).
+ *
+ * Pure and deterministic, so the policy is unit-tested without a loaded
+ * host. Unusable/absent inputs never flag contention (fail-open: the caller
+ * keeps its absolute assertion).
+ */
+export function hostContendedForAbsoluteTiming(
+  conditions: Pick<HostConditions, 'loadPerCore' | 'cpuPercent' | 'idleNoise'> | undefined,
+  limits: {
+    maxLoadPerCore?: number;
+    maxCpuPercent?: number;
+    noiseRatio?: number;
+    noiseFloorMs?: number;
+  } = {},
+): boolean {
+  if (conditions === undefined) return false;
+  const maxLoadPerCore = limits.maxLoadPerCore ?? HOST_LOAD_LIMIT_PER_CORE;
+  const maxCpuPercent = limits.maxCpuPercent ?? HOST_CPU_LIMIT_PERCENT;
+  const noiseRatio = limits.noiseRatio ?? HOST_NOISE_RATIO_LIMIT;
+  const noiseFloorMs = limits.noiseFloorMs ?? HOST_NOISE_FLOOR_MS;
+
+  const load = conditions.loadPerCore;
+  if (
+    load !== undefined &&
+    Number.isFinite(load.max) &&
+    Number.isFinite(load.start) &&
+    Number.isFinite(load.end) &&
+    Math.max(load.start, load.max, load.end) > maxLoadPerCore
+  ) {
+    return true;
+  }
+
+  const cpuPercent = conditions.cpuPercent;
+  if (typeof cpuPercent === 'number' && Number.isFinite(cpuPercent) && cpuPercent >= maxCpuPercent) {
+    return true;
+  }
+
+  const idle = conditions.idleNoise;
+  if (idle !== undefined && Number.isFinite(idle.durationMs) && idle.durationMs > 0) {
+    const allowance = Math.max(noiseFloorMs, idle.durationMs * noiseRatio);
+    if (Number.isFinite(idle.blockedMs) && idle.blockedMs > allowance) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Pure policy: does the with-sync event-loop reading stay inside its headroom?
+ *
+ * Absolute `totalBlockedMs` is the SUM of every >2 ms probe delay, so it grows
+ * with the window: a host that stretches the refresh (e.g. a slow `tsx` CLI
+ * spawn under external load) accumulates more absolute "blocking" with no
+ * product change. Compare the BLOCKING RATE (blocked ÷ wall) instead, which is
+ * window-length independent, and allow the documented relative headroom on top
+ * of a floor (`minRate`, default 25 % of wall). The absolute AC numbers remain
+ * gated at full scale on a quiet host by the F7 `--ac-report`.
+ */
+export function eventLoopHeadroomOk(
+  baselineBlockedMs: number,
+  baselineWallMs: number,
+  measuredBlockedMs: number,
+  measuredWallMs: number,
+  limits: { minRate?: number; relativeHeadroom?: number } = {},
+): boolean {
+  const minRate = limits.minRate ?? 0.25;
+  const relativeHeadroom = limits.relativeHeadroom ?? 3;
+  const baseRate = baselineBlockedMs / Math.max(1, baselineWallMs);
+  const measuredRate = measuredBlockedMs / Math.max(1, measuredWallMs);
+  return measuredRate <= Math.max(minRate, baseRate * relativeHeadroom);
 }
 
 /** One measured default-view refresh. */
@@ -1835,6 +2099,8 @@ export interface SyncIsolationScenarioOptions {
   samples?: number;
   /** Simulated `wl sync` duration in ms (default: the operator-observed ~36 s). */
   syncDurationMs?: number;
+  /** Ambience-window length for the host-contention canary (default 250 ms). */
+  idleCanaryMs?: number;
   /** CLI target to drive (default `auto`). */
   target?: 'auto' | LargeDbTarget;
   /** Repository root (defaults to this checkout). */
@@ -1885,6 +2151,8 @@ export interface SyncInFlightReport {
   settledState: SyncRunState;
   /** Outcome success of the hooked sync run. */
   lastOutcomeSuccess: boolean | undefined;
+  /** Host conditions measured across this scenario's window. */
+  hostConditions: HostConditions;
 }
 
 /** Context shared by the F3 isolation scenarios (mirrors F1's setup). */
@@ -2284,12 +2552,18 @@ export async function runSyncInFlightScenario(
   const samples = Math.max(1, options.samples ?? 3);
   const syncDurationMs = Math.max(1, options.syncDurationMs ?? 36_000);
   const ctx = await openIsolationContext(options);
+  const hostLoadProbe = startHostLoadProbe();
+  const hostCpuProbe = startHostCpuProbe();
   try {
     // Phase 1 — baseline refreshes, no sync in flight.
     const baseline: RefreshSample[] = [];
     for (let index = 0; index < samples; index += 1) {
       baseline.push(await measureRefresh(ctx.refresh, ctx.spawnFile, ctx.spawnArgs));
     }
+
+    // Ambience canary — idle-loop noise on the SAME host/run, right before
+    // the measured phase.
+    const idleNoise = await measureIdleLoopNoise(options.idleCanaryMs ?? 250);
 
     // Phase 2 — hold a long sync in flight through the REAL runSync.
     _resetSyncInFlight();
@@ -2336,6 +2610,8 @@ export async function runSyncInFlightScenario(
     const settled = getSyncStatus();
 
     const remaining = withSync.map((sample) => sample.syncRemainingAtEndMs);
+    const hostSamples = hostLoadProbe.stop();
+    const cpu = hostCpuProbe.stop();
     return {
       profile: ctx.profile,
       target: ctx.invocation.target,
@@ -2352,8 +2628,16 @@ export async function runSyncInFlightScenario(
       noWaitGap: remaining.every((value) => value > 0),
       settledState: settled.state,
       lastOutcomeSuccess: settled.lastOutcome?.success,
+      hostConditions: {
+        loadPerCore: hostSamples,
+        cpuPercent: cpu.cpuPercent,
+        cpuSource: cpu.cpuSource,
+        idleNoise,
+      },
     };
   } finally {
+    hostLoadProbe.stop();
+    hostCpuProbe.stop();
     _resetSyncSpawnForTests();
     _resetSyncInFlight();
     ctx.cleanup();
@@ -2372,6 +2656,8 @@ export interface SyncLockContentionReport {
   /** Whether a real SQLite write transaction was open throughout. */
   writerTransactionOpen: boolean;
   dbItemCount: number;
+  /** Host conditions measured across this scenario's window. */
+  hostConditions: HostConditions;
 }
 
 /**
@@ -2387,11 +2673,15 @@ export async function runSyncLockContentionScenario(
 ): Promise<SyncLockContentionReport> {
   const samples = Math.max(1, options.samples ?? 3);
   const ctx = await openIsolationContext(options);
+  const hostLoadProbe = startHostLoadProbe();
+  const hostCpuProbe = startHostCpuProbe();
   try {
     const baseline: RefreshSample[] = [];
     for (let index = 0; index < samples; index += 1) {
       baseline.push(await measureRefresh(ctx.refresh, ctx.spawnFile, ctx.spawnArgs));
     }
+
+    const idleNoise = await measureIdleLoopNoise(options.idleCanaryMs ?? 250);
 
     const db = new Database(ctx.fixture.dbPath);
     const dbItemCount = (db.prepare('SELECT COUNT(*) AS n FROM workitems').get() as { n: number }).n;
@@ -2414,6 +2704,8 @@ export async function runSyncLockContentionScenario(
       for (let index = 0; index < samples; index += 1) {
         underWriterLock.push(await measureRefresh(ctx.refresh, ctx.spawnFile, ctx.spawnArgs));
       }
+      const hostSamples = hostLoadProbe.stop();
+      const cpu = hostCpuProbe.stop();
       return {
         profile: ctx.profile,
         target: ctx.invocation.target,
@@ -2423,6 +2715,12 @@ export async function runSyncLockContentionScenario(
         syncFileLockHeld: true,
         writerTransactionOpen,
         dbItemCount,
+        hostConditions: {
+          loadPerCore: hostSamples,
+          cpuPercent: cpu.cpuPercent,
+          cpuSource: cpu.cpuSource,
+          idleNoise,
+        },
       };
     } finally {
       try {
@@ -2434,6 +2732,8 @@ export async function runSyncLockContentionScenario(
       releaseFileLock(lockPath);
     }
   } finally {
+    hostLoadProbe.stop();
+    hostCpuProbe.stop();
     ctx.cleanup();
   }
 }
@@ -4098,9 +4398,10 @@ export function formatSyncIsolationReport(
       `  spawns per refresh:     baseline ${inFlight.baseline[0]?.spawns ?? '?'} / ` +
         `with sync ${inFlight.withSync[0]?.spawns ?? '?'} (sync adds none)`,
       `  no wait gap:            ${inFlight.noWaitGap} ` +
-        `(min sync remaining at refresh end ${inFlight.minRemainingAtEndMs} ms)`, 
+        `(min sync remaining at refresh end ${inFlight.minRemainingAtEndMs} ms)`,
       `  settled:                ${inFlight.settledState} ` +
         `(last success ${inFlight.lastOutcomeSuccess})`,
+      ...describeHostConditions(inFlight.hostConditions),
       '',
     ].join('\n');
   }
@@ -4117,8 +4418,28 @@ export function formatSyncIsolationReport(
     `  sync file lock held:    ${lock.syncFileLockHeld}`,
     `  writer transaction:     ${lock.writerTransactionOpen} (${lock.dbItemCount} items)`,
     `  refresh wall p95:       baseline ${Math.round(wallBase)} ms -> under locks ${Math.round(wallUnder)} ms`,
+    ...describeHostConditions(lock.hostConditions),
     '',
   ].join('\n');
+}
+
+/** Render the host conditions measured across a scenario window. */
+function describeHostConditions(conditions: HostConditions | undefined): string[] {
+  if (conditions === undefined) return [];
+  const load = conditions.loadPerCore;
+  const cpu =
+    typeof conditions.cpuPercent === 'number' && Number.isFinite(conditions.cpuPercent)
+      ? `${Math.round(conditions.cpuPercent)}% (${conditions.cpuSource})`
+      : 'n/a';
+  return [
+    `  host load/core:         ${load.start.toFixed(2)} -> ${load.max.toFixed(2)} max -> ` +
+      `${load.end.toFixed(2)} (${load.samples} samples)`,
+    `  host CPU utilisation:   ${cpu}`,
+    `  idle-loop canary:       ${conditions.idleNoise.blockedMs} ms / ` +
+      `${conditions.idleNoise.durationMs} ms idle window ` +
+      `(max stall ${conditions.idleNoise.maxBlockedMs} ms)`,
+    `  contended for timing:   ${hostContendedForAbsoluteTiming(conditions)}`,
+  ];
 }
 
 /** Render a report as human-readable text. */

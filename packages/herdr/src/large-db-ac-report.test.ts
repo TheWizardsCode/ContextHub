@@ -116,6 +116,12 @@ function syncInFlightReport(overrides: Partial<SyncInFlightReport> = {}): SyncIn
     noWaitGap: true,
     settledState: 'synced',
     lastOutcomeSuccess: true,
+    hostConditions: {
+      loadPerCore: { start: 0.2, max: 0.3, end: 0.2, samples: 5 },
+      cpuPercent: 10,
+      cpuSource: 'proc-stat',
+      idleNoise: { durationMs: 250, blockedMs: 0, maxBlockedMs: 0 },
+    },
     ...overrides,
   };
 }

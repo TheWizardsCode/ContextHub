@@ -535,20 +535,32 @@ pane-side isolation only.
   counter, settling clears the notice, auto-sync disabled shows nothing, and a
   sync already in flight when the pane starts is adopted.
 - `auto-sync-isolation.test.ts` — `runSyncInFlightScenario` at the default
-  profile with the operator-observed ~36 s figure: spawn blocks the event loop
-  ≤ 200 ms (measured ~0), the notice shows "syncing…" for every with-sync
-  refresh, every refresh ends with ≥ half the sync duration still remaining
-  (no wait gap), refresh wall/event-loop stay inside the documented F1
-  headroom of their own no-sync baseline, the refresh path still issues
+  profile with the operator-observed ~36 s figure: the spawn blocks the event
+  loop ≤ 200 ms when the host was measured quiet (~0 ms), the notice shows
+  "syncing…" for every with-sync refresh, every refresh ends with ≥ half the
+  sync duration still remaining (no wait gap), refresh wall stays inside the
+  documented F1 headroom of its own no-sync baseline and event-loop blocking
+  stays inside the baseline's **rate** headroom, the refresh path still issues
   exactly one consolidated `wl worklist` spawn (the sync adds none), and the
   hook settles to `synced`. `runSyncLockContentionScenario` asserts the same
-  relative budget while the file lock and a real write transaction are held.
+  wall/rate budget while the file lock and a real write transaction are held.
 
 Like F1, the absolute AC numbers (refresh ≤ 1.5 s wall p95, ≤ 200 ms event-loop
 blocking at full scale) stay gated behind `acTargets.enforced` (flipped once F7
-records a compliant full-scale baseline); F3's tests prove **non-interference**
-(the no-wait-gap invariant, absolute) plus host-load-tolerant relative
-headroom, which is the actual F3 deliverable.
+records a compliant full-scale baseline) and are quoted from the quiet-host
+`--ac-report` AC3 verdict; F3's default-suite tests prove **non-interference**
+(the no-wait-gap invariant, absolute) plus host-tolerant relative headroom,
+which is the actual F3 deliverable.
+
+Both scenarios report the host conditions measured ACROSS their window
+(`hostConditions`): per-core load sampled before/during/after (max, not just a
+trailing post-run read), `/proc/stat` CPU utilisation for the window (via
+`src/host-cpu.ts`, falling back to the load signal off Linux), and an
+idle-loop canary quantifying the probe's ambient noise. The pure predicates
+`hostContendedForAbsoluteTiming()` (quiet-host gate for absolute assertions)
+and `eventLoopHeadroomOk()` (window-length-independent blocking-rate headroom)
+keep the decision deterministic and unit-tested. Rationale and the failure
+that motivated it: `WL-0MVMSE2S0006L56D`.
 
 ### `wl sync` persist phases
 
@@ -628,6 +640,20 @@ run, cached for the audit).
   loop blocking and 2.2 s write → reflect with no code change; the report
   records the host + load average so a reading can be judged. The regression
   ratchet remains CPU-time based (load independent), as documented above.
+- **Why the isolation tests use a blocking-RATE headroom.** The 1 ms
+  event-loop probe sums every delay beyond its 2 ms tolerance, so its total
+  grows with the measured window: on a host that stretches the refresh (a
+  loaded host makes the `tsx` CLI spawn slower) the absolute total inflates
+  with no product change. `WL-0MVMSE2S0006L56D` was exactly that — 402 ms in
+  a refresh against an absolute 200 ms assertion, at the same blocked ÷ wall
+  rate as its own baseline. The default-suite assertions therefore compare the
+  **rate** (`eventLoopHeadroomOk`: ≤ max(25 % of wall, 3 × baseline rate)) and
+  only gate ABSOLUTE numbers on a host measured quiet across the window. A
+  single trailing 1-min load read is not a sufficient quiet signal: on this
+  shared multi-agent host the load average read 0.69/core while `/proc/stat`
+  showed 73–100 % utilisation, so the harness samples load before/during/after
+  (max), CPU utilisation over the window, and an idle-loop canary
+  (`hostContendedForAbsoluteTiming`).
 - **AC5 route choice.** The per-spawn peak (145–176 MB cold, measured on
   `dist`) is not below the pre-change baseline, so AC5 is satisfied by the
   bounded fan-out route: F8 (`WL-0MVKVJYV6008SL9G`) tightened the read-spawn
