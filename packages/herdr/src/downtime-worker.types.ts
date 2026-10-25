@@ -3,14 +3,16 @@
  * types.
  *
  * Single responsibility: the pure-data type surface (status/slot/poller,
- * candidates, results, panes) shared by the idle, poller and selection
- * modules. Dispatch-event/spawn/worker types stay in the monolith until
- * their owning children land.
+ * candidates, results, panes, stalled-work scan/resume shapes) shared by the
+ * idle, poller, selection and dispatch modules. Dispatch-event/outcome types
+ * live in `downtime-worker.dispatch-contract.ts`; spawn/worker types stay in
+ * the barrel until their owning children land.
  * Moved verbatim out of `downtime-worker.ts` (parent WL-0MVF3F9A7000HKP7;
  * promised deliverable of WL-0MVLIHXD1004L0UO, falsely marked complete —
  * landed via WL-0MVN6UUEH009GID8). No behaviour change.
  */
 
+import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
 import type { HerdrAgentSession } from './pane-close-herdr.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -783,4 +785,57 @@ export interface CriticalFirstGuardDecision {
   escalate: boolean;
   /** Machine-readable reason (also the AC6 selectionReason vocabulary). */
   reason: CriticalFirstGuardReason;
+}
+
+// ── Stalled-work scan/resume shapes (WL-0MVLII0NO007JJBA) ─────────────
+//
+// Moved verbatim out of `stalled-work.ts` so the extracted dispatch pipeline
+// and its stalled-resume helper can type the scan/resume seams without
+// importing a module that sits inside the split guard's cycle baseline.
+// `stalled-work.ts` re-exports both, so its public surface is unchanged.
+/**
+ * Options threaded through the stalled-work scan and resume. Re-read from the
+ * plugin settings on every idle tick (never cached) so a settings change —
+ * `downtimeStallScanEnabled` / `downtimeStallThresholdMs` — applies live.
+ */
+export interface StalledScanOptions {
+  /** Master switch (`downtimeStallScanEnabled`). False → no scan at all. */
+  enabled: boolean;
+  /** True while the code-freeze marker is frozen/ambiguous (split-by-skill). */
+  frozen: boolean;
+  /**
+   * True while the host-CPU dispatch gate is active (WL-0MVK0UO3Q002TXW6
+   * AC3): a gated tick must NOT resume a stalled pane in place — waking an
+   * agent adds load to an already saturated host. Absent/false leaves the
+   * scan unchanged.
+   */
+  cpuSaturated?: boolean;
+  /** Minimum continuous not-working duration (`downtimeStallThresholdMs`). */
+  thresholdMs: number;
+  /** Non-terminal pane-close cooldown window (ms). */
+  nonTerminalCooldownMs: number;
+  /** Per-item/per-kind dispatch attempt cap. */
+  maxAttempts: number;
+  /** Injectable clock (defaults to `Date.now`). */
+  now?: number;
+}
+
+/**
+ * A stalled pane the scan is willing to resume, carrying the item's OWN
+ * worklog root so a foreign-root pane is resumed against that root — never
+ * the leader's (parent AC5).
+ */
+export interface StalledPaneCandidate {
+  pane: HerdrPaneRecord;
+  item: DowntimeItemInfo;
+  /** The item's worklog root (resolved from the pane's cwd / agent_session). */
+  cwd: string;
+  kind: DowntimeSkillKind;
+  /**
+   * The machine-wide model-cooldown entry whose expiry made this candidate
+   * (WL-0MV5639GG00085Q7), or `null` for a generic stall candidate. Non-null
+   * always means the entry was DUE (`cooldownUntil <= now`); an active entry
+   * is never a candidate (strictness).
+   */
+  modelCooldown: ModelCooldownEntry | null;
 }
