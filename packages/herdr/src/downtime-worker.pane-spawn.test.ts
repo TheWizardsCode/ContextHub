@@ -28,8 +28,11 @@ describe('defaultDowntimeSpawn (real spawn boundary)', () => {
     expect(result.ok).toBe(false);
     if (!result.ok) {
       // ENOENT surfaces as the spawn `error` event → error trace captured.
+      // The message text is Node/libuv-version dependent ("ENOENT" vs
+      // "no such file or directory"), so assert the observable contract —
+      // a truthy error trace naming the failure — not an OS-specific string.
       expect(result.error).toBeTruthy();
-      expect(result.error).toContain('no such file or directory');
+      expect(result.error).toMatch(/ENOENT|no such file or directory/i);
     }
   });
 
