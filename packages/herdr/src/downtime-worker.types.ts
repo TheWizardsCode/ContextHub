@@ -5,8 +5,9 @@
  * Single responsibility: the pure-data type surface (status/slot/poller,
  * candidates, results, panes, stalled-work scan/resume shapes) shared by the
  * idle, poller, selection and dispatch modules. Dispatch-event/outcome types
- * live in `downtime-worker.dispatch-contract.ts`; spawn/worker types stay in
- * the barrel until their owning children land.
+ * live in `downtime-worker.dispatch-contract.ts`; the worker's own contract
+ * (`DowntimeWorkerDeps` + the config/result/handle types) lives in
+ * `downtime-worker.worker-contract.ts`.
  * Moved verbatim out of `downtime-worker.ts` (parent WL-0MVF3F9A7000HKP7;
  * promised deliverable of WL-0MVLIHXD1004L0UO, falsely marked complete —
  * landed via WL-0MVN6UUEH009GID8). No behaviour change.
@@ -839,3 +840,96 @@ export interface StalledPaneCandidate {
    */
   modelCooldown: ModelCooldownEntry | null;
 }
+
+// ── Long-running pane scan shapes (WL-0MVLII2080074S5L) ───────────────
+//
+// Moved verbatim out of `long-running-panes.ts` so the extracted downtime-
+// worker orchestrator (the capacity-starvation signal) can type the scan/run
+// seams without importing a module that sits inside the split guard's cycle
+// baseline. `long-running-panes.ts` re-exports both, so its public surface is
+// unchanged.
+
+/** One flagged pane, carrying its OWN worklog root. */
+export interface LongRunningPaneObservation {
+  paneId: string;
+  itemId: string;
+  /** The item's worklog root (resolved from the pane's cwd / agent_session). */
+  cwd: string;
+  kind: DowntimeSkillKind;
+  lastActivityAt: number;
+  stalledForMs: number;
+  agentStatus: string;
+  stage: string;
+  title?: string;
+}
+
+/** Options for {@link scanLongRunningPanes}. */
+export interface LongRunningScanOptions {
+  /** Progress window before a pane is reported (ms). */
+  thresholdMs: number;
+  /** Injectable clock (defaults to `Date.now`). */
+  now?: number;
+  /** Upper bound on returned observations (default 10; `0` = unlimited). */
+  maxObservations?: number;
+}
+
+// ── Stalled-resume outcome shapes (WL-0MVLII2080074S5L) ────────────────
+//
+// Moved verbatim out of `stalled-work.ts` so the extracted worker contract
+// (`DowntimeWorkerDeps.resumeStalledPane`) can name the outcome without
+// importing a module that sits inside the split guard's cycle baseline.
+// `stalled-work.ts` re-exports every alias, so its public surface is
+// unchanged.
+
+/**
+ * Machine-readable reason a stalled pane was NOT resumed. Every value is a
+ * neutral "not this cycle" outcome — never a strike, never a crash.
+ */
+export type StalledPaneReason =
+  | 'no-agent'
+  | 'no-item-id'
+  | 'kind-unknown'
+  | 'item-terminal'
+  | 'needs-producer-review'
+  | 'agent-working'
+  | 'agent-blocked'
+  | 'kind-stale'
+  | 'cooldown-active'
+  | 'model-cooldown-active'
+  | 'attempt-cap-exhausted'
+  | 'last-activity-unknown'
+  | 'stall-threshold-not-elapsed';
+
+/** The seven documented resume failure modes. */
+export type StalledResumeFailureReason =
+  | 'agent-blocked'
+  | 'agent-prompt-stalled'
+  | 'pane-vanished'
+  | 'cli-error';
+
+/**
+ * Outcome of one {@link resumeStalledPane} attempt. `resumed:false` is ALWAYS
+ * a neutral "not resumed this cycle" result — never a strike, never a crash,
+ * never a duplicate. Includes every classifier reason plus the in-process
+ * concurrency guard and the herdr CLI failures.
+ */
+export type StalledResumeOutcomeReason =
+  | StalledPaneReason
+  | 'concurrent-resume'
+  | StalledResumeFailureReason;
+
+export type StalledResumeOutcome =
+  | {
+      resumed: true;
+      via: 'prompt' | 'start';
+      paneId: string;
+      itemId: string;
+      kind: DowntimeSkillKind;
+    }
+  | {
+      resumed: false;
+      reason: StalledResumeOutcomeReason;
+      paneId: string;
+      itemId: string;
+      kind: DowntimeSkillKind;
+    };

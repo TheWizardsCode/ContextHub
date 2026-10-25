@@ -33,6 +33,10 @@ import { isActiveBlocker } from './hydrator.js';
 // its stalled-resume helper consume them without importing the barrel).
 import type {
   StalledPaneCandidate,
+  StalledPaneReason,
+  StalledResumeFailureReason,
+  StalledResumeOutcome,
+  StalledResumeOutcomeReason,
   StalledScanOptions,
 } from './downtime-worker.types.js';
 import { isNonTerminalCooldownActive, type DowntimeLogEntry } from './downtime-log.js';
@@ -52,6 +56,10 @@ import {
 // module).
 export type {
   StalledPaneCandidate,
+  StalledPaneReason,
+  StalledResumeFailureReason,
+  StalledResumeOutcome,
+  StalledResumeOutcomeReason,
   StalledScanOptions,
 } from './downtime-worker.types.js';
 
@@ -101,20 +109,7 @@ export interface StalledPaneGuards {
  *  - `last-activity-unknown`    — no activity timestamp to measure a stall.
  *  - `stall-threshold-not-elapsed` — not-working for less than the threshold.
  */
-export type StalledPaneReason =
-  | 'no-agent'
-  | 'no-item-id'
-  | 'kind-unknown'
-  | 'item-terminal'
-  | 'needs-producer-review'
-  | 'agent-working'
-  | 'agent-blocked'
-  | 'kind-stale'
-  | 'cooldown-active'
-  | 'model-cooldown-active'
-  | 'attempt-cap-exhausted'
-  | 'last-activity-unknown'
-  | 'stall-threshold-not-elapsed';
+
 
 /** The classifier's decision: stalled (with the derived kind) or a reason. */
 export type StalledPaneDecision =
@@ -372,11 +367,7 @@ export const STALLED_RESUME_PROMPT = 'continue';
  *                             reaper closed it) between scan and resume.
  *  - `cli-error`            — any other herdr/CLI failure.
  */
-export type StalledResumeFailureReason =
-  | 'agent-blocked'
-  | 'agent-prompt-stalled'
-  | 'pane-vanished'
-  | 'cli-error';
+
 
 /** Result of one herdr agent prompt/start invocation (injected seam). */
 export type StalledResumeCliResult =
@@ -519,32 +510,7 @@ export interface StalledResumeInput {
   modelCooldown?: ModelCooldownEntry | null;
 }
 
-/**
- * Outcome of one {@link resumeStalledPane} attempt. `resumed:false` is ALWAYS
- * a neutral "not resumed this cycle" result — never a strike, never a crash,
- * never a duplicate. Includes every classifier reason plus the in-process
- * concurrency guard and the herdr CLI failures.
- */
-export type StalledResumeOutcomeReason =
-  | StalledPaneReason
-  | 'concurrent-resume'
-  | StalledResumeFailureReason;
 
-export type StalledResumeOutcome =
-  | {
-      resumed: true;
-      via: 'prompt' | 'start';
-      paneId: string;
-      itemId: string;
-      kind: DowntimeSkillKind;
-    }
-  | {
-      resumed: false;
-      reason: StalledResumeOutcomeReason;
-      paneId: string;
-      itemId: string;
-      kind: DowntimeSkillKind;
-    };
 
 /** Best-effort producer-review escalation — never throws. */
 async function flagStalledResumeBudgetExhausted(
