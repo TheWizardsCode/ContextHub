@@ -14,7 +14,16 @@ no-change sync performs **zero record writes and zero FTS writes**. The phase
 timings are now observable in `wl sync --json` (`summary.phaseTimings`, same
 names as the probe — WL-0MVK6SD5O001K901), and the write-detection behaviour is
 pinned by the default-suite tests added in WL-0MVK6S4HM005GBCO
-(`tests/unit/persist-write-detection.test.ts`).
+(`tests/unit/persist-write-detection.test.ts`). That test file imports the
+shared **source** (`../../packages/shared/src/database.js`) rather than the CLI
+wrapper: `src/database.ts` re-exports `@worklog/shared`, which resolves to the
+**built** `packages/shared/dist/`, so a checkout holding a `dist/` built before
+the differential-persist change would run these assertions against the old
+clear-and-reinsert code and fail with spurious "FTS mocks not called" /
+"rollback did not happen" errors (WL-0MVM9E3SV003III0). Importing the source
+keeps the regression honest in linked worktrees, where gitignored build output
+is absent until `npm run build` runs (see
+[implement-worktree-node-modules-verification.md](./implement-worktree-node-modules-verification.md)).
 
 This note is the measurement record: the re-runnable commands and the
 before/after table behind parent ACs 2 and 6.

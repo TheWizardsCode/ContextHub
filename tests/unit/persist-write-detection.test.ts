@@ -33,11 +33,19 @@
  * these live here rather than only in `packages/shared/src/database.test.ts`
  * (which carries the pre-existing `import()`/`upsertItems()` semantics tests)
  * — otherwise the regression would never run at the dev-push gate.
+ *
+ * Import the shared source directly (not `../../src/database.js`, whose
+ * `WorklogDatabase` re-exports `@worklog/shared` → the prebuilt `dist/`): the
+ * CLI wrapper resolves to whatever build happens to be on disk, so the same
+ * assertions failed spuriously (WL-0MVM9E3SV003III0) when a checkout ran them
+ * against a `dist/` built before the change-detection rewrite. Importing the
+ * branch's own source keeps this regression test honest in worktrees, where
+ * untracked build output is stale or absent.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { WorklogDatabase } from '../../src/database.js';
-import { WorkItem, Comment, DependencyEdge, AuditResult } from '../../src/types.js';
+import { WorklogDatabase } from '../../packages/shared/src/database.js';
+import { WorkItem, Comment, DependencyEdge, AuditResult } from '../../packages/shared/src/types.js';
 import { createTempDir, cleanupTempDir, createTempJsonlPath, createTempDbPath } from '../test-utils.js';
 
 const FIXED_TS = '2026-01-01T00:00:00.000Z';
