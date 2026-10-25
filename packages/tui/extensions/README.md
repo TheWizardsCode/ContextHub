@@ -53,6 +53,43 @@ the directory path and Git branch info.
 | Free-form text | `Fix the login bug` | Clears the indicator |
 | Other extension commands | `/other-ext-cmd` | Not detectable (Pi limitation) |
 
+### Work Item Titles in the Footer
+
+When the input contains a work item ID (e.g. `/intake RISE-0MVCFSM9B0019M8L`),
+the indicator is enriched with the item's title:
+
+```
+⏵ /intake RISE...19M8L AI cards should be face down
+```
+
+The title is resolved by a single shared resolver
+(`Worklog/lib/work-item-title.ts`) used by both the activity status line and
+the session-health footer's initial-prompt preview:
+
+- **Cross-project IDs resolve.** If the ID's prefix (`RISE`, `POD`, `WL`, …) is
+  declared as `prefix: <PFX>` in a sibling project's
+  `<projects-root>/<project>/.worklog/config.yaml`, the resolver passes that
+  `.worklog` directory to `wl show` as `--worklog-dir`. This mirrors the
+  skills layer's `SIBLING_SCAN_ROOT` resolution
+  (`skill/shared/status_lifecycle.py`). Without it, a cross-project ID looked
+  up from the current project's cwd returned "Work item not found" and the
+  title silently disappeared from the footer (WL-0MVGB23MM004X501).
+- **Ambiguous prefixes never show a wrong title.** When several sibling
+  projects declare the same prefix (e.g. `POD`), each candidate is probed and
+  only the project that actually owns the ID is used.
+- **Sibling scan is memoised per process.** The prefix→directory mapping is
+  scanned once (per prefix) and cached for the process lifetime, so the
+  per-second footer refresh never re-scans the filesystem. The owning
+  directory for an ID is memoised too.
+- **Silent fallback.** Any lookup failure (unknown ID, timeout, missing
+  config, unreadable worklog) leaves the raw text in place — no error is
+  shown. The lookup budget is 5 s (`TITLE_LOOKUP_TIMEOUT_MS`), sized for a
+  cold `wl show` of a large item (an 18 KB item measured 2.36 s).
+
+The scan root is derived from the extension's own install location (the
+parent of the checkout that ships it) and can be overridden with the
+`WORKLOG_SIBLING_SCAN_ROOT` environment variable.
+
 ### Persistence
 
 - The indicator persists across turns within a session until new input is typed.
