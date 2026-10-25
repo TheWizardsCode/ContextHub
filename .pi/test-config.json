@@ -1,9 +1,8 @@
 {
   "suiteCommands": [
-    "npm --silent test -- tests/cli",
-    "npm --silent test -- tests/unit"
+    "npm --silent test -- tests"
   ],
-  "timeoutPerCommand": 1800,
+  "timeoutPerCommand": 3600,
   "groups": {
     "herdr": {
       "commands": ["npm --silent test -- packages/herdr/src"],

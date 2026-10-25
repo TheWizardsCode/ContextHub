@@ -2581,15 +2581,16 @@ npx tsx packages/herdr/src/start.ts
 # Run tests
 #
 # The herdr package suite is a SEPARATE, opt-in gate — it is not part of the
-# canonical full suite (`tests/cli` + `tests/unit`), by producer decision on
+# canonical full suite (`npm --silent test -- tests`), by producer decision on
 # WL-0MVFZVIA50062TJ8. Run it through the sanctioned test-skill runner so the
 # run is cache-recorded and visible to the audit; an ad-hoc `npx vitest` run
 # is invisible to the audit.
 python3 <test-skill>/scripts/run_tests.py --type herdr --json    # types.herdr
 python3 <test-skill>/scripts/run_tests.py --group herdr --json   # groups.herdr
 
-# Other plugin/pane tests (not covered by the herdr profile)
-npx vitest run tests/herdr/ tests/unit/start-launcher.test.ts
+# Plugin/pane tests that live under tests/herdr/ ARE part of the canonical
+# full suite since WL-0MVG4FF9200346NR (the canonical command is the `tests/`
+# umbrella), so they run there — no separate npx invocation is needed.
 
 # Build TypeScript (compiles packages/shared first, then the plugin)
 cd packages/herdr && npm run build

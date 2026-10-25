@@ -14,9 +14,11 @@ legacy `test/` vs `tests/` deduplication epic, so the post-change child
 
 **Canonical gate reference.** Added by WL-0MVGJ4WSS005BMSI (child:
 WL-0MVH75NY3002TTX9). This section states which suites each gate runs and how
-to run the herdr package suite. It is shared with **WL-0MVG4FF9200346NR**
-(root-level `tests/*.test.ts` coverage): extend this section rather than
-adding a second one.
+to run the herdr package suite. Its root-level coverage gap (root-level
+`tests/*.test.ts` files never executed by any gate) was closed by
+**WL-0MVG4FF9200346NR** — see [Full `tests/` coverage](#full-tests-coverage-wl-0mvg4ff9200346nr)
+below; the old two-command canonical suite (`tests/cli` + `tests/unit`) was
+replaced by the `tests/` umbrella.
 
 ### What each gate runs
 
@@ -28,12 +30,23 @@ adding a second one.
 | Audit (F3) | audit skill, on a cache miss | full | The full canonical suite, read from the per-repo test cache |
 
 The **canonical full suite** is declared in `.pi/test-config.json`
-(`suiteCommands`) and is unchanged:
+(`suiteCommands`):
 
 ```bash
-npm --silent test -- tests/cli
-npm --silent test -- tests/unit
+npm --silent test -- tests
 ```
+
+Since **WL-0MVG4FF9200346NR** this is a single umbrella command that
+executes **all 277 `tests/` test files** in one vitest run — the 77
+root-level files plus the `bench/`, `debug/`, `extensions/`, `herdr/`,
+`integration/`, `lib/` and `scripts/` sub-suite files. It replaced the two
+narrow commands (`tests/cli` + `tests/unit`), which left 117 files executed
+by no full-suite gate. Vitest positional filters are substring matches on
+the repository-relative path, so the `tests` filter grabs exactly the
+`tests/` files and nothing outside them, and a single run de-duplicates its
+own file set (the shared-basename unit-vs-CLI variants — e.g.
+`tests/audit.test.ts` + `tests/cli/audit.test.ts` — each execute exactly
+once).
 
 > **This repository's `pre-push` hook does not run the test suite today** — it
 > enforces branch policy, the context budget and `wl sync` only. Until it
@@ -87,6 +100,83 @@ keys (`herdr`, `group:herdr`): they are recorded and queryable, but they
 still needs operator attestation (`--green-run HEAD`) or a herdr-aware audit
 follow-up (not implemented).
 
+### Full `tests/` coverage (WL-0MVG4FF9200346NR)
+
+**2026-10-25.** The canonical suite used to run `tests/cli` + `tests/unit`
+only, leaving 117 of 277 `tests/` files (77 root-level plus the `bench/`,
+`debug/`, `extensions/`, `herdr/`, `integration/`, `lib/`, `scripts/`
+sub-suite files) executed by no full-suite gate — they only ran under a bare
+`npx vitest` / CI. The fix replaced the two narrow commands with the single
+umbrella `npm --silent test -- tests` (see above), so a `--type full` run now
+executes every `tests/` file.
+
+#### Coverage table (2026-10-25 `dev` tree, `git ls-files`)
+
+| Location | Files | In canonical suite? |
+|---|---|---|
+| `tests/` (root level) | 77 | Yes (was No) |
+| `tests/cli` | 111 | Yes (unchanged) |
+| `tests/unit` | 49 | Yes (unchanged) |
+| `tests/herdr` | 20 | Yes (was No) |
+| `tests/integration` | 5 | Yes (was No) |
+| `tests/lib` | 6 | Yes (was No) |
+| `tests/bench` | 4 | Yes (was No) |
+| `tests/scripts` | 3 | Yes (was No) |
+| `tests/debug` | 1 | Yes (was No) |
+| `tests/extensions` | 1 | Yes (was No) |
+| **`tests/` total** | **277** | **277 / 277 (100 %)** |
+| `packages/herdr` | 129 | No — producer decision WL-0MVFZVIA50062TJ8 (won't-fix); opt-in `--type herdr` / `--group herdr` |
+| `packages/tui` | 22 | No — documented gap; tracked in WL-0MVODOJWB004G03J |
+| `packages/shared` | 12 | No — documented gap; tracked in WL-0MVODOJWB004G03J |
+| **Repository total** | **440** | **277 (63 %)** |
+
+The `packages/` rows are deliberately out of this item's scope: the herdr
+exclusion is producer-sanctioned (won't-fix) and the `tui` + `shared` gap is
+tracked in **WL-0MVODOJWB004G03J** (`discovered-from:WL-0MVG4FF9200346NR`).
+"Full parity with `npm test`" is **not** the accepted intent (see the herdr
+decision above).
+
+#### Runtime (measured with `run_tests.py`, 16-core shared host)
+
+Before and after runs both resolved the *declared* canonical set through the
+test skill's runner. **Trap:** `run_tests.py --suite node` resolves the
+**legacy convention** path (`tests/{unit,node,cli}`) and ignores
+`suiteCommands` — for canonical runs always use the default `--suite all`
+(or a plain `--type full`) so the declared `suiteCommands` drive the run.
+
+| Run | Command resolved | Files | Vitest duration | Runner elapsed |
+|---|---|---|---|---|
+| Before (2026-10-25) | `npm --silent test -- tests/cli` + `npm --silent test -- tests/unit` | 160 (111 cli + 49 unit) | — (per-suite tails truncated by the runner; load-dominated) | **1620.1 s** — host heavily loaded with concurrent agent suites |
+| After (2026-10-25) | `npm --silent test -- tests` | **278** (277 + the guard test below) | **790.89 s** | **1065.4 s** |
+
+`timeoutPerCommand` was raised 1800 → **3600** in the same change: the after run
+is ~2× the before suite's file count, and the old budget left too little
+headroom on a loaded host (both numbers stay far below the new ceiling, so the
+timeout is a safety net, not a runtime cost).
+
+#### Verification (AC2) and regression guard
+
+The widened run reports `Test Files 278 …` (277 `tests/` + the guard test)
+and a path diff against `git ls-files` confirms every `tests/` test file
+runs and no file runs twice (one vitest run de-duplicates its own file set).
+`tests/unit/canonical-suite-coverage.test.ts` (**added by this item**) is a
+regression guard: it fails the build if `suiteCommands` ever stops covering a
+`tests/` test file — naming the uncovered files — so the coverage cannot
+silently regress (same guard class as `no-stale-dist-spawn.test.ts`).
+
+#### Newly surfaced failures
+
+6 failures surfaced, all in `tests/herdr/fetcher-memo.test.ts` (a file the
+old canonical suite never executed): its spawn-count assertions were written
+before the F5/F8 bounded spawn cap made `runWlInner` await
+`acquireWlSpawnSlot()` before reaching `execFileAsync`, so they read 0 calls
+synchronously and the leaked in-flight promise hung every later test. Fixed
+in place (`waitForCalls()` + a raised spawn cap for the memo suite, whose
+serial-concurrency contract lives in
+`packages/herdr/src/fetcher-spawn-cap.test.ts`) — triaged as the critical
+test-failure item **WL-0MVOERBM5001VUPY**, closed inline by this item's
+commit. The remainder of the widened suite was green on the first run.
+
 ## Test file count (baseline)
 
 Tracked test files matching the vitest include pattern:
@@ -104,6 +194,13 @@ git ls-files | grep -E '\.(test|spec)\.(ts|tsx|js|mjs|cjs)$' | wc -l
 
 Vitest discovers 358 test files (357 passed, 1 skipped —
 `tests/github-sync-load.long.test.ts`).
+
+> **Stale row note (WL-0MVG4FF9200346NR).** The legacy root `test/` directory
+> no longer exists — the deduplication epic (WL-0MV28X3BT0079JM3) deleted its
+> last files, so the `test/` row above is a baseline snapshot for commit
+> `85679713`, not a description of the current tree. Current counts live in
+> the [coverage table](#coverage-table-2026-10-25-dev-tree-git-ls-files)
+> (`tests/` 277, `packages/` 163, repository total 440).
 
 ## Suite runtime (baseline)
 
@@ -126,6 +223,12 @@ Result:
 | Wall clock (`/usr/bin/time -v`) | 4:04.27 |
 
 ### Framework-declared canonical suite (`.pi/test-config.json`)
+
+> **Historical baseline (pre-WL-0MVG4FF9200346NR).** The commands and numbers
+> below describe the commit `85679713` baseline, when `suiteCommands` was
+> `tests/cli` + `tests/unit`. The canonical suite is now the single umbrella
+> `npm --silent test -- tests` (277 files) — see
+> [Full `tests/` coverage](#full-tests-coverage-wl-0mvg4ff9200346nr).
 
 The implement/test/pre-push gates run the suite declared in
 `.pi/test-config.json`:
@@ -506,6 +609,11 @@ commit that registered the `worklist` command — the source was correct.
 
 ### Results — canonical suite (`.pi/test-config.json`)
 
+> Historical (WL-0MVF9JJUH0077OB8): the canonical suite at the time was the
+> two-command pair below. Since WL-0MVG4FF9200346NR it is the single umbrella
+> `npm --silent test -- tests` (277 files); the runtime figures in this
+> section remain valid as a pre-widening measurement.
+
 ```bash
 npm --silent test -- tests/cli
 npm --silent test -- tests/unit
@@ -666,3 +774,12 @@ python3 <test-skill>/scripts/run_tests.py --suite pytest --force --json
 - Test-suite runtime reduction: WL-0MVF9JJUH0077OB8 — Reduce time to run tests
   (bundle-based CLI spawning; see the section above)
 - Pre-existing pytest failures: WL-0MVH2T0ZV006KIOU
+- Canonical gate reference author: WL-0MVGJ4WSS005BMSI (child WL-0MVH75NY3002TTX9)
+- Root-level `tests/` coverage (the `tests/` umbrella): WL-0MVG4FF9200346NR —
+  see [Full `tests/` coverage](#full-tests-coverage-wl-0mvg4ff9200346nr)
+- Stale `fetcher-memo` test exposed by that widening:
+  WL-0MVOERBM5001VUPY (fixed inline by WL-0MVG4FF9200346NR)
+- Remaining `packages/` coverage gap (`tui` + `shared`):
+  WL-0MVODOJWB004G03J
+- Herdr package suite exclusion (producer decision, won't-fix):
+  WL-0MVFZVIA50062TJ8

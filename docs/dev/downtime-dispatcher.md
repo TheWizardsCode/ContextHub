@@ -1828,7 +1828,7 @@ The batch feature (parent WL-0MVEDM8OT007WDRS) was verified as one slice at
 | Command | Result |
 | --- | --- |
 | `npm --silent test -- packages/herdr/src` | **107 files / 3510 tests passed** (no failures, no unhandled rejections) |
-| `python3 run_tests.py --scope full` (the configured dev-push gate: `tests/cli` + `tests/unit`) | green |
+| `python3 run_tests.py --scope full` (the configured dev-push gate: `tests/cli` + `tests/unit` at the time of this run; since WL-0MVG4FF9200346NR the canonical gate is the single `tests/` umbrella) | green |
 | doc-consistency scan for stale "single-dispatch-only" claims | clean — the only `single-dispatch-per-window` mentions are the deliberate `1` = legacy/off descriptions |
 
 **AC traceability.**
@@ -1844,9 +1844,12 @@ The batch feature (parent WL-0MVEDM8OT007WDRS) was verified as one slice at
 | AC7 documentation | this document, `packages/herdr/README.md`, code comments | this verification record |
 | AC8 full suite | herdr package suite + configured gate | table above |
 
-Known gate gap (discovered, not fixed here): the configured dev-push gate runs
+Known gate gap (discovered, not fixed here): the configured dev-push gate ran
 `tests/cli` + `tests/unit` only, so the herdr package suite is invoked
-explicitly for herdr-touching items — tracked as WL-0MVGJ4WSS005BMSI.
+explicitly for herdr-touching items — tracked as WL-0MVGJ4WSS005BMSI. (Since
+WL-0MVG4FF9200346NR the canonical gate is the `tests/` umbrella command, which
+covers every `tests/` file but still not `packages/` — see the coverage table
+in `docs/dev/test-suite-baseline.md`.)
 
 ### Soft-delete exclusion (SA-0MUJBLZC60085DI9)
 
