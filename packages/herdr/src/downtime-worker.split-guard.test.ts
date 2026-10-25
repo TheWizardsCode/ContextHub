@@ -97,6 +97,18 @@ describe('downtime-worker split guard — live tree', () => {
     expect(findMissingExports(consumerImportNames(index).keys(), exported)).toEqual([]);
   });
 
+  it('discovers consumers in the root tests/ and scripts/ trees too', () => {
+    // `isSoftDeleted` is imported only by
+    // `tests/unit/downtime-worker-soft-delete.test.ts`, and
+    // `scripts/downtime-agreement-sample.ts` imports the barrel as well.
+    // Scanning consumers only under `src/` + `packages/herdr/src` let a
+    // dropped export pass this guard and fail the full suite instead
+    // (WL-0MVLII2OY004S3BN).
+    const consumers = consumerImportNames(index);
+    expect(consumers.has('isSoftDeleted')).toBe(true);
+    expect(consumers.has('isAssigneeHeld')).toBe(true);
+  });
+
   it('declares the single-flight counter in exactly one production module', () => {
     const modules = splitFamilyModules(index);
     expect(modules.length).toBeGreaterThan(0);

@@ -333,6 +333,16 @@ design and test map.
 
 ### Downtime worker (local-LLM idle dispatch)
 
+**Module layout:** the downtime worker is decomposed into a thin re-export
+barrel (`packages/herdr/src/downtime-worker.ts`, the public surface every
+consumer imports) over single-responsibility sibling modules
+(`downtime-worker.dispatch*.ts`, `.orchestrator*.ts`, `.coordination*.ts`,
+`.gates.ts`, `.pane.ts`, `.idle.ts`, `.poller.ts`, `.selection.ts`,
+`.parsers.ts`, `.constants.ts`, `.types.ts`, `.clamps.ts`, `.prompts.ts`); the
+full module → responsibility → key-exports table is in the
+[downtime dispatcher module layout](../../docs/dev/downtime-dispatcher.md#module-layout)
+(parent WL-0MVF3F9A7000HKP7).
+
 **Leader-election + shared coordination list (parent WL-0MST3OJ8S0001ROL):**
 since the refactor, ONE elected leader handles all llama-proxy polling and
 dispatches; the other herdr instances coordinate instead of polling:

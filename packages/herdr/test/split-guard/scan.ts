@@ -65,10 +65,11 @@ export const MAX_MODULE_LINES = 1000;
  * Files that are currently exempt from the size gate.
  *
  * This is a *shrink-only* allowlist: it may only ever lose entries, never gain
- * them. The final barrel child empties it, at which point every
- * `downtime-worker*.ts` module must be ≤ {@link MAX_MODULE_LINES} lines.
+ * them. The final barrel child (WL-0MVLII2OY004S3BN) emptied it once the
+ * monolith was fully decomposed, so every `downtime-worker*.ts` production
+ * module — the barrel included — is now held to {@link MAX_MODULE_LINES}.
  */
-export const SPLIT_ALLOWLIST: readonly string[] = ['downtime-worker.ts'];
+export const SPLIT_ALLOWLIST: readonly string[] = [];
 
 /**
  * The allowlist as it stood at plan time. {@link SPLIT_ALLOWLIST} must remain a
@@ -121,6 +122,20 @@ export const CYCLE_BASELINE_TYPE_ONLY_EDGES: readonly { from: string; to: string
 
 /** Source roots scanned for consumers and for the module graph. */
 export const SCAN_ROOTS: readonly string[] = ['src', 'packages/herdr/src'];
+
+/**
+ * Every root scanned for barrel CONSUMERS.
+ *
+ * The repository also imports the barrel from the root `tests/` tree and from
+ * `scripts/`. Those imports are part of the public-surface contract — the root
+ * `tests/unit/downtime-worker-*.test.ts` suites are behaviour gates — so
+ * leaving them out let a dropped export (`isSoftDeleted`) pass this guard and
+ * fail only the full suite (WL-0MVLII2OY004S3BN). Test/fixture files are still
+ * excluded from the module-graph gates by `productionModules`, and the split
+ * family is still limited to `packages/herdr/src`, so widening the scan here
+ * only affects consumer discovery.
+ */
+export const CONSUMER_ROOTS: readonly string[] = [...SCAN_ROOTS, 'tests', 'scripts'];
 
 /** Generation command recorded in the baseline provenance (AC10). */
 export const BASELINE_COMMAND =
@@ -361,10 +376,10 @@ function collectSourceFiles(dir: string, found: string[] = []): string[] {
   return found;
 }
 
-/** Parse every `.ts` file under {@link SCAN_ROOTS} into a {@link ModuleIndex}. */
+/** Parse every `.ts` file under {@link CONSUMER_ROOTS} into a {@link ModuleIndex}. */
 export function loadModuleIndex(repoRoot: string): ModuleIndex {
   const byFile = new Map<string, ParsedModule>();
-  const files = SCAN_ROOTS.flatMap((root) => collectSourceFiles(path.join(repoRoot, root)));
+  const files = CONSUMER_ROOTS.flatMap((root) => collectSourceFiles(path.join(repoRoot, root)));
   for (const abs of files) {
     const rel = toPosix(path.relative(repoRoot, abs));
     byFile.set(rel, parseModuleSource(rel, fs.readFileSync(abs, 'utf-8')));
@@ -724,7 +739,7 @@ export function buildBaseline(repoRoot: string): SplitBaseline {
       }).trim(),
       generatedAt: new Date().toISOString(),
       barrel: BARREL,
-      consumerGlobs: SCAN_ROOTS.map((root) => `${root}/**/*.ts`),
+      consumerGlobs: CONSUMER_ROOTS.map((root) => `${root}/**/*.ts`),
     },
     symbols,
   };

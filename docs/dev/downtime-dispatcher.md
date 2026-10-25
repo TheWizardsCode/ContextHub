@@ -1,6 +1,8 @@
 # Downtime Dispatcher: Leader Election + Shared Coordination File
 
-The herdr plugin's **downtime worker** (`packages/herdr/src/downtime-worker.ts`)
+The herdr plugin's **downtime worker** (decomposed into a re-export barrel,
+`packages/herdr/src/downtime-worker.ts`, over ~24 sibling modules — see
+[Module layout](#module-layout))
 uses local-LLM idle compute to advance the worklog backlog automatically
 (dispatch `/skill:audit`, `/skill:plan`, `/skill:implement`, scheduled
 prompts). The 2026-08 refactor (work item **WL-0MST3OJ8S0001ROL**) changed the
@@ -12,6 +14,46 @@ This page is the deep-dive reference for operators and agents. The
 package-level overview lives in
 [`packages/herdr/README.md`](../../packages/herdr/README.md) *Downtime worker
 (local-LLM idle dispatch)*.
+
+## Module layout (WL-0MVF3F9A7000HKP7)
+
+`packages/herdr/src/downtime-worker.ts` is a **thin barrel** — a module-level
+doc comment plus re-export statements only, re-exporting exactly the symbols
+consumers import from `./downtime-worker.js` (Q2 refinement: unused exports
+stay internal to their module). Every behaviour lives in the sibling modules
+below; each one carries a doc comment stating its single responsibility.
+
+| Module | Single responsibility | Key exports (consumer-facing) |
+|---|---|---|
+| `downtime-worker.constants.ts` | Tuning constants, floors/maxima, tier ordering and decision helpers | `DEFAULT_DOWNTIME_POLL_INTERVAL_MS`, `DOWNTIME_AUDIT_STALE_WINDOW_MS`, `decisionHeaderToken`, `withTransientRetry` |
+| `downtime-worker.types.ts` | Pure-data type surface (status/slot/poller, candidates, claim/result, config/worker) | `LlamaStatus`, `DowntimeCandidate`, `DowntimeStage`, `RunningPanesResult`, `HerdrPaneRecord` |
+| `downtime-worker.clamps.ts` | The ten `clampDowntime*` settings normalisers (floors/ceilings) | `clampDowntimePollInterval`, `clampDowntimeAuditBatchMax`, … |
+| `downtime-worker.idle.ts` | Idle evaluation, idle-duration tracker, per-slot tracker, prefill pacing | `evaluateIdle`, `isIdleStatus`, `createIdleTracker`, `createPerSlotIdleTracker`, `evaluatePrefillPacing` |
+| `downtime-worker.poller.ts` | One `GET {proxyUrl}/llama/local/status` poll (fail-closed parse) | `parseLlamaStatus`, `fetchLocalStatus`, `createDowntimePoller` |
+| `downtime-worker.parsers.ts` | Raw `wl` CLI stdout → typed candidates/results | `parseNextCandidatesOutput`, `parseAuditCandidatesOutput`, `parseShowItemOutput`, `skillKindFromPrompt` |
+| `downtime-worker.selection.ts` | Per-tier candidate selection, rotation, critical-first, dependency frontier | `selectNextCandidate`, `selectAuditCandidate`, `selectWithRotation`, `resolveDependencyFrontier` |
+| `downtime-worker.pane.ts` | Pane identity, in-flight resolution, spawn invocation, pane-lifecycle monitor | `buildDowntimePaneArgs`, `spawnDowntimePane`, `monitorDispatchedPanes`, `parseHerdrPaneListOutput` |
+| `downtime-worker.gates.ts` | Every "may the worker dispatch X?" decision (holds, depth, attempt budget, classification) | `classifyItemForDispatch`, `evaluateCriticalFirstGuard`, `readReviewQueueGate`, `isAttemptBudgetExhausted` |
+| `downtime-worker.prompts.ts` | The prompt a dispatched pane receives (incl. blocked-questions instruction) | `buildDowntimePrompt`, `BLOCKED_QUESTIONS_INSTRUCTION`, `buildDowntimeDispatchComment` |
+| `downtime-worker.dispatch-filter.ts` | The Herdr list-head FILTER pipeline (sequential safety filters; critical-first selector) | `selectCriticalFirstCandidates` |
+| `downtime-worker.dispatch-cpu-gate.ts` | Host-CPU dispatch gate (host-utilisation seam) | `CPU_SATURATED_REASON` |
+| `downtime-worker.dispatch-claims.ts` | The claim → marker → spawn pipeline for one selected candidate | *(internal to the dispatch entry)* |
+| `downtime-worker.dispatch-contract.ts` | The dispatch pipeline's dependency boundary + event/outcome types | `DowntimeDispatchEvent`, `DowntimeErrorEvent`, … |
+| `downtime-worker.dispatch.ts` | The dispatch entry point + the single `dispatchInFlightCount` (single-flight) | `dispatchDowntimeWork` |
+| `downtime-worker.local-reservation.ts` | The local-capacity reservation handshake (wire contract, tolerant 429s) | `createLocalReserver`, `parseLocalReservationResponse` |
+| `downtime-worker.stalled-resume.ts` | Prefer resuming a stalled pane in place over opening a new one | `resumeStalledWorkIfAble` |
+| `downtime-worker.coordination.ts` | The coordination OFFER computation (one item per instance per check-in) | `computeMostImportantItem`, `coordinationTierRank` |
+| `downtime-worker.coordination-leader.ts` | Leader-side coordination dispatch, own-head fallback, check-in | `dispatchFromCoordination`, `runCoordinationCheckIn` |
+| `downtime-worker.worker-contract.ts` | The injected dependency boundary (`DowntimeWorkerDeps`) + config/result/handle types | `DowntimeWorker`, `DowntimeWorkerDeps` |
+| `downtime-worker.launch-fence.ts` | One-per-idle-window launch fence (closes the stale-status launch window) | `createIdleWindowLaunchFence` |
+| `downtime-worker.orchestrator-dispatch.ts` | Per-tick dispatch admission and the dispatch attempt (shared tick context) | *(internal to the orchestrator)* |
+| `downtime-worker.orchestrator-tick.ts` | The per-tick state machine: markers, leader/check-in, cooldown/three-strike, decision log | *(internal to the orchestrator)* |
+| `downtime-worker.orchestrator.ts` | The worker factory and returned handle | `createDowntimeWorker` |
+
+Layering: extracted modules import concrete siblings — never the barrel — so
+the import graph stays acyclic (enforced by
+`packages/herdr/test/split-guard/scan.ts`, suite
+`downtime-worker.split-guard.test.ts`).
 
 ## Ranking contract (WL-0MTK1ILM2009QYB2) — dispatcher == Herdr list head
 
@@ -1866,7 +1908,7 @@ moment the queue thins.
 > client-side `parentId` exclusion in `selectAuditCandidate`). Durable reporting of
 > uncovered children is out of scope here (WL-0MUBVH9FV0027COG).
 - **Shared gate implementation** (`readReviewQueueGate` / `isImplementHeldByReviewGate` in
-  `downtime-worker.ts`): ONE bounded `wl list` per dispatch/offer computation, applied
+  `downtime-worker.gates.ts`): ONE bounded `wl list` per dispatch/offer computation, applied
   identically on every dispatch path — `dispatchFromHerdrList` (direct Herdr-head
 dispatch), `computeMostImportantItem` (coordination check-in offer) and
   `dispatchFromCoordination` (leader dispatch, gated per **offer's own root** via the
@@ -2324,31 +2366,31 @@ status refresh unchanged at 30s.**
 
 | Setting | Default | Source |
 |---|---|---|
-| Dispatch poll interval | **10 s** (`downtimePollIntervalMs`) | `DEFAULT_DOWNTIME_POLL_INTERVAL_MS`, floor 10 s (`downtime-worker.ts`) |
-| LLM continuous idle threshold | **75 s** (`downtimeIdleThresholdMs`) | `DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS`, floor 1 s (`downtime-worker.ts`) |
+| Dispatch poll interval | **10 s** (`downtimePollIntervalMs`) | `DEFAULT_DOWNTIME_POLL_INTERVAL_MS`, floor 10 s (`downtime-worker.constants.ts`) |
+| LLM continuous idle threshold | **75 s** (`downtimeIdleThresholdMs`) | `DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS`, floor 1 s (`downtime-worker.constants.ts`) |
 | Proxy status refresh | 30 s (`refreshIntervalMs`) | `settings.ts` (unchanged, pre-refactor cadence) |
 | Leader lease TTL | 5 min (`DEFAULT_LEASE_TTL_SECONDS = 300`) | `leader-election.ts` |
-| Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.ts`, `leader-election.ts` |
-| Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.ts` |
-| No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.ts` |
-| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS`, `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.ts`) |
-| Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS`, `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.ts`) |
-| Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS`, `clampDowntimeMaxAttempts` (`downtime-worker.ts`), `countAttempts` (`downtime-log.ts`) |
-| Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX`, `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.ts`) |
-| Stalled-work scan | enabled (`downtimeStallScanEnabled`; re-read live; `false` disables the pre-dispatch scan and falls through to normal dispatch, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_SCAN_ENABLED` (`downtime-worker.ts`) |
-| Stalled-work threshold | **5 min** / `300000` ms (`downtimeStallThresholdMs`; minimum continuous not-`working` duration before an in-place resume; clamped to 60 s – 60 min; invalid/missing falls back to the default, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS`, `clampDowntimeStallThresholdMs` (`downtime-worker.ts`) |
+| Leader check-in | 4 min (`DEFAULT_LEADER_CHECK_IN_MS`) — leader re-offer + lease renew inside 5-min TTL | `downtime-worker.constants.ts`, `leader-election.ts` |
+| Follower check-in | 5 min (`DEFAULT_COORDINATION_CHECK_IN_MS`, WL-0MTMPSCL8000O45H) — non-leader re-offer | `downtime-worker.constants.ts` |
+| No-candidate cooldown | 60 min (`downtimeNoCandidateCooldownMs`; probe-before-pause in coordination mode, re-offer cancels) | `downtime-worker.constants.ts` |
+| Success-marker staleness window | **24 h** (`downtimeMarkerStaleWindowMs`; clamped to 1 h – 7 d; releases a stranded success marker at an unchanged stage, WL-0MU6UL0RJ008IHGT) | `DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS` (`downtime-worker.constants.ts`), `clampDowntimeMarkerStaleWindowMs` (`downtime-worker.clamps.ts`) |
+| Non-terminal pane-close cooldown | **30 min** (`downtimeNonTerminalCooldownMs`; clamped to 1 min – 24 h; holds same-kind re-dispatch after a non-terminal pane close, WL-0MUKYERLZ006ELL5) | `DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS` (`downtime-worker.constants.ts`), `clampDowntimeNonTerminalCooldownMs` (`downtime-worker.clamps.ts`) |
+| Per-item/per-kind attempt cap | **3** (`downtimeMaxAttempts`; clamped to 1 – 10; flags `needsProducerReview` and stops re-dispatch of that kind once the cap is reached at the current stage, WL-0MUKYEXMK0033MFK) | `DEFAULT_DOWNTIME_MAX_ATTEMPTS` (`downtime-worker.constants.ts`), `clampDowntimeMaxAttempts` (`downtime-worker.clamps.ts`), `countAttempts` (`downtime-log.ts`) |
+| Depth-aware audit-batch cap | **2** (`downtimeAuditBatchMax`; clamped to 1 – 5; `1` = batching off, legacy single-dispatch-per-window; allows sequential audit continuations in one idle window while the audit-eligible depth is at/above `browseItemCount`, WL-0MVEDM8OT007WDRS) | `DEFAULT_DOWNTIME_AUDIT_BATCH_MAX` (`downtime-worker.constants.ts`), `DOWNTIME_AUDIT_BATCH_MAX_MIN`/`MAX`, `clampDowntimeAuditBatchMax` (`downtime-worker.clamps.ts`) |
+| Stalled-work scan | enabled (`downtimeStallScanEnabled`; re-read live; `false` disables the pre-dispatch scan and falls through to normal dispatch, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_SCAN_ENABLED` (`downtime-worker.constants.ts`) |
+| Stalled-work threshold | **5 min** / `300000` ms (`downtimeStallThresholdMs`; minimum continuous not-`working` duration before an in-place resume; clamped to 60 s – 60 min; invalid/missing falls back to the default, WL-0MUYMBK6H005PY16) | `DEFAULT_DOWNTIME_STALL_THRESHOLD_MS` (`downtime-worker.constants.ts`), `clampDowntimeStallThresholdMs` (`downtime-worker.clamps.ts`) |
 | Capacity-starvation alert window | **2 h** (`downtimeCapacityStarvationAlertMs`; clamped to 5 min – 24 h; continuous capacity-refusal run that triggers a `capacity-starved` observation, WL-0MVKNC2N50025HXE) | `DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS`, `clampDowntimeCapacityStarvationAlertMs` (`capacity-starvation.ts`) |
 | Long-running pane window | **3 h** (`downtimeLongRunningThresholdMs`; clamped to 1 h – 48 h; progress window before a live `working` pane is reported on a starvation signal, WL-0MVKNC2N50025HXE) | `DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS`, `clampDowntimeLongRunningThresholdMs` (`long-running-panes.ts`) |
 | Pane-closure reaper cadence | **60 s** (`PANE_CLOSE_REAPER_INTERVAL_MS`; gated by `paneCloseEnabled`, WL-0MUJL1NAH0042GOS) | `pane-close-scheduler.ts` |
 | Pane-closure idle threshold | **0 min** — idle close disabled (`paneCloseIdleThresholdMinutes`; clamped to 0 min – 24 h) | `pane-close-scheduler.ts` |
 | Pane-closure grace period | **5 min** (`paneCloseGracePeriodMinutes`; clamped to 1 min – 24 h; no pane is eligible for close within this window of first dispatch, WL-0MUMM5IUF003EVT8) | `pane-close-scheduler.ts` |
-| (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.ts` |
+| (removed) Max running downtime panes | **none** — no client-side pane cap; the LLM idle / free-slot check is the concurrency limiter (WL-0MU2EP6JL006A1U3) | `downtime-worker.constants.ts` |
 
 Both dispatch-poll and idle-threshold are configurable in the herdr plugin
 settings file (`~/.config/herdr/worklog-plugin.json`,
 `downtimePollIntervalMs` / `downtimeIdleThresholdMs`) and are clamped on
 load (see `clampDowntimePollInterval` / `clampDowntimeIdleThresholdMs` in
-`downtime-worker.ts`). The 75 s idle threshold exceeds the 1-minute
+`downtime-worker.clamps.ts`). The 75 s idle threshold exceeds the 1-minute
 slot-exhaustion cooldown so that existing sessions have a chance to reclaim
 the slot before a new work item is dispatched. The success-marker staleness
 window (`downtimeMarkerStaleWindowMs`) is likewise configurable and clamped
@@ -2373,7 +2415,7 @@ likewise re-read live every tick and clamped on load
 | `packages/herdr/src/machine-coordination.ts` | Machine coordination dir resolver (`~/.herdr/downtime` / `HERDR_COORDINATION_DIR`) |
 | `packages/herdr/src/leader-election.ts` | Lock acquisition, lease management, re-election (machine dir) |
 | `packages/herdr/src/coordination.ts` | Coordination file read/write (entries, prune, upsert) — machine dir `downtime-coordination.json` |
-| `packages/herdr/src/downtime-worker.ts` | Worker tick: election, check-in, idle gate, dispatch (anchor-before-claim); stalled-work scan wiring (`resumeStalledWorkIfAble`, `STALLED_RESUME_REASON`) |
+| `packages/herdr/src/downtime-worker*.ts` | The downtime-worker module family: the barrel (`downtime-worker.ts`, re-exports only) over the sibling modules — worker tick orchestration (`downtime-worker.orchestrator*.ts`, `worker-contract.ts`, `launch-fence.ts`), dispatch (`dispatch.ts`, `dispatch-filter.ts`, `dispatch-claims.ts`, `dispatch-cpu-gate.ts`, `dispatch-contract.ts`), coordination (`coordination.ts`, `coordination-leader.ts`), gates/prompts/stalled-resume, pane, idle/poller, parsers/selection, constants/types/clamps (full layout: [Module layout](#module-layout)) |
 | `packages/herdr/src/stalled-work.ts` | Stalled-pane classifier + machine-wide scan + in-place resume orchestrator (`classifyStalledPane`, `scanStalledPanes`, `resumeStalledPane`) |
 | `packages/herdr/src/capacity-starvation.ts` | Capacity-refusal episode tracker + `capacity-starved` signal (`CapacityStarvationTracker`, `isCapacityRefusal`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
 | `packages/herdr/src/long-running-panes.ts` | Long-running pane detector (`classifyLongRunningPane`, `scanLongRunningPanes`, clamp) — observation only (WL-0MVKNC2N50025HXE) |
