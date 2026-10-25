@@ -47,10 +47,6 @@ export function clampDowntimeLongRunningThresholdMs(value: number): number {
   return Math.min(
     Math.max(Math.round(value), DOWNTIME_LONG_RUNNING_THRESHOLD_FLOOR_MS),
     DOWNTIME_LONG_RUNNING_THRESHOLD_MAX_MS,
-  DOWNTIME_MAX_ATTEMPTS_MIN,
-  DOWNTIME_MAX_ATTEMPTS_MAX,
-  DOWNTIME_AUDIT_BATCH_MAX_MIN,
-  DOWNTIME_AUDIT_BATCH_MAX_MAX,
   );
 }
 // ── Settings clamps (implemented — wired into settings.ts by F2) ──────
