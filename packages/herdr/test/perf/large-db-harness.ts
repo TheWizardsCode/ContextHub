@@ -532,36 +532,119 @@ export interface EventLoopBlocking {
   totalBlockedMs: number;
   /** Longest single stall (ms). */
   maxBlockedMs: number;
+  /**
+   * Sum of the loop-blocking time attributable to the process itself (ms):
+   * wall delay during which the loop thread was actually on CPU. A timer that
+   * runs late while the process was idle/descheduled is OS contention, not
+   * the plugin blocking input, so it is excluded — the same CPU-time policy
+   * F1 gates its regressions on (WL-0MVMSE5LN003KCPQ).
+   */
+  busyBlockedMs: number;
+  /** Longest single CPU-attributed stall (ms). */
+  maxBusyBlockedMs: number;
   /** Probe ticks observed. */
   samples: number;
 }
 
 /**
+ * Attribute one event-loop-probe tick to loop blocking vs OS descheduling.
+ *
+ * `wallDelayMs` is how late the tick's timer ran; `cpuMs` is the loop thread's
+ * CPU time consumed across that interval. A late timer with no matching CPU
+ * use means the host descheduled the process (shared-machine contention), which
+ * is not the plugin blocking input; only on-CPU delay is counted as loop
+ * blocking, and it is capped by the wall delay (a thread cannot run for longer
+ * than the interval, so parallel GC/compiler threads on a process-wide clock
+ * can never masquerade as loop work). The tolerance absorbs normal timer
+ * granularity (and the probe's own ~1 ms tick cost) so an idle loop reports ~0.
+ */
+export function attributeEventLoopTick(
+  wallDelayMs: number,
+  cpuMs: number,
+  toleranceMs: number,
+): { blockedMs: number; busyBlockedMs: number } {
+  const busyMs = Math.min(Math.max(0, cpuMs), Math.max(0, wallDelayMs));
+  return {
+    blockedMs: Math.max(0, wallDelayMs - toleranceMs),
+    busyBlockedMs: Math.max(0, busyMs - toleranceMs),
+  };
+}
+
+/** Options for {@link startEventLoopProbe}. */
+export interface EventLoopProbeOptions {
+  /**
+   * CPU-time reader seam for the loop thread (microseconds, `cpuUsage` shape).
+   * Injectable so tests can simulate descheduling deterministically.
+   */
+  readCpuUsage?: () => { user: number; system: number };
+}
+
+/**
+ * Default CPU clock for the probe: the current thread's clock where available
+ * (`process.threadCpuUsage`) so parallel GC/compiler threads cannot look like
+ * loop work, else the whole-process clock (whose over-count is capped by the
+ * wall delay in {@link attributeEventLoopTick}).
+ */
+function cpuUsageReader(): () => { user: number; system: number } {
+  const threadCpuUsage = (
+    process as unknown as { threadCpuUsage?: () => { user: number; system: number } }
+  ).threadCpuUsage;
+  if (typeof threadCpuUsage === 'function') {
+    return () => threadCpuUsage.call(process);
+  }
+  return () => process.cpuUsage();
+}
+
+function cpuMsOf(usage: { user: number; system: number }): number {
+  return (usage.user + usage.system) / 1000;
+}
+
+/**
  * Start a 1 ms event-loop heartbeat probe.
  *
- * Each tick records how much later than expected it ran; delays beyond
- * `toleranceMs` are attributed to the event loop being blocked (synchronous
- * SQLite work, JSON parsing). Summing them yields the aggregate blocking the
- * operator perceives as lag during a refresh, which is what the parent AC
- * bounds (≤ ~200 ms aggregate). The tolerance absorbs the normal timer
- * granularity so an idle loop reports ~0.
+ * Each tick records how much later than expected it ran (and how much loop-
+ * thread CPU it consumed); delays beyond `toleranceMs` are attributed to the
+ * event loop being blocked (synchronous SQLite work, JSON parsing). Summing
+ * them yields the aggregate blocking the operator perceives as lag during a
+ * refresh, which is what the parent AC bounds (≤ ~200 ms aggregate). The
+ * tolerance absorbs the normal timer granularity so an idle loop reports ~0.
+ *
+ * The CPU attribution splits the wall delay into loop work (on-CPU) and host
+ * descheduling (off-CPU): callers that gate an absolute bound (the
+ * spawn-burst ratchet) use `busyBlockedMs` so a shared host cannot fail the
+ * plugin's own input-lag budget.
  */
-export function startEventLoopProbe(toleranceMs = 2): { stop(): EventLoopBlocking } {
+export function startEventLoopProbe(
+  toleranceMs = 2,
+  options: EventLoopProbeOptions = {},
+): { stop(): EventLoopBlocking } {
+  const readCpuUsage = options.readCpuUsage ?? cpuUsageReader();
   let handle: ReturnType<typeof setTimeout> | null = null;
   let last = performance.now();
+  let lastCpuMs = cpuMsOf(readCpuUsage());
   let total = 0;
+  let busyTotal = 0;
   let max = 0;
+  let busyMax = 0;
   let samples = 0;
   let stopped = false;
 
   const tick = (): void => {
     if (stopped) return;
     const now = performance.now();
-    const delay = Math.max(0, now - last - toleranceMs);
-    total += delay;
-    if (delay > max) max = delay;
+    const cpuMs = cpuMsOf(readCpuUsage());
+    const { blockedMs, busyBlockedMs } = attributeEventLoopTick(
+      Math.max(0, now - last),
+      Math.max(0, cpuMs - lastCpuMs),
+      toleranceMs,
+    );
+    total += blockedMs;
+    if (blockedMs > max) max = blockedMs;
+    busyTotal += busyBlockedMs;
+    if (busyBlockedMs > busyMax) busyMax = busyBlockedMs;
     samples += 1;
     last = now;
+    lastCpuMs = cpuMs;
     handle = setTimeout(tick, 1);
   };
   handle = setTimeout(tick, 1);
@@ -574,6 +657,8 @@ export function startEventLoopProbe(toleranceMs = 2): { stop(): EventLoopBlockin
       return {
         totalBlockedMs: round1(total),
         maxBlockedMs: round1(max),
+        busyBlockedMs: round1(busyTotal),
+        maxBusyBlockedMs: round1(busyMax),
         samples,
       };
     },
@@ -2308,6 +2393,16 @@ export interface SpawnCapPhaseReport {
   eventLoopBlockedMs: number;
   /** Longest single event-loop stall during the phase (ms). */
   maxEventLoopBlockedMs: number;
+  /**
+   * Event-loop blocking during the phase attributable to the process itself
+   * (ms) — wall delay during which the loop thread was on CPU. OS
+   * descheduling on a shared host inflates {@link eventLoopBlockedMs} without
+   * the plugin blocking input; the absolute AC1 bound is gated on this field
+   * (WL-0MVMSE5LN003KCPQ).
+   */
+  eventLoopBusyBlockedMs: number;
+  /** Longest single CPU-attributed loop stall during the phase (ms). */
+  maxEventLoopBusyBlockedMs: number;
   /** Wall time of the phase (ms). */
   wallMs: number;
 }
@@ -2366,6 +2461,8 @@ export async function runSpawnConcurrencyScenario(
       const wallSamples: number[] = [];
       const blockedSamples: number[] = [];
       const maxStalls: number[] = [];
+      const busySamples: number[] = [];
+      const maxBusyStalls: number[] = [];
       let peakConcurrentSpawns = 0;
       let spawns = 0;
       for (let index = 0; index < samples; index += 1) {
@@ -2397,6 +2494,8 @@ export async function runSpawnConcurrencyScenario(
         wallSamples.push(wallMs);
         blockedSamples.push(blocking.totalBlockedMs);
         maxStalls.push(blocking.maxBlockedMs);
+        busySamples.push(blocking.busyBlockedMs);
+        maxBusyStalls.push(blocking.maxBusyBlockedMs);
         spawns += summariseSpawnRecords(spawnFile).total;
       }
 
@@ -2413,6 +2512,8 @@ export async function runSpawnConcurrencyScenario(
           peakRssPerSpawnMb === null ? null : round1(cap * peakRssPerSpawnMb),
         eventLoopBlockedMs: round1(Math.max(...blockedSamples, 0)),
         maxEventLoopBlockedMs: round1(Math.max(...maxStalls, 0)),
+        eventLoopBusyBlockedMs: round1(Math.max(...busySamples, 0)),
+        maxEventLoopBusyBlockedMs: round1(Math.max(...maxBusyStalls, 0)),
         wallMs: round1(Math.max(...wallSamples)),
       };
     };
@@ -2487,12 +2588,17 @@ export function evaluateSpawnCapReport(
     );
   }
 
-  // 4. Queued/deferred reads must never block input: the event loop stays
-  //    within the parent AC 1 ≤ ~200 ms total-blocking budget.
-  if (phase.eventLoopBlockedMs > 200) {
+  // 4. Queued/deferred reads must never block input: the event-loop time the
+  //    process actually spent running code stays within the parent AC 1
+  //    ≤ ~200 ms total-blocking budget. The probe's CPU attribution excludes
+  //    OS descheduling — a wall-clock delay with no matching process CPU is
+  //    the shared host under contention, not the plugin blocking input — so
+  //    the absolute bound holds on a loaded machine too (WL-0MVMSE5LN003KCPQ).
+  //    The raw wall reading (eventLoopBlockedMs) is kept for diagnostics.
+  if (phase.eventLoopBusyBlockedMs > 200) {
     violations.push(
-      `event loop blocked ${phase.eventLoopBlockedMs} ms during the burst ` +
-        `(documented ≤ 200 ms) — queued reads blocked input`,
+      `event loop blocked ${phase.eventLoopBusyBlockedMs} ms of loop-thread CPU during the burst ` +
+        `(documented ≤ 200 ms; wall-clock delay ${phase.eventLoopBlockedMs} ms) — queued reads blocked input`,
     );
   }
   return { ok: violations.length === 0, violations };
@@ -2510,7 +2616,8 @@ export function formatSpawnCapReport(report: SpawnCapScenarioReport): string {
       `    peak concurrent wl:     ${phase.peakConcurrentSpawns} child processes`,
       `    per-spawn peak RSS:     ${phase.peakRssPerSpawnMb ?? 'n/a'} MB`,
       `    aggregate bound:        ${phase.aggregateRssBoundMb ?? 'n/a'} MB (cap × per-spawn peak)`,
-      `    event-loop blocked:     ${phase.eventLoopBlockedMs} ms (max stall ${phase.maxEventLoopBlockedMs} ms)`,
+      `    event-loop blocked:     ${phase.eventLoopBlockedMs} ms wall (` +
+        `${phase.eventLoopBusyBlockedMs} ms on-CPU, max stall ${phase.maxEventLoopBlockedMs} ms)`,
       `    wall:                   ${phase.wallMs} ms`,
     ].join('\n');
   return [
@@ -2992,9 +3099,15 @@ export function buildAcReport(inputs: LargeDbAcReportInputs): LargeDbAcReport {
         },
         {
           metric: 'spawnBurstEventLoopBlockedMs',
-          measured: spawnCap.capped.eventLoopBlockedMs,
+          measured: spawnCap.capped.eventLoopBusyBlockedMs,
           target: ac.eventLoopBlockingP95Ms,
-          ok: spawnCap.capped.eventLoopBlockedMs <= ac.eventLoopBlockingP95Ms,
+          ok: spawnCap.capped.eventLoopBusyBlockedMs <= ac.eventLoopBlockingP95Ms,
+        },
+        {
+          metric: 'spawnBurstEventLoopBlockedWallMs',
+          measured: spawnCap.capped.eventLoopBlockedMs,
+          target: 'report-only: raw wall reading includes OS descheduling (WL-0MVMSE5LN003KCPQ)',
+          ok: true,
         },
       ],
     ),

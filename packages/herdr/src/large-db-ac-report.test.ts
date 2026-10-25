@@ -44,6 +44,8 @@ function phase(overrides: Partial<SpawnCapPhaseReport> = {}): SpawnCapPhaseRepor
     aggregateRssBoundMb: 120,
     eventLoopBlockedMs: 60,
     maxEventLoopBlockedMs: 30,
+    eventLoopBusyBlockedMs: 30,
+    maxEventLoopBusyBlockedMs: 15,
     wallMs: 3_000,
     ...overrides,
   };
@@ -236,7 +238,7 @@ describe('end-to-end parent AC report', () => {
 
   it('marks AC1 unmet when the capped spawn burst blocks input', () => {
     const inputs = acInputs({
-      spawnCap: { capped: phase({ eventLoopBlockedMs: 250 }) },
+      spawnCap: { capped: phase({ eventLoopBlockedMs: 250, eventLoopBusyBlockedMs: 250 }) },
     });
     expect(verdict(inputs, 'AC1')?.status).toBe('unmet');
   });

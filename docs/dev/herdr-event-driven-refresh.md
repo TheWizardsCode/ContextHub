@@ -391,7 +391,7 @@ in-process failure degrades to it). Ten concurrent reads at 145 MB each is a
 | Per-spawn peak RSS | measured per profile/target in `large-db-budget.json` (`peakRssPerSpawnMb`; full-scale: ≤ ~130–145 MB baseline) | F1 refresh ratchet (`large-db-refresh-budget.test.ts`) |
 | **Concurrent `wl` read spawns per pane** | **`DEFAULT_WL_SPAWN_CAP = 1`** (`fetcher.ts` semaphore, FIFO, microtask handover) | **fetcher production code** + spawn-burst ratchet (`large-db-spawn-cap.test.ts`) |
 | **Aggregate spawn-RSS bound** | **cap × worst-case cold per-spawn peak ≤ ~145–176 MB ≤ 300 MB ceiling** | spawn-burst policy (`evaluateSpawnCapReport`) |
-| Event-loop blocking with a spawn-heavy burst | ≤ ~200 ms (parent AC 1) | spawn-burst measured event-loop probe |
+| Event-loop blocking with a spawn-heavy burst | ≤ ~200 ms (parent AC 1) | spawn-burst measured event-loop probe (CPU-attributed on-CPU time) |
 
 The cap was **2** in F5 (`WL-0MVJV2PC2008PY64`); **F8
 (`WL-0MVKVJYV6008SL9G`) tightened it to 1** after F7's end-to-end verification
@@ -454,6 +454,16 @@ ceiling and independent of the cold per-spawn peak's run-to-run variation
 100 MB children), while the capped phase stays at 140 ms: bound the
 concurrency and you bound the input lag too.
 
+The event-loop column above is the probe's raw wall reading on a quiet
+reference host (where wall ≈ on-CPU). The ratchet gate itself uses the
+probe's **CPU-attributed** on-CPU time: at 1 ms resolution the probe also
+counts OS descheduling as "blocked", so on a shared machine (other agents'
+suites) a wall reading describes the host, not the plugin — the absolute
+≤ ~200 ms bound would then flake with nothing wrong in the code
+(WL-0MVMSE5LN003KCPQ). On-CPU time is load-independent (F1 gates regressions
+on CPU time for the same reason); the raw wall figure is still reported for
+diagnostics.
+
 ### AC coverage
 
 - AC1 (per-spawn or aggregate budget confirmed): the aggregate budget is the
@@ -469,7 +479,9 @@ concurrency and you bound the input lag too.
   tick never calls the fetch path).
 - AC5 (spawns off the event loop; queued reads never block input): the queue
   is promise-based with microtask handover; the spawn-burst measured phase
-  asserts total event-loop blocking ≤ 200 ms. F3's sync isolation is
+  asserts on-CPU event-loop blocking ≤ 200 ms (host descheduling on a shared
+  machine is excluded from the gate — raw wall delay is reported, not
+  gated, WL-0MVMSE5LN003KCPQ). F3's sync isolation is
   unaffected (`wl sync` is not in the capped command set).
 - AC6 (no new heavy dependency): the cap is a promise FIFO — no library,
   no new import in the Pane graph, and reads keep preferring the in-process
