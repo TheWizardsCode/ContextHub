@@ -42,9 +42,13 @@ import {
 // ── Candidate eligibility guards (SA-0MUJBLZC60085DI9 / WL-0MV85WCJJ0087VMP)
 // Provisional home: these two predicates are consumed by the selectors
 // below, so they move with them here (a leaf module cannot import the
-// barrel). The dispatch-gates child (WL-0MVLIHZZI004D7EK) takes them on
-// to downtime-worker.gates.ts when it lands; the barrel re-exports them
-// throughout, so the public surface is unchanged.
+// barrel). The dispatch-gates child (WL-0MVLIHZZI004D7EK) consumes them
+// from this module in `classifyItemForDispatch` instead of owning them:
+// moving them into `downtime-worker.gates.ts` would make the gates module
+// import this one for the ordinals/selectors and this one import the gates
+// module for the holds — a runtime cycle the parent (WL-0MVF3F9A7000HKP7
+// AC4) forbids. The barrel re-exports them throughout, so the public
+// surface is unchanged either way.
 
 /**
  * Whether a candidate/work item carries a soft-delete marker.
