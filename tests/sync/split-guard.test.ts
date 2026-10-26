@@ -188,9 +188,15 @@ describe('sync split guard — live tree', () => {
     expect(files).toEqual(expect.arrayContaining([SYNC_BARREL, 'src/sync/merge-utils.ts']));
     const oversized = findOversizedModules(modules);
     expect(oversized.map((m) => `${m.file}: ${m.lineCount} lines`)).toEqual([]);
-    // The 1,867-line monolith is over the ceiling, exempt only while in flight.
+    // The monolith began over the ceiling and was exempt only while in
+    // flight. With the merge region extracted (WL-0MVP9QLWU003NV41) the barrel
+    // is under the ceiling like every other family module; the exemption can
+    // therefore never cover a newly oversized module (child 6 empties the
+    // allowlist once the barrel is reduced to a thin facade).
     const barrel = modules.find((m) => m.file === SYNC_BARREL)!;
-    expect(barrel.lineCount).toBeGreaterThan(MAX_MODULE_LINES);
+    if (barrel.lineCount > MAX_MODULE_LINES) {
+      expect([...SPLIT_ALLOWLIST]).toContain('sync.ts');
+    }
   });
 
   it('only ever shrinks the sync split allowlist', () => {
