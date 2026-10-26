@@ -2,16 +2,17 @@
  * Sync functionality for merging local and remote work items with conflict resolution.
  *
  * Shared type declarations live in `./sync/types.js`, git subprocess plumbing
- * in `./sync/git-exec.js` (WL-0MVP9PCOU004L8HN), the merge decision predicates
- * in `./sync/merge-predicates.js` and the field-level merge implementations in
- * `./sync/field-merge.js` (WL-0MVP9QLWU003NV41); the public names are
- * re-exported below so the surface of this module is unchanged.
+ * in `./sync/git-exec.js`, the merge decision predicates in
+ * `./sync/merge-predicates.js`, the field-level merge implementations in
+ * `./sync/field-merge.js`, the public merge entry point in `./sync/merge.js`
+ * and the collateral merges in `./sync/merge-collateral.js`
+ * (WL-0MVP9QLWU003NV41); the public names are re-exported below so the
+ * surface of this module is unchanged.
  */
 
-import { WorkItem, Comment, ConflictDetail, ConflictFieldDetail, DependencyEdge, AuditResult } from './types.js';
+import { WorkItem, Comment, DependencyEdge, AuditResult } from './types.js';
 import type { ClaimHoldDecision } from './claim-hold.js';
 import type { SyncPhaseTimings } from './sync-phase-timings.js';
-import { isDefaultValue, stableValueKey, stableItemKey, mergeTags } from './sync/merge-utils.js';
 import { importFromJsonlContent } from './jsonl.js';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -20,7 +21,6 @@ import { withinWorktreeContext, killProcessesForWorktree } from './process-lifec
 import { gitExecAsync, execAsync, execGitCaptureStdout, escapeShellArg } from './sync/git-exec.js';
 import type {
   GitTarget,
-  MergeOptions,
   IncomingCommit,
   SyncAllowedAuthors,
   AuthorIdentityOptions,
@@ -28,7 +28,7 @@ import type {
   AuthorIdentityResult,
   DeltaReplayResult,
 } from './sync/types.js';
-import { indexItemsById, mergeRemoteItem } from './sync/field-merge.js';
+import { mergeWorkItems } from './sync/merge.js';
 
 // ── Public type surface (barrel re-export) ────────────────────────────
 // The 9 type declarations moved to `./sync/types.js`; re-exporting them here
@@ -45,8 +45,9 @@ export type {
   DeltaReplayResult,
 } from './sync/types.js';
 
-// ── Merge predicates (WL-0MVP9QLWU003NV41) ───────────────────────────
-// Moved to `./sync/merge-predicates.js`; the four public predicates are
+// ── Merged modules (WL-0MVP9QLWU003NV41) ─────────────────────────────
+// The merge region of `src/sync.ts` moved to `./sync/{merge-predicates,
+// field-merge, merge, merge-collateral}.js`; the public names are
 // re-exported here so consumers of `'./sync.js'` are unaffected.
 export {
   isRegressionDefault,
@@ -54,32 +55,8 @@ export {
   isEmptyMeaningfulField,
   isTerminalStage,
 } from './sync/merge-predicates.js';
+export { mergeWorkItems } from './sync/merge.js';
 
-
-/**
- * Merge two sets of work items with intelligent field-level conflict resolution
- * Strategy: For each field, prefer non-default values, or use the value from the newer version
- * This heuristic allows merging changes from both versions without needing a common ancestor
- */
-export function mergeWorkItems(
-  localItems: WorkItem[],
-  remoteItems: WorkItem[],
-  options?: MergeOptions
-): { merged: WorkItem[], conflicts: string[], conflictDetails: ConflictDetail[] } {
-  const conflicts: string[] = [];
-  const conflictDetails: ConflictDetail[] = [];
-  const mergedMap = indexItemsById(localItems);
-
-  for (const remoteItem of remoteItems) {
-    mergeRemoteItem(mergedMap, remoteItem, options, conflicts, conflictDetails);
-  }
-
-  return {
-    merged: Array.from(mergedMap.values()),
-    conflicts,
-    conflictDetails
-  };
-}
 
 /**
  * Cross-project prefix filter (SA-0MSC0BM1V0032UYT) — defense-in-depth.
