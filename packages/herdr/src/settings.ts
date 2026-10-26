@@ -10,6 +10,7 @@ import { clampSyncInterval } from './auto-sync.js';
 import {
   DOWNTIME_LOCAL_PREFERENCE,
   clampDowntimeLocalPreference,
+  isLocalPreference,
   type LocalPreference,
 } from './local-preference.js';
 import {
@@ -112,6 +113,18 @@ export interface PluginSettings {
    * request header.
    */
   downtimeLocalPreference: LocalPreference;
+  /**
+   * Derived — NEVER persisted (WL-0MVNUIW77000VYAX AC3). True only when the
+   * settings file contains a valid `local-only`/`remote-ok`
+   * `downtimeLocalPreference` value; an absent key, a missing file and
+   * out-of-alphabet values all resolve `false` so the low-priority rule
+   * applies. `saveSettings` strips it and `loadSettings` always recomputes it
+   * from the file, so it can never become a persisted second alphabet.
+   *
+   * The dispatch layer uses it to pick the locality precedence: explicit
+   * operator setting > priority rule > deployment default.
+   */
+  downtimeLocalPreferenceExplicit: boolean;
   /**
    * Full pause (no proxy polling, no idle tracking, no dispatch) after the
    * worker finds no candidate in either stage (genuine empty backlog).
@@ -231,6 +244,9 @@ export const defaultSettings: PluginSettings = {
   downtimeProxyUrl: DEFAULT_DOWNTIME_PROXY_URL,
   downtimeModel: DEFAULT_DOWNTIME_MODEL,
   downtimeLocalPreference: DOWNTIME_LOCAL_PREFERENCE,
+  // Derived (never persisted): the default settings carry no persisted key,
+  // so the priority rule is free to apply (WL-0MVNUIW77000VYAX AC3).
+  downtimeLocalPreferenceExplicit: false,
   downtimeNoCandidateCooldownMs: DEFAULT_DOWNTIME_NO_CANDIDATE_COOLDOWN_MS,
   downtimeNonTerminalCooldownMs: DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS,
   downtimeMaxAttempts: DEFAULT_DOWNTIME_MAX_ATTEMPTS,
@@ -329,6 +345,11 @@ export function loadSettings(settingsPath?: string): PluginSettings {
       downtimeModel: typeof parsed.downtimeModel === 'string' && parsed.downtimeModel.length > 0
         ? parsed.downtimeModel : defaultSettings.downtimeModel,
       downtimeLocalPreference: clampDowntimeLocalPreference(parsed.downtimeLocalPreference),
+      // Derived explicitness signal (WL-0MVNUIW77000VYAX AC3): true ONLY when
+      // the file holds a valid two-value preference. Deliberately computed
+      // here (never read from the file, never persisted) so a clamped default
+      // is distinguishable from an operator's explicit choice.
+      downtimeLocalPreferenceExplicit: isLocalPreference(parsed.downtimeLocalPreference),
       downtimeNoCandidateCooldownMs: typeof parsed.downtimeNoCandidateCooldownMs === 'number'
         ? clampDowntimeNoCandidateCooldownMs(parsed.downtimeNoCandidateCooldownMs)
         : defaultSettings.downtimeNoCandidateCooldownMs,
@@ -392,5 +413,18 @@ export function saveSettings(settingsPath: string, settings: PluginSettings): vo
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
-  writeFileSync(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+  // `downtimeLocalPreferenceExplicit` is a DERIVED signal
+  // (WL-0MVNUIW77000VYAX AC3): persisting it would turn every explicit
+  // deployment permanently explicit after one save. Strip it so the settings
+  // file keeps only the two-value `downtimeLocalPreference` alphabet, and keep
+  // the preference KEY absent for a deployment that was not explicit (its
+  // value is only the clamped default) so saving settings never silently
+  // disables the priority rule.
+  const {
+    downtimeLocalPreferenceExplicit: explicit,
+    downtimeLocalPreference,
+    ...rest
+  } = settings;
+  const persisted = explicit ? { ...rest, downtimeLocalPreference } : rest;
+  writeFileSync(settingsPath, JSON.stringify(persisted, null, 2), 'utf-8');
 }

@@ -17,7 +17,10 @@
 
 import {
   BACKGROUND_LOCAL_PREFERENCE,
+  resolveDispatchLocalPreferenceDecision,
   type LocalPreference,
+  type LocalPreferenceMode,
+  type LocalPreferenceReason,
 } from './local-preference.js';
 import { buildLocalReservationRequest } from './downtime-worker.local-reservation.js';
 import { buildDowntimePrompt } from './downtime-worker.prompts.js';
@@ -115,9 +118,29 @@ export async function dispatchClaimedTier(
     selectionReason?: string;
     /** Per-turn locality preference forwarded to the pane (C4-AC1). */
     localPreference?: LocalPreference;
+    /**
+     * Locality-preference precedence opt-in (WL-0MVNUIW77000VYAX AC4). Set by
+     * the plugin's `config()` only: `operator-setting` keeps a persisted
+     * setting verbatim, `priority-rule` lets a `low`-priority candidate
+     * resolve to `local-only`. Absent → legacy caller: forward
+     * `localPreference` verbatim and add no marker fields.
+     */
+    localPreferenceMode?: LocalPreferenceMode;
   },
 ): Promise<DowntimeDispatchOutcome> {
   const expected = TIER_EXPECTED[kind];
+  // Locality preference (WL-0MVNUIW77000VYAX AC4): resolved ONCE at this
+  // dispatch boundary — coordination offers, own-backlog fallback, audit-batch
+  // continuation, critical-first/normal scans and the legacy tier chain all
+  // funnel through here with the candidate in hand, so the priority rule can
+  // never diverge between paths. `undefined` = legacy caller (forward
+  // `opts.localPreference` verbatim, no marker fields).
+  const resolvedLocalPreference = resolveDispatchLocalPreferenceDecision(
+    candidate.priority,
+    opts.localPreference,
+    opts.localPreferenceMode,
+  );
+  const localPreference = resolvedLocalPreference?.preference ?? opts.localPreference;
   // Placement precedence (AC1, WL-0MUR5FUWD00024XN): resolve the anchor
   // BEFORE the claim so a provisioning failure degrades to "no dispatch this
   // cycle" (F1 AC6 — caller fail-safe) without claiming/marking an item that
@@ -326,6 +349,16 @@ export async function dispatchClaimedTier(
       // selected this candidate and why — makes the log self-explanatory.
       ...(opts.selectionPath !== undefined ? { selectionPath: opts.selectionPath } : {}),
       ...(opts.selectionReason !== undefined ? { selectionReason: opts.selectionReason } : {}),
+      // Locality-preference evidence (WL-0MVNUIW77000VYAX AC5): the resolved
+      // preference and its machine-readable reason, so an operator can confirm
+      // whether the priority rule, the deployment default or an explicit
+      // operator setting decided the route. Absent for legacy callers.
+      ...(resolvedLocalPreference !== undefined
+        ? {
+            localPreference: resolvedLocalPreference.preference,
+            localPreferenceReason: resolvedLocalPreference.reason,
+          }
+        : {}),
       // Reservation provenance (parent WL-0MVIKRFP0005JDL8 AC4, slice C2):
       // the marker records the granted ticket so the dispatch can be
       // correlated with the pane's route log. Absent on a fail-open dispatch.
@@ -395,8 +428,10 @@ export async function dispatchClaimedTier(
       ...(reservationTicketId !== undefined ? { reservationTicketId } : {}),
       // Per-turn locality preference (slice C4 AC1): forwarded to the pane so
       // the extension sends `X-Local-Preference` and writes the route log.
-      // Absent → today's byte-identical launch (fail-open C4-AC3).
-      ...(opts.localPreference !== undefined ? { localPreference: opts.localPreference } : {}),
+      // WL-0MVNUIW77000VYAX: the value resolved above (priority rule /
+      // explicit setting) is what reaches the wire. Absent → today's
+      // byte-identical launch (fail-open C4-AC3).
+      ...(localPreference !== undefined ? { localPreference } : {}),
     },
   );
   if (!spawn.ok) {
@@ -528,6 +563,14 @@ export async function dispatchClaimedTier(
     stage: expected.stage,
     ...(opts.selectionPath !== undefined ? { selectionPath: opts.selectionPath } : {}),
     ...(opts.selectionReason !== undefined ? { selectionReason: opts.selectionReason } : {}),
+    // Copy the locality evidence onto the enrichment entry too
+    // (WL-0MVNUIW77000VYAX AC5) so the last-entry-wins readers never lose it.
+    ...(resolvedLocalPreference !== undefined
+      ? {
+          localPreference: resolvedLocalPreference.preference,
+          localPreferenceReason: resolvedLocalPreference.reason,
+        }
+      : {}),
   });
 
   return { dispatched: true, candidate, kind };
@@ -550,6 +593,9 @@ export async function recordDispatchEnrichmentBestEffort(
     stage?: string;
     selectionPath?: string;
     selectionReason?: string;
+    /** Resolved locality preference + reason copied from the success marker. */
+    localPreference?: LocalPreference;
+    localPreferenceReason?: LocalPreferenceReason;
   },
 ): Promise<void> {
   if (typeof deps.recordDispatchEnrichment !== 'function') return; // legacy callers
@@ -602,9 +648,28 @@ export async function recordDispatchEnrichmentBestEffort(
 export async function dispatchScheduledPrompt(
   deps: DowntimeDispatchDeps,
   prompt: ScheduledPrompt,
-  opts: { model: string; cwd: string; localPreference?: LocalPreference },
+  opts: {
+    model: string;
+    cwd: string;
+    localPreference?: LocalPreference;
+    /**
+     * Locality-preference precedence opt-in (WL-0MVNUIW77000VYAX AC4/AC5).
+     * A scheduled prompt has no work item and therefore no priority, so the
+     * resolution yields the deployment default (`default`) or the explicit
+     * operator setting (`operator-setting`).
+     */
+    localPreferenceMode?: LocalPreferenceMode;
+  },
 ): Promise<DowntimeDispatchOutcome> {
   const at = new Date().toISOString();
+  // Scheduled prompts carry no priority: the rule can only leave the
+  // deployment default in place (or honour an explicit operator setting).
+  const resolvedLocalPreference = resolveDispatchLocalPreferenceDecision(
+    undefined,
+    opts.localPreference,
+    opts.localPreferenceMode,
+    BACKGROUND_LOCAL_PREFERENCE,
+  );
 
   // Dispatcher anchor (C0 WL-0MTR01EU7005SYZG): scheduled-prompt panes are
   // downtime-worker spawns too — resolve the dedicated Dispatcher anchor
@@ -647,6 +712,15 @@ export async function dispatchScheduledPrompt(
       noItemComment: true,
       selectionPath: 'scheduled-prompt',
       selectionReason: 'scheduled-due',
+      // Locality evidence (WL-0MVNUIW77000VYAX AC5): scheduled prompts have no
+      // priority, so the reason is `default` (deployment default) or
+      // `operator-setting`. Absent for legacy callers.
+      ...(resolvedLocalPreference !== undefined
+        ? {
+            localPreference: resolvedLocalPreference.preference,
+            localPreferenceReason: resolvedLocalPreference.reason,
+          }
+        : {}),
     });
   } catch {
     // Fail-closed: a throwing recordDispatch (stub or regression) is a
@@ -665,7 +739,12 @@ export async function dispatchScheduledPrompt(
     ...(anchorId !== undefined ? { anchorId } : {}),
     // Scheduled/background work defaults to `remote-ok` (C4-AC1): it must
     // never queue local capacity the operator may need for interactive work.
-    localPreference: opts.localPreference ?? BACKGROUND_LOCAL_PREFERENCE,
+    // WL-0MVNUIW77000VYAX: an explicit operator setting still wins; otherwise
+    // the resolved deployment default is forwarded.
+    localPreference:
+      resolvedLocalPreference?.preference ??
+      opts.localPreference ??
+      BACKGROUND_LOCAL_PREFERENCE,
   });
   if (!spawn.ok) {
     // Failure trace (WL-0MSLWJ3I70031Z8U AC2 pattern): the audit log

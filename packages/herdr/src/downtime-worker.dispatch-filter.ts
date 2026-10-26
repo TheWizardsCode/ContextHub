@@ -31,7 +31,7 @@ import {
   readDowntimeLogEntries as _readDowntimeEntries,
   type DispatchMarker,
 } from './downtime-log.js';
-import type { LocalPreference } from './local-preference.js';
+import type { LocalPreference, LocalPreferenceMode } from './local-preference.js';
 import type { DowntimeDispatchDeps, DowntimeDispatchOutcome } from './downtime-worker.dispatch-contract.js';
 import { dispatchClaimedTier } from './downtime-worker.dispatch-claims.js';
 import type {
@@ -98,7 +98,7 @@ export function selectCriticalFirstCandidates(
 export async function dispatchFromHerdrList(
   deps: DowntimeDispatchDeps,
   items: DowntimeHerdrItem[],
-  ctx: { cwd: string; model: string; localPreference?: LocalPreference; freeSlots?: number; frozen: boolean; cpuSaturated: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
+  ctx: { cwd: string; model: string; localPreference?: LocalPreference; localPreferenceMode?: LocalPreferenceMode; freeSlots?: number; frozen: boolean; cpuSaturated: boolean; panesEligible: boolean; auditEligible: boolean; reviewGate: ReviewQueueGateResult | null; markerStaleWindowMs: number; nonTerminalCooldownMs: number; maxAttempts: number; inFlight: InFlightPanes },
   flags: { auditInFlight: boolean; auditCheckFailed: boolean; auditCheckError?: string; freshnessSkip: boolean; reviewHeld: boolean; cooldownHeld: boolean; budgetExhausted: boolean; cpuHeld: boolean; auditHostSaturated: boolean },
 ): Promise<DowntimeDispatchOutcome | null> {
   if (items.length === 0) return null;
@@ -185,6 +185,7 @@ export async function dispatchFromHerdrList(
       model: ctx.model,
       cwd: ctx.cwd,
       localPreference: ctx.localPreference,
+      localPreferenceMode: ctx.localPreferenceMode,
       selectionPath: 'critical-first',
       selectionReason: guard.reason,
     });
@@ -325,6 +326,7 @@ export async function dispatchFromHerdrList(
       model: ctx.model,
       cwd: ctx.cwd,
       localPreference: ctx.localPreference,
+      localPreferenceMode: ctx.localPreferenceMode,
       selectionPath: 'normal-scan',
       selectionReason: item.priority === 'critical' ? 'no-live-pane' : 'non-critical',
     });

@@ -29,8 +29,27 @@
  * (and the `HERDR_LOCAL_PREFERENCE` env var the extension reads), so a
  * producer can flip either default per deployment.
  *
+ * Priority rule (WL-0MVNUIW77000VYAX): cheap work should absorb contention on
+ * the local slot instead of competing for remote capacity, so a `low`-priority
+ * candidate is dispatched `local-only` while every other priority keeps the
+ * deployment default. The rule LAYERS ON TOP of WL-0MVNUHWH500196K1's
+ * `remote-ok` default and is applied at the dispatch boundary
+ * (`dispatchClaimedTier`) through the single-dispatch resolution below.
+ *
+ * Precedence (highest first):
+ *   1. an EXPLICIT operator setting (`downtimeLocalPreference` persisted as a
+ *      valid `local-only`/`remote-ok`) wins for every dispatch — the priority
+ *      rule is bypassed and the marker records `operator-setting`;
+ *   2. the priority rule — `low` → `local-only`, everything else →
+ *      `DOWNTIME_LOCAL_PREFERENCE` (`remote-ok`); the marker records
+ *      `priority-low` / `default`;
+ *   3. the deployment default — the same `remote-ok` constant, used when no
+ *      priority is known (scheduled prompts have no work item).
+ *
  * Fail-open is mandatory: an unset/empty/invalid setting resolves to the
- * downtime default (`remote-ok`) and never invents a value.
+ * downtime default (`remote-ok`) and never invents a value. Legacy callers
+ * that pass a preference WITHOUT the dispatch mode opt-in keep forwarding it
+ * verbatim (byte-identical launch, no marker fields).
  */
 
 /** The proxy's per-turn locality preference alphabet (fixed wire contract). */
@@ -52,6 +71,11 @@ export const BACKGROUND_LOCAL_PREFERENCE: LocalPreference = 'remote-ok';
 
 const VALID_PREFERENCES: readonly LocalPreference[] = ['local-only', 'remote-ok'];
 
+/** True when `value` is one of the two valid wire/settings values. */
+export function isLocalPreference(value: unknown): value is LocalPreference {
+  return (VALID_PREFERENCES as readonly unknown[]).includes(value);
+}
+
 /**
  * Clamp a raw `downtimeLocalPreference` setting (or env value) to the
  * preference alphabet. Anything absent/invalid resolves to the downtime
@@ -59,7 +83,80 @@ const VALID_PREFERENCES: readonly LocalPreference[] = ['local-only', 'remote-ok'
  * value.
  */
 export function clampDowntimeLocalPreference(value: unknown): LocalPreference {
-  return (VALID_PREFERENCES as readonly unknown[]).includes(value)
-    ? (value as LocalPreference)
-    : DOWNTIME_LOCAL_PREFERENCE;
+  return isLocalPreference(value) ? value : DOWNTIME_LOCAL_PREFERENCE;
+}
+
+/**
+ * Machine-readable reason a dispatch's locality preference resolved to its
+ * value (WL-0MVNUIW77000VYAX AC5), recorded on the dispatch marker:
+ *
+ *  - `operator-setting` — the operator persisted `downtimeLocalPreference`, so
+ *    that value was forwarded for every dispatch regardless of priority;
+ *  - `priority-low` — no persisted setting and the candidate's priority is
+ *    `low`, so the priority rule chose `local-only`;
+ *  - `default` — no persisted setting and the priority rule left the
+ *    deployment default (`remote-ok`) in place.
+ */
+export type LocalPreferenceReason = 'operator-setting' | 'priority-low' | 'default';
+
+/**
+ * How a dispatch boundary should derive a pane's locality preference
+ * (WL-0MVNUIW77000VYAX AC4). Only the plugin's `config()` sets it — a caller
+ * that omits the mode keeps the legacy behaviour (forward `localPreference`
+ * verbatim, add no marker fields):
+ *
+ *  - `operator-setting` — the persisted setting wins; forward it verbatim and
+ *    record `operator-setting`;
+ *  - `priority-rule` — apply the priority rule against the supplied value (or
+ *    the deployment default when none was supplied).
+ */
+export type LocalPreferenceMode = 'operator-setting' | 'priority-rule';
+
+/** A resolved preference plus the machine-readable reason for it. */
+export interface ResolvedDispatchLocalPreference {
+  preference: LocalPreference;
+  reason: LocalPreferenceReason;
+}
+
+/**
+ * Pure priority rule (WL-0MVNUIW77000VYAX AC1): `low` → `local-only`, every
+ * other input (`medium`, `high`, `critical`, `undefined`, `null`, `''`, an
+ * unknown string) → `defaultPreference` verbatim. No IO, never throws.
+ */
+export function resolveDispatchLocalPreference(
+  priority: unknown,
+  defaultPreference: LocalPreference,
+): LocalPreference {
+  return priority === 'low' ? 'local-only' : defaultPreference;
+}
+
+/**
+ * Resolve a dispatch's locality preference and WHY (WL-0MVNUIW77000VYAX
+ * AC2/AC4/AC5) — the single decision point for every dispatch path.
+ *
+ * Returns `undefined` for a legacy caller (no `mode`): the caller forwards its
+ * `localPreference` verbatim and writes no marker fields, keeping hand-built
+ * configs byte-identical. Otherwise the precedence is explicit operator
+ * setting > priority rule > deployment default.
+ */
+export function resolveDispatchLocalPreferenceDecision(
+  priority: unknown,
+  localPreference: LocalPreference | undefined,
+  mode: LocalPreferenceMode | undefined,
+  defaultPreference: LocalPreference = DOWNTIME_LOCAL_PREFERENCE,
+): ResolvedDispatchLocalPreference | undefined {
+  if (mode === undefined) return undefined;
+  if (mode === 'operator-setting') {
+    return {
+      preference: localPreference ?? defaultPreference,
+      reason: 'operator-setting',
+    };
+  }
+  return {
+    preference: resolveDispatchLocalPreference(
+      priority,
+      localPreference ?? defaultPreference,
+    ),
+    reason: priority === 'low' ? 'priority-low' : 'default',
+  };
 }

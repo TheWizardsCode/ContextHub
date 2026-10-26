@@ -570,7 +570,11 @@ pacing* below).
   pane as `HERDR_LOCAL_PREFERENCE`, where the Worklog pi extension turns it
   into the `X-Local-Preference` request header and records the response route
   headers in `.worklog/local-route.log` — see [Per-turn local preference and
-  route log](#per-turn-local-preference-x-local-preference-and-route-log-wl-0mvljtv03000kiqz)
+  route log](#per-turn-local-preference-x-local-preference-and-route-log-wl-0mvljtv03000kiqz).
+  An **explicitly persisted** value wins for every dispatch; when the key is
+  absent, `low`-priority candidates are dispatched `local-only` while every
+  other priority keeps the deployment default
+  (WL-0MVNUIW77000VYAX).
 - `downtimeNoCandidateCooldownMs` — Full pause (no proxy polling, no idle
   tracking, no dispatch) after the worker finds no candidate in either
   stage — a genuine empty backlog (default: `3600000` = 60 minutes, floor
@@ -1211,6 +1215,25 @@ fallback decision instead of a silent ~120 s proxy-side wait.
   local capacity) and inherit an explicit knob — so a `local-only` deployment
   also makes scheduled work local-only. Interactive panes carry no preference
   unless the operator exports `HERDR_LOCAL_PREFERENCE` themselves.
+- **Precedence (WL-0MVNUIW77000VYAX).** Explicit persisted setting > priority
+  rule > deployment default. When the operator persists a valid
+  `downtimeLocalPreference`, it is forwarded for every dispatch regardless of
+  priority. When the key is absent, a **`low`-priority** candidate is
+  dispatched `local-only` (cheap work absorbs local contention and fails fast
+  instead of consuming remote capacity); `medium`/`high`/`critical` and
+  scheduled prompts (no work item, therefore no priority) keep the deployment
+  default `remote-ok`. The resolution happens once in `dispatchClaimedTier`,
+  so the coordination offer, own-backlog fallback, audit-batch continuation,
+  critical-first/normal scan and the legacy tier chain all agree.
+  Explicitness is derived by `loadSettings`
+  (`downtimeLocalPreferenceExplicit`) and never persisted; the persisted
+  alphabet and the `X-Local-Preference` wire contract are unchanged.
+- **Marker evidence.** Each dispatch marker records the resolved
+  `localPreference` plus a `localPreferenceReason` (`operator-setting` |
+  `priority-low` | `default`), so the route log's `preference` value can be
+  traced to the rule that produced it. Legacy callers that pass a preference
+  without the mode opt-in add no marker fields, and readers ignore
+  unknown/absent fields.
 - **Transport.** `send-to-pi.sh --local-preference <local-only|remote-ok>`
   injects `exec env HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`;
   the headless path sets it directly on the spawn environment. An absent or
@@ -1237,10 +1260,15 @@ fallback decision instead of a silent ~120 s proxy-side wait.
 Tests: `packages/tui/extensions/local-preference/local-preference.test.ts`
 (pure module + hook behaviour, both preference values, the unset case, route
 parsing and the bounded log), `packages/herdr/src/local-preference.test.ts`
-(policy defaults/clamp), `packages/herdr/src/downtime-worker.reserve.test.ts`
-(pane-arg/env forwarding), `tests/herdr/send-to-pi.test.ts`
-(`--local-preference` passthrough, both values, invalid/absent fail-open) and
-`tests/herdr/settings.test.ts` (setting default + clamp).
+(policy defaults/clamp plus the priority resolver and precedence table),
+`packages/herdr/src/downtime-worker.reserve.test.ts` (pane-arg/env forwarding
+and low-vs-high priority resolution + marker fields),
+`packages/herdr/src/coordination-dispatch.test.ts` (offer, own-backlog
+fallback and audit-batch continuation inheritance),
+`tests/herdr/send-to-pi.test.ts` (`--local-preference` passthrough, both
+values, invalid/absent fail-open) and `tests/herdr/settings.test.ts` (setting
+default + clamp; the derived explicitness signal is covered in
+`packages/herdr/src/settings.test.ts`).
 
 ### Request priority (per-request `X-Priority`)
 

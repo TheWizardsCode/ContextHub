@@ -20,7 +20,7 @@
  */
 
 import type { HostCpuReading } from './host-cpu.js';
-import type { LocalPreference } from './local-preference.js';
+import type { LocalPreference, LocalPreferenceMode } from './local-preference.js';
 import type { RoundRobinRegistry } from './downtime-round-robin.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { PaneItemState } from './pane-lifecycle.js';
@@ -609,6 +609,16 @@ export interface DowntimeWorkerConfig {
      * today (no `X-Local-Preference`, no route log).
      */
     localPreference?: LocalPreference;
+    /**
+     * Locality-preference precedence opt-in (WL-0MVNUIW77000VYAX AC4): how the
+     * dispatch boundary derives the pane's preference from `localPreference`.
+     * `operator-setting` = the operator persisted the knob (wins over
+     * priority); `priority-rule` = the knob was not persisted, so a
+     * `low`-priority candidate resolves to `local-only` and everything else to
+     * the deployment default. Optional for backward compat — absent keeps
+     * today's fixed forwarding (no marker fields).
+     */
+    localPreferenceMode?: LocalPreferenceMode;
     /**
      * Non-terminal pane-close cooldown, ms (WL-0MUKYERLZ006ELL5). Optional
      * for backward compat — defaults to DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS.

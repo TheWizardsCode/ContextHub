@@ -1525,9 +1525,10 @@ through `DowntimeWorkerConfig.config()` → both dispatch paths →
 `dispatchClaimedTier` → `spawnAgentPane` → `buildDowntimePaneArgs` /
 `buildDowntimeSpawnOptions`:
 
-- **Downtime backlog panes** carry the knob's value; an unconfigured
-  deployment (no persisted key) therefore forwards `remote-ok` — unattended
-  work goes remote rather than stall on a contended local slot.
+- **Downtime backlog panes** carry the resolved value (see the priority rule
+  below); with no persisted key a `medium`/`high`/`critical` item still
+  forwards `remote-ok` — unattended work goes remote rather than stall on a
+  contended local slot — while a `low`-priority item becomes `local-only`.
 - **Scheduled-prompt panes** and **headless background dispatches**
   (`spawnBackgroundPi`) default to `remote-ok`: unattended work never queues
   local capacity the operator may need. They also *inherit the knob when it
@@ -1536,6 +1537,50 @@ through `DowntimeWorkerConfig.config()` → both dispatch paths →
   background fallback agree on `remote-ok`.
 - **Interactive panes** carry no preference unless the operator exports
   `HERDR_LOCAL_PREFERENCE` — requests stay byte-identical to today.
+
+**Priority rule and precedence (WL-0MVNUIW77000VYAX).** The preference is
+resolved **once** at the dispatch boundary (`dispatchClaimedTier`, from the
+already-resolved candidate priority), so every dispatch path — coordination
+offer, own-backlog fallback, audit-batch continuation, critical-first/normal
+scan and the legacy tier chain — inherits the same decision. Precedence,
+highest first:
+
+1. **Explicit operator setting wins.** When `downtimeLocalPreference` is
+   *persisted* with a valid value (`local-only` or `remote-ok`), that value is
+   forwarded for every pane regardless of priority. Remove the key to opt into
+   the priority rule.
+2. **Priority rule.** With no persisted key, a `low`-priority candidate is
+   dispatched `local-only` (cheap work absorbs contention on the local slot and
+   fails fast instead of consuming remote capacity); `medium`, `high`,
+   `critical` and an absent/unknown priority resolve to the deployment default
+   `DOWNTIME_LOCAL_PREFERENCE` (`remote-ok`).
+3. **Deployment default.** `remote-ok`, also used when no priority exists (a
+   scheduled prompt has no work item).
+
+Explicitness is a **derived, never-persisted** signal: `loadSettings` reports
+`downtimeLocalPreferenceExplicit` `true` only when the settings file holds a
+valid two-value preference (an absent key, a missing file and out-of-alphabet
+values are not explicit). The persisted alphabet stays
+`local-only | remote-ok`, the setting's `remote-ok` default is unchanged, and
+the `X-Local-Preference` wire contract is unchanged — the rule only chooses
+between the existing two values.
+
+**Marker evidence.** The success marker in
+`.worklog/downtime-dispatches.log` records the resolved `localPreference` and a
+machine-readable `localPreferenceReason`:
+
+| reason | meaning |
+|---|---|
+| `operator-setting` | a persisted `downtimeLocalPreference` decided the value |
+| `priority-low` | the low-priority rule chose `local-only` |
+| `default` | the deployment default was kept (non-low or absent priority) |
+
+Scheduled-prompt markers record the same two fields (`default`, or
+`operator-setting` when the operator persisted the knob). Legacy callers that
+pass a preference without the new dispatch mode add no marker fields, and
+marker readers ignore unknown/absent fields, so existing logs stay valid. The
+route log's `preference` field therefore shows `local-only` for a low-priority
+dispatch and the deployment default for a high-priority one.
 
 > **Default flip (WL-0MVNUHWH500196K1).** The C4-AC1 downtime default of
 > `local-only` (WL-0MVLJTV03000KIQZ) is superseded by `remote-ok`. The

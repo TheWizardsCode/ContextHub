@@ -1927,6 +1927,8 @@ export function createDowntimeDeps(
         anchorId?: string;
         priority?: string | null;
         reservationTicketId?: string;
+        /** Per-turn locality preference forwarded to the pane (C4-AC1). */
+        localPreference?: LocalPreference;
       },
     ): Promise<DowntimeSpawnResult> {
       const kind = skillKindFromPrompt(prompt);
@@ -2554,6 +2556,15 @@ export async function main(): Promise<void> {
         // dispatched pane as `HERDR_LOCAL_PREFERENCE`. The extension turns it
         // into the `X-Local-Preference` header and records the route log.
         localPreference: s.downtimeLocalPreference,
+        // Locality precedence (WL-0MVNUIW77000VYAX AC2/AC4): an explicitly
+        // persisted `downtimeLocalPreference` is the operator's policy and
+        // wins for every dispatch; when the key is absent the dispatch
+        // boundary may apply the low-priority rule (`low` → `local-only`,
+        // everything else → the deployment default). Explicitness is derived
+        // by `loadSettings` and never persisted (AC3).
+        localPreferenceMode: s.downtimeLocalPreferenceExplicit
+          ? 'operator-setting'
+          : 'priority-rule',
         noCandidateCooldownMs: s.downtimeNoCandidateCooldownMs,
         // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5).
         nonTerminalCooldownMs: s.downtimeNonTerminalCooldownMs,

@@ -40,7 +40,7 @@ import {
 } from './downtime-worker.gates.js';
 import { resolveInFlightPanes } from './downtime-worker.pane.js';
 import { criticalSkillKind } from './downtime-worker.parsers.js';
-import type { LocalPreference } from './local-preference.js';
+import type { LocalPreference, LocalPreferenceMode } from './local-preference.js';
 import {
   CPU_SATURATED_REASON,
   hostCpuGateEvidence,
@@ -284,6 +284,13 @@ export async function dispatchDowntimeWork(
      * leaves the launch byte-identical to today (fail-open C4-AC3).
      */
     localPreference?: LocalPreference;
+    /**
+     * Locality-preference precedence opt-in (WL-0MVNUIW77000VYAX AC4):
+     * `operator-setting` keeps a persisted setting verbatim, `priority-rule`
+     * lets a `low`-priority candidate resolve to `local-only`. Absent keeps
+     * legacy fixed forwarding.
+     */
+    localPreferenceMode?: LocalPreferenceMode;
   },
 ): Promise<DowntimeDispatchOutcome> {
   // Per-process PIPELINE single-flight gate (F3, WL-0MT50LKAK001EF5Q): at
@@ -449,7 +456,7 @@ export async function dispatchDowntimeWork(
         // spawn. `resolveInFlightPanes` never throws — an unavailable query
         // degrades to the marker-TTL fallback inside the decision table.
         const inFlight = await resolveInFlightPanes(deps, opts.cwd);
-        const ctx = { cwd: opts.cwd, model: opts.model, localPreference: opts.localPreference, freeSlots, frozen, cpuSaturated, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
+        const ctx = { cwd: opts.cwd, model: opts.model, localPreference: opts.localPreference, localPreferenceMode: opts.localPreferenceMode, freeSlots, frozen, cpuSaturated, panesEligible, auditEligible, reviewGate, markerStaleWindowMs: opts.markerStaleWindowMs ?? DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS, nonTerminalCooldownMs: opts.nonTerminalCooldownMs ?? DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS, maxAttempts: opts.maxAttempts ?? DEFAULT_DOWNTIME_MAX_ATTEMPTS, inFlight };
         const herdrOutcome = await dispatchFromHerdrList(deps, head.items, ctx, flags);
         if (herdrOutcome !== null) return finalize(herdrOutcome);
 

@@ -75,7 +75,7 @@ import type {
   DowntimeStage,
   InFlightPanes,
 } from './downtime-worker.types.js';
-import type { LocalPreference } from './local-preference.js';
+import type { LocalPreference, LocalPreferenceMode } from './local-preference.js';
 
 /**
  * The leader-facing dependency slice: the offer seams plus the item re-fetch
@@ -139,7 +139,7 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
 export async function dispatchFromCoordination(
   deps: CoordinationLeaderDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; localPreference?: LocalPreference; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number;
+  opts: { model: string; cwd: string; coordinationDir: string; localPreference?: LocalPreference; /** Locality precedence opt-in (WL-0MVNUIW77000VYAX AC4); absent keeps legacy fixed forwarding. */ localPreferenceMode?: LocalPreferenceMode; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number;
     /**
      * Host-CPU gate threshold (WL-0MVK0UO3Q002TXW6 AC2/AC5): live
      * `downtimeCpuGatePercent` re-read every tick. At or above it new
@@ -275,7 +275,7 @@ async function readOwnHeadWindow(
  */
 async function dispatchFromOwnHead(
   deps: CoordinationLeaderDeps,
-  opts: { model: string; cwd: string; localPreference?: LocalPreference },
+  opts: { model: string; cwd: string; localPreference?: LocalPreference; localPreferenceMode?: LocalPreferenceMode },
   ctx: {
     window: { head: DowntimeHerdrItem[]; tail: DowntimeHerdrItem[] };
     frozen: boolean;
@@ -400,6 +400,7 @@ async function dispatchFromOwnHead(
         model: opts.model,
         cwd: opts.cwd,
         localPreference: opts.localPreference,
+        localPreferenceMode: opts.localPreferenceMode,
         selectionPath: 'own-backlog',
         selectionReason: ctx.selectionReason,
       },
@@ -559,6 +560,9 @@ async function dispatchFromCoordinationGated(
         model: opts.model,
         cwd: opts.cwd,
         ...(opts.localPreference !== undefined ? { localPreference: opts.localPreference } : {}),
+        ...(opts.localPreferenceMode !== undefined
+          ? { localPreferenceMode: opts.localPreferenceMode }
+          : {}),
       });
     }
   }
@@ -724,6 +728,7 @@ async function dispatchFromCoordinationGated(
         model: opts.model,
         cwd: worklogRoot,
         localPreference: opts.localPreference,
+        localPreferenceMode: opts.localPreferenceMode,
         selectionPath: 'coordination-offer',
         selectionReason: 'leader-offer',
       },
@@ -841,7 +846,7 @@ async function dispatchFromCoordinationGated(
       if (batchRemainingBefore > 0 && batchCap > 1) {
         const continuation = await dispatchFromOwnHead(
           deps,
-          { model: opts.model, cwd: opts.cwd, localPreference: opts.localPreference },
+          { model: opts.model, cwd: opts.cwd, localPreference: opts.localPreference, localPreferenceMode: opts.localPreferenceMode },
           {
             ...sharedScan,
             kinds: ['audit'],
@@ -855,7 +860,7 @@ async function dispatchFromCoordinationGated(
       }
       const ownOutcome = await dispatchFromOwnHead(
         deps,
-        { model: opts.model, cwd: opts.cwd, localPreference: opts.localPreference },
+        { model: opts.model, cwd: opts.cwd, localPreference: opts.localPreference, localPreferenceMode: opts.localPreferenceMode },
         {
           ...sharedScan,
           kinds: null,

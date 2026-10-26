@@ -429,6 +429,57 @@ describe('dispatch scheduled-prompts tier', () => {
     );
   });
 
+  it('WL-0MVNUIW77000VYAX AC4/AC5: priority-rule mode keeps the default reason for a scheduled prompt', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+    });
+
+    await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      localPreferenceMode: 'priority-rule',
+    });
+
+    // No work item → no priority → the deployment default is forwarded and
+    // the marker records WHY (the rule could not fire).
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      '/skill:refactor',
+      expect.objectContaining({ localPreference: 'remote-ok' }),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'scheduled',
+        localPreference: 'remote-ok',
+        localPreferenceReason: 'default',
+      }),
+    );
+  });
+
+  it('WL-0MVNUIW77000VYAX AC2/AC5: an explicit operator setting overrides the rule for scheduled work', async () => {
+    const deps = makeDeps({
+      getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
+    });
+
+    await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      localPreference: 'local-only',
+      localPreferenceMode: 'operator-setting',
+    });
+
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      '/skill:refactor',
+      expect.objectContaining({ localPreference: 'local-only' }),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        kind: 'scheduled',
+        localPreference: 'local-only',
+        localPreferenceReason: 'operator-setting',
+      }),
+    );
+  });
+
   it('persists lastTriggeredAt and writes the scheduled log marker before the spawn (AC4)', async () => {
     const deps = makeDeps({
       getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
@@ -1345,5 +1396,74 @@ describe('single-flight dispatch guard', () => {
     expect(first.dispatched).toBe(true);
     expect(second.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ── Legacy tier chain inherits the priority rule (WL-0MVNUIW77000VYAX AC4) ──
+
+describe('legacy tier chain locality resolution (WL-0MVNUIW77000VYAX AC4)', () => {
+  it('a low-priority plan candidate resolves local-only through the direct chain', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: {
+          id: 'WL-PLAN-LOW',
+          title: 'Prep task',
+          stage: 'intake_complete',
+          priority: 'low',
+        },
+      }),
+    });
+
+    const outcome = await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      localPreferenceMode: 'priority-rule',
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.kind).toBe('plan');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-PLAN-LOW'),
+      expect.objectContaining({ localPreference: 'local-only' }),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'WL-PLAN-LOW',
+        localPreference: 'local-only',
+        localPreferenceReason: 'priority-low',
+      }),
+    );
+  });
+
+  it('a candidate without a priority keeps the deployment default and records default', async () => {
+    const deps = makeDeps({
+      getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
+      getNextImplementCandidate: vi.fn().mockResolvedValue(null),
+      getNextItem: vi.fn().mockResolvedValue({
+        ok: true,
+        candidate: { id: 'WL-PLAN-NOP', title: 'Prep task', stage: 'intake_complete' },
+      }),
+    });
+
+    await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      localPreferenceMode: 'priority-rule',
+    });
+
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:plan WL-PLAN-NOP'),
+      expect.objectContaining({ localPreference: 'remote-ok' }),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'WL-PLAN-NOP',
+        localPreference: 'remote-ok',
+        localPreferenceReason: 'default',
+      }),
+    );
   });
 });

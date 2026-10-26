@@ -26,7 +26,11 @@
  */
 
 import type { HostCpuReading, HostCpuSource } from './host-cpu.js';
-import type { LocalPreference } from './local-preference.js';
+import type {
+  LocalPreference,
+  LocalPreferenceMode,
+  LocalPreferenceReason,
+} from './local-preference.js';
 import type { ScheduledPrompt } from './scheduled-prompts.js';
 import type { PaneLifecycleKind } from './downtime-log.js';
 import type {
@@ -201,6 +205,19 @@ export interface DowntimeDispatchEvent {
   reservationTicketId?: string;
   /** ISO timestamp the ticket was granted at (parent AC4, slice C2). */
   reservationGrantedAt?: string;
+  /**
+   * Resolved per-turn locality preference forwarded to the pane
+   * (WL-0MVNUIW77000VYAX AC5). Absent on legacy entries and on callers that
+   * did not opt into the priority rule.
+   */
+  localPreference?: LocalPreference;
+  /**
+   * Why the preference resolved to its value (WL-0MVNUIW77000VYAX AC5):
+   * `operator-setting` (persisted `downtimeLocalPreference` won),
+   * `priority-low` (the low-priority rule chose `local-only`) or `default`
+   * (deployment default kept). Absent on legacy entries; readers ignore it.
+   */
+  localPreferenceReason?: LocalPreferenceReason;
 }
 
 /**

@@ -230,6 +230,11 @@ async function runDispatchTick(
     requiredFreeSlots?: number;
     /** Per-turn locality preference (C4-AC1); absent → legacy config shape. */
     localPreference?: 'local-only' | 'remote-ok';
+    /**
+     * Locality precedence opt-in (WL-0MVNUIW77000VYAX AC4); absent → legacy
+     * fixed forwarding (no marker fields).
+     */
+    localPreferenceMode?: 'operator-setting' | 'priority-rule';
   } = {},
 ) {
   const pollFetch = vi.fn().mockResolvedValue(jsonResponseFixture(opts.status ?? idleAllSlotsFree));
@@ -244,6 +249,9 @@ async function runDispatchTick(
       cwd: C2_CWD,
       noCandidateCooldownMs: 3_600_000,
       ...(opts.localPreference !== undefined ? { localPreference: opts.localPreference } : {}),
+      ...(opts.localPreferenceMode !== undefined
+        ? { localPreferenceMode: opts.localPreferenceMode }
+        : {}),
     }),
   });
   const start = 1_000_000;
@@ -468,6 +476,89 @@ describe('local-preference forwarding to the pane (C4-AC1)', () => {
       }
     },
   );
+});
+
+describe('priority-aware locality preference (WL-0MVNUIW77000VYAX)', () => {
+  /** A dispatchable plan candidate at an explicit priority. */
+  function planCandidateAt(priority: string, id: string) {
+    return { ...planCandidate(id), priority };
+  }
+
+  function dispatchWithHead(priority: string, opts: Parameters<typeof runDispatchTick>[1] = {}) {
+    const deps = makeDeps({
+      getHerdrListHead: vi
+        .fn()
+        .mockResolvedValue({ ok: true, items: [planCandidateAt(priority, `WL-${priority.toUpperCase()}`)] }),
+    });
+    return { deps, run: runDispatchTick(deps, opts) };
+  }
+
+  it('AC2/AC6: a low-priority dispatch resolves local-only and records priority-low', async () => {
+    const { deps, run } = dispatchWithHead('low', { localPreferenceMode: 'priority-rule' });
+
+    const outcome = await run;
+
+    expect(outcome.dispatched).toBe(true);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.localPreference).toBe('local-only');
+    // The marker records BOTH the resolved preference and its reason.
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ localPreference: 'local-only', localPreferenceReason: 'priority-low' }),
+    );
+
+    // The same value reaches the wire: the pane launch arg/env the extension
+    // reads for `X-Local-Preference` and the route log.
+    const args = buildDowntimePaneArgs('plan', '/skill:plan WL-LOW', {
+      model: 'code',
+      cwd: C2_CWD,
+      localPreference: spawnOpts.localPreference,
+    });
+    expect(args[args.indexOf('--local-preference') + 1]).toBe('local-only');
+    const paneSpawn = buildDowntimeSpawnOptions(C2_CWD, { localPreference: spawnOpts.localPreference });
+    expect(paneSpawn.env[LOCAL_PREFERENCE_ENV_VAR]).toBe('local-only');
+  });
+
+  it('AC2: a high-priority dispatch keeps the deployment default and records default', async () => {
+    const { deps, run } = dispatchWithHead('high', { localPreferenceMode: 'priority-rule' });
+
+    const outcome = await run;
+
+    expect(outcome.dispatched).toBe(true);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.localPreference).toBe('remote-ok');
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ localPreference: 'remote-ok', localPreferenceReason: 'default' }),
+    );
+  });
+
+  it('AC2: an explicit operator remote-ok wins over the low-priority rule', async () => {
+    const { deps, run } = dispatchWithHead('low', {
+      localPreference: 'remote-ok',
+      localPreferenceMode: 'operator-setting',
+    });
+
+    const outcome = await run;
+
+    expect(outcome.dispatched).toBe(true);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.localPreference).toBe('remote-ok');
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({ localPreference: 'remote-ok', localPreferenceReason: 'operator-setting' }),
+    );
+  });
+
+  it('AC4: a legacy caller (no mode) forwards verbatim and adds no marker fields', async () => {
+    const { deps, run } = dispatchWithHead('low', { localPreference: 'remote-ok' });
+
+    const outcome = await run;
+
+    expect(outcome.dispatched).toBe(true);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.localPreference).toBe('remote-ok');
+    const marker = (deps.recordDispatch as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(marker.localPreference).toBeUndefined();
+    expect(marker.localPreferenceReason).toBeUndefined();
+  });
 });
 
 describe('dispatch reserve gate — granted (AC1)', () => {

@@ -625,6 +625,7 @@ export async function performDispatch(
               cwd: cfg.cwd,
               coordinationDir: ctx.opts.coordinationDir,
               localPreference: cfg.localPreference,
+              localPreferenceMode: cfg.localPreferenceMode,
               freeSlots: admission.effectiveFreeSlots,
               browseItemCount: cfg.browseItemCount,
               auditBatchMax: cfg.auditBatchMax,
@@ -655,8 +656,11 @@ export async function performDispatch(
             cwd: cfg.cwd,
             // Per-turn locality preference (slice C4 AC1), read live from
             // `downtimeLocalPreference`. Absent on legacy configs →
-            // today's byte-identical launch (fail-open C4-AC3).
+            // today's byte-identical launch (fail-open C4-AC3). The mode
+            // (WL-0MVNUIW77000VYAX) tells the dispatch boundary whether the
+            // low-priority rule may derive the value.
             localPreference: cfg.localPreference,
+            localPreferenceMode: cfg.localPreferenceMode,
             freeSlots: admission.effectiveFreeSlots,
             browseItemCount: cfg.browseItemCount,
             // Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1).

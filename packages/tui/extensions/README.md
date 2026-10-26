@@ -494,7 +494,11 @@ per-turn capacity claim against the llama-proxy:
 
 See `packages/herdr/README.md` and `docs/dev/downtime-dispatcher.md` for the
 policy knob (`downtimeLocalPreference` — default `remote-ok`, `local-only`
-opt-in) and the transport.
+opt-in) and the transport. Precedence (WL-0MVNUIW77000VYAX): an explicitly
+persisted setting > the low-priority rule (`low` → `local-only`) > the
+deployment default, so a low-priority dispatch arrives here with
+`HERDR_LOCAL_PREFERENCE=local-only` and its route-log line records that
+`preference`.
 
 ## Pane-Closure Reaper (WL-0MUJL1NAH0042GOS)
 

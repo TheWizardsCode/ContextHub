@@ -2542,3 +2542,162 @@ describe('audit-batch coordination continuation (parent AC4/AC6e/f)', () => {
     expect(ownBacklogFlag(outcome)).toBe(false);
   });
 });
+
+// ── Priority-aware locality preference across dispatch paths ───────────
+// WL-0MVNUIW77000VYAX AC4: the preference is resolved ONCE at the dispatch
+// boundary, so the coordination offer, the own-backlog fallback and the
+// audit-batch continuation all inherit the same rule.
+describe('priority-aware locality preference at every dispatch path (WL-0MVNUIW77000VYAX AC4)', () => {
+  const SPRINT = 20;
+
+  const filteredInView = (): DowntimeHerdrItem[] =>
+    Array.from({ length: SPRINT }, (_, i) =>
+      headItem({
+        id: `WL-VIEW-PREF-${String(i).padStart(2, '0')}`,
+        status: 'open',
+        stage: 'plan_complete',
+        priority: 'high',
+        risk: 'Low',
+        effort: 'S',
+        needsProducerReview: true,
+        sortIndex: i,
+      }),
+    );
+
+  const backlogAt = (id: string, priority: string): DowntimeHerdrItem =>
+    headItem({
+      id,
+      status: 'open',
+      stage: 'plan_complete',
+      priority,
+      risk: 'Low',
+      effort: 'S',
+      sortIndex: 1000,
+    });
+
+  const rankedOwnRoot = (tail: readonly DowntimeHerdrItem[]) =>
+    vi.fn(async (_cwd: string, limit = SPRINT) => ({
+      ok: true as const,
+      items: limit <= SPRINT ? filteredInView() : [...filteredInView(), ...tail],
+    }));
+
+  it('AC4: a coordination offer resolves from the offered item priority', async () => {
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({
+          id: 'WL-OFFER-LOW',
+          status: 'open',
+          stage: 'plan_complete',
+          priority: 'low',
+          risk: 'Low',
+          effort: 'S',
+        }),
+      }),
+    });
+
+    const outcome = await dispatchFromCoordination(
+      deps,
+      [makeEntry('inst-low', 'WL-OFFER-LOW', '/offer-root')],
+      {
+        model: 'plan',
+        cwd: '/leader-root',
+        coordinationDir: testDir,
+        localPreferenceMode: 'priority-rule',
+      },
+    );
+
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement WL-OFFER-LOW'),
+      expect.objectContaining({ localPreference: 'local-only' }),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectionPath: 'coordination-offer',
+        localPreference: 'local-only',
+        localPreferenceReason: 'priority-low',
+      }),
+    );
+  });
+
+  it('AC4: the own-backlog fallback applies the same rule to a low-priority item', async () => {
+    const deps = makeCoordinationDeps({
+      getHerdrListHead: rankedOwnRoot([backlogAt('WL-BACKLOG-LOW', 'low')]),
+    });
+
+    const outcome = await dispatchFromCoordination(deps, [], {
+      model: 'plan',
+      cwd: '/leader-root',
+      coordinationDir: testDir,
+      browseItemCount: SPRINT,
+      localPreferenceMode: 'priority-rule',
+    });
+
+    expect(outcome.dispatched).toBe(true);
+    expect(outcome.candidate?.id).toBe('WL-BACKLOG-LOW');
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:implement WL-BACKLOG-LOW'),
+      expect.objectContaining({ localPreference: 'local-only' }),
+    );
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        selectionPath: 'own-backlog',
+        localPreference: 'local-only',
+        localPreferenceReason: 'priority-low',
+      }),
+    );
+  });
+
+  it('AC4/AC5: an audit-batch continuation with no priority records the default reason', async () => {
+    const BATCH_SPRINT = 2;
+    const auditHead = (id: string, sortIndex = 0): DowntimeHerdrItem =>
+      headItem({
+        id,
+        status: 'completed',
+        stage: 'in_review',
+        updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        sortIndex,
+      });
+    const tail = [auditHead('WL-AUD-PREF-2', 1), auditHead('WL-AUD-PREF-3', 2)];
+    const getHerdrListHead = vi.fn(async (_cwd: string, limit = BATCH_SPRINT) => ({
+      ok: true as const,
+      items: limit <= BATCH_SPRINT ? [] : [...tail],
+    }));
+    const deps = makeCoordinationDeps({
+      getHerdrListHead,
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({
+          id: 'WL-AUD-PREF-1',
+          status: 'completed',
+          stage: 'in_review',
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+        }),
+      }),
+    });
+
+    const opts = {
+      model: 'plan',
+      cwd: '/leader-root',
+      coordinationDir: testDir,
+      browseItemCount: BATCH_SPRINT,
+      auditBatchMax: 3,
+      localPreferenceMode: 'priority-rule' as const,
+    };
+    const first = await dispatchFromCoordination(deps, [], {
+      ...opts,
+      auditBatchRemaining: 2,
+    });
+
+    expect(first.dispatched).toBe(true);
+    expect(first.candidate?.id).toBe('WL-AUD-PREF-2');
+    expect(deps.recordDispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        itemId: 'WL-AUD-PREF-2',
+        localPreference: 'remote-ok',
+        localPreferenceReason: 'default',
+      }),
+    );
+  });
+});
