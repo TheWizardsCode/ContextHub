@@ -85,6 +85,63 @@ export interface WorklogDatabaseContext {
    * `WorklogDatabase` constructor; read-only for the modules.
    */
   writeHooks: WriteHooks;
+  /**
+   * Façade-provided collaborators for the extracted item/hierarchy modules
+   * (`work-items.ts`, `hierarchy.ts`). Wired once in the `WorklogDatabase`
+   * constructor; read-only for the modules.
+   */
+  itemHooks: ItemHooks;
+}
+
+// ── Façade hooks used by the item/hierarchy modules ────────────────────
+
+/**
+ * The private `WorklogDatabase` members the extracted `work-items.ts` and
+ * `hierarchy.ts` modules may call.
+ *
+ * `work-items.ts` must not import `hierarchy.ts`: `hierarchy.ts` calls
+ * `update()` from `work-items.ts` (priority cascade, parent demotion, revert
+ * to plan), so a reverse import would make the slice cyclic. The hierarchy
+ * queries `delete()` needs to walk the tree (`getDescendants`, `getDepth`) are
+ * therefore expressed here and wired by the façade instead; the same applies
+ * to the dependency-reconciliation and semantic-index members, which still
+ * live on the façade until their own slices move them.
+ */
+export interface ItemHooks {
+  /** Order items by the hierarchy sort-index (createdAt/id fallback). */
+  orderBySortIndex(items: WorkItem[], sortOrderCache?: WorkItem[]): WorkItem[];
+  /** Every descendant (children, grandchildren, …) of `parentId`. */
+  getDescendants(parentId: string): WorkItem[];
+  /** Depth of an item in the tree (root = 0). */
+  getDepth(itemId: string): number;
+  /** Index a work item for semantic search in the background (no-op if off). */
+  triggerSemanticIndex(item: WorkItem): void;
+  /** Remove a work item from the semantic search index (no-op if off). */
+  removeFromSemanticIndex(itemId: string): void;
+  /** Reconcile an item's own blocked state from its blockers. */
+  reconcileDependentStatus(itemId: string): boolean;
+  /** Dependency edges whose target is `toId`. */
+  listDependencyEdgesTo(toId: string): DependencyEdge[];
+  /** Reconcile every item that depends on `targetId`. */
+  reconcileDependentsForTarget(targetId: string): number;
+}
+
+// ── Item-cluster result types ─────────────────────────────────────────
+
+/**
+ * Result of a conditional update (`updateIfMatches`, the CAS claim).
+ * `ok:true` carries the updated item; `ok:false` distinguishes "no such
+ * item" from "item no longer in the expected status/stage" (another
+ * process won the race).
+ *
+ * Lives here (rather than in the façade) so `work-items.ts` can name its
+ * return type without importing `database.ts`; the façade re-exports it so
+ * the public surface at `@worklog/shared` is unchanged.
+ */
+export interface UpdateIfMatchesResult {
+  ok: boolean;
+  reason?: 'not-found' | 'stale';
+  item?: WorkItem;
 }
 
 // ── Façade write hooks (sort / audit modules) ──────────────────────────

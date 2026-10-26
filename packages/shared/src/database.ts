@@ -7,7 +7,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, AuditWaiver, DemotedParent, RevertedItem } from './types.js';
 import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps, unescapeText } from './persistent-store.js';
-import { normalizeStatusValue } from './status-stage-rules.js';
 // Self-referencing package export (WL-0MSJ4BT4Z002HH9B grep guard forbids a
 // relative `icons.js` import; `@worklog/shared/icons` is the canonical path
 // even from within the shared package).
@@ -19,9 +18,8 @@ import {
   getPrefix,
   setPrefix,
   laterTimestamp,
-  buildChildrenByParent,
   buildEdgeCache as _buildEdgeCache,
-  normalizeTitleForMatch,
+  UpdateIfMatchesResult,
 } from './database/context.js';
 // `wl next` selection modules — thin-delegate targets (WL-0MVOBP0U5007BAZD).
 // Method implementations moved here; the class members below delegate.
@@ -46,8 +44,12 @@ import { handleCriticalEscalation } from './database/critical-escalation.js';
 // Method implementations moved here; the class members below delegate.
 import * as auditModule from './database/audit.js';
 import * as sortModule from './database/sort.js';
+// Work-item and hierarchy modules — thin-delegate targets (WL-0MVOBP4J6003ZKML).
+// Method implementations moved here; the class members below delegate.
+import * as workItemsModule from './database/work-items.js';
+import * as hierarchyModule from './database/hierarchy.js';
 
-export { normalizeTitleForMatch } from './database/context.js';
+export { normalizeTitleForMatch, UpdateIfMatchesResult } from './database/context.js';
 
 // ── Injectable service types ────────────────────────────────────────────
 
@@ -69,18 +71,6 @@ export interface JsonlImportResult {
 export interface GitTarget {
   remote: string;
   branch: string;
-}
-
-/**
- * Result of a conditional update (`updateIfMatches`, the CAS claim).
- * `ok:true` carries the updated item; `ok:false` distinguishes "no such
- * item" from "item no longer in the expected status/stage" (another
- * process won the race).
- */
-export interface UpdateIfMatchesResult {
-  ok: boolean;
-  reason?: 'not-found' | 'stale';
-  item?: WorkItem;
 }
 
 /**
@@ -228,6 +218,16 @@ export class WorklogDatabase {
       },
       writeHooks: {
         triggerAutoSync: () => this.triggerAutoSync(),
+      },
+      itemHooks: {
+        orderBySortIndex: (items, sortOrderCache) => this.orderBySortIndex(items, sortOrderCache),
+        getDescendants: (parentId) => this.getDescendants(parentId),
+        getDepth: (itemId) => this.getDepth(itemId),
+        triggerSemanticIndex: (item) => this.triggerSemanticIndex(item),
+        removeFromSemanticIndex: (itemId) => this.removeFromSemanticIndex(itemId),
+        reconcileDependentStatus: (itemId) => this.reconcileDependentStatus(itemId),
+        listDependencyEdgesTo: (toId) => this.listDependencyEdgesTo(toId),
+        reconcileDependentsForTarget: (targetId) => this.reconcileDependentsForTarget(targetId),
       },
     };
     
@@ -1106,58 +1106,29 @@ export class WorklogDatabase {
     return generateCommentId(this.ctx);
   }
 
+  // ── Work-item and hierarchy delegates ──────────────────────────────
+  // This cluster now lives in ./database/{work-items,hierarchy}.js
+  // (WL-0MVOBP4J6003ZKML). Every member below keeps its ORIGINAL signature
+  // and delegates to the extracted function, so the class surface is
+  // unchanged. Members with no remaining in-façade caller are retained
+  // deliberately: the split is move-only, and the delegating member documents
+  // where the implementation went.
+
   /**
    * Create a new work item
+   *
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
    */
   create(input: CreateWorkItemInput): WorkItem {
-    const id = this.generateId();
-    const now = new Date().toISOString();
-    
-      const item: WorkItem = {
-      id,
-      title: input.title,
-      description: input.description || '',
-      status: (normalizeStatusValue(input.status) ?? input.status ?? 'open') as WorkItem['status'],
-      priority: input.priority || 'medium',
-      sortIndex: input.sortIndex ?? 0,
-      parentId: input.parentId || null,
-      createdAt: now,
-      updatedAt: now,
-      tags: input.tags || [],
-      assignee: input.assignee || '',
-      stage: input.stage || '',
-
-      issueType: input.issueType || '',
-      createdBy: input.createdBy || '',
-      deletedBy: input.deletedBy || '',
-      deleteReason: input.deleteReason || '',
-      risk: input.risk || '',
-      effort: input.effort || '',
-      githubIssueNumber: undefined,
-      githubIssueId: undefined,
-      githubIssueUpdatedAt: undefined,
-      // default for the new flag
-      needsProducerReview: input.needsProducerReview ?? false,
-    };
-
-    this.store.saveWorkItem(item);
-    this.store.upsertFtsEntry(item);
-    this.triggerSemanticIndex(item);
-    // Clear comment caches that triggerSemanticIndex may have populated
-    // with stale (empty) data, so subsequent reads see fresh results.
-    this.store.clearCommentCaches();
-    this.triggerAutoSync();
-    return item;
+    return workItemsModule.create(this.ctx, this.ctx.itemHooks, input);
   }
 
+  /**
+   * Create a work item after the last sibling in hierarchy order.
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
+   */
   createWithNextSortIndex(input: CreateWorkItemInput, gap: number = 100): WorkItem {
-    const siblings = this.store
-      .getAllWorkItems()
-      .filter(item => item.parentId === (input.parentId ?? null));
-      const ordered = this.orderBySortIndex(siblings);
-      const maxSortIndex = ordered.reduce((max, item) => Math.max(max, item.sortIndex ?? 0), 0);
-    const sortIndex = maxSortIndex + gap;
-    return this.create({ ...input, sortIndex });
+    return workItemsModule.createWithNextSortIndex(this.ctx, this.ctx.itemHooks, input, gap);
   }
 
   /**
@@ -1178,21 +1149,18 @@ export class WorklogDatabase {
    * @param prefix - Prefix scope; defaults to this database's prefix. Only
    *   items whose id starts with `<prefix>-` are considered.
    * @returns The newest matching item, or null when no match exists.
+   *
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
    */
   getRecentDuplicate(title: string, windowMs: number, prefix?: string): WorkItem | null {
-    const effectivePrefix = (prefix ?? this.ctx.prefix).toUpperCase();
-    return this.store.getRecentDuplicateByNormalizedTitle(
-      normalizeTitleForMatch(title),
-      windowMs,
-      effectivePrefix,
-    );
+    return workItemsModule.getRecentDuplicate(this.ctx, title, windowMs, prefix);
   }
 
   /**
    * Get a work item by ID
    */
   get(id: string): WorkItem | null {
-    return this.store.getWorkItem(id);
+    return workItemsModule.get(this.ctx, id);
   }
 
   /**
@@ -1213,137 +1181,24 @@ export class WorklogDatabase {
    * @returns `{ok:true, item}` on success; `{ok:false, reason:'not-found'}`
    * when the id is absent; `{ok:false, reason:'stale'}` when the guard
    * mismatch means another process already changed the item.
+   *
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
    */
   updateIfMatches(
     id: string,
     input: UpdateWorkItemInput,
     expected: { status?: string; stage?: string; assignee?: string } = {},
   ): UpdateIfMatchesResult {
-    return this.store.transactionImmediate(() => {
-      const current = this.store.getWorkItem(id);
-      if (!current) {
-        return { ok: false, reason: 'not-found' };
-      }
-      if (expected.status !== undefined) {
-        const want = normalizeStatusValue(expected.status) ?? expected.status;
-        const have = normalizeStatusValue(current.status) ?? current.status;
-        if (want !== have) {
-          return { ok: false, reason: 'stale' };
-        }
-      }
-      if (expected.stage !== undefined && current.stage !== expected.stage) {
-        return { ok: false, reason: 'stale' };
-      }
-      if (expected.assignee !== undefined && (current.assignee ?? '') !== expected.assignee) {
-        return { ok: false, reason: 'stale' };
-      }
-      const updated = this.update(id, input);
-      return updated ? { ok: true, item: updated } : { ok: false, reason: 'not-found' };
-    });
+    return workItemsModule.updateIfMatches(this.ctx, this.ctx.itemHooks, id, input, expected);
   }
 
   /**
    * Update a work item
+   *
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
    */
   update(id: string, input: UpdateWorkItemInput): WorkItem | null {
-    const item = this.store.getWorkItem(id);
-    if (!item) {
-      return null;
-    }
-
-    const previousStatus = item.status;
-    const previousStage = item.stage;
-
-    // Build the new state to detect what actually changed
-    const updated: WorkItem = {
-      ...item,
-      ...input,
-      id: item.id, // Prevent ID changes
-      // Normalize status to canonical hyphenated form (e.g. in_progress -> in-progress)
-      status: (normalizeStatusValue(input.status ?? item.status) ?? item.status) as WorkItem['status'],
-      createdAt: item.createdAt, // Prevent createdAt changes
-      githubIssueNumber: item.githubIssueNumber,
-      githubIssueId: item.githubIssueId,
-      githubIssueUpdatedAt: item.githubIssueUpdatedAt,
-    };
-
-    // Detect whether any tracked field actually changed.  If the update is a
-    // no-op (same values as the existing item), preserve the original
-    // updatedAt to avoid silent re-timestamping during bulk operations.
-    // Note: githubIssueNumber/Id/UpdatedAt are intentionally excluded from
-    // this comparison because the update method above explicitly preserves
-    // the existing values for these fields (prevents manual update from
-    // overwriting GitHub metadata). Only hasWorkItemChanged() checks them.
-    const contentFieldsToCompare: (keyof WorkItem)[] = [
-      'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
-      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
-      'deletedBy', 'deleteReason'
-    ];
-    const fieldsToCompare: (keyof WorkItem)[] = [
-      ...contentFieldsToCompare,
-      'needsProducerReview'
-    ];
-    // Shared comparator: whitespace-only diffs in title/description are not
-    // semantic changes (WL-0MSORD6HC005QVZX). Same normalization as
-    // hasWorkItemChanged().
-    const hasChanged = this.compareTrackedFields(item, updated, fieldsToCompare);
-
-    if (!hasChanged) {
-      // Nothing changed — preserve original updatedAt and return early
-      // without writing to the store or triggering autoSync.
-      updated.updatedAt = item.updatedAt;
-      return updated;
-    }
-
-    // At least one tracked field changed.  Check whether a content field
-    // actually changed — only then bump the timestamp.  This prevents
-    // needsProducerReview-only flips from invalidating audits
-    // (WL-0MSN6ZCTN0027U2R).  A metadata-only change still persists the
-    // flag but preserves the timestamp so that existing audits remain fresh.
-    const contentChanged = this.compareTrackedFields(item, updated, contentFieldsToCompare);
-    if (contentChanged) {
-      updated.updatedAt = new Date().toISOString();
-    } else {
-      // Metadata-only change (e.g. needsProducerReview): preserve the
-      // original updatedAt so existing audits remain fresh.
-      updated.updatedAt = item.updatedAt;
-    }
-
-    if (process.env.WL_DEBUG_SQL_BINDINGS) {
-      try {
-        const repr: any = {};
-        for (const k of Object.keys(updated)) {
-          try {
-            const v = (updated as any)[k];
-            repr[k] = { type: v === null ? 'null' : typeof v, constructor: v && v.constructor ? v.constructor.name : null };
-          } catch (_e) {
-            repr[k] = { type: 'unreadable' };
-          }
-        }
-        console.error('WL_DEBUG_SQL_BINDINGS WorklogDatabase.update prepared updated types:', JSON.stringify(repr, null, 2));
-        // Also log description to capture non-string values
-        try { console.error('WL_DEBUG_SQL_BINDINGS WorklogDatabase.update description value:', (updated as any).description); } catch (_e) { /* ignore */ }
-      } catch (_e) {
-        console.error('WL_DEBUG_SQL_BINDINGS WorklogDatabase.update: failed to prepare updated log');
-      }
-    }
-
-    this.store.saveWorkItem(updated);
-    this.store.upsertFtsEntry(updated);
-    this.triggerSemanticIndex(updated);
-    this.triggerAutoSync();
-
-    if (previousStatus !== updated.status || previousStage !== updated.stage) {
-      // Reconcile the item itself (e.g., re-block when reopened while
-      // active blockers still exist, or unblock when all blockers completed
-      // if the item was previously manually blocked without blockers).
-      this.reconcileDependentStatus(id);
-      // Reconcile all items that depend on this item
-      if (this.listDependencyEdgesTo(id).length > 0) {
-        this.reconcileDependentsForTarget(id);
-      }
-    }
-    return updated;
+    return workItemsModule.update(this.ctx, this.ctx.itemHooks, id, input);
   }
 
   /**
@@ -1360,127 +1215,38 @@ export class WorklogDatabase {
    *   the soft-delete carries real intent — unattributed deletes never
    *   merge-propagate over a live remote item (delete-side protection in the
    *   merge layer).
+   *
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML; the
+   * module exports it as `deleteWorkItem` because `delete` is a reserved word).
    */
   delete(id: string, recursive: boolean = true, opts?: { deletedBy?: string; deleteReason?: string }): boolean {
-    const item = this.store.getWorkItem(id);
-    if (!item) {
-      return false;
-    }
-
-    // Recursively delete all descendants first (children, grandchildren, etc.)
-    if (recursive) {
-      const descendants = this.getDescendants(id);
-      // Delete from leaf to root so parent-child relationships are handled
-      // in reverse depth order (descendants sorted deepest-first)
-      const deepestFirst = [...descendants].sort((a, b) => {
-        const depthA = this.getDepth(a.id);
-        const depthB = this.getDepth(b.id);
-        return depthB - depthA;
-      });
-      for (const descendant of deepestFirst) {
-        this.deleteSingle(descendant.id, opts);
-      }
-    }
-
-    // Now delete the item itself
-    return this.deleteSingle(id, opts);
+    return workItemsModule.deleteWorkItem(this.ctx, this.ctx.itemHooks, id, recursive, opts);
   }
 
   /**
-   * Internal: Mark a single work item as deleted (no recursive child handling).
-   * Persists attribution (deletedBy/deleteReason) when provided — the merge
-   * layer's delete-side protection relies on it to distinguish real intent
-   * from bogus/stale deleted markers.
+   * Internal: delete a single work item without recursive child handling.
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
    */
   private deleteSingle(id: string, opts?: { deletedBy?: string; deleteReason?: string }): boolean {
-    const item = this.store.getWorkItem(id);
-    if (!item) {
-      return false;
-    }
-
-    const updated: WorkItem = {
-      ...item,
-      status: 'deleted',
-      // Preserve the existing stage so UI/clients can still show where the
-      // item was in the workflow when it was deleted. Clearing the stage
-      // caused unexpected regressions in clients/tests that expect the
-      // original stage to be retained.
-      stage: item.stage,
-      deletedBy: opts?.deletedBy || item.deletedBy || '',
-      deleteReason: opts?.deleteReason || item.deleteReason || '',
-      updatedAt: new Date().toISOString(),
-    };
-
-    this.store.saveWorkItem(updated);
-    this.store.deleteFtsEntry(id);
-    this.removeFromSemanticIndex(id);
-    this.triggerAutoSync();
-    if (this.listDependencyEdgesTo(id).length > 0) {
-      this.reconcileDependentsForTarget(id);
-    }
-    return true;
+    return workItemsModule.deleteSingle(this.ctx, this.ctx.itemHooks, id, opts);
   }
 
   /**
    * List all work items
+   *
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
    */
   list(query?: WorkItemQuery): WorkItem[] {
-    let items = this.store.getAllWorkItems();
-
-      if (query) {
-      if (query.status && query.status.length > 0) {
-        // Status values are normalized to hyphenated form on write/import,
-        // so we normalize each query value for comparison.
-        const normalizedStatuses = query.status.map(s => normalizeStatusValue(s) ?? s);
-        items = items.filter(item => normalizedStatuses.includes(item.status));
-      }
-      if (query.priority) {
-        items = items.filter(item => item.priority === query.priority);
-      }
-      if (query.parentId !== undefined) {
-        items = items.filter(item => item.parentId === query.parentId);
-      }
-      if (query.rootOnly) {
-        items = items.filter(item => item.parentId === null);
-      }
-      if (query.tags && query.tags.length > 0) {
-        items = items.filter(item => 
-          query.tags!.some(tag => item.tags.includes(tag))
-        );
-      }
-      if (query.assignee) {
-        items = items.filter(item => item.assignee === query.assignee);
-      }
-      if (query.stage) {
-        items = items.filter(item => item.stage === query.stage);
-      }
-      if (query.issueType) {
-        items = items.filter(item => item.issueType === query.issueType);
-      }
-      if (query.createdBy) {
-        items = items.filter(item => item.createdBy === query.createdBy);
-      }
-      if (query.deletedBy) {
-        items = items.filter(item => item.deletedBy === query.deletedBy);
-      }
-      if (query.deleteReason) {
-        items = items.filter(item => item.deleteReason === query.deleteReason);
-      }
-      if (query.needsProducerReview !== undefined) {
-        items = items.filter(item => Boolean(item.needsProducerReview) === Boolean(query.needsProducerReview));
-      }
-    }
-
-    return items;
+    return workItemsModule.list(this.ctx, query);
   }
 
   /**
    * Get children of a work item
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   getChildren(parentId: string): WorkItem[] {
-    return this.store.getAllWorkItems().filter(
-      item => item.parentId === parentId
-    );
+    return hierarchyModule.getChildren(this.ctx, parentId);
   }
 
   /**
@@ -1496,22 +1262,11 @@ export class WorklogDatabase {
    * @param newPriority - the parent's new priority; when still `critical`
    *   this is a no-op (no children are touched)
    * @returns the list of children whose priority was downgraded (empty if none)
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   cascadePriorityDowngrade(parentId: string, newPriority: WorkItemPriority): WorkItem[] {
-    if (newPriority === 'critical') {
-      return [];
-    }
-    const downgraded: WorkItem[] = [];
-    const children = this.getChildren(parentId);
-    for (const child of children) {
-      if (child.priority === 'critical') {
-        const updated = this.update(child.id, { priority: 'high' });
-        if (updated) {
-          downgraded.push(updated);
-        }
-      }
-    }
-    return downgraded;
+    return hierarchyModule.cascadePriorityDowngrade(this.ctx, this.ctx.itemHooks, parentId, newPriority);
   }
 
   /**
@@ -1528,26 +1283,11 @@ export class WorklogDatabase {
    * @param parentId - id of the parent that received the new child
    * @returns the demotion details (parent, from status/stage, to status/stage)
    *   or `null` when the parent is not in an eligible state (or does not exist)
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   demoteParentOnChildAdded(parentId: string): DemotedParent | null {
-    const parent = this.get(parentId);
-    if (!parent) {
-      return null;
-    }
-    const eligible = parent.status === 'completed' || parent.stage === 'in_review';
-    if (!eligible) {
-      return null;
-    }
-    const from = { status: parent.status, stage: parent.stage };
-    const updated = this.update(parentId, { status: 'open', stage: 'plan_complete' });
-    if (!updated) {
-      return null;
-    }
-    return {
-      parent: updated,
-      from,
-      to: { status: updated.status, stage: updated.stage },
-    };
+    return hierarchyModule.demoteParentOnChildAdded(this.ctx, this.ctx.itemHooks, parentId);
   }
 
   /**
@@ -1567,26 +1307,11 @@ export class WorklogDatabase {
    * @param itemId - id of the work item whose audit verdict is not-ready-to-close
    * @returns the reversion details (item, from status/stage, to status/stage)
    *   or `null` when the item is not in an eligible state (or does not exist)
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   revertToPlanComplete(itemId: string): RevertedItem | null {
-    const item = this.get(itemId);
-    if (!item) {
-      return null;
-    }
-    const eligible = item.status === 'completed' && item.stage === 'in_review';
-    if (!eligible) {
-      return null;
-    }
-    const from = { status: item.status, stage: item.stage };
-    const updated = this.update(itemId, { status: 'open', stage: 'plan_complete' });
-    if (!updated) {
-      return null;
-    }
-    return {
-      item: updated,
-      from,
-      to: { status: updated.status, stage: updated.stage },
-    };
+    return hierarchyModule.revertToPlanComplete(this.ctx, this.ctx.itemHooks, itemId);
   }
 
   /**
@@ -1595,73 +1320,56 @@ export class WorklogDatabase {
    * If items is provided, only counts within that subset; otherwise uses all items.
    * This is more efficient than calling getChildren() for every item individually
    * because it computes the full map in a single O(n) pass.
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   getChildCounts(items?: WorkItem[]): Map<string, number> {
-    const source = items ?? this.store.getAllWorkItems();
-    const counts = new Map<string, number>();
-    for (const item of source) {
-      if (item.parentId) {
-        counts.set(item.parentId, (counts.get(item.parentId) ?? 0) + 1);
-      }
-    }
-    return counts;
+    return hierarchyModule.getChildCounts(this.ctx, items);
   }
 
   /**
    * Get children that are not closed or deleted
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   private getNonClosedChildren(parentId: string, edgeCache?: EdgeCache): WorkItem[] {
-    const children = edgeCache
-      ? (edgeCache.childrenByParent.get(parentId) ?? [])
-      : this.getChildren(parentId);
-    return children.filter(
-      item => item.status !== 'completed' && item.status !== 'deleted'
-    );
+    return hierarchyModule.getNonClosedChildren(this.ctx, parentId, edgeCache);
   }
 
   /**
    * Get all descendants (children, grandchildren, etc.) of a work item
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   getDescendants(parentId: string): WorkItem[] {
-    const descendants: WorkItem[] = [];
-    const children = this.getChildren(parentId);
-    
-    for (const child of children) {
-      descendants.push(child);
-      descendants.push(...this.getDescendants(child.id));
-    }
-    
-    return descendants;
+    return hierarchyModule.getDescendants(this.ctx, parentId);
   }
 
   /**
    * Check if a work item is a leaf node (has no children)
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   isLeafNode(itemId: string): boolean {
-    return this.getChildren(itemId).length === 0;
+    return hierarchyModule.isLeafNode(this.ctx, itemId);
   }
 
   /**
    * Get all leaf nodes that are descendants of a parent item
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   getLeafDescendants(parentId: string): WorkItem[] {
-    const descendants = this.getDescendants(parentId);
-    return descendants.filter(item => this.isLeafNode(item.id));
+    return hierarchyModule.getLeafDescendants(this.ctx, parentId);
   }
 
   /**
    * Get the depth of an item in the tree (root = 0)
+   *
+   * Implementation in `./database/hierarchy.js` (WL-0MVOBP4J6003ZKML).
    */
   private getDepth(itemId: string): number {
-    let depth = 0;
-    let current = this.get(itemId);
-
-    while (current && current.parentId) {
-      depth += 1;
-      current = this.get(current.parentId);
-    }
-
-    return depth;
+    return hierarchyModule.getDepth(this.ctx, itemId);
   }
 
   // ── `wl next` selection delegates ──────────────────────────────────────
@@ -1902,29 +1610,11 @@ export class WorklogDatabase {
    * Shared by {@link hasWorkItemChanged} (16-field tracked set, used by
    * import()/upsertItems()) and the no-op guard in {@link update} (13-field
    * set, excluding the GitHub metadata fields).
+   *
+   * Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
    */
   private compareTrackedFields(oldItem: WorkItem, newItem: WorkItem, fields: (keyof WorkItem)[]): boolean {
-    return fields.some(f => {
-      const oldVal = oldItem[f];
-      const newVal = newItem[f];
-      if (f === 'title' || f === 'description') {
-        // Whitespace-only differences (trailing newline strip/normalization)
-        // are not semantic changes — compare normalized text only.
-        return String(oldVal ?? '').trim() !== String(newVal ?? '').trim();
-      }
-      if (f === 'needsProducerReview') {
-        // Stored items round-trip this flag through Boolean() (SQLite INTEGER
-        // column), while incoming import/upsert items may omit the key
-        // (undefined). Normalise so an omitted flag is equivalent to an
-        // explicit false — otherwise every no-op re-import looks like a
-        // semantic change and updatedAt gets bumped (WL-0MVB9557U009LEIF).
-        return Boolean(oldVal) !== Boolean(newVal);
-      }
-      if (Array.isArray(oldVal) && Array.isArray(newVal)) {
-        return JSON.stringify(oldVal) !== JSON.stringify(newVal);
-      }
-      return oldVal !== newVal;
-    });
+    return workItemsModule.compareTrackedFields(oldItem, newItem, fields);
   }
 
   /**
@@ -1937,13 +1627,8 @@ export class WorklogDatabase {
    * treated as changed against stored `false` values (WL-0MVB9557U009LEIF).
    */
   private hasWorkItemChanged(oldItem: WorkItem, newItem: WorkItem): boolean {
-    const fieldsToCompare: (keyof WorkItem)[] = [
-      'title', 'description', 'status', 'priority', 'sortIndex', 'parentId',
-      'tags', 'assignee', 'stage', 'issueType', 'risk', 'effort',
-      'needsProducerReview', 'githubIssueNumber', 'githubIssueId',
-      'githubIssueUpdatedAt'
-    ];
-    return this.compareTrackedFields(oldItem, newItem, fieldsToCompare);
+    // Implementation in `./database/work-items.js` (WL-0MVOBP4J6003ZKML).
+    return workItemsModule.hasWorkItemChanged(oldItem, newItem);
   }
 
   /**
