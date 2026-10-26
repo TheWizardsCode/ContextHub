@@ -90,6 +90,68 @@ import {
   resolveNoteWithSync,
   type NoteEditResult,
 } from './md-note-edit.js';
+import {
+  ANSI,
+  DOUBLE_CLICK_WINDOW_MS,
+  DRAG_THRESHOLD_CELLS,
+  PRIORITY_MAP,
+  SHIP_IT_COMMAND,
+  STAGES,
+  STAGE_COLORS,
+  STAGE_MAP,
+  type Stage,
+} from './worklist.constants.js';
+import { computeMetadataPanelHeight, getTermSize } from './worklist.layout.js';
+import type {
+  ChordState,
+  DisplayHeadingRow,
+  ExecuteResult,
+  HelpIconRow,
+  KeyAction,
+  MouseAction,
+  MouseClickState,
+  MouseDragState,
+  NavigationStackEntry,
+  NoteEditAction,
+  ParsedMouseEvent,
+  PodcastNotice,
+  PodcastTargetResolution,
+  ReviewQueueBannerState,
+  TermSize,
+  ViewMode,
+} from './worklist.types.js';
+
+// ── Barrel re-exports (WL-0MVND6DHH008R3LG): moved symbols still on the
+// public surface; `PRIORITY_MAP`/`STAGE_COLORS` and `MIN_META_SHARE`/
+// `MAX_META_SHARE` are internal to their modules (recorded-unused outside,
+// parent AC2 — re-export only symbols consumers actually use) ──
+export {
+  ANSI,
+  DOUBLE_CLICK_WINDOW_MS,
+  DRAG_THRESHOLD_CELLS,
+  SHIP_IT_COMMAND,
+  STAGES,
+  STAGE_MAP,
+} from './worklist.constants.js';
+export type { Stage } from './worklist.constants.js';
+export { computeMetadataPanelHeight, getTermSize } from './worklist.layout.js';
+export type {
+  ChordState,
+  DisplayHeadingRow,
+  ExecuteResult,
+  HelpIconRow,
+  KeyAction,
+  MouseAction,
+  MouseClickState,
+  MouseDragState,
+  NavigationStackEntry,
+  NoteEditAction,
+  ParsedMouseEvent,
+  PodcastNotice,
+  PodcastTargetResolution,
+  ReviewQueueBannerState,
+  TermSize,
+} from './worklist.types.js';
 
 // ── Input-active predicate (WL-0MTV67MZU003H7SH) ──────────────────────
 
@@ -161,107 +223,6 @@ export function createGatedTick(deps: {
   };
 }
 
-// ── Constants ─────────────────────────────────────────────────────────
-
-/**
- * The dev→main release command dispatched by the Ship It shortcut (`S`,
- * WL-0MSGG5N5Z0074TLY). Global release — receives NO work item id. The
- * command must be typed as `ship` + Enter in the confirmation dialog
- * before it is dispatched via the standard command-routing path.
- */
-export const SHIP_IT_COMMAND = '/skill:ship release';
-
-// The canonical `wl` CLI stage vocabulary (WL-0MUY1CRBQ007L7AK). Mirrors the
-// stages accepted by `wl update`/`wl next` validation (`done` is the
-// post-release terminal stage). Do NOT reintroduce `in_progress`/`completed`:
-// the CLI no longer accepts them as stages (`status=in-progress` is the
-// "actively worked" signal).
-export const STAGES = [
-  'idea',
-  'intake_complete',
-  'plan_complete',
-  'in_review',
-  'done',
-] as const;
-
-export type Stage = (typeof STAGES)[number];
-
-// ── /wl <stage> argument map (WL-0MSDT8X1V003206G) ────────────────────
-// Maps every accepted /wl stage argument — shorthand aliases and canonical
-// stage names — to the internal stage name used for filtering. Restricted to
-// the CLI stage vocabulary (WL-0MUY1CRBQ007L7AK): unknown/removed values are
-// absent, so `/wl <bogus>` (and `/wl progress`, `/wl completed`) fail soft.
-export const STAGE_MAP: Record<string, string> = {
-  intake: 'intake_complete',
-  plan: 'plan_complete',
-  review: 'in_review',
-  // Canonical names mapped to themselves for validation
-  idea: 'idea',
-  intake_complete: 'intake_complete',
-  plan_complete: 'plan_complete',
-  in_review: 'in_review',
-  done: 'done',
-};
-
-// ── /wl --priority <priority> map (WL-0MSKC8T46006999S) ────────────────
-// Canonical priority names accepted by `/wl --priority <p>` and the
-// `f p *` priority-filter chords. Invalid/unknown values fall back
-// gracefully (no crash, no filter change), matching `/wl <bogus>`.
-export const PRIORITY_MAP: Record<string, string> = {
-  critical: 'critical',
-  high: 'high',
-  medium: 'medium',
-  low: 'low',
-};
-
-// Re-export stage colors from icons for backward compatibility
-export const STAGE_COLORS: Record<string, number> = {
-  idea: 247,
-  intake_complete: 68,
-  plan_complete: 172,
-  in_review: 220,
-  done: 33,
-};
-
-// ── Metadata panel sizing ───────────────────────────────────────────────
-// The list renderer shows the selected item's metadata in a panel below the
-// list. The list takes as much vertical space as its content needs (up to
-// the full pane height) and the panel fills the remainder, keeping a small
-// minimum — see computeDynamicLayout (WL-0MSQ44MDX008U69J).
-// computeMetadataPanelHeight below is retained as a legacy fallback (used by
-// metaScrollDown when no dynamic panel height is supplied) from the original
-// fixed 20–40% reservation (WL-0MSAYNVBY006LM9X).
-
-/** Minimum share of pane rows reserved for the metadata panel (small panes). */
-export const MIN_META_SHARE = 0.2;
-/** Maximum share of pane rows reserved for the metadata panel (tall panes). */
-export const MAX_META_SHARE = 0.4;
-
-/** Pane height (rows) at which the panel uses the minimum share. */
-const META_SHARE_MIN_ROWS = 12;
-/** Pane height (rows) at which the panel reaches the maximum share. */
-const META_SHARE_MAX_ROWS = 40;
-
-/**
- * Legacy fallback: compute a fixed metadata panel height from the pane rows.
- *
- * The share ramps linearly from MIN_META_SHARE at `META_SHARE_MIN_ROWS` to
- * MAX_META_SHARE at `META_SHARE_MAX_ROWS`. The result is clamped to a
- * minimum of 3 rows. Only used by metaScrollDown when no dynamic panel
- * height is provided; the renderer uses computeDynamicLayout instead.
- *
- * @param rows - Total pane height in rows.
- * @returns Number of panel rows (always < rows).
- */
-export function computeMetadataPanelHeight(rows: number): number {
-  let share = MIN_META_SHARE;
-  if (rows > META_SHARE_MIN_ROWS) {
-    const t = Math.min(1, (rows - META_SHARE_MIN_ROWS) / (META_SHARE_MAX_ROWS - META_SHARE_MIN_ROWS));
-    share = MIN_META_SHARE + (MAX_META_SHARE - MIN_META_SHARE) * t;
-  }
-  return Math.max(3, Math.min(Math.round(rows * share), Math.floor(rows * MAX_META_SHARE)));
-}
-
 /**
  * Compute the dynamic list / metadata panel layout (WL-0MSQ44MDX008U69J).
  *
@@ -314,73 +275,7 @@ export function computeDynamicLayout(
   return { panelHeight, listArea, listHeight };
 }
 
-// ── Terminal helpers ─────────────────────────────────────────────────
-
-export interface TermSize {
-  rows: number;
-  cols: number;
-}
-
-/**
- * Get current terminal size. Falls back to defaults.
- */
-export function getTermSize(): TermSize {
-  try {
-    // Prefer process.stdout.columns/rows (reflects actual terminal size dynamically)
-    if (process.stdout.columns && process.stdout.rows) {
-      return { rows: process.stdout.rows, cols: process.stdout.columns };
-    }
-    // Fallback to env vars
-    const rows = parseInt(process.env.LINES || '', 10) || 24;
-    const cols = parseInt(process.env.COLUMNS || '', 10) || 80;
-    return { rows, cols };
-  } catch {
-    return { rows: 24, cols: 80 };
-  }
-}
-
-/**
- * ANSI escape code helpers.
- */
-export const ANSI = {
-  reset: '\x1b[0m',
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  reverse: '\x1b[7m',
-  underline: '\x1b[4m',
-  yellow: '\x1b[33m',
-  clear: '\x1b[2J',
-  clearLine: '\x1b[2K',
-  cursorHome: '\x1b[H',
-  cursorUp: (n: number) => `\x1b[${n}A`,
-  cursorDown: (n: number) => `\x1b[${n}B`,
-  cursorCol: (n: number) => `\x1b[${n}G`,
-  fg: (code: number) => `\x1b[38;5;${code}m`,
-  bg: (code: number) => `\x1b[48;5;${code}m`,
-  hideCursor: '\x1b[?25l',
-  showCursor: '\x1b[?25h',
-  scrollRegion: (top: number, bottom: number) => `\x1b[${top};${bottom}r`,
-  // SGR mouse tracking (WL-0MSGHM5BQ0096BNJ AC1): enable/disable sequences
-  // for button-event (1000), button-event-motion (1002) and SGR-encoded
-  // (1006) reporting, emitted on raw-mode entry / cleanup respectively.
-  mouseEnable: '\x1b[?1000h\x1b[?1002h\x1b[?1006h',
-  mouseDisable: '\x1b[?1000l\x1b[?1002l\x1b[?1006l',
-};
-
 // ── Navigation Stack ──────────────────────────────────────────────────
-
-/**
- * A single entry on the navigation stack, representing a parent context
- * that the user can return to via Escape.
- */
-export interface NavigationStackEntry {
-  /** ID of the parent item whose context was saved. */
-  parentId: string;
-  /** Scroll offset at the time of push. */
-  scrollOffset: number;
-  /** Selected index at the time of push. */
-  selectedIndex: number;
-}
 
 /**
  * A LIFO stack that tracks navigation history for hierarchical browsing.
@@ -445,30 +340,6 @@ export class NavigationStack {
 }
 
 // ── State ─────────────────────────────────────────────────────────────
-
-export type ViewMode = 'list' | 'detail' | 'filter' | 'form' | 'help';
-
-/**
- * A group heading row in the display-rows model (WL-0MSL5MPSZ003TG94).
- *
- * Headings are first-class rows interleaved with item rows by
- * `WorkItemListState.getDisplayRows()`. They carry the group number, the
- * human-readable label, the count of top-level items in the group (current
- * view, post stage-filter) and the in-memory collapse state.
- */
-export interface DisplayHeadingRow {
-  kind: 'heading';
-  /** Group number (1-indexed, from regroupWorkItems). */
-  group: number;
-  /** Human-readable group label (e.g. `Group 1`, `Idea`, `In Review`). */
-  groupLabel: string;
-  /** Top-level items in this group in the current view (post stage-filter). */
-  count: number;
-  /** Whether the group's items are hidden (in-memory, session-only). */
-  collapsed: boolean;
-  /** Depth indentation level (0 = top-level, 1+ = inside expanded parents). */
-  depth?: number;
-}
 
 /**
  * A single row in the display-rows model: either a group heading or a work
@@ -2459,19 +2330,6 @@ export function renderFileViewer(
 
 // ── Note-edit write-back (WL-0MSKV6SKK008MMXR) ────────────────────────
 
-/** A note-edit operation to apply to a markdown file. */
-export interface NoteEditAction {
-  kind: 'insert' | 'update' | 'remove';
-  /** Paragraph index (into `splitParagraphs`) for insert. */
-  paragraphIndex?: number;
-  /** New note body (insert/update). */
-  text?: string;
-  /** Marker id to update/remove. */
-  noteId?: string;
-  /** Mark DONE (§7.3) on update. */
-  done?: boolean;
-}
-
 /**
  * Read a markdown file, apply an inline-note edit, and write it back.
  *
@@ -2920,16 +2778,6 @@ export function formatFooterShortcutHints(entries: ShortcutEntry[]): string {
   return parts.join('  ');
 }
 
-/** A single row in the help screen's icon legend. */
-export interface HelpIconRow {
-  /** Icon category (the name prefix, e.g. `status`) used to group the legend. */
-  category: string;
-  /** The glyph (or noIcons text fallback) as rendered in the list. */
-  glyph: string;
-  /** Short human-readable meaning of the glyph. */
-  meaning: string;
-}
-
 /**
  * Word-wrap a single logical line into lines of at most `cols` display
  * cells, indenting continuation lines by `indent` columns. Keeps the FULL
@@ -3195,42 +3043,6 @@ export function getChordHelpHints(registry: ShortcutRegistry | undefined, codeFr
 }
 
 // ── Keyboard handling ─────────────────────────────────────────────────
-
-export type KeyAction = 'up' | 'down' | 'pageup' | 'pagedown' | 'select'
-  | 'back' | 'filter' | 'refresh' | 'quit' | 'first' | 'last'
-  | 'meta-up' | 'meta-down'
-  | 'chord-start' | 'chord-complete' | 'chord-cancel'
-  | 'toggle-expand' | 'dismiss-tooltip' | null;
-
-export interface ChordState {
-  /** Keys pressed so far in the current chord sequence */
-  pendingKeys: string[];
-  /** Hints for next-expected keys and their commands */
-  hints: string;
-  /** The resolved command if chord was completed (cleared after execution) */
-  resolvedCommand: string | null;
-  /**
-   * The model pattern bound to the resolved shortcut entry, if any
-   * (cleared after execution). Used to spawn the pi CLI with `--model`.
-   */
-  resolvedModel: string | null;
-  /**
-   * Whether the resolved shortcut should open a visible pane
-   * (WL-0MSJLD1I70045ZUL). `undefined` = the entry did not set `open_pane`
-   * → open a pane (the default, backward compatible); `false` = run in the
-   * background with output captured to a log file. Cleared (undefined)
-   * after execution.
-   */
-  resolvedOpenPane: boolean | undefined;
-  /**
-   * Whether the resolved shortcut wants the new pane focused
-   * (WL-0MT70LC6B009TL3Q). `undefined`/`false` = open without focus
-   * (current default); `true` = the new pane is zoomed/focused immediately
-   * after opening. Only `P n` (new session) sets this to `true` today.
-   * Cleared (undefined) after execution.
-   */
-  resolvedFocus: boolean | undefined;
-}
 
 /**
  * Map special key sequences to action names.
@@ -3538,57 +3350,6 @@ const SGR_MOUSE_RE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/;
  * (e.g. '\x1b[<0;10;') — still awaiting its terminating M/m. */
 const SGR_PARTIAL_RE = /^\x1b\[<[0-9;]*$/;
 
-/**
- * A parsed SGR mouse event with 1-based terminal coordinates.
- */
-export interface ParsedMouseEvent {
-  /** Raw SGR button code: 0=left, 1=middle, 2=right, 64=wheel up,
-   * 65=wheel down; bit 32 = motion. */
-  button: number;
-  /** 1-based column. */
-  x: number;
-  /** 1-based row. */
-  y: number;
-  /** True for '\x1b[<...m' (release), false for '\x1b[<...M' (press). */
-  release: boolean;
-}
-
-/** Double-click window in ms (WL-0MSGHM5BQ0096BNJ AC3); boundary
- * inclusive (<=). */
-export const DOUBLE_CLICK_WINDOW_MS = 400;
-
-/** Minimum pointer displacement (in terminal cells / rows) before a
- * held-button motion event is treated as a drag-to-scroll gesture rather
- * than click jitter.  SGR coordinates are 1-based cell positions so a
- * threshold of 1 row distinguishes deliberate scrolling from incidental
- * movement.  (WL-0MSI72S0Y0060BRK) */
-export const DRAG_THRESHOLD_CELLS = 1;
-
-/** State tracker for an active drag-to-scroll gesture.  Tracks the press
- * origin, a fractional accumulator for proportional scrolling, and the
- * pre-press selection/scroll so the drag can restore them when it
- * activates — ensuring a drag never leaves the selection moved by the
- * initial press.  (WL-0MSI72S0Y0060BRK) */
-export interface MouseDragState {
-  /** Origin of the press (x, y) or null when no drag is active. */
-  origin: { x: number; y: number } | null;
-  /** Fractional row/line accumulator — integer parts are dispatched as
-   * discrete scroll deltas. */
-  accumulator: number;
-  /** True when the drag has crossed the threshold and is actively
-   * scrolling. */
-  active: boolean;
-  /** Snapshot of selectedIndex and scrollOffset taken at press time, used
-   * to restore state when the drag activates so the drag never leaves the
-   * selection moved by the initial press. */
-  prePressSelection: { selectedIndex: number; scrollOffset: number } | null;
-  /** True once the pre-press selection has been restored for this drag
-   * gesture — the restore happens exactly once, on the first threshold-
-   * crossing motion; subsequent drag events accumulate scroll on top of
-   * the restored state. */
-  restored: boolean;
-}
-
 /** Create a fresh drag state (helper for tests). */
 export function createDragState(): MouseDragState {
   return {
@@ -3599,41 +3360,6 @@ export function createDragState(): MouseDragState {
     restored: false,
   };
 }
-
-/** Prior left-press coordinates plus an injectable clock for deterministic
- * double-click tests. */
-export interface MouseClickState {
-  /** The previous left-press position/time, or null when none. */
-  lastClick: { x: number; y: number; at: number } | null;
-  /** Current clock (ms) — injected for deterministic tests. */
-  now: number;
-}
-
-/** Internal drag bookkeeping action — emitted on the first press and
- * never dispatched to the state switch (it triggers state capture only).
- * (WL-0MSI72S0Y0060BRK) */
-type DragAction =
-  | { type: 'drag-start' }
-  | { type: 'drag-list'; rows: number }
-  | { type: 'drag-detail'; lines: number };
-
-/** Dispatchable mouse action — mirrors the list/detail/filter key paths.
- * Drag actions are emitted by `mapMouseDrag` and dispatched by
- * `handleMouseInput`; the drag consumer never emits `select-row` /
- * `open-detail`, so a drag-release can never click.  (WL-0MSI72S0Y0060BRK) */
-export type MouseAction =
-  | { type: 'select-row'; index: number } // list: click/tap an item row
-  | { type: 'open-detail' } // list: double-click (Enter-equivalent)
-  | { type: 'back' } // detail: double-click (to the list)
-  | { type: 'wheel-up' } // list: wheel/touch-scroll up
-  | { type: 'wheel-down' } // list: wheel/touch-scroll down
-  | { type: 'scroll-detail-up' } // detail: wheel up (k-equivalent)
-  | { type: 'scroll-detail-down' } // detail: wheel down (j-equivalent)
-  | { type: 'filter-stage'; index: number } // filter: tap a stage option
-  | { type: 'hover-row'; index: number } // list: motion over an item row (tooltip)
-  | { type: 'hover-none' } // list: motion over chrome rows (pointer left the rows)
-  | DragAction // internal drag actions (drag-start, drag-list, drag-detail)
-  | null; // inert: chrome rows, motion, releases, unknown buttons
 
 /**
  * Parse a COMPLETE SGR mouse sequence ('\x1b[<b;x;yM' press or
@@ -4188,20 +3914,6 @@ export function renderDowntimeStatus(worker: DowntimeWorker | undefined): string
     return ` ${ANSI.fg(34)}[⏳ downtime idle ${minutes}:${String(seconds).padStart(2, '0')}]${ANSI.reset}`;
   }
   return ` ${ANSI.dim}[downtime busy]${ANSI.reset}`;
-}
-
-/**
- * Review-queue banner state for the footer (parent WL-0MTHSHN5V008R5L0).
- */
-export interface ReviewQueueBannerState {
-  /** True when the root-only completed/in_review count ≥ browseItemCount. */
-  queueDeep: boolean;
-  /** Number of root-level completed/in_review items counted. */
-  completedCount: number;
-  /** browseItemCount threshold (undefined when the setting is unavailable). */
-  browseItemCount?: number;
-  /** True when at least one root in_review item has an outstanding audit. */
-  auditsOutstanding: boolean;
 }
 
 /**
@@ -4927,19 +4639,6 @@ export function formatNoticeDialog(
 }
 
 /**
- * Outcome of a podcast w-chord dispatch attempt, surfaced to the operator.
- *
- * - `dispatched` — the command resolved and was sent to a Pi agent pane.
- * - `error` — `resolvePodcastTarget` refused to resolve the command (e.g. no
- *   script in `Key Files:`, or the belt-and-braces "never author a duplicate"
- *   guard). Nothing was dispatched.
- */
-export interface PodcastNotice {
-  kind: 'dispatched' | 'error';
-  body: string;
-}
-
-/**
  * Render the persistent, dismissable notice for a podcast w-chord dispatch
  * attempt (OSL-0MUQ59IRF009ICIF).
  *
@@ -5292,19 +4991,6 @@ export function dispatchChordCommand(
 
   // Unknown command — not handled
   return false;
-}
-
-export type ExecuteResult = 'dispatched' | 'callback' | 'noop' | 'blocked';
-
-/**
- * Result of resolving a podcast-progression command marker for the selected
- * work item. Either a fully-resolved command (no markers remain) or an
- * error message that must be surfaced WITHOUT dispatching (OSL-0MSHFQ51L009IUOS
- * belt-and-braces guard).
- */
-export interface PodcastTargetResolution {
-  command?: string;
-  error?: string;
 }
 
 /**

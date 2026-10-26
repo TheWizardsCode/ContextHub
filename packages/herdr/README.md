@@ -2386,7 +2386,10 @@ packages/herdr/
 │   ├── md-note-edit.ts     # Inline-note marker edit helpers (insert/update/remove, LOCAL-<seq>, §7.3 sync)
 │   ├── command-log.ts      # Command log: record/get last command per work item
 │   ├── settings.ts         # User settings management
-│   └── worklist.ts         # List state, rendering, keyboard handling, command output
+│   ├── worklist.ts         # List state, rendering, keyboard handling, command output (barrel)
+│   ├── worklist.types.ts   # Leaf type declarations for the worklist family (no worklist imports)
+│   ├── worklist.constants.ts # Stage/priority maps, ANSI escape helper, mouse tuning constants
+│   └── worklist.layout.ts  # Metadata-panel height budget (computeMetadataPanelHeight) + getTermSize
 ├── scripts/
 │   ├── open.sh             # Open the worklist pane
 │   ├── open-worklog-tab.sh # Open the worklist pane in a tab renamed "Worklog"
