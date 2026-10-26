@@ -37,7 +37,7 @@ import {
 import type { CapacityStarvationObservation } from './capacity-starvation.js';
 import { dispatchFromCoordination } from './downtime-worker.coordination-leader.js';
 import { computeMostImportantItem } from './downtime-worker.coordination.js';
-import { readCoordinationFile } from './coordination.js';
+import { hasPeerOffer, readCoordinationFile } from './coordination.js';
 import { countFreeUnownedSlots, evaluatePrefillPacing } from './downtime-worker.idle.js';
 import { dispatchDowntimeWork } from './downtime-worker.dispatch.js';
 import type {
@@ -614,12 +614,21 @@ export async function performDispatch(
   // batch metadata to a blocked/ended decision.
   const armedBatch = ctx.activeAuditBatch;
   const continuationBudget = armedBatch !== null ? armedBatch.remaining : null;
+  // Coordination entries read ONCE for this dispatch (parent
+  // WL-0MVP7QHUB003ZA2A AC2): the same snapshot feeds the dispatch attempt
+  // AND the no-candidate arm's peer-offer check below, so the "is a peer's
+  // offer still live?" question costs a cheap in-memory scan instead of a
+  // second worklog CLI probe.
+  const coordinationEntries =
+    ctx.opts.coordinationDir && typeof ctx.opts.deps.fetchItem === 'function'
+      ? readCoordinationFile(ctx.opts.coordinationDir)?.entries ?? []
+      : [];
   try {
     const outcome =
       ctx.opts.coordinationDir && typeof ctx.opts.deps.fetchItem === 'function'
         ? await dispatchFromCoordination(
             ctx.opts.deps,
-            readCoordinationFile(ctx.opts.coordinationDir)?.entries ?? [],
+            coordinationEntries,
             {
               model: cfg.model,
               cwd: cfg.cwd,
@@ -913,9 +922,22 @@ export async function performDispatch(
             ctx.leaderManager.releaseLeadership();
             ctx.leaderState = false;
           }
-          ctx.cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
-          ctx.tracker.record(false);
-          ctx.perSlotTracker.record([]);
+          // Peer-offer suppression (parent WL-0MVP7QHUB003ZA2A AC2): the
+          // probe answered only "is THIS instance's own root empty?". When a
+          // PEER's entry still holds a dispatchable offer, the backlog is not
+          // empty — it is another root's — and the 60-minute full stop would
+          // stop polling the offer list entirely, starving that offer (the
+          // live 2026-10-26 incident: an idle leader paused while
+          // ContextHub's offer sat undispatched). So a live peer offer skips
+          // the pause arm AND its idle-tracker reset, leaving the offer list
+          // polled and the peer offer dispatchable across the leadership
+          // hand-off. The check is a cheap scan of the entries already read
+          // for this dispatch (no second worklog probe).
+          if (!hasPeerOffer(coordinationEntries, ctx.instanceId)) {
+            ctx.cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
+            ctx.tracker.record(false);
+            ctx.perSlotTracker.record([]);
+          }
         } else if (!probe.ok) {
           await pauseAfterPersistentErrors(
             ctx,

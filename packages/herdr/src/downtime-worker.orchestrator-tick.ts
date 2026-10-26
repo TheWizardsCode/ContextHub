@@ -20,7 +20,7 @@
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  */
 
-import { getEntry } from './coordination.js';
+import { getEntry, hasPeerOffer, readCoordinationFile } from './coordination.js';
 import { appendCoordinationLogEntry } from './downtime-log.js';
 import { DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS } from './capacity-starvation.js';
 import { disableMarkerExists } from './downtime-disable-marker.js';
@@ -227,6 +227,22 @@ export async function runLeaderElectionAndCheckIn(
           // File already holds the same entry (no write needed) but
           // CLI healthy — also cancel so stale-file probes don't keep
           // the pause alive while work still exists.
+          ctx.cooldownUntil = null;
+          ctx.errorStrikes = 0;
+        } else if (ctx.cooldownUntil !== null && hasPeerOffer(
+          readCoordinationFile(ctx.opts.coordinationDir!)?.entries ?? [],
+          ctx.instanceId,
+        )) {
+          // Coordination check-in cancels, peer presence cancels (parent
+          // WL-0MVP7QHUB003ZA2A AC3): an offer that APPEARS during a pause
+          // (another instance's check-in) must not wait out the 60-minute
+          // full stop — the offer list is not polled while paused, so this
+          // check-in is the only tick that can observe it. A peer entry with
+          // a dispatchable item means the backlog is not empty, so the pause
+          // is cancelled and polling resumes on this very tick (the cooldown
+          // gate below then sees `cooldownUntil === null`). Fail-safe: an
+          // unreadable coordination file resolves `[]` → no peer → the pause
+          // is left exactly as it is today.
           ctx.cooldownUntil = null;
           ctx.errorStrikes = 0;
         }

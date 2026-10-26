@@ -1099,7 +1099,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
       };
     }
 
-    it.fails(
+    it(
       'does not arm the cooldown while a live peer offer exists (AC2)',
       async () => {
         const peerRoot = coordinationTmpDirs.make('peer-root-');
@@ -1140,14 +1140,29 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
       },
     );
 
-    it.fails(
+    it(
       'cancels a live pause at the next leader check-in when a peer offer appears (AC3)',
       async () => {
         const peerRoot = coordinationTmpDirs.make('peer-root-');
         // Genuinely empty everywhere at first: the own root is empty AND
         // the offer list is empty → the 60-min pause arms exactly as
         // today.
-        const { worker, deps, coordDir } = makeCoordinationWorker();
+        const { worker, deps, coordDir } = makeCoordinationWorker({
+          deps: {
+            // The leader classifies each offered entry by re-fetching its
+            // item; echo the requested id so the spawned prompt names the
+            // PEER's item.
+            fetchItem: vi.fn().mockImplementation(async (id: string) => ({
+              ok: true,
+              info: {
+                id,
+                title: `Peer offer ${id}`,
+                status: 'open',
+                stage: 'intake_complete',
+              },
+            })),
+          },
+        });
         vi.setSystemTime(PEER_START);
 
         await worker.tick(); // election + empty check-in
@@ -1178,7 +1193,11 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
         // never a 60-minute pause (the dispatch may land on the resume tick
         // itself or on the next threshold tick).
         vi.setSystemTime(
-          PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 4 * 60_000 + 60_001 + 2_000,
+          PEER_START +
+            DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS +
+            4 * 60_000 +
+            DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS +
+            2_000,
         );
         await worker.tick();
         expect(deps.spawnAgentPane).toHaveBeenCalledWith(

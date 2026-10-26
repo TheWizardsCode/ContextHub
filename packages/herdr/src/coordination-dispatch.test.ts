@@ -1362,7 +1362,7 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
     /** A second instance offering its own root's head. */
     const peerRoot = () => join(testDir, 'peer-root');
 
-    it.fails('does not pause when a peer entry holds a dispatchable offer while the own root is empty (AC2)', async () => {
+    it('does not pause when a peer entry holds a dispatchable offer while the own root is empty (AC2)', async () => {
       vi.useFakeTimers();
       const T0 = 40_000_000;
       vi.setSystemTime(T0);
@@ -1374,6 +1374,12 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
             ok: true,
             info: itemInfo({ id: 'WL-PEER', status: 'open', stage: 'intake_complete' }),
           }),
+          // The peer's offer is classified DISPATCHABLE, but its CAS claim is
+          // lost this cycle (another pane won the race) — the offer is KEPT
+          // (still valid) and the cycle ends `no-candidate` because the
+          // leader's own root is empty. This is the exact starvation window:
+          // a live offer exists yet this cycle yielded nothing.
+          claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
         });
         // …while a PEER's entry holds a dispatchable item. Its claim is lost
         // this cycle (another pane won the CAS race), so the offer is KEPT
@@ -1400,7 +1406,7 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
       }
     });
 
-    it.fails('cancels a live pause at the next leader check-in when a peer offer appears, then dispatches it (AC3)', async () => {
+    it('cancels a live pause at the next leader check-in when a peer offer appears, then dispatches it (AC3)', async () => {
       vi.useFakeTimers();
       const T0 = 50_000_000;
       vi.setSystemTime(T0);
