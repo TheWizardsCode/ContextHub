@@ -285,8 +285,11 @@ describe('gitPushDataFileToBranch target validation', () => {
   it('push command uses --no-verify to avoid recursive pre-push hook', async () => {
     // Verify the source code contains --no-verify in the push command.
     // This prevents the pre-push hook from running recursively inside the temp worktree.
+    // The push path lives in `src/sync/push.ts` since the sync split
+    // (WL-0MVP9RW4Z006VLW1); the assertion is unchanged, only the module it
+    // reads moved.
     const syncSource = fs.readFileSync(
-      new URL('../src/sync.ts', import.meta.url),
+      new URL('../src/sync/push.ts', import.meta.url),
       'utf8'
     );
     const pushLine = syncSource
