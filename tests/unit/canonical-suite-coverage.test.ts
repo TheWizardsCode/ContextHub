@@ -60,11 +60,15 @@ function suiteCommands(): string[] {
 function positionalFilters(command: string): string[] {
   // e.g. "npm --silent test -- tests"  ->  ["tests"]
   //      "npm --silent test -- tests/cli"  ->  ["tests/cli"]
-  const dashDash = command.indexOf('--');
-  const tail = dashDash >= 0 ? command.slice(dashDash + 2) : '';
-  return tail
-    .split(/\s+/)
-    .filter((p) => p.length > 0 && !p.startsWith('-'));
+  //
+  // Tokenised on whitespace and matched on the standalone `--` TOKEN: a
+  // plain `indexOf('--')` finds the `--silent` flag first and would treat
+  // `test` as a positional filter — a substring of every path, which makes
+  // the guard pass vacuously (verified red-first against the old config).
+  const tokens = command.split(/\s+/).filter((t) => t.length > 0);
+  const separator = tokens.indexOf('--');
+  if (separator < 0) return [];
+  return tokens.slice(separator + 1).filter((t) => !t.startsWith('-'));
 }
 
 /** Every `*.test.ts` file under `tests/`, excluding dependency/fixture dirs. */
