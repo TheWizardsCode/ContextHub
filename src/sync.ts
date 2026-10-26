@@ -1,9 +1,10 @@
 /**
  * Sync functionality for merging local and remote work items with conflict resolution.
  *
- * Shared type declarations live in `./sync/types.js` and git subprocess
- * plumbing in `./sync/git-exec.js` (WL-0MVP9PCOU004L8HN); the types are
- * re-exported below so the public surface of this module is unchanged.
+ * Shared type declarations live in `./sync/types.js`, git subprocess plumbing
+ * in `./sync/git-exec.js` (WL-0MVP9PCOU004L8HN) and the merge decision
+ * predicates in `./sync/merge-predicates.js` (WL-0MVP9QLWU003NV41); the public
+ * names are re-exported below so the surface of this module is unchanged.
  */
 
 import { WorkItem, Comment, ConflictDetail, ConflictFieldDetail, DependencyEdge, AuditResult } from './types.js';
@@ -26,6 +27,7 @@ import type {
   AuthorIdentityResult,
   DeltaReplayResult,
 } from './sync/types.js';
+import { isTerminalStage, isValueRegression, isEmptyMeaningfulField, isAttributedDelete } from './sync/merge-predicates.js';
 
 // ── Public type surface (barrel re-export) ────────────────────────────
 // The 9 type declarations moved to `./sync/types.js`; re-exporting them here
@@ -42,70 +44,16 @@ export type {
   DeltaReplayResult,
 } from './sync/types.js';
 
+// ── Merge predicates (WL-0MVP9QLWU003NV41) ───────────────────────────
+// Moved to `./sync/merge-predicates.js`; the four public predicates are
+// re-exported here so consumers of `'./sync.js'` are unaffected.
+export {
+  isRegressionDefault,
+  isValueRegression,
+  isEmptyMeaningfulField,
+  isTerminalStage,
+} from './sync/merge-predicates.js';
 
-/**
- * Regression-guard definition of "default" for merge-participating fields.
- * These are the values that constitute a regression when they appear on the
- * remote side while the local side has a meaningful non-default value.
- *
- * This is DISTINCT from `isDefaultValue` which only treats ''/undefined/[] as
- * defaults.  The regression guard uses a broader definition so that
- * `status: open`, `stage: idea`, `priority: medium` are recognised as defaults
- * that signal data loss when they overwrite local non-default values.
- *
- * `assignee` is intentionally NOT a regression-guarded field
- * (WL-0MV85WBZ2004VDUQ, epic Q1 option (a)).  It is a scheduling hold whose
- * clear must propagate cross-root, so an empty value is treated as meaningful
- * intent and resolved by timestamp rather than refused as a regression.
- */
-export function isRegressionDefault(value: unknown, field: string): boolean {
-  if (value === undefined || value === '') {
-    // `assignee` is a scheduling hold whose clear is meaningful intent
-    // (WL-0MV85WBZ2004VDUQ, Q1 option (a)) — empty is never a regression.
-    return field !== 'assignee';
-  }
-  const str = String(value);
-  switch (field) {
-    case 'status':
-      // 'open' is the default; everything else is a real value.
-      return str === 'open';
-    case 'stage':
-      // 'idea' is the default; everything else is a real value.
-      return str === 'idea';
-    case 'priority':
-      // 'medium' is the default.
-      return str === 'medium';
-    default:
-      return false;
-  }
-}
-
-/**
- * Check whether a remote value is a "regression default" while the local
- * value is a meaningful non-default — the core regression-detection predicate.
- */
-export function isValueRegression(localValue: unknown, remoteValue: unknown, field: string): boolean {
-  return !isRegressionDefault(localValue, field) && isRegressionDefault(remoteValue, field);
-}
-
-/**
- * Merge fields whose empty value carries intent rather than signalling
- * absence, so it must NOT take part in the "prefer non-default" heuristic.
- *
- * `assignee` is a scheduling hold (WL-0MV85WBZ2004VDUQ, epic Q1 option (a)):
- * assigning an item holds it from auto-dispatch and clearing the assignee
- * releases it.  If `''` were treated as a default, a newer remote clear would
- * either be refused as a regression (old behaviour) or lose to a stale local
- * non-empty value — both resurrect stale claims.  Resolving such fields by
- * timestamp/tie-break like any other field lets a newer clear win, so it
- * propagates cross-root without `--accept-regressions`.
- */
-const EMPTY_IS_MEANINGFUL_FIELDS: ReadonlySet<string> = new Set(['assignee']);
-
-/** True when `field`'s empty value is meaningful (never treated as a default). */
-export function isEmptyMeaningfulField(field: string): boolean {
-  return EMPTY_IS_MEANINGFUL_FIELDS.has(field);
-}
 
 /**
  * Merge two sets of work items with intelligent field-level conflict resolution
@@ -469,32 +417,6 @@ export async function enforceAuthorIdentityGate(
   if (!result.allowed) {
     throw new Error(result.message);
   }
-}
-
-/**
- * Terminal (closed) workflow stages. An item with `completed` status and a
- * terminal stage is a protected close state: it must never be silently
- * reverted by a stale remote `open`/`in_progress` copy during merge.
- *
- * `in_review` is the standard 'ready for review' state after a pi audit — a
- * closed state until manually reopened (WL-0MSPZP7FE009YXPG).
- *
- * Whitelist per approved plan: {done, in_review}. Custom stages are NOT
- * protected and fall back to normal timestamp/lexicographic resolution.
- */
-export function isTerminalStage(stage: string | undefined): boolean {
-  return stage === 'done' || stage === 'in_review';
-}
-
-/**
- * DELETE-SIDE PROTECTION (WL-0MSKZ30SK007K9TO): an attributed delete carries real
- * intent — non-empty `deletedBy` (who) or `deleteReason` (why). Unattributed
- * `status='deleted'` markers (empty both) are NOT real deletes and must never
- * override a live remote/local item (mirrors the close-preservation model that
- * protects `status='completed'`).
- */
-function isAttributedDelete(item: WorkItem): boolean {
-  return Boolean(item.deletedBy) || Boolean(item.deleteReason);
 }
 
 function mergeSameTimestampItems(
