@@ -6,7 +6,8 @@
  * `./sync/merge-predicates.js`, the field-level merge implementations in
  * `./sync/field-merge.js`, the public merge entry point in `./sync/merge.js`
  * and the collateral (comment / audit-result / dependency-edge) merges in
- * `./sync/merge-collateral.js` (WL-0MVP9QLWU003NV41). The mid-layer concerns
+ * `./sync/merge-collateral.js` (shared primitives in `./sync/merge-utils.js`;
+ * WL-0MVP9QLWU003NV41). The mid-layer concerns
  * live in `./sync/author-identity.js` (author-identity gate), `./sync/refs.js`
  * (last-synced/remote refs), `./sync/prefix-filter.js` (cross-project prefix
  * filter) and `./sync/repo-context.js` (repo-root resolution + cross-project

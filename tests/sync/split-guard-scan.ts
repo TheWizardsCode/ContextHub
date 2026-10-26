@@ -22,12 +22,12 @@
  *    may re-home a symbol but may never drop one.
  * 2. **Module size (AC1).** Every top-level `src/sync*.ts` module and every
  *    module under `src/sync/` stays ≤ {@link MAX_MODULE_LINES};
- *    {@link SPLIT_ALLOWLIST}
- *    is shrink-only against a plan-time ceiling.
+ *    {@link SPLIT_ALLOWLIST} is shrink-only against a plan-time ceiling and is
+ *    empty at close-out once `src/sync.ts` is a thin re-export façade.
  * 3. **Import graph (AC4).** The static import graph of the sync family is
- *    acyclic, no family module imports the barrel at runtime, and the single
- *    pre-existing `merge-utils.ts` type-only barrel import sits in
- *    {@link TYPE_ONLY_BARREL_ALLOWLIST} for child 2 to remove.
+ *    acyclic, no family module imports the barrel at runtime, and
+ *    {@link TYPE_ONLY_BARREL_ALLOWLIST} is empty — child 2 re-pointed the
+ *    former `merge-utils.ts` type-only barrel import at `./types.js`.
  *
  * The gates live here as **pure predicates over parsed modules** rather than as
  * assertions over the live tree, so `split-guard.test.ts` can prove each gate
@@ -74,11 +74,13 @@ export const MAX_MODULE_LINES = 1000;
 /**
  * Family modules currently exempt from the size gate.
  *
- * A *shrink-only* allowlist: it may only ever lose entries. It starts with the
- * 1,867-line monolith; the final barrel child removes it once `src/sync.ts` is
- * a thin re-export façade.
+ * A *shrink-only* allowlist: it may only ever lose entries. It started with the
+ * 1,867-line monolith; the final barrel child removed that entry once
+ * `src/sync.ts` became a thin re-export façade, so it is now empty — every
+ * family module must stay under {@link MAX_MODULE_LINES} with no exemptions
+ * (WL-0MVP9SEJZ000KWXJ).
  */
-export const SPLIT_ALLOWLIST: readonly string[] = ['sync.ts'];
+export const SPLIT_ALLOWLIST: readonly string[] = [];
 
 /**
  * The allowlist as it stood at plan time. {@link SPLIT_ALLOWLIST} must remain a
