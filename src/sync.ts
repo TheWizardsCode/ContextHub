@@ -1,5 +1,9 @@
 /**
- * Sync functionality for merging local and remote work items with conflict resolution
+ * Sync functionality for merging local and remote work items with conflict resolution.
+ *
+ * Shared type declarations live in `./sync/types.js` and git subprocess
+ * plumbing in `./sync/git-exec.js` (WL-0MVP9PCOU004L8HN); the types are
+ * re-exported below so the public surface of this module is unchanged.
  */
 
 import { WorkItem, Comment, ConflictDetail, ConflictFieldDetail, DependencyEdge, AuditResult } from './types.js';
@@ -7,128 +11,37 @@ import type { ClaimHoldDecision } from './claim-hold.js';
 import type { SyncPhaseTimings } from './sync-phase-timings.js';
 import { isDefaultValue, stableValueKey, stableItemKey, mergeTags } from './sync/merge-utils.js';
 import { importFromJsonlContent } from './jsonl.js';
-import * as childProcess from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { promisify } from 'util';
-import { contextExec, withinWorktreeContext, killProcessesForWorktree, type TrackedExecResult } from './process-lifecycle.js';
+import { withinWorktreeContext, killProcessesForWorktree } from './process-lifecycle.js';
+import { gitExecAsync, execAsync, execGitCaptureStdout, escapeShellArg } from './sync/git-exec.js';
+import type {
+  GitTarget,
+  MergeOptions,
+  IncomingCommit,
+  SyncAllowedAuthors,
+  AuthorIdentityOptions,
+  AuthorIdentityViolation,
+  AuthorIdentityResult,
+  DeltaReplayResult,
+} from './sync/types.js';
 
-/**
- * Git exports GIT_DIR (and GIT_WORK_TREE / GIT_INDEX_FILE) when it invokes
- * hooks, and `wl sync` spawned from a hook inherits them. A leaked GIT_DIR
- * redirects `git -C <path> ...` commands to the CALLER's worktree (its
- * index/HEAD/refs) instead of the repository named on the command line —
- * which produced destructive "Sync work items and comments" commits on
- * worktree branches (WL-0MS99Y6R40028Q9G). Every git command in this module
- * therefore runs with those variables cleared, matching git's own behavior
- * of unsetting them for hook child processes.
- */
-function sanitizeGitEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const clean = { ...env };
-  delete clean.GIT_DIR;
-  delete clean.GIT_WORK_TREE;
-  delete clean.GIT_INDEX_FILE;
-  return clean;
-}
+// ── Public type surface (barrel re-export) ────────────────────────────
+// The 9 type declarations moved to `./sync/types.js`; re-exporting them here
+// keeps all 34 exports importable from `'./sync.js'` unchanged (AC3).
+export type {
+  GitTarget,
+  SyncResult,
+  MergeOptions,
+  IncomingCommit,
+  SyncAllowedAuthors,
+  AuthorIdentityOptions,
+  AuthorIdentityViolation,
+  AuthorIdentityResult,
+  DeltaReplayResult,
+} from './sync/types.js';
 
-async function gitExecAsync(
-  command: string,
-  options?: { cwd?: string }
-): Promise<TrackedExecResult> {
-  return contextExec(command, { ...options, env: sanitizeGitEnv(process.env) });
-}
-
-const execAsync = gitExecAsync;
-
-// git show of large JSONL can exceed Node's exec() maxBuffer.
-// Use spawn to stream the output when reading remote content.
-async function execGitCaptureStdout(args: string[], options?: { cwd?: string }): Promise<string> {
-  return await new Promise((resolve, reject) => {
-    // On Windows, shell: true is required so spawn can resolve .cmd/.bat
-    // wrappers. Pass args as a single command string to avoid the
-    // DEP0190 deprecation warning about unescaped args with shell=true.
-    const useShell = process.platform === 'win32';
-    const childEnv = sanitizeGitEnv(process.env);
-    const child = useShell
-      ? childProcess.spawn(`git ${args.map(a => escapeShellArg(a)).join(' ')}`, [], {
-          cwd: options?.cwd,
-          env: childEnv,
-          stdio: ['ignore', 'pipe', 'pipe'],
-          shell: true,
-        })
-      : childProcess.spawn('git', args, {
-          cwd: options?.cwd,
-          env: childEnv,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        });
-    let out = '';
-    let err = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      out += chunk;
-    });
-    child.stderr.on('data', (chunk) => {
-      err += chunk;
-    });
-    child.on('error', reject);
-    child.on('close', (code) => {
-      if (code === 0) return resolve(out);
-      reject(new Error(err.trim() || `git ${args.join(' ')} failed with code ${code}`));
-    });
-  });
-}
-
-export interface GitTarget {
-  remote: string;
-  branch: string; // may be a branch name or a full ref (e.g. refs/worklog/data)
-}
-
-/**
- * Escape a string for safe use in shell commands
- */
-function escapeShellArg(arg: string): string {
-  if (process.platform === 'win32') {
-    // Windows cmd.exe uses double quotes; escape internal double quotes
-    return '"' + arg.replace(/"/g, '\\"') + '"';
-  }
-  // Unix: use single quotes and escape any single quotes within the string
-  return "'" + arg.replace(/'/g, "'\\''") + "'";
-}
-
-/**
- * Result of a sync operation
- */
-export interface SyncResult {
-  itemsAdded: number;
-  itemsUpdated: number;
-  itemsUnchanged: number;
-  commentsAdded: number;
-  commentsUnchanged: number;
-  conflicts: string[]; // Legacy text-based conflicts (for backward compatibility)
-  conflictDetails: ConflictDetail[]; // Detailed conflict information
-  /**
-   * Held-claim downgrades the sync refused to write (SA-0MVE34D9B005TUYJ).
-   * Empty unless a claim landed during the sync window or a stale remote row
-   * tried to downgrade a held claim. Present for the sync log / `--json`.
-   */
-  claimHolds?: ClaimHoldDecision[];
-  /**
-   * Wall-clock milliseconds per sync phase (`pull`, `persist-items`,
-   * `persist-comments`, `export`, `push` — {@link SyncPhaseTimings}).
-   * Populated by `performSync` so the `--json` summary and the sync log can
-   * attribute the wall-clock cost (WL-0MVK6SD5O001K901). Skipped phases
-   * report 0 rather than disappearing.
-   */
-  phaseTimings?: SyncPhaseTimings;
-}
-
-export interface MergeOptions {
-  defaultValueFields?: Array<keyof WorkItem>;
-  sameTimestampStrategy?: 'lexicographic' | 'local' | 'remote';
-  /** When true, allow remote defaults to overwrite local non-defaults (accept regressions). Default: false. */
-  acceptRegressions?: boolean;
-}
 
 /**
  * Regression-guard definition of "default" for merge-participating fields.
@@ -353,20 +266,6 @@ export function filterRemoteDataByPrefix(
  * yields the same result, so dry-run and normal syncs report the same refusal.
  */
 
-export interface IncomingCommit {
-  hash: string;         // short commit hash (e.g. '5fc880a')
-  authorEmail: string;  // may be '' when the commit has an empty author email
-}
-
-export type SyncAllowedAuthors = string[] | null | boolean;
-
-export interface AuthorIdentityOptions {
-  remoteTrackingRef: string;     // e.g. refs/worklog/remotes/origin/worklog/data
-  expectedAuthorEmail?: string;  // repo `git config user.email`; undefined = not configured
-  allowForeignAuthor?: boolean;  // `wl sync --allow-foreign-author` (legacy override)
-  allowedAuthors?: SyncAllowedAuthors; // whitelist: []=strict, string[]=allow listed, null/true=allow all
-}
-
 /** Normalize email for comparison: trimmed, lowercased. */
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -386,17 +285,6 @@ function isEmailWhitelisted(email: string, allowedAuthors: SyncAllowedAuthors | 
   return allowedAuthors.some((entry) => typeof entry === 'string' && normalizeEmail(entry) === normalized);
 }
 
-export interface AuthorIdentityViolation {
-  commit: string;
-  authorEmail: string;
-  reason: 'empty-email' | 'foreign-email';
-}
-
-export interface AuthorIdentityResult {
-  allowed: boolean;
-  violations: AuthorIdentityViolation[];
-  message: string;   // refusal message naming the offending commit(s) + remote ref; '' when allowed
-}
 
 /**
  * Inspect the author emails of commits on the remote tracking ref since the
@@ -1465,16 +1353,6 @@ export async function getRemoteDataFileContentWithRef(
 
 export async function getRemoteDataFileContent(dataFilePath: string, target: GitTarget): Promise<string | null> {
   return (await getRemoteDataFileContentWithRef(dataFilePath, target)).content;
-}
-
-/**
- * Result of reconstructing a remote worklog stream from ref history.
- */
-export interface DeltaReplayResult {
-  items: WorkItem[];
-  comments: Comment[];
-  dependencyEdges: DependencyEdge[];
-  auditResults: AuditResult[];
 }
 
 /**

@@ -90,13 +90,13 @@ export const SPLIT_ALLOWLIST_CEILING: readonly string[] = ['sync.ts'];
 /**
  * Family modules permitted to import the barrel with a (type-only) edge.
  *
- * Recorded reality (2026-10-26, `dev` @ `f40fcd7a`): `src/sync/merge-utils.ts`
- * imports `type { MergeOptions } from '../sync.js'` — the only known
- * would-be cycle in the sync family. Child 2 re-points it at
- * `src/sync/types.ts`, which removes the entry *and* the import together. Any
- * other family module importing the barrel is a layering violation.
+ * Was `['src/sync/merge-utils.ts']` while that module still imported
+ * `type { MergeOptions } from '../sync.js'` (recorded 2026-10-26, `dev` @
+ * `f40fcd7a`). Child 2 re-pointed it at `src/sync/types.ts`, removing the
+ * entry and the import together (WL-0MVP9PCOU004L8HN AC4). Any family module
+ * importing the barrel — type-only or runtime — is a layering violation.
  */
-export const TYPE_ONLY_BARREL_ALLOWLIST: readonly string[] = ['src/sync/merge-utils.ts'];
+export const TYPE_ONLY_BARREL_ALLOWLIST: readonly string[] = [];
 
 /** Roots scanned for barrel consumers (static and dynamic imports). */
 export const CONSUMER_ROOTS: readonly string[] = ['src', 'tests', 'scripts'];

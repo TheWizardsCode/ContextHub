@@ -500,14 +500,17 @@ describe('GIT_DIR leak defense in sync.ts (WL-0MS99Y6R40028Q9G)', () => {
       .resolves.toBeUndefined();
   });
 
-  it('sync.ts sanitizes GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE for child git processes', () => {
-    const syncSource = fs.readFileSync(
-      new URL('../src/sync.ts', import.meta.url),
+  it('sync family sanitizes GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE for child git processes', () => {
+    // sanitizeGitEnv moved to src/sync/git-exec.ts by WL-0MVP9PCOU004L8HN;
+    // the invariant — sync git children never inherit a leaked GIT_DIR
+    // (WL-0MS99Y6R40028Q9G) — is unchanged and is pinned at its new home.
+    const gitExecSource = fs.readFileSync(
+      new URL('../src/sync/git-exec.ts', import.meta.url),
       'utf8'
     );
-    expect(syncSource).toContain('sanitizeGitEnv');
-    expect(syncSource).toContain('delete clean.GIT_DIR');
-    expect(syncSource).toContain('delete clean.GIT_WORK_TREE');
-    expect(syncSource).toContain('delete clean.GIT_INDEX_FILE');
+    expect(gitExecSource).toContain('sanitizeGitEnv');
+    expect(gitExecSource).toContain('delete clean.GIT_DIR');
+    expect(gitExecSource).toContain('delete clean.GIT_WORK_TREE');
+    expect(gitExecSource).toContain('delete clean.GIT_INDEX_FILE');
   });
 });

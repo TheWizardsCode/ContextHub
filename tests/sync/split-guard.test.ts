@@ -170,11 +170,14 @@ describe('sync split guard — live tree', () => {
     expect(findBarrelImports(index, true)).toEqual([]);
   });
 
-  it('keeps the single merge-utils type-only barrel import allowlisted and intact', () => {
-    expect([...TYPE_ONLY_BARREL_ALLOWLIST]).toEqual(['src/sync/merge-utils.ts']);
-    // No module outside the allowlist may type-import the barrel…
+  it('allows no sync-family module to import the barrel (allowlist emptied)', () => {
+    // Child 2 re-pointed merge-utils.ts at ./types.js, so the allowlist is
+    // empty and no family module may hold a type-only — or runtime — barrel
+    // edge (WL-0MVP9PCOU004L8HN AC4).
+    expect([...TYPE_ONLY_BARREL_ALLOWLIST]).toEqual([]);
+    // No module may type-import the barrel…
     expect(findBarrelTypeOnlyImportsOutsideAllowlist(index)).toEqual([]);
-    // …and the allowlisted edge must still exist (it is not a stale exemption).
+    // …and no stale exemption may remain recorded.
     expect(findAbsentAllowlistedBarrelImports(index)).toEqual([]);
     expect(index.byFile.has('src/sync/merge-utils.ts')).toBe(true);
   });
@@ -365,13 +368,18 @@ describe('sync split guard — gates fail on broken input', () => {
     expect(findRuntimeCycles(broken)).toHaveLength(1);
   });
 
-  it('permits the allowlisted type-only barrel edge but reports a runtime one', () => {
+  it('reports a type-only barrel edge now the allowlist is empty, and a runtime one', () => {
     const typeOnly = indexFromSources({
       [SYNC_BARREL]: `export interface MergeOptions {}\n`,
       'src/sync/merge-utils.ts': `import type { MergeOptions } from '../sync.js';\nexport const x = (o: MergeOptions) => o;\n`,
     });
+    // The type-only edge is erased at runtime…
     expect(findBarrelImports(typeOnly, true)).toEqual([]);
-    expect(findBarrelTypeOnlyImportsOutsideAllowlist(typeOnly)).toEqual([]);
+    // …but with no allowlisted module it is still a layering violation
+    // (WL-0MVP9PCOU004L8HN AC4 emptied the allowlist).
+    expect(findBarrelTypeOnlyImportsOutsideAllowlist(typeOnly)).toEqual([
+      { file: 'src/sync/merge-utils.ts', specifier: '../sync.js', typeOnly: true },
+    ]);
     expect(findUnexplainedStaticCycles(typeOnly)).toEqual([]);
 
     const runtime = indexFromSources({
@@ -402,7 +410,11 @@ describe('sync split guard — gates fail on broken input', () => {
       [SYNC_BARREL]: `export interface MergeOptions {}\n`,
       'src/sync/merge-utils.ts': `export const x = 1;\n`,
     });
-    expect(findAbsentAllowlistedBarrelImports(stale)).toEqual(['src/sync/merge-utils.ts']);
+    // Pass the historical allowlist explicitly: the live one is now empty, but
+    // the stale-exemption proof must keep working for any future entry.
+    expect(
+      findAbsentAllowlistedBarrelImports(stale, ['src/sync/merge-utils.ts']),
+    ).toEqual(['src/sync/merge-utils.ts']);
   });
 
   it('reports a module one line over the ceiling and passes at the ceiling', () => {
