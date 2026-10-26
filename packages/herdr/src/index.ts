@@ -24,7 +24,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
 import { tmpdir, cpus } from 'node:os';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
 import { isAuditFresh } from '@worklog/shared/icons';
 import {
@@ -218,85 +218,27 @@ export {
   spawnBackgroundShell,
 } from './index.background.js';
 
-// ── Pane-ID capture (WL-0MSBQUJQX005RAT9) ─────────────────────────────
+// ── Pane-ID capture + work-item extraction (index.pane-capture.ts) ──
+// Extracted verbatim (move-only, WL-0MVOA0MBH004KKL0): the pane-ID
+// association capture and work-item extraction helpers moved to
+// `index.pane-capture.ts`. Re-exported so the barrel keeps the surface
+// index.test.ts/claim.test.ts import (`CAPTURE_TIMEOUT_MS`,
+// `capturePaneIdFromFile`, `extractWorkItemId`); `CAPTURE_POLL_INTERVAL_MS`
+// and `PaneIdFileDeps` become internal to the new module. The dispatch
+// paths below value-import the helpers (same pattern as the
+// index.commands.js import above). `AGENT_ASSIGNEE` stays with the claim
+// section (phase 5).
 
-/** Poll interval for the pane-ID file capture loop. */
-export const CAPTURE_POLL_INTERVAL_MS = 200;
-/** Total time budget for the pane-ID file capture loop. */
-export const CAPTURE_TIMEOUT_MS = 5000;
+import {
+  capturePaneIdFromFile,
+  extractWorkItemId,
+} from './index.pane-capture.js';
 
-/**
- * Injectable filesystem/timer dependencies for {@link capturePaneIdFromFile}
- * (tests replace these so no real polling or temp files are needed).
- */
-export interface PaneIdFileDeps {
-  existsSync?: (p: string) => boolean;
-  readFile?: (p: string) => string;
-  unlink?: (p: string) => void;
-  sleep?: (ms: number) => Promise<void>;
-  now?: () => number;
-}
-
-/**
- * Poll for the pane-ID file written by send-to-pi.sh, record the
- * work-item ↔ pane association, and clean up the temp file.
- *
- * Fire-and-forget (never awaited by the TUI): the loop polls briefly for
- * the file so pane-ID capture never blocks the TUI event loop or changes
- * spawn behavior. A missing file (split failed) is a no-op — no entry is
- * recorded. All failures are swallowed (fail-open).
- *
- * @param workItemId - Work item the agent command was dispatched for.
- * @param paneIdFile - Path passed to send-to-pi.sh via `--pane-id-file`.
- * @param record - Records the association (typically
- *                 `tracker.recordAgentForWorkItem`).
- * @param deps - Injectable fs/timer dependencies (tests).
- * @returns The captured pane ID, or undefined on timeout.
- */
-export async function capturePaneIdFromFile(
-  workItemId: string,
-  paneIdFile: string,
-  record: (workItemId: string, paneId: string) => void | Promise<void>,
-  deps: PaneIdFileDeps = {},
-): Promise<string | undefined> {
-  const existsSyncFn = deps.existsSync ?? ((p: string) => existsSync(p));
-  const readFileFn = deps.readFile ?? ((p: string) => readFileSync(p, 'utf8'));
-  const unlinkFn = deps.unlink ?? ((p: string) => { try { unlinkSync(p); } catch { /* ignore */ } });
-  const sleep = deps.sleep ?? ((ms: number) => new Promise((r) => setTimeout(r, ms)));
-  const now = deps.now ?? (() => Date.now());
-  const deadline = now() + CAPTURE_TIMEOUT_MS;
-
-  while (now() < deadline) {
-    if (existsSyncFn(paneIdFile)) {
-      let raw: string | null = null;
-      try {
-        raw = readFileFn(paneIdFile);
-      } catch {
-        raw = null; // file mid-write — keep polling
-      }
-      const paneId = raw !== null ? parsePaneIdFile(raw) : undefined;
-      if (paneId) {
-        try {
-          await record(workItemId, paneId);
-        } catch {
-          // Recording must never break dispatch; the temp file is still
-          // cleaned up below.
-        }
-        unlinkFn(paneIdFile);
-        return paneId;
-      }
-    }
-    await sleep(CAPTURE_POLL_INTERVAL_MS);
-  }
-  // Timed out — the split may have failed or the file never appeared.
-  return undefined;
-}
-
-/**
- * Work-item ID format: a prefix (e.g. `WL`, `SA`) followed by a hash,
- * e.g. `WL-0MS9NPHQU005Y3VE`.
- */
-const WORK_ITEM_ID_PATTERN = /^[A-Z]+-\w+$/;
+export {
+  CAPTURE_TIMEOUT_MS,
+  capturePaneIdFromFile,
+  extractWorkItemId,
+} from './index.pane-capture.js';
 
 /**
  * Assignee used when the plugin claims a work-item (sets status to
@@ -304,25 +246,6 @@ const WORK_ITEM_ID_PATTERN = /^[A-Z]+-\w+$/;
  * handle used across the worklog (see AGENTS.md claim pattern).
  */
 const AGENT_ASSIGNEE = 'Map';
-
-/**
- * Extract the work-item ID from an agent command string.
- *
- * Agent commands are typically `/intake <id>`, `/plan <id>`, or
- * `/skill:<name> <id>` with the ID as the last argument. All tokens are
- * scanned for the work-item ID pattern and the last match is returned.
- * Commands without an ID (e.g. `/intake` alone) return `undefined` and
- * skip the status update gracefully.
- */
-export function extractWorkItemId(command: string): string | undefined {
-  const tokens = command.trim().split(/\s+/);
-  for (let i = tokens.length - 1; i >= 0; i -= 1) {
-    if (WORK_ITEM_ID_PATTERN.test(tokens[i])) {
-      return tokens[i];
-    }
-  }
-  return undefined;
-}
 
 /**
  * Claim the work-item referenced by an agent command (set its status to
