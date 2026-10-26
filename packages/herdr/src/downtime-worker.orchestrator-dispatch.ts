@@ -889,6 +889,30 @@ export async function performDispatch(
         const probe = await computeMostImportantItem(ctx.opts.deps, cfg.cwd, Date.now(), cfg.browseItemCount, cfg.markerStaleWindowMs, cfg.nonTerminalCooldownMs, cfg.maxAttempts, cfg.stallScanEnabled, cfg.stallScanThresholdMs, cfg.cpuGatePercent);
         if (probe.ok && 'noCandidate' in probe && probe.noCandidate) {
           ctx.errorStrikes = 0; // the CLI answered — it is healthy
+          // Empty-leader hand-off (parent WL-0MVP7QHUB003ZA2A AC1): a
+          // genuinely empty cycle (no in-view, no offer, no own-backlog
+          // dispatch AND an empty own root) releases leadership so a peer
+          // whose sprint view DOES hold dispatchable work can win the next
+          // election and dispatch. Leadership is a transient role granted
+          // to the instance with work to do, not permanently held by a
+          // no-work instance. This is the SAME `releaseLeadership()`
+          // primitive the own-backlog hand-off above uses (the election
+          // primitive is reused, never modified) and it fires at most once
+          // per cycle: the `ctx.leaderState === true` guard makes a repeat
+          // call in the same tick a no-op, and `releaseLeadership()` itself
+          // is an idempotent stateless lock/lease file delete (fail-safe —
+          // never throws, so it cannot escape the dispatch attempt). The
+          // step-down is skipped for every other branch: a probe candidate
+          // (transiently empty coordination file), a failed probe
+          // (fail-closed strike path — an unknown backlog is not an empty
+          // one) and every hold/gate reason, which return their own
+          // terminal reason before reaching this arm. Legacy mode
+          // (`leaderManager === null`) has nothing to hand off and is
+          // unchanged.
+          if (ctx.leaderManager !== null && ctx.leaderState) {
+            ctx.leaderManager.releaseLeadership();
+            ctx.leaderState = false;
+          }
           ctx.cooldownUntil = Date.now() + cfg.noCandidateCooldownMs;
           ctx.tracker.record(false);
           ctx.perSlotTracker.record([]);

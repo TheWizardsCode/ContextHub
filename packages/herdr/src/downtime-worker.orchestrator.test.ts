@@ -597,11 +597,17 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick();
     expect(worker.paused).toBe(true);
-    expect(worker.isLeader).toBe(true);
+    // Empty-leader hand-off (parent WL-0MVP7QHUB003ZA2A AC1): a genuinely
+    // empty cycle releases leadership, so `leaderState` is false here. With
+    // no peer competing, the leader block at the START of the next tick
+    // re-elects this instance (asserted below).
+    expect(worker.isLeader).toBe(false);
 
-    // Tick 3 during cooldown: lease should refresh (leader block runs first)
+    // Tick 3 during cooldown: the leader block runs first → re-election wins
+    // (no peer) → the lease is refreshed during the pause.
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 60_000);
     await worker.tick();
+    expect(worker.isLeader).toBe(true);
 
     const leaseDuringPause = readLease(coordDir);
     expect(leaseDuringPause.leaderId).toBe('inst-a');
@@ -631,7 +637,15 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick();
     expect(worker.paused).toBe(true);
+    // Empty-leader hand-off (parent WL-0MVP7QHUB003ZA2A AC1): the genuinely
+    // empty cycle released leadership. Re-acquire it with one paused tick
+    // (no peer holds the lease) so this spec still exercises lease renewal
+    // while `leaderState === true`.
+    expect(worker.isLeader).toBe(false);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 60_000);
+    await worker.tick();
     expect(worker.isLeader).toBe(true);
+    expect(worker.paused).toBe(true);
 
     // Stalled tick loop: advance time PAST lease TTL (300s) but still within
     // the cooldown (3.6M ms) — simulate a frozen tick loop mid-pause.
@@ -680,7 +694,15 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
     vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
     await worker.tick();
     expect(worker.paused).toBe(true);
+    // Empty-leader hand-off (parent WL-0MVP7QHUB003ZA2A AC1): the genuinely
+    // empty cycle released leadership. Re-acquire it with one paused tick
+    // (no peer holds the lease yet) so this spec still exercises the
+    // per-tick re-derivation from a CACHED `leaderState === true`.
+    expect(worker.isLeader).toBe(false);
+    vi.setSystemTime(start + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 60_000);
+    await worker.tick();
     expect(worker.isLeader).toBe(true);
+    expect(worker.paused).toBe(true);
 
     // Mid-pause, B wins the election with a FRESH lease and a FRESH
     // coordination entry (a live instance refreshes its entry on its own
@@ -758,12 +780,12 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
   // gate / fail-closed probe path) — and legacy mode has no manager to
   // release.
   //
-  // RED WITNESS: today the worker loop calls `releaseLeadership()` ONLY for
-  // `outcome.ownBacklogDispatch === true`, so the positive spec below asserts
-  // post-implementation behaviour and is committed with `it.fails` — the
-  // suite stays GREEN while the assertion is RED. The implementation child
-  // (WL-0MVP9UHCF005XHR2) flips `it.fails` to `it`. The negative specs are
-  // regression pins that already hold and must stay green.
+  // RED WITNESS (now GREEN): the pre-fix worker loop called
+  // `releaseLeadership()` ONLY for `outcome.ownBacklogDispatch === true`, so
+  // the positive spec below was committed as `it.fails` while the assertion
+  // was RED; the implementation child (WL-0MVP9UHCF005XHR2) added the
+  // empty-own-backlog trigger and flipped it to `it`. The negative specs are
+  // regression pins that hold in both states and must stay green.
   describe('empty-own-backlog leadership step-down (WL-0MVP7QHUB003ZA2A AC1)', () => {
     const START = 900_000_000;
 
@@ -822,7 +844,7 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
       dispatchedAt: new Date(START).toISOString(),
     });
 
-    it.fails(
+    it(
       'steps down exactly once when the own head and the offer list are both genuinely empty (AC1)',
       async () => {
         const { worker, coordDir } = makeCoordinationWorker();
