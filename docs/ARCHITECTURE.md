@@ -325,6 +325,11 @@ Two fingerprint providers exist; the CLI uses the counter-based one:
   integer in the cache dir. It is stable across reads (reads never touch it)
   and changes exactly when a write lands, so it is the CLI's fingerprint of
   record. The file fingerprint remains available for direct module use.
+  Writes are atomic (temp file + rename) and a writer never returns a value
+  below one it has already returned for the same counter (per-process
+  high-water mark, WL-0MVOGBJ7V00973BI); a concurrent writer's stale write
+  can still lower the on-disk value, which only causes extra invalidation —
+  never a stale hit — and the next bump re-raises it.
 
 ### Invalidation semantics (CLI wiring)
 

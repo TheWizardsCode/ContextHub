@@ -169,8 +169,10 @@ export function readStateCounter(cacheDir: string, worklogDir: string): number {
 
 /**
  * Atomically increment the per-worklog-dir write counter. Returns the new
- * value. Concurrent increments may coalesce (both write N+1) but can never
- * regress the counter, which is all freshness checking needs.
+ * value. Concurrent increments may coalesce (both write N+1) but a bump never
+ * returns a value below one this process already returned for the same counter
+ * — a writer's own sequence is strictly increasing, which is all freshness
+ * checking needs.
  *
  * Every bump is a cache write, so a bounded, rate-limited opportunistic prune
  * runs here (F9 — WL-0MVFRRQ9W003KEFL): once the state dir exceeds the bound,
@@ -178,7 +180,16 @@ export function readStateCounter(cacheDir: string, worklogDir: string): number {
  */
 export function bumpStateCounter(cacheDir: string, worklogDir: string): number {
   const file = stateCounterFilePath(cacheDir, worklogDir);
-  const next = readStateCounter(cacheDir, worklogDir) + 1;
+  const key = path.resolve(file);
+  // The bump is a read-modify-write of a shared file, so a slow writer can
+  // compute N+1 from a stale read and rename it over a newer value written by
+  // a concurrent writer. That made the value a writer returns regress
+  // (``COUNTER REGRESSION … last=20 value=19``, WL-0MVOGBJ7V00973BI). Remember
+  // the highest value THIS process has returned for the counter and never
+  // return below it: coalescing across processes stays allowed, but a writer
+  // never observes its own counter going backwards.
+  const previous = stateHighWaterMark(key);
+  const next = Math.max(readStateCounter(cacheDir, worklogDir), previous) + 1;
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     const tmp = `${file}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
@@ -187,8 +198,39 @@ export function bumpStateCounter(cacheDir: string, worklogDir: string): number {
   } catch (err) {
     debugLog(`failed to bump state counter: ${(err as Error).message}`);
   }
+  rememberStateHighWaterMark(key, next);
   if (statePruneDue()) maybePruneStateDir(cacheDir);
   return next;
+}
+
+/**
+ * Bounded per-process high-water marks for the values `bumpStateCounter` has
+ * already returned, keyed by resolved counter-file path.
+ *
+ * Cross-process writes are only ever optimistic (no lock): the on-disk value
+ * may still be lowered by another process's stale write. That is safe — a
+ * lowered counter only causes extra cache invalidation, never a stale hit —
+ * and the next bump re-raises it. This map only guarantees the local
+ * (per-writer) monotonicity the concurrency contract promises.
+ *
+ * The `wl` CLI is short-lived (one command per process), so the map holds a
+ * handful of entries; the cap keeps a long-lived importer bounded (dropping a
+ * forgotten dir merely weakens the local guard, never freshness).
+ */
+const STATE_HIGH_WATER_MAX_ENTRIES = 1024;
+const stateHighWaterMarks = new Map<string, number>();
+
+function stateHighWaterMark(key: string): number {
+  return stateHighWaterMarks.get(key) ?? 0;
+}
+
+function rememberStateHighWaterMark(key: string, value: number): void {
+  // Re-insert so Map insertion order reflects recency for the eviction below.
+  stateHighWaterMarks.delete(key);
+  stateHighWaterMarks.set(key, value);
+  if (stateHighWaterMarks.size <= STATE_HIGH_WATER_MAX_ENTRIES) return;
+  const oldest = stateHighWaterMarks.keys().next().value;
+  if (oldest !== undefined) stateHighWaterMarks.delete(oldest);
 }
 
 // -----------------------------------------------------------------------
