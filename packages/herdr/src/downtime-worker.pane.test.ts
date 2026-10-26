@@ -251,22 +251,32 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     const handle = { unref: vi.fn(), once: vi.fn() };
     const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
 
-    const startedAt = Date.now();
-    const spawned = await spawnDowntimePane(
-      '/path/to/send-to-pi.sh',
-      [],
-      { cwd: '/repo', probeMs: 40 },
-      spawnFn,
-    );
+    // Deterministic fake timers: no wall-clock assertion (a timing assertion
+    // is the same load-sensitive flake class this item fixes).
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const spawned = spawnDowntimePane('/path/to/send-to-pi.sh', [], { cwd: '/repo', probeMs: 40 }, spawnFn);
+      void spawned.then(() => {
+        settled = true;
+      });
 
-    // The probe window is a caller-side deadline, NOT part of the spawn opts
-    // carrier: the boundary sees the pane opts unchanged.
-    expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo' });
-    // With no error/exit events, the injected (short) window resolves ok:true
-    // well before the 500 ms default — proving the override is honoured and
-    // that no-op-event panes still assume the pane opened.
-    expect(spawned).toEqual({ ok: true });
-    expect(Date.now() - startedAt).toBeLessThan(450);
+      // The probe window is a caller-side deadline, NOT part of the spawn opts
+      // carrier: the boundary sees the pane opts unchanged.
+      expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo' });
+      // Before the injected 40 ms window elapses the pane is not yet assumed
+      // opened...
+      await vi.advanceTimersByTimeAsync(30);
+      expect(settled).toBe(false);
+      // ...and at 40 ms it resolves ok:true — proving the override is honoured
+      // (the 500 ms default would still be pending here) and that no-op-event
+      // panes still assume the pane opened.
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(true);
+      expect(await spawned).toEqual({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
