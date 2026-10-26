@@ -19,6 +19,7 @@ import * as path from 'path';
 import { promisify } from 'util';
 import { withinWorktreeContext, killProcessesForWorktree } from './process-lifecycle.js';
 import { gitExecAsync, execAsync, execGitCaptureStdout, escapeShellArg } from './sync/git-exec.js';
+import { getRemoteTrackingRef, fetchTargetRef, readLastSyncedRef } from './sync/refs.js';
 import type {
   GitTarget,
   IncomingCommit,
@@ -58,6 +59,18 @@ export {
 } from './sync/merge-predicates.js';
 export { mergeWorkItems } from './sync/merge.js';
 export { mergeComments, mergeAuditResults, mergeDependencyEdges } from './sync/merge-collateral.js';
+
+// ── Refs (WL-0MVP9R3PU004EGYE) ───────────────────────────────────────
+// The last-synced/remote-ref bookkeeping moved to `./sync/refs.js`; the
+// public names are re-exported here so consumers of `'./sync.js'` are
+// unaffected.
+export {
+  getLastSyncedRefPath,
+  readLastSyncedRef,
+  writeLastSyncedRef,
+  getRemoteTrackingRefSha,
+  _testOnly_getRemoteTrackingRef,
+} from './sync/refs.js';
 
 
 /**
@@ -280,54 +293,6 @@ export async function getConfiguredUserEmail(): Promise<string | undefined> {
 }
 
 /**
- * Path of the last-synced-ref state file (mirrors the last-sync-time
- * pattern). Persists the remote tracking ref tip after each successful
- * non-dry-run sync so the next sync only inspects commits since that point.
- */
-export function getLastSyncedRefPath(dataFilePath: string): string {
-  return path.join(path.dirname(dataFilePath), 'last-synced-ref');
-}
-
-/**
- * Read the last-known sync point (remote tracking ref tip). Returns undefined
- * when the state file is absent, empty, or unreadable — the gate then scans
- * the whole remote ref history.
- */
-export function readLastSyncedRef(dataFilePath: string): string | undefined {
-  try {
-    const raw = fs.readFileSync(getLastSyncedRefPath(dataFilePath), 'utf8').trim();
-    return raw || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Persist the last-known sync point after a successful non-dry-run sync.
- */
-export function writeLastSyncedRef(dataFilePath: string, refSha: string): void {
-  try {
-    fs.writeFileSync(getLastSyncedRefPath(dataFilePath), `${refSha}\n`, 'utf8');
-  } catch {
-    // Non-critical state file; a failed write only means the next sync scans
-    // more history than necessary (the gate still runs).
-  }
-}
-
-/**
- * Resolve the tip SHA of the remote tracking ref (used to persist
- * last-synced-ref). Returns undefined when the ref cannot be resolved.
- */
-export async function getRemoteTrackingRefSha(remoteTrackingRef: string): Promise<string | undefined> {
-  try {
-    const { stdout } = await gitExecAsync(`git rev-parse ${escapeShellArg(remoteTrackingRef)}`);
-    return stdout.trim() || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
  * Wire the author-identity gate into a sync flow (parent AC4): inspect the
  * incoming commits on the remote tracking ref since the last sync point and
  * throw a refusal error naming the offending commit(s) + remote ref when the
@@ -413,95 +378,6 @@ export async function assertDataFileInCwdRepo(dataFilePath: string): Promise<voi
       `Run 'wl sync' from inside '${dataRepoRoot}'.`
     );
   }
-}
-
-async function fetchRemote(remote: string): Promise<void> {
-  await execAsync(`git fetch ${escapeShellArg(remote)}`);
-}
-
-function getRemoteTrackingRef(remote: string, branchOrRef: string): string {
-  // For a named branch like "worklog-data", track it as refs/remotes/origin/worklog-data.
-  // For an explicit ref like "refs/worklog/data", DO NOT track it under refs/remotes/...
-  // because that namespace is reserved for remote-tracking branches and can collide with
-  // real branches like "worklog/data" and/or reject non-fast-forward updates.
-  //
-  // Instead, keep a local-only tracking ref under refs/worklog/remotes/<remote>/...
-  if (branchOrRef.startsWith('refs/')) {
-    const suffix = branchOrRef.slice('refs/'.length);
-    return `refs/worklog/remotes/${remote}/${suffix}`;
-  }
-
-  return `refs/remotes/${remote}/${branchOrRef}`;
-}
-
-// Exposed for unit tests.
-export const _testOnly_getRemoteTrackingRef = getRemoteTrackingRef;
-
-async function refExists(ref: string): Promise<boolean> {
-  try {
-    await execAsync(`git show-ref --verify --quiet ${escapeShellArg(ref)}`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function fetchTargetRef(target: GitTarget): Promise<{ hasRemote: boolean; remoteTrackingRef: string }> {
-  const remoteTrackingRef = getRemoteTrackingRef(target.remote, target.branch);
-
-  if (target.branch.startsWith('refs/')) {
-    // Default git fetch refspec does not include custom refs/*, so fetch it explicitly.
-    // If it doesn't exist yet, treat as "no remote".
-    try {
-      await execAsync(
-        // Force-update the local tracking ref so stale/colliding local refs don't block sync.
-        `git fetch ${escapeShellArg(target.remote)} ${escapeShellArg(`+${target.branch}:${remoteTrackingRef}`)}`
-      );
-    } catch {
-      // Avoid silently treating fetch failures as "ref missing"; that can lead to overwriting
-      // an existing remote data ref from an orphan branch.
-      let remoteExists = false;
-      try {
-        const { stdout } = await execAsync(
-          `git ls-remote --exit-code ${escapeShellArg(target.remote)} ${escapeShellArg(target.branch)}`
-        );
-        remoteExists = !!stdout.trim();
-      } catch {
-        remoteExists = false;
-      }
-
-      if (remoteExists) {
-        throw new Error(`Failed to fetch existing remote ref ${target.branch} from ${target.remote}`);
-      }
-
-      return { hasRemote: false, remoteTrackingRef };
-    }
-
-    const hasRemote = await refExists(remoteTrackingRef);
-    if (!hasRemote) {
-      // If the remote ref exists but we can't materialize a local tracking ref,
-      // treat it as an error to avoid overwriting the remote from an orphan branch.
-      let remoteExists = false;
-      try {
-        const { stdout } = await execAsync(
-          `git ls-remote --exit-code ${escapeShellArg(target.remote)} ${escapeShellArg(target.branch)}`
-        );
-        remoteExists = !!stdout.trim();
-      } catch {
-        remoteExists = false;
-      }
-
-      if (remoteExists) {
-        throw new Error(`Failed to create local tracking ref for ${target.branch} from ${target.remote}`);
-      }
-    }
-
-    return { hasRemote, remoteTrackingRef };
-  }
-
-  // Standard branch fetch. This will populate refs/remotes/<remote>/<branch>.
-  await execAsync(`git fetch ${escapeShellArg(target.remote)} ${escapeShellArg(target.branch)}`);
-  return { hasRemote: await refExists(remoteTrackingRef), remoteTrackingRef };
 }
 
 function getRepoRelativePath(repoRootPath: string, filePath: string): { absolutePath: string; relativePath: string } {
