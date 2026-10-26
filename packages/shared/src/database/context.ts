@@ -104,8 +104,10 @@ export interface WorklogDatabaseContext {
  * to plan), so a reverse import would make the slice cyclic. The hierarchy
  * queries `delete()` needs to walk the tree (`getDescendants`, `getDepth`) are
  * therefore expressed here and wired by the façade instead; the same applies
- * to the dependency-reconciliation and semantic-index members, which still
- * live on the façade until their own slices move them.
+ * to the semantic-index members, which still live on the façade until their
+ * own slice moves them. The dependency-reconciliation members
+ * (`reconcileDependentStatus`, `reconcileDependentsForTarget`) now live in
+ * `dependencies.ts` and are reached here through the façade's thin delegates.
  */
 export interface ItemHooks {
   /** Order items by the hierarchy sort-index (createdAt/id fallback). */
@@ -155,6 +157,8 @@ export interface UpdateIfMatchesResult {
 export interface WriteHooks {
   /** Trigger the configured auto-sync provider (no-op when disabled). */
   triggerAutoSync(): void;
+  /** Diagnostic trace (suppressed when the database is silent). */
+  debug(message: string): void;
 }
 
 // ── Façade hooks used by the `wl next` selection modules ────────────────

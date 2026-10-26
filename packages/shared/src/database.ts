@@ -6,7 +6,7 @@ import { randomBytes } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { WorkItem, WorkItemPriority, CreateWorkItemInput, UpdateWorkItemInput, WorkItemQuery, Comment, CreateCommentInput, UpdateCommentInput, NextWorkItemResult, DependencyEdge, AuditResult, AuditWaiver, DemotedParent, RevertedItem } from './types.js';
-import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps, unescapeText } from './persistent-store.js';
+import { SqlitePersistentStore, FtsSearchResult, PersistentStoreServices, PersistentStoreCacheOptions, LastExportTimestamps } from './persistent-store.js';
 // Self-referencing package export (WL-0MSJ4BT4Z002HH9B grep guard forbids a
 // relative `icons.js` import; `@worklog/shared/icons` is the canonical path
 // even from within the shared package).
@@ -48,6 +48,11 @@ import * as sortModule from './database/sort.js';
 // Method implementations moved here; the class members below delegate.
 import * as workItemsModule from './database/work-items.js';
 import * as hierarchyModule from './database/hierarchy.js';
+// Dependency-edge and comment modules — thin-delegate targets
+// (WL-0MVOBP6K0007574C). Method implementations moved here; the class members
+// below delegate with their ORIGINAL signatures.
+import * as dependenciesModule from './database/dependencies.js';
+import * as commentsModule from './database/comments.js';
 
 export { normalizeTitleForMatch, UpdateIfMatchesResult } from './database/context.js';
 
@@ -218,6 +223,7 @@ export class WorklogDatabase {
       },
       writeHooks: {
         triggerAutoSync: () => this.triggerAutoSync(),
+        debug: (message) => this.debug(message),
       },
       itemHooks: {
         orderBySortIndex: (items, sortOrderCache) => this.orderBySortIndex(items, sortOrderCache),
@@ -1860,59 +1866,47 @@ export class WorklogDatabase {
 
   /**
    * Add a dependency edge (fromId depends on toId)
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
    */
   addDependencyEdge(fromId: string, toId: string): DependencyEdge | null {
-    if (!this.store.getWorkItem(fromId) || !this.store.getWorkItem(toId)) {
-      return null;
-    }
-
-    const edge: DependencyEdge = {
-      fromId,
-      toId,
-      createdAt: new Date().toISOString(),
-    };
-
-    this.store.saveDependencyEdge(edge);
-    this.triggerAutoSync();
-    return edge;
+    return dependenciesModule.addDependencyEdge(this.ctx, fromId, toId);
   }
 
   /**
    * Remove a dependency edge (fromId depends on toId)
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
    */
   removeDependencyEdge(fromId: string, toId: string): boolean {
-    const removed = this.store.deleteDependencyEdge(fromId, toId);
-    if (removed) {
-      this.triggerAutoSync();
-    }
-    return removed;
+    return dependenciesModule.removeDependencyEdge(this.ctx, fromId, toId);
   }
 
   /**
    * List outbound dependency edges (fromId depends on toId)
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
    */
   listDependencyEdgesFrom(fromId: string): DependencyEdge[] {
-    return this.store.getDependencyEdgesFrom(fromId);
+    return dependenciesModule.listDependencyEdgesFrom(this.ctx, fromId);
   }
 
   /**
    * List inbound dependency edges (items that depend on toId)
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
    */
   listDependencyEdgesTo(toId: string): DependencyEdge[] {
-    return this.store.getDependencyEdgesTo(toId);
+    return dependenciesModule.listDependencyEdgesTo(this.ctx, toId);
   }
 
+  /**
+   * Delegates to {@link isDependencyActive} in `./database/dependencies.js`.
+   * Retained because the `wl next` selection modules reach it through the
+   * `SelectionHooks` context (never by importing the façade).
+   */
   private isDependencyActive(target: WorkItem | null): boolean {
-    if (!target) {
-      return false;
-    }
-    if (target.status === 'completed' || target.status === 'deleted') {
-      return false;
-    }
-    if (target.stage === 'in_review' || target.stage === 'done') {
-      return false;
-    }
-    return true;
+    return dependenciesModule.isDependencyActive(target);
   }
 
   /**
@@ -1927,267 +1921,121 @@ export class WorklogDatabase {
     return this.isInProgressSubtree(parent, allItems);
   }
 
+  /**
+   * Delegates to {@link getActiveDependencyBlockers} in
+   * `./database/dependencies.js`. Retained because the `wl next` selection
+   * modules reach it through the `SelectionHooks` context.
+   */
   private getActiveDependencyBlockers(itemId: string, edgeCache?: EdgeCache): WorkItem[] {
-    let edges: DependencyEdge[];
-    if (edgeCache) {
-      edges = edgeCache.outbound.get(itemId) ?? [];
-    } else {
-      edges = this.listDependencyEdgesFrom(itemId);
-    }
-    const blockers: WorkItem[] = [];
-    for (const edge of edges) {
-      const target = edgeCache
-        ? (edgeCache.itemsById.get(edge.toId) ?? null)
-        : this.get(edge.toId);
-      if (this.isDependencyActive(target) && target) {
-        blockers.push(target);
-      }
-    }
-    return blockers;
+    return dependenciesModule.getActiveDependencyBlockers(this.ctx, itemId, edgeCache);
   }
 
+  /**
+   * The items that depend on `targetId`.
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
+   */
   getInboundDependents(targetId: string): WorkItem[] {
-    const inbound = this.listDependencyEdgesTo(targetId);
-    const dependents: WorkItem[] = [];
-    for (const edge of inbound) {
-      const dependent = this.get(edge.fromId);
-      if (dependent) {
-        dependents.push(dependent);
-      }
-    }
-    return dependents;
+    return dependenciesModule.getInboundDependents(this.ctx, targetId);
   }
 
+  /**
+   * True when `itemId` depends on at least one still-active item.
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
+   */
   hasActiveBlockers(itemId: string): boolean {
-    const edges = this.listDependencyEdgesFrom(itemId);
-    for (const edge of edges) {
-      const target = this.get(edge.toId);
-      if (this.isDependencyActive(target)) {
-        return true;
-      }
-    }
-    return false;
+    return dependenciesModule.hasActiveBlockers(this.ctx, itemId);
   }
 
+  /**
+   * Set or clear `blocked` for an item purely from its active blockers.
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
+   */
   reconcileBlockedStatus(itemId: string): boolean {
-    const item = this.get(itemId);
-    if (!item) {
-      return false;
-    }
-    if (item.status !== 'blocked') {
-      return false;
-    }
-    if (this.hasActiveBlockers(itemId)) {
-      return false;
-    }
-
-    const updated: WorkItem = {
-      ...item,
-      status: 'open',
-      updatedAt: new Date().toISOString(),
-    };
-    this.store.saveWorkItem(updated);
-    // Keep the FTS index fresh so status-filtered search reflects the change
-    if (this.store.ftsAvailable) {
-      this.store.upsertFtsEntry(updated);
-    }
-    this.triggerAutoSync();
-    return true;
+    return dependenciesModule.reconcileBlockedStatus(this.ctx, itemId);
   }
 
+  /**
+   * Reconcile one item's own `blocked`/`open` status from its blockers.
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
+   */
   reconcileDependentStatus(itemId: string): boolean {
-    const item = this.get(itemId);
-    if (!item) {
-      return false;
-    }
-    if (item.status === 'completed' || item.status === 'deleted') {
-      return false;
-    }
-
-    if (this.hasActiveBlockers(itemId)) {
-      if (item.status === 'blocked') {
-        return false;
-      }
-      const updated: WorkItem = {
-        ...item,
-        status: 'blocked',
-        updatedAt: new Date().toISOString(),
-      };
-      this.store.saveWorkItem(updated);
-      // Keep the FTS index fresh so status-filtered search reflects the change
-      if (this.store.ftsAvailable) {
-        this.store.upsertFtsEntry(updated);
-      }
-      this.triggerAutoSync();
-      if (process.env.WL_DEBUG) {
-        process.stderr.write(`[wl:dep] re-blocked ${itemId} (active blockers remain)\n`);
-      }
-      return true;
-    }
-
-    if (item.status !== 'blocked') {
-      return false;
-    }
-
-    const updated: WorkItem = {
-      ...item,
-      status: 'open',
-      updatedAt: new Date().toISOString(),
-    };
-    this.store.saveWorkItem(updated);
-    // Keep the FTS index fresh so status-filtered search reflects the change
-    if (this.store.ftsAvailable) {
-      this.store.upsertFtsEntry(updated);
-    }
-    this.triggerAutoSync();
-    if (process.env.WL_DEBUG) {
-      process.stderr.write(`[wl:dep] unblocked ${itemId} (no active blockers remain)\n`);
-    }
-    return true;
+    return dependenciesModule.reconcileDependentStatus(this.ctx, itemId);
   }
 
+  /**
+   * Reconcile every item that depends on `targetId`.
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
+   */
   reconcileDependentsForTarget(targetId: string): number {
-    const dependents = this.getInboundDependents(targetId);
-    let updated = 0;
-    for (const dependent of dependents) {
-      if (this.reconcileDependentStatus(dependent.id)) {
-        updated += 1;
-      }
-    }
-    if (process.env.WL_DEBUG && updated > 0) {
-      process.stderr.write(`[wl:dep] reconciled ${updated} dependent(s) for target ${targetId}\n`);
-    }
-    return updated;
+    return dependenciesModule.reconcileDependentsForTarget(this.ctx, targetId);
   }
 
   /**
    * Create a new comment
+   *
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   createComment(input: CreateCommentInput): Comment | null {
-    // Validate required fields
-    if (!input.author || input.author.trim() === '') {
-      throw new Error('Author is required');
-    }
-    if (!input.comment || input.comment.trim() === '') {
-      throw new Error('Comment text is required');
-    }
-    
-    // Verify that the work item exists
-    if (!this.store.getWorkItem(input.workItemId)) {
-      return null;
-    }
-
-    const id = this.generateCommentId();
-    const now = new Date().toISOString();
-    
-    const comment: Comment = {
-      id,
-      workItemId: input.workItemId,
-      author: input.author,
-      comment: input.comment,
-      createdAt: now,
-      references: input.references || [],
-      // Normalize nullable inputs: treat null as undefined
-      githubCommentId: input.githubCommentId == null ? undefined : input.githubCommentId,
-      githubCommentUpdatedAt: input.githubCommentUpdatedAt == null ? undefined : input.githubCommentUpdatedAt,
-    };
-
-    // Debug: log creation intent before saving (only when not silent)
-     if (!this.silent) {
-       // Send to stderr so JSON output on stdout is not contaminated
-       this.debug(`WorklogDatabase.createComment: creating comment for ${input.workItemId} by ${input.author}`);
-     }
-
-     this.store.saveComment(comment);
-     this.touchWorkItemActivityAt(input.workItemId);
-     // Re-index the parent work item in FTS to include the new comment text
-     const parentItem = this.store.getWorkItem(input.workItemId);
-     if (parentItem) this.store.upsertFtsEntry(parentItem);
-     this.triggerAutoSync();
-     return comment;
+    return commentsModule.createComment(this.ctx, this.ctx.writeHooks, input);
   }
 
   /**
    * Get a comment by ID
+   *
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   getComment(id: string): Comment | null {
-    return this.store.getComment(id);
+    return commentsModule.getComment(this.ctx, id);
   }
 
   /**
    * Update a comment
+   *
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   updateComment(id: string, input: UpdateCommentInput): Comment | null {
-    const comment = this.store.getComment(id);
-    if (!comment) {
-      return null;
-    }
-
-    let updatedAny: any = {
-      ...comment,
-      ...input,
-    };
-
-    // Normalize nullable github mapping fields: convert null -> undefined
-    if (updatedAny.githubCommentId == null) {
-      updatedAny.githubCommentId = undefined;
-    }
-    if (updatedAny.githubCommentUpdatedAt == null) {
-      updatedAny.githubCommentUpdatedAt = undefined;
-    }
-
-    // Prevent changing immutable fields
-    const updated: Comment = {
-      ...updatedAny,
-      id: comment.id,
-      workItemId: comment.workItemId,
-      createdAt: comment.createdAt,
-    } as Comment;
-
-     this.store.saveComment(updated);
-     this.touchWorkItemActivityAt(comment.workItemId);
-     // Re-index the parent work item in FTS to reflect updated comment text
-     const parentItem = this.store.getWorkItem(comment.workItemId);
-     if (parentItem) this.store.upsertFtsEntry(parentItem);
-     this.triggerAutoSync();
-     return updated;
+    return commentsModule.updateComment(this.ctx, this.ctx.writeHooks, id, input);
   }
 
   /**
    * Delete a comment
+   *
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   deleteComment(id: string): boolean {
-     const comment = this.store.getComment(id);
-     if (!comment) {
-       return false;
-     }
-     const result = this.store.deleteComment(id);
-      if (result) {
-        this.touchWorkItemActivityAt(comment.workItemId);
-        // Re-index the parent work item in FTS to reflect removed comment
-        const parentItem = this.store.getWorkItem(comment.workItemId);
-        if (parentItem) this.store.upsertFtsEntry(parentItem);
-        this.triggerAutoSync();
-      }
-      return result;
+    return commentsModule.deleteComment(this.ctx, this.ctx.writeHooks, id);
   }
 
   /**
    * Get all comments for a work item
+   *
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   getCommentsForWorkItem(workItemId: string): Comment[] {
-    return this.store.getCommentsForWorkItem(workItemId);
+    return commentsModule.getCommentsForWorkItem(this.ctx, workItemId);
   }
 
   /**
    * Get all comments as an array
+   *
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   getAllComments(): Comment[] {
-    return this.store.getAllComments();
+    return commentsModule.getAllComments(this.ctx);
   }
 
+  /**
+   * All dependency edges in the store (used by JSONL export / sync).
+   *
+   * Implementation in `./database/dependencies.js` (WL-0MVOBP6K0007574C).
+   */
   getAllDependencyEdges(): DependencyEdge[] {
-    return this.store.getAllDependencyEdges();
+    return dependenciesModule.getAllDependencyEdges(this.ctx);
   }
 
   /**
@@ -2197,127 +2045,37 @@ export class WorklogDatabase {
    * INSERT OR REPLACE so local comments absent from the incoming delta are
    * preserved, while overlapping ids converge to the merged value.
    *
-   * Change detection (WL-0MVK6S4HM005GBCO): unchanged comments are not
-   * re-saved, and FTS upkeep is restricted to the affected parent items —
-   * looked up by id instead of scanning every work item, so a comment merge
-   * never re-indexes the whole store.
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   upsertComments(comments: Comment[]): void {
-    const affectedItemIds = new Set<string>();
-    for (const comment of comments) {
-      const stored = this.store.getComment(comment.id);
-      if (stored && !this.hasCommentChanged(stored, comment)) {
-        continue;
-      }
-      this.store.saveComment(comment);
-      affectedItemIds.add(comment.workItemId);
-    }
-    // Comment text is embedded in the parent item's FTS row, so refresh only
-    // the affected parents.
-    if (this.store.ftsAvailable && affectedItemIds.size > 0) {
-      for (const id of affectedItemIds) {
-        const item = this.store.getWorkItem(id);
-        if (item) {
-          this.store.upsertFtsEntry(item);
-        }
-      }
-    }
-    this.triggerAutoSync();
+    commentsModule.upsertComments(this.ctx, this.ctx.writeHooks, comments);
   }
 
   /**
    * Import comments destructively (full-snapshot sync).
    *
-   * **Change detection (WL-0MVK6S4HM005GBCO)**: comments absent from the
-   * incoming set are deleted, unchanged comments are not re-saved, and FTS
-   * upkeep is restricted to the parents whose comment text actually changed —
-   * a no-change comment import performs zero `saveComment` writes and zero FTS
-   * writes instead of clearing and re-indexing every item.
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   importComments(comments: Comment[]): void {
-    const existingById = new Map<string, Comment>();
-    for (const stored of this.store.getAllComments()) {
-      existingById.set(stored.id, stored);
-    }
-    const incomingIds = new Set(comments.map(comment => comment.id));
-    // Parents whose FTS row (which embeds comment text) must be refreshed.
-    const affectedItemIds = new Set<string>();
-
-    // One transaction for the whole differential persist (clear/save/FTS), so
-    // readers never observe a partially-applied comment snapshot.
-    this.store.transaction(() => {
-      for (const [id, stored] of existingById) {
-        if (!incomingIds.has(id)) {
-          this.store.deleteComment(id);
-          affectedItemIds.add(stored.workItemId);
-        }
-      }
-      for (const comment of comments) {
-        const stored = existingById.get(comment.id);
-        if (stored && !this.hasCommentChanged(stored, comment)) {
-          continue;
-        }
-        this.store.saveComment(comment);
-        affectedItemIds.add(comment.workItemId);
-        // A comment that moved between items affects both parents.
-        if (stored && stored.workItemId !== comment.workItemId) {
-          affectedItemIds.add(stored.workItemId);
-        }
-      }
-
-      // Re-index only the affected parents (FTS rows embed comment text).
-      if (this.store.ftsAvailable) {
-        for (const id of affectedItemIds) {
-          const item = this.store.getWorkItem(id);
-          if (item) {
-            this.store.upsertFtsEntry(item);
-          }
-        }
-      }
-    });
-
-    this.triggerAutoSync();
+    commentsModule.importComments(this.ctx, this.ctx.writeHooks, comments);
   }
 
   /**
    * Compare a stored comment with an incoming candidate and return true when
    * persisting the candidate would change the stored row.
    *
-   * `saveComment()` stores comment text unescaped (`unescapeText`), so the
-   * incoming text is normalised the same way before comparison — a re-import
-   * of the identical snapshot must not look changed. Optional GitHub mapping
-   * fields are normalised (null vs undefined are equivalent).
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   private hasCommentChanged(stored: Comment, incoming: Comment): boolean {
-    return (
-      stored.workItemId !== incoming.workItemId ||
-      stored.author !== incoming.author ||
-      stored.comment !== unescapeText(incoming.comment ?? '') ||
-      stored.createdAt !== incoming.createdAt ||
-      JSON.stringify(stored.references ?? []) !== JSON.stringify(incoming.references ?? []) ||
-      (stored.githubCommentId ?? null) !== (incoming.githubCommentId ?? null) ||
-      (stored.githubCommentUpdatedAt ?? null) !== (incoming.githubCommentUpdatedAt ?? null)
-    );
+    return commentsModule.hasCommentChanged(stored, incoming);
   }
 
   /**
    * Record comment activity without moving the audit-relevant `updatedAt`.
    *
-   * Comment create/update/delete bump `activityAt` only, so ordering/recency
-   * features still observe the activity while audit freshness (computed
-   * against the content timestamp `updatedAt`) is unaffected
-   * (WL-0MUBVH6JM0093KVM). `saveWorkItem` keeps activityAt >= updatedAt.
+   * Implementation in `./database/comments.js` (WL-0MVOBP6K0007574C).
    */
   private touchWorkItemActivityAt(workItemId: string): void {
-    const item = this.store.getWorkItem(workItemId);
-    if (!item) {
-      return;
-    }
-    this.store.saveWorkItem({
-      ...item,
-      // updatedAt is intentionally preserved: comment activity must never
-      // invalidate a valid audit (see isAuditFresh).
-      activityAt: new Date().toISOString(),
-    });
+    commentsModule.touchWorkItemActivityAt(this.ctx, workItemId);
   }
 }
