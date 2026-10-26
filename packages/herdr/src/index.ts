@@ -257,100 +257,12 @@ export {
   resolveInteractiveDispatchPriority,
 } from './index.claim.js';
 
-/**
- * Default Dispatcher-anchor resolver used by {@link createDowntimeDeps}
- * (C0 WL-0MTR01EU7005SYZG): resolves the machine-wide dedicated Dispatcher
- * anchor pane via the herdr CLI (F1 WL-0MTR2CD4X006XI7U), provisioning the
- * Dispatcher workspace idempotently on first dispatch. Null on any
- * failure — dispatch degrades to "no dispatch this cycle". Injectable for
- * tests that build real deps without a live herdr session.
- */
-async function defaultDispatcherAnchorResolver(
-  cwd: string,
-): Promise<DispatcherAnchor | null> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveDispatcherAnchor(cwd, createDispatcherAnchorDeps(cwd, herdrBin));
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Default project-workspace resolver used by {@link createDowntimeDeps}
- * (WL-0MU321YK70035AYT): resolves the herdr plugin pane/workspace whose
- * logical root (`HERDR_RESOLVED_CWD`) equals the worklog root `cwd`, via the
- * herdr CLI. Null on any failure — dispatch falls back to the retained
- * Dispatcher anchor (AC4). Injectable for tests that build real deps without
- * a live herdr session.
- */
-async function defaultProjectWorkspaceResolver(
-  cwd: string,
-): Promise<ProjectWorkspaceTarget | null> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveProjectWorkspaceForRoot(
-      cwd,
-      createDispatcherAnchorDeps(cwd, herdrBin),
-      cwd,
-    );
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Default per-prefix Dispatcher tab-anchor resolver used by
- * {@link createDowntimeDeps} (C1, parent WL-0MTRQT482001SNXC): resolves or
- * creates the tab labelled with the work-item id prefix (e.g. `WL`, `TCE`)
- * inside the machine-wide Dispatcher workspace and returns its root pane.
- * This is the FALLBACK placement path (AC3, WL-0MUR5FUWD00024XN) — it is only
- * consulted when no project workspace resolves for the item's root. Null on
- * any failure — the dispatch fails closed ('anchor-unavailable'), never a
- * wrong-tab/workspace placement. Injectable for tests that build real deps
- * without a live herdr session.
- */
-async function defaultDispatcherTabAnchorResolver(
-  cwd: string,
-  prefix: string,
-): Promise<DispatcherPrefixTabAnchor | null> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveDispatcherTabAnchor(
-      cwd,
-      createDispatcherAnchorDeps(cwd, herdrBin),
-      prefix,
-    );
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Default item-ID tab-anchor resolver used by {@link createDowntimeDeps}
- * (WL-0MU321YK70035AYT): ensures/reuses the tab labelled with the exact
- * work-item id inside the resolved project workspace and returns its root
- * pane, via the herdr CLI. Null on any failure — the dispatch fails closed
- * ('anchor-unavailable'). Injectable for tests that build real deps without
- * a live herdr session.
- */
-async function defaultItemTabAnchorResolver(
-  cwd: string,
-  workspaceId: string,
-  itemId: string,
-): Promise<ItemTabAnchor | null> {
-  try {
-    const herdrBin = process.env.HERDR_BIN_PATH ?? 'herdr';
-    return await resolveItemTabAnchor(
-      cwd,
-      createDispatcherAnchorDeps(cwd, herdrBin),
-      workspaceId,
-      itemId,
-    );
-  } catch {
-    return null;
-  }
-}
+import {
+  defaultDispatcherAnchorResolver,
+  defaultDispatcherTabAnchorResolver,
+  defaultItemTabAnchorResolver,
+  defaultProjectWorkspaceResolver,
+} from './index.anchor-resolvers.js';
 
 /**
  * Resolve the workspace that should host an interactive item-ID tab
