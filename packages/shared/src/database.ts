@@ -11,7 +11,7 @@ import { normalizeStatusValue } from './status-stage-rules.js';
 // Self-referencing package export (WL-0MSJ4BT4Z002HH9B grep guard forbids a
 // relative `icons.js` import; `@worklog/shared/icons` is the canonical path
 // even from within the shared package).
-import { isAuditFresh, type AuditInvalidationVerdict } from '@worklog/shared/icons';
+import type { AuditInvalidationVerdict } from '@worklog/shared/icons';
 import {
   EdgeCache,
   generateId,
@@ -42,6 +42,10 @@ import {
   selectHighestPriorityBlocking,
 } from './database/next-pipeline.js';
 import { handleCriticalEscalation } from './database/critical-escalation.js';
+// Sort-index and audit modules — thin-delegate targets (WL-0MVOBP2Q2002ZYCF).
+// Method implementations moved here; the class members below delegate.
+import * as auditModule from './database/audit.js';
+import * as sortModule from './database/sort.js';
 
 export { normalizeTitleForMatch } from './database/context.js';
 
@@ -221,6 +225,9 @@ export class WorklogDatabase {
           this.resolveBlockerToRoot(blocker, allItems, assignee, searchTerm, excluded),
         selectHighestPriorityBlocking: (pairs, sortOrderCache) =>
           this.selectHighestPriorityBlocking(pairs, sortOrderCache),
+      },
+      writeHooks: {
+        triggerAutoSync: () => this.triggerAutoSync(),
       },
     };
     
@@ -709,148 +716,50 @@ export class WorklogDatabase {
     return Array.from(byId.values());
   }
 
-  /**
-   * Ordering-tier gate (WL-0MTH7G2O1004BHN5): only an audit that exists,
-   * is not ready to close (`readyToClose === false`), and is fresh per the
-   * shared `isAuditFresh` predicate qualifies for the audit-not-ready boost.
-   * Stale audits (content edited more than the 60 s at-or-near tolerance
-   * after the audit) are treated as no audit for ordering. The timestamp
-   * comparison is delegated to the single source of
-   * truth in `@worklog/shared/icons` (WL-0MUBVH7ZR009PP80) — no competing
-   * `auditedAt`-vs-`updatedAt` comparison lives here. No fingerprints are
-   * passed: the ordering path has no per-item current fingerprint, so the
-   * shared helper applies its time-gate fallback. Critical items are never
-   * boosted past by the audit tier (hard boundary, enforced by callers).
-   */
-  private isAuditNotReadyFresh(audit: AuditResult | null | undefined, itemUpdatedAt: string | undefined): boolean {
-    if (!audit || audit.readyToClose) return false;
-    return isAuditFresh(audit.auditedAt, itemUpdatedAt);
-  }
-
-  /**
-   * Build a batch audit map for a set of work item ids (EdgeCache-style, one
-   * batch query per scored set, no per-item N+1). Used by sortItemsByScore
-   * and the selectBySortIndex fallback.
-   */
-  private buildAuditMapForItems(items: WorkItem[]): Map<string, AuditResult> {
-    const all = this.store.getAllAuditResults();
-    const map = new Map<string, AuditResult>();
-    for (const a of all) map.set(a.workItemId, a);
-    return map;
-  }
-
+  /** Delegates to {@link sortItemsByScore} in `./database/sort.js`. */
   private sortItemsByScore(items: WorkItem[], recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore', edgeCache?: EdgeCache): WorkItem[] {
-    const now = Date.now();
-    const cache = edgeCache ?? this.buildEdgeCache(items);
-
-    // Pre-compute ancestors of in-progress items for O(1) per-item lookup.
-    // For each in-progress item, walk up the parent chain and record ancestor IDs.
-    const MAX_ANCESTOR_DEPTH = 50;
-    const ancestorsOfInProgress = new Set<string>();
-    for (const item of items) {
-      if (item.status === 'in-progress') {
-        let currentParentId = item.parentId ?? null;
-        let depth = 0;
-        while (currentParentId && depth < MAX_ANCESTOR_DEPTH) {
-          ancestorsOfInProgress.add(currentParentId);
-          const parent = cache.itemsById.get(currentParentId);
-          currentParentId = parent?.parentId ?? null;
-          depth++;
-        }
-      }
-    }
-
-    // Audit-not-ready tier: batch audit map so the comparator is O(1) per
-    // item (no per-item N+1 queries). Mirrors the EdgeCache pattern.
-    const auditMap = this.buildAuditMapForItems(items);
-    const maxPriorityValue = 4; // critical
-
-    return items.slice().sort((a, b) => {
-      const aIsCritical = this.getPriorityValue(a.priority) === maxPriorityValue;
-      const bIsCritical = this.getPriorityValue(b.priority) === maxPriorityValue;
-      const aAuditFresh = !aIsCritical && this.isAuditNotReadyFresh(auditMap.get(a.id), a.updatedAt);
-      const bAuditFresh = !bIsCritical && this.isAuditNotReadyFresh(auditMap.get(b.id), b.updatedAt);
-      // Hard tier boundary: critical items stay above any audited non-critical.
-      // Otherwise, any fresh audited-not-ready non-critical outranks any unaudited/non-fresh non-critical,
-      // regardless of base priority — enforced here as a tiered comparator before score.
-      if (aIsCritical !== bIsCritical) {
-        return aIsCritical ? -1 : 1;
-      }
-      if (!aIsCritical && !bIsCritical && aAuditFresh !== bAuditFresh) {
-        return aAuditFresh ? -1 : 1;
-      }
-      const scoreA = this.computeScore(a, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap);
-      const scoreB = this.computeScore(b, now, recencyPolicy, ancestorsOfInProgress, cache, auditMap);
-      if (scoreB !== scoreA) return scoreB - scoreA;
-      const createdA = new Date(a.createdAt).getTime();
-      const createdB = new Date(b.createdAt).getTime();
-      if (createdA !== createdB) return createdA - createdB;
-      return a.id.localeCompare(b.id);
-    });
+    return sortModule.sortItemsByScore(this.ctx, items, recencyPolicy, edgeCache);
   }
 
+  /** Delegates to {@link computeScore} in `./database/sort.js`. */
+  private computeScore(
+    item: WorkItem,
+    now: number,
+    recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
+    ancestorsOfInProgress?: Set<string>,
+    edgeCache?: EdgeCache,
+    auditMap?: Map<string, AuditResult>
+  ): number {
+    return sortModule.computeScore(this.ctx, item, now, recencyPolicy, ancestorsOfInProgress, edgeCache, auditMap);
+  }
+
+  /** Delegates to {@link compareAuditNotReadyTier} in `./database/sort.js`. */
+  private compareAuditNotReadyTier(
+    a: WorkItem,
+    b: WorkItem,
+    auditMap: Map<string, AuditResult>,
+    maxPriorityValue: number
+  ): number {
+    return sortModule.compareAuditNotReadyTier(a, b, auditMap, maxPriorityValue);
+  }
+
+  /** Delegates to {@link computeSortIndexOrder} in `./database/sort.js`. */
   private computeSortIndexOrder(): WorkItem[] {
-    const items = this.store.getAllWorkItems();
-    const childrenByParent = new Map<string | null, WorkItem[]>();
+    return sortModule.computeSortIndexOrder(this.ctx);
+  }
 
-    for (const item of items) {
-      const parentKey = item.parentId ?? null;
-      const list = childrenByParent.get(parentKey);
-      if (list) {
-        list.push(item);
-      } else {
-        childrenByParent.set(parentKey, [item]);
-      }
-    }
+  /** Delegates to {@link isAuditNotReadyFresh} in `./database/audit.js`. */
+  private isAuditNotReadyFresh(audit: AuditResult | null | undefined, itemUpdatedAt: string | undefined): boolean {
+    return auditModule.isAuditNotReadyFresh(audit, itemUpdatedAt);
+  }
 
-    const order: WorkItem[] = [];
-    const sortSiblings = (list: WorkItem[]): WorkItem[] => {
-      return list.slice().sort((a, b) => {
-        if (a.sortIndex !== b.sortIndex) {
-          return a.sortIndex - b.sortIndex;
-        }
-        const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-        if (createdDiff !== 0) return createdDiff;
-        return a.id.localeCompare(b.id);
-      });
-    };
-
-    const traverse = (parentId: string | null) => {
-      const children = childrenByParent.get(parentId) || [];
-      const sorted = sortSiblings(children);
-      for (const child of sorted) {
-        order.push(child);
-        traverse(child.id);
-      }
-    };
-
-    traverse(null);
-    return order;
+  /** Delegates to {@link buildAuditMapForItems} in `./database/audit.js`. */
+  private buildAuditMapForItems(items: WorkItem[]): Map<string, AuditResult> {
+    return auditModule.buildAuditMapForItems(this.ctx, items);
   }
 
   assignSortIndexValues(gap: number): { updated: number } {
-    const ordered = this.computeSortIndexOrder();
-    let updated = 0;
-    for (let index = 0; index < ordered.length; index += 1) {
-      const item = ordered[index];
-      const nextSortIndex = (index + 1) * gap;
-      if (item.sortIndex !== nextSortIndex) {
-        // sortIndex is organizational, not semantic: a sortIndex-only change
-        // must NOT bump `updatedAt`, or a mechanical re-assignment would
-        // invalidate a previously-passing audit (WL-0MTWU4XGP001GDEA /
-        // WL-0MU2O8AQ8000ASDO). Semantic edits still bump `updatedAt` via
-        // `update`/`saveWorkItem`, and the activityAt invariant is preserved
-        // because `saveWorkItem` takes the later of the two.
-        const updatedItem = {
-          ...item,
-          sortIndex: nextSortIndex,
-        };
-        this.store.saveWorkItem(updatedItem);
-        updated += 1;
-      }
-    }
-    this.triggerAutoSync();
-    return { updated };
+    return sortModule.assignSortIndexValues(this.ctx, this.ctx.writeHooks, gap);
   }
 
   /**
@@ -866,31 +775,19 @@ export class WorklogDatabase {
     recencyPolicy: 'prefer' | 'avoid' | 'ignore' = 'ignore',
     gap: number = 100
   ): { updated: number } {
-    const ordered = this
-      .getAllOrderedByScore(recencyPolicy)
-      .filter(item => item.status !== 'completed' && item.status !== 'deleted');
-    return this.assignSortIndexValuesForItems(ordered, gap);
+    return sortModule.reSort(this.ctx, this.ctx.writeHooks, recencyPolicy, gap);
   }
 
   assignSortIndexValuesForItems(orderedItems: WorkItem[], gap: number): { updated: number } {
-    const updated = this.store.batchUpdateSortIndices(orderedItems, gap);
-    this.triggerAutoSync();
-    return { updated };
+    return sortModule.assignSortIndexValuesForItems(this.ctx, this.ctx.writeHooks, orderedItems, gap);
   }
 
   previewSortIndexOrder(gap: number): Array<{ id: string; sortIndex: number } & WorkItem> {
-    const ordered = this.computeSortIndexOrder();
-    return ordered.map((item, index) => ({
-      ...item,
-      sortIndex: (index + 1) * gap,
-    }));
+    return sortModule.previewSortIndexOrder(this.ctx, gap);
   }
 
   previewSortIndexOrderForItems(items: WorkItem[], gap: number): Array<{ id: string; sortIndex: number } & WorkItem> {
-    return items.map((item, index) => ({
-      ...item,
-      sortIndex: (index + 1) * gap,
-    }));
+    return sortModule.previewSortIndexOrderForItems(items, gap);
   }
 
   // ── Full-Text Search ──────────────────────────────────────────────
@@ -1089,7 +986,7 @@ export class WorklogDatabase {
    * Only the latest audit per work item is kept.
    */
   saveAuditResult(audit: { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint?: string | null }): void {
-    this.store.saveAuditResult(audit);
+    auditModule.saveAuditResult(this.ctx, audit);
   }
 
   /**
@@ -1111,7 +1008,7 @@ export class WorklogDatabase {
     workItemId: string,
     currentFingerprint?: string | null,
   ): AuditInvalidationVerdict {
-    return this.store.reconcileAuditInvalidation(workItemId, currentFingerprint);
+    return auditModule.reconcileAuditInvalidation(this.ctx, workItemId, currentFingerprint);
   }
 
   /**
@@ -1119,14 +1016,14 @@ export class WorklogDatabase {
    * Returns null if no audit result exists.
    */
   getAuditResult(workItemId: string): { workItemId: string; readyToClose: boolean; auditedAt: string; summary: string | null; rawOutput: string | null; author: string | null; fingerprint: string | null } | null {
-    return this.store.getAuditResult(workItemId);
+    return auditModule.getAuditResult(this.ctx, workItemId);
   }
 
   /**
    * Delete the audit result for a work item.
    */
   deleteAuditResult(workItemId: string): boolean {
-    return this.store.deleteAuditResult(workItemId);
+    return auditModule.deleteAuditResult(this.ctx, workItemId);
   }
 
   /**
@@ -1143,22 +1040,7 @@ export class WorklogDatabase {
    * @returns the updated item, or `null` when the id does not exist.
    */
   setAuditWaiver(id: string, waiver: AuditWaiver): WorkItem | null {
-    const item = this.store.getWorkItem(id);
-    if (!item) return null;
-    const now = new Date().toISOString();
-    const updated: WorkItem = {
-      ...item,
-      auditWaiver: {
-        reason: waiver.reason,
-        author: waiver.author ?? '',
-        waivedAt: waiver.waivedAt || now,
-      },
-      updatedAt: now,
-    };
-    this.store.saveWorkItem(updated);
-    this.store.upsertFtsEntry(updated);
-    this.triggerAutoSync();
-    return updated;
+    return auditModule.setAuditWaiver(this.ctx, this.ctx.writeHooks, id, waiver);
   }
 
   /**
@@ -1168,30 +1050,21 @@ export class WorklogDatabase {
    * @returns the updated item, or `null` when the id does not exist.
    */
   clearAuditWaiver(id: string): WorkItem | null {
-    const item = this.store.getWorkItem(id);
-    if (!item) return null;
-    if (!item.auditWaiver) return item;
-    const now = new Date().toISOString();
-    const updated: WorkItem = { ...item, auditWaiver: null, updatedAt: now };
-    this.store.saveWorkItem(updated);
-    this.store.upsertFtsEntry(updated);
-    this.triggerAutoSync();
-    return updated;
+    return auditModule.clearAuditWaiver(this.ctx, this.ctx.writeHooks, id);
   }
 
   /**
    * Get all audit results (for JSONL export / sync).
    */
   getAllAuditResults(): AuditResult[] {
-    return this.store.getAllAuditResults();
+    return auditModule.getAllAuditResults(this.ctx);
   }
 
   /**
    * Import audit results (upsert, bulk).
    */
   importAuditResults(audits: AuditResult[]): void {
-    this.store.saveAuditResults(audits);
-    this.triggerAutoSync();
+    auditModule.importAuditResults(this.ctx, this.ctx.writeHooks, audits);
   }
 
   /**
@@ -1867,186 +1740,12 @@ export class WorklogDatabase {
   }
 
 
-  /**
-   * Compute a score for an item. Defaults: recencyPolicy='ignore'.
-   * Higher score == more desirable.
-   */
-   private computeScore(
-    item: WorkItem,
-    now: number,
-    recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore',
-    ancestorsOfInProgress?: Set<string>,
-    edgeCache?: EdgeCache,
-    auditMap?: Map<string, AuditResult>
-  ): number {
-    // Weights are intentionally fixed and not configurable per request
-    //
-    // Ranking precedence (highest to lowest):
-    //   1. priority          — primary ranking (weight 1000 per level)
-    //   2. blocksHighPriority — boost for items that unblock high/critical work
-    //   3. in-progress multipliers — boost active items and their ancestors
-    //   4. blocked penalty   — heavy penalty for blocked items
-    //   5. age / effort / recency — fine-grained tie-breakers
-    const WEIGHTS = {
-      priority: 1000,
-      blocksHighPriority: 500,  // boost when this item unblocks high/critical items
-      age: 10, // per day
-      updated: 100, // recency boost/penalty
-      blocked: -10000,
-      effort: 20,
-    };
-
-    let score = 0;
-
-    // Audit-not-ready tier: second only to critical. Fresh `readyToClose ===
-    // false` audits boost any non-critical item so it outranks any unaudited
-    // non-critical regardless of base priority (tiered as numeric boost >
-    // max priority delta, with the comparator above as the hard authority).
-    // Critical items never receive this boost (hard boundary).
-    if (item.priority !== 'critical' && auditMap) {
-      const audit = auditMap.get(item.id);
-      if (this.isAuditNotReadyFresh(audit, item.updatedAt)) {
-        score += 3500; // > priority range (max 3*1000=3000 delta) but < critical gap
-      }
-    }
-
-    // Priority base
-    score += this.getPriorityValue(item.priority) * WEIGHTS.priority;
-
-    // Blocks-high-priority boost: if this item is a dependency prerequisite for
-    // active items with high or critical priority, add a proportional boost.
-    // This ensures that among equal-priority peers, unblockers rank higher.
-    // Uses store-direct access to avoid per-item refreshFromJsonlIfNewer overhead
-    // (consistent with the dependency filter at the top of findNextWorkItemFromItems).
-    // When edgeCache is provided, uses pre-loaded in-memory Maps instead of
-    // per-item SQL queries, eliminating the N+1 query pattern (Bottleneck 1).
-    const inboundEdges = edgeCache
-      ? (edgeCache.inbound.get(item.id) ?? [])
-      : this.store.getDependencyEdgesTo(item.id);
-    let maxBlockedPriorityValue = 0;
-    for (const edge of inboundEdges) {
-      const dependent = edgeCache
-        ? (edgeCache.itemsById.get(edge.fromId) ?? null)
-        : this.store.getWorkItem(edge.fromId);
-      if (dependent && dependent.status !== 'completed' && dependent.status !== 'deleted') {
-        const depPriority = this.getPriorityValue(dependent.priority);
-        // Only boost for high (3) or critical (4) dependents
-        if (depPriority >= 3 && depPriority > maxBlockedPriorityValue) {
-          maxBlockedPriorityValue = depPriority;
-        }
-      }
-    }
-    if (maxBlockedPriorityValue > 0) {
-      // Proportional: critical (4) gets a larger boost than high (3).
-      // Scale: high=1.0x, critical=1.33x of the base weight.
-      score += (maxBlockedPriorityValue / 3) * WEIGHTS.blocksHighPriority;
-    }
-
-    // In-review boost: items awaiting review are surfaced above medium- and
-    // low-priority items but below critical- and high-priority items.
-    // 600 points = 0.6 * priority weight (1000), which places in-review items
-    // in a band between high (3000) and medium (2000) priority levels:
-    //   - Critical (4000) + in-review (600) = 4600 > high (3000) ✓
-    //   - High (3000) + in-review (600) = 3600 > medium (2000) ✓
-    //   - Medium (2000) + in-review (600) = 2600 < high (3000) ✓
-    //   - Medium (2000) + in-review (600) = 2600 > medium (2000, non-review) ✓
-    //   - Low (1000) + in-review (600) = 1600 < medium (2000) ✓
-    if (item.stage === 'in_review') {
-      score += 600;
-    }
-
-    // Age (createdAt) - small boost per day to avoid starvation
-    const ageDays = Math.max(0, (now - new Date(item.createdAt).getTime()) / (1000 * 60 * 60 * 24));
-    score += Math.min(ageDays, 365) * WEIGHTS.age;
-
-    // Effort: prefer smaller numeric efforts if present
-    if (item.effort) {
-      const effortVal = parseFloat(String(item.effort)) || 0;
-      if (effortVal > 0) score += (1 / (1 + effortVal)) * WEIGHTS.effort;
-    }
-
-    // Activity recency policy. `activityAt` includes comment activity; it
-    // falls back to `updatedAt` for rows written before the column existed.
-    // Audit freshness deliberately does NOT use this field (WL-0MUBVH6JM0093KVM).
-    const lastActivity = item.activityAt ?? item.updatedAt;
-    if (recencyPolicy !== 'ignore' && lastActivity) {
-      const activityHours = (now - new Date(lastActivity).getTime()) / (1000 * 60 * 60);
-      if (recencyPolicy === 'avoid') {
-        // Penalty stronger when active very recently, decays to zero by 72 hours
-        const penaltyFactor = Math.max(0, (72 - activityHours) / 72);
-        score -= penaltyFactor * WEIGHTS.updated;
-      } else if (recencyPolicy === 'prefer') {
-        // Boost for recent activity (peak within ~48 hours)
-        const boostFactor = Math.max(0, (48 - activityHours) / 48);
-        score += boostFactor * WEIGHTS.updated;
-      }
-    }
-
-    // Blocked status - heavy penalty
-    if (item.status === 'blocked') score += WEIGHTS.blocked;
-
-    // In-progress score multiplier boosts (applied after all additive components).
-    // Non-stacking: direct in-progress boost takes precedence over ancestor boost.
-    // Blocked items receive no boost (the -10000 penalty remains dominant).
-    const IN_PROGRESS_BOOST = 1.5;
-    const PARENT_IN_PROGRESS_BOOST = 1.25;
-    // Apply in-progress / ancestor multipliers non-stacking.
-    // Use an explicit multiplier variable to avoid any accidental
-    // double-application of boosts if this code is refactored in future.
-    let multiplier = 1;
-    if (item.status !== 'blocked') {
-      if (item.status === 'in-progress') {
-        multiplier = IN_PROGRESS_BOOST;
-      } else if (ancestorsOfInProgress?.has(item.id)) {
-        multiplier = PARENT_IN_PROGRESS_BOOST;
-      }
-    }
-    score *= multiplier;
-
-    return score;
-  }
-
+  /** Delegates to {@link sortModule.orderBySortIndex} in `./database/sort.js`. */
   private orderBySortIndex(items: WorkItem[], sortOrderCache?: WorkItem[]): WorkItem[] {
-    const orderedAll = sortOrderCache ?? this.store.getAllWorkItemsOrderedByHierarchySortIndexSkipCompleted();
-    const positions = new Map(orderedAll.map((item, index) => [item.id, index]));
-    return items.slice().sort((a, b) => {
-      const aPos = positions.get(a.id);
-      const bPos = positions.get(b.id);
-      if (aPos === undefined && bPos === undefined) {
-        const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-        if (createdDiff !== 0) return createdDiff;
-        return a.id.localeCompare(b.id);
-      }
-      if (aPos === undefined) return 1;
-      if (bPos === undefined) return -1;
-      if (aPos !== bPos) return aPos - bPos;
-      return a.id.localeCompare(b.id);
-    });
+    return sortModule.orderBySortIndex(this.ctx, items, sortOrderCache);
   }
 
-  /**
-   * Compare two items by the audit-not-ready tier (WL-0MTH7G2O1004BHN5).
-   * Critical is strictly above the audited-not-ready non-critical tier;
-   * within the non-critical tier, a fresh `readyToClose===false` item
-   * outranks any unaudited/stale/ready-to-close item regardless of base
-   * priority. The tier only applies to workers that respect it (see callers).
-   * Returns -1/0/1 suitable as a comparator prefix before fallbacks.
-   */
-  private compareAuditNotReadyTier(
-    a: WorkItem,
-    b: WorkItem,
-    auditMap: Map<string, AuditResult>,
-    maxPriorityValue: number
-  ): number {
-    const aIsCritical = this.getPriorityValue(a.priority) === maxPriorityValue;
-    const bIsCritical = this.getPriorityValue(b.priority) === maxPriorityValue;
-    const aAuditFresh = !aIsCritical && this.isAuditNotReadyFresh(auditMap.get(a.id), a.updatedAt);
-    const bAuditFresh = !bIsCritical && this.isAuditNotReadyFresh(auditMap.get(b.id), b.updatedAt);
-    if (aIsCritical !== bIsCritical) return aIsCritical ? -1 : 1;
-    if (!aIsCritical && !bIsCritical && aAuditFresh !== bAuditFresh) return aAuditFresh ? -1 : 1;
-    return 0;
-  }
-
+  /** Delegates to {@link sortModule.selectBySortIndex} in `./database/sort.js`. */
   private selectBySortIndex(
     items: WorkItem[],
     effectivePriorityCache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>,
@@ -2054,42 +1753,7 @@ export class WorklogDatabase {
     edgeCache?: EdgeCache,
     allItems?: WorkItem[]
   ): WorkItem | null {
-    if (!items || items.length === 0) return null;
-    const cache = effectivePriorityCache ?? new Map();
-    const auditMap = this.buildAuditMapForItems(items);
-    const maxPriorityValue = 4;
-    // When all sortIndex values coincide (including all-zero), full fallback
-    // is effective priority/age. Otherwise the primary ordering is sortIndex —
-    // but the audit tier is applied as a prefix before any of those so that
-    // `wl next --no-re-sort` (which skips reSort) still reflects the boosted
-    // order rather than stale sortIndex (AC3, WL-0MTH7G2O1004BHN5).
-    const firstSortIndex = items[0].sortIndex ?? 0;
-    const allSame = items.every(item => (item.sortIndex ?? 0) === firstSortIndex);
-    if (allSame) {
-      const sorted = items.slice().sort((a, b) => {
-        const tierDiff = this.compareAuditNotReadyTier(a, b, auditMap, maxPriorityValue);
-        if (tierDiff !== 0) return tierDiff;
-        const aEffective = this.computeEffectivePriority(a, cache, edgeCache, allItems);
-        const bEffective = this.computeEffectivePriority(b, cache, edgeCache, allItems);
-        const priDiff = bEffective.value - aEffective.value;
-        if (priDiff !== 0) return priDiff;
-        const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-        if (createdDiff !== 0) return createdDiff;
-        return a.id.localeCompare(b.id);
-      });
-      return sorted[0] ?? null;
-    }
-    const sorted = items.slice().sort((a, b) => {
-      const tierDiff = this.compareAuditNotReadyTier(a, b, auditMap, maxPriorityValue);
-      if (tierDiff !== 0) return tierDiff;
-      const aIdx = a.sortIndex ?? 0;
-      const bIdx = b.sortIndex ?? 0;
-      if (aIdx !== bIdx) return aIdx - bIdx;
-      const createdDiff = new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-      if (createdDiff !== 0) return createdDiff;
-      return a.id.localeCompare(b.id);
-    });
-    return sorted[0] ?? null;
+    return sortModule.selectBySortIndex(this.ctx, this.ctx.hooks, items, effectivePriorityCache, sortOrderCache, edgeCache, allItems);
   }
 
   /** Delegates to {@link filterCandidates} in `./database/next-pipeline.js`. */
@@ -2216,9 +1880,7 @@ export class WorklogDatabase {
   }
 
   getAllOrderedByScore(recencyPolicy: 'prefer'|'avoid'|'ignore' = 'ignore'): WorkItem[] {
-    const items = this.store.getAllWorkItems();
-    const cache = this.buildEdgeCache(items);
-    return this.sortItemsByScore(items, recencyPolicy, cache);
+    return sortModule.getAllOrderedByScore(this.ctx, recencyPolicy);
   }
 
   /**

@@ -79,6 +79,25 @@ export interface WorklogDatabaseContext {
    * constructor; read-only for the modules.
    */
   hooks: SelectionHooks;
+  /**
+   * Façade-provided write-side collaborators for the extracted modules that
+   * persist state (`sort.ts`, `audit.ts`). Wired once in the
+   * `WorklogDatabase` constructor; read-only for the modules.
+   */
+  writeHooks: WriteHooks;
+}
+
+// ── Façade write hooks (sort / audit modules) ──────────────────────────
+
+/**
+ * The private `WorklogDatabase` write-side members the extracted sort/audit
+ * modules may call. Everything here is implemented by the façade (thin
+ * delegate) — no extracted module imports the façade, so the graph stays
+ * acyclic.
+ */
+export interface WriteHooks {
+  /** Trigger the configured auto-sync provider (no-op when disabled). */
+  triggerAutoSync(): void;
 }
 
 // ── Façade hooks used by the `wl next` selection modules ────────────────
