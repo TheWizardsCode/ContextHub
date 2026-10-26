@@ -1047,6 +1047,173 @@ describe('downtime no-candidate cooldown (createDowntimeWorker)', () => {
       expect(worker.paused).toBe(true);
     });
   });
+
+  // ── Peer-offer presence cancels the no-candidate cooldown (parent
+  // WL-0MVP7QHUB003ZA2A AC2/AC3) ────────────────────────────────────────
+  //
+  // The no-candidate probe answers only "is the LEADER's own backlog
+  // empty?" (orchestrator-dispatch.ts). An empty own root must NOT arm the
+  // 60-minute full-stop pause while a PEER's coordination entry holds a
+  // dispatchable offer (non-empty workItemId, instanceId !== self) — the
+  // pause suppresses the offer-list polling and starves that peer for up to
+  // 60 minutes. RED WITNESS: the two `it.fails` specs below assert
+  // post-implementation behaviour (pause not armed while a live peer offer
+  // exists; pause cancelled by the next leader check-in once a peer offer
+  // appears). Feature 4 (WL-0MVP9UJ6S009LLK4) flips them to `it`. The
+  // remaining specs are regression pins that hold on today's code.
+  describe('peer-offer presence cancels the no-candidate cooldown (WL-0MVP7QHUB003ZA2A AC2/AC3)', () => {
+    const PEER_START = 900_000_000;
+
+    /** A peer instance's coordination entry holding a stated offer. */
+    function peerOffer(workItemId: string, directory: string) {
+      const at = new Date(PEER_START).toISOString();
+      return {
+        instanceId: 'inst-b',
+        workItemId,
+        directory,
+        worklogRoot: directory,
+        assignedAt: at,
+        lastUpdated: at,
+      };
+    }
+
+    it.fails(
+      'does not arm the cooldown while a live peer offer exists (AC2)',
+      async () => {
+        const peerRoot = coordinationTmpDirs.make('peer-root-');
+        const { worker, deps, coordDir } = makeCoordinationWorker({
+          deps: {
+            // The peer's offer is classified DISPATCHABLE, but the CAS
+            // claim is lost this cycle — the offer is KEPT (still
+            // valid) and the cycle ends 'no-candidate' (own head
+            // empty). This is the exact starvation window: the entry is
+            // live yet this cycle yielded nothing.
+            claimItem: vi.fn()
+              .mockResolvedValueOnce({ ok: false, reason: 'stale' })
+              .mockResolvedValue({ ok: true }),
+          },
+        });
+        writeCoordinationFile(coordDir, {
+          version: 1,
+          entries: [peerOffer('WL-PEER', peerRoot)],
+        });
+        vi.setSystemTime(PEER_START);
+
+        await worker.tick(); // election + first check-in
+        vi.setSystemTime(PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+        const cycle = await worker.tick(); // dispatch attempt → no-candidate
+
+        expect(cycle.dispatched).toBe(false);
+        // The claim was lost, not the offer: the peer entry is still in
+        // the file and must remain dispatchable.
+        expect(getEntry(coordDir, 'inst-b')).not.toBeNull();
+        // POST-FIX: a live peer offer means the cooldown must NOT arm
+        // (today this cycle arms it → RED).
+        expect(worker.paused).toBe(false);
+        // The arming-time peer check reuses the entries already read
+        // for the dispatch — no second full worklog CLI probe
+        // (`fetchItem` was called exactly once, for the dispatch's own
+        // classification read).
+        expect((deps.fetchItem as ReturnType<typeof vi.fn>)).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it.fails(
+      'cancels a live pause at the next leader check-in when a peer offer appears (AC3)',
+      async () => {
+        const peerRoot = coordinationTmpDirs.make('peer-root-');
+        // Genuinely empty everywhere at first: the own root is empty AND
+        // the offer list is empty → the 60-min pause arms exactly as
+        // today.
+        const { worker, deps, coordDir } = makeCoordinationWorker();
+        vi.setSystemTime(PEER_START);
+
+        await worker.tick(); // election + empty check-in
+        expect(worker.isLeader).toBe(true);
+        vi.setSystemTime(PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+        await worker.tick(); // genuine-empty → cooldown armed
+        expect(worker.paused).toBe(true);
+
+        // A peer's offer appears WHILE the leader is paused.
+        writeCoordinationFile(coordDir, {
+          version: 1,
+          entries: [peerOffer('WL-PEER', peerRoot)],
+        });
+
+        // The leader's next check-in (4-min cadence, WL-0MTOCBP1D009P4U3)
+        // runs BEFORE the cooldown gate — a live peer entry must cancel
+        // the pause so the offer list keeps being polled (today the
+        // check-in only inspects the leader's OWN entry → RED).
+        vi.setSystemTime(
+          PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 4 * 60_000 + 1_000,
+        );
+        const resumed = await worker.tick();
+
+        expect(resumed.polled).toBe(true);
+        expect(worker.paused).toBe(false);
+
+        // After a fresh full idle period the peer offer dispatches —
+        // never a 60-minute pause (the dispatch may land on the resume tick
+        // itself or on the next threshold tick).
+        vi.setSystemTime(
+          PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS + 4 * 60_000 + 60_001 + 2_000,
+        );
+        await worker.tick();
+        expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+          expect.stringContaining('WL-PEER'),
+          expect.objectContaining({ cwd: peerRoot }),
+        );
+      },
+    );
+
+    it('a self entry (instanceId === self) never counts as a peer offer — the genuine-empty cooldown still arms (AC2 discriminator)', async () => {
+      // The leader's check-in writes/removes its OWN entry, so the self
+      // entry is written AFTER tick 1 — it must then be present in the
+      // dispatch-time entry snapshot. The own item's CAS claim is lost
+      // (kept → no-candidate), exactly like the peer spec above.
+      const { worker, coordDir } = makeCoordinationWorker({
+        deps: {
+          claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
+        },
+      });
+      vi.setSystemTime(PEER_START);
+
+      await worker.tick(); // election + check-in (own entry absent/removed)
+      writeCoordinationFile(coordDir, {
+        version: 1,
+        entries: [
+          {
+            ...peerOffer('WL-OWN', coordinationTmpDirs.make('self-root-')),
+            instanceId: 'inst-a',
+          },
+        ],
+      });
+      vi.setSystemTime(PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const cycle = await worker.tick();
+
+      expect(cycle.dispatched).toBe(false);
+      expect(getEntry(coordDir, 'inst-a')).not.toBeNull();
+      // Only a PEER offer suppresses the arm — a self entry does not.
+      expect(worker.paused).toBe(true);
+    });
+
+    it('an entry with an empty workItemId is not an offer — the cooldown still arms (AC2/AC5)', async () => {
+      const { worker, coordDir } = makeCoordinationWorker();
+      writeCoordinationFile(coordDir, {
+        version: 1,
+        entries: [peerOffer('', coordinationTmpDirs.make('null-root-'))],
+      });
+      vi.setSystemTime(PEER_START);
+
+      await worker.tick(); // election
+      vi.setSystemTime(PEER_START + DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS);
+      const cycle = await worker.tick();
+
+      expect(cycle.dispatched).toBe(false);
+      // Nothing dispatchable anywhere → the pause still arms as today.
+      expect(worker.paused).toBe(true);
+    });
+  });
 });
 
 // ── Three-strike rule on CLI errors ───────────────────────────────────

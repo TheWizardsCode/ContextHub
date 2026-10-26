@@ -1343,8 +1343,149 @@ describe('no-candidate cooldown in coordination mode (WL-0MTEZ4XZJ006Y9U7)', () 
       vi.useRealTimers();
     }
   });
+
+  // ── Peer-offer presence cancels the pause (parent WL-0MVP7QHUB003ZA2A
+  // AC2/AC3) ──────────────────────────────────────────────────────────
+  // Live incident (2026-10-26): leader `956ca7b9` had an EMPTY own root, so
+  // its no-candidate probe found nothing and armed the 60-minute full stop
+  // while ContextHub's offer (`WL-0MVK0UO3Q002TXW6`) sat in the shared file,
+  // undispatched, for the rest of the pause. The probe answers only "is the
+  // LEADER's own backlog empty?" — a peer entry holding a dispatchable item
+  // is NOT an empty backlog, so the pause must never arm on that cycle, and
+  // an offer appearing DURING a pause must cancel it at the leader's next
+  // check-in (the check-in runs before the cooldown gate).
+  //
+  // RED WITNESS: both specs below are `it.fails` — today the peer entry is
+  // invisible to the pause decision (own-root probe only), so the pause arms
+  // and starves the offer. Feature 4 (WL-0MVP9UJ6S009LLK4) flips them.
+  describe('peer-offer presence cancels the no-candidate pause (WL-0MVP7QHUB003ZA2A AC2/AC3)', () => {
+    /** A second instance offering its own root's head. */
+    const peerRoot = () => join(testDir, 'peer-root');
+
+    it.fails('does not pause when a peer entry holds a dispatchable offer while the own root is empty (AC2)', async () => {
+      vi.useFakeTimers();
+      const T0 = 40_000_000;
+      vi.setSystemTime(T0);
+      try {
+        // The LEADER's own root is genuinely empty (no head to offer)…
+        const deps = makeCoordinationDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+          fetchItem: vi.fn().mockResolvedValue({
+            ok: true,
+            info: itemInfo({ id: 'WL-PEER', status: 'open', stage: 'intake_complete' }),
+          }),
+        });
+        // …while a PEER's entry holds a dispatchable item. Its claim is lost
+        // this cycle (another pane won the CAS race), so the offer is KEPT
+        // and the cycle ends `no-candidate` — the exact starvation window.
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-b', 'WL-PEER', peerRoot())],
+        });
+        const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a', depsOverrides: deps });
+
+        await worker.tick(); // election + empty check-in
+        expect(worker.isLeader).toBe(true);
+        vi.setSystemTime(T0 + 60_001);
+        const cycle = await worker.tick(); // no-candidate (own root empty)
+
+        expect(cycle.dispatched).toBe(false);
+        // The peer's offer survives the cycle — it is still dispatchable.
+        expect(getEntry(testDir, 'inst-b')).not.toBeNull();
+        // POST-FIX: a live peer offer means the pause must NOT arm (today it
+        // does → RED), so the offer list keeps being polled.
+        expect(worker.paused).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it.fails('cancels a live pause at the next leader check-in when a peer offer appears, then dispatches it (AC3)', async () => {
+      vi.useFakeTimers();
+      const T0 = 50_000_000;
+      vi.setSystemTime(T0);
+      try {
+        const deps = makeCoordinationDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+          fetchItem: vi.fn().mockResolvedValue({
+            ok: true,
+            info: itemInfo({ id: 'WL-PEER', status: 'open', stage: 'intake_complete' }),
+          }),
+        });
+        const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a', depsOverrides: deps });
+
+        // Genuinely nothing anywhere → the pause arms exactly as today.
+        await worker.tick();
+        vi.setSystemTime(T0 + 60_001);
+        await worker.tick();
+        expect(worker.paused).toBe(true);
+
+        // A peer's offer appears WHILE the leader is paused.
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-b', 'WL-PEER', peerRoot())],
+        });
+
+        // The leader's next check-in (4-min cadence, WL-0MTOCBP1D009P4U3)
+        // runs BEFORE the cooldown gate: a live peer entry must cancel the
+        // pause (today the check-in only inspects the leader's OWN entry →
+        // RED) and polling resumes immediately.
+        vi.setSystemTime(T0 + 60_001 + 4 * 60_000 + 1_000);
+        const resumed = await worker.tick();
+        expect(resumed.polled).toBe(true);
+        expect(worker.paused).toBe(false);
+
+        // The peer's offer then dispatches after a fresh full idle period —
+        // never starved for the 60-minute pause (the dispatch may land on the
+        // resume tick itself or on the next threshold tick).
+        vi.setSystemTime(T0 + 60_001 + 4 * 60_000 + 60_001 + 2_000);
+        await worker.tick();
+        expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+          expect.stringContaining('WL-PEER'),
+          expect.objectContaining({ cwd: peerRoot() }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('still pauses when the only entry is the leader’s own (no peer offer) (AC2 discriminator)', async () => {
+      vi.useFakeTimers();
+      const T0 = 60_000_000;
+      vi.setSystemTime(T0);
+      try {
+        const deps = makeCoordinationDeps({
+          getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+          // The leader's own offer cannot be dispatched (lost CAS) → it is
+          // KEPT, the cycle ends `no-candidate`, and a SELF entry must not
+          // suppress the pause.
+          fetchItem: vi.fn().mockResolvedValue({
+            ok: true,
+            info: itemInfo({ id: 'WL-OWN', status: 'open', stage: 'intake_complete' }),
+          }),
+          claimItem: vi.fn().mockResolvedValue({ ok: false, reason: 'stale' }),
+        });
+        const { worker } = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a', depsOverrides: deps });
+
+        // The leader's own check-in removes its own entry when it has
+        // nothing to offer, so the SELF entry is written AFTER tick 1 — it
+        // must then be present in the dispatch-time entry snapshot.
+        await worker.tick();
+        writeCoordinationFile(testDir, {
+          version: 1,
+          entries: [makeEntry('inst-a', 'WL-OWN', '/repo')],
+        });
+        vi.setSystemTime(T0 + 60_001);
+        await worker.tick();
+
+        expect(getEntry(testDir, 'inst-a')).not.toBeNull();
+        expect(worker.paused).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
-// ── Review-queue depth gate on the live coordination path (WL-0MTTSWC1X005P4VD) ──
 // Root cause B2: the gate originally lived only in the legacy tier chain (dead
 // while the Herdr head is non-empty), so non-critical implements kept
 // dispatching into a deep review queue. These tests pin the gate on the live
