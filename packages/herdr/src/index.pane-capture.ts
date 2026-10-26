@@ -11,8 +11,8 @@
  * WL-0MVGKGFFN009UCM6); the barrel re-exports the consumed symbols
  * (`CAPTURE_TIMEOUT_MS`, `capturePaneIdFromFile`, `extractWorkItemId`),
  * while `CAPTURE_POLL_INTERVAL_MS` and `PaneIdFileDeps` stay internal.
- * `AGENT_ASSIGNEE` remains in the barrel with the claim section (phase 5),
- * which will import `extractWorkItemId` from this module.
+ * `AGENT_ASSIGNEE` moved with the claim section (phase 5,
+ * `index.claim.ts`), which imports `extractWorkItemId` from this module.
  */
 
 import { existsSync, readFileSync, unlinkSync } from 'node:fs';
