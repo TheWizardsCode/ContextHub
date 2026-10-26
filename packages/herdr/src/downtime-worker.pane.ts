@@ -452,11 +452,14 @@ export const defaultDowntimeSpawn: DowntimeSpawn = (
   spawn(scriptPath, args, buildDowntimeSpawnOptions(opts.cwd, opts));
 
 /**
- * How long to wait for a spawn-level `error` event or an immediate
- * non-zero script `exit` before assuming the pane started (an
- * ENOENT/EACCES error fires on the next event-loop tick; a failing script
- * exits within milliseconds). The probe keeps the failure observable
- * without delaying the poll loop.
+ * Default probe window for {@link spawnDowntimePane} — how long to wait for a
+ * spawn-level `error` event or an immediate non-zero script `exit` before
+ * assuming the pane started (an ENOENT/EACCES error fires on the next
+ * event-loop tick; a failing script exits within milliseconds). The probe
+ * keeps the failure observable without delaying the poll loop. Overridable
+ * per call via the `probeMs` option — a caller that spawns a real interpreter
+ * under load must not race the 500 ms default (the real-spawn characterisation
+ * suite passes a generous window, WL-0MVOTIJ2U000JI44).
  */
 export const DOWNTIME_SPAWN_PROBE_MS = 500;
 
@@ -480,10 +483,20 @@ export async function spawnDowntimePane(
     reservationTicketId?: string;
     /** Per-turn locality preference (parent AC4, slice C4). */
     localPreference?: LocalPreference;
+    /**
+     * Probe window override (ms); defaults to
+     * {@link DOWNTIME_SPAWN_PROBE_MS}. Bounds only how long the caller waits
+     * for a spawn `error` / non-zero `exit` before assuming the pane
+     * started; it is NOT forwarded to the spawn boundary. Real-spawn tests
+     * pass a generous value so a slow interpreter startup under host load
+     * cannot race the default window (WL-0MVOTIJ2U000JI44).
+     */
+    probeMs?: number;
   },
   spawnFn: DowntimeSpawn = defaultDowntimeSpawn,
 ): Promise<DowntimeSpawnResult> {
-  const child = spawnFn(scriptPath, args, opts);
+  const { probeMs = DOWNTIME_SPAWN_PROBE_MS, ...spawnOpts } = opts;
+  const child = spawnFn(scriptPath, args, spawnOpts);
   child.unref();
   return new Promise<DowntimeSpawnResult>((resolve) => {
     let settled = false;
@@ -494,7 +507,7 @@ export async function spawnDowntimePane(
       if (timer !== undefined) clearTimeout(timer);
       resolve(result);
     };
-    timer = setTimeout(() => settle({ ok: true }), DOWNTIME_SPAWN_PROBE_MS);
+    timer = setTimeout(() => settle({ ok: true }), probeMs);
     child.once('error', (err: Error) => {
       process.stderr.write(
         `[worklog-plugin] Downtime pane spawn failed: ${err.message}\n`,

@@ -246,6 +246,28 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
     // carrier reaches the spawn boundary unchanged.
     expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo' });
   });
+
+  it('honours an injectable probe window and strips it from the spawn opts (WL-0MVOTIJ2U000JI44)', async () => {
+    const handle = { unref: vi.fn(), once: vi.fn() };
+    const spawnFn = vi.fn(() => handle) as unknown as DowntimeSpawn;
+
+    const startedAt = Date.now();
+    const spawned = await spawnDowntimePane(
+      '/path/to/send-to-pi.sh',
+      [],
+      { cwd: '/repo', probeMs: 40 },
+      spawnFn,
+    );
+
+    // The probe window is a caller-side deadline, NOT part of the spawn opts
+    // carrier: the boundary sees the pane opts unchanged.
+    expect(spawnFn).toHaveBeenCalledWith('/path/to/send-to-pi.sh', [], { cwd: '/repo' });
+    // With no error/exit events, the injected (short) window resolves ok:true
+    // well before the 500 ms default — proving the override is honoured and
+    // that no-op-event panes still assume the pane opened.
+    expect(spawned).toEqual({ ok: true });
+    expect(Date.now() - startedAt).toBeLessThan(450);
+  });
 });
 
 describe('parseHerdrPaneListOutput / countRunningDowntimePanes (AC1)', () => {

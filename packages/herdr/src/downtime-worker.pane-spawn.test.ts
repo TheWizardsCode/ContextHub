@@ -13,6 +13,15 @@
  *
  * Observability contract (WL-0MSLWJ3I70031Z8U AC2): a failed spawn is always
  * reported `{ ok: false }` and is never logged as a successful dispatch.
+ *
+ * Load-sensitivity note (WL-0MVOTIJ2U000JI44): each test passes a generous
+ * `opts.probeMs` (10 s) because the probe window is a *fallback deadline*, not
+ * a timing assertion — under host load, real `node` interpreter startup can
+ * exceed the 500 ms production default (observed ~0.56 s at load average ~28),
+ * so a racing probe would resolve `{ ok: true }` before the child's exit event
+ * fired. The 10 s bound keeps the end-to-end boundary characterisation while
+ * removing the flaky probe race; the default window itself is pinned by
+ * `downtime-worker.pane.test.ts` with an injected spawn boundary.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -23,7 +32,12 @@ import { defaultDowntimeSpawn, spawnDowntimePane } from './downtime-worker.js';
 describe('defaultDowntimeSpawn (real spawn boundary)', () => {
   it('reports a missing launcher script as { ok: false } via the error handler', async () => {
     const missing = path.join(os.tmpdir(), 'worklog-no-such-send-to-pi.sh');
-    const result = await spawnDowntimePane(missing, [], { cwd: os.tmpdir() }, defaultDowntimeSpawn);
+    const result = await spawnDowntimePane(
+      missing,
+      [],
+      { cwd: os.tmpdir(), probeMs: 10_000 },
+      defaultDowntimeSpawn,
+    );
 
     expect(result.ok).toBe(false);
     if (!result.ok) {
@@ -40,7 +54,7 @@ describe('defaultDowntimeSpawn (real spawn boundary)', () => {
     const result = await spawnDowntimePane(
       process.execPath,
       ['-e', 'process.exit(3)'],
-      { cwd: os.tmpdir() },
+      { cwd: os.tmpdir(), probeMs: 10_000 },
       defaultDowntimeSpawn,
     );
 
@@ -51,7 +65,7 @@ describe('defaultDowntimeSpawn (real spawn boundary)', () => {
     const result = await spawnDowntimePane(
       process.execPath,
       ['-e', 'process.exit(0)'],
-      { cwd: os.tmpdir() },
+      { cwd: os.tmpdir(), probeMs: 10_000 },
       defaultDowntimeSpawn,
     );
 

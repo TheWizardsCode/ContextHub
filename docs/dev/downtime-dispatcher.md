@@ -670,6 +670,16 @@ are now recovered automatically:
 
 A STANDING success marker (no `outcome`) excludes the item for its tier **for a bounded lifetime**, so a dispatched item is never double-dispatched while its pane may still be running — and never stranded forever if it is not (see below).
 
+**Probe window (how `spawn-failed` is observed).** `spawnDowntimePane` waits
+for a spawn `error` (ENOENT/EACCES) or a non-zero child `exit` for
+`DOWNTIME_SPAWN_PROBE_MS` (default 500 ms) before assuming the pane started.
+The window is a caller-side fallback deadline, not a timing guarantee, and is
+overridable per call via `probeMs` (stripped before the opts reach the spawn
+boundary). A caller that spawns a real interpreter on a loaded host must widen
+it: real `node` startup has been observed at ~0.56 s under load average ~28,
+which would otherwise resolve `{ok: true}` before the exit event and hide a
+non-zero script exit (WL-0MVOTIJ2U000JI44).
+
 ### Status-neutral audit-tier claim (WL-0MV85WCJJ0087VMP)
 
 The AUDIT tier claim is deliberately STATUS-NEUTRAL: an audited
