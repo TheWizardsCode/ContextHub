@@ -24,13 +24,11 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { dirname, resolve, join } from 'path';
 import { tmpdir } from 'node:os';
-import { resolveWorklogRoot } from '@worklog/shared/worklog-paths';
 import { isAuditFresh } from '@worklog/shared/icons';
 import {
   checkWlAvailable,
   fetchNextItems,
   fetchItemsByStage,
-  setWorklogDir,
   claimWorkItem,
   rollbackClaimWorkItem,
   markNeedsProducerReviewWorkItem,
@@ -312,6 +310,24 @@ export {
 import { readHostCpu } from './index.host-cpu.js';
 
 export { setHostCpuSamplerForTests } from './index.host-cpu.js';
+
+// ── Settings bootstrap + worklog-target (index.settings.ts) ─────────
+// Extracted verbatim (move-only, WL-0MVOA0W1P000IZKK): the single module-level
+// `const settings = loadSettings()` side effect and the two worklog-target
+// bootstrap functions moved to `index.settings.ts` so the settings singleton
+// lives in exactly one module (AC5). Value-imported so `createDowntimeDeps` and
+// `main()` keep sharing the same instance (settings is NOT re-exported — no
+// consumer imports it from the barrel, AC2). Re-exported so the barrel keeps
+// the surface index.test.ts imports via dynamic `import('./index.js')` casts
+// (`configureWorklogTarget`, `uninitializedReport`).
+
+import {
+  configureWorklogTarget,
+  settings,
+  uninitializedReport,
+} from './index.settings.js';
+
+export { configureWorklogTarget, uninitializedReport };
 
 /**
  * Build the real downtime-worker dependencies (WL-0MSF49FMW009M06K):
@@ -1294,45 +1310,6 @@ export function createDowntimeDeps(
       );
     },
   };
-}
-
-// Load settings
-const settings = loadSettings();
-
-/**
- * Resolve the worklog root starting from the given directory (or the
- * process CWD when not provided) and configure the fetcher so every child
- * `wl` invocation targets that root's database via `--worklog-dir`.
- *
- * The resolution itself is delegated to the shared
- * `resolveWorklogRoot()` (packages/shared/src/worklog-paths.ts) — the same
- * strategy the `wl` CLI uses — so the plugin and the CLI can never disagree
- * about what constitutes the project root.
- *
- * Returns the resolved project root, or undefined when no valid `.worklog/`
- * is found (in which case the fetcher falls back to default resolution).
- */
-export function configureWorklogTarget(startDir?: string): string | undefined {
-  if (startDir) {
-    process.stderr.write(`[worklog-plugin] resolving worklog root from HERDR_RESOLVED_CWD: ${startDir}\n`);
-  }
-  const wlRoot = resolveWorklogRoot(startDir);
-  if (wlRoot) {
-    setWorklogDir(join(wlRoot, '.worklog'));
-  }
-  return wlRoot;
-}
-
-/**
- * Report text emitted when no valid `.worklog/` directory is found in or
- * above the given start directory. Extracted so tests can assert the
- * uninitialized reporting without launching the full TUI.
- */
-export function uninitializedReport(startDir: string): string {
-  return [
-    `[worklog-plugin] No valid .worklog/ directory found in or above '${startDir}'`,
-    `[worklog-plugin] Showing empty worklist. Navigate to a project with 'worklog init' to see items.`,
-  ].join('\n') + '\n';
 }
 
 export async function main(): Promise<void> {
