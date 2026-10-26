@@ -30,6 +30,8 @@ import {
   buildDowntimeSpawnOptions,
   scrubRepositoryOverrides,
   REPOSITORY_OVERRIDE_ENV_VARS,
+  LOCAL_PREFERENCE_ENV_VAR,
+  LOCAL_RESERVATION_TICKET_ENV,
   parseHerdrPaneListOutput,
   countRunningDowntimePanes,
   paneLabelItemId,
@@ -198,6 +200,42 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
       expect(options.env.HERDR_RESOLVED_CWD).toBe('/repo');
     } finally {
       for (const key of REPOSITORY_OVERRIDE_ENV_VARS) {
+        const previous = saved.get(key);
+        if (previous === undefined) delete process.env[key];
+        else process.env[key] = previous;
+      }
+    }
+  });
+
+  it('buildDowntimeSpawnOptions never inherits the launcher pane-launch knobs (WL-0MVP643Q4007BZJ8)', () => {
+    // The downtime suite can itself run inside a herdr pane that carries
+    // `HERDR_LOCAL_PREFERENCE` (a `local-only` pane) or a reservation ticket.
+    // Inheriting that leaked value would (a) break the documented fail-open
+    // contract (`absent value omits the env var`, C4-AC3) and (b) bypass the
+    // dispatch priority rule — a local-only leader would force EVERY child
+    // local-only. Only the explicit dispatch decision may set these vars.
+    const saved = new Map<string, string | undefined>();
+    for (const key of [LOCAL_PREFERENCE_ENV_VAR, LOCAL_RESERVATION_TICKET_ENV]) {
+      saved.set(key, process.env[key]);
+      process.env[key] = 'leaked-from-launcher';
+    }
+    try {
+      const inherited = buildDowntimeSpawnOptions('/repo');
+      expect(inherited.env[LOCAL_PREFERENCE_ENV_VAR]).toBeUndefined();
+      expect(inherited.env[LOCAL_RESERVATION_TICKET_ENV]).toBeUndefined();
+      // Scrubbing the knobs must not discard unrelated forwarding.
+      expect(inherited.env.HERDR_RESOLVED_CWD).toBe('/repo');
+      expect(inherited.env.AUDIT_PHASE2_PARALLELISM).toBe('1');
+
+      // The explicit dispatch decision still reaches the pane.
+      const explicit = buildDowntimeSpawnOptions('/repo', {
+        localPreference: 'remote-ok',
+        reservationTicketId: 'tkt-1',
+      });
+      expect(explicit.env[LOCAL_PREFERENCE_ENV_VAR]).toBe('remote-ok');
+      expect(explicit.env[LOCAL_RESERVATION_TICKET_ENV]).toBe('tkt-1');
+    } finally {
+      for (const key of [LOCAL_PREFERENCE_ENV_VAR, LOCAL_RESERVATION_TICKET_ENV]) {
         const previous = saved.get(key);
         if (previous === undefined) delete process.env[key];
         else process.env[key] = previous;

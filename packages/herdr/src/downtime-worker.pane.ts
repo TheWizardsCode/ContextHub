@@ -365,6 +365,17 @@ export type DowntimeSpawn = (
  * fast/cheap operating mode (WL-0MVE1NZ4J000H5NH). The audit skill honours
  * the env var (integer >= 1); interactive (non-downtime) panes are
  * unaffected.
+ *
+ * The two pane-launch knobs — `HERDR_LOCAL_PREFERENCE` and
+ * `PI_LOCAL_RESERVATION_TICKET` — come from `opts` **only** and are stripped
+ * from the inherited environment (WL-0MVP643Q4007BZJ8). The downtime worker
+ * can itself run inside a `local-only` pane that exports
+ * `HERDR_LOCAL_PREFERENCE`; inheriting that value would (a) violate the
+ * fail-open contract that an absent preference leaves the pane env
+ * byte-identical (C4-AC3) and (b) bypass the resolved dispatch decision, so a
+ * `local-only` leader would force every child — including `critical` work —
+ * local-only. Interactive panes are not built here, so an operator who
+ * exports the variable still gets it in their own panes.
  */
 export function buildDowntimeSpawnOptions(
   cwd: string,
@@ -375,37 +386,42 @@ export function buildDowntimeSpawnOptions(
   cwd: string;
   env: NodeJS.ProcessEnv;
 } {
+  const env: NodeJS.ProcessEnv = {
+    ...scrubRepositoryOverrides(process.env),
+    HERDR_RESOLVED_CWD: cwd,
+    // Phase 2 child deep-analysis is always serial (parent + one child =
+    // two local slots).
+    AUDIT_PHASE2_PARALLELISM: '1',
+    // Convey the selected candidate's priority to the launched pi session
+    // (the Worklog pi extension turns it into the `X-Priority` header).
+    // Mapped through the downtime table; defaults to `medium` for an
+    // unknown/absent priority (parent WL-0MVE1NZ4J000H5NH AC3).
+    [REQUEST_PRIORITY_ENV_VAR]: mapDowntimeRequestPriority(opts?.priority),
+  };
+  // Pane-launch knobs are never inherited from the launcher
+  // (WL-0MVP643Q4007BZJ8): the resolved dispatch decision is their only source.
+  delete env[LOCAL_RESERVATION_TICKET_ENV];
+  delete env[LOCAL_PREFERENCE_ENV_VAR];
+  // Granted reservation ticket (slice C2 AC1): belt-and-braces beside the
+  // `--reservation-ticket` arg — the pane process reads this env var on its
+  // first request (the Worklog pi extension turns it into
+  // `X-Local-Reservation`). Absent on a fail-open dispatch, so the child env
+  // stays byte-identical to today.
+  if (opts?.reservationTicketId) {
+    env[LOCAL_RESERVATION_TICKET_ENV] = opts.reservationTicketId;
+  }
+  // Per-turn locality preference (parent AC4, slice C4): belt-and-braces
+  // beside the `--local-preference` arg. The Worklog pi extension turns this
+  // into the `X-Local-Preference` header on every provider request. Absent
+  // leaves the child env byte-identical to today (fail-open).
+  if (opts?.localPreference) {
+    env[LOCAL_PREFERENCE_ENV_VAR] = opts.localPreference;
+  }
   return {
     detached: true,
     stdio: 'ignore',
     cwd,
-    env: {
-      ...scrubRepositoryOverrides(process.env),
-      HERDR_RESOLVED_CWD: cwd,
-      // Phase 2 child deep-analysis is always serial (parent + one child =
-      // two local slots).
-      AUDIT_PHASE2_PARALLELISM: '1',
-      // Convey the selected candidate's priority to the launched pi session
-      // (the Worklog pi extension turns it into the `X-Priority` header).
-      // Mapped through the downtime table; defaults to `medium` for an
-      // unknown/absent priority (parent WL-0MVE1NZ4J000H5NH AC3).
-      [REQUEST_PRIORITY_ENV_VAR]: mapDowntimeRequestPriority(opts?.priority),
-      // Granted reservation ticket (slice C2 AC1): belt-and-braces beside
-      // the `--reservation-ticket` arg — the pane process reads this env var
-      // on its first request (the Worklog pi extension turns it into
-      // `X-Local-Reservation`). Absent on a fail-open dispatch, so the child
-      // env stays byte-identical to today.
-      ...(opts?.reservationTicketId
-        ? { [LOCAL_RESERVATION_TICKET_ENV]: opts.reservationTicketId }
-        : {}),
-      // Per-turn locality preference (parent AC4, slice C4): belt-and-braces
-      // beside the `--local-preference` arg. The Worklog pi extension turns
-      // this into the `X-Local-Preference` header on every provider request.
-      // Absent leaves the child env byte-identical to today (fail-open).
-      ...(opts?.localPreference
-        ? { [LOCAL_PREFERENCE_ENV_VAR]: opts.localPreference }
-        : {}),
-    },
+    env,
   };
 }
 

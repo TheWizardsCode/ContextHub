@@ -422,11 +422,22 @@ describe('local-preference forwarding to the pane (C4-AC1)', () => {
   });
 
   it('C4-AC3: no preference leaves the launch byte-identical (fail-open)', () => {
-    const args = buildDowntimePaneArgs('plan', '/skill:plan WL-X', { model: 'code', cwd: C2_CWD });
-    expect(args).not.toContain('--local-preference');
+    // Pin the ambient environment: the suite itself can run inside a
+    // `local-only` downtime pane (which exports `HERDR_LOCAL_PREFERENCE`), and
+    // the fail-open contract must hold regardless — an inherited launcher
+    // value must never reach the child pane (WL-0MVP643Q4007BZJ8).
+    const savedPreference = process.env[LOCAL_PREFERENCE_ENV_VAR];
+    process.env[LOCAL_PREFERENCE_ENV_VAR] = 'local-only';
+    try {
+      const args = buildDowntimePaneArgs('plan', '/skill:plan WL-X', { model: 'code', cwd: C2_CWD });
+      expect(args).not.toContain('--local-preference');
 
-    const spawn = buildDowntimeSpawnOptions(C2_CWD, { priority: 'low' });
-    expect(spawn.env[LOCAL_PREFERENCE_ENV_VAR]).toBeUndefined();
+      const spawn = buildDowntimeSpawnOptions(C2_CWD, { priority: 'low' });
+      expect(spawn.env[LOCAL_PREFERENCE_ENV_VAR]).toBeUndefined();
+    } finally {
+      if (savedPreference === undefined) delete process.env[LOCAL_PREFERENCE_ENV_VAR];
+      else process.env[LOCAL_PREFERENCE_ENV_VAR] = savedPreference;
+    }
   });
 
   it('C4-AC1: a dispatch configured with a preference carries it into the spawn', async () => {

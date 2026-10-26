@@ -1238,7 +1238,11 @@ fallback decision instead of a silent ~120 s proxy-side wait.
   injects `exec env HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`;
   the headless path sets it directly on the spawn environment. An absent or
   invalid value omits the env var — the pane launch stays byte-identical to
-  the pre-feature behaviour.
+  the pre-feature behaviour. The pane-spawn helper never **inherits** the
+  launcher's own `HERDR_LOCAL_PREFERENCE`/`PI_LOCAL_RESERVATION_TICKET`: it
+  strips both from the inherited environment and re-adds them only from the
+  resolved dispatch decision (WL-0MVP643Q4007BZJ8), so a worker running inside
+  a `local-only` pane cannot force every child pane local-only.
 - **Header injection + route capture.** The Worklog pi extension
   (`packages/tui/extensions/local-preference/`) reads the env var on every
   provider request (never cached, so a re-launched pane is never stale) and

@@ -1548,6 +1548,14 @@ through `DowntimeWorkerConfig.config()` → both dispatch paths →
 - **Interactive panes** carry no preference unless the operator exports
   `HERDR_LOCAL_PREFERENCE` — requests stay byte-identical to today.
 
+Downtime-spawned panes take both pane-launch knobs (`HERDR_LOCAL_PREFERENCE`,
+`PI_LOCAL_RESERVATION_TICKET`) from the **resolved dispatch decision only**:
+`buildDowntimeSpawnOptions` strips them from the inherited environment before
+re-adding an explicit value (WL-0MVP643Q4007BZJ8). A worker that itself runs
+inside a `local-only` pane therefore cannot leak its own preference into every
+child — that would bypass the priority rule and violate the fail-open contract
+that an absent value omits the env var.
+
 **Priority rule and precedence (WL-0MVNUIW77000VYAX).** The preference is
 resolved **once** at the dispatch boundary (`dispatchClaimedTier`, from the
 already-resolved candidate priority), so every dispatch path — coordination
