@@ -1,9 +1,21 @@
 /**
  * packages/herdr/test/split-guard/scan.ts — static scanners and gate predicates
- * for the `downtime-worker.ts` split guard.
+ * shared by the split guards (`downtime-worker.ts`, `index.ts`,
+ * `worklist.ts`).
  *
  * Parent: WL-0MVF3F9A7000HKP7 (decompose the `downtime-worker.ts` god class).
  * Guard item: WL-0MVLIHWOY003IP5E (this file's owning work item).
+ *
+ * ## Parameterisation (WL-0MVND6BL30066V6B)
+ *
+ * The predicates were originally hard-wired to the `downtime-worker` family.
+ * Every family-specific input now travels in a {@link SplitFamilyConfig}
+ * (barrel path, family predicate, baseline path, line-ceiling allowlist and its
+ * plan-time ceiling, cycle baselines, and the single-owner declaration name).
+ * Each parameterised function defaults to {@link DOWNTIME_CONFIG}, so the
+ * original downtime guard keeps compiling and passing with **no edits** — the
+ * worklist guard (WL-0MVND6BL30066V6B) supplies its own config from
+ * `worklist-family.ts`.
  *
  * ## Why this module exists
  *
@@ -141,6 +153,62 @@ export const CONSUMER_ROOTS: readonly string[] = [...SCAN_ROOTS, 'tests', 'scrip
 export const BASELINE_COMMAND =
   'npx tsx packages/herdr/test/split-guard/scan.ts --write-baseline';
 
+/**
+ * Every family-specific input a split guard needs.
+ *
+ * Predicates take one of these as their last argument and default to
+ * {@link DOWNTIME_CONFIG}; a new guard supplies its own (see
+ * `worklist-family.ts`). Keeping the family's shape in data rather than in
+ * `if` branches is what lets one scanner serve several refactor epics without
+ * forking the gate logic.
+ */
+export interface SplitFamilyConfig {
+  /** Repository-relative path of the barrel every consumer imports. */
+  readonly barrel: string;
+  /** Directory the split's modules live in. */
+  readonly familyDir: string;
+  /** Filename predicate selecting the family's modules (test files included). */
+  readonly familyPattern: RegExp;
+  /** Repository-relative path of the committed consumer-symbol baseline. */
+  readonly baselinePath: string;
+  /** Files currently exempt from the size gate (shrink-only). */
+  readonly allowlist: readonly string[];
+  /** The allowlist as recorded at plan time (the shrink-only ceiling). */
+  readonly allowlistCeiling: readonly string[];
+  /** Recorded pre-existing import cycles the family participates in. */
+  readonly cycleBaseline: readonly (readonly string[])[];
+  /** Recorded edges of those cycles that must stay type-only. */
+  readonly typeOnlyEdges: readonly { readonly from: string; readonly to: string }[];
+  /** Recorded pre-existing **runtime** (value-only) cycles. */
+  readonly runtimeCycleBaseline: readonly (readonly string[])[];
+  /** Module-scope declaration that must live in exactly one family module. */
+  readonly singleOwnerDeclaration: string;
+  /** Generation command recorded in the baseline provenance. */
+  readonly baselineCommand: string;
+  /** Roots scanned for barrel consumers. */
+  readonly consumerRoots: readonly string[];
+}
+
+/**
+ * Defaults preserved byte-for-byte from the original downtime guard, so
+ * `downtime-worker.split-guard.test.ts` and `index-family.ts` keep working
+ * untouched.
+ */
+export const DOWNTIME_CONFIG: SplitFamilyConfig = {
+  barrel: BARREL,
+  familyDir: SPLIT_FAMILY_DIR,
+  familyPattern: /^downtime-worker[^/]*\.ts$/,
+  baselinePath: BASELINE_PATH,
+  allowlist: SPLIT_ALLOWLIST,
+  allowlistCeiling: SPLIT_ALLOWLIST_CEILING,
+  cycleBaseline: CYCLE_BASELINE,
+  typeOnlyEdges: CYCLE_BASELINE_TYPE_ONLY_EDGES,
+  runtimeCycleBaseline: [],
+  singleOwnerDeclaration: 'dispatchInFlightCount',
+  baselineCommand: BASELINE_COMMAND,
+  consumerRoots: CONSUMER_ROOTS,
+};
+
 // ── Parsed-module model ───────────────────────────────────────────────
 
 export interface ParsedImportName {
@@ -176,6 +244,12 @@ export interface ParsedModule {
   exportedNames: string[];
   reexports: ParsedReexport[];
   imports: ParsedImport[];
+  /**
+   * Every name declared at module scope (variables, functions, classes,
+   * interfaces, type aliases, enums, modules), with its declaration count.
+   * Backs the generic single-owner gate (e.g. `WorkItemListState`).
+   */
+  declarations: Map<string, number>;
   /** Module-scope `let`/`const`/`var dispatchInFlightCount` declarations. */
   dispatchInFlightDeclarations: number;
 }
@@ -218,6 +292,20 @@ function declarationName(node: ts.Node): string | null {
   return name && ts.isIdentifier(name) ? name.text : null;
 }
 
+/** Every module-scope name a statement declares (variables, functions, types, …). */
+function declarationNames(stmt: ts.Statement): string[] {
+  if (ts.isVariableStatement(stmt)) {
+    return stmt.declarationList.declarations
+      .map((decl) => (ts.isIdentifier(decl.name) ? decl.name.text : null))
+      .filter((name): name is string => name !== null);
+  }
+  if (DECLARATION_KINDS.has(stmt.kind)) {
+    const name = declarationName(stmt);
+    return name ? [name] : [];
+  }
+  return [];
+}
+
 const DECLARATION_KINDS = new Set<ts.SyntaxKind>([
   ts.SyntaxKind.FunctionDeclaration,
   ts.SyntaxKind.ClassDeclaration,
@@ -240,6 +328,7 @@ export function parseModuleSource(file: string, source: string): ParsedModule {
     exportedNames: [],
     reexports: [],
     imports: [],
+    declarations: new Map(),
     dispatchInFlightDeclarations: 0,
   };
 
@@ -325,6 +414,12 @@ export function parseModuleSource(file: string, source: string): ParsedModule {
       continue;
     }
 
+    // Record module-scope declarations (exported or not) for the generic
+    // single-owner gate. Imports/exports have already been handled above.
+    for (const name of declarationNames(stmt)) {
+      parsed.declarations.set(name, (parsed.declarations.get(name) ?? 0) + 1);
+    }
+
     if (!hasExportModifier(stmt)) continue;
     if (hasDefaultModifier(stmt)) parsed.exportedNames.push('default');
 
@@ -376,15 +471,37 @@ function collectSourceFiles(dir: string, found: string[] = []): string[] {
   return found;
 }
 
-/** Parse every `.ts` file under {@link CONSUMER_ROOTS} into a {@link ModuleIndex}. */
-export function loadModuleIndex(repoRoot: string): ModuleIndex {
+/** Parse every `.ts` file under `roots` (default {@link CONSUMER_ROOTS}). */
+export function loadModuleIndex(
+  repoRoot: string,
+  roots: readonly string[] = CONSUMER_ROOTS,
+): ModuleIndex {
   const byFile = new Map<string, ParsedModule>();
-  const files = CONSUMER_ROOTS.flatMap((root) => collectSourceFiles(path.join(repoRoot, root)));
+  const files = roots.flatMap((root) => collectSourceFiles(path.join(repoRoot, root)));
   for (const abs of files) {
     const rel = toPosix(path.relative(repoRoot, abs));
     byFile.set(rel, parseModuleSource(rel, fs.readFileSync(abs, 'utf-8')));
   }
   return { repoRoot, byFile };
+}
+
+/**
+ * Every scanned consumer source, keyed by repository-relative POSIX path.
+ *
+ * The dynamic-import scanner needs the raw text (it walks parent pointers), so
+ * it cannot reuse the lighter {@link ParsedModule} model.
+ */
+export function loadConsumerSources(
+  repoRoot: string,
+  roots: readonly string[] = CONSUMER_ROOTS,
+): Map<string, string> {
+  const sources = new Map<string, string>();
+  for (const root of roots) {
+    for (const abs of collectSourceFiles(path.join(repoRoot, root))) {
+      sources.set(toPosix(path.relative(repoRoot, abs)), fs.readFileSync(abs, 'utf-8'));
+    }
+  }
+  return sources;
 }
 
 /** Index built from in-memory sources — used by the negative-case tests. */
@@ -410,17 +527,20 @@ export function productionModules(index: ModuleIndex): ParsedModule[] {
   return [...index.byFile.values()].filter((m) => !isTestOrFixture(m.file));
 }
 
-/** True for `packages/herdr/src/downtime-worker*.ts` (the split's own family). */
-export function isSplitFamilyFile(file: string): boolean {
-  return (
-    path.posix.dirname(file) === SPLIT_FAMILY_DIR &&
-    /^downtime-worker[^/]*\.ts$/.test(basename(file))
-  );
+/** True for a module in the configured split family (e.g. `downtime-worker*.ts`). */
+export function isSplitFamilyFile(
+  file: string,
+  config: SplitFamilyConfig = DOWNTIME_CONFIG,
+): boolean {
+  return path.posix.dirname(file) === config.familyDir && config.familyPattern.test(basename(file));
 }
 
-/** Production `downtime-worker*.ts` modules. */
-export function splitFamilyModules(index: ModuleIndex): ParsedModule[] {
-  return productionModules(index).filter((m) => isSplitFamilyFile(m.file));
+/** Production modules of the configured family. */
+export function splitFamilyModules(
+  index: ModuleIndex,
+  config: SplitFamilyConfig = DOWNTIME_CONFIG,
+): ParsedModule[] {
+  return productionModules(index).filter((m) => isSplitFamilyFile(m.file, config));
 }
 
 /** Resolve a relative import/export specifier to an indexed module file. */
@@ -472,6 +592,25 @@ export function findMissingExports(
 }
 
 /**
+ * Symbols a live consumer imports that the barrel does not export.
+ *
+ * `knownMissing` records pre-existing gaps (shrink-only): the guard fails on a
+ * *new* consumer import the barrel never provided, but does not demand the
+ * repository first fix an inconsistency that predates the split.
+ */
+export function findUnexportedConsumerImports(
+  index: ModuleIndex,
+  barrel: string = BARREL,
+  knownMissing: readonly string[] = [],
+): string[] {
+  const exported = collectExportedNames(index, barrel);
+  const known = new Set(knownMissing);
+  return findMissingExports(consumerImportNames(index, barrel).keys(), exported).filter(
+    (name) => !known.has(name),
+  );
+}
+
+/**
  * All symbols any consumer imports from the barrel, mapped to how they are
  * used. Covers named imports, whole-clause type imports, per-specifier `type`
  * prefixes and `import('./downtime-worker.js').X` type positions.
@@ -497,31 +636,48 @@ export function consumerImportNames(
   return usage;
 }
 
-// ── Gate 2: single-flight state ───────────────────────────────────────
+// ── Gate 2: single-owner state ────────────────────────────────────────
 
-/** Modules declaring a module-scope `dispatchInFlightCount`, with counts. */
+/** Modules declaring a module-scope `name`, with per-module counts. */
+export function findDeclarationModules(
+  modules: readonly ParsedModule[],
+  name: string,
+): { file: string; count: number }[] {
+  return modules
+    .filter((m) => (m.declarations.get(name) ?? 0) > 0)
+    .map((m) => ({ file: m.file, count: m.declarations.get(name)! }))
+    .sort((a, b) => a.file.localeCompare(b.file));
+}
+
+/** Total module-scope `name` declarations across `modules`. */
+export function countDeclarations(modules: readonly ParsedModule[], name: string): number {
+  return modules.reduce((total, m) => total + (m.declarations.get(name) ?? 0), 0);
+}
+
+/** Modules declaring the downtime guard's single-flight counter, with counts. */
 export function findDispatchInFlightDeclarations(
   modules: readonly ParsedModule[],
 ): { file: string; count: number }[] {
-  return modules
-    .filter((m) => m.dispatchInFlightDeclarations > 0)
-    .map((m) => ({ file: m.file, count: m.dispatchInFlightDeclarations }));
+  return findDeclarationModules(modules, 'dispatchInFlightCount');
 }
 
 /** Total module-scope `dispatchInFlightCount` declarations across `modules`. */
 export function countDispatchInFlightDeclarations(modules: readonly ParsedModule[]): number {
-  return modules.reduce((total, m) => total + m.dispatchInFlightDeclarations, 0);
+  return countDeclarations(modules, 'dispatchInFlightCount');
 }
 
 // ── Gate 3: barrel imports and cycles ─────────────────────────────────
 
 /** Split-family modules that import the barrel with runtime (value) semantics. */
-export function findBarrelValueImports(index: ModuleIndex): { file: string; specifier: string }[] {
+export function findBarrelValueImports(
+  index: ModuleIndex,
+  config: SplitFamilyConfig = DOWNTIME_CONFIG,
+): { file: string; specifier: string }[] {
   const violations: { file: string; specifier: string }[] = [];
-  for (const mod of splitFamilyModules(index)) {
-    if (mod.file === BARREL) continue;
+  for (const mod of splitFamilyModules(index, config)) {
+    if (mod.file === config.barrel) continue;
     for (const imp of mod.imports) {
-      if (resolveImportTarget(mod.file, imp.specifier) !== BARREL) continue;
+      if (resolveImportTarget(mod.file, imp.specifier) !== config.barrel) continue;
       if (!isTypeOnlyImport(imp)) {
         violations.push({ file: mod.file, specifier: imp.specifier });
       }
@@ -619,30 +775,40 @@ export function findStronglyConnectedComponents(graph: Map<string, GraphEdge[]>)
   return components;
 }
 
-function cycleComponents(graph: Map<string, GraphEdge[]>): string[][] {
+function cycleComponents(
+  graph: Map<string, GraphEdge[]>,
+  config: SplitFamilyConfig,
+): string[][] {
   return findStronglyConnectedComponents(graph).filter(
     (component) =>
-      component.length > 1 && component.some((file) => isSplitFamilyFile(file)),
+      component.length > 1 && component.some((file) => isSplitFamilyFile(file, config)),
   );
 }
 
 /** Cyclic components of the full (value + type) static import graph. */
-export function findSplitFamilyCycles(index: ModuleIndex): string[][] {
-  return cycleComponents(buildImportGraph(index));
+export function findSplitFamilyCycles(
+  index: ModuleIndex,
+  config: SplitFamilyConfig = DOWNTIME_CONFIG,
+): string[][] {
+  return cycleComponents(buildImportGraph(index), config);
 }
 
 /**
  * Cyclic components of the **runtime** import graph (type-only edges removed).
  *
  * These are the cycles that exist in the emitted JavaScript. The split must not
- * introduce one (AC4/AC5): the recorded baseline has none today.
+ * introduce one (AC4/AC5); compare the result against
+ * `config.runtimeCycleBaseline` with {@link findCycleBaselineViolations}.
  */
-export function findRuntimeCycles(index: ModuleIndex): string[][] {
+export function findRuntimeCycles(
+  index: ModuleIndex,
+  config: SplitFamilyConfig = DOWNTIME_CONFIG,
+): string[][] {
   const runtime = new Map<string, GraphEdge[]>();
   for (const [file, edges] of buildImportGraph(index)) {
     runtime.set(file, edges.filter((e) => !e.typeOnly));
   }
-  return cycleComponents(runtime);
+  return cycleComponents(runtime, config);
 }
 
 /**
@@ -727,34 +893,45 @@ export function findAllowlistViolations(
 // ── Baseline ──────────────────────────────────────────────────────────
 
 /** Build the baseline payload from the live tree. */
-export function buildBaseline(repoRoot: string): SplitBaseline {
-  const index = loadModuleIndex(repoRoot);
-  const symbols = [...consumerImportNames(index).keys()].sort();
+export function buildBaseline(
+  repoRoot: string,
+  config: SplitFamilyConfig = DOWNTIME_CONFIG,
+): SplitBaseline {
+  const index = loadModuleIndex(repoRoot, config.consumerRoots);
+  const symbols = [...consumerImportNames(index, config.barrel).keys()].sort();
   return {
     provenance: {
-      generatedBy: BASELINE_COMMAND,
+      generatedBy: config.baselineCommand,
       sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], {
         cwd: repoRoot,
         encoding: 'utf-8',
       }).trim(),
       generatedAt: new Date().toISOString(),
-      barrel: BARREL,
-      consumerGlobs: CONSUMER_ROOTS.map((root) => `${root}/**/*.ts`),
+      barrel: config.barrel,
+      consumerGlobs: config.consumerRoots.map((root) => `${root}/**/*.ts`),
     },
     symbols,
   };
 }
 
-/** Read + parse the committed baseline. */
-export function readBaseline(repoRoot: string): SplitBaseline {
-  return JSON.parse(fs.readFileSync(path.join(repoRoot, BASELINE_PATH), 'utf-8')) as SplitBaseline;
+/** Read + parse a committed baseline (`config.baselinePath` by default). */
+export function readBaseline(
+  repoRoot: string,
+  config: SplitFamilyConfig = DOWNTIME_CONFIG,
+): SplitBaseline {
+  return JSON.parse(
+    fs.readFileSync(path.join(repoRoot, config.baselinePath), 'utf-8'),
+  ) as SplitBaseline;
 }
 
-/** Write the baseline to {@link BASELINE_PATH}; returns the payload written. */
-export function writeBaseline(repoRoot: string): SplitBaseline {
-  const baseline = buildBaseline(repoRoot);
+/** Write a baseline to `config.baselinePath`; returns the payload written. */
+export function writeBaseline(
+  repoRoot: string,
+  config: SplitFamilyConfig = DOWNTIME_CONFIG,
+): SplitBaseline {
+  const baseline = buildBaseline(repoRoot, config);
   fs.writeFileSync(
-    path.join(repoRoot, BASELINE_PATH),
+    path.join(repoRoot, config.baselinePath),
     `${JSON.stringify({ version: 1, ...baseline }, null, 2)}\n`,
     'utf-8',
   );
