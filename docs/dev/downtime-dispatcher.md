@@ -177,15 +177,13 @@ review-queue hold. A gated own-backlog item is skipped exactly like an in-view
 one; a lost CAS race tries the next ranked candidate.
 
 **Leadership hand-off (AC4/AC5/AC6, assumption A3).** A successful dispatch
-sourced from the own backlog (and **only** then) is flagged machine-readably on
-the outcome (`ownBacklogDispatch: true`). After the claim, dispatch marker and
-pane spawn have completed, the worker loop calls the existing
+sourced from the own backlog is flagged machine-readably on the outcome
+(`ownBacklogDispatch: true`). After the claim, dispatch marker and pane spawn
+have completed, the worker loop calls the existing
 `LeaderElectionManager.releaseLeadership()` **exactly once** and sets
 `leaderState = false`, so another instance can win the next election. The
 step-down never rolls back the pending dispatch and never orphans the spawned
-pane. It is **not** called after a normal in-view dispatch, and **not** called
-when the fallback finds nothing — in that case leadership is retained and the
-pre-existing terminal reason is reported unchanged. **Exception — audit
+pane. It is **not** called after a normal in-view dispatch. **Exception — audit
 batching:** while an audit batch is armed a continuation audit sourced from the
 leader's own head does **not** step down mid-batch; the hand-off is deferred to
 batch end and fires once, on the batch-ending dispatch (see *Depth-aware audit
@@ -195,8 +193,40 @@ dispatch), the step-down is unconditional after a successful fallback dispatch;
 with no peer the same instance simply re-wins the normal election on a later
 tick, bounded by the existing election backoff.
 
+**Empty-leader step-down (WL-0MVP7QHUB003ZA2A AC1).** Leadership is a
+*transient* role granted to the instance with work to do — never a permanent
+perk of the instance that happened to win first. So the step-down fires on a
+**genuinely empty cycle** as well: when a dispatch cycle yields no in-view
+item, no coordination offer and no own-backlog dispatch, **and** the own-root
+probe confirms the leader's own head/backlog is empty, the worker loop calls
+the same `releaseLeadership()` and sets `leaderState = false` — exactly once
+per cycle (a repeat call in the same tick is a no-op because `leaderState` is
+already `false`, and `releaseLeadership()` itself is an idempotent stateless
+lock/lease file delete). A peer whose sprint view *does* hold dispatchable
+work can then win the next election and dispatch it. Contract details:
+
+- **Fail-safe.** The call is guarded by `leaderManager !== null &&
+  leaderState`; `releaseLeadership()` never throws, so nothing can escape the
+  dispatch attempt and no double-release is possible.
+- **Never on a dispatched cycle.** The trigger sits only in the
+  `no-candidate` arm, after the genuine-empty probe; a cycle that dispatched an
+  in-view or offer item never reaches it, and the `ownBacklogDispatch`
+  hand-off above is untouched (including the audit-batch deferral).
+- **Never on an unknown backlog.** A probe *failure* is a fail-closed
+  three-strike event, not an empty backlog, so it retains leadership.
+- **Never on a hold/gate.** `review-queue-hold`, `in-flight-pane`,
+  `non-terminal-cooldown`, `attempt-budget-exhausted`, `code-freeze` and
+  CPU-saturation each return their own neutral reason before this arm — the
+  backlog is *not* empty, so the leader keeps its role and keeps polling.
+- **No peer needed.** The step-down fires whether or not a peer has an offer:
+  with no peer the same instance simply re-wins the next election (the leader
+  block re-elects it on the following tick), which is cheap and keeps the
+  invariant "leadership follows work" simple. The no-candidate pause still
+  arms on that cycle unless a peer offer is live (see *No-candidate cooldown &
+  the empty offer file* below).
+
 **Scope: coordination/leader mode only.** The fallback lives on the
-coordination leader path (`dispatchFromCoordination`) and the step-down is
+coordination leader path (`dispatchFromCoordination`) and both step-downs are
 guarded by a non-null `leaderManager`. **Legacy mode** (no `coordinationDir`;
 `leaderManager === null`, `leaderState` hard-coded `true`) is unchanged — there
 is no manager and no peer to hand off to, so the direct/legacy path keeps the
@@ -1670,6 +1700,23 @@ the worklog still holds dispatchable work. Therefore:
   a probe CLI error is a three-strike event (fail-closed — a broken
   lookup can never masquerade as an empty backlog, `deps.recordError` is
   called before any pause).
+- **Peer offer suppresses the pause (WL-0MVP7QHUB003ZA2A AC2).** The probe
+  answers only "is the **leader's own** root empty?". A peer entry in the
+  offer list with a non-empty `workItemId` means the backlog is not empty —
+  it is somebody else's root — so the pause must not arm: the pause is a full
+  stop that does not poll the offer list at all, and arming it would starve
+  that offer for up to the whole cooldown (the live 2026-10-26 incident: an
+  idle leader paused for 60 min while ContextHub's offer sat undispatched).
+  The arming check (`hasPeerOffer`, `coordination.ts`) is a cheap in-memory
+  scan of the coordination entries **already read for that dispatch** — never
+  a second worklog CLI probe. It is deliberately conservative/fail-open (a
+  stale peer entry only costs an idle tick); an instance's own entry never
+  counts, and neither does an entry with an empty `workItemId`. The cooldown
+  duration (`downtimeNoCandidateCooldownMs`, 60 min) is unchanged and still
+  arms when there is genuinely nothing anywhere. The empty-leader step-down
+  still fires on that cycle (see *Own-backlog fallback & leadership hand-off*
+  above) — the peer offer then dispatches after the hand-off instead of being
+  starved.
 - **Check-in is never suppressed:** the cooldown gate runs AFTER the
   leader-election/check-in block, so the coordination check-in
   (the only re-offer mechanism) still lands during a pause and the leader
@@ -1677,6 +1724,15 @@ the worklog still holds dispatchable work. Therefore:
   owned-but-expired lease — the zombie can never lose its renewal path).
   A successful re-offer
   (`checkIn.updated && offered !== null`) cancels the pause immediately.
+- **Coordination check-in cancels, peer presence cancels
+  (WL-0MVP7QHUB003ZA2A AC3):** the same check-in tick also cancels an armed
+  pause when the offer list holds a **peer** entry with a non-empty
+  `workItemId` (`hasPeerOffer`). An offer that appears *during* a pause is
+  therefore dispatchable on that very tick instead of waiting out the full
+  cooldown — the pause is cleared before the cooldown gate below reads it.
+  Fail-safe: an unreadable/corrupt coordination file resolves to an empty
+  entry list, so no peer is detected and the pause is left exactly as it is
+  today.
 - **Cooldown-exit renewal + re-derivation:** the first tick after the pause
   expires re-runs the leader block (self-heal refresh + per-tick leadership
   re-derivation) BEFORE reaching the cooldown gate, so every dispatch

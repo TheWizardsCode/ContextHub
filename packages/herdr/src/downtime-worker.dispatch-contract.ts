@@ -315,6 +315,15 @@ export interface DowntimeDispatchOutcome {
    * was recorded during interim). When `reason` is 'wl-error', `error`
    * may carry the underlying wl/CLI error details (timeout, SQLITE_BUSY,
    * parse failure, stderr) for the three-strike pause log.
+   *
+   * `no-candidate` itself is UNCHANGED by the empty-leader work (parent
+   * WL-0MVP7QHUB003ZA2A): it still means "this cycle yielded no
+   * dispatchable candidate". What the reason *implies* for the worker loop
+   * is now decided there, from state the loop already holds — the empty
+   * cycle steps leadership down (`releaseLeadership()`, AC1), and the
+   * no-candidate pause is armed only when the offer list holds no peer
+   * offer (`hasPeerOffer`, AC2). No new outcome flag was introduced for
+   * either behaviour, so this contract stays the complete reason surface.
    * already running — a non-stale kind=audit dispatch marker maps to an
    * `in_progress` item — so the audit tier was skipped; a skip that leaves
    * an empty remaining backlog reports this reason, NEVER 'no-candidate',
@@ -351,6 +360,12 @@ export interface DowntimeDispatchOutcome {
    * surface to perform the voluntary `releaseLeadership()` step-down exactly
    * once per own-backlog dispatch, and never for a normal in-view dispatch.
    * Absent/false on every other outcome.
+   *
+   * Note (parent WL-0MVP7QHUB003ZA2A AC1): the *empty*-cycle step-down needs
+   * no counterpart flag — it is decided in the worker loop from the
+   * `no-candidate` reason plus the genuine-empty probe result, and releases
+   * leadership through the same `releaseLeadership()` primitive. This field
+   * therefore stays a dispatch-sourcing signal only.
    */
   ownBacklogDispatch?: boolean;
 
