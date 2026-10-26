@@ -23,6 +23,25 @@ import {
   buildEdgeCache as _buildEdgeCache,
   normalizeTitleForMatch,
 } from './database/context.js';
+// `wl next` selection modules — thin-delegate targets (WL-0MVOBP0U5007BAZD).
+// Method implementations moved here; the class members below delegate.
+import {
+  riskOrdinal,
+  effortOrdinal,
+  matchesRiskEffort,
+  getPriorityValue,
+  computeEffectivePriority,
+} from './database/priority.js';
+import {
+  findNextWorkItem,
+  findNextWorkItemFromItems,
+  findNextWorkItems,
+  applyFilters,
+  filterCandidates,
+  resolveBlockerToRoot,
+  selectHighestPriorityBlocking,
+} from './database/next-pipeline.js';
+import { handleCriticalEscalation } from './database/critical-escalation.js';
 
 export { normalizeTitleForMatch } from './database/context.js';
 
@@ -187,6 +206,22 @@ export class WorklogDatabase {
       silent,
       _lastIdTime: 0,
       _idSequence: 0,
+      hooks: {
+        debug: (message) => this.debug(message),
+        getNonClosedChildren: (parentId, edgeCache) => this.getNonClosedChildren(parentId, edgeCache),
+        getActiveDependencyBlockers: (itemId, edgeCache) => this.getActiveDependencyBlockers(itemId, edgeCache),
+        isInProgressSubtree: (item, allItems) => this.isInProgressSubtree(item, allItems),
+        isDependencyActive: (target) => this.isDependencyActive(target),
+        getDescendants: (parentId) => this.getDescendants(parentId),
+        orderBySortIndex: (items, sortOrderCache) => this.orderBySortIndex(items, sortOrderCache),
+        selectBySortIndex: (items, effectivePriorityCache, sortOrderCache, edgeCache, allItems) =>
+          this.selectBySortIndex(items, effectivePriorityCache, sortOrderCache, edgeCache, allItems),
+        applyFilters: (items, assignee, searchTerm) => this.applyFilters(items, assignee, searchTerm),
+        resolveBlockerToRoot: (blocker, allItems, assignee, searchTerm, excluded) =>
+          this.resolveBlockerToRoot(blocker, allItems, assignee, searchTerm, excluded),
+        selectHighestPriorityBlocking: (pairs, sortOrderCache) =>
+          this.selectHighestPriorityBlocking(pairs, sortOrderCache),
+      },
     };
     
     // Refresh from JSONL only if SQLite is empty (ephemeral JSONL pattern)
@@ -1756,126 +1791,42 @@ export class WorklogDatabase {
     return depth;
   }
 
-  /**
-   * Ordinal rank of a risk level on the canonical scale
-   * (Low < Medium < High < Severe/Critical). Both the type-level spelling
-   * ('Severe') and the icon-scale spelling ('critical') map to the top
-   * rank. Agents may produce verbose risk fields like "Medium — NVIDIA
-   * driver changes…"; extract the leading keyword before any delimiter.
-   * Unset/unknown values map to null (fail-closed: they are never
-   * matched by an at-most risk filter).
-   */
+  // ── `wl next` selection delegates ──────────────────────────────────────
+  // This cluster now lives in ./database/{priority,next-pipeline,critical-escalation}.js
+  // (WL-0MVOBP0U5007BAZD). Every member below keeps its ORIGINAL signature and
+  // delegates to the extracted function, so the class surface is unchanged.
+  // Members with no remaining in-façade caller are retained deliberately: the
+  // split is move-only, and the delegating member documents where the
+  // implementation went.
+
+  /** Delegates to {@link riskOrdinal} in `./database/priority.js`. */
   private riskOrdinal(risk: string | undefined | null): number | null {
-    // Extract the leading keyword before any delimiter (—, -, :, whitespace).
-    const normalized = (risk ?? '').trim().toLowerCase().split(/[-:–—\s]+/)[0];
-    switch (normalized) {
-      case 'low': return 1;
-      case 'medium': return 2;
-      case 'high': return 3;
-      case 'severe':
-      case 'critical': return 4;
-      default: return null;
-    }
+    return riskOrdinal(risk);
   }
 
-  /**
-   * Ordinal rank of an effort level on the canonical scale
-   * (Extra Small < Small < Medium < Large < Extra Large). Accepts both the
-   * short CLI spellings (XS/S/M/L/XL) and the long-form effort-and-risk
-   * skill spellings (extra small/small/medium/large/extra large),
-   * normalized case-insensitively. Agents may produce verbose effort fields
-   * like "1–4 hours — Small. Diagnostic investigation…"; extract the
-   * keyword via exact match on stripped string first, then fall back to
-   * word-boundary search.
-   * Unset/unknown values map to null (fail-closed: they are never matched
-   * by an at-most effort filter).
-   */
+
+  /** Delegates to {@link effortOrdinal} in `./database/priority.js`. */
   private effortOrdinal(effort: string | undefined | null): number | null {
-    const normalized = (effort ?? '').trim().toLowerCase();
-    // Try exact match on stripped version first (simple cases: "small", "medium",
-    // "Extra Small" → "extrasmall"). If that fails, fall back to searching for
-    // the keyword anywhere in the string — agents produce verbose fields like
-    // "1–4 hours — Small. Diagnostic investigation…" (keyword after the dash).
-    const stripped = normalized.replace(/[\s-]+/g, '');
-    switch (stripped) {
-      case 'xs':
-      case 'extrasmall': return 1;
-      case 's':
-      case 'small': return 2;
-      case 'm':
-      case 'medium': return 3;
-      case 'l':
-      case 'large': return 4;
-      case 'xl':
-      case 'extralarge': return 5;
-      default:
-        // Fallback: search for the keyword bounded by non-word characters.
-        // Checked in order of specificity (longest first) so "small" wins over "s".
-        if (/(?:^|\W)extrasmall(?:\W|$)/.test(normalized)) return 1;
-        if (/(?:^|\W)xs(?:\W|$)/.test(normalized)) return 1;
-        if (/(?:^|\W)small(?:\W|$)/.test(normalized)) return 2;
-        if (/(?:^|\W)s(?:\W|$)/.test(normalized)) return 2;
-        if (/(?:^|\W)extralarge(?:\W|$)/.test(normalized)) return 5;
-        if (/(?:^|\W)large(?:\W|$)/.test(normalized)) return 4;
-        if (/(?:^|\W)xl(?:\W|$)/.test(normalized)) return 5;
-        if (/(?:^|\W)l(?:\W|$)/.test(normalized)) return 4;
-        if (/(?:^|\W)m(?:\W|$)/.test(normalized)) return 3;
-        if (/(?:^|\W)medium(?:\W|$)/.test(normalized)) return 3;
-        return null;
-    }
+    return effortOrdinal(effort);
   }
 
-  /**
-   * True when an item satisfies the optional at-most risk/effort filters.
-   * Fail-closed: an unset/unknown risk or effort on the item (or an invalid
-   * filter level) never matches.
-   */
+
+  /** Delegates to {@link matchesRiskEffort} in `./database/priority.js`. */
   private matchesRiskEffort(item: WorkItem, risk?: string, effort?: string): boolean {
-    if (risk !== undefined && risk !== '') {
-      const level = this.riskOrdinal(risk);
-      const ord = this.riskOrdinal(item.risk);
-      if (level === null || ord === null || ord > level) return false;
-    }
-    if (effort !== undefined && effort !== '') {
-      const level = this.effortOrdinal(effort);
-      const ord = this.effortOrdinal(item.effort);
-      if (level === null || ord === null || ord > level) return false;
-    }
-    return true;
+    return matchesRiskEffort(item, risk, effort);
   }
 
-  /**
-   * Get numeric priority value for comparisons
-   */
+
+  /** Delegates to {@link getPriorityValue} in `./database/priority.js`. */
   private getPriorityValue(priority?: string): number {
-    const priorityOrder: { [key: string]: number } = {
-      'critical': 4,
-      'high': 3,
-      'medium': 2,
-      'low': 1,
-    };
-
-    if (!priority) return 0;
-    return priorityOrder[priority] ?? 0;
+    return getPriorityValue(priority);
   }
 
+
   /**
-   * Compute the effective priority of a candidate work item.
-   *
-   * Effective priority is the maximum of:
-   *   - The item's own priority
-   *   - The priority of any active (non-completed, non-deleted) item that
-   *     depends on this item (i.e., this item is a prerequisite for)
-   *
-   * This implements transparent, deterministic priority inheritance:
-   * an item that blocks a critical task is elevated to critical effective
-   * priority for tie-breaking in sortIndex selection.
-   *
-   * Results are cached in the optional `cache` map to avoid redundant
-   * dependency lookups across a candidate pool.
-   *
-   * @returns Object with numeric value, human-readable reason, and optional
-   *          inheritedFrom item ID
+   * Effective-priority tie-breaker — implementation in `./database/priority.js`
+   * (WL-0MVOBP0U5007BAZD). Kept as a delegating member with an identical
+   * signature so the public API is unchanged.
    */
   computeEffectivePriority(
     item: WorkItem,
@@ -1883,109 +1834,21 @@ export class WorklogDatabase {
     edgeCache?: EdgeCache,
     items?: WorkItem[]
   ): { value: number; reason: string; inheritedFrom?: string } {
-    // Check cache first
-    if (cache) {
-      const cached = cache.get(item.id);
-      if (cached) return cached;
-    }
-
-    const ownValue = this.getPriorityValue(item.priority);
-    let maxInheritedValue = 0;
-    let inheritedFromId: string | undefined;
-    let inheritedFromPriority: string | undefined;
-
-    // Check inbound dependency edges: items that depend on this item
-    const inboundEdges = edgeCache
-      ? (edgeCache.inbound.get(item.id) ?? [])
-      : this.listDependencyEdgesTo(item.id);
-    for (const edge of inboundEdges) {
-      const dependent = edgeCache
-        ? (edgeCache.itemsById.get(edge.fromId) ?? null)
-        : this.get(edge.fromId);
-      if (!dependent) continue;
-      // Only inherit from active items (not completed or deleted)
-      if (dependent.status === 'completed' || dependent.status === 'deleted') continue;
-      // Skip dependents that are in an in-progress parent subtree —
-      // children of in-progress parents must not influence priority
-      // inheritance for their blockers, as they should be invisible to
-      // the selection algorithm.
-      if (items && this.isInProgressSubtree(dependent, items)) continue;
-      const depValue = this.getPriorityValue(dependent.priority);
-      if (depValue > maxInheritedValue) {
-        maxInheritedValue = depValue;
-        inheritedFromId = dependent.id;
-        inheritedFromPriority = dependent.priority;
-      }
-    }
-
-    // Also check if this item is a child that implicitly blocks its parent
-    if (item.parentId) {
-      const parent = edgeCache
-        ? (edgeCache.itemsById.get(item.parentId) ?? null)
-        : this.get(item.parentId);
-      if (parent && parent.status !== 'completed' && parent.status !== 'deleted') {
-        // A non-closed child blocks its parent — inherit parent's priority
-        const parentValue = this.getPriorityValue(parent.priority);
-        if (parentValue > maxInheritedValue) {
-          maxInheritedValue = parentValue;
-          inheritedFromId = parent.id;
-          inheritedFromPriority = parent.priority;
-        }
-      }
-    }
-
-    const effectiveValue = Math.max(ownValue, maxInheritedValue);
-
-    let result: { value: number; reason: string; inheritedFrom?: string };
-    if (effectiveValue > ownValue && inheritedFromId) {
-      result = {
-        value: effectiveValue,
-        reason: `effective priority: ${inheritedFromPriority}, inherited from ${inheritedFromId}`,
-        inheritedFrom: inheritedFromId,
-      };
-    } else {
-      result = {
-        value: ownValue,
-        reason: `own priority: ${item.priority || 'none'}`,
-      };
-    }
-
-    // Cache the result
-    if (cache) {
-      cache.set(item.id, result);
-    }
-
-    return result;
+    return computeEffectivePriority(this.ctx, this.ctx.hooks, item, cache, edgeCache, items);
   }
 
+
   /**
-   * Select the highest priority blocking candidate with critical reference
+   * Delegates to {@link selectHighestPriorityBlocking} in `./database/next-pipeline.js`.
+   * Retained here because the critical-escalation stage reaches it through the
+   * context hooks (never by importing the module that imports it).
    */
   private selectHighestPriorityBlocking(pairs: { blocking: WorkItem; critical: WorkItem }[], sortOrderCache?: WorkItem[]): { blocking: WorkItem; critical: WorkItem } | null {
-    if (pairs.length === 0) {
-      return null;
-    }
-
-    const orderedBlocking = this.orderBySortIndex(pairs.map(pair => pair.blocking), sortOrderCache);
-    const selected = orderedBlocking[0];
-    return selected ? pairs.find(pair => pair.blocking.id === selected.id) ?? null : null;
+    return selectHighestPriorityBlocking(this.ctx.hooks, pairs, sortOrderCache);
   }
 
-  /**
-   * Handle critical-path escalation (Stage 2 of the next-item algorithm).
-   *
-   * Critical items are always prioritized above non-critical items:
-   *   - Unblocked criticals are selected first by sortIndex (priority+age fallback).
-   *   - Blocked criticals surface their direct blocker (child or dependency edge)
-   *     with the highest effective priority.
-   *   - An unblocked critical always wins over a blocker of a non-critical item.
-   *
-   * Operates on the FULL item set so that critical items outside the
-   * assignee/search filter are still considered — only the final blocker
-   * selection is filtered by assignee/search.
-   *
-   * @returns NextWorkItemResult if critical escalation selects an item, null otherwise
-   */
+
+  /** Delegates to {@link handleCriticalEscalation} in `./database/critical-escalation.js`. */
   private handleCriticalEscalation(
     allItems: WorkItem[],
     options: {
@@ -2000,176 +1863,9 @@ export class WorklogDatabase {
       sortOrderCache?: WorkItem[];
     } = {}
   ): NextWorkItemResult | null {
-    const {
-      assignee,
-      searchTerm,
-      risk,
-      effort,
-      excluded,
-      debugPrefix = '[critical]',
-      includeInProgress = false,
-      edgeCache,
-    } = options;
-
-    // Find all critical items from the full set, excluding only
-    // deleted items (these are never actionable).
-    // In-progress items are excluded by default (not actionable for escalation)
-    // unless --include-in-progress is set.
-    // Items in the in_review stage are preserved even if their status
-    // is 'completed' since they need to appear in wl next for review.
-    // Items in the done stage are excluded (terminal, not actionable)
-    // (WL-0MSGRJWRX0068W3W).
-    const criticalItems = allItems.filter(
-      item =>
-        item.priority === 'critical' &&
-        item.status !== 'deleted' &&
-        (item.status !== 'completed' || item.stage === 'in_review') &&
-        item.stage !== 'done' &&
-        (includeInProgress || item.status !== 'in-progress')
-    );
-    this.debug(`${debugPrefix} critical items from full set=${criticalItems.length}`);
-
-    if (criticalItems.length === 0) {
-      return null;
-    }
-
-    // ── Unblocked criticals ──
-    // An item is "unblocked" if it is not blocked AND has no non-closed children
-    // (children act as implicit blockers).
-    const unblockedCriticals = criticalItems.filter(
-      item => item.status !== 'blocked' && this.getNonClosedChildren(item.id, edgeCache).length === 0
-    );
-    this.debug(`${debugPrefix} unblocked criticals=${unblockedCriticals.length}`);
-
-    if (unblockedCriticals.length > 0) {
-      // Apply assignee/search to unblocked criticals — only return items
-      // that match the caller's filters (including risk/effort).
-      let selectable = this.applyFilters(unblockedCriticals, assignee, searchTerm)
-        .filter(item => this.matchesRiskEffort(item, risk, effort));
-      if (excluded && excluded.size > 0) {
-        selectable = selectable.filter(item => !excluded.has(item.id));
-      }
-      this.debug(`${debugPrefix} unblocked criticals after filters=${selectable.length}`);
-
-      if (selectable.length > 0) {
-        // Strict root-only (WL-0MS964SIA0057ABR): only root criticals are
-        // selectable here. Children are hidden entirely (no orphan promotion)
-        // and their parent, if actionable, competes in Stage 5.
-        selectable = selectable.filter(item => !item.parentId);
-      }
-
-      if (selectable.length > 0) {
-        const selected = this.selectBySortIndex(selectable, undefined, options.sortOrderCache, options.edgeCache);
-        this.debug(`${debugPrefix} selected unblocked critical=${selected?.id || ''} title="${selected?.title || ''}"`);
-        return {
-          workItem: selected,
-          reason: `Next unblocked critical item by sort_index${selected ? ` (priority ${selected.priority})` : ''}`
-        };
-      }
-    }
-
-    // ── Blocked criticals ──
-    // For each blocked critical, gather its direct blockers (children + dependency edges)
-    // from the full item store, then select the best blocker that passes filters.
-    const blockedCriticals = criticalItems.filter(
-      item => item.status === 'blocked'
-    );
-    this.debug(`${debugPrefix} blocked criticals=${blockedCriticals.length}`);
-
-    if (blockedCriticals.length > 0) {
-      const blockingPairs: { blocking: WorkItem; critical: WorkItem }[] = [];
-
-      for (const critical of blockedCriticals) {
-        // If the blocked critical has a parent that is a valid (open, not
-        // deleted/completed/in-progress) candidate, skip surfacing its
-        // blockers — the parent will compete in Stage 5 (open item selection)
-        // instead. This ensures that children are not surfaced individually
-        // when their parent is a valid candidate (WL-0MQFIYPZK00680H1).
-        if (critical.parentId) {
-          const critParent = allItems.find(p => p.id === critical.parentId);
-          if (
-            critParent &&
-            critParent.status !== 'deleted' &&
-            critParent.status !== 'completed' &&
-            critParent.status !== 'in-progress'
-          ) {
-            this.debug(`${debugPrefix}   skip blocker pairs for ${critical.id} (valid parent ${critical.parentId})`);
-            continue;
-          }
-        }
-
-        // Child blockers (non-closed children implicitly block a parent)
-        const blockingChildren = this.getNonClosedChildren(critical.id, options.edgeCache);
-        for (const child of blockingChildren) {
-          if (excluded?.has(child.id)) continue;
-          blockingPairs.push({ blocking: child, critical });
-          this.debug(`${debugPrefix}   blocker: child ${child.id} ("${child.title}") blocks critical ${critical.id}`);
-        }
-
-        // Dependency-edge blockers
-        const dependencyBlockers = this.getActiveDependencyBlockers(critical.id, options.edgeCache);
-        for (const blocker of dependencyBlockers) {
-          if (excluded?.has(blocker.id)) continue;
-          blockingPairs.push({ blocking: blocker, critical });
-          this.debug(`${debugPrefix}   blocker: dep ${blocker.id} ("${blocker.title}") blocks critical ${critical.id}`);
-        }
-      }
-
-      // Apply assignee/search filters to the blockers only
-      const filteredBlockingPairs = blockingPairs.filter(pair =>
-        this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
-      ).filter(pair => this.matchesRiskEffort(pair.blocking, risk, effort));
-      this.debug(`${debugPrefix} blocking candidates=${blockingPairs.length} after filters=${filteredBlockingPairs.length}`);
-
-      // Strict root-only (WL-0MS964SIA0057ABR): never surface child blockers.
-      // Resolve each blocker to its root parent when the parent is selectable;
-      // drop blockers whose parent is not selectable (children are hidden
-      // entirely — no orphan promotion).
-      const rootBlockingPairs: { blocking: WorkItem; critical: WorkItem }[] = [];
-      for (const pair of filteredBlockingPairs) {
-        const resolved = this.resolveBlockerToRoot(pair.blocking, allItems, assignee, searchTerm, excluded);
-        if (resolved && this.matchesRiskEffort(resolved, risk, effort)) {
-          rootBlockingPairs.push({ blocking: resolved, critical: pair.critical });
-        }
-      }
-      this.debug(`${debugPrefix} root-resolved blocking candidates=${rootBlockingPairs.length}`);
-
-      const selectedBlocking = this.selectHighestPriorityBlocking(rootBlockingPairs, options.sortOrderCache);
-
-      if (selectedBlocking) {
-        this.debug(`${debugPrefix} selected blocker=${selectedBlocking.blocking.id} ("${selectedBlocking.blocking.title}") for critical ${selectedBlocking.critical.id}`);
-        return {
-          workItem: selectedBlocking.blocking,
-          reason: `Blocking issue for critical item ${selectedBlocking.critical.id} (${selectedBlocking.critical.title})`
-        };
-      }
-
-      // No actionable blocker found — return the blocked critical itself as a
-      // last resort so the user is aware of the stuck critical item.
-      let selectableBlocked = this.applyFilters(blockedCriticals, assignee, searchTerm)
-        .filter(item => this.matchesRiskEffort(item, risk, effort));
-      if (excluded && excluded.size > 0) {
-        selectableBlocked = selectableBlocked.filter(item => !excluded.has(item.id));
-      }
-      // Strict root-only (WL-0MS964SIA0057ABR): only root blocked criticals
-      // are eligible for the last-resort selection. Children are hidden
-      // entirely (no orphan promotion).
-      selectableBlocked = selectableBlocked.filter(item => !item.parentId);
-      if (selectableBlocked.length === 0) {
-        this.debug(`${debugPrefix} all blocked criticals filtered out by root-only filter — returning null`);
-        return null;
-      }
-      const selectedBlockedCritical = this.selectBySortIndex(selectableBlocked, undefined, options.sortOrderCache, options.edgeCache);
-      this.debug(`${debugPrefix} selected blocked critical (fallback)=${selectedBlockedCritical?.id || ''}`);
-      return {
-        workItem: selectedBlockedCritical,
-        reason: 'Blocked critical work item with no identifiable blocking issues'
-      };
-    }
-
-    // No critical items to escalate
-    return null;
+    return handleCriticalEscalation(this.ctx.hooks, allItems, options);
   }
+
 
   /**
    * Compute a score for an item. Defaults: recencyPolicy='ignore'.
@@ -2396,25 +2092,7 @@ export class WorklogDatabase {
     return sorted[0] ?? null;
   }
 
-  /**
-   * Consolidated filter pipeline for wl next candidate selection.
-   *
-   * Removes non-actionable items in a single pass and returns two pools:
-   *   - candidates: fully filtered items ready for selection
-   *   - criticalPool: items filtered before dep-blocking, with assignee/search
-   *     applied, so that critical-path escalation can still find blocked
-   *     critical items and surface their blockers
-   *
-   * Filter stages (in order):
-   *   0. Apply stage filter first if specified (before other removals)
-   *   1. Remove deleted items
-   *   2. Remove completed items (preserving in_review stage)
-   *   3. Remove in-progress items (wl next skips items already being worked on)
-   *   4. Remove excluded items (batch mode)
-   *   5. Apply assignee and search filters
-   *   --- criticalPool snapshot taken here ---
-   *   6. Remove dependency-blocked items (unless includeBlocked)
-   */
+  /** Delegates to {@link filterCandidates} in `./database/next-pipeline.js`. */
   private filterCandidates(
     items: WorkItem[],
     options: {
@@ -2430,152 +2108,16 @@ export class WorklogDatabase {
       edgeCache?: EdgeCache;
     } = {}
   ): { candidates: WorkItem[]; criticalPool: WorkItem[] } {
-    const {
-      assignee,
-      searchTerm,
-      stage,
-      risk,
-      effort,
-      excluded,
-      includeBlocked = false,
-      includeInProgress = false,
-      debugPrefix = '[filter]',
-    } = options;
-
-    let pool = items;
-    this.debug(`${debugPrefix} filter: total=${pool.length}`);
-
-    // 1. Apply stage filter first if specified (before removing completed/deleted)
-    if (stage) {
-      pool = pool.filter(item => item.stage === stage);
-      this.debug(`${debugPrefix} filter: after stage=${stage}=${pool.length}`);
-    }
-
-    // 2. Remove deleted items
-    pool = pool.filter(item => item.status !== 'deleted');
-    this.debug(`${debugPrefix} filter: after deleted=${pool.length}`);
-
-    // 3. Remove completed items (unless stage filter was applied - user is
-    //    explicitly filtering by stage and may want completed items in that stage).
-    //    Also preserve items in the in_review stage - they need to appear in
-    //    wl next for review even though their status is 'completed'.
-    //    Also exclude items in the done stage by default (WL-0MSGRJWRX0068W3W) -
-    //    done items are terminal and not actionable; explicit --stage done still works.
-    if (!stage) {
-      pool = pool.filter(
-        item =>
-          (item.status !== 'completed' || item.stage === 'in_review') &&
-          item.stage !== 'done'
-      );
-      this.debug(`${debugPrefix} filter: after completed/done=${pool.length}`);
-    }
-
-    // 4. Remove in-progress items by default (wl next recommends what to work on next,
-    //    not what's already being worked on). Skip this filter when --include-in-progress
-    //    is set so items already being worked on appear in the output.
-    if (!includeInProgress) {
-      pool = pool.filter(item => item.status !== 'in-progress');
-      this.debug(`${debugPrefix} filter: after in-progress=${pool.length}`);
-    } else {
-      this.debug(`${debugPrefix} filter: skip in-progress (includeInProgress=true)`);
-    }
-
-    // 5. Remove excluded items (batch mode)
-    if (excluded && excluded.size > 0) {
-      pool = pool.filter(item => !excluded.has(item.id));
-      this.debug(`${debugPrefix} filter: after excluded=${pool.length}`);
-    }
-
-    // 7. Apply assignee and search filters
-    pool = this.applyFilters(pool, assignee, searchTerm);
-    this.debug(`${debugPrefix} filter: after assignee/search=${pool.length}`);
-
-    // 7b. Apply risk/effort at-most filters (ordinal, fail-closed on unset).
-    // An item is eligible only when its risk ≤ the filter level (Low < Medium
-    // < High < Severe) and its effort ≤ the filter level (Extra Small < Small
-    // < Medium < Large < Extra Large). Items with unset/empty risk or effort
-    // are NEVER matched — an absent estimate is not "≤ low/small" (AC2).
-    if (risk !== undefined && risk !== '') {
-      const riskLevel = this.riskOrdinal(risk);
-      if (riskLevel === null) {
-        // Invalid filter level → fail-closed: match nothing.
-        pool = [];
-      } else {
-        pool = pool.filter(item => {
-          const ord = this.riskOrdinal(item.risk);
-          return ord !== null && ord <= riskLevel;
-        });
-      }
-      this.debug(`${debugPrefix} filter: after risk=${risk}=${pool.length}`);
-    }
-    if (effort !== undefined && effort !== '') {
-      const effortLevel = this.effortOrdinal(effort);
-      if (effortLevel === null) {
-        // Invalid filter level → fail-closed: match nothing.
-        pool = [];
-      } else {
-        pool = pool.filter(item => {
-          const ord = this.effortOrdinal(item.effort);
-          return ord !== null && ord <= effortLevel;
-        });
-      }
-      this.debug(`${debugPrefix} filter: after effort=${effort}=${pool.length}`);
-    }
-
-    // Snapshot for critical-path escalation (before dep-blocker removal)
-    const criticalPool = pool;
-
-    // 8. Remove dependency-blocked items unless opted in
-    let candidates = pool;
-    if (!includeBlocked) {
-      const ec = options.edgeCache;
-      candidates = pool.filter(item => {
-        const edges = ec
-          ? (ec.outbound.get(item.id) ?? [])
-          : this.store.getDependencyEdgesFrom(item.id);
-        for (const edge of edges) {
-          const target = ec
-            ? (ec.itemsById.get(edge.toId) ?? null)
-            : this.store.getWorkItem(edge.toId);
-          if (this.isDependencyActive(target ?? null)) {
-            return false;
-          }
-        }
-        return true;
-      });
-      this.debug(`${debugPrefix} filter: after dep-blocked=${candidates.length}`);
-    }
-
-    return { candidates, criticalPool };
+    return filterCandidates(this.ctx, this.ctx.hooks, items, options);
   }
 
-  /**
-   * Shared next-item selection logic to keep single-item and batch results aligned.
-   *
-   * Selection proceeds through several phases:
-   *   1. Filter candidates via filterCandidates() pipeline.
-   *   2. Critical-path escalation: if a critical item is blocked, surface its direct
-   *      blocker immediately (bypasses scoring).
-   *   3. Non-critical blocker surfacing: if a non-critical blocked item has priority
-   *      >= the best open competitor, surface its blocker so the dependency is resolved.
-   *   4. Open item selection: SortIndex-based ranking among remaining candidates;
-   *      when all sortIndex values are equal, effective priority (descending,
-   *      accounting for priority inheritance from blocked dependents) then age
-   *      (ascending) break ties.
-   */
 
   /**
-   * Resolve a would-be-surfaced blocker to a root-level item (strict root-only,
-   * WL-0MS964SIA0057ABR).
-   *
-   * - Root blockers (no parentId) are returned as-is.
-   * - A child blocker is resolved to its parent when the parent is selectable
-   *   (a root-level item with an actionable status and no active dependency
-   *   blockers, matching the Stage 5 candidate rules). The parent is the unit
-   *   of work and is surfaced instead of the child.
-   * - Returns null when the blocker is a child whose parent is not selectable
-   *   (e.g. the parent is closed/completed/deleted/in-progress/blocked). Such
-   *   children are hidden entirely — never promoted to root.
+
+  /**
+   * Delegates to {@link resolveBlockerToRoot} in `./database/next-pipeline.js`.
+   * Retained here because the critical-escalation stage reaches it through the
+   * context hooks (never by importing the module that imports it).
    */
   private resolveBlockerToRoot(
     blocker: WorkItem,
@@ -2584,41 +2126,11 @@ export class WorklogDatabase {
     searchTerm?: string,
     excluded?: Set<string>
   ): WorkItem | null {
-    if (!blocker.parentId) {
-      return blocker; // already a root blocker
-    }
-    const parent = allItems.find(p => p.id === blocker.parentId);
-    if (!parent) {
-      // Parent is missing (deleted) — the child is an orphan; hidden entirely.
-      return null;
-    }
-    // The parent itself must be a root item (no grandparent) so the surfaced
-    // item is always root-level.
-    if (parent.parentId) {
-      return null;
-    }
-    // Parent must be actionable and not dependency-blocked (matching Stage 5
-    // candidate rules: open, not deleted/completed/in-progress/blocked).
-    if (
-      parent.status === 'deleted' ||
-      parent.status === 'completed' ||
-      parent.status === 'in-progress' ||
-      parent.status === 'blocked'
-    ) {
-      return null;
-    }
-    if (this.getActiveDependencyBlockers(parent.id).length > 0) {
-      return null;
-    }
-    if (excluded?.has(parent.id)) {
-      return null;
-    }
-    if (this.applyFilters([parent], assignee, searchTerm).length === 0) {
-      return null;
-    }
-    return parent;
+    return resolveBlockerToRoot(this.ctx, this.ctx.hooks, blocker, allItems, assignee, searchTerm, excluded);
   }
 
+
+  /** Delegates to {@link findNextWorkItemFromItems} in `./database/next-pipeline.js`. */
   private findNextWorkItemFromItems(
     items: WorkItem[],
     assignee?: string,
@@ -2632,240 +2144,13 @@ export class WorklogDatabase {
     risk?: string,
     effort?: string
   ): NextWorkItemResult {
-    this.debug(`${debugPrefix} assignee=${assignee || ''} search=${searchTerm || ''} stage=${stage || ''} excluded=${excluded?.size || 0} risk=${risk || ''} effort=${effort || ''}`);
-
-    // Build the sort-order cache once from the pre-loaded items array.
-    // This avoids an extra full-table scan of all work items from the database.
-    const sortOrderCache = this.store.orderItemsByHierarchySortIndexSkipCompleted(items);
-
-    // Shared effective-priority cache: avoids redundant dependency lookups
-    // across all selectBySortIndex calls within this invocation.
-    const effectivePriorityCache = new Map<string, { value: number; reason: string; inheritedFrom?: string }>();
-
-    // ── Stage 1: Filter pipeline ──
-    const { candidates: filteredItems, criticalPool } = this.filterCandidates(items, {
-      assignee,
-      searchTerm,
-      stage,
-      risk,
-      effort,
-      excluded,
-      includeBlocked,
-      includeInProgress,
-      debugPrefix,
-      edgeCache,
-    });
-
-    // ── Stage 2: Critical-path escalation ──
-    // Delegated to handleCriticalEscalation() which operates on the full
-    // item set so that critical items outside the assignee/search filter
-    // can still surface their blockers.
-    // Skip critical escalation when stage filter is specified - user is
-    // explicitly filtering by stage and doesn't want escalation to override it.
-    if (!stage) {
-      const criticalResult = this.handleCriticalEscalation(items, {
-        assignee,
-        searchTerm,
-        excluded,
-        includeInProgress,
-        risk,
-        effort,
-        debugPrefix: `${debugPrefix} [critical]`,
-        edgeCache,
-        sortOrderCache,
-      });
-      if (criticalResult) {
-        return criticalResult;
-      }
-    }
-
-    // ── Stage 3: Non-critical blocker surfacing ──
-    // For non-critical blocked items whose priority is >= the best open
-    // competitor, surface their blocker so that the dependency is resolved
-    // first.  This mirrors the old selectDeepestInProgress blocked-item
-    // handling that was removed during the filter-pipeline consolidation.
-    //
-    // Blocked items in an in-progress parent subtree are excluded from
-    // Stage 3 — the parent represents the unit of work and children should
-    // be hidden from wl next results. The existing isInProgressSubtree()
-    // filter in Stage 5 already ensures this for open items; Stage 3 must
-    // apply the same filtering for blocker surfacing.
-    //
-    // Skip non-critical blocker surfacing when a stage filter is specified —
-    // mirroring the Stage 2 guard above: the user is explicitly filtering by
-    // stage and blocker surfacing must not surface items at other stages
-    // (WL-0MSP1XJSO007LE3K). A blocker's own stage is not constrained by the
-    // stage-filtered candidate pool, so surfacing it would violate the filter.
-    // Strict root-only (WL-0MS964SIA0057ABR): tracks whether any would-be
-    // blocker was a hidden child whose parent is not selectable. If no blocker
-    // can be surfaced and no root candidate remains in Stage 5, wl next
-    // returns null with a clear reason rather than surfacing the child.
-    let droppedHiddenChildBlocker = false;
-
-    if (!stage) {
-      const nonCriticalBlocked = criticalPool.filter(
-        item => item.status === 'blocked' && item.priority !== 'critical'
-      ).filter(item => !this.isInProgressSubtree(item, items));
-      this.debug(`${debugPrefix} non-critical blocked=${nonCriticalBlocked.length}`);
-
-      if (nonCriticalBlocked.length > 0 && filteredItems.length > 0) {
-        // Find the highest priority value among open candidates
-        const bestCompetitorPriority = Math.max(
-          ...filteredItems.map(item => this.getPriorityValue(item.priority))
-        );
-  
-        // Sort blocked items by priority descending so we handle the most
-        // important blocked item first
-        const sortedBlocked = nonCriticalBlocked.slice().sort(
-          (a, b) => this.getPriorityValue(b.priority) - this.getPriorityValue(a.priority)
-        );
-  
-        for (const blockedItem of sortedBlocked) {
-          const blockedPriority = this.getPriorityValue(blockedItem.priority);
-          if (blockedPriority < bestCompetitorPriority) {
-            // Blocked item is lower priority than best open candidate — skip
-            continue;
-          }
-  
-          // Blocked item priority >= best competitor: surface its blocker
-          const blockingPairs: { blocking: WorkItem; blocked: WorkItem }[] = [];
-  
-          // Check dependency blockers
-          const dependencyBlockers = this.getActiveDependencyBlockers(blockedItem.id, edgeCache);
-          for (const blocker of dependencyBlockers) {
-            if (excluded?.has(blocker.id)) continue;
-            blockingPairs.push({ blocking: blocker, blocked: blockedItem });
-          }
-  
-          // Check child blockers
-          const blockingChildren = this.getNonClosedChildren(blockedItem.id, edgeCache);
-          for (const child of blockingChildren) {
-            if (excluded?.has(child.id)) continue;
-            blockingPairs.push({ blocking: child, blocked: blockedItem });
-          }
-  
-          // Apply assignee/search filters to blockers
-          let filteredBlockers = blockingPairs.filter(pair =>
-            this.applyFilters([pair.blocking], assignee, searchTerm).length > 0
-          ).filter(pair => this.matchesRiskEffort(pair.blocking, risk, effort));
-  
-          // Strict root-only (WL-0MS964SIA0057ABR): child blockers are never
-          // surfaced by wl next.
-          //  - A child blocker whose parent is a selectable actionable root
-          //    candidate is dropped — the parent competes in Stage 5 (open item
-          //    selection) and is the unit of work surfaced there.
-          //  - A child blocker whose parent is NOT selectable is hidden entirely
-          //    (no orphan promotion); if no surfacable blocker remains and no
-          //    root candidate exists, wl next returns null with a clear reason.
-          const rootOnlyBlockers: { blocking: WorkItem; blocked: WorkItem }[] = [];
-          for (const pair of filteredBlockers) {
-            if (!pair.blocking.parentId) {
-              // Root-level blocker — surfacing it is fine.
-              rootOnlyBlockers.push(pair);
-              continue;
-            }
-            // Child blocker: resolve to parent when selectable, else hidden.
-            const resolved = this.resolveBlockerToRoot(pair.blocking, items, assignee, searchTerm, excluded);
-            if (resolved) {
-              // Parent is selectable — it competes in Stage 5 (existing
-              // hierarchy awareness, WL-0MQF95NCC0024H61).
-              this.debug(`${debugPrefix}   drop child blocker ${pair.blocking.id} (selectable parent ${resolved.id} competes in Stage 5)`);
-            } else {
-              droppedHiddenChildBlocker = true;
-            }
-          }
-          filteredBlockers = rootOnlyBlockers;
-  
-          // Filter out blockers that belong to an in-progress parent subtree —
-          // children of in-progress parents must not appear as independent
-          // wl next results from any stage, including blocker surfacing.
-          // This complements the in-progress subtree filter above on the
-          // blocked item itself and the existing isInProgressSubtree() filter
-          // in Stage 5 (open item selection).
-          filteredBlockers = filteredBlockers.filter(pair =>
-            !this.isInProgressSubtree(pair.blocking, items)
-          );
-  
-          this.debug(`${debugPrefix} blocker-surfacing: blockedItem=${blockedItem.id} pri=${blockedItem.priority} blockers=${filteredBlockers.length}`);
-  
-          if (filteredBlockers.length > 0) {
-            // Select the best blocker by sort index
-            const orderedBlockers = this.orderBySortIndex(filteredBlockers.map(p => p.blocking), sortOrderCache);
-            const selectedBlocker = orderedBlockers[0];
-            if (selectedBlocker) {
-              const pair = filteredBlockers.find(p => p.blocking.id === selectedBlocker.id)!;
-              return {
-                workItem: selectedBlocker,
-                reason: `Blocking issue for ${pair.blocked.priority}-priority item ${pair.blocked.id} (${pair.blocked.title})`
-              };
-            }
-          }
-        }
-      }
-    } // end if (!stage) — Stage 3 skipped under stage filter
-
-    // ── Stage 5: Open item selection ──
-    // Select among filtered candidates, returning the best root item
-    // without descending into children.
-    if (filteredItems.length === 0) {
-      return { workItem: null, reason: 'No work items available' };
-    }
-    this.debug(`${debugPrefix} open candidates=${filteredItems.length}`);
-
-    // Identify root-level candidates: items with no parent. Strict root-only
-    // (WL-0MS964SIA0057ABR): orphan promotion is removed — children whose
-    // parent is closed/deleted/not in the candidate pool are NOT promoted
-    // and are not returned by wl next.
-    // Children of in-progress parents are excluded — the entire in-progress
-    // subtree should be skipped from wl next recommendations.
-    const rootCandidates = filteredItems.filter(item => !item.parentId)
-      .filter(item => !this.isInProgressSubtree(item, items));
-    this.debug(`${debugPrefix} root candidates=${rootCandidates.length}`);
-
-    if (rootCandidates.length === 0) {
-      // Fallback: no root-level candidates. Strict root-only — do not
-      // descend into children, and do not promote orphans.
-      // Still exclude items in an in-progress subtree even in the fallback path
-      // so that the entire in-progress subtree is skipped.
-      const fallbackItems = filteredItems.filter(item => !item.parentId && !this.isInProgressSubtree(item, items));
-      if (fallbackItems.length === 0) {
-        // Clear reason when blockers were hidden children (WL-0MS964SIA0057ABR):
-        // the child is hidden entirely and its parent is not selectable.
-        if (droppedHiddenChildBlocker) {
-          return {
-            workItem: null,
-            reason: 'No work items available — blockers are child items whose parents are not selectable (children are hidden from wl next)'
-          };
-        }
-        return { workItem: null, reason: 'No work items available' };
-      }
-      const selected = this.selectBySortIndex(fallbackItems, effectivePriorityCache, sortOrderCache, edgeCache, items);
-      this.debug(`${debugPrefix} selected open (fallback)=${selected?.id || ''}`);
-      const effectiveInfo = selected ? this.computeEffectivePriority(selected, effectivePriorityCache, edgeCache, items) : null;
-      return {
-        workItem: selected,
-        reason: `Next open item by sort_index${selected ? ` (${effectiveInfo?.inheritedFrom ? effectiveInfo.reason : `priority ${selected.priority}`})` : ''}`
-      };
-    }
-
-    const selectedRoot = this.selectBySortIndex(rootCandidates, effectivePriorityCache, sortOrderCache, edgeCache, items);
-    this.debug(`${debugPrefix} selected root=${selectedRoot?.id || ''}`);
-
-    if (!selectedRoot) {
-      return { workItem: null, reason: 'No work items available' };
-    }
-
-    // Return the selected root directly — do NOT descend into children.
-    // The parent represents the unit of work; children are tracked within it.
-    const rootEffectiveInfo = this.computeEffectivePriority(selectedRoot, effectivePriorityCache, edgeCache, items);
-    return {
-      workItem: selectedRoot,
-      reason: `Next open item by sort_index${rootEffectiveInfo ? ` (${rootEffectiveInfo.inheritedFrom ? rootEffectiveInfo.reason : `priority ${selectedRoot.priority}`})` : ''}`
-    };
+    return findNextWorkItemFromItems(this.ctx, this.ctx.hooks, items, assignee, searchTerm, excluded, debugPrefix, includeBlocked, stage, includeInProgress, edgeCache, risk, effort);
   }
+
 
   /**
    * Find the next work item to work on based on priority and creation time
+   * — implementation in `./database/next-pipeline.js` (WL-0MVOBP0U5007BAZD).
    * @param assignee - Optional assignee filter
    * @param searchTerm - Optional search term for fuzzy matching
    * @returns The next work item and a reason for the selection, or null if none found
@@ -2879,14 +2164,14 @@ export class WorklogDatabase {
     risk?: string,
     effort?: string
   ): NextWorkItemResult {
-    const items = this.store.getAllWorkItems();
-    const edgeCache = this.buildEdgeCache(items);
-    return this.findNextWorkItemFromItems(items, assignee, searchTerm, undefined, '[next]', includeBlocked, stage, includeInProgress, edgeCache, risk, effort);
+    return findNextWorkItem(this.ctx, this.ctx.hooks, assignee, searchTerm, includeBlocked, stage, includeInProgress, risk, effort);
   }
+
 
   /**
    * Find multiple next work items (up to `count`) using the same selection logic
-   * as `findNextWorkItem`, but excluding already-selected items between iterations.
+   * as `findNextWorkItem`, but excluding already-selected items between iterations
+   * — implementation in `./database/next-pipeline.js` (WL-0MVOBP0U5007BAZD).
    */
   findNextWorkItems(
     count: number,
@@ -2898,90 +2183,19 @@ export class WorklogDatabase {
     risk?: string,
     effort?: string
   ): NextWorkItemResult[] {
-    const results: NextWorkItemResult[] = [];
-    const excluded = new Set<string>();
-
-    // Load all items and dependency edges once, reuse across batch iterations
-    // to avoid N+1 database loads (Bottleneck 4: batch reloads all items per iteration)
-    const allItems = this.store.getAllWorkItems();
-    const edgeCache = this.buildEdgeCache(allItems);
-
-    for (let i = 0; i < count; i += 1) {
-      const result = this.findNextWorkItemFromItems(
-        allItems,
-        assignee,
-        searchTerm,
-        excluded,
-        `[next batch ${i + 1}/${count}]`,
-        includeBlocked,
-        stage,
-        includeInProgress,
-        edgeCache,
-        risk,
-        effort
-      );
-
-      results.push(result);
-      if (result.workItem) {
-        excluded.add(result.workItem.id);
-        // Also exclude all descendants so children of returned parents
-        // are never surfaced in batch results (AC #4)
-        const descendants = this.getDescendants(result.workItem.id);
-        for (const desc of descendants) {
-          excluded.add(desc.id);
-        }
-      }
-    }
-
-    return results;
+    return findNextWorkItems(this.ctx, this.ctx.hooks, count, assignee, searchTerm, includeBlocked, stage, includeInProgress, risk, effort);
   }
+
 
   /**
-   * Apply assignee and search term filters to a list of work items
+   * Delegates to {@link applyFilters} in `./database/next-pipeline.js`.
+   * Retained here because the critical-escalation stage reaches it through the
+   * context hooks (never by importing the module that imports it).
    */
   private applyFilters(items: WorkItem[], assignee?: string, searchTerm?: string): WorkItem[] {
-    let filtered = items;
-
-    // Filter by assignee if provided
-    if (assignee) {
-      filtered = filtered.filter(item => item.assignee === assignee);
-    }
-
-    // Filter by search term if provided (fuzzy match against id, title, description, and comments)
-    if (searchTerm) {
-      const lowerSearchTerm = searchTerm.toLowerCase();
-
-      // Batch-load all comments once into a Map<workItemId, commentText[]>
-      // to avoid N+1 per-item comment queries (Bottleneck 5)
-      const allComments = this.store.getAllComments();
-      const commentsByItemId = new Map<string, string[]>();
-      for (const comment of allComments) {
-        let list = commentsByItemId.get(comment.workItemId);
-        if (!list) {
-          list = [];
-          commentsByItemId.set(comment.workItemId, list);
-        }
-        list.push(comment.comment);
-      }
-
-      filtered = filtered.filter(item => {
-        const idMatch = item.id.toLowerCase().includes(lowerSearchTerm);
-        // Check title and description
-        const titleMatch = item.title.toLowerCase().includes(lowerSearchTerm);
-        const descriptionMatch = item.description?.toLowerCase().includes(lowerSearchTerm) || false;
-
-        // Check comments from the pre-loaded batch
-        const itemComments = commentsByItemId.get(item.id);
-        const commentMatch = itemComments
-          ? itemComments.some(comment => comment.toLowerCase().includes(lowerSearchTerm))
-          : false;
-
-        return idMatch || titleMatch || descriptionMatch || commentMatch;
-      });
-    }
-
-    return filtered;
+    return applyFilters(this.ctx, items, assignee, searchTerm);
   }
+
 
   /**
    * Clear all work items (useful for import)

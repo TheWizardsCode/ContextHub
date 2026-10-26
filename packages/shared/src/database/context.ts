@@ -66,6 +66,80 @@ export interface WorklogDatabaseContext {
   /** Mutable state for `generateUniqueId` — advances on every call. */
   _lastIdTime: number;
   _idSequence: number;
+  /**
+   * Façade-provided collaborators for the extracted `wl next` selection
+   * modules (`priority.ts`, `next-pipeline.ts`, `critical-escalation.ts`).
+   *
+   * The extracted modules are pure functions and must never import the
+   * `database.ts` façade (acyclic-graph invariant, WL-0MVOBOX1U0013HNF); the
+   * few private `WorklogDatabase` members they still need (debug logging,
+   * hierarchy/child queries, dependency activation, sort selection, and the
+   * next-pipeline primitives reused by the critical-escalation stage) are
+   * expressed on this type instead. Wired once in the `WorklogDatabase`
+   * constructor; read-only for the modules.
+   */
+  hooks: SelectionHooks;
+}
+
+// ── Façade hooks used by the `wl next` selection modules ────────────────
+
+/**
+ * The private `WorklogDatabase` members the extracted selection modules may
+ * call, plus the next-pipeline primitives that `critical-escalation.ts`
+ * reuses. Everything here is implemented either by the façade (thin
+ * delegates) or by the next-pipeline module the façade wires in — no
+ * extracted module imports the façade, so the graph stays acyclic.
+ */
+export interface SelectionHooks {
+  /** Diagnostic trace (suppressed when the database is silent). */
+  debug(message: string): void;
+  /** Direct children that are neither completed nor deleted. */
+  getNonClosedChildren(parentId: string, edgeCache?: EdgeCache): WorkItem[];
+  /** Items this item depends on whose dependency is still active. */
+  getActiveDependencyBlockers(itemId: string, edgeCache?: EdgeCache): WorkItem[];
+  /** True when any ancestor of `item` is in progress. */
+  isInProgressSubtree(item: WorkItem, allItems: WorkItem[]): boolean;
+  /** True when a dependency target is not closed/done and therefore blocks. */
+  isDependencyActive(target: WorkItem | null): boolean;
+  /** Every descendant (children, grandchildren, …) of `parentId`. */
+  getDescendants(parentId: string): WorkItem[];
+  /** Order items by the hierarchy sort-index (createdAt/id fallback). */
+  orderBySortIndex(items: WorkItem[], sortOrderCache?: WorkItem[]): WorkItem[];
+  /** Select the best candidate by sort-index / effective priority / age. */
+  selectBySortIndex(
+    items: WorkItem[],
+    effectivePriorityCache?: Map<string, { value: number; reason: string; inheritedFrom?: string }>,
+    sortOrderCache?: WorkItem[],
+    edgeCache?: EdgeCache,
+    allItems?: WorkItem[],
+  ): WorkItem | null;
+  /**
+   * Assignee/search candidate filter — the `next-pipeline.ts` implementation,
+   * exposed via the façade so `critical-escalation.ts` can apply the final
+   * blocker-selection filters without importing `next-pipeline.ts` (whose
+   * pipeline module calls this stage; an import back would cycle the graph).
+   */
+  applyFilters(items: WorkItem[], assignee?: string, searchTerm?: string): WorkItem[];
+  /**
+   * Resolve a would-be-surfaced blocker to a root-level item (strict
+   * root-only, WL-0MS964SIA0057ABR) — same next-pipeline module, same
+   * cycle-avoidance rationale as {@link applyFilters}.
+   */
+  resolveBlockerToRoot(
+    blocker: WorkItem,
+    allItems: WorkItem[],
+    assignee?: string,
+    searchTerm?: string,
+    excluded?: Set<string>,
+  ): WorkItem | null;
+  /**
+   * Best blocking pair by sort-index — same next-pipeline module, same
+   * cycle-avoidance rationale as {@link applyFilters}.
+   */
+  selectHighestPriorityBlocking(
+    pairs: { blocking: WorkItem; critical: WorkItem }[],
+    sortOrderCache?: WorkItem[],
+  ): { blocking: WorkItem; critical: WorkItem } | null;
 }
 
 // ── Edge cache type (shared across helpers) ───────────────────────────
