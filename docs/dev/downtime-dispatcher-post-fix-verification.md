@@ -22,7 +22,7 @@ plugin); until that reload a running dispatcher executes pre-fix code.
 ## Method (repeatable)
 
 ```bash
-# Full historical scan over the five host roots
+# Full historical scan over the default host roots
 python3 packages/herdr/scripts/scan_duplicate_dispatches.py --json
 
 # Post-fix window: only entries dispatched at/after the fix commit
@@ -33,8 +33,10 @@ python3 packages/herdr/scripts/scan_duplicate_dispatches.py \
 python3 packages/herdr/scripts/scan_duplicate_dispatches.py --since <fix-deploy-iso> --json
 ```
 
-Roots (defaults in `scan_duplicate_dispatches.py`): `ContextHub`, `SorraAgents`,
-`Tableau-Card-Engine`, `dev-scripts`, `open_source_llm`.
+Roots (defaults in `scan_duplicate_dispatches.py`): `AI_Hell`, `ContentCreator`,
+`Nova`, `tts` — the host projects that carry a live dispatch log. Scan other
+roots either as positional arguments or with the `HERDR_DISPATCH_ROOTS`
+environment variable (`os.pathsep`-separated), which overrides the defaults.
 
 The scan now **excludes `enrichment: true` entries** (F6 post-spawn enrichment,
 which copies the marker fields and is not a second dispatch) and reports
@@ -62,6 +64,12 @@ code):
   before F6 existed). This pair is therefore **not** evidence against the fix.
 
 ### Scan from the F3 fix commit (`--since 2026-09-22T11:01:55Z`)
+
+> **History note.** The `roots` array below is the captured output of the
+> verification run and is kept verbatim. Those were the default roots at the
+> time; they no longer carry dispatch logs, and the pre-rename `open_source_llm`
+> checkout now lives at `/home/rgardler/projects/ContentCreator`
+> (OSL-0MVOB9VGA005L9MI). The current defaults are listed under *Method*.
 
 ```json
 {

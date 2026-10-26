@@ -2,7 +2,7 @@
 
 This directory contains shared shell scripts and documentation for Herdr plugin
 development. These scripts are consumed by multiple Herdr plugins across different
-repositories (e.g., ContextHub, open_source_llm).
+repositories (e.g., ContextHub, ContentCreator).
 
 ## Contents
 
