@@ -12,20 +12,19 @@ import { normalizeStatusValue } from './status-stage-rules.js';
 // relative `icons.js` import; `@worklog/shared/icons` is the canonical path
 // even from within the shared package).
 import { isAuditFresh, type AuditInvalidationVerdict } from '@worklog/shared/icons';
+import {
+  EdgeCache,
+  generateId,
+  generateCommentId,
+  getPrefix,
+  setPrefix,
+  laterTimestamp,
+  buildChildrenByParent,
+  buildEdgeCache as _buildEdgeCache,
+  normalizeTitleForMatch,
+} from './database/context.js';
 
-/**
- * Return the later of two ISO-8601 timestamps (undefined/null-safe).
- *
- * Used to preserve comment activity stamps when a peer snapshot carries an
- * older `activityAt` than the local database (comment-only writes do not move
- * `updatedAt`, so sync cannot rely on it to carry activity —
- * WL-0MUBVH6JM0093KVM).
- */
-function laterTimestamp(a?: string | null, b?: string | null): string | undefined {
-  if (!a) return b ?? undefined;
-  if (!b) return a;
-  return a >= b ? a : b;
-}
+export { normalizeTitleForMatch } from './database/context.js';
 
 // ── Injectable service types ────────────────────────────────────────────
 
@@ -137,69 +136,19 @@ export interface WorklogDatabaseServices {
  * Pre-loaded cache of dependency edges and work items to eliminate N+1 queries
  * during the wl next selection pipeline.
  */
-interface EdgeCache {
-  /** inbound dependency edges: toId -> edges[] (items that depend on this item) */
-  inbound: Map<string, DependencyEdge[]>;
-  /** outbound dependency edges: fromId -> edges[] (items this item depends on) */
-  outbound: Map<string, DependencyEdge[]>;
-  /** All work items indexed by id for O(1) lookup */
-  itemsById: Map<string, WorkItem>;
-  /**
-   * Children of each parentId (including non-closed children).
-   * Built once from loaded items to avoid per-item SQL queries for getChildren().
-   */
-  childrenByParent: Map<string, WorkItem[]>;
-}
-
-/**
- * Build a map of parentId -> direct children from a list of work items.
- */
-function buildChildrenByParent(items: WorkItem[]): Map<string, WorkItem[]> {
-  const map = new Map<string, WorkItem[]>();
-  for (const item of items) {
-    if (item.parentId) {
-      let list = map.get(item.parentId);
-      if (!list) {
-        list = [];
-        map.set(item.parentId, list);
-      }
-      list.push(item);
-    }
-  }
-  return map;
-}
-
-const UNIQUE_TIME_LENGTH = 9;
-const UNIQUE_SEQUENCE_LENGTH = 2;
-const UNIQUE_RANDOM_BYTES = 3;
-const UNIQUE_RANDOM_LENGTH = 5;
-const UNIQUE_ID_LENGTH = UNIQUE_TIME_LENGTH + UNIQUE_SEQUENCE_LENGTH + UNIQUE_RANDOM_LENGTH;
-const MAX_ID_GENERATION_ATTEMPTS = 10;
-
-/**
- * Normalize a title into a canonical dedup-comparison key: case-folded with
- * ALL whitespace removed (tabs/newlines collapse away too). `"Same Title"`,
- * `"same  title"` and `" same\ttitle "` all normalize to `"sametitle"` so
- * retried create commands with cosmetic title differences still match
- * (WL-0MSTNG2QF0049B97). The SQL side of `getRecentDuplicate` applies the
- * same transformation to stored titles.
- */
-export function normalizeTitleForMatch(title: string): string {
-  return title.replace(/\s+/g, '').toLowerCase();
-}
+// normalizeTitleForMatch is re-exported at the top of this file.
 
 export class WorklogDatabase {
   private store: SqlitePersistentStore;
-  private prefix: string;
   private jsonlPath: string;
   private silent: boolean;
   private autoSync: boolean;
   private syncProvider?: () => Promise<void>;
   private lockPath: string;
-  private _lastIdTime: number = 0;
-  private _idSequence: number = 0;
   private _semanticSearch: any | null = null;
   private services: WorklogDatabaseServices;
+  /** Shared context built once in the constructor. */
+  private ctx!: import('./database/context.js').WorklogDatabaseContext;
 
   constructor(
     prefix: string = 'WI',
@@ -212,7 +161,6 @@ export class WorklogDatabase {
     options: WorklogDatabaseOptions = {}
   ) {
     this.services = services ?? {};
-    this.prefix = prefix;
     this.jsonlPath = jsonlPath || (this.services.jsonl?.getDefaultDataPath?.() ?? '.worklog/data.jsonl');
     this.silent = silent;
     this.autoSync = autoSync;
@@ -230,6 +178,16 @@ export class WorklogDatabase {
       this.services.cacheOptions,
       { readOnly: options.readOnly === true },
     );
+    
+    // Build shared context after the store is initialised (helpers need store access).
+    this.ctx = {
+      store: this.store,
+      prefix,
+      services: this.services,
+      silent,
+      _lastIdTime: 0,
+      _idSequence: 0,
+    };
     
     // Refresh from JSONL only if SQLite is empty (ephemeral JSONL pattern)
     // In the ephemeral pattern, SQLite is the sole runtime source of truth.
@@ -1086,39 +1044,7 @@ export class WorklogDatabase {
    * @param items - Optional pre-loaded work items to avoid double-loading
    */
   private buildEdgeCache(items?: WorkItem[]): EdgeCache {
-    const allEdges = this.store.getAllDependencyEdges();
-    const allItems = items ?? this.store.getAllWorkItems();
-
-    const inbound = new Map<string, DependencyEdge[]>();
-    const outbound = new Map<string, DependencyEdge[]>();
-    const itemsById = new Map<string, WorkItem>();
-
-    for (const edge of allEdges) {
-      // outbound: fromId -> edges (items that depend on others)
-      let fromList = outbound.get(edge.fromId);
-      if (!fromList) {
-        fromList = [];
-        outbound.set(edge.fromId, fromList);
-      }
-      fromList.push(edge);
-
-      // inbound: toId -> edges (items that are depended upon)
-      let toList = inbound.get(edge.toId);
-      if (!toList) {
-        toList = [];
-        inbound.set(edge.toId, toList);
-      }
-      toList.push(edge);
-    }
-
-    for (const item of allItems) {
-      itemsById.set(item.id, item);
-    }
-
-    // Build childrenByParent map once to avoid per-item SQL queries
-    const childrenByParent = buildChildrenByParent(allItems);
-
-    return { inbound, outbound, itemsById, childrenByParent };
+    return _buildEdgeCache(this.ctx, items);
   }
 
   // ── Audit Results ────────────────────────────────────────────────
@@ -1237,27 +1163,21 @@ export class WorklogDatabase {
    * Set the prefix for this database
    */
   setPrefix(prefix: string): void {
-    this.prefix = prefix;
+    setPrefix(this.ctx, prefix);
   }
 
   /**
    * Get the current prefix
    */
   getPrefix(): string {
-    return this.prefix;
+    return getPrefix(this.ctx);
   }
 
   /**
    * Generate a unique ID for a work item
    */
   private generateId(): string {
-    for (let attempt = 0; attempt < MAX_ID_GENERATION_ATTEMPTS; attempt += 1) {
-      const id = `${this.prefix}-${this.generateUniqueId()}`;
-      if (!this.store.getWorkItem(id)) {
-        return id;
-      }
-    }
-    throw new Error('Unable to generate a unique work item ID');
+    return generateId(this.ctx);
   }
 
   generateWorkItemId(): string {
@@ -1275,42 +1195,7 @@ export class WorklogDatabase {
    * Generate a unique ID for a comment
    */
   private generateCommentId(): string {
-    for (let attempt = 0; attempt < MAX_ID_GENERATION_ATTEMPTS; attempt += 1) {
-      const id = `${this.prefix}-C${this.generateUniqueId()}`;
-      if (!this.store.getComment(id)) {
-        return id;
-      }
-    }
-    throw new Error('Unable to generate a unique comment ID');
-  }
-
-  /**
-   * Generate a globally unique, human-readable identifier.
-   * Uses a sequence counter to ensure deterministic ordering when multiple
-   * IDs are generated within the same millisecond.
-   */
-  private generateUniqueId(): string {
-    const now = Date.now();
-    if (now !== this._lastIdTime) {
-      this._lastIdTime = now;
-      this._idSequence = 0;
-    } else {
-      this._idSequence++;
-    }
-    const timeRaw = now.toString(36).toUpperCase();
-    if (timeRaw.length > UNIQUE_TIME_LENGTH) {
-      throw new Error('Timestamp overflow while generating unique ID');
-    }
-    const timePart = timeRaw.padStart(UNIQUE_TIME_LENGTH, '0');
-    const randomBytesValue = randomBytes(UNIQUE_RANDOM_BYTES);
-    const randomNumber = randomBytesValue.readUIntBE(0, UNIQUE_RANDOM_BYTES);
-    const randomPart = randomNumber.toString(36).toUpperCase().padStart(UNIQUE_RANDOM_LENGTH, '0');
-    const sequencePart = this._idSequence.toString(36).toUpperCase().padStart(2, '0');
-    const id = `${timePart}${sequencePart}${randomPart}`;
-    if (id.length !== UNIQUE_ID_LENGTH) {
-      throw new Error('Generated unique ID has unexpected length');
-    }
-    return id;
+    return generateCommentId(this.ctx);
   }
 
   /**
@@ -1387,7 +1272,7 @@ export class WorklogDatabase {
    * @returns The newest matching item, or null when no match exists.
    */
   getRecentDuplicate(title: string, windowMs: number, prefix?: string): WorkItem | null {
-    const effectivePrefix = (prefix ?? this.prefix).toUpperCase();
+    const effectivePrefix = (prefix ?? this.ctx.prefix).toUpperCase();
     return this.store.getRecentDuplicateByNormalizedTitle(
       normalizeTitleForMatch(title),
       windowMs,
