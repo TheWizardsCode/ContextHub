@@ -65,6 +65,22 @@ path's dynamic entrypoints and their runtime module union, plus the measured
 `src`/`dist` baselines and regression headroom. Background and re-run
 instructions: [`docs/dev/wl-startup-import-budget.md`](docs/dev/wl-startup-import-budget.md).
 
+**Missing shared build output.** Before anything resolves
+`@worklog/shared/*`, the fast path checks that the workspace build output
+(`packages/shared/dist`) actually exists and, when it does not, prints one
+actionable line (the missing artifact, the absolute path checked and the fix)
+and exits non-zero instead of an `ERR_MODULE_NOT_FOUND` stack trace. Recovery
+is always the same:
+
+```sh
+npm run build:shared
+```
+
+The check resolves through the same `node_modules/@worklog/shared` link the
+runtime uses, so a linked worktree without its own `dist/` (which resolves the
+main checkout's build) never trips it. Details:
+[`docs/dev/wl-shared-dist-diagnostic.md`](docs/dev/wl-shared-dist-diagnostic.md).
+
 ### Spawn instrumentation and CPU-seconds per refresh cycle
 
 When `WL_SPAWN_COUNT_FILE=<path>` is set, every `wl` process appends one line

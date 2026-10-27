@@ -17,10 +17,150 @@
  * recorded ratchet is deliberately tightened.
  */
 
-import { sep as pathSep } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
+import { dirname as pathDirname, join as pathJoin, sep as pathSep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { normalizeFieldsArgv, extractCommandFromArgv } from './argv-normalize.js';
 import { recordSpawn } from './spawn-counter.js';
 import { WORKLOG_VERSION } from './version.js';
+
+// ── Shared workspace build-output preflight (WL-0MVPADZ1Z000FOSG AC4) ──────
+//
+// `@worklog/shared/*` resolves through the workspace link into
+// `packages/shared/dist` — gitignored build output. When a concurrent actor
+// wipes it, every command used to die with a bare `ERR_MODULE_NOT_FOUND`
+// stack trace naming a path nobody recognises. The helpers below turn that
+// into one actionable line naming the missing artifact and the exact
+// remediation (`npm run build:shared`).
+//
+// The check mirrors the runtime resolution (`import.meta.resolve` from THIS
+// module, then an existence check) rather than guessing a repo root, so a
+// linked worktree without its own `dist/` — where the runtime resolves the
+// main checkout's build output through the symlinked `node_modules` — never
+// sees a false positive.
+//
+// The helpers live in this file (rather than a new module) because the
+// startup import budget forbids growing the fast path's boot graph, and they
+// are exported so the resolver can be unit-tested without spawning the CLI
+// (see the import-safe invocation guard below).
+
+/** Package specifier whose build output the preflight checks. */
+export const SHARED_DIST_SPECIFIER = '@worklog/shared/worklog-paths';
+
+/** Package-relative artifact path, for diagnostics and tests. */
+export const SHARED_DIST_ARTIFACT_RELPATH = 'packages/shared/dist/worklog-paths.js';
+
+/** Maximum ancestor levels walked when locating the repository root. */
+const REPO_ROOT_SEARCH_DEPTH = 8;
+
+/**
+ * Best-effort absolute path of the artifact the runtime would load.
+ *
+ * Walks up from the module's directory (bounded) to the repository root (the
+ * nearest directory owning `packages/shared/package.json`). Returns `null`
+ * when no such root exists (a relocated bundle), so callers never invent a
+ * path.
+ *
+ * @param moduleUrl - module URL to anchor the search (defaults to this module)
+ */
+export function expectedSharedDistArtifactPath(
+  moduleUrl: string = import.meta.url
+): string | null {
+  let dir = pathDirname(fileURLToPath(moduleUrl));
+  for (let depth = 0; depth <= REPO_ROOT_SEARCH_DEPTH; depth++) {
+    if (existsSync(pathJoin(dir, 'packages', 'shared', 'package.json'))) {
+      return pathJoin(dir, ...SHARED_DIST_ARTIFACT_RELPATH.split('/'));
+    }
+    const parent = pathDirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+/**
+ * The single actionable diagnostic printed when the artifact is missing:
+ * the missing artifact, the absolute path checked, and the exact remediation.
+ */
+export function missingSharedDistDiagnostic(artifactPath: string): string {
+  // <repo>/packages/shared/dist/worklog-paths.js → <repo>
+  const repoRoot = pathDirname(
+    pathDirname(pathDirname(pathDirname(artifactPath)))
+  );
+  return [
+    'wl: cannot start — the shared workspace build output is missing.',
+    `  Missing artifact: ${artifactPath}`,
+    '  wl resolves @worklog/shared/* from packages/shared/dist, which is',
+    '  gitignored build output (a wiped build tree produces this).',
+    `  Fix: run \`npm run build:shared\` in ${repoRoot} and retry.`,
+  ].join('\n');
+}
+
+/** Resolver signature injected by tests (defaults to `import.meta.resolve`). */
+export type SharedDistResolver = (specifier: string) => string;
+
+/** Options for {@link sharedDistPreflight} (a test seam only). */
+export interface SharedDistPreflightOptions {
+  moduleUrl?: string;
+  resolve?: SharedDistResolver;
+}
+
+function defaultSharedDistResolver(specifier: string): string {
+  const resolver = (import.meta as ImportMeta & {
+    resolve?: (specifier: string) => string;
+  }).resolve;
+  if (typeof resolver !== 'function') {
+    throw new Error('import.meta.resolve is unavailable in this runtime');
+  }
+  return resolver(specifier);
+}
+
+/**
+ * Preflight: return the diagnostic when the shared build output is missing,
+ * or `null` when the CLI may proceed.
+ *
+ * Proceeds when the runtime resolution of {@link SHARED_DIST_SPECIFIER}
+ * yields an existing file (a healthy checkout, including a worktree that
+ * resolves the main checkout's `dist/` through the symlinked
+ * `node_modules`). When resolution fails or the resolved file does not
+ * exist, the diagnostic names the absolute path checked. When the path
+ * cannot be determined at all, the check stays silent (fail-open — it may
+ * only fire for a genuinely missing artifact).
+ */
+export function sharedDistPreflight(
+  options: SharedDistPreflightOptions = {}
+): string | null {
+  const moduleUrl = options.moduleUrl ?? import.meta.url;
+  const resolve = options.resolve ?? defaultSharedDistResolver;
+  const expected = expectedSharedDistArtifactPath(moduleUrl);
+
+  let resolvedPath: string | null = null;
+  try {
+    const resolved = resolve(SHARED_DIST_SPECIFIER);
+    resolvedPath = resolved.startsWith('file:') ? fileURLToPath(resolved) : resolved;
+  } catch {
+    resolvedPath = null;
+  }
+
+  if (resolvedPath !== null && existsSync(resolvedPath)) return null;
+
+  const artifactPath = resolvedPath ?? expected;
+  if (artifactPath === null) return null; // cannot judge — never guess
+  return missingSharedDistDiagnostic(artifactPath);
+}
+
+// ── Import-safe invocation guard ──────
+// Only a real CLI invocation may run the fast path. Importing this module
+// (the preflight resolver's unit tests) must not execute the CLI, so the
+// entry point is compared by realpath — which also keeps symlinked launchers
+// (`/usr/local/bin/wl -> …/dist/cli.js`) working.
+const _invokedAsEntry = (() => {
+  try {
+    return realpathSync(process.argv[1]) === fileURLToPath(import.meta.url);
+  } catch {
+    return false;
+  }
+})();
 
 // Watch flag parsing - supports -w, -wN, --watch, --watch=N
 function parseWatchFlag(argv: string[]) {
@@ -61,7 +201,7 @@ function parseWatchFlag(argv: string[]) {
 }
 
 const _parsedWatch = parseWatchFlag(process.argv);
-if (_parsedWatch.enabled) {
+if (_invokedAsEntry && _parsedWatch.enabled) {
   const freq = _parsedWatch.seconds;
   // Use the cleaned argv (includes node and script) and spawn the same
   // command (node <script> <args...>) but with the watch flag removed.
@@ -158,10 +298,12 @@ if (_parsedWatch.enabled) {
 // before Commander parses argv. Without this, the trailing token is mistaken
 // for the positional search/query argument and the projection silently drops
 // requested fields (WL-0MSLW8GHQ0092PJK).
-process.argv = [
-  ...process.argv.slice(0, 2),
-  ...normalizeFieldsArgv(process.argv.slice(2)),
-];
+if (_invokedAsEntry) {
+  process.argv = [
+    ...process.argv.slice(0, 2),
+    ...normalizeFieldsArgv(process.argv.slice(2)),
+  ];
+}
 
 // ── `--version` fast path (first thing: nothing else is imported) ─────────
 // A bare `wl --version` / `-V` prints the version from the generated
@@ -180,12 +322,22 @@ const _wantsVersion =
   extractCommandFromArgv(_fastArgv) === null &&
   (_fastArgv.includes('--version') || _fastArgv.includes('-V'));
 
-if (_wantsVersion) {
+if (_invokedAsEntry && _wantsVersion) {
   recordSpawn('version');
   process.stdout.write(`${WORKLOG_VERSION}\n`, () => process.exit(0));
   // Safety net if the flush callback never fires.
   setTimeout(() => process.exit(0), 2000).unref();
-} else {
+} else if (_invokedAsEntry) {
+
+  // ── Shared build-output preflight (WL-0MVPADZ1Z000FOSG AC4) ────────────
+  // Runs before the first load of `@worklog/shared/*` (via worklog-paths.js
+  // below): a wiped `packages/shared/dist` must produce one actionable line,
+  // not an `ERR_MODULE_NOT_FOUND` stack trace.
+  const _sharedDistIssue = sharedDistPreflight();
+  if (_sharedDistIssue !== null) {
+    process.stderr.write(`${_sharedDistIssue}\n`);
+    process.exit(1);
+  }
 
   // Apply the --worklog-dir override from argv BEFORE anything resolves a
   // worklog path (the cache key and `ctx.dataPath` both depend on it). The
