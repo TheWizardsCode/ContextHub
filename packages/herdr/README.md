@@ -769,10 +769,17 @@ prefillCapacityBudget = 0                        when cap > 0 and inFlight >= ca
 - `prefill_gate_waiters > 0` → the gate is contended, exactly like a
   non-empty `contention_queue_depth`: no dispatch, reason `prefill-gate`,
   header token `prefill-gate` (distinct from `contention`).
-- The prefill-ETA guard's `queue_eta_seconds` (or any per-slot
-  `prefill_eta_seconds`) above `prefill_budget_seconds` → defer, reason
-  `prefill-eta`, header token `prefill-eta`. Both values must be present and
-  finite; a missing ETA or budget never blocks dispatch.
+- **ETA deferral is calibration-gated and occupancy-only.** The proxy's
+  `prefill_eta_calibrated` flag gates the guard: `false` (below the proxy's
+  `MIN_CALIBRATION_SAMPLES`, so its own admission guard is inert) → no ETA
+  deferral (fail open). When calibrated, only the **occupancy** term paces —
+  `queue_eta_occupancy_seconds`, the wait behind OTHER in-flight prefills;
+  the newcomer's own prefill never blocks dispatch, and a per-slot
+  `prefill_eta_seconds` counts only for slots that are actually busy. An
+  occupancy ETA (or a busy slot's ETA) above `prefill_budget_seconds` →
+  defer, reason `prefill-eta`, header token `prefill-eta`. Both values must
+  be present and finite; a missing ETA or budget never blocks dispatch, and
+  a legacy proxy (no calibration signal) keeps today's total-ETA behaviour.
 - The effective budget is what the tier minimums see: with headroom `1` the
   **audit** tier (≥ 2 free slots) is skipped and the implement tier
   dispatches instead.
@@ -786,9 +793,10 @@ Malformed gate counters (`local_prefills_in_flight`,
 `local_max_concurrent_prefills`, `prefill_gate_waiters`) fail closed (poll
 treated as busy); malformed ETA fields are advisory and ignored. Every
 polled decision entry records `prefillsInFlight`, `maxConcurrentPrefills`,
-`prefillGateWaiters`, `prefillBudgetSeconds`, `queueEtaSeconds` and the
-per-slot `slotPrefillEtaSeconds` so a paced tick is diagnosable from the log
-alone.
+`prefillGateWaiters`, `prefillBudgetSeconds`, `queueEtaSeconds`,
+`queueEtaOccupancySeconds`, `queueEtaBusySlots`, `prefillEtaCalibrated` and
+the per-slot `slotPrefillEtaSeconds` so a paced tick is diagnosable from the
+log alone.
 
 **Local capacity reservation** (LP-0MVIKPCSG002B0NL, parent
 WL-0MVIKRFP0005JDL8 slice C2) — polling the status endpoint and then launching

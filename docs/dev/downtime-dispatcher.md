@@ -374,7 +374,7 @@ authoritative**:
 | `capacity_hint: "saturated"` | defensive no-dispatch (reason `capacity-saturated`, header `saturated`), even if the per-slot detail looks inconsistent |
 | `capacity_hint: "idle"` / `"prefill_bound"` | not by themselves a stop; the per-slot free budget still applies |
 | `slots[].phase`, `slots[].context_tokens` | advisory evidence only — recorded in the decision log, never a gate |
-| `slots[].prefill_eta_seconds`, `prefill_budget_seconds` | not availability gates; they feed the prefill-ETA deferral (`prefill-eta`, see *Prefill serialisation pacing* below) |
+| `slots[].prefill_eta_seconds`, `prefill_budget_seconds` | not availability gates; they feed the calibration-gated, occupancy-only prefill-ETA deferral (`prefill-eta`, see *Prefill serialisation pacing* below) |
 
 With truthful lease state, the coarse global `local_lease_active` flag no
 longer blocks dispatch (`idle_leased` leases are exactly the case it
@@ -409,8 +409,10 @@ The proxy publishes the gate state on `GET /llama/local/status`:
 | `local_prefills_in_flight` | prefills currently in flight |
 | `local_max_concurrent_prefills` | effective cap; `1` = serialised (default), `0` = gate disabled |
 | `prefill_gate_waiters` | requests waiting for the prefill gate (the live gate queue depth) |
-| `queue_eta_seconds` / `prefill_budget_seconds` | the prefill-ETA guard's projected wait and admission budget (LP-0MVGDUV5E005UWBQ) |
-| `slots[].phase` / `slots[].prefill_eta_seconds` | per-slot prefill phase and calibrated prefill cost |
+| `queue_eta_seconds` / `prefill_budget_seconds` | the proxy's projected wait (own prefill + occupancy) and admission budget (LP-0MVGDUV5E005UWBQ); advisory evidence — the ETA alone is never a deferral trigger (see the calibration/occupancy rules below) |
+| `queue_eta_occupancy_seconds` / `queue_eta_busy_slots` | the wait behind OTHER in-flight prefills and the slots they occupy (LP-0MVGDUV5E005UWBQ); advisory — the only ETA term that can pace dispatch |
+| `prefill_eta_calibrated` | enough samples for the estimate to be actionable (`false` below the proxy's `MIN_CALIBRATION_SAMPLES`); advisory — `false` disables ETA deferral (fail open, see below) |
+| `slots[].phase` / `slots[].prefill_eta_seconds` | per-slot prefill phase and calibrated prefill cost (only busy slots count for pacing) |
 
 **Concurrency-budget contract.** On every poll the dispatcher computes an
 **effective local dispatch budget** and passes it to the tier chain (and to
@@ -430,11 +432,25 @@ prefillCapacityBudget = 0                                 when cap > 0 and inFli
 - `prefill_gate_waiters > 0` → contention evidence, equivalent to a non-empty
   `contention_queue_depth`: no dispatch, reason `prefill-gate`, header token
   `prefill-gate` (deliberately distinct from `contention`).
-- `queue_eta_seconds` (or a per-slot `prefill_eta_seconds`) above
+- **ETA deferral is calibration-gated and paces on occupancy only.**
+  `prefill_eta_calibrated === false` → **no ETA deferral** (fail open): an
+  estimate below the proxy's calibration floor (`MIN_CALIBRATION_SAMPLES`)
+  mirrors the proxy's own admission guard, which is inert
+  (`insufficient_samples`) until then — deferring on an uncalibrated idle
+  pool would livelock it (never dispatch ⇒ never calibrate ⇒ stay
+  pessimistic). The paced queue term is the **occupancy wait**
+  (`queue_eta_occupancy_seconds` — the wait behind OTHER in-flight prefills),
+  never the newcomer's own prefill; a per-slot `prefill_eta_seconds` counts
+  only for slots that are actually busy (an idle pool has no in-flight slot
+  ETA to respect). When the occupancy term (or a busy slot's ETA) exceeds
   `prefill_budget_seconds` → defer, reason `prefill-eta`, header token
   `prefill-eta`. Both values must be present and finite; a missing ETA **or**
-  budget never blocks dispatch. This mirrors the proxy's own admission guard
-  instead of parking a pane behind a doomed wait.
+  budget never blocks dispatch. Fallbacks (parent AC4): a legacy proxy (no
+  calibration signal) keeps today's total-`queue_eta_seconds` behaviour; a
+  calibration-aware proxy that did not serve the split uses the total only
+  when occupancy evidence exists (`local_prefills_in_flight > 0` or a busy
+  slot); any other shape is zero occupancy — an absent occupancy ETA never
+  means "unknown ⇒ defer".
 - The effective budget is what the dispatch tier sees, so a reduced budget
   interacts directly with `downtimeRequiredFreeSlots` and the **per-tier
   free-slot minimums**: with a prefill headroom of `1` the audit tier (≥ 2
@@ -454,17 +470,30 @@ cap and budget, avoiding a second source of truth). Malformed gate counters
 
 **Observability.** Every polled decision entry records `prefillsInFlight`,
 `maxConcurrentPrefills`, `prefillGateWaiters`, `prefillBudgetSeconds`,
-`queueEtaSeconds` (and the per-slot `slotPrefillEtaSeconds`) alongside the
-existing `capacityHint` / `contentionDepth` evidence, and the paced refusal
-carries its own `reason` (`prefill-gate` / `prefill-cap` / `prefill-eta`).
+`queueEtaSeconds`, the occupancy/calibration evidence
+`queueEtaOccupancySeconds`, `queueEtaBusySlots` and `prefillEtaCalibrated`
+(and the per-slot `slotPrefillEtaSeconds`) alongside the existing
+`capacityHint` / `contentionDepth` evidence, and the paced refusal carries
+its own `reason` (`prefill-gate` / `prefill-cap` / `prefill-eta`) — so an
+operator can tell *waiting behind other prefills* from *waiting on my own
+cold prefill* straight from the coordination log.
 
 **Tests.** `downtime-worker.parse.test.ts` pins the parser (gate counters
-fail-closed, ETA advisory, absent fields unchanged);
-`downtime-worker.idle.test.ts` pins `evaluatePrefillPacing` (budget 0 at the
-cap, headroom recovery, gate waiters, ETA deferral, missing budget/ETA
-non-blocking, cap absent/0 unbounded); `downtime-worker.test.ts` pins the tick
-reason/token, decision-log evidence, ETA deferral and the effective-budget
-clamp (audit vs implement tier).
+fail-closed, ETA advisory, absent fields unchanged) and the new
+occupancy/calibration advisories (present / absent / malformed →
+`undefined`, a malformed advisory never rejects the poll and never masks a
+fail-closed gate counter); `downtime-worker.idle.test.ts` pins
+`evaluatePrefillPacing` (budget 0 at the cap, headroom recovery, gate
+waiters, ETA deferral, missing budget/ETA non-blocking, cap absent/0
+unbounded) plus the calibration/occupancy contract (the idle-uncalibrated
+and idle-zero-occupancy fixtures never defer, an idle slot's stale per-slot
+ETA never defers, gate waiters and a saturated cap still defer while
+uncalibrated, and a real occupancy ETA above the budget still defers with
+`prefill-eta`); `downtime-worker.test.ts` pins the tick reason/token,
+decision-log evidence including the occupancy/calibration record fields,
+ETA deferral, the effective-budget clamp (audit vs implement tier) and the
+tick-level dispatch proof (an idle-uncalibrated poll now selects and
+dispatches a candidate, with the busy-occupancy twin still pacing).
 
 ### Local capacity reservation (LP-0MVIKPCSG002B0NL, parent WL-0MVIKRFP0005JDL8, slice C2)
 
@@ -2627,7 +2656,8 @@ rate limit: an identical reason inside `DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS`
 them, every entry also carries the capacity/prefill evidence
 (`capacityHint`, `statusSchemaVersion`, `prefillsInFlight`,
 `maxConcurrentPrefills`, `prefillGateWaiters`, `prefillBudgetSeconds`,
-`queueEtaSeconds`, `slotPhases`, `slotPrefillEtaSeconds`); prefill pacing
+`queueEtaSeconds`, `queueEtaOccupancySeconds`, `queueEtaBusySlots`,
+`prefillEtaCalibrated`, `slotPhases`, `slotPrefillEtaSeconds`); prefill pacing
 refusals use the distinct reasons/tokens `prefill-gate`, `prefill-cap` and
 `prefill-eta`. The reservation slices add two more distinct tokens:
 `reservation-refused` (header token `reservation-lost`, with the proxy's own
