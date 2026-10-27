@@ -236,13 +236,44 @@ export const idleWithCumulativeContention: LlamaStatus = {
 // parser, the pacing helper and the tick-level gates can share one shape.
 
 /**
+ * The proxy's ADVISORY occupancy/calibration terms
+ * (LP-0MVGDUV5E005UWBQ, `prefill_eta.py:status_estimate`): the wait behind
+ * OTHER prefills (`queue_eta_occupancy_seconds`), how many slots that wait
+ * is composed of (`queue_eta_busy_slots`) and whether the estimate has
+ * enough samples to be actionable (`prefill_eta_calibrated`).
+ *
+ * Declared here — not in `LlamaStatus` — because the regression fixtures and
+ * their `it.fails` witnesses land BEFORE the types/pacing implementation
+ * (WL-0MVPUDYHD000QI0K, test-first slice; the implementation child
+ * WL-0MVPUE4C9005380J moves them onto `LlamaStatus` and `PrefillPacing`).
+ * Absent on a legacy proxy, so the factory injects them only when supplied.
+ */
+export interface PrefillOccupancyFields {
+  /** Wait a newcomer faces behind OTHER prefills (own prefill excluded). */
+  queue_eta_occupancy_seconds?: number;
+  /** Slots currently occupied by an in-flight prefill. */
+  queue_eta_busy_slots?: number;
+  /** Whether the proxy's ETA estimate has enough samples to be actionable. */
+  prefill_eta_calibrated?: boolean;
+}
+
+/** `prefillPacingStatus` overrides: `LlamaStatus` fields plus the advisory terms. */
+export type PrefillPacingOverrides = Partial<LlamaStatus> & PrefillOccupancyFields;
+
+/**
  * Schema-v2 status with the prefill-gate fields served. Defaults: four
  * free/idle_leased slots, cap `1`, nothing in flight, no waiters, a 120 s
  * admission budget and a 0 s queue ETA — i.e. TODAY's behaviour (dispatch
  * admitted) with the new fields present. Override one field per fixture.
  */
-export function prefillPacingStatus(overrides: Partial<LlamaStatus> = {}): LlamaStatus {
-  return {
+export function prefillPacingStatus(overrides: PrefillPacingOverrides = {}): LlamaStatus {
+  const {
+    queue_eta_occupancy_seconds,
+    queue_eta_busy_slots,
+    prefill_eta_calibrated,
+    ...statusOverrides
+  } = overrides;
+  const status: LlamaStatus & PrefillOccupancyFields = {
     llama_server_running: true,
     local_active_query: false,
     model_switch_in_progress: false,
@@ -269,8 +300,20 @@ export function prefillPacingStatus(overrides: Partial<LlamaStatus> = {}): Llama
     ],
     contention_queue_depth: 0,
     contention_queued_count: 0,
-    ...overrides,
+    ...statusOverrides,
   };
+  // Advisory fields appear only when the fixture supplies them, so a fixture
+  // built without them keeps the legacy (absent) shape byte-for-byte.
+  if (queue_eta_occupancy_seconds !== undefined) {
+    status.queue_eta_occupancy_seconds = queue_eta_occupancy_seconds;
+  }
+  if (queue_eta_busy_slots !== undefined) {
+    status.queue_eta_busy_slots = queue_eta_busy_slots;
+  }
+  if (prefill_eta_calibrated !== undefined) {
+    status.prefill_eta_calibrated = prefill_eta_calibrated;
+  }
+  return status;
 }
 
 /**
@@ -323,6 +366,82 @@ export const prefillSlotEtaOverBudget: LlamaStatus = prefillPacingStatus({
     { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
     { slot_id: 'slot-3', is_processing: false, lease_state: 'free' },
     { slot_id: 'slot-4', is_processing: false, lease_state: 'free' },
+  ],
+});
+
+// ── Occupancy/calibration regression fixtures (WL-0MVPUDYHD000QI0K) ───
+//
+// Reconstructed from the leader's `prefill-eta` decision records in
+// `.worklog/downtime-coordination.log` (parent WL-0MVPRZU0A000TSWD): the
+// dispatcher deferred every tick with `capacityHint: idle`, `freeSlots 2/2`,
+// `prefillsInFlight: 0`, `prefillGateWaiters: 0`, `queueEtaSeconds: 97.5`,
+// `prefillBudgetSeconds: 60`, `queueEtaOccupancySeconds: 0`,
+// `queueEtaBusySlots: 0`, `prefillEtaCalibrated: false`.
+
+/**
+ * The incident pool: TWO slots, both genuinely free, nothing prefilling, no
+ * gate waiters, and an UNCALIBRATED proxy whose 97.5 s queue ETA is the
+ * newcomer's OWN cold prefill against a 60 s admission budget. Deferring on
+ * it is the livelock this parent exists to fix (never dispatch ⇒ never
+ * calibrate ⇒ stay pessimistic). Occupancy terms are zero, so the whole ETA
+ * is the own-prefill cost.
+ */
+export const prefillIdleUncalibrated: LlamaStatus = prefillPacingStatus({
+  local_active_query: false,
+  local_lease_active: false,
+  available_slots: 2,
+  total_slots: 2,
+  capacity_hint: 'idle',
+  local_prefills_in_flight: 0,
+  local_max_concurrent_prefills: 1,
+  prefill_gate_waiters: 0,
+  prefill_budget_seconds: 60,
+  queue_eta_seconds: 97.5,
+  queue_eta_occupancy_seconds: 0,
+  queue_eta_busy_slots: 0,
+  prefill_eta_calibrated: false,
+  slots: [
+    { slot_id: 'slot-1', is_processing: false, lease_state: 'free' },
+    { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+  ],
+});
+
+/**
+ * The same idle pool on a CALIBRATED proxy, isolating the occupancy rule from
+ * the calibration prerequisite: `queue_eta_seconds` is high (300 s) but no
+ * slot is busy and the occupancy terms are zero, so the ETA is entirely the
+ * newcomer's own prefill and must never defer dispatch.
+ */
+export const prefillIdleZeroOccupancy: LlamaStatus = prefillPacingStatus({
+  ...prefillIdleUncalibrated,
+  queue_eta_seconds: 300,
+  prefill_eta_calibrated: true,
+});
+
+/**
+ * A genuinely contended pool: one slot is prefilling and the newcomer's wait
+ * behind it (`queue_eta_occupancy_seconds`) is 300 s — well above the 60 s
+ * admission budget — while the capacity headroom is still positive (cap `2`,
+ * one in flight), so only the occupancy ETA can explain a paced tick. The
+ * busy slot deliberately carries NO per-slot `prefill_eta_seconds`, so the
+ * retained `prefill-eta` deferral must come from the occupancy term.
+ */
+export const prefillBusyOccupancy: LlamaStatus = prefillPacingStatus({
+  local_active_query: true,
+  available_slots: 1,
+  total_slots: 2,
+  capacity_hint: 'prefill_bound',
+  local_prefills_in_flight: 1,
+  local_max_concurrent_prefills: 2,
+  prefill_gate_waiters: 0,
+  prefill_budget_seconds: 60,
+  queue_eta_seconds: 320,
+  queue_eta_occupancy_seconds: 300,
+  queue_eta_busy_slots: 1,
+  prefill_eta_calibrated: true,
+  slots: [
+    { slot_id: 'slot-1', is_processing: true, lease_state: 'generating', phase: 'prefill' },
+    { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
   ],
 });
 
