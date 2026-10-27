@@ -406,6 +406,26 @@ export const prefillIdleZeroOccupancy: LlamaStatus = prefillPacingStatus({
 });
 
 /**
+ * The LEGACY twin of the incident pool (parent AC4, this item AC4): a
+ * pre-feature proxy that publishes NONE of the prefill-gate fields — no cap,
+ * no gate counters, no `queue_eta_seconds` / `prefill_budget_seconds`, and
+ * none of the advisory occupancy/calibration terms
+ * (`queue_eta_occupancy_seconds`, `queue_eta_busy_slots`,
+ * `prefill_eta_calibrated`) — on the same idle 2-slot pool. An absent
+ * ETA/budget/calibration flag never blocks dispatch: the tick keeps exactly
+ * today's free-slot-only budget, erring towards dispatch.
+ */
+export const prefillLegacyIdlePool: LlamaStatus = {
+  ...idleAllSlotsFree,
+  available_slots: 2,
+  total_slots: 2,
+  slots: [
+    { slot_id: 'slot-1', is_processing: false },
+    { slot_id: 'slot-2', is_processing: false },
+  ],
+};
+
+/**
  * A genuinely contended pool: one slot is prefilling and the newcomer's wait
  * behind it (`queue_eta_occupancy_seconds`) is 300 s — well above the 60 s
  * admission budget — while the capacity headroom is still positive (cap `2`,
