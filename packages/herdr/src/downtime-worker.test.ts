@@ -141,6 +141,7 @@ import {
   prefillGateContended,
   prefillQueueEtaOverBudget,
   prefillSlotEtaOverBudget,
+  prefillBusyOccupancy,
 } from './downtime-worker.fixtures.js';
 import {
   resumeStalledPane,
@@ -1935,5 +1936,92 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
       expect.stringContaining('/skill:audit'),
       expect.anything(),
     );
+  });
+
+  // ── Occupancy/calibration evidence on the paced decision record ─────
+  //
+  // Parent WL-0MVPRZU0A000TSWD AC3: the paced tick keeps its existing reason
+  // string, header token and no-candidate semantics, and the decision record
+  // ADDITIONALLY carries the proxy's occupancy/calibration terms
+  // (`queueEtaOccupancySeconds`, `queueEtaBusySlots`, `prefillEtaCalibrated`)
+  // so an operator can tell "waiting behind other prefills" from "waiting on
+  // my own cold prefill" straight from the coordination log.
+  //
+  // RED WITNESS: the paced-record spec is `it.fails` — today's
+  // `capacityEvidence` emits only the pre-existing gate/ETA fields, so the
+  // body fails. The legacy-omission spec is a plain `it` guard (today's shape
+  // must survive the fix). Implementation child WL-0MVPUE4C9005380J flips the
+  // witness as it lands.
+
+  it.fails(
+    'parent AC3: a paced tick records the occupancy/calibration evidence',
+    async () => {
+      // One slot genuinely prefilling, a 300 s wait behind it
+      // (`queue_eta_occupancy_seconds`) against a 60 s admission budget, the
+      // proxy calibrated — a legitimate paced stop both before and after the
+      // pacing fix (only the occupancy term can explain it: the busy slot
+      // carries no per-slot `prefill_eta_seconds`).
+      const root = tempDirs.make('dt-prefill-occupancy-evidence-');
+      const { worker, deps } = makePrefillWorker({
+        status: prefillBusyOccupancy,
+        root,
+        deps: {
+          getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+        },
+      });
+      const outcome = await worker.tick();
+      // Reason string, no-candidate semantics and header token unchanged.
+      expect(outcome.dispatched).toBe(false);
+      expect(worker.blockReason).toBe('prefill-eta');
+      expect(decisionHeaderToken('prefill-eta')).toBe('prefill-eta');
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+      await vi.waitFor(async () => {
+        const entries = (await readCoordinationLogEntries(root)).filter(
+          (e) => e.kind === 'decision',
+        );
+        expect(entries).toHaveLength(1);
+        expect(entries[0]).toMatchObject({
+          reason: 'prefill-eta',
+          // Existing evidence fields, unchanged by the occupancy split.
+          prefillsInFlight: 1,
+          maxConcurrentPrefills: 2,
+          prefillGateWaiters: 0,
+          prefillBudgetSeconds: 60,
+          queueEtaSeconds: 320,
+          // New diagnosability evidence (parent AC3).
+          queueEtaOccupancySeconds: 300,
+          queueEtaBusySlots: 1,
+          prefillEtaCalibrated: true,
+        });
+      });
+    },
+  );
+
+  it('parent AC4: a legacy poll without the new fields omits them from the record', async () => {
+    // A legacy proxy poll (no occupancy/calibration fields) still produces a
+    // decision record with today's shape: the new keys are simply absent, so
+    // existing log readers see no change.
+    const root = tempDirs.make('dt-prefill-legacy-shape-');
+    const { worker } = makePrefillWorker({
+      status: prefillCapReached,
+      root,
+      deps: {
+        getNextImplementCandidate: vi.fn().mockResolvedValue(implementCandidate),
+      },
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('prefill-cap');
+    await vi.waitFor(async () => {
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      expect(entries).toHaveLength(1);
+      // Non-vacuous: the record exists and carries the pre-existing evidence.
+      expect(entries[0]).toMatchObject({ reason: 'prefill-cap', prefillsInFlight: 1 });
+      expect(entries[0]).not.toHaveProperty('queueEtaOccupancySeconds');
+      expect(entries[0]).not.toHaveProperty('queueEtaBusySlots');
+      expect(entries[0]).not.toHaveProperty('prefillEtaCalibrated');
+    });
   });
 });

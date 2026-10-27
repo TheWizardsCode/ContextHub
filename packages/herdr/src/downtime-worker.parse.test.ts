@@ -1014,3 +1014,156 @@ describe('parseLlamaStatus: prefill serialisation gate (WL-0MVHSZRZQ00482QX)', (
     expect(nullEta!.queue_eta_seconds).toBeNull();
   });
 });
+
+// ── Prefill-ETA occupancy/calibration advisory fields ─────────────────
+//
+// Parent WL-0MVPRZU0A000TSWD: the proxy's `status_estimate()`
+// (`prefill_eta.py`, LP-0MVGDUV5E005UWBQ) publishes, alongside
+// `queue_eta_seconds` (own prefill + occupancy), the SPLIT terms
+// `queue_eta_occupancy_seconds` (wait behind OTHER prefills) and
+// `queue_eta_busy_slots` (slots occupied by them), plus
+// `prefill_eta_calibrated` (enough samples for the estimate to be
+// actionable — false below the proxy's `MIN_CALIBRATION_SAMPLES`).
+//
+// Herdr's parser must consume all three as ADVISORY fields, exactly like
+// `queue_eta_seconds`: absent → `undefined` (legacy proxy, today's shape),
+// malformed → `undefined` (a bad advisory value must NEVER reject an
+// otherwise usable poll). Contrast the availability-affecting gate counters
+// (`local_prefills_in_flight`, `local_max_concurrent_prefills`,
+// `prefill_gate_waiters`), which keep failing closed — pinned below so the
+// advisory relaxation can never silently widen to the gates.
+//
+// RED WITNESS: the present-field spec is `it.fails` — today the parser
+// ignores all three fields, so the body fails. The suite stays GREEN
+// meanwhile. Implementation child WL-0MVPUE4SE004QYUT moves the fields onto
+// `LlamaStatus` (making `AdvisoryOccupancyFields` and the cast redundant)
+// and flips `it.fails` to `it`.
+
+/**
+ * Local mirror of the three advisory proxy fields. Declared here, not on
+ * `LlamaStatus`, because this test-first slice lands BEFORE the
+ * types/poller implementation (WL-0MVPUE4SE004QYUT), following the same
+ * convention as `PrefillOccupancyFields` in `downtime-worker.fixtures.ts`.
+ */
+interface AdvisoryOccupancyFields {
+  queue_eta_occupancy_seconds?: number | null;
+  queue_eta_busy_slots?: number | null;
+  prefill_eta_calibrated?: boolean | null;
+}
+
+/** Read the parsed status through the advisory-field view (see above). */
+function advisory(status: LlamaStatus): AdvisoryOccupancyFields {
+  return status as LlamaStatus & AdvisoryOccupancyFields;
+}
+
+describe('parseLlamaStatus: prefill-ETA occupancy/calibration advisories (WL-0MVPUDZ7P008UZGD)', () => {
+  const prefillBase = {
+    llama_server_running: true,
+    local_active_query: false,
+    model_switch_in_progress: false,
+    local_lease_active: false,
+    available_slots: 2,
+    total_slots: 2,
+    local_prefills_in_flight: 0,
+    local_max_concurrent_prefills: 1,
+    prefill_gate_waiters: 0,
+    prefill_budget_seconds: 60,
+    queue_eta_seconds: 97.5,
+    slots: [
+      { slot_id: 'slot-1', is_processing: false, lease_state: 'free' },
+      { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+    ],
+  };
+
+  it.fails('AC1: parses the three new fields when the proxy serves them', () => {
+    // The incident pool's own shape: an idle, uncalibrated proxy whose
+    // whole 97.5 s ETA is the newcomer's own prefill (zero occupancy).
+    const status = parseLlamaStatus({
+      ...prefillBase,
+      queue_eta_occupancy_seconds: 0,
+      queue_eta_busy_slots: 0,
+      prefill_eta_calibrated: false,
+    });
+    expect(status).not.toBeNull();
+    expect(advisory(status!).queue_eta_occupancy_seconds).toBe(0);
+    expect(advisory(status!).queue_eta_busy_slots).toBe(0);
+    expect(advisory(status!).prefill_eta_calibrated).toBe(false);
+  });
+
+  it.fails('AC1: parses occupancy terms and a calibrated flag when served', () => {
+    const status = parseLlamaStatus({
+      ...prefillBase,
+      queue_eta_occupancy_seconds: 300,
+      queue_eta_busy_slots: 1,
+      prefill_eta_calibrated: true,
+    });
+    expect(status).not.toBeNull();
+    expect(advisory(status!).queue_eta_occupancy_seconds).toBe(300);
+    expect(advisory(status!).queue_eta_busy_slots).toBe(1);
+    expect(advisory(status!).prefill_eta_calibrated).toBe(true);
+  });
+
+  it('AC2: absent fields yield undefined (legacy proxy stays usable)', () => {
+    const status = parseLlamaStatus(prefillBase);
+    expect(status).not.toBeNull();
+    expect(advisory(status!).queue_eta_occupancy_seconds).toBeUndefined();
+    expect(advisory(status!).queue_eta_busy_slots).toBeUndefined();
+    expect(advisory(status!).prefill_eta_calibrated).toBeUndefined();
+    // The pre-existing ETA/budget contract is untouched by their absence.
+    expect(status!.queue_eta_seconds).toBe(97.5);
+    expect(status!.prefill_budget_seconds).toBe(60);
+  });
+
+  it('AC3: malformed occupancy numbers degrade to undefined, never reject the poll', () => {
+    for (const field of ['queue_eta_occupancy_seconds', 'queue_eta_busy_slots'] as const) {
+      for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -5, '300', true, {}]) {
+        const status = parseLlamaStatus({ ...prefillBase, [field]: bad });
+        expect(status).not.toBeNull();
+        expect(advisory(status!)[field]).toBeUndefined();
+      }
+    }
+  });
+
+  it('AC3: a non-boolean calibration flag degrades to undefined, never rejects the poll', () => {
+    for (const bad of ['yes', 'false', 1, 0, {}, []]) {
+      const status = parseLlamaStatus({ ...prefillBase, prefill_eta_calibrated: bad });
+      expect(status).not.toBeNull();
+      expect(advisory(status!).prefill_eta_calibrated).toBeUndefined();
+    }
+  });
+
+  it('AC3: a malformed advisory field never masks a fail-closed gate counter', () => {
+    // Same malformed advisory values, but a gate counter is also malformed:
+    // the poll must STILL be rejected (ambiguous → busy, fail-closed). The
+    // advisory relaxation covers only the new fields, never the gates.
+    for (const field of [
+      'local_prefills_in_flight',
+      'local_max_concurrent_prefills',
+      'prefill_gate_waiters',
+    ] as const) {
+      expect(
+        parseLlamaStatus({
+          ...prefillBase,
+          queue_eta_occupancy_seconds: Number.NaN,
+          queue_eta_busy_slots: 'many',
+          prefill_eta_calibrated: 'yes',
+          [field]: '2',
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it('AC3: valid advisory fields leave the poll usable', () => {
+    // Present-and-valid is the common case; guard against an over-eager
+    // implementation that rejects instead of degrading on the new fields.
+    const status = parseLlamaStatus({
+      ...prefillBase,
+      queue_eta_occupancy_seconds: 12.5,
+      queue_eta_busy_slots: 1,
+      prefill_eta_calibrated: true,
+    });
+    expect(status).not.toBeNull();
+    expect(status!.llama_server_running).toBe(true);
+    expect(status!.available_slots).toBe(2);
+  });
+});
