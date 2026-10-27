@@ -235,30 +235,17 @@ export const idleWithCumulativeContention: LlamaStatus = {
 // served; the named fixtures pin the individual pacing transitions so the
 // parser, the pacing helper and the tick-level gates can share one shape.
 
-/**
- * The proxy's ADVISORY occupancy/calibration terms
- * (LP-0MVGDUV5E005UWBQ, `prefill_eta.py:status_estimate`): the wait behind
- * OTHER prefills (`queue_eta_occupancy_seconds`), how many slots that wait
- * is composed of (`queue_eta_busy_slots`) and whether the estimate has
- * enough samples to be actionable (`prefill_eta_calibrated`).
- *
- * Declared here — not in `LlamaStatus` — because the regression fixtures and
- * their `it.fails` witnesses land BEFORE the types/pacing implementation
- * (WL-0MVPUDYHD000QI0K, test-first slice; the implementation child
- * WL-0MVPUE4C9005380J moves them onto `LlamaStatus` and `PrefillPacing`).
- * Absent on a legacy proxy, so the factory injects them only when supplied.
- */
-export interface PrefillOccupancyFields {
-  /** Wait a newcomer faces behind OTHER prefills (own prefill excluded). */
-  queue_eta_occupancy_seconds?: number;
-  /** Slots currently occupied by an in-flight prefill. */
-  queue_eta_busy_slots?: number;
-  /** Whether the proxy's ETA estimate has enough samples to be actionable. */
-  prefill_eta_calibrated?: boolean;
-}
+// The proxy's ADVISORY occupancy/calibration terms
+// (LP-0MVGDUV5E005UWBQ, `prefill_eta.py:status_estimate`): the wait behind
+// OTHER prefills (`queue_eta_occupancy_seconds`), how many slots that wait is
+// composed of (`queue_eta_busy_slots`) and whether the estimate has enough
+// samples to be actionable (`prefill_eta_calibrated`). Declared on
+// `LlamaStatus` (WL-0MVPUE4SE004QYUT); the regression fixtures and their
+// witnesses landed test-first (WL-0MVPUDYHD000QI0K). Absent on a legacy proxy,
+// so the factory injects them only when supplied.
 
-/** `prefillPacingStatus` overrides: `LlamaStatus` fields plus the advisory terms. */
-export type PrefillPacingOverrides = Partial<LlamaStatus> & PrefillOccupancyFields;
+/** `prefillPacingStatus` overrides: any `LlamaStatus` field (incl. the advisory terms). */
+export type PrefillPacingOverrides = Partial<LlamaStatus>;
 
 /**
  * Schema-v2 status with the prefill-gate fields served. Defaults: four
@@ -273,7 +260,7 @@ export function prefillPacingStatus(overrides: PrefillPacingOverrides = {}): Lla
     prefill_eta_calibrated,
     ...statusOverrides
   } = overrides;
-  const status: LlamaStatus & PrefillOccupancyFields = {
+  const status: LlamaStatus = {
     llama_server_running: true,
     local_active_query: false,
     model_switch_in_progress: false,

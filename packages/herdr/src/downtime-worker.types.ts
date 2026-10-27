@@ -136,6 +136,37 @@ export interface LlamaStatus {
    */
   queue_eta_seconds?: number | null;
   /**
+   * Prefill-ETA guard's OCCUPANCY term in seconds
+   * (LP-0MVGDUV5E005UWBQ, WL-0MVPUE4SE004QYUT): the wait a newcomer faces
+   * behind OTHER in-flight prefills, with its own cold-prefill cost
+   * EXCLUDED. `queue_eta_seconds` is the sum of this term and the
+   * newcomer's own prefill, so on an idle pool this is `0` while the total
+   * ETA is still the own-prefill cost. This is the only term that expresses
+   * genuine contention. ADVISORY: absent → undefined (legacy proxy) and a
+   * malformed (non-finite / negative / wrong type) value degrades to
+   * `undefined` — it never rejects an otherwise usable poll.
+   */
+  queue_eta_occupancy_seconds?: number | null;
+  /**
+   * Number of slots occupied by the in-flight prefills that make up
+   * `queue_eta_occupancy_seconds` (LP-0MVGDUV5E005UWBQ): the evidence that
+   * tells "waiting behind other prefills" apart from "waiting on my own
+   * cold prefill". ADVISORY: absent → undefined; malformed → `undefined`,
+   * never rejects the poll.
+   */
+  queue_eta_busy_slots?: number | null;
+  /**
+   * Whether the proxy's prefill-ETA estimate has enough samples to be
+   * actionable (LP-0MVGDUV5E005UWBQ): `false` while the observed sample
+   * count is below the proxy's `MIN_CALIBRATION_SAMPLES` threshold (5). The
+   * proxy's own admission guard is inert in that state, so an actionable
+   * consumer must not pace on an uncalibrated estimate. ADVISORY: absent →
+   * undefined (legacy proxy: no calibration signal, today's behaviour); a
+   * malformed (non-boolean) value degrades to `undefined`, never rejects the
+   * poll.
+   */
+  prefill_eta_calibrated?: boolean | null;
+  /**
    * PROXY-AUTHORITATIVE local idle age in SECONDS (LP-0MVGD9Z8Z0055Y5J,
    * WL-0MVHSZR9C0012NQY): the monotonic idle age of the local backend,
    * updated by the proxy on dispatch start, on every forwarded SSE chunk and
@@ -238,8 +269,31 @@ export interface PrefillPacing {
   gateWaiters?: number;
   /** `prefill_budget_seconds` when served (the admission wait budget). */
   budgetSeconds?: number;
-  /** `queue_eta_seconds` when served (projected queue wait). */
+  /**
+   * `queue_eta_seconds` when served: the projected wait before a newcomer's
+   * first byte, i.e. occupancy PLUS the newcomer's own cold prefill.
+   */
   queueEtaSeconds?: number;
+  /**
+   * `queue_eta_occupancy_seconds` when served: the projected wait behind
+   * OTHER in-flight prefills, excluding the newcomer's own prefill. This is
+   * the only queue term that expresses genuine contention; absent on a
+   * legacy proxy (treated as zero occupancy — never "unknown ⇒ defer").
+   */
+  queueEtaOccupancySeconds?: number;
+  /**
+   * `queue_eta_busy_slots` when served: how many slots the occupancy wait is
+   * composed of. Evidence/diagnosability only, never a gate.
+   */
+  queueEtaBusySlots?: number;
+  /**
+   * `prefill_eta_calibrated` when served: `false` means the proxy's estimate
+   * is below its `MIN_CALIBRATION_SAMPLES` threshold and therefore not
+   * actionable (the proxy's own admission guard is inert). ABSENT on a
+   * legacy proxy → no calibration signal, so the ETA term keeps today's
+   * behaviour.
+   */
+  prefillEtaCalibrated?: boolean;
   /** Highest per-slot `prefill_eta_seconds` observed in flight. */
   maxSlotPrefillEtaSeconds?: number;
   /**

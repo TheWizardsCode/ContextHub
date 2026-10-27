@@ -115,6 +115,19 @@ function parseAdvisoryInteger(value: unknown): number | null | undefined {
 }
 
 /**
+ * Parse an optional ADVISORY boolean (prefill calibration flag). Absent →
+ * undefined; explicit null → null (the proxy's "not computable" marker,
+ * mirroring {@link parseAdvisoryNumber}); malformed (non-boolean) →
+ * undefined. Advisory fields must never reject an otherwise usable poll.
+ */
+function parseAdvisoryBoolean(value: unknown): boolean | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== 'boolean') return undefined;
+  return value;
+}
+
+/**
  * Parse an optional operator-facing ISO timestamp (last local activity).
  * Absent, explicit null and malformed values (non-string, empty, unparseable)
  * all degrade to `undefined` — these fields are evidence only and must never
@@ -320,6 +333,18 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
   if (prefillGateWaiters === null) return null;
   const queueEtaSeconds = parseAdvisoryNumber(o.queue_eta_seconds);
 
+  // Prefill-ETA occupancy/calibration advisories
+  // (LP-0MVGDUV5E005UWBQ, WL-0MVPUE4SE004QYUT): the occupancy terms and the
+  // calibration flag published alongside `queue_eta_seconds`. All three are
+  // ADVISORY exactly like `queue_eta_seconds` — absent → undefined (legacy
+  // proxy), malformed (non-finite / negative / wrong type) → undefined, and
+  // an explicit null ("not computable") is preserved — so a bad advisory
+  // value never rejects an otherwise usable poll. Contrast the gate counters
+  // above, which keep failing closed.
+  const queueEtaOccupancySeconds = parseAdvisoryNumber(o.queue_eta_occupancy_seconds);
+  const queueEtaBusySlots = parseAdvisoryNumber(o.queue_eta_busy_slots);
+  const prefillEtaCalibrated = parseAdvisoryBoolean(o.prefill_eta_calibrated);
+
   return {
     llama_server_running: o.llama_server_running,
     local_active_query: localActiveQuery,
@@ -347,6 +372,9 @@ export function parseLlamaStatus(raw: unknown): LlamaStatus | null {
     local_max_concurrent_prefills: localMaxConcurrentPrefills,
     prefill_gate_waiters: prefillGateWaiters,
     queue_eta_seconds: queueEtaSeconds,
+    queue_eta_occupancy_seconds: queueEtaOccupancySeconds,
+    queue_eta_busy_slots: queueEtaBusySlots,
+    prefill_eta_calibrated: prefillEtaCalibrated,
     local_idle_seconds: localIdleSeconds,
     local_last_activity_at: localLastActivityAt,
     local_last_activity_source: localLastActivitySource,

@@ -38,6 +38,8 @@ import {
 import {
   jsonResponseFixture,
   makeDeps,
+  prefillIdleUncalibrated,
+  prefillPacingStatus,
 } from './downtime-worker.fixtures.js';
 import {
   appendDowntimeLogEntry,
@@ -1033,29 +1035,10 @@ describe('parseLlamaStatus: prefill serialisation gate (WL-0MVHSZRZQ00482QX)', (
 // `prefill_gate_waiters`), which keep failing closed — pinned below so the
 // advisory relaxation can never silently widen to the gates.
 //
-// RED WITNESS: the present-field spec is `it.fails` — today the parser
-// ignores all three fields, so the body fails. The suite stays GREEN
-// meanwhile. Implementation child WL-0MVPUE4SE004QYUT moves the fields onto
-// `LlamaStatus` (making `AdvisoryOccupancyFields` and the cast redundant)
-// and flips `it.fails` to `it`.
-
-/**
- * Local mirror of the three advisory proxy fields. Declared here, not on
- * `LlamaStatus`, because this test-first slice lands BEFORE the
- * types/poller implementation (WL-0MVPUE4SE004QYUT), following the same
- * convention as `PrefillOccupancyFields` in `downtime-worker.fixtures.ts`.
- */
-interface AdvisoryOccupancyFields {
-  queue_eta_occupancy_seconds?: number | null;
-  queue_eta_busy_slots?: number | null;
-  prefill_eta_calibrated?: boolean | null;
-}
-
-/** Read the parsed status through the advisory-field view (see above). */
-function advisory(status: LlamaStatus): AdvisoryOccupancyFields {
-  return status as LlamaStatus & AdvisoryOccupancyFields;
-}
-
+// RED WITNESS: the present-field specs were `it.fails` until the fields
+// moved onto `LlamaStatus` (WL-0MVPUE4SE004QYUT), which made the local
+// mirror interface and the cast redundant; the witnesses are now plain
+// `it` specs asserting the real `LlamaStatus` shape.
 describe('parseLlamaStatus: prefill-ETA occupancy/calibration advisories (WL-0MVPUDZ7P008UZGD)', () => {
   const prefillBase = {
     llama_server_running: true,
@@ -1075,7 +1058,7 @@ describe('parseLlamaStatus: prefill-ETA occupancy/calibration advisories (WL-0MV
     ],
   };
 
-  it.fails('AC1: parses the three new fields when the proxy serves them', () => {
+  it('AC1: parses the three new fields when the proxy serves them', () => {
     // The incident pool's own shape: an idle, uncalibrated proxy whose
     // whole 97.5 s ETA is the newcomer's own prefill (zero occupancy).
     const status = parseLlamaStatus({
@@ -1085,12 +1068,12 @@ describe('parseLlamaStatus: prefill-ETA occupancy/calibration advisories (WL-0MV
       prefill_eta_calibrated: false,
     });
     expect(status).not.toBeNull();
-    expect(advisory(status!).queue_eta_occupancy_seconds).toBe(0);
-    expect(advisory(status!).queue_eta_busy_slots).toBe(0);
-    expect(advisory(status!).prefill_eta_calibrated).toBe(false);
+    expect(status!.queue_eta_occupancy_seconds).toBe(0);
+    expect(status!.queue_eta_busy_slots).toBe(0);
+    expect(status!.prefill_eta_calibrated).toBe(false);
   });
 
-  it.fails('AC1: parses occupancy terms and a calibrated flag when served', () => {
+  it('AC1: parses occupancy terms and a calibrated flag when served', () => {
     const status = parseLlamaStatus({
       ...prefillBase,
       queue_eta_occupancy_seconds: 300,
@@ -1098,20 +1081,31 @@ describe('parseLlamaStatus: prefill-ETA occupancy/calibration advisories (WL-0MV
       prefill_eta_calibrated: true,
     });
     expect(status).not.toBeNull();
-    expect(advisory(status!).queue_eta_occupancy_seconds).toBe(300);
-    expect(advisory(status!).queue_eta_busy_slots).toBe(1);
-    expect(advisory(status!).prefill_eta_calibrated).toBe(true);
+    expect(status!.queue_eta_occupancy_seconds).toBe(300);
+    expect(status!.queue_eta_busy_slots).toBe(1);
+    expect(status!.prefill_eta_calibrated).toBe(true);
   });
 
   it('AC2: absent fields yield undefined (legacy proxy stays usable)', () => {
     const status = parseLlamaStatus(prefillBase);
     expect(status).not.toBeNull();
-    expect(advisory(status!).queue_eta_occupancy_seconds).toBeUndefined();
-    expect(advisory(status!).queue_eta_busy_slots).toBeUndefined();
-    expect(advisory(status!).prefill_eta_calibrated).toBeUndefined();
+    expect(status!.queue_eta_occupancy_seconds).toBeUndefined();
+    expect(status!.queue_eta_busy_slots).toBeUndefined();
+    expect(status!.prefill_eta_calibrated).toBeUndefined();
     // The pre-existing ETA/budget contract is untouched by their absence.
     expect(status!.queue_eta_seconds).toBe(97.5);
     expect(status!.prefill_budget_seconds).toBe(60);
+  });
+
+  it('AC2: an explicit null ("not computable") is preserved, mirroring queue_eta_seconds', () => {
+    for (const field of ['queue_eta_occupancy_seconds', 'queue_eta_busy_slots'] as const) {
+      const status = parseLlamaStatus({ ...prefillBase, [field]: null });
+      expect(status).not.toBeNull();
+      expect(status![field]).toBeNull();
+    }
+    const status = parseLlamaStatus({ ...prefillBase, prefill_eta_calibrated: null });
+    expect(status).not.toBeNull();
+    expect(status!.prefill_eta_calibrated).toBeNull();
   });
 
   it('AC3: malformed occupancy numbers degrade to undefined, never reject the poll', () => {
@@ -1119,7 +1113,7 @@ describe('parseLlamaStatus: prefill-ETA occupancy/calibration advisories (WL-0MV
       for (const bad of [Number.NaN, Number.POSITIVE_INFINITY, -5, '300', true, {}]) {
         const status = parseLlamaStatus({ ...prefillBase, [field]: bad });
         expect(status).not.toBeNull();
-        expect(advisory(status!)[field]).toBeUndefined();
+        expect(status![field]).toBeUndefined();
       }
     }
   });
@@ -1128,7 +1122,7 @@ describe('parseLlamaStatus: prefill-ETA occupancy/calibration advisories (WL-0MV
     for (const bad of ['yes', 'false', 1, 0, {}, []]) {
       const status = parseLlamaStatus({ ...prefillBase, prefill_eta_calibrated: bad });
       expect(status).not.toBeNull();
-      expect(advisory(status!).prefill_eta_calibrated).toBeUndefined();
+      expect(status!.prefill_eta_calibrated).toBeUndefined();
     }
   });
 
@@ -1165,5 +1159,29 @@ describe('parseLlamaStatus: prefill-ETA occupancy/calibration advisories (WL-0MV
     expect(status).not.toBeNull();
     expect(status!.llama_server_running).toBe(true);
     expect(status!.available_slots).toBe(2);
+  });
+
+  it('AC4: the incident fixture parses end-to-end with its advisory terms', () => {
+    // `prefillIdleUncalibrated` (from `downtime-worker.fixtures.ts`) is built
+    // through the `prefillPacingStatus` factory, so this pins BOTH the
+    // factory surfacing (AC4) and the parser round-trip: the reconstructed
+    // 97.5 s idle-uncalibrated incident pool keeps its three advisory terms.
+    const status = parseLlamaStatus(prefillIdleUncalibrated);
+    expect(status).not.toBeNull();
+    expect(status!.queue_eta_seconds).toBe(97.5);
+    expect(status!.queue_eta_occupancy_seconds).toBe(0);
+    expect(status!.queue_eta_busy_slots).toBe(0);
+    expect(status!.prefill_eta_calibrated).toBe(false);
+  });
+
+  it('AC4: a fixture built without the advisory terms stays shape-identical to a legacy poll', () => {
+    // The factory injects the advisory fields ONLY when supplied, so a poll
+    // built without them must parse exactly like a legacy proxy: the new
+    // keys are absent, not present-and-undefined.
+    const status = parseLlamaStatus(prefillPacingStatus());
+    expect(status).not.toBeNull();
+    expect(status!.queue_eta_occupancy_seconds).toBeUndefined();
+    expect(status!.queue_eta_busy_slots).toBeUndefined();
+    expect(status!.prefill_eta_calibrated).toBeUndefined();
   });
 });
