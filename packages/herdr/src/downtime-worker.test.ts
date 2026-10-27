@@ -1947,13 +1947,14 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
   // so an operator can tell "waiting behind other prefills" from "waiting on
   // my own cold prefill" straight from the coordination log.
   //
-  // RED WITNESS: the paced-record spec is `it.fails` — today's
-  // `capacityEvidence` emits only the pre-existing gate/ETA fields, so the
-  // body fails. The legacy-omission spec is a plain `it` guard (today's shape
-  // must survive the fix). Implementation child WL-0MVPUE4C9005380J flips the
-  // witness as it lands.
+  // LANDED: the paced-record spec below was committed as a RED witness
+  // (`it.fails`) by WL-0MVPUDZ7P008UZGD while today's `capacityEvidence`
+  // emitted only the pre-existing gate/ETA fields; the implementation child
+  // WL-0MVPUE4C9005380J added the occupancy/calibration extraction and
+  // flipped the witness to `it`. The legacy-omission spec is a plain `it`
+  // guard (today's shape must survive the fix).
 
-  it.fails(
+  it(
     'parent AC3: a paced tick records the occupancy/calibration evidence',
     async () => {
       // One slot genuinely prefilling, a 300 s wait behind it

@@ -1088,13 +1088,11 @@ describe('evaluatePrefillPacing (WL-0MVHSZRZQ00482QX)', () => {
 //  - AC3 (parent): a real occupancy ETA above the budget still defers with the
 //    existing `prefill-eta` reason.
 //
-// RED WITNESS: the parent-AC1/AC2 specs below are `it.fails` — today the gate
-// defers on `queue_eta_seconds` alone (and on any slot's `prefill_eta_seconds`,
-// busy or not), so those bodies fail until the pacing fix lands. The suite
-// stays GREEN meanwhile. Implementation child WL-0MVPUE4C9005380J flips each
-// `it.fails` to `it` as it lands.
+// LANDED: these bodies were committed as RED witnesses (`it.fails`) by
+// WL-0MVPUDYHD000QI0K and flipped to `it` by the implementation child
+// WL-0MVPUE4C9005380J (calibration prerequisite + occupancy-only ETA).
 describe('evaluatePrefillPacing — calibration + occupancy (WL-0MVPUDYHD000QI0K)', () => {
-  it.fails(
+  it(
     'parent AC1: an uncalibrated ETA above the budget never defers (fail open)',
     () => {
       // The incident fixture: idle pool, 97.5 s own-prefill ETA, 60 s budget,
@@ -1125,7 +1123,7 @@ describe('evaluatePrefillPacing — calibration + occupancy (WL-0MVPUDYHD000QI0K
     expect(pacing.deferReason).toBe('prefill-cap');
   });
 
-  it.fails(
+  it(
     'parent AC2: a calibrated zero-occupancy pool never defers on a high own-prefill ETA',
     () => {
       const status = prefillIdleZeroOccupancy;
@@ -1138,7 +1136,7 @@ describe('evaluatePrefillPacing — calibration + occupancy (WL-0MVPUDYHD000QI0K
     },
   );
 
-  it.fails(
+  it(
     'parent AC2: an idle slot\u2019s stale per-slot prefill ETA never defers',
     () => {
       // Same zero-occupancy pool, but a STALE per-slot `prefill_eta_seconds`
@@ -1156,7 +1154,7 @@ describe('evaluatePrefillPacing — calibration + occupancy (WL-0MVPUDYHD000QI0K
     },
   );
 
-  it.fails(
+  it(
     'parent AC2: occupancy below the budget does not defer even when the total ETA exceeds it',
     () => {
       // Own prefill (~97.5 s) + 30 s behind one in-flight prefill: the total
@@ -1192,7 +1190,7 @@ describe('evaluatePrefillPacing — calibration + occupancy (WL-0MVPUDYHD000QI0K
     expect(pacing.deferReason).toBe('prefill-eta');
   });
 
-  it.fails('parent AC3: an uncalibrated busy pool does not defer on the ETA either', () => {
+  it('parent AC3: an uncalibrated busy pool does not defer on the ETA either', () => {
     const status = prefillPacingStatus({
       ...prefillBusyOccupancy,
       prefill_eta_calibrated: false,

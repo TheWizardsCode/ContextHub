@@ -174,6 +174,16 @@ interface CapacityEvidence {
   prefillBudgetSeconds?: number;
   queueEtaSeconds?: number;
   /**
+   * Occupancy/calibration evidence (parent WL-0MVPRZU0A000TSWD AC3): the
+   * wait behind OTHER in-flight prefills, the busy-slot count that wait is
+   * composed of, and whether the proxy's estimate is calibrated. Recorded
+   * whenever served — on a legacy proxy (fields absent) they are simply
+   * omitted — so a paced tick is diagnosable from the log alone.
+   */
+  queueEtaOccupancySeconds?: number;
+  queueEtaBusySlots?: number;
+  prefillEtaCalibrated?: boolean;
+  /**
    * Authoritative local idle-age evidence (LP-0MVGD9Z8Z0055Y5J,
    * WL-0MVHSZR9C0012NQY): the proxy's reported idle age in seconds and the
    * source of the last local activity. Observability only — they let an
@@ -272,6 +282,18 @@ export function capacityEvidence(
   }
   if (typeof status.queue_eta_seconds === 'number') {
     evidence.queueEtaSeconds = status.queue_eta_seconds;
+  }
+  // Occupancy/calibration terms (parent WL-0MVPRZU0A000TSWD AC3): extracted
+  // whenever served so a paced stop shows "waiting behind other prefills"
+  // apart from "waiting on my own cold prefill"; absent on a legacy proxy.
+  if (typeof status.queue_eta_occupancy_seconds === 'number') {
+    evidence.queueEtaOccupancySeconds = status.queue_eta_occupancy_seconds;
+  }
+  if (typeof status.queue_eta_busy_slots === 'number') {
+    evidence.queueEtaBusySlots = status.queue_eta_busy_slots;
+  }
+  if (typeof status.prefill_eta_calibrated === 'boolean') {
+    evidence.prefillEtaCalibrated = status.prefill_eta_calibrated;
   }
   // Idle-age evidence is attached on EVERY polled decision (even when the
   // per-slot detail is unusable) so a refused/deferred tick always shows the

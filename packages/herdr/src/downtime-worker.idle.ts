@@ -280,6 +280,17 @@ export function evaluateIdle(status: LlamaStatus, requiredFreeSlots: number): bo
  * is contention evidence equivalent to a non-empty `contention_queue_depth`.
  * A projected wait is deferred only when BOTH the ETA and the admission
  * budget are present and finite — a missing value never blocks dispatch.
+ *
+ * ETA-deferral prerequisites (parent WL-0MVPRZU0A000TSWD):
+ *  - calibration (AC1): `prefill_eta_calibrated === false` → fail open — the
+ *    proxy's own admission guard is inert below `MIN_CALIBRATION_SAMPLES`, so
+ *    an uncalibrated estimate never paces. `undefined` (legacy proxy) keeps
+ *    today's behaviour.
+ *  - occupancy-only (AC2): the paced queue term is the wait behind OTHER
+ *    prefills (`queue_eta_occupancy_seconds`); the newcomer's own prefill
+ *    never blocks dispatch, and an absent occupancy ETA is zero occupancy.
+ *  - per-slot (AC4): a slot's `prefill_eta_seconds` counts only when the
+ *    slot is actually busy.
  */
 export function evaluatePrefillPacing(
   status: LlamaStatus,
@@ -297,9 +308,26 @@ export function evaluatePrefillPacing(
   if (typeof budget === 'number') pacing.budgetSeconds = budget;
   const queueEta = status.queue_eta_seconds;
   if (typeof queueEta === 'number') pacing.queueEtaSeconds = queueEta;
+  // Occupancy/calibration evidence (LP-0MVGDUV5E005UWBQ, parent
+  // WL-0MVPRZU0A000TSWD AC3): carried on the pacing decision whenever served
+  // so a paced tick is diagnosable even before the decision-record evidence.
+  const queueEtaOccupancy = status.queue_eta_occupancy_seconds;
+  if (typeof queueEtaOccupancy === 'number') {
+    pacing.queueEtaOccupancySeconds = queueEtaOccupancy;
+  }
+  const queueEtaBusySlots = status.queue_eta_busy_slots;
+  if (typeof queueEtaBusySlots === 'number') {
+    pacing.queueEtaBusySlots = queueEtaBusySlots;
+  }
+  const calibrated = status.prefill_eta_calibrated;
+  if (typeof calibrated === 'boolean') pacing.prefillEtaCalibrated = calibrated;
 
+  // Per-slot ETA (parent AC4): only slots that are ACTUALLY busy contribute
+  // their `prefill_eta_seconds` — an idle pool's stale per-slot ETA is the
+  // newcomer's own cost, never a queue wait it must respect.
   if (slots !== null) {
     for (const slot of slots) {
+      if (!isSlotBusyWithPrefill(slot)) continue;
       const eta = slot.prefill_eta_seconds;
       if (typeof eta !== 'number') continue;
       if (pacing.maxSlotPrefillEtaSeconds === undefined || eta > pacing.maxSlotPrefillEtaSeconds) {
@@ -310,12 +338,15 @@ export function evaluatePrefillPacing(
 
   // Prefill capacity budget: only a POSITIVE cap with a known in-flight count
   // can pace. `cap === 0` disables the gate (unbounded); an absent cap or
-  // in-flight count cannot be judged → unbounded (today's behaviour).
+  // in-flight count cannot be judged → unbounded (today's behaviour). This
+  // fail-closed counter is untouched by the calibration/occupancy rules.
   if (typeof cap === 'number' && cap > 0 && typeof inFlight === 'number') {
     pacing.capacityBudget = inFlight >= cap ? 0 : cap - inFlight;
   }
 
   // Deferral precedence: gate waiters (contention) → cap saturated → ETA.
+  // `prefill-cap` and `prefill-gate` keep their precedence while the proxy is
+  // uncalibrated (parent AC1) — only the ETA term is calibration-gated.
   if (typeof gateWaiters === 'number' && gateWaiters > 0) {
     pacing.deferReason = 'prefill-gate';
     return pacing;
@@ -324,14 +355,76 @@ export function evaluatePrefillPacing(
     pacing.deferReason = 'prefill-cap';
     return pacing;
   }
-  if (typeof budget === 'number') {
-    const queueEtaExceeds = typeof queueEta === 'number' && queueEta > budget;
-    const slotEtaExceeds =
-      pacing.maxSlotPrefillEtaSeconds !== undefined &&
-      pacing.maxSlotPrefillEtaSeconds > budget;
-    if (queueEtaExceeds || slotEtaExceeds) pacing.deferReason = 'prefill-eta';
-  }
+  // ETA deferral (parent WL-0MVPRZU0A000TSWD): calibration is a prerequisite
+  // (AC1, fail open), the queue term is occupancy-only (AC2) and the per-slot
+  // term only counts busy slots (AC4, computed above).
+  if (typeof budget !== 'number') return pacing; // absent budget → cannot judge
+  if (calibrated === false) return pacing; // AC1: fail open while uncalibrated
+  const queueTerm = queueEtaTerm(status);
+  const slotEtaExceeds =
+    pacing.maxSlotPrefillEtaSeconds !== undefined &&
+    pacing.maxSlotPrefillEtaSeconds > budget;
+  if (queueTerm > budget || slotEtaExceeds) pacing.deferReason = 'prefill-eta';
   return pacing;
+}
+
+/**
+ * Whether a slot is genuinely prefilling (parent AC4): the only slots whose
+ * per-slot `prefill_eta_seconds` a newcomer would wait behind. An
+ * `idle_leased` / `free` slot carries no in-flight prefill the pool must
+ * respect.
+ */
+function isSlotBusyWithPrefill(slot: LlamaSlot): boolean {
+  return slot.is_processing === true || slot.lease_state === 'generating';
+}
+
+/**
+ * The queue ETA term that may pace dispatch (parent WL-0MVPRZU0A000TSWD
+ * AC2): the OCCUPANCY wait — the wait behind OTHER in-flight prefills —
+ * never the newcomer's own prefill:
+ *
+ *  - `queue_eta_occupancy_seconds` when served is that term directly;
+ *  - on a LEGACY proxy (no calibration signal) the total `queue_eta_seconds`
+ *    keeps today's behaviour (AC1), so the term is the total;
+ *  - on a calibration-aware proxy whose occupancy fields are absent the
+ *    total is used only when occupancy evidence exists
+ *    (`local_prefills_in_flight > 0` or a busy slot) — otherwise the pool
+ *    has no occupancy to wait behind;
+ *  - any other shape (an occupancy field served but unusable) is ZERO
+ *    occupancy — an absent occupancy ETA never means "unknown ⇒ defer"
+ *    (parent AC4 / this item's AC6).
+ */
+function queueEtaTerm(status: LlamaStatus): number {
+  const occupancy = status.queue_eta_occupancy_seconds;
+  if (typeof occupancy === 'number') return occupancy;
+  const totalEta = status.queue_eta_seconds;
+  const occupancyFieldsAbsent =
+    occupancy === undefined && status.queue_eta_busy_slots === undefined;
+  if (occupancyFieldsAbsent && status.prefill_eta_calibrated === undefined) {
+    // Legacy proxy: no calibration signal → today's total-ETA behaviour.
+    return typeof totalEta === 'number' ? totalEta : 0;
+  }
+  if (occupancyFieldsAbsent && typeof totalEta === 'number' && hasOccupancyEvidence(status)) {
+    // Calibrated proxy that did not serve the split: genuine contention is
+    // the only justification for the total (own + occupancy) fallback.
+    return totalEta;
+  }
+  return 0;
+}
+
+/**
+ * True when the poll carries evidence of OTHER in-flight prefills the
+ * newcomer would queue behind: the proxy's own in-flight counter above zero,
+ * or a busy slot in the per-slot detail (parent AC2 fallback rule).
+ */
+function hasOccupancyEvidence(status: LlamaStatus): boolean {
+  if (typeof status.local_prefills_in_flight === 'number' && status.local_prefills_in_flight > 0) {
+    return true;
+  }
+  if (Array.isArray(status.slots)) {
+    return status.slots.some((slot) => isSlotBusyWithPrefill(slot));
+  }
+  return false;
 }
 
 // ── Idle-duration tracker (implemented — F3) ──────────────────────────
