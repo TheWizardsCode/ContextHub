@@ -1624,13 +1624,13 @@ request the pane makes.
 
 | Direction | Header | Meaning |
 |---|---|---|
-| request | `X-Local-Preference: local-only` | Work the operator marks local-first: the proxy refuses immediately when the local slot is contended instead of silently waiting |
+| request | `X-Local-Preference: local-preferred` | Work the operator marks local-first: the prompt stays local while it fits and is deferred with a retryable 429 (`Retry-After`) when the local slot is contended, instead of being silently sent remote |
 | request | `X-Local-Preference: remote-ok` | Background work: may go remote without queuing local capacity |
 | response | `X-Local-Route` | Route the proxy took (e.g. `local`, `remote:<provider>`) |
 | response | `X-Local-Fallback-Reason` | Why the request left the local route |
 
 **Policy knob.** `downtimeLocalPreference` (herdr setting, clamped to the two
-values, default `remote-ok` since WL-0MVNUHWH500196K1; `local-only` is the
+values, default `remote-ok` since WL-0MVNUHWH500196K1; `local-preferred` is the
 explicit per-deployment opt-in) is read live on every tick and threaded
 through `DowntimeWorkerConfig.config()` → both dispatch paths →
 `dispatchClaimedTier` → `spawnAgentPane` → `buildDowntimePaneArgs` /
@@ -1639,12 +1639,12 @@ through `DowntimeWorkerConfig.config()` → both dispatch paths →
 - **Downtime backlog panes** carry the resolved value (see the priority rule
   below); with no persisted key a `medium`/`high`/`critical` item still
   forwards `remote-ok` — unattended work goes remote rather than stall on a
-  contended local slot — while a `low`-priority item becomes `local-only`.
+  contended local slot — while a `low`-priority item becomes `local-preferred`.
 - **Scheduled-prompt panes** and **headless background dispatches**
   (`spawnBackgroundPi`) default to `remote-ok`: unattended work never queues
   local capacity the operator may need. They also *inherit the knob when it
-  is present* — so an explicit `local-only` deployment also makes scheduled
-  work local-only. For an unconfigured deployment the knob and the
+  is present* — so an explicit `local-preferred` deployment also makes scheduled
+  work local-preferred. For an unconfigured deployment the knob and the
   background fallback agree on `remote-ok`.
 - **Interactive panes** carry no preference unless the operator exports
   `HERDR_LOCAL_PREFERENCE` — requests stay byte-identical to today.
@@ -1653,9 +1653,9 @@ Downtime-spawned panes take both pane-launch knobs (`HERDR_LOCAL_PREFERENCE`,
 `PI_LOCAL_RESERVATION_TICKET`) from the **resolved dispatch decision only**:
 `buildDowntimeSpawnOptions` strips them from the inherited environment before
 re-adding an explicit value (WL-0MVP643Q4007BZJ8). A worker that itself runs
-inside a `local-only` pane therefore cannot leak its own preference into every
-child — that would bypass the priority rule and violate the fail-open contract
-that an absent value omits the env var.
+inside a `local-preferred` pane therefore cannot leak its own preference into
+every child — that would bypass the priority rule and violate the fail-open
+contract that an absent value omits the env var.
 
 **Priority rule and precedence (WL-0MVNUIW77000VYAX).** The preference is
 resolved **once** at the dispatch boundary (`dispatchClaimedTier`, from the
@@ -1665,13 +1665,13 @@ scan and the legacy tier chain — inherits the same decision. Precedence,
 highest first:
 
 1. **Explicit operator setting wins.** When `downtimeLocalPreference` is
-   *persisted* with a valid value (`local-only` or `remote-ok`), that value is
-   forwarded for every pane regardless of priority. Remove the key to opt into
-   the priority rule.
+   *persisted* with a valid value (`local-preferred` or `remote-ok`), that value
+   is forwarded for every pane regardless of priority. Remove the key to opt
+   into the priority rule.
 2. **Priority rule.** With no persisted key, a `low`-priority candidate is
-   dispatched `local-only` (cheap work absorbs contention on the local slot and
-   fails fast instead of consuming remote capacity); `medium`, `high`,
-   `critical` and an absent/unknown priority resolve to the deployment default
+   dispatched `local-preferred` (cheap work absorbs contention on the local slot
+   instead of consuming remote capacity); `medium`, `high`, `critical` and an
+   absent/unknown priority resolve to the deployment default
    `DOWNTIME_LOCAL_PREFERENCE` (`remote-ok`).
 3. **Deployment default.** `remote-ok`, also used when no priority exists (a
    scheduled prompt has no work item).
@@ -1679,10 +1679,18 @@ highest first:
 Explicitness is a **derived, never-persisted** signal: `loadSettings` reports
 `downtimeLocalPreferenceExplicit` `true` only when the settings file holds a
 valid two-value preference (an absent key, a missing file and out-of-alphabet
-values are not explicit). The persisted alphabet stays
-`local-only | remote-ok`, the setting's `remote-ok` default is unchanged, and
-the `X-Local-Preference` wire contract is unchanged — the rule only chooses
-between the existing two values.
+values are not explicit). The persisted alphabet is
+`local-preferred | remote-ok`, the setting's `remote-ok` default is unchanged,
+and the `X-Local-Preference` wire contract emits the same two values — the
+rule only chooses between them.
+
+> **`local-only` removed (WL-0MVSI1RX2005O9NE).** The retired value is not a
+> deprecated alias: it is rejected on every input surface. A settings file
+> still holding `local-only` loads as `downtimeLocalPreference: 'remote-ok'`
+> with `downtimeLocalPreferenceExplicit: false` (the low-priority rule applies
+> again) and a save round-trip drops the key; `send-to-pi.sh` warns and drops
+> `--local-preference local-only` while still exiting successfully (fail-open).
+> Migration: rewrite the setting to `local-preferred`.
 
 **Marker evidence.** The success marker in
 `.worklog/downtime-dispatches.log` records the resolved `localPreference` and a
@@ -1691,28 +1699,28 @@ machine-readable `localPreferenceReason`:
 | reason | meaning |
 |---|---|
 | `operator-setting` | a persisted `downtimeLocalPreference` decided the value |
-| `priority-low` | the low-priority rule chose `local-only` |
+| `priority-low` | the low-priority rule chose `local-preferred` |
 | `default` | the deployment default was kept (non-low or absent priority) |
 
 Scheduled-prompt markers record the same two fields (`default`, or
 `operator-setting` when the operator persisted the knob). Legacy callers that
 pass a preference without the new dispatch mode add no marker fields, and
 marker readers ignore unknown/absent fields, so existing logs stay valid. The
-route log's `preference` field therefore shows `local-only` for a low-priority
+route log's `preference` field therefore shows `local-preferred` for a low-priority
 dispatch and the deployment default for a high-priority one.
 
 > **Default flip (WL-0MVNUHWH500196K1).** The C4-AC1 downtime default of
 > `local-only` (WL-0MVLJTV03000KIQZ) is superseded by `remote-ok`. The
 > trade is deliberate: contended downtime work may now leave the box for a
-> remote (possibly metered) provider rather than silently not run. Keep
-> `local-only` where that spend/reach profile is unwanted; the route log
+> remote (possibly metered) provider rather than silently not run. Persist
+> `local-preferred` where that spend/reach profile is unwanted; the route log
 > makes the actual route visible either way.
 
-**Transport.** `send-to-pi.sh --local-preference <local-only|remote-ok>`
+**Transport.** `send-to-pi.sh --local-preference <local-preferred|remote-ok>`
 injects the value into the pane process (`exec env
-HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`); anything else is
-ignored with a warning and the launch proceeds unchanged (fail-open). An
-absent flag omits the env var entirely.
+HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`); anything else —
+including the removed `local-only` — is ignored with a warning and the launch
+proceeds unchanged (fail-open). An absent flag omits the env var entirely.
 
 **Header injection + route capture.** The Worklog pi extension
 (`packages/tui/extensions/local-preference/`, loaded through the extension

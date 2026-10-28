@@ -2582,7 +2582,7 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
   );
 
   it(
-    'AC5: an explicit local-only setting is forwarded verbatim by the own-backlog fallback',
+    'AC5: an explicit local-preferred setting is forwarded verbatim by the own-backlog fallback',
     async () => {
       const getHerdrListHead = rankedOwnRoot([eligibleBacklog('WL-BACKLOG-LOCAL')]);
       const deps = makeCoordinationDeps({ getHerdrListHead });
@@ -2592,13 +2592,13 @@ describe('own-backlog fallback — leader selection contract (WL-0MUZPBQQ3001DAM
         cwd: '/leader-root',
         coordinationDir: testDir,
         browseItemCount: SPRINT,
-        localPreference: 'local-only',
+        localPreference: 'local-preferred',
       });
 
       expect(outcome.dispatched).toBe(true);
       expect(deps.spawnAgentPane).toHaveBeenCalledWith(
         expect.stringContaining('/skill:implement WL-BACKLOG-LOCAL'),
-        expect.objectContaining({ localPreference: 'local-only' }),
+        expect.objectContaining({ localPreference: 'local-preferred' }),
       );
     },
   );
@@ -3149,12 +3149,12 @@ describe('priority-aware locality preference at every dispatch path (WL-0MVNUIW7
     expect(outcome.dispatched).toBe(true);
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-OFFER-LOW'),
-      expect.objectContaining({ localPreference: 'local-only' }),
+      expect.objectContaining({ localPreference: 'local-preferred' }),
     );
     expect(deps.recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         selectionPath: 'coordination-offer',
-        localPreference: 'local-only',
+        localPreference: 'local-preferred',
         localPreferenceReason: 'priority-low',
       }),
     );
@@ -3177,12 +3177,12 @@ describe('priority-aware locality preference at every dispatch path (WL-0MVNUIW7
     expect(outcome.candidate?.id).toBe('WL-BACKLOG-LOW');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:implement WL-BACKLOG-LOW'),
-      expect.objectContaining({ localPreference: 'local-only' }),
+      expect.objectContaining({ localPreference: 'local-preferred' }),
     );
     expect(deps.recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         selectionPath: 'own-backlog',
-        localPreference: 'local-only',
+        localPreference: 'local-preferred',
         localPreferenceReason: 'priority-low',
       }),
     );

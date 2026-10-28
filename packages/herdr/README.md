@@ -566,15 +566,23 @@ pacing* below).
 - `downtimeModel` — pi model pattern for dispatched panes (default: `plan`)
 - `downtimeLocalPreference` — Per-turn locality preference sent to the proxy by
   every dispatched pane (default: `remote-ok`; the opt-in alternative is
-  `local-only`; anything else clamps back to `remote-ok`). It travels to the
+  `local-preferred`; anything else — including the removed `local-only` —
+  clamps back to `remote-ok`). It travels to the
   pane as `HERDR_LOCAL_PREFERENCE`, where the Worklog pi extension turns it
   into the `X-Local-Preference` request header and records the response route
   headers in `.worklog/local-route.log` — see [Per-turn local preference and
   route log](#per-turn-local-preference-x-local-preference-and-route-log-wl-0mvljtv03000kiqz).
   An **explicitly persisted** value wins for every dispatch; when the key is
-  absent, `low`-priority candidates are dispatched `local-only` while every
+  absent, `low`-priority candidates are dispatched `local-preferred` while every
   other priority keeps the deployment default
   (WL-0MVNUIW77000VYAX).
+
+  > **`local-only` was removed** (WL-0MVSI1RX2005O9NE). It is not a deprecated
+  > alias and is not normalised onto `local-preferred`: a settings file still
+  > holding it loads as `remote-ok` with
+  > `downtimeLocalPreferenceExplicit: false` (so the low-priority rule applies
+  > again) and the key is dropped on the next save. Rewrite the setting to
+  > `local-preferred` to keep local-first behaviour.
 - `downtimeNoCandidateCooldownMs` — Full pause (no proxy polling, no idle
   tracking, no dispatch) after the worker finds no candidate in either
   stage — a genuine empty backlog (default: `3600000` = 60 minutes, floor
@@ -1211,46 +1219,54 @@ fallback decision instead of a silent ~120 s proxy-side wait.
 
 | Direction | Header | Meaning |
 |---|---|---|
-| request | `X-Local-Preference: local-only` | Work the operator marks local-first — the proxy refuses immediately when the local slot is contended (an honest fallback, not a silent queue) |
+| request | `X-Local-Preference: local-preferred` | Work the operator marks local-first — the prompt stays local while it fits and is deferred with a retryable 429 (`Retry-After`) when the local slot is contended, never silently sent remote |
 | request | `X-Local-Preference: remote-ok` | Background work — may go remote without queuing local capacity |
 | response | `X-Local-Route` | The route the proxy took (e.g. `local`, `remote:<provider>`) |
 | response | `X-Local-Fallback-Reason` | Why the request left the local route (e.g. `queue-full`, `stall_after_reasoning`) |
 
 - **Policy knob.** `downtimeLocalPreference` (default `remote-ok` since
-  WL-0MVNUHWH500196K1; `local-only` is the explicit per-deployment opt-in)
+  WL-0MVNUHWH500196K1; `local-preferred` is the explicit per-deployment opt-in)
   governs downtime-dispatched panes. Scheduled-prompt panes and headless
   background dispatches default to `remote-ok` (unattended work never queues
-  local capacity) and inherit an explicit knob — so a `local-only` deployment
-  also makes scheduled work local-only. Interactive panes carry no preference
-  unless the operator exports `HERDR_LOCAL_PREFERENCE` themselves.
+  local capacity) and inherit an explicit knob — so a `local-preferred`
+  deployment also makes scheduled work local-preferred. Interactive panes carry
+  no preference unless the operator exports `HERDR_LOCAL_PREFERENCE`
+  themselves.
+- **Removed value (WL-0MVSI1RX2005O9NE).** `local-only` is no longer accepted on
+  any input surface (the setting, `--local-preference`, or the pane env). It is
+  **not** aliased to `local-preferred`: reads clamp it to `remote-ok` and drop
+  its explicitness, and `send-to-pi.sh` warns and drops it. Migration is a
+  one-line settings edit — `downtimeLocalPreference: 'local-preferred'`.
 - **Precedence (WL-0MVNUIW77000VYAX).** Explicit persisted setting > priority
   rule > deployment default. When the operator persists a valid
   `downtimeLocalPreference`, it is forwarded for every dispatch regardless of
   priority. When the key is absent, a **`low`-priority** candidate is
-  dispatched `local-only` (cheap work absorbs local contention and fails fast
-  instead of consuming remote capacity); `medium`/`high`/`critical` and
-  scheduled prompts (no work item, therefore no priority) keep the deployment
-  default `remote-ok`. The resolution happens once in `dispatchClaimedTier`,
-  so the coordination offer, own-backlog fallback, audit-batch continuation,
+  dispatched `local-preferred` (cheap work absorbs local contention instead of
+  consuming remote capacity); `medium`/`high`/`critical` and scheduled prompts
+  (no work item, therefore no priority) keep the deployment default
+  `remote-ok`. The resolution happens once in `dispatchClaimedTier`, so the
+  coordination offer, own-backlog fallback, audit-batch continuation,
   critical-first/normal scan and the legacy tier chain all agree.
   Explicitness is derived by `loadSettings`
   (`downtimeLocalPreferenceExplicit`) and never persisted; the persisted
-  alphabet and the `X-Local-Preference` wire contract are unchanged.
+  alphabet and the `X-Local-Preference` wire contract are both
+  `local-preferred | remote-ok`.
 - **Marker evidence.** Each dispatch marker records the resolved
   `localPreference` plus a `localPreferenceReason` (`operator-setting` |
   `priority-low` | `default`), so the route log's `preference` value can be
   traced to the rule that produced it. Legacy callers that pass a preference
   without the mode opt-in add no marker fields, and readers ignore
   unknown/absent fields.
-- **Transport.** `send-to-pi.sh --local-preference <local-only|remote-ok>`
+- **Transport.** `send-to-pi.sh --local-preference <local-preferred|remote-ok>`
   injects `exec env HERDR_LOCAL_PREFERENCE=<value> bash run-pi-agent.sh …`;
   the headless path sets it directly on the spawn environment. An absent or
-  invalid value omits the env var — the pane launch stays byte-identical to
+  invalid value — including the removed `local-only` — omits the env var and
+  warns where applicable, so the pane launch stays byte-identical to
   the pre-feature behaviour. The pane-spawn helper never **inherits** the
   launcher's own `HERDR_LOCAL_PREFERENCE`/`PI_LOCAL_RESERVATION_TICKET`: it
   strips both from the inherited environment and re-adds them only from the
   resolved dispatch decision (WL-0MVP643Q4007BZJ8), so a worker running inside
-  a `local-only` pane cannot force every child pane local-only.
+  a `local-preferred` pane cannot force every child pane local-preferred.
 - **Header injection + route capture.** The Worklog pi extension
   (`packages/tui/extensions/local-preference/`) reads the env var on every
   provider request (never cached, so a re-launched pane is never stale) and

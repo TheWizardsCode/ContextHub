@@ -106,19 +106,21 @@ export interface PluginSettings {
    * Per-turn locality preference for downtime-dispatched panes
    * (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4; default flipped
    * in WL-0MVNUHWH500196K1): `remote-ok` (default) lets unattended work go
-   * remote rather than queue a contended local slot; `local-only`
-   * (explicit opt-in) makes the proxy refuse immediately rather than
-   * silently wait. Forwarded to the pane as `HERDR_LOCAL_PREFERENCE`,
-   * which the Worklog pi extension turns into the `X-Local-Preference`
-   * request header.
+   * remote rather than queue a contended local slot; `local-preferred`
+   * (explicit opt-in) keeps a prompt local while it fits and defers it with
+   * a retryable 429 rather than going remote. Forwarded to the pane as
+   * `HERDR_LOCAL_PREFERENCE`, which the Worklog pi extension turns into the
+   * `X-Local-Preference` request header. `local-only` was retired in
+   * WL-0MVSI1RX2005O9NE and is NOT an alias: like any other out-of-alphabet
+   * value it clamps to `remote-ok`.
    */
   downtimeLocalPreference: LocalPreference;
   /**
    * Derived — NEVER persisted (WL-0MVNUIW77000VYAX AC3). True only when the
-   * settings file contains a valid `local-only`/`remote-ok`
+   * settings file contains a valid `local-preferred`/`remote-ok`
    * `downtimeLocalPreference` value; an absent key, a missing file and
-   * out-of-alphabet values all resolve `false` so the low-priority rule
-   * applies. `saveSettings` strips it and `loadSettings` always recomputes it
+   * out-of-alphabet values — including the retired `local-only` — all resolve
+   * `false` so the low-priority rule applies. `saveSettings` strips it and `loadSettings` always recomputes it
    * from the file, so it can never become a persisted second alphabet.
    *
    * The dispatch layer uses it to pick the locality precedence: explicit

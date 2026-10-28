@@ -215,7 +215,7 @@ export interface DowntimeDispatchEvent {
   /**
    * Why the preference resolved to its value (WL-0MVNUIW77000VYAX AC5):
    * `operator-setting` (persisted `downtimeLocalPreference` won),
-   * `priority-low` (the low-priority rule chose `local-only`) or `default`
+   * `priority-low` (the low-priority rule chose `local-preferred`) or `default`
    * (deployment default kept). Absent on legacy entries; readers ignore it.
    */
   localPreferenceReason?: LocalPreferenceReason;

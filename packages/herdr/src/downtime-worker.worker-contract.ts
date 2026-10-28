@@ -604,7 +604,7 @@ export interface DowntimeWorkerConfig {
      * Per-turn locality preference for dispatched panes (parent
      * WL-0MVIKRFP0005JDL8 AC4, slice C4). Read live on every tick from the
      * `downtimeLocalPreference` setting (default `remote-ok`,
-     * WL-0MVNUHWH500196K1; `local-only` is the explicit opt-in). Optional
+     * WL-0MVNUHWH500196K1; `local-preferred` is the explicit opt-in). Optional
      * for backward compat — absent leaves the pane launch byte-identical to
      * today (no `X-Local-Preference`, no route log).
      */
@@ -614,7 +614,7 @@ export interface DowntimeWorkerConfig {
      * dispatch boundary derives the pane's preference from `localPreference`.
      * `operator-setting` = the operator persisted the knob (wins over
      * priority); `priority-rule` = the knob was not persisted, so a
-     * `low`-priority candidate resolves to `local-only` and everything else to
+     * `low`-priority candidate resolves to `local-preferred` and everything else to
      * the deployment default. Optional for backward compat — absent keeps
      * today's fixed forwarding (no marker fields).
      */

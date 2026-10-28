@@ -535,7 +535,7 @@ describe('downtimeLocalPreferenceExplicit — derived explicitness (WL-0MVNUIW77
   });
 
   it('is true only when the file persists a valid two-value preference', () => {
-    for (const value of ['local-only', 'remote-ok'] as const) {
+    for (const value of ['local-preferred', 'remote-ok'] as const) {
       const path = tempSettingsPath();
       writeFileSync(path, JSON.stringify({ downtimeLocalPreference: value }), 'utf-8');
       const settings = loadSettings(path);
@@ -562,11 +562,11 @@ describe('downtimeLocalPreferenceExplicit — derived explicitness (WL-0MVNUIW77
     // the presence of that knob alone.
     saveSettings(path, {
       ...defaultSettings,
-      downtimeLocalPreference: 'local-only',
+      downtimeLocalPreference: 'local-preferred',
       downtimeLocalPreferenceExplicit: true,
     });
     const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
-    expect(raw.downtimeLocalPreference).toBe('local-only');
+    expect(raw.downtimeLocalPreference).toBe('local-preferred');
     expect('downtimeLocalPreferenceExplicit' in raw).toBe(false);
     expect(loadSettings(path).downtimeLocalPreferenceExplicit).toBe(true);
 
@@ -581,5 +581,21 @@ describe('downtimeLocalPreferenceExplicit — derived explicitness (WL-0MVNUIW77
 
     // Re-reading is stable: loading and re-saving preserves the signal.
     expect(loadSettings(path).downtimeLocalPreferenceExplicit).toBe(false);
+  });
+
+  it('AC3: a persisted local-only is not explicit, clamps to remote-ok and is dropped on save', () => {
+    const path = tempSettingsPath();
+    writeFileSync(path, JSON.stringify({ downtimeLocalPreference: 'local-only' }), 'utf-8');
+
+    const loaded = loadSettings(path);
+    expect(loaded.downtimeLocalPreference).toBe('remote-ok');
+    expect(loaded.downtimeLocalPreferenceExplicit).toBe(false);
+
+    // A save round-trip leaves the key absent: nothing is persisted for a
+    // non-explicit deployment, so the retired value cannot linger.
+    saveSettings(path, loaded);
+    const raw = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    expect('downtimeLocalPreference' in raw).toBe(false);
+    expect(loadSettings(path).downtimeLocalPreference).toBe('remote-ok');
   });
 });

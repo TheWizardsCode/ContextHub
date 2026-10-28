@@ -305,7 +305,7 @@ export async function dispatchDowntimeWork(
     /**
      * Locality-preference precedence opt-in (WL-0MVNUIW77000VYAX AC4):
      * `operator-setting` keeps a persisted setting verbatim, `priority-rule`
-     * lets a `low`-priority candidate resolve to `local-only`. Absent keeps
+     * lets a `low`-priority candidate resolve to `local-preferred`. Absent keeps
      * legacy fixed forwarding.
      */
     localPreferenceMode?: LocalPreferenceMode;

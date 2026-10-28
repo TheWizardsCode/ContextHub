@@ -282,7 +282,7 @@ export function buildDowntimePaneArgs(
     reservationTicketId?: string;
     /**
      * Per-turn locality preference (parent AC4, slice C4): forwarded as
-     * `--local-preference <local-only|remote-ok>` so send-to-pi.sh passes
+     * `--local-preference <local-preferred|remote-ok>` so send-to-pi.sh passes
      * `HERDR_LOCAL_PREFERENCE` into the pane process. Absent leaves the launch
      * args byte-identical (fail-open C4-AC3).
      */
@@ -369,12 +369,12 @@ export type DowntimeSpawn = (
  * The two pane-launch knobs — `HERDR_LOCAL_PREFERENCE` and
  * `PI_LOCAL_RESERVATION_TICKET` — come from `opts` **only** and are stripped
  * from the inherited environment (WL-0MVP643Q4007BZJ8). The downtime worker
- * can itself run inside a `local-only` pane that exports
+ * can itself run inside a `local-preferred` pane that exports
  * `HERDR_LOCAL_PREFERENCE`; inheriting that value would (a) violate the
  * fail-open contract that an absent preference leaves the pane env
  * byte-identical (C4-AC3) and (b) bypass the resolved dispatch decision, so a
- * `local-only` leader would force every child — including `critical` work —
- * local-only. Interactive panes are not built here, so an operator who
+ * `local-preferred` leader would force every child — including `critical` work —
+ * local-preferred. Interactive panes are not built here, so an operator who
  * exports the variable still gets it in their own panes.
  */
 export function buildDowntimeSpawnOptions(

@@ -122,7 +122,7 @@ export async function dispatchClaimedTier(
      * Locality-preference precedence opt-in (WL-0MVNUIW77000VYAX AC4). Set by
      * the plugin's `config()` only: `operator-setting` keeps a persisted
      * setting verbatim, `priority-rule` lets a `low`-priority candidate
-     * resolve to `local-only`. Absent → legacy caller: forward
+     * resolve to `local-preferred`. Absent → legacy caller: forward
      * `localPreference` verbatim and add no marker fields.
      */
     localPreferenceMode?: LocalPreferenceMode;

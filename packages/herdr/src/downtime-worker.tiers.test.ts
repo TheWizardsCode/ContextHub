@@ -416,16 +416,20 @@ describe('dispatch scheduled-prompts tier', () => {
     );
   });
 
-  it('AC5: an explicit local-only deployment also makes scheduled work local-only', async () => {
+  it('AC5: an explicit local-preferred deployment also makes scheduled work local-preferred', async () => {
     const deps = makeDeps({
       getDueScheduledPrompt: vi.fn().mockResolvedValue(duePrompt),
     });
 
-    await dispatchDowntimeWork(deps, { model: 'plan', cwd: '/repo', localPreference: 'local-only' });
+    await dispatchDowntimeWork(deps, {
+      model: 'plan',
+      cwd: '/repo',
+      localPreference: 'local-preferred',
+    });
 
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       '/skill:refactor',
-      expect.objectContaining({ localPreference: 'local-only' }),
+      expect.objectContaining({ localPreference: 'local-preferred' }),
     );
   });
 
@@ -463,18 +467,18 @@ describe('dispatch scheduled-prompts tier', () => {
     await dispatchDowntimeWork(deps, {
       model: 'plan',
       cwd: '/repo',
-      localPreference: 'local-only',
+      localPreference: 'local-preferred',
       localPreferenceMode: 'operator-setting',
     });
 
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       '/skill:refactor',
-      expect.objectContaining({ localPreference: 'local-only' }),
+      expect.objectContaining({ localPreference: 'local-preferred' }),
     );
     expect(deps.recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         kind: 'scheduled',
-        localPreference: 'local-only',
+        localPreference: 'local-preferred',
         localPreferenceReason: 'operator-setting',
       }),
     );
@@ -1402,7 +1406,7 @@ describe('single-flight dispatch guard', () => {
 // ── Legacy tier chain inherits the priority rule (WL-0MVNUIW77000VYAX AC4) ──
 
 describe('legacy tier chain locality resolution (WL-0MVNUIW77000VYAX AC4)', () => {
-  it('a low-priority plan candidate resolves local-only through the direct chain', async () => {
+  it('a low-priority plan candidate resolves local-preferred through the direct chain', async () => {
     const deps = makeDeps({
       getNextAuditCandidate: vi.fn().mockResolvedValue({ ok: true, candidate: null }),
       getNextImplementCandidate: vi.fn().mockResolvedValue(null),
@@ -1427,12 +1431,12 @@ describe('legacy tier chain locality resolution (WL-0MVNUIW77000VYAX AC4)', () =
     expect(outcome.kind).toBe('plan');
     expect(deps.spawnAgentPane).toHaveBeenCalledWith(
       expect.stringContaining('/skill:plan WL-PLAN-LOW'),
-      expect.objectContaining({ localPreference: 'local-only' }),
+      expect.objectContaining({ localPreference: 'local-preferred' }),
     );
     expect(deps.recordDispatch).toHaveBeenCalledWith(
       expect.objectContaining({
         itemId: 'WL-PLAN-LOW',
-        localPreference: 'local-only',
+        localPreference: 'local-preferred',
         localPreferenceReason: 'priority-low',
       }),
     );

@@ -426,7 +426,7 @@ describe('send-to-pi.sh --reservation-ticket forwarding (C2 AC1)', () => {
 
 describe('send-to-pi.sh --local-preference forwarding (C4-AC1)', () => {
   it('passes both preference values into the pane process', () => {
-    for (const preference of ['local-only', 'remote-ok']) {
+    for (const preference of ['local-preferred', 'remote-ok']) {
       const { status, log } = runScript([
         '--no-resize',
         '--cwd',
@@ -456,7 +456,7 @@ describe('send-to-pi.sh --local-preference forwarding (C4-AC1)', () => {
       '--reservation-ticket',
       'tkt-2',
       '--local-preference',
-      'local-only',
+      'local-preferred',
       '--model',
       'code',
       '/skill:implement <id>',
@@ -464,7 +464,7 @@ describe('send-to-pi.sh --local-preference forwarding (C4-AC1)', () => {
     expect(status).toBe(0);
     const run = log.find((line) => line.includes('pane run'));
     expect(run).toBeDefined();
-    expect(run).toContain('HERDR_LOCAL_PREFERENCE=local-only');
+    expect(run).toContain('HERDR_LOCAL_PREFERENCE=local-preferred');
     expect(run).toContain('PI_LOCAL_RESERVATION_TICKET=tkt-2');
     expect(run).toContain('HERDR_REQUEST_PRIORITY=low');
   });
@@ -482,6 +482,23 @@ describe('send-to-pi.sh --local-preference forwarding (C4-AC1)', () => {
       '/tmp/project-root',
       '--local-preference',
       'auto; rm -rf /',
+      '/skill:implement <id>',
+    ]);
+    expect(status).toBe(0);
+    expect(log.some((line) => line.includes('HERDR_LOCAL_PREFERENCE'))).toBe(false);
+    expect(log.some((line) => line.includes('pane run'))).toBe(true);
+  });
+
+  it('AC4: rejects the retired local-only value instead of forwarding it (fail-open)', () => {
+    // `local-only` is not a deprecated alias — it must be dropped with a
+    // warning exactly like any other out-of-alphabet value, and the launch
+    // still succeeds with no env var on the wire (WL-0MVSI1RX2005O9NE).
+    const { status, log } = runScript([
+      '--no-resize',
+      '--cwd',
+      '/tmp/project-root',
+      '--local-preference',
+      'local-only',
       '/skill:implement <id>',
     ]);
     expect(status).toBe(0);

@@ -18,6 +18,9 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   DEFAULT_DOWNTIME_IDLE_THRESHOLD_MS,
@@ -52,11 +55,18 @@ import {
   reserveServerError,
   reserveTimeout,
 } from './downtime-worker.fixtures.js';
-import { defaultSettings } from './settings.js';
+import { defaultSettings, loadSettings } from './settings.js';
 
 /** Parse a fixture exactly as the C2 client will after reading the response. */
 function parse(fixture: { status: number; body: unknown }) {
   return parseLocalReservationResponse(fixture.body, fixture.status);
+}
+
+/** Write a herdr settings file with the supplied keys and return its path. */
+function tempSettingsPathWith(values: Record<string, unknown>): string {
+  const path = join(mkdtempSync(join(tmpdir(), 'herdr-reserve-settings-')), 'settings.json');
+  writeFileSync(path, JSON.stringify(values), 'utf-8');
+  return path;
 }
 
 describe('reservation contract constants (AC1)', () => {
@@ -229,7 +239,7 @@ async function runDispatchTick(
     status?: unknown;
     requiredFreeSlots?: number;
     /** Per-turn locality preference (C4-AC1); absent → legacy config shape. */
-    localPreference?: 'local-only' | 'remote-ok';
+    localPreference?: 'local-preferred' | 'remote-ok';
     /**
      * Locality precedence opt-in (WL-0MVNUIW77000VYAX AC4); absent → legacy
      * fixed forwarding (no marker fields).
@@ -401,7 +411,7 @@ describe('ticket forwarding to the pane (AC1)', () => {
 
 describe('local-preference forwarding to the pane (C4-AC1)', () => {
   it('C4-AC1: forwards --local-preference and HERDR_LOCAL_PREFERENCE for both values', () => {
-    for (const preference of ['local-only', 'remote-ok'] as const) {
+    for (const preference of ['local-preferred', 'remote-ok'] as const) {
       const args = buildDowntimePaneArgs('plan', '/skill:plan WL-X', {
         model: 'code',
         cwd: C2_CWD,
@@ -423,11 +433,11 @@ describe('local-preference forwarding to the pane (C4-AC1)', () => {
 
   it('C4-AC3: no preference leaves the launch byte-identical (fail-open)', () => {
     // Pin the ambient environment: the suite itself can run inside a
-    // `local-only` downtime pane (which exports `HERDR_LOCAL_PREFERENCE`), and
+    // `local-preferred` downtime pane (which exports `HERDR_LOCAL_PREFERENCE`), and
     // the fail-open contract must hold regardless — an inherited launcher
     // value must never reach the child pane (WL-0MVP643Q4007BZJ8).
     const savedPreference = process.env[LOCAL_PREFERENCE_ENV_VAR];
-    process.env[LOCAL_PREFERENCE_ENV_VAR] = 'local-only';
+    process.env[LOCAL_PREFERENCE_ENV_VAR] = 'local-preferred';
     try {
       const args = buildDowntimePaneArgs('plan', '/skill:plan WL-X', { model: 'code', cwd: C2_CWD });
       expect(args).not.toContain('--local-preference');
@@ -453,15 +463,15 @@ describe('local-preference forwarding to the pane (C4-AC1)', () => {
   });
 
   it(
-    'AC4/AC5: the settings value reaches the pane — remote-ok by default, local-only when persisted',
+    'AC4/AC5: the settings value reaches the pane — remote-ok by default, local-preferred when persisted',
     async () => {
       // `index.ts` always supplies `loadSettings().downtimeLocalPreference`, so
       // an unconfigured deployment (no persisted key) dispatches with the
       // settings default (WL-0MVNUHWH500196K1 AC4), while an explicit
-      // `local-only` opt-in is forwarded verbatim and never overridden (AC5).
+      // `local-preferred` opt-in is forwarded verbatim and never overridden (AC5).
       expect(defaultSettings.downtimeLocalPreference).toBe('remote-ok');
 
-      for (const preference of ['remote-ok', 'local-only'] as const) {
+      for (const preference of ['remote-ok', 'local-preferred'] as const) {
         const deps = makeDeps({
           getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
         });
@@ -487,6 +497,31 @@ describe('local-preference forwarding to the pane (C4-AC1)', () => {
       }
     },
   );
+
+  it('AC2: a deployment whose setting is the retired local-only forwards remote-ok instead', async () => {
+    // loadSettings clamps at load (AC3), so the dispatch seam sees `remote-ok`
+    // and never the retired value — the legacy file cannot leak onto the wire.
+    const loaded = loadSettings(tempSettingsPathWith({ downtimeLocalPreference: 'local-only' }));
+    expect(loaded.downtimeLocalPreference).toBe('remote-ok');
+    expect(loaded.downtimeLocalPreferenceExplicit).toBe(false);
+
+    const deps = makeDeps({
+      getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [planCandidate()] }),
+    });
+    const outcome = await runDispatchTick(deps, { localPreference: loaded.downtimeLocalPreference });
+
+    expect(outcome.dispatched).toBe(true);
+    const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
+    expect(spawnOpts.localPreference).toBe('remote-ok');
+    const args = buildDowntimePaneArgs('plan', '/skill:plan WL-X', {
+      model: 'code',
+      cwd: C2_CWD,
+      localPreference: spawnOpts.localPreference,
+    });
+    expect(args[args.indexOf('--local-preference') + 1]).toBe('remote-ok');
+    const paneSpawn = buildDowntimeSpawnOptions(C2_CWD, { localPreference: spawnOpts.localPreference });
+    expect(paneSpawn.env[LOCAL_PREFERENCE_ENV_VAR]).toBe('remote-ok');
+  });
 });
 
 describe('priority-aware locality preference (WL-0MVNUIW77000VYAX)', () => {
@@ -504,17 +539,17 @@ describe('priority-aware locality preference (WL-0MVNUIW77000VYAX)', () => {
     return { deps, run: runDispatchTick(deps, opts) };
   }
 
-  it('AC2/AC6: a low-priority dispatch resolves local-only and records priority-low', async () => {
+  it('AC2/AC6: a low-priority dispatch resolves local-preferred and records priority-low', async () => {
     const { deps, run } = dispatchWithHead('low', { localPreferenceMode: 'priority-rule' });
 
     const outcome = await run;
 
     expect(outcome.dispatched).toBe(true);
     const spawnOpts = (deps.spawnAgentPane as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    expect(spawnOpts.localPreference).toBe('local-only');
+    expect(spawnOpts.localPreference).toBe('local-preferred');
     // The marker records BOTH the resolved preference and its reason.
     expect(deps.recordDispatch).toHaveBeenCalledWith(
-      expect.objectContaining({ localPreference: 'local-only', localPreferenceReason: 'priority-low' }),
+      expect.objectContaining({ localPreference: 'local-preferred', localPreferenceReason: 'priority-low' }),
     );
 
     // The same value reaches the wire: the pane launch arg/env the extension
@@ -524,9 +559,9 @@ describe('priority-aware locality preference (WL-0MVNUIW77000VYAX)', () => {
       cwd: C2_CWD,
       localPreference: spawnOpts.localPreference,
     });
-    expect(args[args.indexOf('--local-preference') + 1]).toBe('local-only');
+    expect(args[args.indexOf('--local-preference') + 1]).toBe('local-preferred');
     const paneSpawn = buildDowntimeSpawnOptions(C2_CWD, { localPreference: spawnOpts.localPreference });
-    expect(paneSpawn.env[LOCAL_PREFERENCE_ENV_VAR]).toBe('local-only');
+    expect(paneSpawn.env[LOCAL_PREFERENCE_ENV_VAR]).toBe('local-preferred');
   });
 
   it('AC2: a high-priority dispatch keeps the deployment default and records default', async () => {

@@ -1475,7 +1475,7 @@ export async function main(): Promise<void> {
         // Locality precedence (WL-0MVNUIW77000VYAX AC2/AC4): an explicitly
         // persisted `downtimeLocalPreference` is the operator's policy and
         // wins for every dispatch; when the key is absent the dispatch
-        // boundary may apply the low-priority rule (`low` → `local-only`,
+        // boundary may apply the low-priority rule (`low` → `local-preferred`,
         // everything else → the deployment default). Explicitness is derived
         // by `loadSettings` and never persisted (AC3).
         localPreferenceMode: s.downtimeLocalPreferenceExplicit

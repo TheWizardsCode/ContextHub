@@ -209,11 +209,11 @@ describe('downtime pane spawn (send-to-pi.sh)', () => {
 
   it('buildDowntimeSpawnOptions never inherits the launcher pane-launch knobs (WL-0MVP643Q4007BZJ8)', () => {
     // The downtime suite can itself run inside a herdr pane that carries
-    // `HERDR_LOCAL_PREFERENCE` (a `local-only` pane) or a reservation ticket.
+    // `HERDR_LOCAL_PREFERENCE` (a `local-preferred` pane) or a reservation ticket.
     // Inheriting that leaked value would (a) break the documented fail-open
     // contract (`absent value omits the env var`, C4-AC3) and (b) bypass the
-    // dispatch priority rule — a local-only leader would force EVERY child
-    // local-only. Only the explicit dispatch decision may set these vars.
+    // dispatch priority rule — a local-preferred leader would force EVERY child
+    // local-preferred. Only the explicit dispatch decision may set these vars.
     const saved = new Map<string, string | undefined>();
     for (const key of [LOCAL_PREFERENCE_ENV_VAR, LOCAL_RESERVATION_TICKET_ENV]) {
       saved.set(key, process.env[key]);

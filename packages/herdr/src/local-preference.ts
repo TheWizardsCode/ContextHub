@@ -3,14 +3,15 @@
  * (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4, slice C4).
  *
  * The llama-proxy honours a per-request locality preference carried on the
- * `X-Local-Preference` header (`local-only` = work the operator marks
- * local-first: the proxy refuses immediately instead of silently waiting up
- * to 120 s before falling back; `remote-ok` = background work that may go
- * remote without queuing local capacity). Herdr conveys the policy to
- * launched pi sessions as the pane-launch environment variable
- * `HERDR_LOCAL_PREFERENCE`; the Worklog pi extension turns that variable
- * into the request header and records the response route headers in the
- * bounded route log.
+ * `X-Local-Preference` header (`local-preferred` = work the operator marks
+ * local-first: the prompt stays on the local model while it fits and is
+ * *deferred* — a retryable 429 with `Retry-After`, never a silent remote
+ * fallback — when the local slot is contended; `remote-ok` = background work
+ * that may go remote without queuing local capacity). Herdr conveys the policy
+ * to launched pi sessions as the pane-launch environment variable
+ * `HERDR_LOCAL_PREFERENCE`; the Worklog pi extension turns that variable into
+ * the request header and records the response route headers in the bounded
+ * route log.
  *
  * Policy defaults:
  *   - downtime panes → `remote-ok` (never queue local capacity the
@@ -19,28 +20,34 @@
  *   - background/scheduled work → `remote-ok` (never queue local capacity
  *     for unattended work).
  *
- * `local-only` remains the explicit per-deployment opt-in (WL-0MVNUHWH500196K1):
- * an operator who wants today's fail-fast-local behaviour for downtime panes
- * sets `downtimeLocalPreference: 'local-only'` and every dispatch path keeps
- * it verbatim. It supersedes the C4-AC1 default `local-only` pinned in
- * WL-0MVLJTV03000KIQZ, which this module's constant flips.
+ * `local-preferred` is the explicit per-deployment opt-in: an operator who
+ * wants every dispatched prompt to stay local while it fits that capacity sets
+ * `downtimeLocalPreference: 'local-preferred'` and every dispatch path keeps
+ * it verbatim.
  *
- * Both are configurable through the herdr setting `downtimeLocalPreference`
- * (and the `HERDR_LOCAL_PREFERENCE` env var the extension reads), so a
- * producer can flip either default per deployment.
+ * `local-only` was **removed** (WL-0MVSI1RX2005O9NE) — it is not a deprecated
+ * alias and is not normalised onto `local-preferred`. `isLocalPreference` is
+ * the single strict validation gate, so a legacy `local-only` setting is
+ * treated exactly like any other invalid value: it clamps to the fail-open
+ * default `remote-ok` (and loses explicitness). Operators migrating an older
+ * deployment rewrite the setting to `local-preferred`.
+ *
+ * Both valid values are configurable through the herdr setting
+ * `downtimeLocalPreference` (and the `HERDR_LOCAL_PREFERENCE` env var the
+ * extension reads), so a producer can flip either default per deployment.
  *
  * Priority rule (WL-0MVNUIW77000VYAX): cheap work should absorb contention on
  * the local slot instead of competing for remote capacity, so a `low`-priority
- * candidate is dispatched `local-only` while every other priority keeps the
- * deployment default. The rule LAYERS ON TOP of WL-0MVNUHWH500196K1's
+ * candidate is dispatched `local-preferred` while every other priority keeps
+ * the deployment default. The rule LAYERS ON TOP of WL-0MVNUHWH500196K1's
  * `remote-ok` default and is applied at the dispatch boundary
  * (`dispatchClaimedTier`) through the single-dispatch resolution below.
  *
  * Precedence (highest first):
  *   1. an EXPLICIT operator setting (`downtimeLocalPreference` persisted as a
- *      valid `local-only`/`remote-ok`) wins for every dispatch — the priority
- *      rule is bypassed and the marker records `operator-setting`;
- *   2. the priority rule — `low` → `local-only`, everything else →
+ *      valid `local-preferred`/`remote-ok`) wins for every dispatch — the
+ *      priority rule is bypassed and the marker records `operator-setting`;
+ *   2. the priority rule — `low` → `local-preferred`, everything else →
  *      `DOWNTIME_LOCAL_PREFERENCE` (`remote-ok`); the marker records
  *      `priority-low` / `default`;
  *   3. the deployment default — the same `remote-ok` constant, used when no
@@ -53,7 +60,7 @@
  */
 
 /** The proxy's per-turn locality preference alphabet (fixed wire contract). */
-export type LocalPreference = 'local-only' | 'remote-ok';
+export type LocalPreference = 'local-preferred' | 'remote-ok';
 
 /** The pane-launch environment variable read by the Worklog pi extension. */
 export const LOCAL_PREFERENCE_ENV_VAR = 'HERDR_LOCAL_PREFERENCE';
@@ -61,15 +68,14 @@ export const LOCAL_PREFERENCE_ENV_VAR = 'HERDR_LOCAL_PREFERENCE';
 /**
  * Default for downtime-dispatched panes (WL-0MVNUHWH500196K1). `remote-ok`
  * lets unattended downtime work go remote rather than stall on a contended
- * local slot; `local-only` is the explicit per-deployment opt-in (it
- * supersedes the C4-AC1 `local-only` default of WL-0MVLJTV03000KIQZ).
+ * local slot; `local-preferred` is the explicit per-deployment opt-in.
  */
 export const DOWNTIME_LOCAL_PREFERENCE: LocalPreference = 'remote-ok';
 
 /** Default for background/scheduled work (C4-AC1). */
 export const BACKGROUND_LOCAL_PREFERENCE: LocalPreference = 'remote-ok';
 
-const VALID_PREFERENCES: readonly LocalPreference[] = ['local-only', 'remote-ok'];
+const VALID_PREFERENCES: readonly LocalPreference[] = ['local-preferred', 'remote-ok'];
 
 /** True when `value` is one of the two valid wire/settings values. */
 export function isLocalPreference(value: unknown): value is LocalPreference {
@@ -78,9 +84,10 @@ export function isLocalPreference(value: unknown): value is LocalPreference {
 
 /**
  * Clamp a raw `downtimeLocalPreference` setting (or env value) to the
- * preference alphabet. Anything absent/invalid resolves to the downtime
- * default `remote-ok` (`DOWNTIME_LOCAL_PREFERENCE`) — never an invented
- * value.
+ * preference alphabet. Anything absent/invalid — including the retired
+ * `local-only`, which is deliberately NOT mapped onto `local-preferred` —
+ * resolves to the downtime default `remote-ok` (`DOWNTIME_LOCAL_PREFERENCE`),
+ * never an invented value.
  */
 export function clampDowntimeLocalPreference(value: unknown): LocalPreference {
   return isLocalPreference(value) ? value : DOWNTIME_LOCAL_PREFERENCE;
@@ -93,7 +100,7 @@ export function clampDowntimeLocalPreference(value: unknown): LocalPreference {
  *  - `operator-setting` — the operator persisted `downtimeLocalPreference`, so
  *    that value was forwarded for every dispatch regardless of priority;
  *  - `priority-low` — no persisted setting and the candidate's priority is
- *    `low`, so the priority rule chose `local-only`;
+ *    `low`, so the priority rule chose `local-preferred`;
  *  - `default` — no persisted setting and the priority rule left the
  *    deployment default (`remote-ok`) in place.
  */
@@ -119,15 +126,15 @@ export interface ResolvedDispatchLocalPreference {
 }
 
 /**
- * Pure priority rule (WL-0MVNUIW77000VYAX AC1): `low` → `local-only`, every
- * other input (`medium`, `high`, `critical`, `undefined`, `null`, `''`, an
- * unknown string) → `defaultPreference` verbatim. No IO, never throws.
+ * Pure priority rule (WL-0MVNUIW77000VYAX AC1): `low` → `local-preferred`,
+ * every other input (`medium`, `high`, `critical`, `undefined`, `null`, `''`,
+ * an unknown string) → `defaultPreference` verbatim. No IO, never throws.
  */
 export function resolveDispatchLocalPreference(
   priority: unknown,
   defaultPreference: LocalPreference,
 ): LocalPreference {
-  return priority === 'low' ? 'local-only' : defaultPreference;
+  return priority === 'low' ? 'local-preferred' : defaultPreference;
 }
 
 /**

@@ -47,7 +47,7 @@
 #                        provider header on the pane's first request. Absent
 #                        (fail-open/older proxy) = no env var, byte-identical
 #                        launch to today.
-#   --local-preference <local-only|remote-ok>
+#   --local-preference <local-preferred|remote-ok>
 #                        Per-turn locality preference (parent
 #                        WL-0MVIKRFP0005JDL8 AC4, slice C4). Forwarded into
 #                        the pane process as HERDR_LOCAL_PREFERENCE, which the
@@ -55,6 +55,8 @@
 #                        `X-Local-Preference` provider header on every request
 #                        (and records the response `X-Local-Route` /
 #                        `X-Local-Fallback-Reason` in the bounded route log).
+#                        The retired `local-only` value is rejected like any
+#                        other invalid input (WL-0MVSI1RX2005O9NE).
 #                        Absent/invalid = no env var, byte-identical launch to
 #                        today (fail-open).
 #   -h, --help           Show this help message
@@ -250,12 +252,12 @@ esac
 # the extension sends no header and the request stays exactly as today.
 # Never fails the launch (C4-AC3).
 case "$local_preference" in
-  local-only|remote-ok)
+  local-preferred|remote-ok)
     ;;
   "")
     ;;
   *)
-    echo "Warning: ignoring invalid --local-preference '$local_preference' (expected local-only|remote-ok)" >&2
+    echo "Warning: ignoring invalid --local-preference '$local_preference' (expected local-preferred|remote-ok)" >&2
     local_preference=""
     ;;
 esac
