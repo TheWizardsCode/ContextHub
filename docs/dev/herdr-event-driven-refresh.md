@@ -462,7 +462,12 @@ suites) a wall reading describes the host, not the plugin — the absolute
 ≤ ~200 ms bound would then flake with nothing wrong in the code
 (WL-0MVMSE5LN003KCPQ). On-CPU time is load-independent (F1 gates regressions
 on CPU time for the same reason); the raw wall figure is still reported for
-diagnostics.
+diagnostics. The probe's CPU-attribution tests burn a fixed amount of
+**loop CPU** (not wall time) when fabricating a synchronous block: a
+wall-clock busy-wait is itself load-dependent, since a descheduled thread
+yields less CPU per wall second and the (correctly) CPU-attributed reading
+would then fall short of its threshold on a contended host — the flake fixed
+in WL-0MVS5CZFT001GHK9.
 
 ### AC coverage
 

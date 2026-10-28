@@ -33,6 +33,7 @@ import {
   attributeEventLoopTick,
   defaultLargeDbBudget,
   evaluateSpawnCapReport,
+  loopThreadCpuMs,
   readLargeDbBudget,
   runSpawnConcurrencyScenario,
   startEventLoopProbe,
@@ -151,12 +152,26 @@ describe('F5 spawn-cap budget policy', () => {
 describe('event-loop probe CPU attribution', () => {
   const yieldToEventLoop = (ms = 5): Promise<void> =>
     new Promise((resolve) => setTimeout(resolve, ms));
-  /** Block this thread synchronously for `ms` (the loop cannot run timers). */
-  const blockLoop = (ms = 120): void => {
-    const until = performance.now() + ms;
-    while (performance.now() < until) {
+  /**
+   * Block this thread synchronously until it has consumed `ms` of on-CPU
+   * time (the loop cannot run timers meanwhile).
+   *
+   * CPU time — not `performance.now()` — is the budget because it is the only
+   * load-independent measure: a wall-clock busy-wait on a contended host is
+   * descheduled mid-wait, so 120 ms of wall time can burn well under 60 ms of
+   * CPU and the probe would then (correctly) attribute the rest to host
+   * descheduling (WL-0MVS5CZFT001GHK9). Burning loop CPU makes the reading
+   * genuinely load-independent, which is what the assertions below test.
+   *
+   * Returns the on-CPU milliseconds actually burned.
+   */
+  const blockLoop = (ms = 120): number => {
+    const started = loopThreadCpuMs();
+    const until = started + ms;
+    while (loopThreadCpuMs() < until) {
       // busy-wait: the loop is blocked by our own synchronous work
     }
+    return loopThreadCpuMs() - started;
   };
 
   it('attributes a tick to loop work only when the loop thread consumed CPU', () => {
@@ -191,14 +206,38 @@ describe('event-loop probe CPU attribution', () => {
   it('records a synchronous block as on-CPU loop blocking', async () => {
     const probe = startEventLoopProbe();
     await yieldToEventLoop();
-    blockLoop();
+    const burned = blockLoop();
     // The delayed tick is only recorded once the loop is free again.
     await yieldToEventLoop();
     const blocking = probe.stop();
     // A ~120 ms synchronous block consumes ~120 ms of loop-thread CPU whatever
     // the host scheduler does, so the CPU-attributed reading is load-independent.
+    expect(burned).toBeGreaterThanOrEqual(120);
     expect(blocking.busyBlockedMs).toBeGreaterThan(60);
     expect(blocking.totalBlockedMs).toBeGreaterThanOrEqual(blocking.busyBlockedMs);
+  });
+
+  it('attributes on-CPU time only, even when the host deschedules the loop mid-block', async () => {
+    // Shared-host pattern: the block is descheduled part way through, so the
+    // wall delay doubles while the loop thread is on CPU for only half of it.
+    // The attributed busy time must follow the CPU clock (~60 ms), never the
+    // wall delay (~120 ms) — the property the load-independent threshold in
+    // the previous test relies on (WL-0MVS5CZFT001GHK9).
+    const onCpuMs = 60;
+    let usage = { user: 0, system: 0 };
+    const probe = startEventLoopProbe(2, { readCpuUsage: () => usage });
+    await yieldToEventLoop();
+    const until = performance.now() + 120;
+    while (performance.now() < until) {
+      // busy-wait the wall delay; CPU is credited below to model a half-share
+    }
+    usage = { user: onCpuMs * 1000, system: 0 };
+    await yieldToEventLoop();
+    const blocking = probe.stop();
+    // ~60 ms on CPU minus the probe's tick tolerance, capped by the wall delay.
+    expect(blocking.busyBlockedMs).toBeGreaterThan(45);
+    expect(blocking.busyBlockedMs).toBeLessThan(75);
+    expect(blocking.totalBlockedMs).toBeGreaterThan(blocking.busyBlockedMs);
   });
 
   it('reports a wall-clock delay with no CPU use as wall-only (descheduling)', async () => {

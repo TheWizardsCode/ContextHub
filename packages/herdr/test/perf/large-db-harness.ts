@@ -585,18 +585,36 @@ export interface EventLoopProbeOptions {
  * loop work, else the whole-process clock (whose over-count is capped by the
  * wall delay in {@link attributeEventLoopTick}).
  */
-function cpuUsageReader(): () => { user: number; system: number } {
+function readLoopCpuUsage(): { user: number; system: number } {
   const threadCpuUsage = (
     process as unknown as { threadCpuUsage?: () => { user: number; system: number } }
   ).threadCpuUsage;
   if (typeof threadCpuUsage === 'function') {
-    return () => threadCpuUsage.call(process);
+    return threadCpuUsage.call(process);
   }
-  return () => process.cpuUsage();
+  return process.cpuUsage();
+}
+
+function cpuUsageReader(): () => { user: number; system: number } {
+  return readLoopCpuUsage;
 }
 
 function cpuMsOf(usage: { user: number; system: number }): number {
   return (usage.user + usage.system) / 1000;
+}
+
+/**
+ * The loop thread's on-CPU time in milliseconds — the same clock
+ * {@link startEventLoopProbe} attributes busy blocking to.
+ *
+ * Exposed so callers that need to burn a known amount of LOOP CPU (rather
+ * than wait a known amount of WALL time) can measure it on the exact clock the
+ * probe reads. A wall-clock busy-wait is not load-independent: on a contended
+ * host the thread is descheduled mid-wait, so `D` ms of wall time yields far
+ * less than `D` ms of on-CPU time (WL-0MVS5CZFT001GHK9).
+ */
+export function loopThreadCpuMs(): number {
+  return cpuMsOf(readLoopCpuUsage());
 }
 
 /**
