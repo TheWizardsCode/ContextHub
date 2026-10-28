@@ -5,13 +5,21 @@
  * The llama-proxy honours a per-request locality preference and reports the
  * route it took:
  *
- *   request:  `X-Local-Preference: local-only | remote-ok`
- *               local-only → the proxy refuses immediately instead of
- *               silently waiting up to 120 s before falling back;
- *               remote-ok  → background work may go remote without queuing
+ *   request:  `X-Local-Preference: local-preferred | remote-ok`
+ *               local-preferred → the prompt stays local while it fits and is
+ *               deferred with a retryable 429 + `Retry-After` when the local
+ *               slot is contended (never a silent remote fallback);
+ *               remote-ok       → background work may go remote without queuing
  *               local capacity.
  *   response: `X-Local-Route`            (e.g. `local`, `remote:<provider>`)
  *             `X-Local-Fallback-Reason`  (why the request left the local route)
+ *
+ * The retired `local-only` spelling (WL-0MVSI1S5P003UAMB, following herdr
+ * WL-0MVSI1RX2005O9NE) is **not** an alias and is **not** normalised: it is
+ * handled like any other invalid value — no header, no route log (fail-open).
+ * Migration is a one-line setting change,
+ * `HERDR_LOCAL_PREFERENCE=local-preferred` (herdr `downtimeLocalPreference:
+ * local-preferred`).
  *
  * Herdr conveys the policy per spawn as the pane-launch environment variable
  * `HERDR_LOCAL_PREFERENCE` (`--local-preference` in send-to-pi.sh); this
@@ -37,7 +45,7 @@ import { join } from 'node:path';
 import type { ExtensionAPI } from '@earendil-works/pi-coding-agent';
 
 /** The proxy's per-turn locality preference alphabet (fixed wire contract). */
-export type LocalPreference = 'local-only' | 'remote-ok';
+export type LocalPreference = 'local-preferred' | 'remote-ok';
 
 /** The pane-launch environment variable herdr sets for a dispatched pane. */
 export const LOCAL_PREFERENCE_ENV_VAR = 'HERDR_LOCAL_PREFERENCE';
@@ -64,10 +72,14 @@ export const LOCAL_ROUTE_LOG_FILE = 'local-route.log';
  */
 export const LOCAL_ROUTE_LOG_MAX_ENTRIES = 2000;
 
-const VALID_PREFERENCES: readonly LocalPreference[] = ['local-only', 'remote-ok'];
+const VALID_PREFERENCES: readonly LocalPreference[] = ['local-preferred', 'remote-ok'];
 
 /**
  * Validate a raw `HERDR_LOCAL_PREFERENCE` value.
+ *
+ * Strict by design: the retired `local-only` spelling is not accepted and is
+ * not normalised onto `local-preferred` — it resolves exactly like any other
+ * unknown value.
  *
  * @param env - Environment mapping to read (defaults to `process.env`).
  * @returns The accepted preference, or `undefined` when absent/empty/invalid.

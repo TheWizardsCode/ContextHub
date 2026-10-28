@@ -477,11 +477,12 @@ drift (WL-0MSGI7UIH008USVB).
 (WL-0MVLJTV03000KIQZ, parent WL-0MVIKRFP0005JDL8 AC4) give an agent pane a
 per-turn capacity claim against the llama-proxy:
 
-- **Request** — reads `HERDR_LOCAL_PREFERENCE` (`local-only` | `remote-ok`, set
-  by the herdr runner per spawn via `--local-preference`) on every provider
+- **Request** — reads `HERDR_LOCAL_PREFERENCE` (`local-preferred` | `remote-ok`,
+  set by the herdr runner per spawn via `--local-preference`) on every provider
   request and sets `X-Local-Preference` through `before_provider_headers`.
-  `local-only` makes the proxy refuse immediately instead of silently waiting
-  for a contended local slot; `remote-ok` lets background work go remote.
+  `local-preferred` keeps the prompt local while it fits and is deferred with a
+  retryable 429 + `Retry-After` when the local slot is contended (never a silent
+  remote fallback); `remote-ok` lets background work go remote.
 - **Response** — parses `X-Local-Route` / `X-Local-Fallback-Reason` on
   `after_provider_response` and appends one bounded JSONL line per response to
   `<cwd>/.worklog/local-route.log` (rolling, capped at 2000 entries;
@@ -490,14 +491,25 @@ per-turn capacity claim against the llama-proxy:
   with the turns it produced.
 - **Fail-open** — with no knob set (an interactive pane), no header is sent and
   no log is written; an older proxy with no route headers writes no entry; a
-  capture or write failure never throws into a turn.
+  capture or write failure never throws into a turn. An **invalid** value —
+  including the retired `local-only` — is treated exactly like an absent knob:
+  no header, no route-log line.
+
+> **`local-only` is retired** (WL-0MVSI1S5P003UAMB, following herdr
+> WL-0MVSI1RX2005O9NE). It is **not** a deprecated alias and is **not**
+> normalised onto `local-preferred`: an older herdr that still forwards
+> `HERDR_LOCAL_PREFERENCE=local-only` sends no preference header, so the proxy
+> applies its default (remote-first), and no route-log line is written.
+> Migration is a one-line setting change —
+> `downtimeLocalPreference: 'local-preferred'` (equivalently
+> `HERDR_LOCAL_PREFERENCE=local-preferred`). See `packages/herdr/README.md`.
 
 See `packages/herdr/README.md` and `docs/dev/downtime-dispatcher.md` for the
-policy knob (`downtimeLocalPreference` — default `remote-ok`, `local-only`
+policy knob (`downtimeLocalPreference` — default `remote-ok`, `local-preferred`
 opt-in) and the transport. Precedence (WL-0MVNUIW77000VYAX): an explicitly
-persisted setting > the low-priority rule (`low` → `local-only`) > the
+persisted setting > the low-priority rule (`low` → `local-preferred`) > the
 deployment default, so a low-priority dispatch arrives here with
-`HERDR_LOCAL_PREFERENCE=local-only` and its route-log line records that
+`HERDR_LOCAL_PREFERENCE=local-preferred` and its route-log line records that
 `preference`.
 
 ## Pane-Closure Reaper (WL-0MUJL1NAH0042GOS)
