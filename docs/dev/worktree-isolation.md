@@ -92,6 +92,31 @@ The same checks exist in `.githooks/pre-push`, `.githooks/post-checkout`,
 `src/commands/init.ts`, and in the canonical hook content in
 `src/doctor/hook-upgrade.ts`.
 
+## Repo-wide filesystem walks and concurrent worktree churn
+
+Implementation worktrees live *inside* the main checkout
+(`.worklog/worktrees/wl-<id>-<slug>`), so they are created and pruned while
+other tests, builds and editors are mutating the same tree. A test that walks
+the whole checkout therefore races the filesystem: a path listed by
+`readdirSync` can be gone by the time it is `stat`ed or read, and a
+hand-rolled `readdir` → `statSync` → `readFileSync` walk crashes with `ENOENT`
+on a healthy tree (WL-0MVSLXT79008D4X6 — the icons repo-wide import guard
+failing while a sibling `implement.py finish` removed its worktree).
+
+Rules for repo-wide guard tests:
+
+- Walk through `tests/helpers/repo-file-walk.ts` (`walkRepoSourceFiles`)
+rather than re-implementing the traversal. It never enters `node_modules`,
+`dist`, `.git`, `.worklog` or `coverage`, never follows symlinks, skips
+entries that vanish mid-walk (`ENOENT`/`ENOTDIR`) and rethrows any other
+error so a genuine filesystem problem still fails the guard.
+- Never assert on files that another agent may be mutating; prefer the
+reader-visitor API so the checked content and its path stay together.
+
+The walker's own contract is pinned by `tests/unit/repo-file-walk.test.ts`
+(vanishing directory, vanishing file, symlinks, exclusions, and error
+propagation).
+
 ## Tests
 
 | Behaviour | Test |
@@ -99,3 +124,5 @@ The same checks exist in `.githooks/pre-push`, `.githooks/post-checkout`,
 | Temp-worktree branch handling, target validation, hook guards, `GIT_DIR` leak | `tests/sync-worktree.test.ts` |
 | Rewrite/force-push against a real polluted remote | `tests/rewrite-and-force-push.test.ts` |
 | Sync-family layering, size ceiling and frozen barrel surface | `tests/sync/split-guard.test.ts` |
+| Race-tolerant repo-wide walker (concurrent worktree churn) | `tests/unit/repo-file-walk.test.ts` |
+| Icons repo-wide import guard (uses the walker) | `tests/unit/icons.test.ts` |
