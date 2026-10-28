@@ -824,6 +824,23 @@ Rules:
   auto-dispatch. `status_lifecycle`'s failure-exit already clears; the
   dispatch claim/rollback paths clear it on every terminal outcome
   (WL-0MV85WD400091OZ6).
+- **Surfaced to the operator (WL-0MVR8FN1D002SCIR).** An all-held dispatch
+  window used to be indistinguishable from an empty or broken backlog: the
+  refusal is silent by design, so a root whose whole window was parked
+  produced a bare `no-candidate` for hours. The Herdr worklist now reports it:
+  the header names how many window items are held and by which sentinel(s)
+  (`[held: 30 by Map]`), and a banner warns when **zero** items in the window
+  are dispatchable *solely* because of assignee holds —
+  `Assignee hold — all 30 of 30 dispatch-window item(s) held by Map; no
+  downtime dispatch possible`. The surface is **strictly read-only**: it never
+  clears, demotes or mutates an `assignee`, and it cannot change a dispatch
+  decision (the dispatched-item set is byte-identical with and without it).
+  The window classification is the SHARED helper
+  (`classifyWindowHold` / `summariseDispatchWindowHold`) that also produces the
+  coordination log's `all-window-items-held` token, so the TUI and the log can
+  never diverge — see
+  [Empty-offer & skipped-tier
+  attribution](#empty-offer--skipped-tier-attribution-wl-0mvr8f-kmu009xted).
 
 ### Success-marker lifetime (WL-0MU6UL0RJ008IHGT)
 

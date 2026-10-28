@@ -13,7 +13,11 @@ only (`wl update <id> --assignee <agent> --if-status completed --if-stage
 in_review --if-assignee ""`), so the item stays `completed`/`in_review`. A
 non-empty assignee is an intentional hold from auto-dispatch (producer sentinel
 `wl update <id> --assignee Map`; clear `--assignee ""` to release); claims
-clear the assignee on session end. See
+clear the assignee on session end. An all-held dispatch window is **surfaced
+read-only** in the Herdr worklist — a header count (`[held: N by Map]`) and an
+amber all-held warning banner — so a fully parked window is never mistaken for
+an empty or broken backlog; the surface never clears a hold and never changes a
+dispatch decision (WL-0MVR8FN1D002SCIR). See
 [docs/dev/downtime-dispatcher.md](./docs/dev/downtime-dispatcher.md) and the
 global instructions (`~/.pi/agent/AGENTS.md`).
 

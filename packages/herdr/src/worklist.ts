@@ -51,6 +51,13 @@ import {
 import { DEFAULT_DOWNTIME_POLL_INTERVAL_MS, DOWNTIME_RUN_TIMEOUT_MS, type DowntimeWorker } from './downtime-worker.js';
 import { groupRecentDispatchesByTimeBlock, recentDispatchedItems } from './downtime-log.js';
 import { buildDispatchWorkItem, mergeDispatchRow } from './dispatch-view.js';
+import { resolveSprintViewWindow } from './browse-window.js';
+import {
+  assigneeHoldBannerText,
+  assigneeHoldStatusText,
+  summariseDispatchWindowHold,
+  type DispatchWindowHoldSummary,
+} from './dispatch-window-hold.js';
 import {
   createHydratorRunner,
   createProductionHydratorDeps,
@@ -2271,6 +2278,19 @@ export function createListRenderer(getShowIcons?: () => boolean): (
   detailBlockedBy?: BlockerRef[] | null,
   /** Non-blocking background-sync status notice appended to the header (F3 — WL-0MVJV2O7H003HY9N). */
   syncNotice?: string,
+  /**
+   * Header segment naming how many dispatch-window items are held by an
+   * `assignee` (AC1, WL-0MVR8FN1D002SCIR): `[held: N by Map]`. Display-only;
+   * absent/null renders nothing.
+   */
+  assigneeHoldStatus?: string | null,
+  /**
+   * Banner copy for a dispatch window held ENTIRELY by the `assignee`
+   * scheduling hold (AC2, WL-0MVR8FN1D002SCIR). Display-only and read-only:
+   * the banner never clears a hold or changes a dispatch decision. `null`
+   * renders no banner (and consumes no chrome row).
+   */
+  assigneeHoldNotice?: string | null,
 ) => string {
   // Default to icons enabled when no getter is supplied (backwards
   // compatible — callers/tests that render without options keep icons).
@@ -2316,6 +2336,10 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     detailBlockedBy?: BlockerRef[] | null,
     /** Non-blocking background-sync status notice appended to the header (F3 — WL-0MVJV2O7H003HY9N). */
     syncNotice?: string,
+    /** Header segment for dispatch-window `assignee` holds (AC1, WL-0MVR8FN1D002SCIR). */
+    assigneeHoldStatus?: string | null,
+    /** Banner copy for an all-held dispatch window (AC2, WL-0MVR8FN1D002SCIR). */
+    assigneeHoldNotice?: string | null,
   ): string => {
     const { rows, cols } = termSize;
     // Icons are gated by the getter for the whole frame (list lines, detail
@@ -2380,6 +2404,15 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     if (downtimeStatus) {
       header += downtimeStatus;
     }
+    // ── Assignee scheduling-hold indicator (AC1 — WL-0MVR8FN1D002SCIR) ──
+    // Names how many dispatch-window items are held by a non-empty
+    // `assignee` (the producer's scheduling hold). Display-only: it never
+    // clears a hold and never changes a dispatch decision. The all-held
+    // WARNING is a banner below (AC2); this segment reports the count even
+    // when the window still has dispatchable work.
+    if (assigneeHoldStatus) {
+      header += ` ${ANSI.fg(220)}${assigneeHoldStatus}${ANSI.reset}`;
+    }
     // ── Non-blocking sync notice (F3 — WL-0MVJV2O7H003HY9N) ─────
     // A tiny, render-only status notice ("⟳ syncing… Ns") while a background
     // `wl sync` is in flight. It NEVER blocks input: it is a pure string read
@@ -2420,6 +2453,20 @@ export function createListRenderer(getShowIcons?: () => boolean): (
     }
     if (codeFreezeAmbiguous) {
       const bannerText = `⚠ Ambiguous Codefreeze marker — implement/audit dispatch disabled`;
+      const bannerLine = `${ANSI.bg(220)}${ANSI.fg(0)} ${bannerText} ${ANSI.reset}`;
+      output.push(truncateLine(bannerLine, cols));
+      bannerCount++;
+    }
+    // Assignee scheduling-hold banner (AC2 — WL-0MVR8FN1D002SCIR): a
+    // dispatch window with ZERO dispatchable items solely because every item
+    // carries a non-empty `assignee` (the producer sentinel `Map`, …). This
+    // is a display-only WARNING — the hold is intentional and is never
+    // auto-cleared; the operator just gets to tell "I parked this work on
+    // purpose" apart from "the dispatcher is broken". Consumes one chrome
+    // row so the `rows - 1` pane line-count invariant still holds
+    // (WL-0MSAAON63003N6LO).
+    if (assigneeHoldNotice) {
+      const bannerText = `⚠ ${assigneeHoldNotice}`;
       const bannerLine = `${ANSI.bg(220)}${ANSI.fg(0)} ${bannerText} ${ANSI.reset}`;
       output.push(truncateLine(bannerLine, cols));
       bannerCount++;
@@ -3813,6 +3860,31 @@ export async function runWorklistTui(
   let sprintCompletedCount = 0;
   let sprintAuditsOutstanding = false;
 
+  // ── Assignee scheduling-hold surface (WL-0MVR8FN1D002SCIR) ───────
+  // Derived from the ALREADY-FETCHED dispatch window on every refresh (no
+  // new `wl` spawn) and purely display-only: it never clears a hold and
+  // never changes a dispatch decision (AC4). `null` while a filter narrows
+  // the list — a filtered window cannot answer "is the WHOLE window held?"
+  // (fail-safe: no warning rather than a false one).
+  let assigneeHoldSummary: DispatchWindowHoldSummary | null = null;
+
+  /**
+   * Recompute the assignee-hold account from the window the worklist just
+   * rendered. Skipped for any filtered/dispatch-derived view, whose items are
+   * not the canonical dispatch window.
+   */
+  const applyAssigneeHoldState = (items: WorkItem[]): void => {
+    const filtered =
+      state.activeFilter !== null ||
+      state.activePriorityFilter !== null ||
+      state.activeDispatchFilter;
+    assigneeHoldSummary = filtered
+      ? null
+      : summariseDispatchWindowHold(items, {
+          windowSize: resolveSprintViewWindow(loadSettings().browseItemCount ?? opts.browseItemCount),
+        });
+  };
+
   /**
    * Apply a pre-fetched review-queue-depth state to the banner indicator
    * (display-only; completed+in_review root count vs browseItemCount, plus
@@ -4262,6 +4334,11 @@ export async function runWorklistTui(
         // released before the pane was (re)opened). Fail-open.
         await applyPaneMarkers(newItems);
         state.refreshItems(newItems);
+        // Refresh the assignee-hold account from the window we just fetched
+        // (WL-0MVR8FN1D002SCIR): no extra `wl` spawn, and the shared
+        // classifier keeps the TUI in step with the coordination log's
+        // `all-window-items-held` token.
+        applyAssigneeHoldState(newItems);
         // Blocked-by rows survive refreshes (WL-0MV8Q5X8U004KKAP): the
         // blocker cache is keyed by item ID and invalidated per item only
         // when its payload signature changes (status/stage/updatedAt — see
@@ -5497,6 +5574,10 @@ export async function runWorklistTui(
       metaBlockers,
       detailBlockers,
       syncNoticeText,
+      // Assignee scheduling-hold surface (AC1 header count + AC2 banner):
+      // display-only, read-only — the holds are never cleared here.
+      assigneeHoldStatusText(assigneeHoldSummary),
+      assigneeHoldBannerText(assigneeHoldSummary),
     );
 
     // Notifications are surfaced via Herdr toasts (showToast), never as a

@@ -1965,6 +1965,33 @@ above.
 The "top N of M" header reflects the **actual displayed count** (N), which
 may exceed `browseItemCount` when the mandatory set is large.
 
+### Assignee scheduling-hold surface
+
+`assignee` doubles as the **scheduling hold**: a non-empty assignee means the
+item is deliberately parked and is never auto-dispatched at any tier
+(the producer sentinel is `wl update <id> --assignee Map`; clear it with
+`--assignee ""`). The refusal used to be completely silent, so a root whose
+entire dispatch window was parked looked exactly like an empty or broken
+backlog. The worklist now surfaces it (WL-0MVR8FN1D002SCIR):
+
+- **Header count (AC1)** — while any item in the dispatch window carries a
+  non-empty assignee, the header names how many and which sentinel(s):
+  `[held: 30 by Map]`.
+- **All-held warning (AC2)** — when the window has **zero** dispatchable items
+  *solely* because of assignee holds, an amber banner reads
+  `⚠ Assignee hold — all 30 of 30 dispatch-window item(s) held by Map; no
+  downtime dispatch possible`.
+
+The banner does **not** fire when at least one item is dispatchable, when the
+window is empty, or when any item is refused by a gate other than the assignee
+hold (AC3 — that story belongs to the empty-offer attribution below). The
+account is computed from the items the worklist has already fetched (no extra
+`wl` spawn), only on the unfiltered sprint view, and is **strictly read-only**:
+it never clears, demotes or mutates an `assignee`, and the dispatched-item set
+is byte-identical with and without it (AC4). The classification shares
+`classifyWindowHold` with the coordination log's `all-window-items-held` token
+(WL-0MVR8FKMU009XTED), so the TUI and the log cannot diverge.
+
 ### Review-queue-depth footer banner
 
 When the root-only `completed`/`in_review` count reaches `browseItemCount`
