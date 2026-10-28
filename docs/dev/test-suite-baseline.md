@@ -572,6 +572,16 @@ Also:
   `beforeEach`; at load ~20 that setup alone exceeded 10 s and failed as
   `Hook timed out` in `sync-concurrent.test.ts` — a load-induced flake with
   nothing wrong with the code under test.
+- `tests/cli/entry-point-split.test.ts` runs its dispatch-parity loop through
+  a bounded pool (4 in flight, `mapConcurrent` + an async `spawn` wrapper)
+  instead of serial `spawnSync` (WL-0MVSFQ3J4004SNJ9). Parity needs one CLI
+  process per built-in command (~32); serially that cost multiplies by the
+  command count, so on a contended host (~10 s per `--help`) the serial sum
+  blew the test's fixed 300 s budget with nothing wrong in the code. The pool
+  divides the wall cost by its width (roughly 32 / 4 ≈ 8 spawns deep instead
+  of 32), and the per-test budget is now 600 s of headroom. Each child keeps
+  the same 60 s hard kill as the synchronous helper, and results are collected
+  in command order so failure messages stay precise.
 - `tests/unit/no-tsx-cli-spawn.test.ts` is the regression guard AC6 asks for:
   it fails if the bundle cannot be built (`isBundled()`) or if any test file
   outside a documented allowlist spawns the CLI through `tsx` again.
