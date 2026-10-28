@@ -474,7 +474,10 @@ prefillCapacityBudget = 0                                 when cap > 0 and inFli
   emits a distinct **`audit-tier-budget-skipped`** observation token carrying
   `freeSlots`, `capacityBudget`, `effectiveFreeSlots` and `skippedTier:
   'audit'` — the skip is never collapsed into a bare `no-candidate`
-  (WL-0MVR8FI4Q0007CGR AC5).
+  (WL-0MVR8FI4Q0007CGR AC5). The token is emitted for **both** the direct and
+  the coordination dispatch path (the leader evaluates the same raw slot
+  budget the tick admitted), see [Empty-offer & skipped-tier
+  attribution](#empty-offer--skipped-tier-attribution-wl-0mvr8f-kmu009xted).
 
 **Pacing only reduces concurrency.** It never raises the free-slot budget,
 never bypasses `slots_stale` / `slots: []` (`slots-unavailable`) or
@@ -2713,6 +2716,83 @@ absent.
  "auditBatchDepth":7,"auditBatchCap":2,"auditBatchRemaining":1,
  "at":"2026-10-20T02:00:00.000Z"}
 ```
+
+### Empty-offer & skipped-tier attribution (WL-0MVR8FKMU009XTED)
+
+A starved root must be **self-diagnosing**: "why is nothing being dispatched?"
+is answered from the log alone, without reading the dispatcher's source or
+re-running classification by hand. Two additive surfaces provide the answer.
+
+**1. The check-in records an empty-offer reason.** Every `operation:
+'checkin'` entry in `.worklog/downtime-coordination.log` that leaves
+`workItemId: null` carries a machine-readable `reason`. The entry itself
+already existed (one line per check-in), so this is **attribution on an
+existing line**, not a new line per cycle — the rolling 100-entry bound and the
+check-in cadence are unchanged.
+
+| `reason` | Meaning | Extra fields |
+|---|---|---|
+| `empty-window` | The Herdr head lookup returned no items at all. | `windowSize: 0` |
+| `all-window-items-held` | **Every** candidate was rejected solely by a non-empty `assignee` (the producer sentinel `Map`, …). | `heldAssignees` (sorted, deduplicated sentinels), `windowSize`, `dominantGate: 'assignee-hold'`, `gateCounts` |
+| `all-window-items-gated` | Candidates were rejected by other gates. | `dominantGate` (the gate that rejected the most items), `gateCounts`, `windowSize` |
+| `code-freeze` | Every rejection was the freeze split-by-skill pause. | `dominantGate`, `gateCounts` |
+| `review-queue-hold` | Every rejection was the deep review-queue hold. | `dominantGate`, `gateCounts` |
+| `attempt-budget-exhausted` | Every rejection was the per-item/per-kind attempt budget. | `dominantGate`, `gateCounts` |
+| `in-flight-hold` | Every rejection was the critical in-flight guard. | `dominantGate`, `gateCounts` |
+| `non-terminal-cooldown` | Every rejection was the non-terminal pane-close cooldown. | `dominantGate`, `gateCounts` |
+| `stalled-resume` | A stalled pane was resumed in place, so no new offer was made. | — |
+| `wl-error` | The offer computation failed; the existing entry was **kept** (fail-open). | `error`, `workItemId` (the kept offer) |
+
+The per-item gate tokens (`gateCounts` keys and `dominantGate`) are stable
+strings: `soft-deleted`, `producer-review`, `assignee-hold`,
+`not-dispatchable`, `audit-fresh`, `audit-recency`, `effort-cap`,
+`dispatched-marker`, `attempt-budget-exhausted`, `non-terminal-cooldown`,
+`code-freeze`, `cpu-saturated`, `audit-slot-min`, `review-queue-hold`,
+`in-flight-pane`, `slots-unavailable`, `wl-error`.
+
+**The result semantics are unchanged.** A fully-held window is still
+`noCandidate` (the 60-minute no-candidate cooldown behaves exactly as before,
+and the genuinely-empty-backlog path is byte-identical); only the explanation
+is added. The attribution is derived in memory from the window already read —
+no extra `wl` spawn.
+
+```json
+{"kind":"coordination","operation":"checkin","instanceId":"87558ae9",
+ "workItemId":null,"reason":"all-window-items-held","windowSize":30,
+ "heldAssignees":["Map"],"dominantGate":"assignee-hold",
+ "gateCounts":{"assignee-hold":30},"at":"2026-10-27T22:05:00.000Z"}
+```
+
+**2. The leader attributes every offer it rejects.** A coordination-mode
+decision entry whose terminal reason collapsed a rejected offer list (for
+example a bare `no-candidate`) additionally carries `offerRejections` — one
+element per rejected entry, with the entry's work item, its worklog root and
+the gate that rejected it:
+
+```json
+{"kind":"decision","operation":"no-dispatch","instanceId":"…",
+ "reason":"no-candidate","freeSlots":2,"totalSlots":2,
+ "offerRejections":[{"workItemId":"WL-ABC","worklogRoot":"/repo/a",
+                     "gate":"assignee-hold","assignee":"Map"}],
+ "at":"2026-10-27T22:06:00.000Z"}
+```
+
+`offerRejections` is evidence only: it is recorded on the **existing**
+rate-limited refusal line (an identical reason inside
+`DOWNTIME_DECISION_LOG_MIN_INTERVAL_MS` is still suppressed), and the refusal
+token / header blocking token / dispatch decision are unchanged. The
+`audit-slot-min` gate attributes an audit offer skipped by the raw slot budget;
+the tick-level `audit-tier-budget-skipped` observation (see [Prefill
+serialisation pacing](#prefill-serialisation-pacing-wl-0mvhszrzq00482qx-wl-0mvr8fi4q0007cgr))
+carries the same budgets for **both** the direct and the coordination path.
+
+**Tests.** `downtime-worker.offer-attribution.test.ts` pins the aggregation
+tokens (empty window, all-held with sentinels, dominated gate, tie-break, sole
+dedicated gate, the shared `classifyWindowHold` helper);
+`coordination-dispatch.test.ts` pins each check-in token end-to-end (including
+the `wl-error` entry-kept path and the unchanged no-candidate/entry-removal
+semantics), the leader's per-offer rejections, and that they appear on the
+terminal decision entry.
 
 ### Decision-log entries: reservation evidence (parent WL-0MVIKRFP0005JDL8 AC4, slice C2)
 

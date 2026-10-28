@@ -41,6 +41,7 @@ import type {
 } from './dispatcher-anchor.js';
 import type { DowntimeSpawnResult } from './downtime-worker.pane.js';
 import type { DowntimeAuditBatchStatus } from './downtime-worker.gates.js';
+import type { CoordinationOfferRejection } from './downtime-worker.offer-attribution.js';
 import type {
   DowntimeActiveAuditResult,
   DowntimeCandidate,
@@ -368,6 +369,14 @@ export interface DowntimeDispatchOutcome {
    * therefore stays a dispatch-sourcing signal only.
    */
   ownBacklogDispatch?: boolean;
+
+  /**
+   * Per-offer rejections (WL-0MVR8FKMU009XTED AC2): every coordination entry
+   * the leader rejected at dispatch time, with its work item id, worklog root
+   * and the STABLE gate token that rejected it. Additive evidence only — the
+   * outcome's `reason` and every dispatch decision are unchanged.
+   */
+  offerRejections?: CoordinationOfferRejection[];
 
   /**
    * Depth-aware audit-batch surface (parent WL-0MVEDM8OT007WDRS AC1/AC2/AC3).

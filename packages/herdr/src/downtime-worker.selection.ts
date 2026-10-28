@@ -86,6 +86,43 @@ export function isAssigneeHeld(
   return typeof assignee === 'string' && assignee.trim() !== '';
 }
 
+// ── Window-hold classification (WL-0MVR8FKMU009XTED / WL-0MVR8FN1D002SCIR) ──
+//
+// The SHARED classification helper the coordination-log empty-offer token and
+// the Herdr worklist surface both consume. Co-located with `isAssigneeHeld`
+// (its only primitive) so the offer-attribution module never needs a value
+// import back into the selection module (split-family import-cycle gate,
+// WL-0MVF3F9A7000HKP7).
+
+/** Distinct non-empty assignees of the given items, sorted, deduplicated. */
+export function heldAssigneesOf(
+  items: ReadonlyArray<{ assignee?: string | null }>,
+): string[] {
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (isAssigneeHeld(item)) seen.add((item.assignee ?? '').trim());
+  }
+  return [...seen].sort();
+}
+
+/**
+ * Shared classification helper: is EVERY item of a dispatch window held by a
+ * non-empty `assignee`? Returns the sentinel values observed so the caller
+ * can name them (`Map`, …) without re-deriving the buckets.
+ *
+ * An empty window is NOT "fully held" — that is `empty-window`.
+ */
+export function classifyWindowHold(
+  items: ReadonlyArray<{ assignee?: string | null }>,
+): { allHeld: boolean; heldAssignees: string[]; count: number } {
+  const count = items.length;
+  return {
+    allHeld: count > 0 && items.every((item) => isAssigneeHeld(item)),
+    heldAssignees: heldAssigneesOf(items),
+    count,
+  };
+}
+
 // ── Rotation-aware selection (WL-0MSSRED76008LGB6) ────────────────────
 
 /**

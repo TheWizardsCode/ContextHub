@@ -117,6 +117,8 @@ export {
 
 // ── Selection + parsers (WL-0MVLIHYOU000YQ0R) ─────────────────────────
 export {
+  classifyWindowHold,
+  heldAssigneesOf,
   isAssigneeHeld,
   isSoftDeleted,
   resolveDependencyFrontier,
@@ -211,7 +213,20 @@ export {
 
 // ── Coordination (WL-0MVLII1AO007TTRK) ─────────────────────────────────
 export { computeMostImportantItem, coordinationTierRank } from './downtime-worker.coordination.js';
-export { dispatchFromCoordination, runCoordinationCheckIn } from './downtime-worker.coordination-leader.js';
+export { dispatchFromCoordination } from './downtime-worker.coordination-leader.js';
+export { runCoordinationCheckIn } from './downtime-worker.coordination-checkin.js';
+export {
+  dominantGateOf,
+  isWindowFullyHeld,
+  summariseEmptyOffer,
+} from './downtime-worker.offer-attribution.js';
+export type {
+  CoordinationOfferRejection,
+  DispatchGateToken,
+  EmptyOfferAttribution,
+  EmptyOfferReason,
+  OfferRejection,
+} from './downtime-worker.offer-attribution.js';
 
 // ── Worker contract + orchestrator (WL-0MVLII2080074S5L) ──────────────
 export type { DowntimeWorker, DowntimeWorkerDeps } from './downtime-worker.worker-contract.js';

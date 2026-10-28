@@ -1213,7 +1213,14 @@ describe('stalled-work scan before new-item dispatch (WL-0MUYMBSA90092QV2)', () 
       300_000,
     );
 
-    expect(result).toEqual({ ok: true, stalledResume: true });
+    // The result union is unchanged; WL-0MVR8FKMU009XTED AC1 only ADDS the
+    // machine-readable empty-offer attribution ("a stalled pane was resumed in
+    // place, so no new offer was made").
+    expect(result).toEqual({
+      ok: true,
+      stalledResume: true,
+      attribution: { reason: 'stalled-resume', windowSize: 0 },
+    });
     expect(deps.getHerdrListHead).not.toHaveBeenCalled();
   });
 

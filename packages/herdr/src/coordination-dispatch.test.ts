@@ -39,6 +39,7 @@ import {
 } from './downtime-worker.js';
 import { createLeaderElectionManager, LEASE_FILE } from './leader-election.js';
 import { writeDowntimeLog } from './downtime-worker.fixtures.js';
+import { readCoordinationLogEntries } from './downtime-log.js';
 import { defaultSettings } from './settings.js';
 import {
   writeCoordinationFile,
@@ -87,6 +88,8 @@ function itemInfo(overrides: Partial<DowntimeItemInfo> & { id: string }): Downti
     updatedAt: overrides.updatedAt,
     sortIndex: overrides.sortIndex,
     needsProducerReview: overrides.needsProducerReview,
+    assignee: overrides.assignee,
+    deletedBy: overrides.deletedBy,
   };
 }
 
@@ -134,6 +137,8 @@ function headItem(overrides: Partial<DowntimeHerdrItem> & { id: string }): Downt
     updatedAt: overrides.updatedAt,
     sortIndex: overrides.sortIndex,
     needsProducerReview: overrides.needsProducerReview,
+    assignee: overrides.assignee,
+    deletedBy: overrides.deletedBy,
   };
 }
 
@@ -1035,6 +1040,346 @@ describe('runCoordinationCheckIn', () => {
   });
 });
 
+// ── Empty-offer attribution (WL-0MVR8FKMU009XTED AC1/AC5) ────────────
+//
+// Every emptied check-in records the machine-readable reason why nothing was
+// offered: `empty-window`, `all-window-items-held` (with the observed
+// scheduling-hold sentinels), `all-window-items-gated` (with the dominant
+// gate), and the dedicated hold tokens. The no-candidate result semantics (and
+// therefore the cooldown) are UNCHANGED — only the explanation is added.
+
+describe('runCoordinationCheckIn empty-offer attribution (WL-0MVR8FKMU009XTED)', () => {
+  /** Read the check-in entries written for this root (the writes are fire-and-forget). */
+  async function checkinEntries(root: string): Promise<Array<Record<string, unknown>>> {
+    const entries = await readCoordinationLogEntries(root);
+    return entries
+      .filter((entry) => entry.operation === 'checkin')
+      .map((entry) => entry as unknown as Record<string, unknown>);
+  }
+
+  it('AC5: a fully-held window yields all-window-items-held with the observed sentinel', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-held-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-H1', stage: 'idea', status: 'open', assignee: 'Map' }),
+            headItem({ id: 'WL-H2', stage: 'plan_complete', status: 'open', assignee: 'Map' }),
+          ],
+        }),
+      });
+      // Seed an own entry so the removal is observable.
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-H1', root)] });
+      const result = await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+      });
+      // The no-candidate semantics are unchanged: nothing is offered and the
+      // own entry is removed (the caller's cooldown decision is untouched).
+      expect(result.offered).toBe(null);
+      expect(result.updated).toBe(true);
+      expect(getEntry(testDir, 'inst-1')).toBe(null);
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied.length).toBeGreaterThan(0);
+        expect(emptied[emptied.length - 1]).toMatchObject({
+          reason: 'all-window-items-held',
+          windowSize: 2,
+          heldAssignees: ['Map'],
+          workItemId: null,
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC5: a genuinely empty window still empties the entry and records empty-window', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-empty-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: true, items: [] }),
+      });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-A', root)] });
+      const result = await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+      });
+      expect(result.updated).toBe(true);
+      expect(getEntry(testDir, 'inst-1')).toBe(null);
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({
+          reason: 'empty-window',
+          windowSize: 0,
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records all-window-items-gated with the gate that rejected the most items', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-gated-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({ id: 'WL-G1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'XL' }),
+            headItem({ id: 'WL-G2', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'XL' }),
+            headItem({ id: 'WL-G3', stage: 'idea', status: 'open', needsProducerReview: true }),
+          ],
+        }),
+      });
+      await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({
+          reason: 'all-window-items-gated',
+          windowSize: 3,
+          dominantGate: 'effort-cap',
+          gateCounts: { 'effort-cap': 2, 'producer-review': 1 },
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records the code-freeze token when every remaining offer is freeze-paused', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-freeze-'));
+    try {
+      const deps = makeCoordinationDeps({
+        readCodeFreezeStatus: vi.fn().mockReturnValue('frozen'),
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [headItem({ id: 'WL-F1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' })],
+        }),
+      });
+      await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({
+          reason: 'code-freeze',
+          dominantGate: 'code-freeze',
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records the review-queue-hold token when the deep queue is the only reason', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-review-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getReviewQueueCount: vi.fn().mockResolvedValue(99),
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [headItem({ id: 'WL-R1', stage: 'plan_complete', status: 'open', risk: 'Low', effort: 'S' })],
+        }),
+      });
+      await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+        browseItemCount: 2,
+      });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({ reason: 'review-queue-hold' });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records the attempt-budget-exhausted token when the budget is the only reason', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-budget-'));
+    try {
+      const attempts = Array.from({ length: 3 }, () => ({
+        kind: 'plan',
+        operation: 'dispatch',
+        itemId: 'WL-B1',
+        stage: 'intake_complete',
+        // Stale markers: the dispatched-marker exclusion only applies while
+        // the marker is FRESH, so an old timestamp leaves the attempt budget
+        // as the sole rejecting gate (the point of this pin).
+        dispatchedAt: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+      }));
+      writeDowntimeLog(root, attempts as never);
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [headItem({ id: 'WL-B1', stage: 'intake_complete', status: 'open' })],
+        }),
+        markNeedsProducerReview: vi.fn().mockResolvedValue(true),
+      });
+      await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+        maxAttempts: 3,
+      });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({ reason: 'attempt-budget-exhausted' });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('records the in-flight-hold token when a live pane holds the only critical item', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-inflight-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({
+          ok: true,
+          items: [
+            headItem({
+              id: 'WL-I1',
+              stage: 'plan_complete',
+              status: 'open',
+              priority: 'critical',
+              risk: 'Low',
+              effort: 'S',
+            }),
+          ],
+        }),
+        getRunningDowntimePanes: vi.fn().mockResolvedValue({
+          ok: true,
+          count: 1,
+          paneIds: ['w1:p1'],
+          records: [
+            {
+              paneId: 'w1:p1',
+              label: 'Downtime triggered implement Crit WL-I1 - WL-I1',
+              agent: 'pi',
+              agentStatus: 'working',
+            },
+          ],
+        }),
+      });
+      await runCoordinationCheckIn(deps, { cwd: root, coordinationDir: testDir, instanceId: 'inst-1' });
+      await vi.waitFor(async () => {
+        const emptied = (await checkinEntries(root)).filter((entry) => entry.workItemId === null);
+        expect(emptied[emptied.length - 1]).toMatchObject({ reason: 'in-flight-hold' });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('AC1: a wl error keeps the entry and still records the wl-error reason', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'herdr-attrib-wlerror-'));
+    try {
+      const deps = makeCoordinationDeps({
+        getHerdrListHead: vi.fn().mockResolvedValue({ ok: false, error: 'wl exploded' }),
+      });
+      writeCoordinationFile(testDir, { version: 1, entries: [makeEntry('inst-1', 'WL-KEPT', root)] });
+      const result = await runCoordinationCheckIn(deps, {
+        cwd: root,
+        coordinationDir: testDir,
+        instanceId: 'inst-1',
+      });
+      expect(result).toEqual({ offered: 'WL-KEPT', updated: false });
+      expect(getEntry(testDir, 'inst-1')?.workItemId).toBe('WL-KEPT');
+      await vi.waitFor(async () => {
+        const entries = await checkinEntries(root);
+        expect(entries[entries.length - 1]).toMatchObject({
+          reason: 'wl-error',
+          workItemId: 'WL-KEPT',
+          error: 'wl exploded',
+        });
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Leader per-offer rejection attribution (AC2) ───────────────────────
+//
+// Every coordination entry the leader rejects at dispatch time records its
+// work item, its worklog root and the gate that rejected it, so the terminal
+// reason can never collapse a starved offer list into a bare `no-candidate`.
+
+describe('dispatchFromCoordination per-offer rejection attribution (WL-0MVR8FKMU009XTED)', () => {
+  it('AC2: records every rejected offer with its root and gate; the reason is unchanged', async () => {
+    const entry = makeEntry('inst-held', 'WL-HELD', '/roots/held');
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({ id: 'WL-HELD', status: 'open', stage: 'plan_complete', assignee: 'Map' }),
+      }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+    });
+    // Additive only: the terminal reason is exactly what it was before.
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.reason).toBe('no-candidate');
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-HELD', worklogRoot: '/roots/held', gate: 'assignee-hold', assignee: 'Map' },
+    ]);
+    expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+  });
+
+  it('AC3: an audit offer skipped by the slot budget is attributed as audit-slot-min', async () => {
+    const entry = makeEntry('inst-audit', 'WL-AUD', '/roots/audit');
+    // The offer must exist in the coordination file for the "entry kept"
+    // assertion below to mean anything.
+    writeCoordinationFile(testDir, { version: 1, entries: [entry] });
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({
+          id: 'WL-AUD',
+          status: 'completed',
+          stage: 'in_review',
+          updatedAt: new Date().toISOString(),
+        }),
+      }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+      freeSlots: 1, // raw slot budget below DOWNTIME_AUDIT_MIN_FREE_SLOTS
+      effectiveFreeSlots: 1,
+    });
+    expect(outcome.dispatched).toBe(false);
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-AUD', worklogRoot: '/roots/audit', gate: 'audit-slot-min' },
+    ]);
+    // The offer is KEPT (still valid once a slot frees up).
+    expect(getEntry(testDir, 'inst-audit')).not.toBeNull();
+  });
+
+  it('AC2: a per-entry fetch failure is attributed as wl-error with its root', async () => {
+    const entry = makeEntry('inst-broken', 'WL-BROKEN', '/roots/broken');
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({ ok: false, error: 'wl timeout' }),
+    });
+    const outcome = await dispatchFromCoordination(deps, [entry], {
+      model: 'plan',
+      cwd: '/repo',
+      coordinationDir: testDir,
+    });
+    expect(outcome.reason).toBe('wl-error');
+    expect(outcome.offerRejections).toEqual([
+      { workItemId: 'WL-BROKEN', worklogRoot: '/roots/broken', gate: 'wl-error' },
+    ]);
+  });
+});
+
 // ── Worker integration: leader vs non-leader (AC4) ────────────────────
 
 function makeStatusPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -1170,6 +1515,53 @@ describe('downtime worker leader/non-leader orchestration (coordination mode)', 
     const a = makeCoordWorker({ coordinationDir: testDir, instanceId: 'inst-a' });
     await a.worker.tick();
     expect(a.worker.isLeader).toBe(true);
+  });
+
+  it('AC2: the terminal decision records each rejected offer with its root and gate', async () => {
+    // A peer offer held by the producer sentinel: the leader rejects it at
+    // dispatch time. The decision log must name the offer and the gate
+    // instead of collapsing it into a bare `no-candidate`.
+    writeCoordinationFile(testDir, {
+      version: 1,
+      entries: [makeEntry('inst-peer', 'WL-HELD', '/roots/held')],
+    });
+    const recordDecision = vi.fn().mockResolvedValue(undefined);
+    const deps = makeCoordinationDeps({
+      fetchItem: vi.fn().mockResolvedValue({
+        ok: true,
+        info: itemInfo({ id: 'WL-HELD', status: 'open', stage: 'plan_complete', assignee: 'Map' }),
+      }),
+      recordDecision,
+    });
+    const { worker } = makeCoordWorker({
+      coordinationDir: testDir,
+      instanceId: 'inst-a',
+      depsOverrides: deps,
+    });
+    vi.useFakeTimers();
+    vi.setSystemTime(10_000_000);
+    try {
+      await worker.tick(); // election + first check-in (own head empty)
+      await worker.tick(); // idle run starts
+      vi.setSystemTime(10_000_000 + 60_001);
+      await worker.tick(); // idle threshold met → dispatch attempt
+      const terminal = recordDecision.mock.calls
+        .map((call) => call[0] as Record<string, unknown>)
+        .filter((entry) => entry.operation === 'no-dispatch')
+        .find((entry) => entry.reason === 'no-candidate');
+      expect(terminal).toBeDefined();
+      expect(terminal?.offerRejections).toEqual([
+        {
+          workItemId: 'WL-HELD',
+          worklogRoot: '/roots/held',
+          gate: 'assignee-hold',
+          assignee: 'Map',
+        },
+      ]);
+      expect(deps.spawnAgentPane).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('non-leader instances perform the first check-in but never dispatch', async () => {

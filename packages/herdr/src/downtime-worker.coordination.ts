@@ -33,7 +33,7 @@ import { selectCriticalFirstCandidates } from './downtime-worker.dispatch-filter
 import type { DowntimeDispatchDeps } from './downtime-worker.dispatch-contract.js';
 import {
   REVIEW_QUEUE_HOLD_REASON,
-  classifyItemForDispatch,
+  classifyItemForDispatchDetail,
   evaluateCriticalFirstGuard,
   fetchExtendedHerdrItems,
   flagBudgetExhausted,
@@ -50,6 +50,12 @@ import {
   readDowntimeLogEntries as _readDowntimeEntries,
   type DispatchMarker,
 } from './downtime-log.js';
+import {
+  summariseEmptyOffer,
+  type EmptyOfferAttribution,
+  type EmptyOfferReason,
+  type OfferRejection,
+} from './downtime-worker.offer-attribution.js';
 import { resolveInFlightPanes } from './downtime-worker.pane.js';
 import { resumeStalledWorkIfAble } from './downtime-worker.stalled-resume.js';
 import type {
@@ -184,7 +190,13 @@ export async function computeMostImportantItem(
       maxAttempts,
       now,
     });
-    if (resumed) return { ok: true, stalledResume: true };
+    if (resumed) {
+      return {
+        ok: true,
+        stalledResume: true,
+        attribution: { reason: 'stalled-resume', windowSize: 0 },
+      };
+    }
   }
 
   // The dispatch window is the sprint view: the live per-root
@@ -195,7 +207,28 @@ export async function computeMostImportantItem(
 
   const head = await deps.getHerdrListHead(cwd, sprintWindow);
   if (!head.ok) return { ok: false, error: head.error }; // CLI error — fail-open (entry kept)
-  if (head.items.length === 0) return { ok: true, noCandidate: true };
+  if (head.items.length === 0) {
+    // Genuine empty window (WL-0MVR8FKMU009XTED AC1): keep the existing
+    // `noCandidate` semantics (the caller's cooldown must not change) and
+    // record WHY the offer was empty.
+    return { ok: true, noCandidate: true, attribution: summariseEmptyOffer({ windowSize: 0, rejections: [] }) };
+  }
+
+  // Per-candidate rejection attribution (WL-0MVR8FKMU009XTED AC1): every
+  // refusal below records the STABLE gate token that produced it, in canonical
+  // window order. First gate wins per item (the authoritative sequential
+  // filter order), so the map is exactly "why each item was not offered".
+  // Derived in memory from the head already read — no extra `wl` spawn.
+  const rejections = new Map<string, OfferRejection>();
+  const reject = (item: DowntimeHerdrItem, gate: OfferRejection['gate']): void => {
+    if (rejections.has(item.id)) return;
+    const assignee = typeof item.assignee === 'string' ? item.assignee.trim() : '';
+    rejections.set(item.id, {
+      itemId: item.id,
+      gate,
+      ...(gate === 'assignee-hold' && assignee.length > 0 ? { assignee } : {}),
+    });
+  };
 
   // Dispatched-marker exclusion (mirrors dispatchFromHerdrList): read the
   // shared rolling dispatch log for THIS worklog root so an item already
@@ -306,8 +339,13 @@ export async function computeMostImportantItem(
     items: DowntimeHerdrItem[],
   ): Promise<{ ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate } | null> => {
     for (const item of items) {
-      const k = classifyItemForDispatch(item, now);
-      if (k === null) continue; // review-gate + freshness/recency + caps
+      const classification = classifyItemForDispatchDetail(item, now);
+      if (classification.kind === null) {
+        // review-gate + freshness/recency + caps — record WHICH gate.
+        reject(item, classification.gate);
+        continue;
+      }
+      const k = classification.kind;
       // Dispatched-marker exclusion per kind, staleness-aware
       // (WL-0MU6UL0RJ008IHGT): exclude only while the item is STILL at the
       // marker's dispatched-at stage AND the marker is fresh; a stale marker
@@ -325,6 +363,7 @@ export async function computeMostImportantItem(
           k === 'audit' || k === 'implement' ? 'id-guard' : 'stage-guard',
         )
       ) {
+        reject(item, 'dispatched-marker');
         continue;
       }
       // Per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK AC1/AC2/AC3):
@@ -336,23 +375,29 @@ export async function computeMostImportantItem(
           await flagBudgetExhausted(deps, item.id, cwd);
         }
         heldByBudget = true;
+        reject(item, 'attempt-budget-exhausted');
         continue;
       }
       // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
       // sequential filter (same placement as the dispatch path).
       if (_isNonTerminalCooldownActive(entries, item.id, k, item.stage, nonTerminalCooldownMs, now)) {
         heldByCooldown = true;
+        reject(item, 'non-terminal-cooldown');
         continue;
       }
       // Code-freeze split-by-skill: audit+implement+risk-effort offers pause
       // during a freeze/ambiguous marker (plan/intake still offer).
-      if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) continue;
+      if (frozen && (k === 'audit' || k === 'implement' || k === 'risk-effort')) {
+        reject(item, 'code-freeze');
+        continue;
+      }
       // In-flight guard (F4): never offer a CRITICAL item with a live working
       // pane — the same item-scoped decision table as the dispatch path.
       if (item.priority === 'critical') {
         const guard = evaluateCriticalFirstGuard(item.id, inFlight, marker?.dispatchedAt, now, markerStaleWindowMs);
         if (!guard.escalate) {
           heldByInFlight = true;
+          reject(item, 'in-flight-pane');
           continue;
         }
       }
@@ -364,6 +409,7 @@ export async function computeMostImportantItem(
         const gate = await reviewGateForQueue();
         if (isImplementHeldByReviewGate(k, item, gate)) {
           heldByReviewQueue = true;
+          reject(item, 'review-queue-hold');
           continue;
         }
       }
@@ -403,13 +449,23 @@ export async function computeMostImportantItem(
   // `reviewQueueHold` result — the backlog is NOT empty, so the caller
   // must not treat this as a genuine no-candidate (no cooldown; polling
   // resumes immediately when the queue drains below the threshold).
+  // Attribution for the empty offer (WL-0MVR8FKMU009XTED AC1). The RESULT
+  // union is unchanged — a fully-held window is still `noCandidate` (the
+  // no-candidate cooldown semantics must not change) — only the explanation
+  // is added. A dedicated hold reason overrides the aggregate, because the
+  // union already publishes that token.
+  const windowSize = head.items.length + extendedItems.length;
+  const attribute = (reason?: EmptyOfferReason): EmptyOfferAttribution => {
+    const summary = summariseEmptyOffer({ windowSize, rejections: [...rejections.values()] });
+    return reason === undefined ? summary : { ...summary, reason };
+  };
   return heldByReviewQueue
-    ? { ok: true, reviewQueueHold: true }
+    ? { ok: true, reviewQueueHold: true, attribution: attribute('review-queue-hold') }
     : heldByCooldown
-      ? { ok: true, nonTerminalCooldownHold: true }
+      ? { ok: true, nonTerminalCooldownHold: true, attribution: attribute('non-terminal-cooldown') }
       : heldByBudget
-        ? { ok: true, attemptBudgetHold: true }
+        ? { ok: true, attemptBudgetHold: true, attribution: attribute('attempt-budget-exhausted') }
         : heldByInFlight
-          ? { ok: true, inFlightHold: true }
-          : { ok: true, noCandidate: true };
+          ? { ok: true, inFlightHold: true, attribution: attribute('in-flight-hold') }
+          : { ok: true, noCandidate: true, attribution: attribute() };
 }

@@ -18,11 +18,21 @@
  */
 
 import { resolveSprintViewWindow } from './browse-window.js';
-import { getEntry, removeEntry, upsertEntry, type CoordinationEntry } from './coordination.js';
-import { appendCoordinationLogEntry, type DowntimeLogEntry } from './downtime-log.js';
+import { removeEntry, type CoordinationEntry } from './coordination.js';
+import type { DowntimeLogEntry } from './downtime-log.js';
 import { selectLeastRecentlyServed } from './downtime-round-robin-by-root.js';
 import { clampDowntimeAuditBatchMax } from './downtime-worker.clamps.js';
+import {
+  createCoordinationBatchRuntime,
+  readOwnHeadWindow,
+  type CoordinationBatchRuntime,
+} from './downtime-worker.coordination-batch.js';
 import { computeMostImportantItem, toCoordinationCandidate, type CoordinationDeps } from './downtime-worker.coordination.js';
+import {
+  withOfferRejections,
+  type CoordinationOfferRejection,
+  type DispatchGateToken,
+} from './downtime-worker.offer-attribution.js';
 import {
   DEFAULT_DOWNTIME_AUDIT_BATCH_MAX,
   DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS,
@@ -45,6 +55,7 @@ import {
 import {
   REVIEW_QUEUE_HOLD_REASON,
   classifyItemForDispatch,
+  classifyItemForDispatchDetail,
   computeAuditEligibleDepth,
   evaluateCriticalFirstGuard,
   fetchExtendedHerdrItems,
@@ -189,70 +200,6 @@ export async function dispatchFromCoordination(
     auditBatchContinuation: true,
     ownBacklogDispatch: finalized.dispatched && batchEnded,
   };
-}
-
-/**
- * Batch runtime shared between the coordination dispatcher and its finalizer
- * (WL-0MVFE1DD8000D8T2 AC4): memoises the leader's own audit-eligible depth so
- * one invocation reads the own Herdr head at most once, whether the read came
- * from the continuation scan or from the outcome finalizer.
- */
-interface CoordinationBatchRuntime {
-  /** Memoised audit-eligible depth over the leader's own head + window extension. */
-  readDepth(): Promise<number>;
-  /** Record a depth already computed from a window this invocation read. */
-  setDepth(depth: number): void;
-}
-
-function createCoordinationBatchRuntime(
-  deps: CoordinationLeaderDeps,
-  opts: { cwd: string; browseItemCount?: number },
-  now: number,
-): CoordinationBatchRuntime {
-  let depth: number | null = null;
-  let pending: Promise<number> | null = null;
-  return {
-    setDepth(value: number): void {
-      depth = value;
-    },
-    async readDepth(): Promise<number> {
-      if (depth !== null) return depth;
-      pending ??= (async () => {
-        const window = await readOwnHeadWindow(deps, opts.cwd, opts.browseItemCount);
-        return window === null
-          ? 0
-          : computeAuditEligibleDepth([...window.head, ...window.tail], now);
-      })();
-      depth = await pending;
-      return depth;
-    },
-  };
-}
-
-/**
- * The leader's own dispatch window (WL-0MVFE1DD8000D8T2 AC4): the canonical
- * ranking head windowed to the live sprint view, plus the bounded window
- * EXTENSION (`fetchExtendedHerdrItems`, never a second ranking). Fail-open:
- * a `{ok:false}`/thrown lookup resolves `null` — the caller then falls back to
- * its unchanged behaviour or to a depth of 0 (no batch armed).
- */
-async function readOwnHeadWindow(
-  deps: CoordinationLeaderDeps,
-  cwd: string,
-  browseItemCount?: number,
-): Promise<{ head: DowntimeHerdrItem[]; tail: DowntimeHerdrItem[] } | null> {
-  const sprintWindow = resolveSprintViewWindow(browseItemCount);
-  let ownHead: DowntimeHerdrListResult | null = null;
-  try {
-    ownHead = await deps.getHerdrListHead(cwd, sprintWindow);
-  } catch {
-    ownHead = null;
-  }
-  if (ownHead === null || !ownHead.ok) return null;
-  const tail = await fetchExtendedHerdrItems(deps, cwd, ownHead.items, {
-    includeNonCritical: true,
-  });
-  return { head: ownHead.items, tail };
 }
 
 /**
@@ -455,6 +402,36 @@ async function dispatchFromCoordinationGated(
   const cpuEvidence = hostCpuGateEvidence(cpuGate);
   let cpuHold = false;
 
+  // Per-offer rejection attribution (WL-0MVR8FKMU009XTED AC2): every entry
+  // rejected at dispatch time records its id, root and the STABLE gate token,
+  // so the terminal reason can never collapse them into a bare
+  // `no-candidate`. Derived from the entries snapshot already read.
+  const offerRejections: CoordinationOfferRejection[] = [];
+  const rejectOffer = (
+    entry: CoordinationEntry,
+    worklogRoot: string,
+    gate: DispatchGateToken,
+    assignee?: string,
+  ): void => {
+    offerRejections.push({
+      workItemId: entry.workItemId,
+      worklogRoot,
+      gate,
+      ...(assignee !== undefined && assignee.trim().length > 0 ? { assignee: assignee.trim() } : {}),
+    });
+  };
+  const rejectedOffers = (
+    list: CoordinationEntry[],
+    gate: DispatchGateToken,
+  ): CoordinationOfferRejection[] =>
+    list
+      .filter((entry) => entry.workItemId.length > 0)
+      .map((entry) => ({
+        workItemId: entry.workItemId,
+        worklogRoot: entry.worklogRoot ?? entry.directory,
+        gate,
+      }));
+
   // No wall-clock prune (WL-0MTMPIQBE001J41P) — entries persist until
   // dispatch-time eligibility check (fetchItem+classify) finds them
   // non-dispatchable. Stale offers are dropped at dispatch, never by age.
@@ -476,7 +453,10 @@ async function dispatchFromCoordinationGated(
   if (!panesEligible) {
     // No slot can host a pane — nothing to dispatch (mirrors the legacy
     // tier chain's 0-free-slots defensive no-candidate).
-    return { dispatched: false, reason: 'no-candidate' };
+    return withOfferRejections(
+      { dispatched: false, reason: 'no-candidate' },
+      rejectedOffers(entries, 'slots-unavailable'),
+    );
   }
 
   // ── Stalled-work scan (WL-0MUYMBSA90092QV2 AC1/AC3/AC4) ──
@@ -635,14 +615,17 @@ async function dispatchFromCoordinationGated(
       fetchFailures += 1;
       lastFetchError = (result as { error?: string }).error ?? 'fetchItem failed';
       lastEntryWorkItemId = entry.workItemId; // WL-0MTJPYM53003ORCV
+      rejectOffer(entry, worklogRoot, 'wl-error');
       continue;
     }
     // Sequential FILTERS on the offer (never a ranking).
     // Producer-review gate (parent WL-0MTIAL65N004T22F AC3) + dispatch-
     // time eligibility (WL-0MTMPIQBE001J41P): a now-gated or otherwise
     // non-dispatchable offer is stale — remove it, no pane, no marker.
-    const kind = classifyItemForDispatch(result.info, now);
+    const classification = classifyItemForDispatchDetail(result.info, now);
+    const kind = classification.kind;
     if (kind === null) {
+      rejectOffer(entry, worklogRoot, classification.gate, result.info.assignee ?? undefined);
       removeEntry(opts.coordinationDir, entry.instanceId);
       continue;
     }
@@ -656,6 +639,7 @@ async function dispatchFromCoordinationGated(
         await flagBudgetExhausted(deps, result.info.id, worklogRoot);
       }
       budgetHold = true;
+      rejectOffer(entry, worklogRoot, 'attempt-budget-exhausted');
       continue;
     }
     // Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): neutral
@@ -673,6 +657,7 @@ async function dispatchFromCoordinationGated(
       )
     ) {
       cooldownHold = true;
+      rejectOffer(entry, worklogRoot, 'non-terminal-cooldown');
       continue;
     }
     // Code-freeze split-by-skill: audit/implement/risk-effort offers pause
@@ -680,6 +665,7 @@ async function dispatchFromCoordinationGated(
     // offer is stale for the dispatch window — drop it so the owner re-offers
     // its next head at the next check-in.
     if (frozen && (kind === 'audit' || kind === 'implement' || kind === 'risk-effort')) {
+      rejectOffer(entry, worklogRoot, 'code-freeze');
       removeEntry(opts.coordinationDir, entry.instanceId);
       continue;
     }
@@ -691,13 +677,20 @@ async function dispatchFromCoordinationGated(
     // reports `code-freeze` (AC4 precedence).
     if (cpuSaturated && (kind === 'audit' || kind === 'implement')) {
       cpuHold = true;
+      rejectOffer(entry, worklogRoot, 'cpu-saturated');
       continue;
     }
     // Audit-tier slot minimum: an audit pane needs a second slot for its
     // Phase 2 child (WL-0MSORQ1RG005DGUS / WL-0MT32F90V008UAD2 AC3) — skip
     // the offer this cycle when too few slots are free, but KEEP it (it is
     // still a valid offer; the next cycle may have the slot).
-    if (kind === 'audit' && !auditEligible) continue;
+    if (kind === 'audit' && !auditEligible) {
+      // Budget precondition (AC3): the tick records the
+      // `audit-tier-budget-skipped` observation for this same raw slot
+      // budget; here we only attribute the rejected offer.
+      rejectOffer(entry, worklogRoot, 'audit-slot-min');
+      continue;
+    }
     // Review-queue depth gate (WL-0MT2UQWOR007CYY9, live-path rewire by
     // WL-0MTTSWC1X005P4VD): hold a NON-CRITICAL implement offer while ITS
     // OWN root's review queue is deep. Audits (the queue drain), plan,
@@ -710,6 +703,7 @@ async function dispatchFromCoordinationGated(
       const gate = await reviewGateForRoot(worklogRoot);
       if (isImplementHeldByReviewGate(kind, result.info, gate)) {
         reviewHold = true;
+        rejectOffer(entry, worklogRoot, 'review-queue-hold');
         continue;
       }
     }
@@ -722,6 +716,7 @@ async function dispatchFromCoordinationGated(
       const inFlight = await inFlightForRoot(worklogRoot);
       if (inFlight.available && inFlight.itemIds.has(result.info.id)) {
         inFlightHold = true;
+        rejectOffer(entry, worklogRoot, 'in-flight-pane');
         continue;
       }
     }
@@ -791,12 +786,15 @@ async function dispatchFromCoordinationGated(
   // failures are tolerated (fail-open). Carry the last entry's workItemId
   // for per-strike logging (WL-0MTJPYM53003ORCV).
   if (fetchAttempts > 0 && fetchFailures === fetchAttempts) {
-    return {
-      dispatched: false,
-      reason: 'wl-error',
-      error: lastFetchError ?? 'all fetchItem lookups failed',
-      workItemId: lastEntryWorkItemId,
-    };
+    return withOfferRejections(
+      {
+        dispatched: false,
+        reason: 'wl-error',
+        error: lastFetchError ?? 'all fetchItem lookups failed',
+        workItemId: lastEntryWorkItemId,
+      },
+      offerRejections,
+    );
   }
 
   // ── Own-backlog fallback (parent WL-0MUU4XFU90008E24 AC1–AC9) ──────
@@ -896,7 +894,7 @@ async function dispatchFromCoordinationGated(
   // while audits are draining the queue; the gate may lift at any moment).
   // A hold reported by the own-head scan (fallback or batch continuation) is
   // folded in here so a filtered own-head backlog keeps its neutral reason.
-  return frozen
+  const terminal: DowntimeDispatchOutcome = frozen
     ? { dispatched: false, reason: 'code-freeze' }
     : cpuHold || ownHeadHolds.cpu
       ? { ...cpuEvidence, dispatched: false, reason: CPU_SATURATED_REASON }
@@ -909,90 +907,5 @@ async function dispatchFromCoordinationGated(
             : inFlightHold || ownHeadHolds.inFlight
             ? { dispatched: false, reason: 'in-flight-pane' }
             : { dispatched: false, reason: 'no-candidate' };
-}
-
-/**
- * One coordination check-in (WL-0MTMPSCL8000O45H — default every 5 min,
- * parent AC3): recompute this instance's most-important item and upsert
- * its entry in the shared coordination file. When the instance has NOTHING
- * dispatchable (genuine empty backlog, no CLI errors) the own entry is
- * removed — the leader must not float a dead offer; the owner re-offers
- * when work appears (immediately on next tick after dispatch removes it —
- * WL-0MTMPSCL8000O45H AC2). On a CLI-error computation the existing entry
- * is kept (fail-open) — a transient wl failure must never drop a valid
- * offer. Returns the stored item id (or null when nothing was offered).
- */
-export async function runCoordinationCheckIn(
-  deps: CoordinationLeaderDeps,
-  coordinator: {
-    cwd: string;
-    coordinationDir: string;
-    instanceId: string;
-    /** browseItemCount threshold for the review-queue depth gate (defaults to DEFAULT_BROWSE_ITEM_COUNT). */
-    browseItemCount?: number;
-    /** Dispatched success-marker staleness window (WL-0MU6UL0RJ008IHGT); defaults to DEFAULT_DOWNTIME_MARKER_STALE_WINDOW_MS. */
-    markerStaleWindowMs?: number;
-    /** Non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5); defaults to DEFAULT_DOWNTIME_NON_TERMINAL_COOLDOWN_MS. */
-    nonTerminalCooldownMs?: number;
-    /** Per-item/per-kind dispatch-attempt cap (WL-0MUKYEXMK0033MFK); defaults to DEFAULT_DOWNTIME_MAX_ATTEMPTS. */
-    maxAttempts?: number;
-  },
-  now: number = Date.now(),
-): Promise<{ offered: string | null; updated: boolean }> {
-  const current = getEntry(coordinator.coordinationDir, coordinator.instanceId);
-  // NOTE (WL-0MUYMBSA90092QV2 AC3): the check-in is NOT idle-gated (it runs
-  // before the proxy poll, for leader and non-leader alike), so the
-  // stalled-work scan is deliberately DISABLED here — resuming a pane is a
-  // dispatch-like side effect that must only run when the dispatcher is
-  // idle-gated and would otherwise dispatch. The idle-gated paths
-  // (`dispatchDowntimeWork` / `dispatchFromCoordination` / the no-candidate
-  // probe below) perform the scan+resume.
-  const result = await computeMostImportantItem(deps, coordinator.cwd, now, coordinator.browseItemCount, coordinator.markerStaleWindowMs, coordinator.nonTerminalCooldownMs, coordinator.maxAttempts, false);
-  if (!result.ok) {
-    // wl/CLI errors — keep the existing entry (fail-open), retry next check-in.
-    return { offered: current?.workItemId ?? null, updated: false };
-  }
-  if (!('candidate' in result)) {
-    // Genuinely nothing dispatchable (`noCandidate`), the deep-queue hold
-    // left nothing offerable (`reviewQueueHold`, WL-0MTTSWC1X005P4VD), or a
-    // stalled pane was resumed in place (`stalledResume`,
-    // WL-0MUYMBSA90092QV2) — either way the own entry is removed (no dead
-    // offers; the owner re-offers once work becomes offerable). The caller
-    // distinguishes the reasons via the probe path (reviewQueueHold and
-    // stalledResume must never pause).
-    const removed = removeEntry(coordinator.coordinationDir, coordinator.instanceId) !== null;
-    // Audit trail (WL-0MSXHAE290067VAL): log the emptied check-in.
-    void appendCoordinationLogEntry(coordinator.cwd, {
-      kind: 'coordination',
-      operation: 'checkin',
-      instanceId: coordinator.instanceId,
-      workItemId: null,
-      at: new Date(now).toISOString(),
-    });
-    return { offered: null, updated: removed };
-  }
-  if (!('candidate' in result) || result.candidate === undefined) {
-    // Defensive: a malformed result (stub/regression) keeps the entry.
-    return { offered: current?.workItemId ?? null, updated: false };
-  }
-  const entry: CoordinationEntry = {
-    instanceId: coordinator.instanceId,
-    workItemId: result.candidate.id,
-    directory: coordinator.cwd,
-    assignedAt: current?.assignedAt ?? new Date(now).toISOString(),
-    lastUpdated: new Date(now).toISOString(),
-  };
-  const updated = upsertEntry(coordinator.coordinationDir, entry);
-  // Audit trail (WL-0MSXHAE290067VAL): log the offered item on every
-  // successful check-in write.
-  if (updated) {
-    void appendCoordinationLogEntry(coordinator.cwd, {
-      kind: 'coordination',
-      operation: 'checkin',
-      instanceId: coordinator.instanceId,
-      workItemId: entry.workItemId,
-      at: new Date(now).toISOString(),
-    });
-  }
-  return { offered: entry.workItemId, updated };
+  return withOfferRejections(terminal, offerRejections);
 }

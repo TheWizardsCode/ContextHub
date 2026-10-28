@@ -25,7 +25,7 @@ import { appendCoordinationLogEntry } from './downtime-log.js';
 import { DEFAULT_DOWNTIME_CAPACITY_STARVATION_ALERT_MS } from './capacity-starvation.js';
 import { disableMarkerExists } from './downtime-disable-marker.js';
 import { cleanupStaleElection } from './leader-election.js';
-import { runCoordinationCheckIn } from './downtime-worker.coordination-leader.js';
+import { runCoordinationCheckIn } from './downtime-worker.coordination-checkin.js';
 import {
   countFreeUnownedSlots,
   evaluateIdle,
@@ -665,6 +665,9 @@ export async function runOrchestratorTick(
   // below it the audit tier was skipped this tick — record a distinct
   // NON-blocking observation (never collapsed into `no-candidate`) carrying
   // the three budgets and the skipped tier. The rate limiter bounds repeats.
+  // AC3 (WL-0MVR8FKMU009XTED): the tick-level check covers BOTH the direct
+  // and the coordination path (the leader evaluates the same raw slot budget
+  // the tick admitted), so a leader-skipped audit tier is never silent.
   if (admitted.freeSlots < DOWNTIME_AUDIT_MIN_FREE_SLOTS) {
     void recordDecision(
       ctx,

@@ -14,6 +14,7 @@
  */
 
 import type { ModelCooldownEntry } from '@worklog/shared/model-cooldown';
+import type { EmptyOfferAttribution } from './downtime-worker.offer-attribution.js';
 import type { HerdrAgentSession } from './pane-close-herdr.js';
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -723,17 +724,23 @@ export type DowntimeItemResult =
  */
 export type MostImportantItemResult =
   | { ok: true; kind: DowntimeSkillKind; candidate: DowntimeCandidate }
-  | { ok: true; noCandidate: true }
+  /**
+   * `attribution` (WL-0MVR8FKMU009XTED AC1) names WHY nothing was offered —
+   * `empty-window` / `all-window-items-held` (+ sentinels) /
+   * `all-window-items-gated` (+ dominant gate). Additive: the discriminants
+   * (and therefore every dispatch decision and cooldown) are unchanged.
+   */
+  | { ok: true; noCandidate: true; attribution?: EmptyOfferAttribution }
   /** Deep review queue + only held non-critical implements remain: nothing offerable NOW, but the backlog is NOT empty — the caller must not pause (WL-0MTTSWC1X005P4VD AC2). */
-  | { ok: true; reviewQueueHold: true }
+  | { ok: true; reviewQueueHold: true; attribution?: EmptyOfferAttribution }
   /** Every remaining offerable candidate is a critical item already in flight (live working pane): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry (WL-0MUBVKYH5009CGBI / F4). */
-  | { ok: true; inFlightHold: true }
+  | { ok: true; inFlightHold: true; attribution?: EmptyOfferAttribution }
   /** The only remaining offerable candidates are held by the non-terminal pane-close cooldown (WL-0MUKYERLZ006ELL5): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
-  | { ok: true; nonTerminalCooldownHold: true }
+  | { ok: true; nonTerminalCooldownHold: true; attribution?: EmptyOfferAttribution }
   /** The only remaining offerable candidates have exhausted their per-item/per-kind attempt budget (WL-0MUKYEXMK0033MFK): nothing offerable NOW, but the backlog is NOT empty — the caller must not pause or drop the entry. */
-  | { ok: true; attemptBudgetHold: true }
+  | { ok: true; attemptBudgetHold: true; attribution?: EmptyOfferAttribution }
   /** A stalled pane was resumed in place this cycle (WL-0MUYMBSA90092QV2): the instance must NOT offer new work — the resumed pane is the preferred work. Neutral: not an error, not a CLI strike, not a no-candidate cooldown. */
-  | { ok: true; stalledResume: true }
+  | { ok: true; stalledResume: true; attribution?: EmptyOfferAttribution }
   | { ok: false; error?: string };
 /**
  * Expected state for the pre-dispatch claim (compare-and-swap, RCA

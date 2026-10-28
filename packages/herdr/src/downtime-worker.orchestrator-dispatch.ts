@@ -732,6 +732,7 @@ export async function performDispatch(
           // The proxy's own refusal reason (open vocabulary), preserved
           // for diagnosis alongside the grouped entry reason.
           ...(reservationRefused ? { reservationReason: outcome.reason } : {}),
+          ...(outcome.offerRejections !== undefined ? { offerRejections: outcome.offerRejections } : {}),
           // Reservation evidence (parent WL-0MVIKRFP0005JDL8 AC2/AC4,
           // slice C2): a refusal carries its reason as the decision reason
           // (distinct header token) plus `admit: false`, `retryAfterS` and

@@ -267,6 +267,18 @@ export interface DecisionEntryFields extends CapacityEvidence {
   capacityBudget?: number;
   effectiveFreeSlots?: number;
   skippedTier?: string;
+  /**
+   * Per-offer dispatch-time rejections (WL-0MVR8FKMU009XTED AC2): present on a
+   * coordination-mode refusal that rejected one or more offers, so each
+   * rejected entry's work item, worklog root and gate are recoverable from the
+   * decision log alone. Absent when the refusal came from another path.
+   */
+  offerRejections?: Array<{
+    workItemId: string;
+    worklogRoot: string;
+    gate: string;
+    assignee?: string;
+  }>;
 }
 export function capacityEvidence(
   status: LlamaStatus,

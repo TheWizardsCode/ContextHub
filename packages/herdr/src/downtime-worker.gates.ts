@@ -48,6 +48,7 @@ import {
   isSoftDeleted,
   riskOrdinal,
 } from './downtime-worker.selection.js';
+import type { ClassifyGateToken } from './downtime-worker.offer-attribution.js';
 import type {
   CriticalFirstGuardDecision,
   DowntimeClaimExpected,
@@ -490,52 +491,72 @@ export function classifyItemForDispatch(
   info: DowntimeItemInfo,
   now: number = Date.now(),
 ): DowntimeSkillKind | null {
+  return classifyItemForDispatchDetail(info, now).kind;
+}
+
+/**
+ * The attributed form of {@link classifyItemForDispatch}
+ * (WL-0MVR8FKMU009XTED AC1): the same classification, plus the STABLE gate
+ * token when the item is not dispatchable. The wrapper above keeps the
+ * published classifier contract byte-identical — every existing caller and
+ * test sees the same `DowntimeSkillKind | null` — while the offer computation
+ * uses this form to explain an empty window (`all-window-items-held`,
+ * `all-window-items-gated`) without a second classification pass.
+ */
+export function classifyItemForDispatchDetail(
+  info: DowntimeItemInfo,
+  now: number = Date.now(),
+): { kind: DowntimeSkillKind; gate?: undefined } | { kind: null; gate: ClassifyGateToken } {
   // Exclude soft-deleted items (SA-0MUJBLZC60085DI9 AC3): a non-empty
   // `deletedBy` is the authoritative deletion marker — the item must never
   // be dispatched, even if its status/stage would otherwise qualify.
-  if (isSoftDeleted(info)) return null;
+  if (isSoftDeleted(info)) return { kind: null, gate: 'soft-deleted' };
   // Exclude items needing producer review (parent WL-0MTIAL65N004T22F AC1).
   // Items flagged for producer review must NOT be auto-dispatched at any tier.
-  if (info.needsProducerReview === true) return null;
+  if (info.needsProducerReview === true) return { kind: null, gate: 'producer-review' };
   // Assignee hold (WL-0MV85WCJJ0087VMP): an item held by a non-empty
   // assignee is never auto-dispatched at any tier. Assigning an item to a
   // human/agent (e.g. the producer) makes it non-dispatchable, and the
   // audit-tier claim's `--if-assignee ""` CAS would fail stale anyway.
-  if (isAssigneeHeld(info)) return null;
+  if (isAssigneeHeld(info)) return { kind: null, gate: 'assignee-hold' };
   const status = typeof info.status === 'string' ? info.status : '';
   const stage = typeof info.stage === 'string' ? info.stage : '';
   if (status === 'completed') {
-    if (stage !== 'in_review') return null;
+    if (stage !== 'in_review') return { kind: null, gate: 'not-dispatchable' };
     // Audit tier: no FRESH audit (auditedAt absent/older than updatedAt
     // semantics per isAuditFresh). A missing auditedAt means not fresh →
     // audit-eligible (the audit tier's conservative default). Fingerprints
     // are used when both sides are available; otherwise the time gate applies.
-    if (isAuditFresh(info.auditedAt, info.updatedAt, info.fingerprint, info.currentFingerprint)) return null;
+    if (isAuditFresh(info.auditedAt, info.updatedAt, info.fingerprint, info.currentFingerprint)) {
+      return { kind: null, gate: 'audit-fresh' };
+    }
     // 7-day recency window (mirrors selectAuditCandidate): an item not
     // modified within the window is not a candidate; missing updatedAt is
     // included (absent data must not silently drop candidates).
     if (typeof info.updatedAt === 'string' && info.updatedAt.length > 0) {
       const updated = new Date(info.updatedAt).getTime();
-      if (Number.isNaN(updated)) return null; // unparseable → fail-closed
-      if (now - updated > DOWNTIME_AUDIT_RECENCY_WINDOW_MS) return null;
+      if (Number.isNaN(updated)) return { kind: null, gate: 'not-dispatchable' }; // unparseable → fail-closed
+      if (now - updated > DOWNTIME_AUDIT_RECENCY_WINDOW_MS) {
+        return { kind: null, gate: 'audit-recency' };
+      }
     }
-    return 'audit';
+    return { kind: 'audit' };
   }
-  if (status !== 'open' && status !== 'blocked') return null;
-  if (stage === 'idea') return 'intake';
-  if (stage === 'intake_complete') return 'plan';
+  if (status !== 'open' && status !== 'blocked') return { kind: null, gate: 'not-dispatchable' };
+  if (stage === 'idea') return { kind: 'intake' };
+  if (stage === 'intake_complete') return { kind: 'plan' };
   if (stage === 'plan_complete') {
     // Items missing risk/effort (root cause C, WL-0MTTSWCJR003OMN7):
     // dispatch a risk-effort evaluation so the fields get populated and
     // the item becomes implement-dispatchable on the next pass.
     const risk = riskOrdinal(info.risk);
     const effort = effortOrdinal(info.effort);
-    if (risk === null || effort === null) return 'risk-effort';
+    if (risk === null || effort === null) return { kind: 'risk-effort' };
     // Effort cap (≤ Medium) — the risk cap was removed so high-risk items
     // reach implement dispatch instead of being stranded (an open/blocked
     // item with populated risk/effort otherwise has no dispatch kind).
-    if (effort > 3) return null;
-    return 'implement';
+    if (effort > 3) return { kind: null, gate: 'effort-cap' };
+    return { kind: 'implement' };
   }
   // Retired `in_progress` stage (WL-0MTTSWCJR003OMN7 — OSL dead zones;
   // WL-0MTYL7DX9000MZOH — claim must not hard-strike): items stuck on the
@@ -550,7 +571,7 @@ export function classifyItemForDispatch(
     // Always dispatch risk-effort for retired-stage items: it evaluates
     // both fields AND confirms the stage is correct, producing a single
     // efficient re-evaluation that advances the item to its proper stage.
-    return 'risk-effort';
+    return { kind: 'risk-effort' };
   }
-  return null;
+  return { kind: null, gate: 'not-dispatchable' };
 }
