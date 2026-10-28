@@ -197,7 +197,25 @@ export async function dispatchDowntimeWork(
   opts: {
     model: string;
     cwd: string;
+    /**
+     * The raw SLOT budget: how many free unowned local slots the poll
+     * observed (`countFreeUnownedSlots`). This is the budget the per-tier
+     * free-slot minimums are evaluated against — the audit tier needs two
+     * slots (parent + Phase 2 child at `AUDIT_PHASE2_PARALLELISM=1`), which
+     * is a SLOT-COUNT requirement. Absent disables the minimums (direct API
+     * callers).
+     */
     freeSlots?: number;
+    /**
+     * The PREFILL-PACED budget: `min(freeSlots, prefillCapacityBudget)`. Only
+     * the single-pane tiers' >= 1 slot minimum is evaluated against it, so a
+     * reduced prefill headroom still paces single-pane dispatch. Optional —
+     * absent falls back to `freeSlots` (today's behaviour for direct API
+     * callers). The audit minimum deliberately uses `freeSlots`, never this
+     * value: conflating the two made the audit tier unreachable under the
+     * default serialised prefill cap (WL-0MVR8FI4Q0007CGR).
+     */
+    effectiveFreeSlots?: number;
     browseItemCount?: number;
     /**
      * Depth-aware audit-batch cap (`downtimeAuditBatchMax`, parent
@@ -333,7 +351,14 @@ export async function dispatchDowntimeWork(
     // per-tier free-slot minimums (audit needs 2, single-pane 1) are now per-item
     // filters on the Herdr-ordered candidates rather than tier skips.
     const freeSlots = opts.freeSlots;
-    const panesEligible = freeSlots === undefined || freeSlots >= DOWNTIME_PANE_MIN_FREE_SLOTS;
+    // Single-pane tiers are paced by the prefill budget (WL-0MVR8FI4Q0007CGR
+    // AC2/AC3: `effectiveFreeSlots` stays their pacing input). The audit
+    // tier's minimum is a SLOT-COUNT requirement, so it is evaluated against
+    // the raw slot budget (`freeSlots`) — never the prefill-concurrency
+    // budget. Conflating them made audit unreachable at the cap=1 default.
+    const panesBudget = opts.effectiveFreeSlots ?? freeSlots;
+    const panesEligible =
+      panesBudget === undefined || panesBudget >= DOWNTIME_PANE_MIN_FREE_SLOTS;
     const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
 
     // Sprint-view dispatch window (WL-0MUNS8X97007C9H9 AC1): the live per-root

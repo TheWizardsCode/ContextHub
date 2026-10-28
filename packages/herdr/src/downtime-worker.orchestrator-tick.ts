@@ -35,6 +35,7 @@ import {
 } from './downtime-worker.idle.js';
 import {
   DEFAULT_DOWNTIME_LONG_RUNNING_THRESHOLD_MS,
+  DOWNTIME_AUDIT_MIN_FREE_SLOTS,
   DOWNTIME_PANE_LIFECYCLE_INTERVAL_MS,
   PANE_LIFECYCLE_MONITOR_ENABLED,
   capacityEvidence,
@@ -659,5 +660,28 @@ export async function runOrchestratorTick(
   const admitted = await admitDispatch(ctx, cfg, evaluated);
   if ('polled' in admitted) return admitted;
   const outcome = await performDispatch(ctx, cfg, evaluated, admitted);
+  // AC5 (WL-0MVR8FI4Q0007CGR): the audit tier's >= 2 minimum is a slot-count
+  // requirement evaluated against the RAW slot budget. When that budget is
+  // below it the audit tier was skipped this tick — record a distinct
+  // NON-blocking observation (never collapsed into `no-candidate`) carrying
+  // the three budgets and the skipped tier. The rate limiter bounds repeats.
+  if (admitted.freeSlots < DOWNTIME_AUDIT_MIN_FREE_SLOTS) {
+    void recordDecision(
+      ctx,
+      cfg.cwd,
+      'audit-tier-budget-skipped',
+      {
+        freeSlots: admitted.freeSlots,
+        totalSlots: evaluated.status.total_slots,
+        ownerPresent: admitted.ownerPresent,
+        runningPanes: admitted.runningPanes,
+        contentionDepth: admitted.contentionQueueDepth,
+        capacityBudget: admitted.prefillCapacityBudget,
+        effectiveFreeSlots: admitted.effectiveFreeSlots,
+        skippedTier: 'audit',
+      },
+      { blocking: false },
+    );
+  }
   return { polled: true, dispatched: outcome.dispatched, idle: true };
 }

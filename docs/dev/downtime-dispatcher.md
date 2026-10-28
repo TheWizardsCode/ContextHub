@@ -419,7 +419,7 @@ The proxy publishes the gate state on `GET /llama/local/status`:
 `dispatchFromCoordination`):
 
 ```
-effectiveBudget      = min(freeSlotBudget, prefillCapacityBudget)
+effectiveBudget      = min(freeSlotBudget, prefillCapacityBudget)   # single-pane tiers only
 freeSlotBudget       = countFreeUnownedSlots(slots)      # downtimeRequiredFreeSlots gate
 prefillCapacityBudget = 0                                 when cap > 0 and inFlight >= cap
                       = cap - inFlight                    otherwise (at least 1)
@@ -451,11 +451,30 @@ prefillCapacityBudget = 0                                 when cap > 0 and inFli
   when occupancy evidence exists (`local_prefills_in_flight > 0` or a busy
   slot); any other shape is zero occupancy — an absent occupancy ETA never
   means "unknown ⇒ defer".
-- The effective budget is what the dispatch tier sees, so a reduced budget
-  interacts directly with `downtimeRequiredFreeSlots` and the **per-tier
-  free-slot minimums**: with a prefill headroom of `1` the audit tier (≥ 2
-  free slots) is skipped and the implement tier dispatches instead, even
-  though more slots are physically free.
+
+**The effective budget paces only the single-pane tiers**
+(WL-0MVR8FI4Q0007CGR): `effectiveFreeSlots` is passed alongside the raw
+`freeSlots` slot budget, and the two are never conflated again.
+
+- The **audit tier's ≥ 2 slot minimum** is a *slot-count* requirement
+  (parent pane + Phase 2 child at `AUDIT_PHASE2_PARALLELISM=1`) and is
+  evaluated against `freeSlotBudget` (the raw free-slot count) — **never**
+  against `effectiveFreeSlots`. A serialised prefill gate (`cap 1`) reduces
+  prefill concurrency, not slot count: two panes can still run, their
+  prefills simply queue serially on the proxy's gate. Capping a slot-count
+  requirement with a prefill-concurrency number made the audit tier
+  permanently unreachable at the documented default (`freeSlots 2`, `cap 1`,
+  `inFlight 0` → `effectiveFreeSlots 1 < 2` → audit always skipped).
+  **Reversed:** with a prefill headroom of `1` and two genuinely free slots
+  the **audit tier dispatches** and the implement tier is not consulted.
+- The **single-pane tier minimums** (≥ 1 slot) keep `effectiveFreeSlots` as
+  their input, so the reduced headroom still reduces single-pane concurrency
+  exactly as before.
+- When the audit tier is skipped because its slot minimum is unmet, the tick
+  emits a distinct **`audit-tier-budget-skipped`** observation token carrying
+  `freeSlots`, `capacityBudget`, `effectiveFreeSlots` and `skippedTier:
+  'audit'` — the skip is never collapsed into a bare `no-candidate`
+  (WL-0MVR8FI4Q0007CGR AC5).
 
 **Pacing only reduces concurrency.** It never raises the free-slot budget,
 never bypasses `slots_stale` / `slots: []` (`slots-unavailable`) or
@@ -491,9 +510,12 @@ ETA never defers, gate waiters and a saturated cap still defer while
 uncalibrated, and a real occupancy ETA above the budget still defers with
 `prefill-eta`); `downtime-worker.test.ts` pins the tick reason/token,
 decision-log evidence including the occupancy/calibration record fields,
-ETA deferral, the effective-budget clamp (audit vs implement tier) and the
-tick-level dispatch proof (an idle-uncalibrated poll now selects and
-dispatches a candidate, with the busy-occupancy twin still pacing).
+ETA deferral, the slot-budget audit contract (the audit tier's ≥ 2 minimum
+is evaluated against the raw `freeSlots` slot budget, not the prefill-paced
+`effectiveFreeSlots` — pinned at cap 1 and at cap 0, with the
+`audit-tier-budget-skipped` observation token) and the tick-level dispatch
+proof (an idle-uncalibrated poll now selects and dispatches a candidate,
+with the busy-occupancy twin still pacing).
 
 ### Local capacity reservation (LP-0MVIKPCSG002B0NL, parent WL-0MVIKRFP0005JDL8, slice C2)
 

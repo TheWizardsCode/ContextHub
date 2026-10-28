@@ -1882,10 +1882,11 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
     }
   });
 
-  it('AC2/AC6: the effective budget is clamped to the prefill headroom (audit needs 2 free slots)', async () => {
-    // Headroom 1 (cap 2, one prefill in flight, 3 genuinely free slots):
-    // the effective budget is 1, so the audit tier (needs ≥ 2) is skipped
-    // and the implement tier dispatches instead of the audit.
+  it('WL-0MVR8FI4Q0007CGR AC2: the audit minimum uses the slot budget, not the prefill headroom', async () => {
+    // Headroom 1 (cap 2, one prefill in flight, 3 genuinely free slots): the
+    // SLOT budget is 3, so the audit tier (needs ≥ 2) is eligible and
+    // dispatches. The reduced prefill headroom paces only the single-pane
+    // tiers; it must never gate the audit tier's slot-count requirement.
     const rootOne = tempDirs.make('dt-prefill-headroom1-');
     const workerOne = makePrefillWorker({
       status: prefillPacingStatus({
@@ -1906,15 +1907,17 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
     // The tick outcome carries no candidate; assert the dispatched TIER via
     // the claim + spawned prompt (the observable dispatch seams).
     expect(workerOne.deps.claimItem).toHaveBeenCalledWith(
-      'WL-IMP',
+      'WL-AUD',
       expect.anything(),
       expect.anything(),
     );
     expect(workerOne.deps.spawnAgentPane).toHaveBeenCalledWith(
-      expect.stringContaining('/skill:implement'),
+      expect.stringContaining('/skill:audit'),
       expect.anything(),
     );
     expect(workerOne.deps.spawnAgentPane).toHaveBeenCalledTimes(1);
+    // The implement fallback is never consulted once the audit tier is live.
+    expect(workerOne.deps.getNextImplementCandidate).not.toHaveBeenCalled();
 
     // Headroom 2 (nothing in flight): the effective budget is 2 → the audit
     // tier (the higher-priority tier) dispatches as before.
@@ -1938,6 +1941,94 @@ describe('downtime prefill-gate pacing (WL-0MVHSZRZQ00482QX)', () => {
       expect.stringContaining('/skill:audit'),
       expect.anything(),
     );
+  });
+
+  it('WL-0MVR8FI4Q0007CGR AC1: cap=1 + 2 free slots dispatches the audit tier (not no-candidate)', async () => {
+    // The documented default: local_max_concurrent_prefills=1, nothing in
+    // flight → capacityBudget 1 → effectiveFreeSlots min(2,1)=1. The audit
+    // tier must still dispatch because the SLOT budget is 2.
+    const root = tempDirs.make('dt-prefill-cap1-audit-');
+    const { worker, deps } = makePrefillWorker({
+      status: prefillPacingStatus({
+        local_max_concurrent_prefills: 1,
+        local_prefills_in_flight: 0,
+        total_slots: 2,
+        slots: [
+          { slot_id: 'slot-1', is_processing: false, lease_state: 'free' },
+          { slot_id: 'slot-2', is_processing: false, lease_state: 'free' },
+        ],
+      }),
+      root,
+      deps: auditTierDeps(),
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(true);
+    expect(worker.blockReason).not.toBe('no-candidate');
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', expect.anything(), expect.anything());
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit'),
+      expect.anything(),
+    );
+  });
+
+  it('WL-0MVR8FI4Q0007CGR AC6: a cap=0 (gate disabled) pool is unchanged and dispatches the audit tier', async () => {
+    // cap=0 disables the prefill gate → capacityBudget undefined →
+    // effectiveFreeSlots === freeSlots. The audit tier behaves exactly as
+    // before the fix.
+    const root = tempDirs.make('dt-prefill-cap0-audit-');
+    const { worker, deps } = makePrefillWorker({
+      status: prefillPacingStatus({
+        local_max_concurrent_prefills: 0,
+        local_prefills_in_flight: 2,
+      }),
+      root,
+      deps: auditTierDeps(),
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(true);
+    expect(deps.claimItem).toHaveBeenCalledWith('WL-AUD', expect.anything(), expect.anything());
+    expect(deps.spawnAgentPane).toHaveBeenCalledWith(
+      expect.stringContaining('/skill:audit'),
+      expect.anything(),
+    );
+  });
+
+  it('WL-0MVR8FI4Q0007CGR AC5: a budget-skipped audit tier emits a distinct observation token', async () => {
+    // Raw slot budget 1 (< the audit minimum of 2): the audit tier is
+    // skipped even though a candidate exists (lookup never consulted). The
+    // tick must record the distinct `audit-tier-budget-skipped` observation
+    // carrying all three budgets and the skipped tier, so the skip is never
+    // collapsed into a bare `no-candidate`.
+    const root = tempDirs.make('dt-audit-budget-skipped-');
+    const { worker } = makePrefillWorker({
+      status: prefillPacingStatus({
+        local_max_concurrent_prefills: 1,
+        local_prefills_in_flight: 0,
+        total_slots: 1,
+        slots: [{ slot_id: 'slot-1', is_processing: false, lease_state: 'free' }],
+      }),
+      root,
+      // Only lower tiers that answer empty: the audit skip leaves an empty
+      // backlog, so the terminal reason stays `no-candidate` and the skip is
+      // observable only through its distinct token.
+    });
+    const outcome = await worker.tick();
+    expect(outcome.dispatched).toBe(false);
+    expect(worker.blockReason).toBe('no-candidate');
+    await vi.waitFor(async () => {
+      const entries = (await readCoordinationLogEntries(root)).filter(
+        (e) => e.kind === 'decision',
+      );
+      const skipped = entries.find((e) => e.reason === 'audit-tier-budget-skipped');
+      expect(skipped).toBeDefined();
+      expect(skipped).toMatchObject({
+        reason: 'audit-tier-budget-skipped',
+        freeSlots: 1,
+        capacityBudget: 1,
+        effectiveFreeSlots: 1,
+        skippedTier: 'audit',
+      });
+    });
   });
 
   // ── Occupancy/calibration evidence on the paced decision record ─────

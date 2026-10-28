@@ -255,6 +255,18 @@ export interface DecisionEntryFields extends CapacityEvidence {
   hostCpuPercent?: number;
   hostCpuSource?: HostCpuSource;
   cpuGatePercent?: number;
+  /**
+   * Audit-tier budget-skip evidence (WL-0MVR8FI4Q0007CGR AC5). On the
+   * `audit-tier-budget-skipped` observation token: the prefill-capacity
+   * headroom (`cap - inFlight`; absent when the cap is disabled/unserved),
+   * the prefill-paced `effectiveFreeSlots` and the tier whose minimum the
+   * raw `freeSlots` budget did not meet (`skippedTier: 'audit'`). Together
+   * with the mandatory `freeSlots` field this makes the prefill-concurrency
+   * vs slot-count distinction fully diagnosable from the log alone.
+   */
+  capacityBudget?: number;
+  effectiveFreeSlots?: number;
+  skippedTier?: string;
 }
 export function capacityEvidence(
   status: LlamaStatus,

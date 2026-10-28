@@ -151,6 +151,8 @@ export interface DispatchAdmission {
   capacity: ReturnType<typeof capacityEvidence>;
   /** min(free-slot budget, prefill headroom) (AC2). */
   effectiveFreeSlots: number;
+  /** Prefill-capacity headroom for the AC5 skip observation (WL-0MVR8FI4Q0007CGR). */
+  prefillCapacityBudget: number | undefined;
   /** True when no free UNOWNED slot remains (AC2/AC5/AC6). */
   slotOwned: boolean;
 }
@@ -578,6 +580,7 @@ export async function admitDispatch(
     contentionQueueDepth: evaluation.contentionQueueDepth,
     capacity: evaluation.capacity,
     effectiveFreeSlots,
+    prefillCapacityBudget: prefillPacing.capacityBudget,
     slotOwned,
   };
 }
@@ -635,7 +638,8 @@ export async function performDispatch(
               coordinationDir: ctx.opts.coordinationDir,
               localPreference: cfg.localPreference,
               localPreferenceMode: cfg.localPreferenceMode,
-              freeSlots: admission.effectiveFreeSlots,
+              freeSlots: admission.freeSlots,
+              effectiveFreeSlots: admission.effectiveFreeSlots,
               browseItemCount: cfg.browseItemCount,
               auditBatchMax: cfg.auditBatchMax,
               // Continuation budget (parent WL-0MVEDM8OT007WDRS AC1) —
@@ -670,7 +674,8 @@ export async function performDispatch(
             // low-priority rule may derive the value.
             localPreference: cfg.localPreference,
             localPreferenceMode: cfg.localPreferenceMode,
-            freeSlots: admission.effectiveFreeSlots,
+            freeSlots: admission.freeSlots,
+            effectiveFreeSlots: admission.effectiveFreeSlots,
             browseItemCount: cfg.browseItemCount,
             // Depth-aware audit-batch cap (parent WL-0MVEDM8OT007WDRS AC1).
             auditBatchMax: cfg.auditBatchMax,

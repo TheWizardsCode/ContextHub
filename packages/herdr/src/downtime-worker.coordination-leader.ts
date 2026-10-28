@@ -139,7 +139,7 @@ export type CoordinationLeaderDeps = CoordinationDeps & {
 export async function dispatchFromCoordination(
   deps: CoordinationLeaderDeps,
   entries: CoordinationEntry[],
-  opts: { model: string; cwd: string; coordinationDir: string; localPreference?: LocalPreference; /** Locality precedence opt-in (WL-0MVNUIW77000VYAX AC4); absent keeps legacy fixed forwarding. */ localPreferenceMode?: LocalPreferenceMode; freeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number;
+  opts: { model: string; cwd: string; coordinationDir: string; localPreference?: LocalPreference; /** Locality precedence opt-in (WL-0MVNUIW77000VYAX AC4); absent keeps legacy fixed forwarding. */ localPreferenceMode?: LocalPreferenceMode; freeSlots?: number; /** Prefill-paced budget (single-pane tiers); audit uses raw `freeSlots` (WL-0MVR8FI4Q0007CGR). */ effectiveFreeSlots?: number; leaseTtlMs?: number; browseItemCount?: number; nonTerminalCooldownMs?: number; maxAttempts?: number; markerStaleWindowMs?: number; stallScanEnabled?: boolean; stallScanThresholdMs?: number;
     /**
      * Host-CPU gate threshold (WL-0MVK0UO3Q002TXW6 AC2/AC5): live
      * `downtimeCpuGatePercent` re-read every tick. At or above it new
@@ -465,8 +465,14 @@ async function dispatchFromCoordinationGated(
   // freeSlots is absent (direct API callers), the minimums do not gate
   // (fail-open for direct API use — the worker always passes the count).
   const freeSlots = opts.freeSlots;
+  // The audit minimum is a SLOT-COUNT requirement (parent + Phase 2 child):
+  // evaluate it against the raw slot budget, never the prefill-concurrency
+  // budget (WL-0MVR8FI4Q0007CGR AC2). Single-pane tiers keep the prefill-
+  // paced budget as their >= 1 slot input.
   const auditEligible = freeSlots === undefined || freeSlots >= DOWNTIME_AUDIT_MIN_FREE_SLOTS;
-  const panesEligible = freeSlots === undefined || freeSlots >= DOWNTIME_PANE_MIN_FREE_SLOTS;
+  const panesBudget = opts.effectiveFreeSlots ?? freeSlots;
+  const panesEligible =
+    panesBudget === undefined || panesBudget >= DOWNTIME_PANE_MIN_FREE_SLOTS;
   if (!panesEligible) {
     // No slot can host a pane — nothing to dispatch (mirrors the legacy
     // tier chain's 0-free-slots defensive no-candidate).
