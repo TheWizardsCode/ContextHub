@@ -35,6 +35,7 @@ import {
   probeInstalledContract,
   evaluateInstalledContract,
 } from '../../src/audit-fingerprint-installed.js';
+import { isAuditFresh } from '@worklog/shared/icons';
 import { createTempDir, cleanupTempDir } from '../test-utils.js';
 
 const AUDIT_SCRIPTS = findAuditScripts();
@@ -236,4 +237,88 @@ describe('canonical fingerprint parity (TS vs audit skill Python)', () => {
       }
     },
   );
+});
+
+/**
+ * A fingerprint-schema skew must never read as fresh (WL-0MVS2PQ7C005IFA2).
+ *
+ * Before the schema-2 port (WL-0MVK5SWZE00254Y7) an audit stored its
+ * fingerprint under the pre-v2 payload
+ * `{path_states, description_hash, key_files}` (verified against
+ * `git show 213a96b7^:src/audit-fingerprint.ts`). The current
+ * `computeContentFingerprint` emits `{schema: 2, title_hash,
+ * description_hash}` instead, so an audit persisted by the old algorithm can
+ * never match the current digest for unchanged content — the false-stale
+ * badge reported in LP-0MVKSXR4P001V0CM.
+ *
+ * The tests are self-contained: the item fixture and both digests are built
+ * in-test with the canonical-JSON/SHA-256 utilities (no DB, no git, no
+ * Python, no live worklog data), because this repository currently holds no
+ * fingerprint-bearing audits from before the port.
+ */
+describe('fingerprint schema skew is never fresh (WL-0MVS2PQ7C005IFA2)', () => {
+  const title = 'Freshness skew fixture title';
+  const description = [
+    '## Summary',
+    'Freshness skew fixture.',
+    '## Key Files',
+    '- `src/fixture.ts`',
+  ].join('\n');
+  const keyFiles = ['src/fixture.ts'];
+
+  // `auditedAt` is deliberately AFTER `updatedAt`: the legacy 60 s time gate
+  // would call this audit fresh, so only the fingerprint comparison can make
+  // the skew read as stale.
+  const auditedAt = '2026-10-20T12:00:00.000Z';
+  const updatedAt = '2026-10-20T11:00:00.000Z';
+
+  /** The pre-v2 payload, reproduced because its emitter no longer exists. */
+  function schema1Fingerprint(): string {
+    return sha256Hex(
+      canonicalJson({
+        path_states: {
+          'src/fixture.ts': { head: 'abc123', worktree: '' },
+        },
+        description_hash: sha256Hex(description),
+        key_files: keyFiles,
+      }),
+    );
+  }
+
+  it('reads an identical schema-2 fingerprint as fresh', () => {
+    const storedSchema2 = computeContentFingerprint({ title, description });
+    const currentSchema2 = computeContentFingerprint({ title, description });
+
+    expect(storedSchema2).toMatch(/^[0-9a-f]{64}$/);
+    expect(isAuditFresh(auditedAt, updatedAt, storedSchema2, currentSchema2)).toBe(true);
+  });
+
+  it('reads a stored schema-1 fingerprint as stale, so a schema skew is never fresh', () => {
+    const storedSchema1 = schema1Fingerprint();
+    const currentSchema2 = computeContentFingerprint({ title, description });
+
+    // Same content, different schema: the digests differ structurally, not
+    // because anything about the item changed.
+    expect(storedSchema1).toMatch(/^[0-9a-f]{64}$/);
+    expect(storedSchema1).not.toBe(currentSchema2);
+    expect(isAuditFresh(auditedAt, updatedAt, storedSchema1, currentSchema2)).toBe(false);
+  });
+
+  it('is a bare string compare, so the 60 s time gate cannot rescue a skew', () => {
+    const storedSchema1 = schema1Fingerprint();
+    const currentSchema2 = computeContentFingerprint({ title, description });
+
+    // Without fingerprints the same timestamps read as fresh (time gate).
+    expect(isAuditFresh(auditedAt, updatedAt)).toBe(true);
+    // With both fingerprints present the string compare decides: no
+    // tolerance and no time-gate fallback, so the skew stays stale.
+    expect(isAuditFresh(auditedAt, updatedAt, storedSchema1, currentSchema2)).toBe(false);
+
+    // A matching fingerprint is fresh even when `updatedAt` post-dates the
+    // audit by far more than the tolerance, proving the comparison ignores
+    // the clock rather than merely narrowing it.
+    const muchLater = '2026-10-20T13:00:00.000Z';
+    expect(isAuditFresh(auditedAt, muchLater)).toBe(false);
+    expect(isAuditFresh(auditedAt, muchLater, currentSchema2, currentSchema2)).toBe(true);
+  });
 });
