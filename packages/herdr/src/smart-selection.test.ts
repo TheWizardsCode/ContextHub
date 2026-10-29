@@ -503,23 +503,57 @@ describe('selectWorkItems — smart selection algorithm', () => {
       expect(ids).toEqual(['C1', 'R1', 'O1']);
     });
 
-    it('shows child critical items at the top level (exception to WL-0MS964SIA0057ABR)', () => {
-      // Child critical items must always be visible so the team can see
-      // blocking items (e.g., untriaged test-failures) that the ship
-      // critical-items gate detects.
+    // Root-only top level for ALL items, critical included (WL-0MVN4WESM007T4XI).
+    // The critical exception (commit cae8ea8a) is superseded: a critical child is
+    // reachable through its root ancestor (substituted in the fetcher), never as
+    // a duplicate top-level row.
+    //
+    // RED WITNESS: the current root filter still carries the
+    // `|| i.priority === 'critical'` exception, so this spec is committed as
+    // `it.fails`; the implementation feature (WL-0MVN4WESM007T4XI-F2) removes the
+    // exception and flips it to `it` (same test-first convention as
+    // WL-0MVFE0T0M009ZCPM).
+    it.fails('hides a child critical item (parentId set) even when priority=critical', () => {
       const items = [
         critical('C1'),
         inReview('R1'),
         other('O1'),
-        // Child critical items appear at top level despite having parentId.
+        // A critical child must NOT be rendered at top level despite its priority.
         makeItem('ChildCritical', { priority: 'critical', parentId: 'C1' }),
-        // Non-critical children are still hidden.
+        // Non-critical children stay hidden too.
         makeItem('ChildReview', { status: 'completed', stage: 'in_review', parentId: 'R1' }),
         makeItem('ChildOther', { parentId: 'O1' }),
       ];
       const result = selectWorkItems(items, 10);
       const ids = result.map(i => i.id);
-      expect(ids).toEqual(['C1', 'ChildCritical', 'R1', 'O1']);
+      expect(ids).toEqual(['C1', 'R1', 'O1']);
+      // Invariant, stated directly: the returned top level contains roots only.
+      expect(result.every(i => !i.parentId)).toBe(true);
+    });
+
+    // RED WITNESS (same as above): hiding must hold even when the root ancestor
+    // is absent from the input — the child is never a fallback top-level row.
+    it.fails('hides a critical child even when its root ancestor is absent from the input', () => {
+      const items = [
+        other('O1'),
+        other('O2'),
+        makeItem('OrphanChildCritical', { priority: 'critical', parentId: 'MissingRoot' }),
+      ];
+      const result = selectWorkItems(items, 10);
+      expect(result.map(i => i.id)).toEqual(['O1', 'O2']);
+    });
+
+    it('keeps a critical root item (no parentId) mandatory regardless of browseItemCount', () => {
+      // A critical ROOT is the release-blocking signal the top level must always
+      // surface: it is mandatory, so no browseItemCount window may cut it.
+      const items = [critical('C1'), other('O1'), other('O2'), other('O3')];
+
+      // browseItemCount=1: the single slot goes to the mandatory critical root.
+      expect(selectWorkItems(items, 1).map(i => i.id)).toEqual(['C1']);
+      // browseItemCount=0: mandatory items are still shown (no hard cap).
+      expect(selectWorkItems(items, 0).map(i => i.id)).toEqual(['C1']);
+      // browseItemCount large enough: the critical root is present as before.
+      expect(selectWorkItems(items, 10).map(i => i.id)).toEqual(['C1', 'O1', 'O2', 'O3']);
     });
   });
 });
